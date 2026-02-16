@@ -1,0 +1,39 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+logging:
+  level: info
+  format: json
+listeners:
+  - name: forward-debug-pages
+    mode: forward
+    listen: "${QPX_LR_FORWARD_LISTEN:-127.0.0.1:18181}"
+    default_action: { type: block }
+    rules:
+      - name: proxy-health-endpoint
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["proxy.local"]
+          path: ["/proxy/healthz"]
+          method: ["GET"]
+        action:
+          type: respond
+          local_response:
+            status: 200
+            content_type: "application/json"
+            body: "{\"status\":\"ok\",\"component\":\"qpx-forward\"}"
+        headers:
+          response_set:
+            X-Qpx-Route: local-healthz
+      - name: block-security-categories
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*.malware.invalid", "*.phishing.invalid"]
+        action:
+          type: respond
+          local_response:
+            status: 451
+            content_type: "text/plain; charset=utf-8"
+            body: "blocked by security policy"
+        headers:
+          response_set:
+            X-Policy-Reason: security-category

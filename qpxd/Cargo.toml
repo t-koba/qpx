@@ -1,0 +1,81 @@
+[package]
+name = "qpxd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["tls-rustls", "http3", "mitm", "digest-auth", "sha2-hash"]
+
+tls-rustls = ["dep:rustls", "dep:tokio-rustls", "dep:webpki-roots", "qpx-core/tls-rustls"]
+tls-native = ["dep:native-tls", "dep:tokio-native-tls", "qpx-core/tls-native"]
+
+# QUIC/HTTP/3 requires rustls (via quinn).
+http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:h3-datagram", "tls-rustls"]
+
+# TLS MITM inspection requires rustls.
+mitm = ["tls-rustls"]
+
+digest-auth = ["qpx-core/digest-auth"]
+sha2-hash = ["dep:sha2"]
+
+[dependencies]
+qpx-core = { path = "../qpx-core", default-features = false }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+cidr.workspace = true
+globset.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+httpdate.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+arc-swap.workspace = true
+notify.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+dirs-next.workspace = true
+
+# TLS
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+native-tls = { workspace = true, optional = true }
+tokio-native-tls = { workspace = true, optional = true }
+
+# HTTP
+hyper.workspace = true
+http.workspace = true
+http1.workspace = true
+http-body.workspace = true
+httparse.workspace = true
+libc.workspace = true
+quinn = { workspace = true, optional = true }
+h3 = { workspace = true, optional = true }
+h3-quinn = { workspace = true, optional = true }
+h3-datagram = { workspace = true, optional = true }
+
+# Async runtime
+tokio.workspace = true
+socket2.workspace = true
+
+# Auth
+base64.workspace = true
+rand.workspace = true
+sha2 = { workspace = true, optional = true }
+
+# FTP
+suppaftp.workspace = true
+
+# CLI
+clap.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true

@@ -1,0 +1,36 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+auth:
+  users:
+    - username: analyst
+      password: change-me
+
+upstreams:
+  - name: corp-egress
+    url: "http://proxy.corp.example:3128"
+
+listeners:
+  - name: authenticated-upstream-egress
+    mode: forward
+    listen: "127.0.0.1:18084"
+    default_action:
+      type: block
+    rules:
+      - name: direct-internal-services
+        match:
+          host: ["*.corp.internal", "metadata.internal"]
+        auth:
+          require: [local]
+        action:
+          type: direct
+
+      - name: proxy-authenticated-users
+        match:
+          host: ["*"]
+          method: [GET, POST, CONNECT]
+        auth:
+          require: [local]
+        action:
+          type: proxy
+          upstream: corp-egress

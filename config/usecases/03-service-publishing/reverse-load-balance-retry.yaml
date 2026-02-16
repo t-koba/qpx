@@ -1,0 +1,24 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+reverse:
+  - name: reverse-lb-retry
+    listen: "0.0.0.0:19081"
+    routes:
+      - match:
+          host: ["api.example.com"]
+          path: ["/v1/*", "/v2/*"]
+          method: ["GET", "POST", "PUT", "DELETE"]
+        upstreams:
+          - "http://10.20.0.11:8080"
+          - "http://10.20.0.12:8080"
+          - "http://10.20.0.13:8080"
+        lb: round_robin
+        retry:
+          attempts: 3
+          backoff_ms: 200
+        timeout_ms: 30000
+        health_check:
+          interval_ms: 5000
+          timeout_ms: 1000
+          fail_threshold: 3
+          cooldown_ms: 30000

@@ -1,0 +1,30 @@
+[package]
+name = "qpxr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["tls-rustls"]
+
+tls-rustls = ["dep:rustls", "dep:tokio-rustls", "qpx-core/tls-rustls"]
+tls-native = ["dep:native-tls", "dep:tokio-native-tls", "qpx-core/tls-native"]
+
+[dependencies]
+qpx-core = { path = "../qpx-core", default-features = false }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+pcap-file.workspace = true
+etherparse.workspace = true
+chrono.workspace = true
+cidr.workspace = true
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+native-tls = { workspace = true, optional = true }
+tokio-native-tls = { workspace = true, optional = true }
+libc.workspace = true
+byteorder_slice = "3"

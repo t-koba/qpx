@@ -1,0 +1,15 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+reverse:
+  - name: reverse-h3-passthrough
+    # tcp listen is kept for schema consistency; passthrough-only mode runs UDP/QUIC path.
+    listen: "0.0.0.0:443"
+    http3:
+      enabled: true
+      listen: "0.0.0.0:443"
+      # Round-robin UDP/443 passthrough upstreams.
+      passthrough_upstreams:
+        - 203.0.113.10:443
+        - 203.0.113.11:443
+    routes: []

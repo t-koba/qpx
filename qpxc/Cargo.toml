@@ -1,0 +1,21 @@
+[package]
+name = "qpxc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["tls-rustls"]
+
+tls-rustls = ["dep:rustls", "dep:rustls-pemfile", "qpx-core/tls-rustls"]
+tls-native = ["dep:native-tls", "qpx-core/tls-native"]
+
+[dependencies]
+qpx-core = { path = "../qpx-core", default-features = false }
+anyhow.workspace = true
+clap.workspace = true
+pcap-file.workspace = true
+rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+native-tls = { workspace = true, optional = true }
+http.workspace = true

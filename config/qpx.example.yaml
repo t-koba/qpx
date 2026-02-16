@@ -1,0 +1,180 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+identity:
+  proxy_name: qpx
+  auth_realm: qpx
+  metrics_prefix: qpx
+  generated_user_agent: "qpxd/0.1 (+https://example.com/qpx)"
+
+messages:
+  blocked: blocked
+  forbidden: forbidden
+  trace_disabled: trace disabled
+  proxy_error: proxy error
+  proxy_auth_required: proxy auth required
+  reverse_error: reverse error
+  cache_miss: cache miss
+  unsupported_ftp_method: unsupported ftp method
+  ftp_disabled: ftp over http disabled
+  connect_udp_disabled: connect-udp disabled
+  upstream_connect_udp_failed: upstream connect-udp failed
+
+runtime:
+  worker_threads: 8
+  max_blocking_threads: 256
+  acceptor_tasks_per_listener: 8
+  reuse_port: true
+  tcp_backlog: 4096
+  trace_enabled: false
+  max_h3_request_body_bytes: 16777216
+  max_h3_response_body_bytes: 16777216
+  max_reverse_retry_template_body_bytes: 8388608
+
+logging:
+  level: info
+  format: json
+
+metrics:
+  listen: "127.0.0.1:9900"
+  path: /metrics
+  max_concurrent_connections: 32
+
+exporter:
+  enabled: true
+  endpoint: "127.0.0.1:19100"
+  max_queue_events: 4096
+  capture:
+    plaintext: true
+    encrypted: true
+    max_chunk_bytes: 16384
+
+auth:
+  users:
+    - username: localuser
+      password: localpass
+  ldap:
+    url: ldaps://ad.example.com:636
+    bind_dn: cn=proxy,ou=svc,dc=example,dc=com
+    bind_password_env: LDAP_BIND_PASSWORD
+    user_base_dn: ou=users,dc=example,dc=com
+    group_base_dn: ou=groups,dc=example,dc=com
+    require_starttls: true
+    user_filter: "(|(uid={username})(sAMAccountName={username})(userPrincipalName={username}))"
+    group_filter: "(|(member={user_dn})(memberUid={username}))"
+    group_attr: cn
+
+upstreams:
+  - name: corp-proxy
+    url: http://proxy.example.com:3128
+
+listeners:
+  - name: forward
+    mode: forward
+    listen: "127.0.0.1:8080"
+    default_action:
+      type: block
+    ftp:
+      max_request_body_bytes: 8388608
+      max_download_bytes: 67108864
+    xdp:
+      enabled: false
+      metadata_mode: proxy-v1
+      require_metadata: true
+      trusted_peers: [127.0.0.1/32]
+    http3:
+      enabled: true
+      listen: "127.0.0.1:8443"
+      connect_udp:
+        enabled: true
+        idle_timeout_secs: 30
+        max_capsule_buffer_bytes: 262144
+    tls_inspection:
+      enabled: true
+      verify_upstream: true
+      verify_exceptions: ["*.internal.example.com"]
+    rules:
+      - name: block-ads-with-local-page
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*.doubleclick.net", "*.googlesyndication.com"]
+        action:
+          type: respond
+          local_response:
+            status: 403
+            content_type: "text/plain; charset=utf-8"
+            body: blocked by qpx policy
+            headers:
+              X-Policy: adblock
+      - name: corp-allow
+        match:
+          src_ip: [10.0.0.0/8]
+          host: ["*.example.com"]
+          method: [GET, CONNECT]
+        auth:
+          require: [ldap]
+          groups: [dev, ops]
+        action:
+          type: inspect
+        headers:
+          request_set:
+            X-Proxy: qpx
+          request_regex_replace:
+            - header: User-Agent
+              pattern: Foo
+              replace: Bar
+      - name: allow-loopback
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*"]
+        action:
+          type: proxy
+
+  - name: transparent
+    mode: transparent
+    listen: "127.0.0.1:15001"
+    default_action:
+      type: block
+    rules:
+      - name: allow-loopback-web
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          dst_port: [80, 443]
+          host: ["*"]
+        action:
+          type: proxy
+
+reverse:
+  - name: site
+    listen: "127.0.0.1:443"
+    xdp:
+      enabled: false
+      metadata_mode: proxy-v1
+      require_metadata: true
+      trusted_peers: [127.0.0.1/32]
+    enforce_sni_host_match: true
+    sni_host_exceptions: []
+    tls:
+      certificates:
+        - sni: example.com
+          cert: /etc/qpx/certs/example.com.crt
+          key: /etc/qpx/certs/example.com.key
+    http3:
+      enabled: true
+      listen: "127.0.0.1:443"
+    routes:
+      - match:
+          host: [example.com]
+        upstreams:
+          - http://10.0.0.10:8080
+          - http://10.0.0.11:8080
+        lb: round_robin
+        retry:
+          attempts: 2
+          backoff_ms: 100
+        timeout_ms: 30000
+        health_check:
+          interval_ms: 5000
+          timeout_ms: 1000
+          fail_threshold: 3
+          cooldown_ms: 30000

@@ -1,0 +1,33 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-/tmp/qpx-e2e-state}"
+auth:
+  users:
+    - username: tester
+      password: secret
+listeners:
+  - name: e2e-forward
+    mode: forward
+    listen: "127.0.0.1:18150"
+    default_action: { type: direct }
+    rules:
+      - name: block-bad-domain
+        match:
+          host: ["blocked.invalid"]
+        action: { type: block }
+      - name: auth-gated-path
+        match:
+          host: ["127.0.0.1"]
+          path: ["/auth/*"]
+        auth:
+          require: ["local"]
+        action: { type: direct }
+      - name: rewrite-headers
+        match:
+          host: ["127.0.0.1"]
+          path: ["/headers"]
+        action: { type: direct }
+        headers:
+          request_set:
+            X-Test-Proxy: qpx-e2e
+          response_set:
+            X-E2E-Proxy: qpx-e2e

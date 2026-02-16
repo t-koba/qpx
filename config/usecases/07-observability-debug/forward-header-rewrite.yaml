@@ -1,0 +1,36 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+listeners:
+  - name: header-rewrite-forward
+    mode: forward
+    listen: "127.0.0.1:18085"
+    default_action: { type: block }
+    rules:
+      - name: api-header-control
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["api.example.com"]
+          path: ["/v1/*", "/v2/*"]
+        action: { type: direct }
+        headers:
+          request_set:
+            X-Proxy: qpx
+            X-Debug-Session: "on"
+          request_add:
+            X-Forwarded-By: qpx
+          request_remove:
+            - x-internal-only
+          request_regex_replace:
+            - header: user-agent
+              pattern: "ExampleClient/([0-9.]+)"
+              replace: "ExampleClient-Edge/$1"
+          response_set:
+            X-Proxy-Handled: qpx
+          response_add:
+            Cache-Tag: proxied
+          response_remove:
+            - x-powered-by
+          response_regex_replace:
+            - header: server
+              pattern: "(?i)nginx"
+              replace: "edge"

@@ -1,0 +1,21 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+reverse:
+  - name: reverse-h2-tls
+    listen: "0.0.0.0:443"
+    tls:
+      certificates:
+        - sni: "app.example.com"
+          cert: "/etc/qpx/certs/app.example.com.crt"
+          key: "/etc/qpx/certs/app.example.com.key"
+    routes:
+      - match:
+          host: ["app.example.com"]
+        upstreams:
+          - "https://10.0.0.10:8443"
+          - "https://10.0.0.11:8443"
+        lb: round_robin
+        retry:
+          attempts: 2
+          backoff_ms: 50
+        timeout_ms: 15000

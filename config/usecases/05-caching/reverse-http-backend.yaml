@@ -1,0 +1,33 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+cache:
+  backends:
+    - name: object-store-gateway
+      kind: http
+      endpoint: "http://127.0.0.1:19080"
+      timeout_ms: 1500
+      max_object_bytes: 2097152
+      # Optional: if your gateway requires auth, set env and uncomment.
+      # auth_header_env: "QPX_CACHE_AUTH_HEADER"
+
+reverse:
+  - name: site
+    listen: "127.0.0.1:8443"
+    routes:
+      - match:
+          host: ["cache.example.local"]
+          path: ["/assets/*", "/docs/*"]
+          method: ["GET", "HEAD"]
+        upstreams:
+          - "http://127.0.0.1:18080"
+        cache:
+          enabled: true
+          backend: object-store-gateway
+          namespace: "reverse-site-assets"
+          default_ttl_secs: 300
+          max_object_bytes: 2097152
+      - match:
+          host: ["cache.example.local"]
+        upstreams:
+          - "http://127.0.0.1:18081"

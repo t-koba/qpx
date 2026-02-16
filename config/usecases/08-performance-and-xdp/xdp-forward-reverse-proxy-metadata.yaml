@@ -1,0 +1,35 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+# This profile assumes an XDP/TC frontend (or L4 relay) prepends PROXY headers.
+# metadata_mode supports proxy-v1 and proxy-v2.
+# qpxd consumes src/dst metadata and applies normal L7 rules.
+listeners:
+  - name: forward-xdp
+    mode: forward
+    listen: "0.0.0.0:18080"
+    default_action: { type: block }
+    xdp:
+      enabled: true
+      metadata_mode: proxy-v2
+      require_metadata: true
+      trusted_peers: ["127.0.0.1/32", "::1/128"]
+    rules:
+      - name: allow-private-sources
+        match:
+          src_ip: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+          host: ["*"]
+        action: { type: direct }
+
+reverse:
+  - name: reverse-xdp
+    listen: "0.0.0.0:18443"
+    xdp:
+      enabled: true
+      metadata_mode: proxy-v2
+      require_metadata: true
+      trusted_peers: ["127.0.0.1/32", "::1/128"]
+    routes:
+      - match:
+          host: ["example.com"]
+        upstreams: ["http://127.0.0.1:19092"]

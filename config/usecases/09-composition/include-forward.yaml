@@ -1,0 +1,4 @@
+version: 1
+include:
+  - ../../fragments/base-observability.yaml
+  - ../../fragments/forward-listener.yaml

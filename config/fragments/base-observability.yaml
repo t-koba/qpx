@@ -1,0 +1,15 @@
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+logging:
+  level: "${QPX_LOG_LEVEL:-info}"
+  format: "${QPX_LOG_FORMAT:-json}"
+metrics:
+  listen: "${QPX_METRICS_LISTEN:-127.0.0.1:19902}"
+  path: "${QPX_METRICS_PATH:-/metrics}"
+  # By default metrics.listen must be loopback. To expose metrics on non-loopback addresses,
+  # configure an explicit CIDR allowlist:
+  # allow:
+  #   - "10.0.0.0/8"
+exporter:
+  enabled: false
+  endpoint: "${QPX_EXPORTER_ENDPOINT:-127.0.0.1:19100}"
+  max_queue_events: 4096

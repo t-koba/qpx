@@ -1,0 +1,23 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+logging:
+  level: debug
+  format: json
+metrics:
+  listen: "127.0.0.1:19901"
+  path: "/metrics"
+exporter:
+  enabled: true
+  endpoint: "127.0.0.1:19100"
+  max_queue_events: 4096
+listeners:
+  - name: obs-forward
+    mode: forward
+    listen: "127.0.0.1:18089"
+    default_action: { type: block }
+    rules:
+      - name: allow-loopback
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*"]
+        action: { type: direct }

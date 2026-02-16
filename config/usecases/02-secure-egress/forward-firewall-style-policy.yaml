@@ -1,0 +1,44 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+auth:
+  users:
+    - username: secops
+      password: secops-password
+upstreams:
+  - name: security-egress
+    url: "http://proxy.security.example:3128"
+listeners:
+  - name: firewall-forward
+    mode: forward
+    listen: "0.0.0.0:18090"
+    default_action: { type: block }
+    tls_inspection:
+      enabled: true
+      verify_upstream: true
+    rules:
+      - name: allow-corp-api
+        match:
+          src_ip: ["10.0.0.0/8", "192.168.0.0/16"]
+          host: ["api.corp.example.com"]
+          path: ["/v1/*", "/v2/*"]
+          method: ["GET", "POST", "PUT", "DELETE"]
+          dst_port: [80, 443]
+        action: { type: proxy, upstream: security-egress }
+      - name: inspect-git-hosting
+        match:
+          sni: ["github.com", "gitlab.com"]
+          method: ["CONNECT"]
+        auth:
+          require: ["local"]
+        action: { type: inspect }
+      - name: allow-websocket-lab
+        match:
+          host: ["ws.lab.example.com"]
+          headers:
+            - name: upgrade
+              regex: "(?i)websocket"
+        action: { type: direct }
+      - name: deny-social-media
+        match:
+          host: ["*.social.example", "*.video.example"]
+        action: { type: block }

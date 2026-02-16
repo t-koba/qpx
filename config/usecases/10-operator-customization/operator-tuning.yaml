@@ -1,0 +1,54 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+identity:
+  proxy_name: "corp-edge-proxy"
+  auth_realm: "corp-proxy-auth"
+  metrics_prefix: "corp_proxy"
+  generated_user_agent: "CorpProxy/2026.02"
+
+messages:
+  blocked: "blocked by corp policy"
+  forbidden: "access denied by corp policy"
+  proxy_error: "corp proxy upstream error"
+  proxy_auth_required: "corp proxy authentication required"
+  reverse_error: "corp reverse upstream error"
+  cache_miss: "corp cache miss"
+  unsupported_ftp_method: "ftp method not allowed by corp policy"
+  connect_udp_disabled: "connect-udp is disabled by corp policy"
+  upstream_connect_udp_failed: "upstream connect-udp chain failed"
+
+cache:
+  backends:
+    - name: cache-gateway
+      kind: http
+      endpoint: "https://cache-gw.example.com"
+      timeout_ms: 1500
+      max_object_bytes: 1048576
+      auth_header_env: "CACHE_GW_AUTH_HEADER"
+
+listeners:
+  - name: forward
+    mode: forward
+    listen: "127.0.0.1:8080"
+    default_action: { type: block }
+    cache:
+      enabled: true
+      backend: cache-gateway
+      namespace: "forward-corp"
+      default_ttl_secs: 30
+      max_object_bytes: 1048576
+    rules:
+      - name: force-client-user-agent
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["example.com"]
+        action: { type: direct }
+        headers:
+          request_set:
+            User-Agent: "ManagedClient/1.0"
+      - name: allow-loopback
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*"]
+        action: { type: direct }

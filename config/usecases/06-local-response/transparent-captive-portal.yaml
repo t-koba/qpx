@@ -1,0 +1,31 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+logging:
+  level: info
+  format: json
+listeners:
+  - name: transparent-portal
+    mode: transparent
+    listen: "${QPX_LR_TRANSPARENT_LISTEN:-0.0.0.0:15181}"
+    default_action: { type: block }
+    rules:
+      - name: captive-portal-checks
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+          host:
+            - "connectivitycheck.gstatic.com"
+            - "www.msftconnecttest.com"
+            - "captive.apple.com"
+          path:
+            - "/generate_204"
+            - "/ncsi.txt"
+            - "/hotspot-detect.html"
+        action:
+          type: respond
+          local_response:
+            status: 200
+            content_type: "text/html; charset=utf-8"
+            body: "<html><body><h1>Network Login Required</h1><p>Open the portal and authenticate.</p></body></html>"
+        headers:
+          response_set:
+            Cache-Control: "no-store"

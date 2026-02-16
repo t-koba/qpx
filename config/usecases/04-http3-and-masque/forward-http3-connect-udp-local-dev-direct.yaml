@@ -1,0 +1,23 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+# Development-only: allow-by-default HTTP/3 forward proxy + CONNECT-UDP.
+# Safe only when bound to loopback (127.0.0.1). Do not expose this listener to untrusted networks.
+listeners:
+  - name: forward-http3-dev
+    mode: forward
+    listen: "127.0.0.1:18080"
+    default_action: { type: direct }
+    http3:
+      enabled: true
+      # HTTP/3 forward listener (QUIC+TLS). A server cert is issued from the local CA state.
+      listen: "127.0.0.1:18443"
+      connect_udp:
+        enabled: true
+        idle_timeout_secs: 45
+        max_capsule_buffer_bytes: 262144
+    rules:
+      - name: block-ads
+        match:
+          host: ["*.doubleclick.net", "*.googlesyndication.com", "*.adservice.google.com"]
+        action: { type: block }

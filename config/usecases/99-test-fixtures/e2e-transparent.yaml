@@ -1,0 +1,20 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-/tmp/qpx-e2e-state}"
+listeners:
+  - name: e2e-transparent
+    mode: transparent
+    listen: "127.0.0.1:15150"
+    default_action: { type: direct }
+    rules:
+      - name: block-transparent-host
+        match:
+          host: ["blocked.invalid"]
+        action: { type: block }
+      - name: trace-transparent-header
+        match:
+          host: ["127.0.0.1"]
+          path: ["/trace"]
+        action: { type: direct }
+        headers:
+          request_set:
+            X-Transparent-Test: enabled

@@ -1,0 +1,22 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+listeners:
+  - name: ftp-over-http-forward
+    mode: forward
+    listen: "127.0.0.1:18087"
+    default_action: { type: block }
+    ftp:
+      enabled: true
+      max_request_body_bytes: 8388608
+      max_download_bytes: 67108864
+    rules:
+      - name: ftp-method-allowlist
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          method: ["GET", "PUT", "LIST"]
+        action: { type: direct }
+      - name: block-non-ftp-verbs
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          method: ["DELETE", "PATCH", "TRACE"]
+        action: { type: block }

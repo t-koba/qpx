@@ -1,0 +1,63 @@
+[package]
+name = "qpx-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["tls-rustls", "digest-auth"]
+
+# rustls backend: required for MITM CA generation and rustls-based helpers.
+tls-rustls = [
+  "dep:rustls",
+  "dep:webpki-roots",
+  "dep:rcgen",
+  "dep:rustls-pemfile",
+  "dep:lru",
+  "ldap3/tls-rustls",
+]
+
+# native-tls backend: currently used for LDAP TLS.
+tls-native = ["ldap3/tls-native"]
+
+# HTTP Digest authentication (RFC 7616) using SHA-256.
+digest-auth = ["dep:sha2"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+serde_json.workspace = true
+serde_ignored.workspace = true
+regex.workspace = true
+cidr.workspace = true
+globset.workspace = true
+url.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+http.workspace = true
+libc.workspace = true
+
+# TLS (rustls)
+rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+lru = { workspace = true, optional = true }
+
+# Auth
+ldap3.workspace = true
+base64.workspace = true
+rand.workspace = true
+async-trait.workspace = true
+sha2 = { workspace = true, optional = true }
+
+# Observability
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
+# Async runtime
+tokio.workspace = true

@@ -1,0 +1,22 @@
+upstreams:
+  - name: shared-egress
+    url: "${QPX_UPSTREAM_URL:-http://proxy.shared.example:3128}"
+listeners:
+  - name: include-forward
+    mode: forward
+    listen: "${QPX_FORWARD_LISTEN:-127.0.0.1:18091}"
+    default_action:
+      type: block
+    rules:
+      - name: include-direct-allow
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*.internal.example"]
+        action: { type: direct }
+      - name: include-allow-loopback-egress
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*"]
+        action:
+          type: proxy
+          upstream: shared-egress

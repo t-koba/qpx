@@ -1,0 +1,53 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+logging:
+  level: info
+  format: json
+metrics:
+  listen: "127.0.0.1:19900"
+  path: "/metrics"
+upstreams:
+  - name: corp-egress
+    url: "http://proxy.corp.example:3128"
+listeners:
+  - name: office-forward
+    mode: forward
+    listen: "0.0.0.0:18088"
+    default_action: { type: block }
+    rules:
+      - name: direct-internal
+        match:
+          src_ip: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+          host: ["*.corp.internal"]
+        action: { type: direct }
+      - name: allow-office-egress
+        match:
+          src_ip: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+          host: ["*"]
+        action:
+          type: proxy
+          upstream: corp-egress
+  - name: office-transparent
+    mode: transparent
+    listen: "0.0.0.0:15004"
+    default_action: { type: block }
+    rules:
+      - name: allow-office-web
+        match:
+          src_ip: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+          dst_port: [80, 443]
+          host: ["*"]
+        action: { type: direct }
+reverse:
+  - name: office-reverse
+    listen: "0.0.0.0:19082"
+    routes:
+      - match:
+          host: ["devportal.example.com"]
+        upstreams:
+          - "http://10.50.0.15:8080"
+        lb: round_robin
+        retry:
+          attempts: 2
+          backoff_ms: 100
+        timeout_ms: 15000

@@ -1,0 +1,36 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+auth:
+  ldap:
+    url: "ldaps://ad.example.com:636"
+    bind_dn: "cn=qpx,ou=svc,dc=example,dc=com"
+    bind_password_env: "LDAP_BIND_PASSWORD"
+    user_base_dn: "ou=users,dc=example,dc=com"
+    group_base_dn: "ou=groups,dc=example,dc=com"
+    require_starttls: true
+listeners:
+  - name: ldap-policy-forward
+    mode: forward
+    listen: "127.0.0.1:18083"
+    default_action: { type: block }
+    tls_inspection:
+      enabled: true
+      verify_upstream: true
+      verify_exceptions: ["*.internal.example.com"]
+    rules:
+      - name: inspect-dev-and-ops
+        match:
+          host: ["*.corp.example.com"]
+          method: ["GET", "POST", "CONNECT"]
+        auth:
+          require: ["ldap"]
+          groups: ["dev", "ops"]
+        action: { type: inspect }
+      - name: read-only-docs
+        match:
+          host: ["docs.example.com"]
+          method: ["GET"]
+        auth:
+          require: ["ldap"]
+          groups: ["all-employees"]
+        action: { type: direct }

@@ -1,0 +1,32 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+listeners:
+  - name: selective-mitm-forward
+    mode: forward
+    listen: "127.0.0.1:18084"
+    default_action: { type: block }
+    tls_inspection:
+      enabled: true
+      verify_upstream: true
+      verify_exceptions: ["*.internal.example.com"]
+    rules:
+      - name: inspect-work-sites
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          sni: ["*.work.example.com", "api.partner.example"]
+        action: { type: inspect }
+      - name: tunnel-banking-sites
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          sni: ["*.bank.example", "*.payments.example"]
+        action: { type: tunnel }
+      - name: block-known-bad
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*.botnet.invalid", "*.malware.test"]
+        action: { type: block }
+      - name: allow-loopback
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*"]
+        action: { type: tunnel }

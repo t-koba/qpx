@@ -1,0 +1,56 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+listeners:
+  - name: forward-http3
+    mode: forward
+    listen: "0.0.0.0:8080"
+    default_action:
+      type: block
+    http3:
+      enabled: true
+      # HTTP/3 forward listener (QUIC+TLS). A server cert is issued from the local CA state.
+      listen: "0.0.0.0:8443"
+      connect_udp:
+        enabled: true
+        idle_timeout_secs: 45
+        max_capsule_buffer_bytes: 262144
+    rules:
+      - name: connect-udp-chain-corp
+        match:
+          method: ["CONNECT"]
+          host: ["*.corp.example"]
+        auth:
+          require: ["local"]
+        action:
+          type: proxy
+          upstream: masque-chain
+      - name: block-ads
+        match:
+          host: ["*.doubleclick.net", "*.googlesyndication.com", "*.adservice.google.com"]
+        action:
+          type: block
+      - name: http-require-auth
+        match:
+          method: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"]
+        auth:
+          require: ["local"]
+        action:
+          type: direct
+      - name: connect-require-auth
+        match:
+          method: ["CONNECT"]
+        auth:
+          require: ["local"]
+        action:
+          type: direct
+
+auth:
+  users:
+    - username: tester
+      password: secret
+
+upstreams:
+  - name: masque-chain
+    # CONNECT-UDP upstream chaining currently expects an HTTP/3-capable proxy URL.
+    url: "https://masque-gateway.example.com:443"

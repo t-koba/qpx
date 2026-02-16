@@ -1,0 +1,15 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+# Development-only: allow-by-default forward proxy.
+# Safe only when bound to loopback (127.0.0.1). Do not expose this listener to untrusted networks.
+listeners:
+  - name: forward-dev-direct
+    mode: forward
+    listen: "127.0.0.1:18070"
+    default_action: { type: direct }
+    rules:
+      - name: block-known-bad
+        match:
+          host: ["*.malware.test", "*.phishing.test", "*.botnet.invalid"]
+        action: { type: block }

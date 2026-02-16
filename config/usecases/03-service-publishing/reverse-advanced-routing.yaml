@@ -1,0 +1,50 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+reverse:
+  - name: reverse-advanced-routing
+    listen: "0.0.0.0:19083"
+    routes:
+      - match:
+          host: ["api.example.com"]
+          path: ["/api/*"]
+        # Route-level request/response header mutations (same syntax as forward rules).
+        headers:
+          request_set:
+            X-Proxy: qpx
+          response_set:
+            X-Proxy-Handled: qpx
+        # Path rewrite supports strip/add prefix + optional regex rewrite.
+        path_rewrite:
+          strip_prefix: "/api"
+          add_prefix: "/v1"
+          regex:
+            pattern: "^/v1/legacy/(.*)$"
+            replace: "/v1/$1"
+        # Weighted traffic splitting / canary.
+        backends:
+          - name: stable
+            weight: 90
+            upstreams:
+              - "http://10.40.0.11:8080"
+              - "http://10.40.0.12:8080"
+          - name: canary
+            weight: 10
+            upstreams:
+              - "http://10.40.0.99:8080"
+        # Shadow traffic (best-effort).
+        mirrors:
+          - name: shadow
+            percent: 5
+            upstreams:
+              - "http://10.40.0.50:8080"
+        lb: round_robin
+        retry:
+          attempts: 2
+          backoff_ms: 100
+        timeout_ms: 10000
+        health_check:
+          interval_ms: 5000
+          timeout_ms: 1000
+          fail_threshold: 3
+          cooldown_ms: 30000
+

@@ -1,0 +1,24 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+cache:
+  backends:
+    - name: redis-remote-tls
+      kind: redis
+      endpoint: "rediss://cache.example.com:6380/2"
+      timeout_ms: 2000
+      max_object_bytes: 1048576
+
+reverse:
+  - name: app
+    listen: "127.0.0.1:8443"
+    routes:
+      - match:
+          host: ["app.example.com"]
+        upstreams: ["http://127.0.0.1:9000"]
+        cache:
+          enabled: true
+          backend: redis-remote-tls
+          namespace: "reverse-app"
+          default_ttl_secs: 60
+          max_object_bytes: 1048576

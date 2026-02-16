@@ -1,0 +1,35 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+logging:
+  level: info
+  format: json
+reverse:
+  - name: reverse-maintenance
+    listen: "${QPX_LR_REVERSE_LISTEN:-0.0.0.0:19181}"
+    routes:
+      - match:
+          host: ["app.example.com"]
+          path: ["/status", "/healthz"]
+        upstreams: []
+        local_response:
+          status: 200
+          content_type: "application/json"
+          body: "{\"ok\":true,\"source\":\"qpx-reverse\"}"
+      - match:
+          host: ["app.example.com"]
+          path: ["/maintenance/*"]
+        upstreams: []
+        local_response:
+          status: 503
+          content_type: "text/html; charset=utf-8"
+          body: "<html><body><h1>Maintenance</h1><p>Please retry later.</p></body></html>"
+      - match:
+          host: ["app.example.com"]
+        upstreams:
+          - "http://10.10.0.11:8080"
+          - "http://10.10.0.12:8080"
+        lb: round_robin
+        retry:
+          attempts: 2
+          backoff_ms: 100
+        timeout_ms: 10000

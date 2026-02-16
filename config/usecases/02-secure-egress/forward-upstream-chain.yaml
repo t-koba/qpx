@@ -1,0 +1,29 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+upstreams:
+  - name: corp-egress
+    url: "http://proxy.corp.example:3128"
+listeners:
+  - name: chained-forward
+    mode: forward
+    listen: "127.0.0.1:18081"
+    default_action:
+      type: block
+    rules:
+      - name: deny-dangerous
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*.malware.test", "*.phishing.test"]
+        action: { type: block }
+      - name: bypass-internal
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*.corp.internal", "status.corp.example"]
+        action: { type: direct }
+      - name: allow-loopback-via-upstream
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*"]
+        action:
+          type: proxy
+          upstream: corp-egress

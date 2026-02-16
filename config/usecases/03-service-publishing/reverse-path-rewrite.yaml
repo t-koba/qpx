@@ -1,0 +1,20 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+reverse:
+  - name: reverse-path-rewrite
+    listen: "0.0.0.0:19082"
+    routes:
+      - match:
+          host: ["api.example.com"]
+          path: ["/api/v1/*"]
+        upstreams:
+          - "http://10.40.0.11:8080"
+        path_rewrite:
+          strip_prefix: "/api/v1"
+          add_prefix: "/v2"
+        lb: round_robin
+        retry:
+          attempts: 1
+          backoff_ms: 50
+        timeout_ms: 10000
+

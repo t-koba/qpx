@@ -1,0 +1,28 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+listeners:
+  - name: transparent-linux
+    mode: transparent
+    listen: "0.0.0.0:15001"
+    default_action: { type: block }
+    tls_inspection:
+      enabled: false
+      verify_upstream: true
+    rules:
+      - name: block-sensitive-domains
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+          host: ["*.social.example", "*.gaming.example"]
+        action: { type: block }
+      - name: direct-local-metadata
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+          dst_port: [80, 443]
+          host: ["metadata.internal"]
+        action: { type: direct }
+      - name: allow-private-web
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+          dst_port: [80, 443]
+          host: ["*"]
+        action: { type: proxy }

@@ -1,0 +1,55 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+logging:
+  level: info
+  format: json
+listeners:
+  - name: policy-forward
+    mode: forward
+    listen: "127.0.0.1:18180"
+    default_action: { type: block }
+    rules:
+      - name: block-ads-with-page
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host:
+            - "*.doubleclick.net"
+            - "*.googlesyndication.com"
+        action:
+          type: respond
+          local_response:
+            status: 403
+            content_type: "text/plain; charset=utf-8"
+            body: "blocked by corporate policy"
+            headers:
+              X-Policy-Id: "adblock-1"
+  - name: policy-transparent
+    mode: transparent
+    listen: "127.0.0.1:15180"
+    default_action: { type: block }
+    rules:
+      - name: transparent-maintenance-page
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["maintenance.internal"]
+        action:
+          type: respond
+          local_response:
+            status: 503
+            body: "service under maintenance"
+reverse:
+  - name: policy-reverse
+    listen: "127.0.0.1:19180"
+    routes:
+      - match:
+          host: ["status.example.com"]
+          path: ["/healthz"]
+        upstreams: []
+        local_response:
+          status: 200
+          content_type: "application/json"
+          body: "{\"ok\":true,\"source\":\"qpx\"}"
+      - match:
+          host: ["status.example.com"]
+        upstreams:
+          - "http://127.0.0.1:8080"

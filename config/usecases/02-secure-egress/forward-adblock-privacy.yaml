@@ -1,0 +1,106 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+logging:
+  level: info
+  format: json
+listeners:
+  - name: adblock-forward
+    mode: forward
+    listen: "127.0.0.1:18100"
+    default_action: { type: block }
+    rules:
+      - name: allow-local-and-internal
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["localhost", "127.0.0.1", "*.corp.internal", "*.home.arpa"]
+        action: { type: direct }
+
+      - name: block-ad-domains
+        match:
+          host:
+            - "*.doubleclick.net"
+            - "*.googlesyndication.com"
+            - "*.googleadservices.com"
+            - "*.adnxs.com"
+            - "*.taboola.com"
+            - "*.outbrain.com"
+            - "*.criteo.com"
+            - "*.adsrvr.org"
+            - "*.moatads.com"
+            - "*.scorecardresearch.com"
+            - "*.zedo.com"
+        action:
+          type: respond
+          local_response:
+            status: 403
+            content_type: "text/plain; charset=utf-8"
+            body: "ad domain blocked by qpx policy"
+        headers:
+          response_set:
+            X-Qpx-Policy: ad-domain
+
+      - name: block-tracker-domains
+        match:
+          host:
+            - "*.google-analytics.com"
+            - "*.analytics.google.com"
+            - "*.segment.io"
+            - "*.mixpanel.com"
+            - "*.amplitude.com"
+            - "*.hotjar.com"
+            - "*.newrelic.com"
+            - "*.appsflyer.com"
+            - "*.adjust.com"
+            - "*.branch.io"
+            - "*.braze.com"
+        action:
+          type: respond
+          local_response:
+            status: 403
+            content_type: "text/plain; charset=utf-8"
+            body: "tracker domain blocked by qpx policy"
+        headers:
+          response_set:
+            X-Qpx-Policy: tracker-domain
+
+      - name: block-ad-connect
+        match:
+          method: ["CONNECT"]
+          sni:
+            - "*.doubleclick.net"
+            - "*.googlesyndication.com"
+            - "*.google-analytics.com"
+            - "*.segment.io"
+            - "*.mixpanel.com"
+            - "*.taboola.com"
+            - "*.outbrain.com"
+        action: { type: block }
+
+      - name: block-ad-paths
+        match:
+          path:
+            - "/ads/*"
+            - "/ad/*"
+            - "/analytics/*"
+            - "/track/*"
+            - "/collect*"
+            - "/pixel*"
+        action:
+          type: respond
+          local_response:
+            status: 403
+            content_type: "text/plain; charset=utf-8"
+            body: "tracking path blocked by qpx policy"
+        headers:
+          response_set:
+            X-Qpx-Policy: tracker-path
+
+      - name: privacy-headers
+        match:
+          src_ip: ["127.0.0.1/32", "::1/128"]
+          host: ["*"]
+        action: { type: direct }
+        headers:
+          request_set:
+            DNT: "1"
+            Sec-GPC: "1"

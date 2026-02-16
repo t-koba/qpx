@@ -1,0 +1,47 @@
+version: 1
+
+# Multi-core runtime tuning for high connection fan-in.
+runtime:
+  worker_threads: 16
+  max_blocking_threads: 512
+  acceptor_tasks_per_listener: 16
+  reuse_port: true
+  tcp_backlog: 8192
+  max_h3_request_body_bytes: 16777216
+  max_h3_response_body_bytes: 16777216
+  max_reverse_retry_template_body_bytes: 8388608
+
+logging:
+  level: info
+  format: json
+
+listeners:
+  - name: forward-scale
+    mode: forward
+    listen: "0.0.0.0:18080"
+    default_action: { type: block }
+    xdp:
+      enabled: true
+      metadata_mode: proxy-v1
+      require_metadata: true
+      trusted_peers: ["10.0.0.0/8", "192.168.0.0/16"]
+    rules:
+      - name: corp-direct
+        match:
+          src_ip: ["10.0.0.0/8"]
+          method: ["GET", "HEAD", "CONNECT"]
+        action: { type: direct }
+
+reverse:
+  - name: reverse-scale
+    listen: "0.0.0.0:18443"
+    xdp:
+      enabled: true
+      metadata_mode: proxy-v1
+      require_metadata: true
+      trusted_peers: ["10.0.0.0/8", "192.168.0.0/16"]
+    routes:
+      - match:
+          host: ["*.example.com"]
+        upstreams: ["http://127.0.0.1:19092"]
+        timeout_ms: 15000
