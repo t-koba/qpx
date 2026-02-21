@@ -3,6 +3,7 @@ pub mod config;
 pub mod envsubst;
 pub mod exporter;
 pub mod matchers;
+pub mod middleware;
 pub mod observability;
 pub mod prefilter;
 pub mod rules;

@@ -3,6 +3,7 @@ use crate::http::common::resolve_named_upstream;
 use crate::upstream::connect::{connect_tunnel_target, ConnectedTunnel};
 use crate::xdp;
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use hyper::{Body, Request};
 use qpx_core::config::{ActionConfig, ListenerConfig};
 use std::net::SocketAddr;
@@ -47,8 +48,7 @@ impl ConnectTarget {
 #[derive(Clone, Debug)]
 pub(super) enum DestinationResolver {
     Kernel,
-    XdpProxyV1 {
-        metadata_mode: xdp::ProxyMetadataMode,
+    XdpProxyV2 {
         require_metadata: bool,
         trusted_peers: Vec<cidr::IpCidr>,
     },
@@ -57,14 +57,25 @@ pub(super) enum DestinationResolver {
 impl DestinationResolver {
     pub(super) async fn resolve_original_target(
         &self,
-        stream: &mut TcpStream,
+        stream: TcpStream,
         remote_addr: SocketAddr,
         metadata_timeout: Duration,
-    ) -> Result<Option<ConnectTarget>> {
+    ) -> Result<(
+        crate::io_prefix::PrefixedIo<TcpStream>,
+        SocketAddr,
+        Option<ConnectTarget>,
+    )> {
+        let mut stream = stream;
         match self {
-            Self::Kernel => Ok(original_dst_socket(stream).ok().map(ConnectTarget::Socket)),
-            Self::XdpProxyV1 {
-                metadata_mode,
+            Self::Kernel => {
+                let target = original_dst_socket(&stream).ok().map(ConnectTarget::Socket);
+                Ok((
+                    crate::io_prefix::PrefixedIo::new(stream, Bytes::new()),
+                    remote_addr,
+                    target,
+                ))
+            }
+            Self::XdpProxyV2 {
                 require_metadata,
                 trusted_peers,
             } => {
@@ -76,31 +87,29 @@ impl DestinationResolver {
                             remote_addr
                         ));
                     }
-                    return Ok(original_dst_socket(stream).ok().map(ConnectTarget::Socket));
+                    let target = original_dst_socket(&stream).ok().map(ConnectTarget::Socket);
+                    return Ok((
+                        crate::io_prefix::PrefixedIo::new(stream, Bytes::new()),
+                        remote_addr,
+                        target,
+                    ));
                 }
-                let meta = match tokio::time::timeout(
-                    metadata_timeout,
-                    xdp::consume_proxy_metadata(stream, *require_metadata, metadata_mode.clone()),
-                )
-                .await
-                {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        if *require_metadata {
-                            return Err(anyhow!(
-                                "proxy metadata required but read timed out: {}",
-                                remote_addr
-                            ));
-                        }
-                        return Ok(original_dst_socket(stream).ok().map(ConnectTarget::Socket));
-                    }
+                let result =
+                    xdp::consume_proxy_metadata(&mut stream, *require_metadata, metadata_timeout)
+                        .await?;
+                let (src, dst) = match result.meta {
+                    Some(meta) => (meta.src, meta.dst),
+                    None => (None, None),
                 };
-                if let Some(meta) = meta {
-                    if let Some(dst) = meta.dst {
-                        return Ok(Some(ConnectTarget::Socket(dst)));
-                    }
-                }
-                Ok(original_dst_socket(stream).ok().map(ConnectTarget::Socket))
+                let effective_remote = src.unwrap_or(remote_addr);
+                let target = dst
+                    .map(ConnectTarget::Socket)
+                    .or_else(|| original_dst_socket(&stream).ok().map(ConnectTarget::Socket));
+                Ok((
+                    crate::io_prefix::PrefixedIo::new(stream, result.prefix),
+                    effective_remote,
+                    target,
+                ))
             }
         }
     }
@@ -118,30 +127,29 @@ pub(super) fn resolve_http_target(
     req: &Request<Body>,
     fallback: Option<&ConnectTarget>,
 ) -> Result<(ConnectTarget, Option<String>)> {
-    let host_from_request = req
-        .headers()
-        .get(http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| req.uri().authority().map(|a| a.as_str()))
-        .and_then(|v| parse_authority_host_port(v, 80));
-
     let target = match fallback {
         Some(target) => target.clone(),
         None => {
-            if let Some((host, port)) = host_from_request.clone() {
+            let host_from_request = req
+                .headers()
+                .get(http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .or_else(|| req.uri().authority().map(|a| a.as_str()))
+                .and_then(|v| parse_authority_host_port(v, 80));
+            if let Some((host, port)) = host_from_request {
                 ConnectTarget::HostPort(host, port)
             } else {
-                return Err(anyhow!("transparent HTTP on this OS requires Host header when original destination is unavailable"));
+                return Err(anyhow!(
+                    "transparent HTTP on this OS requires Host header when original destination is unavailable"
+                ));
             }
         }
     };
 
-    let host_for_match = host_from_request
-        .map(|(host, _)| host)
-        .or_else(|| match &target {
-            ConnectTarget::HostPort(host, _) => Some(host.clone()),
-            ConnectTarget::Socket(addr) => Some(addr.ip().to_string()),
-        });
+    let host_for_match = match &target {
+        ConnectTarget::HostPort(host, _) => Some(host.clone()),
+        ConnectTarget::Socket(addr) => Some(addr.ip().to_string()),
+    };
 
     Ok((target, host_for_match))
 }
@@ -159,8 +167,7 @@ pub(super) fn destination_resolver_for_listener(
     listener: &ListenerConfig,
 ) -> Result<DestinationResolver> {
     if let Some(xdp_cfg) = xdp::compile_xdp_config(listener.xdp.as_ref())? {
-        return Ok(DestinationResolver::XdpProxyV1 {
-            metadata_mode: xdp_cfg.metadata_mode,
+        return Ok(DestinationResolver::XdpProxyV2 {
             require_metadata: xdp_cfg.require_metadata,
             trusted_peers: xdp_cfg.trusted_peers,
         });
@@ -170,36 +177,70 @@ pub(super) fn destination_resolver_for_listener(
 
 #[cfg(target_os = "linux")]
 fn original_dst_socket(stream: &tokio::net::TcpStream) -> Result<SocketAddr> {
-    use libc::{getsockopt, sockaddr_in, socklen_t, SOL_IP};
+    use libc::{getsockopt, sockaddr_in, sockaddr_in6, socklen_t, SOL_IP, SOL_IPV6};
     use std::mem::MaybeUninit;
     use std::os::unix::io::AsRawFd;
 
     const SO_ORIGINAL_DST: i32 = 80;
     let fd = stream.as_raw_fd();
-    let mut addr: MaybeUninit<sockaddr_in> = MaybeUninit::uninit();
-    let mut len = std::mem::size_of::<sockaddr_in>() as socklen_t;
-    let ret = unsafe {
+
+    // IPv4 (iptables / SO_ORIGINAL_DST).
+    let mut addr4: MaybeUninit<sockaddr_in> = MaybeUninit::uninit();
+    let mut len4 = std::mem::size_of::<sockaddr_in>() as socklen_t;
+    let ret4 = unsafe {
         getsockopt(
             fd,
             SOL_IP,
             SO_ORIGINAL_DST,
-            addr.as_mut_ptr() as *mut _,
-            &mut len as *mut _,
+            addr4.as_mut_ptr() as *mut _,
+            &mut len4 as *mut _,
         )
     };
-    if ret != 0 {
-        return Err(anyhow!("getsockopt failed"));
+    if ret4 == 0 {
+        if len4 < std::mem::size_of::<sockaddr_in>() as socklen_t {
+            return Err(anyhow!(
+                "getsockopt returned short sockaddr_in length: {}",
+                len4
+            ));
+        }
+        let addr = unsafe { addr4.assume_init() };
+        let ip = std::net::Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
+        let port = u16::from_be(addr.sin_port);
+        return Ok(SocketAddr::new(std::net::IpAddr::V4(ip), port));
     }
-    if len < std::mem::size_of::<sockaddr_in>() as socklen_t {
+    let err4 = std::io::Error::last_os_error();
+
+    // IPv6 (ip6tables / IP6T_SO_ORIGINAL_DST).
+    const IP6T_SO_ORIGINAL_DST: i32 = 80;
+    let mut addr6: MaybeUninit<sockaddr_in6> = MaybeUninit::uninit();
+    let mut len6 = std::mem::size_of::<sockaddr_in6>() as socklen_t;
+    let ret6 = unsafe {
+        getsockopt(
+            fd,
+            SOL_IPV6,
+            IP6T_SO_ORIGINAL_DST,
+            addr6.as_mut_ptr() as *mut _,
+            &mut len6 as *mut _,
+        )
+    };
+    if ret6 != 0 {
+        let err6 = std::io::Error::last_os_error();
         return Err(anyhow!(
-            "getsockopt returned short sockaddr_in length: {}",
-            len
+            "getsockopt SO_ORIGINAL_DST failed: {}; IP6T_SO_ORIGINAL_DST failed: {}",
+            err4,
+            err6
         ));
     }
-    let addr = unsafe { addr.assume_init() };
-    let ip = std::net::Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
-    let port = u16::from_be(addr.sin_port);
-    Ok(SocketAddr::new(std::net::IpAddr::V4(ip), port))
+    if len6 < std::mem::size_of::<sockaddr_in6>() as socklen_t {
+        return Err(anyhow!(
+            "getsockopt returned short sockaddr_in6 length: {}",
+            len6
+        ));
+    }
+    let addr = unsafe { addr6.assume_init() };
+    let ip = std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr);
+    let port = u16::from_be(addr.sin6_port);
+    Ok(SocketAddr::new(std::net::IpAddr::V6(ip), port))
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -1,5 +1,8 @@
 use super::destination::{resolve_http_target, resolve_upstream, ConnectTarget};
-use crate::http::common::{bad_request_response as bad_request, forbidden_response as forbidden};
+use crate::http::common::{
+    bad_request_response as bad_request, forbidden_response as forbidden,
+    too_many_requests_response as too_many_requests,
+};
 use crate::http::l7::{
     finalize_response_for_request, finalize_response_with_headers_in_place,
     handle_max_forwards_in_place, prepare_request_with_headers_in_place,
@@ -13,21 +16,27 @@ use crate::upstream::http1::{proxy_http1_request, proxy_websocket_http1, Websock
 use anyhow::{anyhow, Context, Result};
 use hyper::service::service_fn;
 use hyper::{Body, Request, StatusCode};
+use qpx_core::middleware::access_log::{AccessLogContext, AccessLogService};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
-use tokio::net::TcpStream;
+use std::sync::Arc;
 use tokio::time::Duration;
 
-pub(super) async fn handle_http_connection(
-    stream: TcpStream,
+pub(super) async fn handle_http_connection<I>(
+    stream: I,
     remote_addr: SocketAddr,
     original_target: Option<ConnectTarget>,
     listener_name: &str,
     runtime: Runtime,
-) -> Result<()> {
+) -> Result<()>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let listener_name = listener_name.to_string();
     let header_read_timeout =
         Duration::from_millis(runtime.state().config.runtime.http_header_read_timeout_ms);
+    let access_cfg = runtime.state().config.access_log.clone();
+    let access_name = Arc::<str>::from(listener_name.as_str());
 
     let service = service_fn(move |mut req: Request<Body>| {
         let runtime = runtime.clone();
@@ -62,6 +71,19 @@ pub(super) async fn handle_http_connection(
                     false,
                 ));
             }
+            if let Some(limits) = state.rate_limiters.listener(listener_name.as_str()) {
+                if let Some(limiter) = limits.listener.requests.as_ref() {
+                    if let Some(retry_after) = limiter.try_acquire(remote_addr.ip(), 1) {
+                        return Ok::<_, anyhow::Error>(finalize_response_for_request(
+                            req.method(),
+                            req.version(),
+                            proxy_name,
+                            too_many_requests(Some(retry_after)),
+                            false,
+                        ));
+                    }
+                }
+            }
             let engine = state
                 .rules_by_listener
                 .get(&listener_name)
@@ -93,15 +115,41 @@ pub(super) async fn handle_http_connection(
                 forbidden,
                 state.messages.forbidden.as_str(),
             )?;
-            let policy = match decision {
-                ListenerPolicyDecision::Proceed(policy) => policy,
-                ListenerPolicyDecision::Early(response) => {
-                    return Ok::<_, anyhow::Error>(response);
+            let (policy, early_response, matched_rule) = match decision {
+                ListenerPolicyDecision::Proceed(mut policy) => {
+                    let matched_rule = policy.matched_rule.take();
+                    (Some(policy), None, matched_rule)
                 }
+                ListenerPolicyDecision::Early(response, matched_rule) => (None, Some(response), matched_rule),
             };
+            if let Some(rule) = matched_rule.as_deref() {
+                if let Some(limits) = state.rate_limiters.listener(listener_name.as_str()) {
+                    if let Some(rule_limits) = limits.rules.get(rule) {
+                        if let Some(limiter) = rule_limits.requests.as_ref() {
+                            if let Some(retry_after) = limiter.try_acquire(remote_addr.ip(), 1) {
+                                return Ok::<_, anyhow::Error>(finalize_response_for_request(
+                                    req.method(),
+                                    req.version(),
+                                    proxy_name,
+                                    too_many_requests(Some(retry_after)),
+                                    false,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(response) = early_response {
+                return Ok::<_, anyhow::Error>(response);
+            }
+            let policy = policy.expect("policy");
 
             let req_method = req.method().clone();
-            if let Some(response) = handle_max_forwards_in_place(&mut req, proxy_name) {
+            if let Some(response) = handle_max_forwards_in_place(
+                &mut req,
+                proxy_name,
+                state.config.runtime.trace_reflect_all_headers,
+            ) {
                 return Ok::<_, anyhow::Error>(response);
             }
             let websocket = is_websocket_upgrade(req.headers());
@@ -185,6 +233,15 @@ pub(super) async fn handle_http_connection(
             Ok::<_, anyhow::Error>(response)
         }
     });
+    let service = AccessLogService::new(
+        service,
+        remote_addr,
+        AccessLogContext {
+            kind: "transparent",
+            name: access_name,
+        },
+        &access_cfg,
+    );
 
     serve_http1_with_upgrades(stream, service, header_read_timeout, false)
         .await

@@ -5,6 +5,7 @@ use crate::http::semantics::{
 };
 use hyper::{Body, Method, Request, Response, StatusCode};
 use qpx_core::rules::CompiledHeaderControl;
+use std::collections::HashSet;
 use std::time::SystemTime;
 
 pub fn finalize_response_for_request(
@@ -137,11 +138,13 @@ pub fn prepare_request_with_headers_in_place(
     sync_host_header_from_absolute_target(request.headers_mut(), &request_uri);
     sanitize_hop_by_hop_headers(request.headers_mut(), preserve_upgrade);
     append_via_for_version(request.headers_mut(), request_version, proxy_name);
+    qpx_core::observability::inject_trace_context(request.headers_mut());
 }
 
 pub fn handle_max_forwards_in_place(
     request: &mut Request<Body>,
     proxy_name: &str,
+    trace_reflect_all_headers: bool,
 ) -> Option<Response<Body>> {
     if request.method() != Method::TRACE && request.method() != Method::OPTIONS {
         return None;
@@ -195,7 +198,7 @@ pub fn handle_max_forwards_in_place(
     if parsed == 0 {
         let response = match *request.method() {
             Method::TRACE => {
-                let body = serialize_request_headers_only(request);
+                let body = serialize_request_headers_only(request, trace_reflect_all_headers);
                 Response::builder()
                     .status(StatusCode::OK)
                     .header(http::header::CONTENT_TYPE, "message/http; charset=utf-8")
@@ -229,7 +232,7 @@ pub fn handle_max_forwards_in_place(
     None
 }
 
-fn serialize_request_headers_only(request: &Request<Body>) -> String {
+fn serialize_request_headers_only(request: &Request<Body>, trace_reflect_all_headers: bool) -> String {
     let mut out = String::new();
     let version = match request.version() {
         http::Version::HTTP_09 => "HTTP/0.9",
@@ -245,7 +248,12 @@ fn serialize_request_headers_only(request: &Request<Body>) -> String {
     out.push(' ');
     out.push_str(version);
     out.push_str("\r\n");
+    let connection_tokens = parse_connection_tokens(request.headers());
     for (name, value) in request.headers().iter() {
+        let lower = name.as_str();
+        if !should_reflect_trace_header(lower, &connection_tokens, trace_reflect_all_headers) {
+            continue;
+        }
         out.push_str(name.as_str());
         out.push_str(": ");
         if let Ok(v) = value.to_str() {
@@ -255,4 +263,61 @@ fn serialize_request_headers_only(request: &Request<Body>) -> String {
     }
     out.push_str("\r\n");
     out
+}
+
+fn parse_connection_tokens(headers: &http::HeaderMap) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for value in headers.get_all(http::header::CONNECTION) {
+        let Ok(s) = value.to_str() else {
+            continue;
+        };
+        for token in s.split(',') {
+            let token = token.trim();
+            if !token.is_empty() {
+                out.insert(token.to_ascii_lowercase());
+            }
+        }
+    }
+    out
+}
+
+fn should_reflect_trace_header(
+    lower_name: &str,
+    connection_tokens: &HashSet<String>,
+    trace_reflect_all_headers: bool,
+) -> bool {
+    if trace_reflect_all_headers {
+        return true;
+    }
+    if connection_tokens.contains(lower_name) {
+        return false;
+    }
+    if crate::http::semantics::is_hop_by_hop_header_name(lower_name) {
+        return false;
+    }
+    // Prefer an allowlist in the default mode to avoid leaking custom secret headers.
+    matches!(
+        lower_name,
+        "host"
+            | "user-agent"
+            | "accept"
+            | "accept-language"
+            | "accept-encoding"
+            | "cache-control"
+            | "pragma"
+            | "content-type"
+            | "content-length"
+            | "range"
+            | "if-match"
+            | "if-none-match"
+            | "if-modified-since"
+            | "if-unmodified-since"
+            | "if-range"
+            | "via"
+            | "x-forwarded-for"
+            | "x-forwarded-proto"
+            | "x-request-id"
+            | "traceparent"
+            | "tracestate"
+    )
 }

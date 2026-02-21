@@ -378,6 +378,32 @@ fn rustls_server_name_for_host(host: &str) -> Result<rustls::pki_types::ServerNa
         .map_err(|_| anyhow!("invalid server name for TLS: {}", host))
 }
 
+fn should_include_export_preview_header(name: &str) -> bool {
+    // Default to an allowlist to avoid leaking custom secret headers (e.g. x-api-key).
+    matches!(
+        name,
+        "host"
+            | "user-agent"
+            | "accept"
+            | "accept-language"
+            | "accept-encoding"
+            | "cache-control"
+            | "pragma"
+            | "content-type"
+            | "content-length"
+            | "etag"
+            | "last-modified"
+            | "expires"
+            | "location"
+            | "via"
+            | "x-forwarded-for"
+            | "x-forwarded-proto"
+            | "x-request-id"
+            | "traceparent"
+            | "tracestate"
+    )
+}
+
 pub fn serialize_request_preview(req: &Request<Body>) -> Vec<u8> {
     let mut out = String::new();
     out.push_str(req.method().as_str());
@@ -387,7 +413,11 @@ pub fn serialize_request_preview(req: &Request<Body>) -> Vec<u8> {
     out.push_str(http_version_label(req.version()));
     out.push_str("\r\n");
     for (name, value) in req.headers() {
-        out.push_str(name.as_str());
+        let name = name.as_str();
+        if !should_include_export_preview_header(name) {
+            continue;
+        }
+        out.push_str(name);
         out.push_str(": ");
         if let Ok(text) = value.to_str() {
             out.push_str(text);
@@ -409,7 +439,11 @@ pub fn serialize_response_preview(response: &Response<Body>) -> Vec<u8> {
     }
     out.push_str("\r\n");
     for (name, value) in response.headers() {
-        out.push_str(name.as_str());
+        let name = name.as_str();
+        if !should_include_export_preview_header(name) {
+            continue;
+        }
+        out.push_str(name);
         out.push_str(": ");
         if let Ok(text) = value.to_str() {
             out.push_str(text);

@@ -2,12 +2,16 @@ use anyhow::Result;
 use async_trait::async_trait;
 use hyper::{Body, Response};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
 pub(super) const CACHE_HEADER: &str = "x-qpx-cache";
 pub(super) const CACHE_WARNING_STALE: &str = "110 - \"Response is stale\"";
+pub(super) const CACHE_WARNING_REVALIDATION_FAILED: &str = "111 - \"Revalidation failed\"";
 pub(super) const INDEX_TTL_SECS: u64 = 24 * 60 * 60;
 pub(super) const MAX_CACHE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_VARIANTS_PER_PRIMARY: usize = 256;
+static BACKGROUND_REVALIDATIONS_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[async_trait]
 pub trait CacheBackend: Send + Sync {
@@ -26,6 +30,7 @@ pub struct CacheRequestKey {
 #[derive(Debug)]
 pub enum LookupOutcome {
     Hit(Response<Body>),
+    StaleWhileRevalidate(Response<Body>, RevalidationState),
     Miss,
     Revalidate(RevalidationState),
     OnlyIfCachedMiss,
@@ -36,6 +41,7 @@ pub struct RevalidationState {
     pub(super) namespace: String,
     pub(super) variant_key: String,
     pub(super) envelope: CachedResponseEnvelope,
+    pub(super) stale_if_error_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,13 +89,51 @@ pub(super) struct ResponseDirectives {
     pub(super) proxy_revalidate: bool,
     pub(super) max_age: Option<u64>,
     pub(super) s_maxage: Option<u64>,
+    pub(super) stale_while_revalidate: Option<u64>,
+    pub(super) stale_if_error: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum CacheEntryDisposition {
     ServeFresh,
     ServeStale,
+    ServeStaleWhileRevalidate,
     RequiresRevalidation,
+}
+
+pub(crate) struct BackgroundRevalidationGuard {
+    key: String,
+}
+
+pub(crate) fn try_begin_background_revalidation(state: &RevalidationState) -> Option<BackgroundRevalidationGuard> {
+    let in_flight =
+        BACKGROUND_REVALIDATIONS_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
+
+    let key = format!("{}::{}", state.namespace, state.variant_key);
+    match in_flight.lock() {
+        Ok(mut set) => {
+            if !set.insert(key.clone()) {
+                return None;
+            }
+        }
+        Err(poisoned) => {
+            let mut set = poisoned.into_inner();
+            if !set.insert(key.clone()) {
+                return None;
+            }
+        }
+    }
+    Some(BackgroundRevalidationGuard { key })
+}
+
+impl Drop for BackgroundRevalidationGuard {
+    fn drop(&mut self) {
+        let in_flight =
+            BACKGROUND_REVALIDATIONS_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
+        if let Ok(mut set) = in_flight.lock() {
+            let _ = set.remove(self.key.as_str());
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,7 @@
 use crate::runtime::Runtime;
-use crate::tls::{extract_sni, looks_like_tls_client_hello, peek_client_hello_with_timeout};
+use crate::tls::{extract_sni, looks_like_tls_client_hello, read_client_hello_with_timeout};
 use anyhow::{anyhow, Context, Result};
+use bytes::Bytes;
 use metrics::{counter, histogram};
 use qpx_core::config::ListenerConfig;
 use std::net::SocketAddr;
@@ -54,7 +55,9 @@ async fn run_transparent_acceptor(
     runtime: Runtime,
     resolver: DestinationResolver,
 ) -> Result<()> {
+    let semaphore = runtime.state().connection_semaphore.clone();
     loop {
+        let permit = semaphore.clone().acquire_owned().await?;
         let (stream, remote_addr) = match tcp_listener.accept().await {
             Ok(accepted) => accepted,
             Err(err) => {
@@ -66,6 +69,7 @@ async fn run_transparent_acceptor(
         let listener_name = listener_name.clone();
         let resolver = resolver.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(err) =
                 handle_connection(stream, remote_addr, &listener_name, runtime, resolver).await
             {
@@ -83,20 +87,22 @@ async fn handle_connection(
     resolver: DestinationResolver,
 ) -> Result<()> {
     let started = Instant::now();
-    let mut stream = stream;
+    let _ = stream.set_nodelay(true);
     let metadata_timeout =
         Duration::from_millis(runtime.state().config.runtime.http_header_read_timeout_ms);
-    let original_target = resolver
-        .resolve_original_target(&mut stream, remote_addr, metadata_timeout)
+    let (mut stream, remote_addr, original_target) = resolver
+        .resolve_original_target(stream, remote_addr, metadata_timeout)
         .await?;
     let state = runtime.state();
     let peek_timeout = Duration::from_millis(state.config.runtime.tls_peek_timeout_ms);
-    let sniff = peek_client_hello_with_timeout(&stream, peek_timeout)
+    let sniff = read_client_hello_with_timeout(&mut stream, peek_timeout)
         .await
         .context("transparent TLS peek timed out")?;
+    let is_tls = looks_like_tls_client_hello(&sniff);
+    let sni = is_tls.then(|| extract_sni(&sniff)).flatten();
+    let stream = crate::io_prefix::PrefixedIo::new(stream, Bytes::from(sniff));
 
-    if looks_like_tls_client_hello(&sniff) {
-        let sni = extract_sni(&sniff);
+    if is_tls {
         let result = tls_path::handle_tls_connection(
             stream,
             remote_addr,

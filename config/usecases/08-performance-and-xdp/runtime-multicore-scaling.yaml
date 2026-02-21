@@ -11,7 +11,7 @@ runtime:
   max_h3_response_body_bytes: 16777216
   max_reverse_retry_template_body_bytes: 8388608
 
-logging:
+system_log:
   level: info
   format: json
 
@@ -22,7 +22,7 @@ listeners:
     default_action: { type: block }
     xdp:
       enabled: true
-      metadata_mode: proxy-v1
+      metadata_mode: proxy-v2
       require_metadata: true
       trusted_peers: ["10.0.0.0/8", "192.168.0.0/16"]
     rules:
@@ -37,7 +37,7 @@ reverse:
     listen: "0.0.0.0:18443"
     xdp:
       enabled: true
-      metadata_mode: proxy-v1
+      metadata_mode: proxy-v2
       require_metadata: true
       trusted_peers: ["10.0.0.0/8", "192.168.0.0/16"]
     routes:

@@ -14,9 +14,15 @@ pub struct Config {
     #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
-    pub logging: LoggingConfig,
+    pub system_log: SystemLogConfig,
+    #[serde(default)]
+    pub access_log: AccessLogConfig,
+    #[serde(default)]
+    pub audit_log: AuditLogConfig,
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
+    #[serde(default)]
+    pub otel: Option<OtelConfig>,
     #[serde(default)]
     pub exporter: Option<ExporterConfig>,
     #[serde(default)]
@@ -106,8 +112,12 @@ pub struct RuntimeConfig {
     pub max_blocking_threads: Option<usize>,
     #[serde(default = "default_runtime_max_ftp_concurrency")]
     pub max_ftp_concurrency: usize,
+    #[serde(default = "default_runtime_max_concurrent_connections")]
+    pub max_concurrent_connections: usize,
     #[serde(default)]
     pub trace_enabled: bool,
+    #[serde(default)]
+    pub trace_reflect_all_headers: bool,
     #[serde(default)]
     pub acceptor_tasks_per_listener: Option<usize>,
     #[serde(default = "default_runtime_reuse_port")]
@@ -140,7 +150,9 @@ impl Default for RuntimeConfig {
             worker_threads: None,
             max_blocking_threads: None,
             max_ftp_concurrency: default_runtime_max_ftp_concurrency(),
+            max_concurrent_connections: default_runtime_max_concurrent_connections(),
             trace_enabled: false,
+            trace_reflect_all_headers: false,
             acceptor_tasks_per_listener: None,
             reuse_port: default_runtime_reuse_port(),
             tcp_backlog: default_runtime_tcp_backlog(),
@@ -159,20 +171,63 @@ impl Default for RuntimeConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct LoggingConfig {
+pub struct SystemLogConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
     #[serde(default = "default_log_format")]
     pub format: String,
 }
 
-impl Default for LoggingConfig {
+impl Default for SystemLogConfig {
     fn default() -> Self {
         Self {
             level: default_log_level(),
             format: default_log_format(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LogOutputConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "default_log_output_format")]
+    pub format: String,
+    #[serde(default = "default_log_rotation")]
+    pub rotation: String,
+    #[serde(default = "default_log_rotation_count")]
+    pub rotation_count: usize,
+}
+
+impl Default for LogOutputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: None,
+            format: default_log_output_format(),
+            rotation: default_log_rotation(),
+            rotation_count: default_log_rotation_count(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AccessLogConfig {
+    #[serde(flatten)]
+    pub output: LogOutputConfig,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AuditLogConfig {
+    #[serde(flatten)]
+    pub output: LogOutputConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -184,6 +239,26 @@ pub struct MetricsConfig {
     pub allow: Vec<String>,
     #[serde(default = "default_metrics_max_concurrent_connections")]
     pub max_concurrent_connections: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OtelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default = "default_otel_protocol")]
+    pub protocol: String,
+    #[serde(default = "default_otel_level")]
+    pub level: String,
+    /// Sampling percentage (0-100).
+    #[serde(default = "default_otel_sample_percent")]
+    pub sample_percent: u32,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub service_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -326,6 +401,30 @@ pub struct CachePolicyConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Keying strategy for the limiter state.
+    ///
+    /// Supported values: "global", "src_ip".
+    #[serde(default = "default_rate_limit_key")]
+    pub key: String,
+    /// Requests per second.
+    #[serde(default)]
+    pub rps: Option<u64>,
+    /// Token bucket capacity for requests (defaults to rps when omitted).
+    #[serde(default)]
+    pub burst: Option<u64>,
+    /// Bandwidth limit in bytes per second (applies to tunnel copy paths).
+    #[serde(default)]
+    pub bytes_per_sec: Option<u64>,
+    /// Token bucket capacity for bytes (defaults to bytes_per_sec when omitted).
+    #[serde(default)]
+    pub bytes_burst: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ListenerConfig {
     pub name: String,
     pub mode: ListenerMode,
@@ -345,6 +444,8 @@ pub struct ListenerConfig {
     pub xdp: Option<XdpConfig>,
     #[serde(default)]
     pub cache: Option<CachePolicyConfig>,
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -432,6 +533,8 @@ pub struct RuleConfig {
     pub action: Option<ActionConfig>,
     #[serde(default)]
     pub headers: Option<HeaderControl>,
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -576,6 +679,9 @@ pub struct ReverseHttp3Config {
 pub struct ReverseTlsConfig {
     #[serde(default)]
     pub certificates: Vec<TlsCertConfig>,
+    /// Optional client CA bundle (PEM). When set, reverse TLS termination requires client certs.
+    #[serde(default)]
+    pub client_ca: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -623,6 +729,20 @@ pub struct ReverseRouteConfig {
     pub cache: Option<CachePolicyConfig>,
     #[serde(default)]
     pub path_rewrite: Option<PathRewriteConfig>,
+    #[serde(default)]
+    pub fastcgi: Option<FastCgiUpstreamConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FastCgiUpstreamConfig {
+    /// FastCGI server address: "127.0.0.1:9000" or "unix:///var/run/qpxf.sock".
+    pub address: String,
+    #[serde(default = "default_fastcgi_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Additional FastCGI params to send with every request.
+    #[serde(default)]
+    pub params: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -709,4 +829,20 @@ pub struct HealthCheckConfig {
     pub fail_threshold: u32,
     #[serde(default = "default_health_check_cooldown_ms")]
     pub cooldown_ms: u64,
+    #[serde(default)]
+    pub http: Option<HttpHealthCheckConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HttpHealthCheckConfig {
+    /// Probe path (absolute path, may include query), defaults to "/".
+    #[serde(default)]
+    pub path: Option<String>,
+    /// HTTP method to use ("HEAD" or "GET"), defaults to "HEAD".
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Expected status codes (exact match). If omitted, 2xx/3xx are treated as healthy.
+    #[serde(default)]
+    pub expected_status: Option<Vec<u16>>,
 }

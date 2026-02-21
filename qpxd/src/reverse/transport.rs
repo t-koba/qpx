@@ -1,13 +1,15 @@
 use super::request_template::{request_is_retryable, ReverseRequestTemplate};
 use super::router::{normalize_host_for_match, CompiledPathRewrite, ReverseRouter};
-use super::security::ReverseTlsHostPolicy;
 use crate::cache::CacheRequestKey;
-use crate::http::header_control::apply_request_headers;
+use crate::fastcgi_client::{
+    proxy_fastcgi_upstream, proxy_fastcgi_url_with_timeout, ClientConnInfo,
+};
 use crate::http::cache_flow::{
-    lookup_with_revalidation, process_upstream_response_for_cache, CacheLookupDecision,
-    CacheWritebackContext,
+    clone_request_head_for_revalidation, lookup_with_revalidation, process_upstream_response_for_cache,
+    CacheLookupDecision, CacheWritebackContext,
 };
 use crate::http::common::bad_request_response as bad_request;
+use crate::http::header_control::apply_request_headers;
 use crate::http::l7::{
     finalize_response_for_request, finalize_response_with_headers,
     finalize_response_with_headers_in_place, handle_max_forwards_in_place,
@@ -18,9 +20,10 @@ use crate::http::websocket::is_websocket_upgrade;
 use crate::runtime::Runtime;
 use crate::upstream::origin::{proxy_http, proxy_websocket};
 use anyhow::{anyhow, Result};
-use hyper::{Body, Method, Request, Response, StatusCode};
 use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+use hyper::{Body, Method, Request, Response, StatusCode};
 use metrics::{counter, histogram};
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use qpx_core::config::ReverseConfig;
 use qpx_core::rules::RuleMatchContext;
 use std::convert::Infallible;
@@ -28,6 +31,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::time::{sleep, timeout, Duration, Instant};
 use tracing::warn;
+use url::Url;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReverseConnInfo {
@@ -47,6 +51,7 @@ impl ReverseConnInfo {
         }
     }
 
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub(crate) fn terminated(
         remote_addr: std::net::SocketAddr,
         dst_port: u16,
@@ -63,15 +68,14 @@ impl ReverseConnInfo {
 
 pub(super) async fn handle_request(
     req: Request<Body>,
-    router: Arc<ReverseRouter>,
-    runtime: Runtime,
+    reverse: super::ReloadableReverse,
     conn: ReverseConnInfo,
-    security_policy: Arc<ReverseTlsHostPolicy>,
 ) -> Result<Response<Body>, Infallible> {
+    let runtime = reverse.runtime.clone();
     let state = runtime.state();
     let request_method = req.method().clone();
     let request_version = req.version();
-    let result = handle_request_inner(req, router, runtime, conn, security_policy.as_ref()).await;
+    let result = handle_request_inner(req, reverse, runtime, conn).await;
     Ok(result.unwrap_or_else(|err| {
         warn!(error = ?err, "reverse handling failed");
         finalize_response_for_request(
@@ -89,11 +93,13 @@ pub(super) async fn handle_request(
 
 pub(crate) async fn handle_request_inner(
     mut req: Request<Body>,
-    router: Arc<ReverseRouter>,
+    reverse: super::ReloadableReverse,
     runtime: Runtime,
     conn: ReverseConnInfo,
-    security_policy: &ReverseTlsHostPolicy,
 ) -> Result<Response<Body>> {
+    let compiled = reverse.compiled().await;
+    let router: Arc<ReverseRouter> = compiled.router.clone();
+    let security_policy = compiled.security_policy.as_ref();
     let state = runtime.state();
     let proxy_name = state.config.identity.proxy_name.clone();
     if let Err(err) = validate_incoming_request(&req) {
@@ -172,6 +178,7 @@ pub(crate) async fn handle_request_inner(
         .select_route(&ctx)
         .ok_or_else(|| anyhow!("no route matched"))?;
     let seed = request_seed(&conn, host.as_str(), &req);
+    let sticky_seed = sticky_seed(&conn, host.as_str());
     if let Some(local) = route.local_response.as_ref() {
         let request_method = req.method().clone();
         let response = finalize_response_with_headers(
@@ -186,7 +193,11 @@ pub(crate) async fn handle_request_inner(
         return Ok(response);
     }
 
-    if let Some(response) = handle_max_forwards_in_place(&mut req, proxy_name.as_str()) {
+    if let Some(response) = handle_max_forwards_in_place(
+        &mut req,
+        proxy_name.as_str(),
+        state.config.runtime.trace_reflect_all_headers,
+    ) {
         return Ok(response);
     }
 
@@ -197,18 +208,13 @@ pub(crate) async fn handle_request_inner(
     apply_request_headers(req.headers_mut(), route.headers.as_deref());
 
     let request_method = req.method().clone();
-    let request_headers_snapshot = req.headers().clone();
-    let cache_default_scheme = if conn.tls_terminated { "https" } else { "http" };
-    let cache_lookup_key = CacheRequestKey::for_lookup(&req, cache_default_scheme)?;
-    let cache_target_key = CacheRequestKey::for_target(&req, cache_default_scheme)?;
-    let cache_policy = route.cache_policy.as_ref().filter(|c| c.enabled);
     if is_websocket_upgrade(req.headers()) {
         let upgrade_wait_timeout =
             Duration::from_millis(state.config.runtime.upgrade_wait_timeout_ms);
         let tunnel_idle_timeout =
             Duration::from_millis(state.config.runtime.tunnel_idle_timeout_ms);
         let upstream = route
-            .select_upstream(seed)
+            .select_upstream(seed, sticky_seed)
             .ok_or_else(|| anyhow!("no healthy upstream"))?;
         upstream.inflight.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
@@ -268,39 +274,125 @@ pub(crate) async fn handle_request_inner(
         }
     }
 
-    let (lookup_decision, mut revalidation_state) = lookup_with_revalidation(
-        &mut req,
-        &request_headers_snapshot,
-        cache_lookup_key.as_ref(),
-        cache_policy,
-        &runtime.state().cache_backends,
-        state.messages.cache_miss.as_str(),
-    )
-    .await?;
-    match lookup_decision {
-        CacheLookupDecision::Hit(mut hit) => {
-            let hit_version = hit.version();
-            finalize_response_with_headers_in_place(
-                &request_method,
-                hit_version,
-                proxy_name.as_str(),
-                &mut hit,
-                route.headers.as_deref(),
-                false,
-            );
-            return Ok(hit);
+    let cache_policy = route.cache_policy.as_ref().filter(|c| c.enabled);
+    let cache_default_scheme = if conn.tls_terminated { "https" } else { "http" };
+    let (request_headers_snapshot, cache_lookup_key, cache_target_key) = if cache_policy.is_some() {
+        let cache_lookup_key = CacheRequestKey::for_lookup(&req, cache_default_scheme)?;
+        let cache_target_key = CacheRequestKey::for_target(&req, cache_default_scheme)?;
+        let snapshot = cache_lookup_key.as_ref().map(|_| req.headers().clone());
+        (snapshot, cache_lookup_key, cache_target_key)
+    } else {
+        (None, None, None)
+    };
+    let mut revalidation_state = None;
+    if let (Some(snapshot), Some(_)) = (request_headers_snapshot.as_ref(), cache_policy) {
+        let (lookup_decision, lookup_revalidation_state) = lookup_with_revalidation(
+            &mut req,
+            snapshot,
+            cache_lookup_key.as_ref(),
+            cache_policy,
+            &runtime.state().cache_backends,
+            state.messages.cache_miss.as_str(),
+        )
+        .await?;
+        revalidation_state = lookup_revalidation_state;
+        match lookup_decision {
+            CacheLookupDecision::Hit(mut hit) => {
+                let hit_version = hit.version();
+                finalize_response_with_headers_in_place(
+                    &request_method,
+                    hit_version,
+                    proxy_name.as_str(),
+                    &mut hit,
+                    route.headers.as_deref(),
+                    false,
+                );
+                return Ok(hit);
+            }
+            CacheLookupDecision::StaleWhileRevalidate(mut hit, state) => {
+                if request_method == Method::GET
+                    && route.fastcgi.is_none()
+                {
+                    if let (Some(policy), Some(snapshot), Some(lookup_key), Some(target_key)) = (
+                        cache_policy,
+                        request_headers_snapshot.as_ref(),
+                        cache_lookup_key.as_ref(),
+                        cache_target_key.as_ref(),
+                    ) {
+                        if let Some(upstream) = route.select_upstream(seed, sticky_seed) {
+                            let target = upstream.target.clone();
+                            if !target.starts_with("fastcgi://")
+                                && !target.starts_with("fastcgi+unix://")
+                            {
+                                if let Some(guard) =
+                                    crate::cache::try_begin_background_revalidation(&state)
+                                {
+                                    let runtime = runtime.clone();
+                                    let proxy_name = proxy_name.clone();
+                                    let timeout_dur = route.policy.timeout;
+                                    let policy = (*policy).clone();
+                                    let snapshot = (*snapshot).clone();
+                                    let lookup_key = (*lookup_key).clone();
+                                    let target_key = (*target_key).clone();
+                                    let bg_req = clone_request_head_for_revalidation(&req);
+                                    tokio::spawn(async move {
+                                        let _guard = guard;
+                                        let started = Instant::now();
+                                        let resp = timeout(
+                                            timeout_dur,
+                                            proxy_http(bg_req, target.as_str(), proxy_name.as_str()),
+                                        )
+                                        .await;
+                                        let Ok(Ok(resp)) = resp else {
+                                            return;
+                                        };
+                                        let response_delay_secs = started.elapsed().as_secs();
+                                        let state_ref = runtime.state();
+                                        let backends = &state_ref.cache_backends;
+                                        let method = Method::GET;
+                                        let _ = process_upstream_response_for_cache(
+                                            resp,
+                                            CacheWritebackContext {
+                                                request_method: &method,
+                                                response_delay_secs,
+                                                cache_target_key: Some(&target_key),
+                                                cache_lookup_key: Some(&lookup_key),
+                                                cache_policy: Some(&policy),
+                                                request_headers_snapshot: &snapshot,
+                                                revalidation_state: Some(state),
+                                                backends,
+                                            },
+                                        )
+                                        .await;
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                let hit_version = hit.version();
+                finalize_response_with_headers_in_place(
+                    &request_method,
+                    hit_version,
+                    proxy_name.as_str(),
+                    &mut hit,
+                    route.headers.as_deref(),
+                    false,
+                );
+                return Ok(hit);
+            }
+            CacheLookupDecision::OnlyIfCachedMiss(response) => {
+                return Ok(finalize_response_with_headers(
+                    &request_method,
+                    req.version(),
+                    proxy_name.as_str(),
+                    response,
+                    route.headers.as_deref(),
+                    false,
+                ));
+            }
+            CacheLookupDecision::Miss => {}
         }
-        CacheLookupDecision::OnlyIfCachedMiss(response) => {
-            return Ok(finalize_response_with_headers(
-                &request_method,
-                req.version(),
-                proxy_name.as_str(),
-                response,
-                route.headers.as_deref(),
-                false,
-            ));
-        }
-        CacheLookupDecision::Miss => {}
     }
 
     let can_retry = request_is_retryable(&req, &request_method);
@@ -315,7 +407,7 @@ pub(crate) async fn handle_request_inner(
         .runtime
         .max_reverse_retry_template_body_bytes;
     let mirror_upstreams = if request_is_templateable(&req, max_template_body_bytes) {
-        route.select_mirror_upstreams(seed)
+        route.select_mirror_upstreams(seed, sticky_seed)
     } else {
         Vec::new()
     };
@@ -338,9 +430,156 @@ pub(crate) async fn handle_request_inner(
         );
     }
 
+    let fastcgi_conn = ClientConnInfo {
+        remote_addr: Some(conn.remote_addr),
+        dst_port: Some(conn.dst_port),
+    };
+
     let mut last_err = None;
+
+    if let Some(fcgi) = route.fastcgi.as_ref() {
+        let timeout_dur = std::cmp::min(route.policy.timeout, fcgi.timeout());
+        for attempt_idx in 0..attempts {
+            let started = Instant::now();
+            let req_for_upstream = if attempt_idx == 0 {
+                match (&template, first_request.take()) {
+                    (Some(template), _) => template.build()?,
+                    (None, Some(req)) => req,
+                    (None, None) => {
+                        return Err(anyhow!("missing reverse request for first attempt"))
+                    }
+                }
+            } else {
+                template
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("reverse retry template missing"))?
+                    .build()?
+            };
+
+            let response = timeout(
+                timeout_dur,
+                proxy_fastcgi_upstream(
+                    req_for_upstream,
+                    fcgi,
+                    proxy_name.as_str(),
+                    fastcgi_conn,
+                    route.policy.timeout,
+                ),
+            )
+            .await;
+
+            match response {
+                Ok(Ok(mut resp)) => {
+                    if resp.status().is_server_error() {
+                        if let Some(stale) = revalidation_state
+                            .as_ref()
+                            .and_then(crate::cache::maybe_build_stale_if_error_response)
+                        {
+                            let mut stale = stale;
+                            let stale_version = stale.version();
+                            finalize_response_with_headers_in_place(
+                                &request_method,
+                                stale_version,
+                                proxy_name.as_str(),
+                                &mut stale,
+                                route.headers.as_deref(),
+                                false,
+                            );
+                            return Ok(stale);
+                        }
+                    }
+                    histogram!(state.metric_names.reverse_upstream_latency_ms.clone())
+                        .record(started.elapsed().as_secs_f64() * 1000.0);
+                    let response_delay_secs = started.elapsed().as_secs();
+                    counter!(
+                        state.metric_names.reverse_requests_total.clone(),
+                        "result" => "ok"
+                    )
+                    .increment(1);
+                    if let (Some(policy), Some(snapshot)) =
+                        (cache_policy, request_headers_snapshot.as_ref())
+                    {
+                        resp = process_upstream_response_for_cache(
+                            resp,
+                            CacheWritebackContext {
+                                request_method: &request_method,
+                                response_delay_secs,
+                                cache_target_key: cache_target_key.as_ref(),
+                                cache_lookup_key: cache_lookup_key.as_ref(),
+                                cache_policy: Some(policy),
+                                request_headers_snapshot: snapshot,
+                                revalidation_state: revalidation_state.take(),
+                                backends: &runtime.state().cache_backends,
+                            },
+                        )
+                        .await?;
+                    } else if let Some(policy) = cache_policy {
+                        crate::cache::maybe_invalidate(
+                            &request_method,
+                            resp.status(),
+                            resp.headers(),
+                            cache_target_key.as_ref(),
+                            policy,
+                            &runtime.state().cache_backends,
+                        )
+                        .await?;
+                    }
+                    let resp_version = resp.version();
+                    finalize_response_with_headers_in_place(
+                        &request_method,
+                        resp_version,
+                        proxy_name.as_str(),
+                        &mut resp,
+                        route.headers.as_deref(),
+                        false,
+                    );
+                    return Ok(resp);
+                }
+                Ok(Err(err)) => {
+                    counter!(
+                        state.metric_names.reverse_requests_total.clone(),
+                        "result" => "error"
+                    )
+                    .increment(1);
+                    last_err = Some(err);
+                }
+                Err(_) => {
+                    counter!(
+                        state.metric_names.reverse_requests_total.clone(),
+                        "result" => "timeout"
+                    )
+                    .increment(1);
+                    last_err = Some(anyhow!("upstream timeout"));
+                }
+            }
+
+            if attempt_idx + 1 < attempts && route.policy.retry_backoff > Duration::ZERO {
+                sleep(route.policy.retry_backoff).await;
+            }
+        }
+
+        if let Some(stale) = revalidation_state
+            .as_ref()
+            .and_then(crate::cache::maybe_build_stale_if_error_response)
+        {
+            let mut stale = stale;
+            let stale_version = stale.version();
+            finalize_response_with_headers_in_place(
+                &request_method,
+                stale_version,
+                proxy_name.as_str(),
+                &mut stale,
+                route.headers.as_deref(),
+                false,
+            );
+            return Ok(stale);
+        }
+
+        return Err(last_err.unwrap_or_else(|| anyhow!("upstream request failed")));
+    }
+
     for attempt_idx in 0..attempts {
-        let upstream = match route.select_upstream(seed) {
+        let upstream = match route.select_upstream(seed, sticky_seed) {
             Some(u) => u,
             None => return Err(anyhow!("no upstream")),
         };
@@ -358,15 +597,55 @@ pub(crate) async fn handle_request_inner(
                 .ok_or_else(|| anyhow!("reverse retry template missing"))?
                 .build()?
         };
-        let response = timeout(
-            route.policy.timeout,
-            proxy_http(req_for_upstream, &upstream.target, proxy_name.as_str()),
-        )
-        .await;
+        let response = if upstream.target.starts_with("fastcgi://")
+            || upstream.target.starts_with("fastcgi+unix://")
+        {
+            match Url::parse(&upstream.target) {
+                Ok(url) => {
+                    timeout(
+                        route.policy.timeout,
+                        proxy_fastcgi_url_with_timeout(
+                            req_for_upstream,
+                            &url,
+                            proxy_name.as_str(),
+                            fastcgi_conn,
+                            route.policy.timeout,
+                        ),
+                    )
+                    .await
+                }
+                Err(err) => Ok(Err(anyhow!("invalid fastcgi upstream url: {}", err))),
+            }
+        } else {
+            timeout(
+                route.policy.timeout,
+                proxy_http(req_for_upstream, &upstream.target, proxy_name.as_str()),
+            )
+            .await
+        };
         upstream.inflight.fetch_sub(1, Ordering::Relaxed);
 
         match response {
             Ok(Ok(mut resp)) => {
+                if resp.status().is_server_error() {
+                    if let Some(stale) = revalidation_state
+                        .as_ref()
+                        .and_then(crate::cache::maybe_build_stale_if_error_response)
+                    {
+                        upstream.mark_failure(&route.policy.health);
+                        let mut stale = stale;
+                        let stale_version = stale.version();
+                        finalize_response_with_headers_in_place(
+                            &request_method,
+                            stale_version,
+                            proxy_name.as_str(),
+                            &mut stale,
+                            route.headers.as_deref(),
+                            false,
+                        );
+                        return Ok(stale);
+                    }
+                }
                 upstream.mark_success();
                 histogram!(state.metric_names.reverse_upstream_latency_ms.clone())
                     .record(started.elapsed().as_secs_f64() * 1000.0);
@@ -376,20 +655,33 @@ pub(crate) async fn handle_request_inner(
                     "result" => "ok"
                 )
                 .increment(1);
-                resp = process_upstream_response_for_cache(
-                    resp,
-                    CacheWritebackContext {
-                        request_method: &request_method,
-                        response_delay_secs,
-                        cache_target_key: cache_target_key.as_ref(),
-                        cache_lookup_key: cache_lookup_key.as_ref(),
-                        cache_policy,
-                        request_headers_snapshot: &request_headers_snapshot,
-                        revalidation_state: revalidation_state.take(),
-                        backends: &runtime.state().cache_backends,
-                    },
-                )
-                .await?;
+                if let (Some(policy), Some(snapshot)) = (cache_policy, request_headers_snapshot.as_ref())
+                {
+                    resp = process_upstream_response_for_cache(
+                        resp,
+                        CacheWritebackContext {
+                            request_method: &request_method,
+                            response_delay_secs,
+                            cache_target_key: cache_target_key.as_ref(),
+                            cache_lookup_key: cache_lookup_key.as_ref(),
+                            cache_policy: Some(policy),
+                            request_headers_snapshot: snapshot,
+                            revalidation_state: revalidation_state.take(),
+                            backends: &runtime.state().cache_backends,
+                        },
+                    )
+                    .await?;
+                } else if let Some(policy) = cache_policy {
+                    crate::cache::maybe_invalidate(
+                        &request_method,
+                        resp.status(),
+                        resp.headers(),
+                        cache_target_key.as_ref(),
+                        policy,
+                        &runtime.state().cache_backends,
+                    )
+                    .await?;
+                }
                 let resp_version = resp.version();
                 finalize_response_with_headers_in_place(
                     &request_method,
@@ -424,6 +716,23 @@ pub(crate) async fn handle_request_inner(
         if attempt_idx + 1 < attempts && route.policy.retry_backoff > Duration::ZERO {
             sleep(route.policy.retry_backoff).await;
         }
+    }
+
+    if let Some(stale) = revalidation_state
+        .as_ref()
+        .and_then(crate::cache::maybe_build_stale_if_error_response)
+    {
+        let mut stale = stale;
+        let stale_version = stale.version();
+        finalize_response_with_headers_in_place(
+            &request_method,
+            stale_version,
+            proxy_name.as_str(),
+            &mut stale,
+            route.headers.as_deref(),
+            false,
+        );
+        return Ok(stale);
     }
 
     Err(last_err.unwrap_or_else(|| anyhow!("upstream request failed")))
@@ -461,8 +770,17 @@ fn apply_path_rewrite(req: &mut Request<Body>, rewrite: &CompiledPathRewrite) {
     if let Some(q) = query {
         new_path = format!("{new_path}?{q}");
     }
-    if let Ok(new_uri) = new_path.parse::<http::Uri>() {
-        *req.uri_mut() = new_uri;
+    match new_path.parse::<http::Uri>() {
+        Ok(new_uri) => {
+            *req.uri_mut() = new_uri;
+        }
+        Err(err) => {
+            counter!("qpx_reverse_path_rewrite_invalid_total").increment(1);
+            warn!(
+                error = ?err,
+                "reverse path_rewrite produced invalid URI; keeping original"
+            );
+        }
     }
 }
 
@@ -495,6 +813,30 @@ fn request_seed(conn: &ReverseConnInfo, host: &str, req: &Request<Body>) -> u64 
     } else {
         hash = feed(hash, b"/");
     }
+    hash
+}
+
+fn sticky_seed(conn: &ReverseConnInfo, host: &str) -> u64 {
+    // Stable per-client+host key for sticky load balancing.
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+    fn feed(mut hash: u64, bytes: &[u8]) -> u64 {
+        for b in bytes {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+    let mut hash = FNV_OFFSET;
+    match conn.remote_addr.ip() {
+        std::net::IpAddr::V4(ip) => {
+            hash = feed(hash, &ip.octets());
+        }
+        std::net::IpAddr::V6(ip) => {
+            hash = feed(hash, &ip.octets());
+        }
+    }
+    hash = feed(hash, host.as_bytes());
     hash
 }
 
@@ -549,10 +891,12 @@ fn dispatch_mirrors(
         let proxy_name = proxy_name.clone();
         let health_policy = health_policy.clone();
         tokio::spawn(async move {
-            let response = timeout(timeout_dur, proxy_http(req, target.as_str(), proxy_name.as_str())).await;
-            upstream_for_task
-                .inflight
-                .fetch_sub(1, Ordering::Relaxed);
+            let response = timeout(
+                timeout_dur,
+                proxy_http(req, target.as_str(), proxy_name.as_str()),
+            )
+            .await;
+            upstream_for_task.inflight.fetch_sub(1, Ordering::Relaxed);
             match response {
                 Ok(Ok(_)) => upstream_for_task.mark_success(),
                 Ok(Err(_)) | Err(_) => upstream_for_task.mark_failure(&health_policy),
@@ -563,8 +907,8 @@ fn dispatch_mirrors(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::router::CompiledRegexPathRewrite;
+    use super::*;
     use regex::Regex;
 
     fn make_req(uri: &str) -> Request<Body> {
@@ -624,7 +968,10 @@ mod tests {
                 regex: None,
             },
         );
-        assert_eq!(req.uri().path_and_query().unwrap().as_str(), "/users?q=foo&limit=10");
+        assert_eq!(
+            req.uri().path_and_query().unwrap().as_str(),
+            "/users?q=foo&limit=10"
+        );
     }
 
     #[test]
@@ -695,16 +1042,39 @@ pub(super) type ReverseTlsAcceptor = tokio_rustls::TlsAcceptor;
 
 #[cfg(feature = "tls-rustls")]
 pub(super) fn build_tls_acceptor(reverse: &ReverseConfig) -> Result<ReverseTlsAcceptor> {
-    use rustls::ServerConfig as RustlsServerConfig;
+    use qpx_core::tls::load_cert_chain;
+    use rustls::server::WebPkiClientVerifier;
+    use rustls::{RootCertStore, ServerConfig as RustlsServerConfig};
+    use std::path::Path;
 
     let tls = reverse
         .tls
         .as_ref()
         .ok_or_else(|| anyhow!("tls config missing"))?;
     let resolver = Arc::new(SniResolver::new(tls)?);
-    let mut config = RustlsServerConfig::builder()
-        .with_no_client_auth()
-        .with_cert_resolver(resolver);
+    let mut config = if let Some(client_ca) = tls
+        .client_ca
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let certs = load_cert_chain(Path::new(client_ca))?;
+        let mut roots = RootCertStore::empty();
+        let (added, _) = roots.add_parsable_certificates(certs);
+        if added == 0 {
+            return Err(anyhow!("no client CA certs loaded from {}", client_ca));
+        }
+        let verifier = WebPkiClientVerifier::builder(roots.into())
+            .build()
+            .map_err(|_| anyhow!("invalid reverse.tls.client_ca"))?;
+        RustlsServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_cert_resolver(resolver)
+    } else {
+        RustlsServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(resolver)
+    };
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
@@ -767,11 +1137,14 @@ pub(super) struct NativeTlsAcceptor {
 
 #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
 impl NativeTlsAcceptor {
-    pub(super) async fn accept(
+    pub(super) async fn accept<S>(
         &self,
-        stream: tokio::net::TcpStream,
+        stream: S,
         sni: Option<&str>,
-    ) -> Result<tokio_native_tls::TlsStream<tokio::net::TcpStream>> {
+    ) -> Result<tokio_native_tls::TlsStream<S>>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
         let key = sni.map(|v| v.to_ascii_lowercase());
         let acceptor = key
             .as_deref()
@@ -832,14 +1205,4 @@ pub(super) fn build_tls_acceptor(reverse: &ReverseConfig) -> Result<ReverseTlsAc
     }
 
     Ok(NativeTlsAcceptor { by_sni, default })
-}
-
-#[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
-pub(super) type ReverseTlsAcceptor = ();
-
-#[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
-pub(super) fn build_tls_acceptor(_reverse: &ReverseConfig) -> Result<ReverseTlsAcceptor> {
-    Err(anyhow!(
-        "reverse TLS termination requires a TLS backend (enable tls-rustls or tls-native)"
-    ))
 }

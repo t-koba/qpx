@@ -31,14 +31,41 @@ runtime:
   max_h3_response_body_bytes: 16777216
   max_reverse_retry_template_body_bytes: 8388608
 
-logging:
+system_log:
   level: info
   format: json
+
+# High-frequency access log (non-blocking). Prefer a file path in production.
+access_log:
+  enabled: false
+  path: "${QPX_ACCESS_LOG_PATH:-~/.local/share/qpx/access.log}"
+  format: json        # json, combined, text
+  rotation: daily     # hourly, daily, never
+  rotation_count: 30
+  exclude:
+    - /health
+    - /metrics
+
+# Low-frequency security/audit log (non-blocking, reliability-focused).
+audit_log:
+  enabled: false
+  path: "${QPX_AUDIT_LOG_PATH:-~/.local/share/qpx/audit.log}"
+  format: json        # json, text
+  rotation: daily     # hourly, daily, never
+  rotation_count: 365
 
 metrics:
   listen: "127.0.0.1:9900"
   path: /metrics
   max_concurrent_connections: 32
+
+otel:
+  enabled: false
+  endpoint: "http://127.0.0.1:4317"
+  level: "info"
+  sample_percent: 100
+  # headers:
+  #   Authorization: "Bearer ${OTEL_TOKEN}"
 
 exporter:
   enabled: true
@@ -79,7 +106,7 @@ listeners:
       max_download_bytes: 67108864
     xdp:
       enabled: false
-      metadata_mode: proxy-v1
+      metadata_mode: proxy-v2
       require_metadata: true
       trusted_peers: [127.0.0.1/32]
     http3:
@@ -149,7 +176,7 @@ reverse:
     listen: "127.0.0.1:443"
     xdp:
       enabled: false
-      metadata_mode: proxy-v1
+      metadata_mode: proxy-v2
       require_metadata: true
       trusted_peers: [127.0.0.1/32]
     enforce_sni_host_match: true

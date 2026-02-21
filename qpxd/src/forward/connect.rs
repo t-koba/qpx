@@ -3,13 +3,13 @@ use crate::forward::request::{proxy_auth_required, resolve_upstream};
 use crate::http::address::parse_authority_host_port;
 use crate::http::common::{
     blocked_response as blocked, connect_established_response as connect_established,
-    forbidden_response as forbidden,
+    forbidden_response as forbidden, too_many_requests_response as too_many_requests,
 };
 use crate::http::l7::finalize_response_for_request;
 use crate::http::local_response::build_local_response;
 #[cfg(feature = "mitm")]
 use crate::http::server::serve_http1_with_upgrades;
-use crate::io_copy::copy_bidirectional_with_export_and_idle;
+use crate::io_copy::{copy_bidirectional_with_export_and_idle, BandwidthThrottle};
 use crate::runtime::Runtime;
 #[cfg(feature = "mitm")]
 use crate::upstream::connect::TunnelIo;
@@ -21,8 +21,12 @@ use anyhow::{anyhow, Result};
 use hyper::service::service_fn;
 use hyper::{Body, Method, Request, Response};
 use qpx_core::config::ActionKind;
+#[cfg(feature = "mitm")]
+use qpx_core::middleware::access_log::{AccessLogContext, AccessLogService};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
+#[cfg(feature = "mitm")]
+use std::sync::Arc;
 use tokio::task;
 use tokio::time::{timeout, Duration};
 use tracing::warn;
@@ -64,7 +68,7 @@ pub(super) async fn handle_connect(
         user_groups: &[],
     };
 
-    let action = match evaluate_forward_policy(
+    let (action, matched_rule) = match evaluate_forward_policy(
         &runtime,
         listener_name,
         ctx,
@@ -74,7 +78,7 @@ pub(super) async fn handle_connect(
     )
     .await?
     {
-        ForwardPolicyDecision::Allow(allowed) => allowed.action,
+        ForwardPolicyDecision::Allow(allowed) => (allowed.action, allowed.matched_rule),
         ForwardPolicyDecision::Challenge(chal) => {
             let response = proxy_auth_required(chal, state.messages.proxy_auth_required.as_str());
             return Ok(finalize_response_for_request(
@@ -95,6 +99,23 @@ pub(super) async fn handle_connect(
             ));
         }
     };
+    if let Some(rule) = matched_rule.as_deref() {
+        if let Some(limits) = state.rate_limiters.listener(listener_name) {
+            if let Some(rule_limits) = limits.rules.get(rule) {
+                if let Some(limiter) = rule_limits.requests.as_ref() {
+                    if let Some(retry_after) = limiter.try_acquire(remote_addr.ip(), 1) {
+                        return Ok(finalize_response_for_request(
+                            &Method::CONNECT,
+                            req_version,
+                            proxy_name,
+                            too_many_requests(Some(retry_after)),
+                            false,
+                        ));
+                    }
+                }
+            }
+        }
+    }
     let upstream_timeout = Duration::from_millis(state.config.runtime.upstream_http_timeout_ms);
 
     match action.kind {
@@ -214,15 +235,29 @@ pub(super) async fn handle_connect(
                             Response::builder()
                                 .status(hyper::StatusCode::BAD_GATEWAY)
                                 .body(Body::from(state.messages.proxy_error.clone()))
-                                .unwrap(),
-                            false,
-                        ))
+                     .unwrap(),
+                             false,
+                         ))
+                     }
+                 };
+            let mut bandwidth_limiters = Vec::new();
+            if let Some(limits) = state.rate_limiters.listener(listener_name) {
+                if let Some(limiter) = limits.listener.bytes.as_ref() {
+                    bandwidth_limiters.push(limiter.clone());
+                }
+                if let Some(rule) = matched_rule.as_deref() {
+                    if let Some(rule_limits) = limits.rules.get(rule) {
+                        if let Some(limiter) = rule_limits.bytes.as_ref() {
+                            bandwidth_limiters.push(limiter.clone());
+                        }
                     }
-                };
+                }
+            }
+            let throttle = BandwidthThrottle::new(remote_addr.ip(), bandwidth_limiters);
             let runtime_for_tunnel = runtime.clone();
             task::spawn(async move {
                 if let Err(err) =
-                    tunnel_connect(req, connected, runtime_for_tunnel, remote_addr).await
+                    tunnel_connect(req, connected, runtime_for_tunnel, remote_addr, throttle).await
                 {
                     warn!(error = ?err, "tunnel failed");
                 }
@@ -243,6 +278,7 @@ async fn tunnel_connect(
     server: ConnectedTunnel,
     runtime: Runtime,
     remote_addr: SocketAddr,
+    throttle: Option<BandwidthThrottle>,
 ) -> Result<()> {
     let upgrade_wait =
         Duration::from_millis(runtime.state().config.runtime.upgrade_wait_timeout_ms);
@@ -251,8 +287,14 @@ async fn tunnel_connect(
         .peer_addr
         .and_then(|server_addr| runtime.state().export_session(remote_addr, server_addr));
     let idle_timeout = Duration::from_millis(runtime.state().config.runtime.tunnel_idle_timeout_ms);
-    copy_bidirectional_with_export_and_idle(upgraded, server.io, export, Some(idle_timeout))
-        .await?;
+    copy_bidirectional_with_export_and_idle(
+        upgraded,
+        server.io,
+        export,
+        Some(idle_timeout),
+        throttle,
+    )
+    .await?;
     Ok(())
 }
 
@@ -299,6 +341,8 @@ async fn mitm_connect(req: Request<Body>, ctx: ForwardMitmContext) -> Result<()>
     let connect_host = host.clone();
     let header_read_timeout =
         Duration::from_millis(runtime.state().config.runtime.http_header_read_timeout_ms);
+    let access_cfg = runtime.state().config.access_log.clone();
+    let access_name = Arc::<str>::from(listener_name.as_str());
     let service = service_fn(move |inner_req: Request<Body>| {
         let sender = sender.clone();
         let runtime = runtime.clone();
@@ -316,6 +360,15 @@ async fn mitm_connect(req: Request<Body>, ctx: ForwardMitmContext) -> Result<()>
             Ok::<_, anyhow::Error>(response)
         }
     });
+    let service = AccessLogService::new(
+        service,
+        remote_addr,
+        AccessLogContext {
+            kind: "forward",
+            name: access_name,
+        },
+        &access_cfg,
+    );
 
     serve_http1_with_upgrades(client_tls, service, header_read_timeout, false)
         .await

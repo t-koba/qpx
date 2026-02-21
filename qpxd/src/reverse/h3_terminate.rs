@@ -1,7 +1,6 @@
 use crate::http3::listener::{H3ConnInfo, H3ConnectKind, H3Limits, H3RequestHandler};
 use crate::http3::quic::build_h3_server_config_from_tls;
 use crate::http3::server::{send_h3_static_response, H3ServerRequestStream};
-use crate::runtime::Runtime;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hyper::{Body, Request, Response};
@@ -17,29 +16,25 @@ use tracing::warn;
 pub(super) async fn run_http3_terminate(
     reverse: ReverseConfig,
     listen_addr: SocketAddr,
-    router: Arc<super::router::ReverseRouter>,
-    runtime: Runtime,
-    security_policy: Arc<super::security::ReverseTlsHostPolicy>,
+    reverse_rt: super::ReloadableReverse,
 ) -> Result<()> {
     let tls_config = build_reverse_tls_config(&reverse)?;
     let server_config = build_h3_server_config_from_tls(tls_config, 1024, 1024)?;
     let endpoint = quinn::Endpoint::server(server_config, listen_addr)?;
 
-    let handler = ReverseH3Handler {
-        router,
-        runtime,
-        security_policy,
-    };
+    let semaphore = reverse_rt.runtime.state().connection_semaphore.clone();
+    let handler = ReverseH3Handler { reverse: reverse_rt };
     crate::http3::listener::serve_endpoint(
         endpoint,
         listen_addr.port(),
         handler,
         "reverse-terminate",
+        semaphore,
     )
     .await
 }
 
-fn build_reverse_tls_config(reverse: &ReverseConfig) -> Result<quinn::rustls::ServerConfig> {
+pub(super) fn build_reverse_tls_config(reverse: &ReverseConfig) -> Result<quinn::rustls::ServerConfig> {
     let tls = reverse
         .tls
         .as_ref()
@@ -52,11 +47,31 @@ fn build_reverse_tls_config(reverse: &ReverseConfig) -> Result<quinn::rustls::Se
     let resolver = Arc::new(QuicSniResolver::new(tls)?);
 
     let provider = quinn::rustls::crypto::ring::default_provider();
-    let tls_config = quinn::rustls::ServerConfig::builder_with_provider(provider.into())
+    let base = quinn::rustls::ServerConfig::builder_with_provider(provider.into())
         .with_protocol_versions(&[&quinn::rustls::version::TLS13])
         .map_err(|_| anyhow!("failed to configure TLS versions for HTTP/3"))?
-        .with_no_client_auth()
-        .with_cert_resolver(resolver);
+        ;
+    let tls_config = if let Some(client_ca) = tls
+        .client_ca
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        use quinn::rustls::server::WebPkiClientVerifier;
+        use quinn::rustls::RootCertStore;
+        let certs = load_cert_chain(Path::new(client_ca))?;
+        let mut roots = RootCertStore::empty();
+        let (added, _) = roots.add_parsable_certificates(certs);
+        if added == 0 {
+            return Err(anyhow!("no client CA certs loaded from {}", client_ca));
+        }
+        let verifier = WebPkiClientVerifier::builder(roots.into())
+            .build()
+            .map_err(|_| anyhow!("invalid reverse.tls.client_ca"))?;
+        base.with_client_cert_verifier(verifier).with_cert_resolver(resolver)
+    } else {
+        base.with_no_client_auth().with_cert_resolver(resolver)
+    };
     Ok(tls_config)
 }
 
@@ -101,15 +116,13 @@ impl quinn::rustls::server::ResolvesServerCert for QuicSniResolver {
 
 #[derive(Clone)]
 struct ReverseH3Handler {
-    router: Arc<super::router::ReverseRouter>,
-    runtime: Runtime,
-    security_policy: Arc<super::security::ReverseTlsHostPolicy>,
+    reverse: super::ReloadableReverse,
 }
 
 #[async_trait]
 impl H3RequestHandler for ReverseH3Handler {
     fn limits(&self) -> H3Limits {
-        let state = self.runtime.state();
+        let state = self.reverse.runtime.state();
         let limits = state.config.runtime.clone();
         H3Limits {
             max_request_body_bytes: limits.max_h3_request_body_bytes,
@@ -126,14 +139,7 @@ impl H3RequestHandler for ReverseH3Handler {
             conn.dst_port,
             conn.tls_sni.clone(),
         );
-        match super::transport::handle_request(
-            req,
-            self.router.clone(),
-            self.runtime.clone(),
-            reverse_conn,
-            self.security_policy.clone(),
-        )
-        .await
+        match super::transport::handle_request(req, self.reverse.clone(), reverse_conn).await
         {
             Ok(resp) => resp,
             Err(impossible) => match impossible {},
@@ -146,8 +152,9 @@ impl H3RequestHandler for ReverseH3Handler {
         mut req_stream: H3ServerRequestStream,
         _conn: H3ConnInfo,
         _kind: H3ConnectKind,
+        _datagrams: Option<crate::http3::datagram::H3StreamDatagrams>,
     ) -> Result<()> {
-        let state = self.runtime.state();
+        let state = self.reverse.runtime.state();
         let proxy_name = state.config.identity.proxy_name.as_str();
         if let Err(err) = send_h3_static_response(
             &mut req_stream,

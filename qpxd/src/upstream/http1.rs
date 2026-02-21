@@ -3,15 +3,16 @@ use crate::http::websocket::spawn_upgrade_tunnel;
 use crate::tls::client::connect_tls_http1;
 use crate::upstream::pool::send_via_upstream_proxy;
 use anyhow::{anyhow, Result};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use hyper::client::conn::Builder as ClientConnBuilder;
-use hyper::header::HeaderValue;
-use hyper::header::HOST;
+use hyper::header::{HeaderValue, HOST, PROXY_AUTHORIZATION};
 use hyper::{Body, Request, Response, Uri};
-use std::str::FromStr;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::warn;
+use url::Url;
 
 pub struct WebsocketProxyConfig<'a> {
     pub upstream_proxy: Option<&'a str>,
@@ -36,6 +37,7 @@ pub struct UpstreamProxyEndpoint {
     pub scheme: UpstreamProxyScheme,
     pub authority: String,
     pub host: String,
+    pub proxy_authorization: Option<HeaderValue>,
 }
 
 impl UpstreamProxyEndpoint {
@@ -99,44 +101,52 @@ pub fn set_host_header(req: &mut Request<Body>, authority: &str) -> Result<()> {
 }
 
 pub fn parse_upstream_proxy_endpoint(upstream: &str) -> Result<UpstreamProxyEndpoint> {
-    let (scheme, authority) = if upstream.contains("://") {
-        let uri: Uri = upstream.parse()?;
-        let scheme = match uri.scheme_str() {
-            Some("http") => UpstreamProxyScheme::Http,
-            Some("https") => UpstreamProxyScheme::Https,
-            Some(other) => {
+    let (scheme, authority, host, proxy_authorization) = if upstream.contains("://") {
+        let url = Url::parse(upstream)?;
+        let scheme = match url.scheme() {
+            "http" => UpstreamProxyScheme::Http,
+            "https" => UpstreamProxyScheme::Https,
+            other => {
                 return Err(anyhow!(
                     "unsupported upstream proxy scheme: {} (expected http/https)",
                     other
                 ))
             }
-            None => return Err(anyhow!("upstream proxy missing scheme")),
         };
-        let authority = uri
-            .authority()
-            .ok_or_else(|| anyhow!("upstream proxy missing authority"))?
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow!("upstream proxy missing host"))?
             .to_string();
-        (scheme, authority)
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| anyhow!("upstream proxy missing port"))?;
+        let authority = crate::http::address::format_authority_host_port(host.as_str(), port);
+        let proxy_authorization = if !url.username().is_empty() || url.password().is_some() {
+            let creds = format!("{}:{}", url.username(), url.password().unwrap_or(""));
+            let encoded = BASE64.encode(creds);
+            let value = HeaderValue::from_str(format!("Basic {}", encoded).as_str())
+                .map_err(|_| anyhow!("invalid upstream proxy credentials"))?;
+            Some(value)
+        } else {
+            None
+        };
+        (scheme, authority, host, proxy_authorization)
     } else {
-        (UpstreamProxyScheme::Http, upstream.trim().to_string())
+        let (host, port) = crate::http::address::parse_authority_host_port(upstream.trim(), 80)
+            .ok_or_else(|| anyhow!("invalid upstream proxy authority: {}", upstream))?;
+        let authority = crate::http::address::format_authority_host_port(host.as_str(), port);
+        (
+            UpstreamProxyScheme::Http,
+            authority,
+            host,
+            None::<HeaderValue>,
+        )
     };
-
-    if authority.contains('@') {
-        return Err(anyhow!(
-            "upstream proxy authority must not include userinfo"
-        ));
-    }
-
-    let authority_parsed = http::uri::Authority::from_str(authority.as_str())
-        .map_err(|_| anyhow!("invalid upstream proxy authority: {}", authority))?;
-    let host = authority_parsed.host().to_string();
-    if host.trim().is_empty() {
-        return Err(anyhow!("upstream proxy host must not be empty"));
-    }
     Ok(UpstreamProxyEndpoint {
         scheme,
         authority,
         host,
+        proxy_authorization,
     })
 }
 
@@ -242,6 +252,10 @@ pub async fn proxy_websocket_http1(
 
     let mut sender = if let Some(upstream_proxy) = upstream_proxy {
         let endpoint = parse_upstream_proxy_endpoint(upstream_proxy)?;
+        req.headers_mut().remove(PROXY_AUTHORIZATION);
+        if let Some(value) = endpoint.proxy_authorization.as_ref() {
+            req.headers_mut().insert(PROXY_AUTHORIZATION, value.clone());
+        }
         let sender =
             open_upstream_proxy_sender(&endpoint, Some(timeout_dur), upstream_context).await?;
         if req.uri().scheme().is_none() || req.uri().authority().is_none() {

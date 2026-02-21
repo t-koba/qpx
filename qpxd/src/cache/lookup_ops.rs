@@ -3,11 +3,13 @@ use super::entry::{not_modified_from_envelope, response_from_envelope};
 use super::freshness::{conditional_not_modified, current_age_secs};
 use super::types::{
     CacheBackend, CacheEntryDisposition, CacheRequestKey, CachedResponseEnvelope, LookupOutcome,
-    RequestDirectives, RevalidationState, CACHE_HEADER,
+    RequestDirectives, RevalidationState, ResponseDirectives, CACHE_HEADER,
+    CACHE_WARNING_REVALIDATION_FAILED,
 };
-use super::util::{cache_namespace, has_validators, header_value, load_variant_index, now_millis};
+use super::util::{cache_namespace, header_value, load_variant_index, now_millis};
 use super::vary::matches_vary;
 use anyhow::Result;
+use http::header::WARNING;
 use http::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 use hyper::{Body, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
@@ -94,14 +96,35 @@ pub async fn lookup(
                     &envelope, now, "HIT", true,
                 )?));
             }
-            CacheEntryDisposition::RequiresRevalidation => {
-                if has_validators(&envelope.headers) {
-                    revalidation = Some(RevalidationState {
-                        namespace: namespace.clone(),
-                        variant_key,
-                        envelope,
-                    });
+            CacheEntryDisposition::ServeStaleWhileRevalidate => {
+                let directives: ResponseDirectives =
+                    parse_response_directives_from_vec(&envelope.headers);
+                let state = RevalidationState {
+                    namespace: namespace.clone(),
+                    variant_key: variant_key.clone(),
+                    stale_if_error_secs: directives.stale_if_error,
+                    envelope,
+                };
+                if conditional_not_modified(&req, &state.envelope) {
+                    return Ok(LookupOutcome::StaleWhileRevalidate(
+                        not_modified_from_envelope(&state.envelope, now, "HIT", true)?,
+                        state,
+                    ));
                 }
+                return Ok(LookupOutcome::StaleWhileRevalidate(
+                    response_from_envelope(&state.envelope, now, "HIT", true)?,
+                    state,
+                ));
+            }
+            CacheEntryDisposition::RequiresRevalidation => {
+                let directives: ResponseDirectives =
+                    parse_response_directives_from_vec(&envelope.headers);
+                revalidation = Some(RevalidationState {
+                    namespace: namespace.clone(),
+                    variant_key,
+                    envelope,
+                    stale_if_error_secs: directives.stale_if_error,
+                });
             }
         }
     }
@@ -156,6 +179,25 @@ pub fn build_only_if_cached_miss_response(message: &str) -> Response<Body> {
     response
 }
 
+pub fn maybe_build_stale_if_error_response(state: &RevalidationState) -> Option<Response<Body>> {
+    let limit = state.stale_if_error_secs?;
+    let now = now_millis();
+    let age = current_age_secs(&state.envelope, now);
+    let freshness = state.envelope.freshness_lifetime_secs;
+    if age <= freshness {
+        return None;
+    }
+    let staleness = age.saturating_sub(freshness);
+    if staleness == 0 || staleness > limit {
+        return None;
+    }
+    let mut response = response_from_envelope(&state.envelope, now, "HIT", true).ok()?;
+    response
+        .headers_mut()
+        .append(WARNING, http::HeaderValue::from_static(CACHE_WARNING_REVALIDATION_FAILED));
+    Some(response)
+}
+
 pub(super) fn classify_for_request(
     req: &RequestDirectives,
     envelope: &CachedResponseEnvelope,
@@ -192,6 +234,20 @@ pub(super) fn classify_for_request(
             };
         if can_serve_stale {
             return CacheEntryDisposition::ServeStale;
+        }
+
+        if staleness > 0 {
+            if let Some(swr) = resp.stale_while_revalidate {
+                if !req.no_cache && staleness <= swr {
+                    // RFC 5861: allow serving stale for SWR window. For only-if-cached, do not
+                    // trigger background network activity.
+                    return if req.only_if_cached {
+                        CacheEntryDisposition::ServeStale
+                    } else {
+                        CacheEntryDisposition::ServeStaleWhileRevalidate
+                    };
+                }
+            }
         }
     }
 

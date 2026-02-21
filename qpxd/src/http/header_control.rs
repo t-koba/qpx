@@ -1,4 +1,6 @@
+use metrics::counter;
 use qpx_core::rules::{CompiledHeaderControl, CompiledRegexReplace};
+use tracing::warn;
 
 pub fn apply_request_headers(
     headers: &mut http::HeaderMap,
@@ -58,6 +60,12 @@ fn apply_header_mutations(
         let replaced = replace.pattern().replace_all(value, replace.replace());
         if let Ok(new_value) = http::HeaderValue::from_str(replaced.as_ref()) {
             headers.insert(replace.header().clone(), new_value);
+        } else {
+            counter!("qpx_header_regex_replace_invalid_total").increment(1);
+            warn!(
+                header = %replace.header(),
+                "header regex_replace produced invalid HeaderValue; mutation skipped"
+            );
         }
     }
 }

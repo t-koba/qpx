@@ -1,8 +1,8 @@
 version: 1
 state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 
-# This profile assumes an XDP/TC frontend (or L4 relay) prepends PROXY headers.
-# metadata_mode supports proxy-v1 and proxy-v2.
+# This profile assumes an XDP/TC frontend (or L4 relay) prepends PROXYv2 headers.
+# metadata_mode supports proxy-v2 only.
 # qpxd consumes src/dst metadata and applies normal L7 rules.
 listeners:
   - name: forward-xdp

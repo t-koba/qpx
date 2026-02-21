@@ -1,37 +1,53 @@
-use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use tokio::io::AsyncReadExt;
+use tokio::time::{timeout, Duration, Instant};
 
 const MAX_CLIENT_HELLO_PEEK_BYTES: usize = 64 * 1024;
 
-pub async fn peek_client_hello(stream: &TcpStream) -> std::io::Result<Vec<u8>> {
+pub async fn read_client_hello_with_timeout<R>(
+    stream: &mut R,
+    timeout_dur: Duration,
+) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let deadline = Instant::now() + timeout_dur;
     let mut desired = 5usize;
-    loop {
-        let mut buf = vec![0u8; desired.min(MAX_CLIENT_HELLO_PEEK_BYTES)];
-        let n = stream.peek(&mut buf).await?;
-        buf.truncate(n);
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
 
-        let target = match required_client_hello_peek_bytes(&buf) {
-            Some(target) => target.min(MAX_CLIENT_HELLO_PEEK_BYTES),
+    loop {
+        let target = desired.min(MAX_CLIENT_HELLO_PEEK_BYTES);
+        while buf.len() < target {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let want = (target - buf.len()).min(tmp.len());
+            let n = match timeout(remaining, stream.read(&mut tmp[..want])).await {
+                Ok(Ok(n)) => n,
+                Ok(Err(err)) => return Err(err),
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timed out while reading client hello",
+                    ));
+                }
+            };
+            if n == 0 {
+                return Ok(buf);
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if buf.len() >= MAX_CLIENT_HELLO_PEEK_BYTES {
+                buf.truncate(MAX_CLIENT_HELLO_PEEK_BYTES);
+                return Ok(buf);
+            }
+        }
+
+        let next = match required_client_hello_peek_bytes(&buf) {
+            Some(next) => next.min(MAX_CLIENT_HELLO_PEEK_BYTES),
             None => return Ok(buf),
         };
-        if n >= target || target == MAX_CLIENT_HELLO_PEEK_BYTES {
+        if buf.len() >= next || next == MAX_CLIENT_HELLO_PEEK_BYTES {
             return Ok(buf);
         }
-        desired = target;
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-}
-
-pub async fn peek_client_hello_with_timeout(
-    stream: &TcpStream,
-    timeout_dur: Duration,
-) -> std::io::Result<Vec<u8>> {
-    match timeout(timeout_dur, peek_client_hello(stream)).await {
-        Ok(result) => result,
-        Err(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "timed out while peeking client hello",
-        )),
+        desired = next;
     }
 }
 

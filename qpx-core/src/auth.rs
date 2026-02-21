@@ -8,9 +8,11 @@ use ldap3::{LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Write as _;
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
+use tracing::Level;
 
 #[cfg(feature = "digest-auth")]
 use rand::RngCore;
@@ -129,12 +131,31 @@ impl Authenticator {
         &self.realm
     }
 
+    fn strip_auth_scheme<'a>(header_value: &'a str, scheme: &str) -> Option<&'a str> {
+        // RFC 9110 / RFC 7616: auth scheme names are case-insensitive.
+        let value = header_value.trim_start();
+        if value.len() <= scheme.len() {
+            return None;
+        }
+        if !value[..scheme.len()].eq_ignore_ascii_case(scheme) {
+            return None;
+        }
+        let rest = &value[scheme.len()..];
+        let mut chars = rest.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_whitespace() => {}
+            _ => return None,
+        }
+        Some(rest.trim_start_matches(|c: char| c.is_ascii_whitespace()))
+    }
+
     pub async fn authenticate_proxy(
         &self,
+        src_ip: Option<IpAddr>,
         headers: &http::HeaderMap,
         required_providers: &[String],
-        _method: &str,
-        _uri: &str,
+        method: &str,
+        uri: &str,
     ) -> Result<AuthOutcome> {
         if required_providers.is_empty() {
             return Ok(AuthOutcome::Allowed(AuthenticatedUser {
@@ -150,28 +171,102 @@ impl Authenticator {
             .unwrap_or("");
 
         if header.is_empty() {
-            return Ok(AuthOutcome::Challenge(self.build_challenge()));
-        }
-
-        if let Some(basic) = header.strip_prefix("Basic ") {
-            if let Some(user) = self.verify_basic(basic, required_providers).await? {
-                return Ok(AuthOutcome::Allowed(user));
+            if tracing::enabled!(target: "audit_log", Level::INFO) {
+                tracing::info!(
+                    target: "audit_log",
+                    event = "auth",
+                    outcome = "challenge",
+                    reason = "missing_proxy_authorization",
+                    src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                    method = method,
+                    uri = uri,
+                    required_providers = ?required_providers,
+                );
             }
             return Ok(AuthOutcome::Challenge(self.build_challenge()));
         }
 
-        if let Some(_digest) = header.strip_prefix("Digest ") {
+        if let Some(basic) = Self::strip_auth_scheme(header, "Basic") {
+            if let Some(user) = self.verify_basic(basic, required_providers).await? {
+                if tracing::enabled!(target: "audit_log", Level::INFO) {
+                    tracing::info!(
+                        target: "audit_log",
+                        event = "auth",
+                        outcome = "allowed",
+                        src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                        method = method,
+                        uri = uri,
+                        username = %user.username,
+                        provider = %user.provider,
+                        required_providers = ?required_providers,
+                    );
+                }
+                return Ok(AuthOutcome::Allowed(user));
+            }
+            if tracing::enabled!(target: "audit_log", Level::INFO) {
+                tracing::info!(
+                    target: "audit_log",
+                    event = "auth",
+                    outcome = "challenge",
+                    reason = "invalid_basic_credentials",
+                    src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                    method = method,
+                    uri = uri,
+                    required_providers = ?required_providers,
+                );
+            }
+            return Ok(AuthOutcome::Challenge(self.build_challenge()));
+        }
+
+        if let Some(_digest) = Self::strip_auth_scheme(header, "Digest") {
             #[cfg(feature = "digest-auth")]
             {
                 if required_providers.iter().any(|p| p == "local") {
-                    if let Some(user) = self.verify_digest(_digest, _method, _uri)? {
+                    if let Some(user) = self.verify_digest(_digest, method, uri)? {
+                        if tracing::enabled!(target: "audit_log", Level::INFO) {
+                            tracing::info!(
+                                target: "audit_log",
+                                event = "auth",
+                                outcome = "allowed",
+                                src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                                method = method,
+                                uri = uri,
+                                username = %user.username,
+                                provider = %user.provider,
+                                required_providers = ?required_providers,
+                            );
+                        }
                         return Ok(AuthOutcome::Allowed(user));
                     }
                 }
             }
+            if tracing::enabled!(target: "audit_log", Level::INFO) {
+                tracing::info!(
+                    target: "audit_log",
+                    event = "auth",
+                    outcome = "challenge",
+                    reason = "invalid_digest_credentials",
+                    src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                    method = method,
+                    uri = uri,
+                    required_providers = ?required_providers,
+                );
+            }
             return Ok(AuthOutcome::Challenge(self.build_challenge()));
         }
 
+        if tracing::enabled!(target: "audit_log", Level::INFO) {
+            tracing::info!(
+                target: "audit_log",
+                event = "auth",
+                outcome = "challenge",
+                reason = "unsupported_proxy_authorization_scheme",
+                src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                method = method,
+                uri = uri,
+                required_providers = ?required_providers,
+            );
+        }
         Ok(AuthOutcome::Challenge(self.build_challenge()))
     }
 
@@ -513,11 +608,10 @@ impl LdapAuthenticator {
 
     async fn authenticate(&self, username: &str, password: &str) -> Result<Option<Vec<String>>> {
         let ldap_timeout = Duration::from_millis(self.config.timeout_ms.max(1));
-        let mut settings = LdapConnSettings::new();
-        if self.config.require_starttls && self.config.url.starts_with("ldap://") {
+        let settings = if self.config.require_starttls && self.config.url.starts_with("ldap://") {
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             {
-                settings = settings.set_starttls(true);
+                LdapConnSettings::new().set_starttls(true)
             }
             #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
             {
@@ -525,7 +619,9 @@ impl LdapAuthenticator {
                     "ldap auth requires TLS backend (enable feature tls-rustls or tls-native)"
                 ));
             }
-        }
+        } else {
+            LdapConnSettings::new()
+        };
         #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
         if self.config.url.starts_with("ldaps://") {
             return Err(anyhow::anyhow!(

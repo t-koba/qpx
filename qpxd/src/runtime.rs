@@ -1,9 +1,10 @@
 use crate::cache::CacheBackend;
 use crate::exporter::{ExportSession, ExporterSink};
+use crate::rate_limit::RateLimiters;
 use anyhow::{anyhow, Result};
 use arc_swap::ArcSwap;
 use qpx_core::auth::Authenticator;
-use qpx_core::config::{Config, ListenerConfig};
+use qpx_core::config::{Config, ListenerConfig, ReverseConfig, XdpConfig};
 use qpx_core::rules::RuleEngine;
 use qpx_core::tls::CaStore;
 #[cfg(feature = "mitm")]
@@ -25,6 +26,7 @@ pub struct RuntimeState {
     pub messages: MessageTexts,
     listener_indices: HashMap<String, usize>,
     pub rules_by_listener: HashMap<String, RuleEngine>,
+    pub rate_limiters: RateLimiters,
     #[cfg(feature = "mitm")]
     tls_verify_exception_sets: HashMap<String, globset::GlobSet>,
     pub auth: Arc<Authenticator>,
@@ -33,6 +35,7 @@ pub struct RuntimeState {
     pub mitm: Option<MitmConfig>,
     pub exporter: Option<ExporterSink>,
     pub ftp_semaphore: Arc<Semaphore>,
+    pub connection_semaphore: Arc<Semaphore>,
     pub upstreams: HashMap<String, String>,
     pub cache_backends: HashMap<String, Arc<dyn CacheBackend>>,
 }
@@ -85,7 +88,9 @@ impl RuntimeState {
         )?);
         let metric_names = MetricNames::from_prefix(config.identity.metrics_prefix.as_str());
         let messages = MessageTexts::from_config(config.as_ref());
+        let rate_limiters = RateLimiters::from_config(config.listeners.as_slice());
 
+        #[cfg(feature = "mitm")]
         let state_dir = config
             .state_dir
             .as_deref()
@@ -110,6 +115,8 @@ impl RuntimeState {
         };
 
         let ftp_semaphore = Arc::new(Semaphore::new(config.runtime.max_ftp_concurrency));
+        let connection_semaphore =
+            Arc::new(Semaphore::new(config.runtime.max_concurrent_connections));
 
         let upstreams = config
             .upstreams
@@ -127,6 +134,7 @@ impl RuntimeState {
             messages,
             listener_indices,
             rules_by_listener,
+            rate_limiters,
             #[cfg(feature = "mitm")]
             tls_verify_exception_sets,
             auth,
@@ -135,6 +143,7 @@ impl RuntimeState {
             mitm,
             exporter,
             ftp_semaphore,
+            connection_semaphore,
             upstreams,
             cache_backends,
         })
@@ -240,6 +249,7 @@ fn any_tls_inspection_enabled(listeners: &[ListenerConfig]) -> bool {
     })
 }
 
+#[cfg(feature = "mitm")]
 pub fn expand_tilde(input: &str) -> PathBuf {
     if let Some(stripped) = input.strip_prefix("~/") {
         if let Some(home) = dirs_next::home_dir() {
@@ -253,8 +263,17 @@ pub fn ensure_hot_reload_compatible(old: &Config, new: &Config) -> Result<()> {
     if old.state_dir != new.state_dir {
         return Err(anyhow!("state_dir changed; restart required"));
     }
-    if old.logging != new.logging {
-        return Err(anyhow!("logging changed; restart required"));
+    if old.system_log != new.system_log {
+        return Err(anyhow!("system_log changed; restart required"));
+    }
+    if old.access_log != new.access_log {
+        return Err(anyhow!("access_log changed; restart required"));
+    }
+    if old.audit_log != new.audit_log {
+        return Err(anyhow!("audit_log changed; restart required"));
+    }
+    if old.otel != new.otel {
+        return Err(anyhow!("otel changed; restart required"));
     }
     if old.metrics != new.metrics {
         return Err(anyhow!("metrics listener config changed; restart required"));
@@ -293,11 +312,9 @@ pub fn ensure_hot_reload_compatible(old: &Config, new: &Config) -> Result<()> {
                 old_reverse.name
             ));
         }
-        // Reverse routes/TLS/http3 listeners are instantiated at startup; changing them
-        // requires a process restart.
-        if old_reverse != new_reverse {
+        if reverse_startup_signature(old_reverse) != reverse_startup_signature(new_reverse) {
             return Err(anyhow!(
-                "reverse config changed for {}; restart required",
+                "reverse startup settings changed for {}; restart required",
                 old_reverse.name
             ));
         }
@@ -325,6 +342,15 @@ fn listener_mode_tag(listener: &ListenerConfig) -> &'static str {
     }
 }
 
+type XdpSignature = (bool, String, bool, Vec<String>);
+type ReverseHttp3Signature = (String, Vec<String>, usize, u64, u64, usize, u32);
+type ReverseStartupSignature = (
+    bool,
+    XdpSignature,
+    Option<ReverseHttp3Signature>,
+    Option<qpx_core::config::ReverseTlsConfig>,
+);
+
 fn listener_http3_signature(
     listener: &ListenerConfig,
 ) -> (
@@ -338,8 +364,45 @@ fn listener_http3_signature(
     }
 }
 
-fn listener_xdp_signature(listener: &ListenerConfig) -> (bool, String, bool, Vec<String>) {
-    match listener.xdp.as_ref() {
+fn listener_xdp_signature(listener: &ListenerConfig) -> XdpSignature {
+    xdp_signature(listener.xdp.as_ref())
+}
+
+fn reverse_startup_signature(reverse: &ReverseConfig) -> ReverseStartupSignature {
+    let tls_enabled = reverse.tls.is_some();
+    let xdp = xdp_signature(reverse.xdp.as_ref());
+    let http3 = reverse_http3_signature(reverse);
+    let h3_terminate_uses_tls = http3
+        .as_ref()
+        .map(|(_, passthrough_upstreams, ..)| passthrough_upstreams.is_empty())
+        .unwrap_or(false);
+    let h3_tls = if h3_terminate_uses_tls {
+        reverse.tls.clone()
+    } else {
+        None
+    };
+    (tls_enabled, xdp, http3, h3_tls)
+}
+
+fn reverse_http3_signature(reverse: &ReverseConfig) -> Option<ReverseHttp3Signature> {
+    let cfg = reverse.http3.as_ref()?;
+    if !cfg.enabled {
+        return None;
+    }
+    let listen = cfg.listen.clone().unwrap_or_else(|| reverse.listen.clone());
+    Some((
+        listen,
+        cfg.passthrough_upstreams.clone(),
+        cfg.passthrough_max_sessions,
+        cfg.passthrough_idle_timeout_secs,
+        cfg.passthrough_max_new_sessions_per_sec,
+        cfg.passthrough_min_client_bytes,
+        cfg.passthrough_max_amplification,
+    ))
+}
+
+fn xdp_signature(xdp: Option<&XdpConfig>) -> XdpSignature {
+    match xdp {
         Some(xdp) => (
             xdp.enabled,
             xdp.metadata_mode.clone(),

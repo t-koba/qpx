@@ -1,18 +1,19 @@
-# qpx — Quick Proxy
+# qpx
 
-HTTP/1.1, HTTP/2, HTTP/3, CONNECT, TLS MITM, forward / reverse / transparent proxy.
+Async HTTP proxy server in Rust. Supports forward, reverse, and transparent proxy modes with HTTP/1.1, HTTP/2, HTTP/3, TLS inspection (MITM), and a FastCGI function executor.
 
 ## Features
 
 - **Forward proxy** — HTTP/HTTPS with rules, auth (Basic/Digest/LDAP), upstream chaining, FTP-over-HTTP gateway, WebSocket upgrade.
-- **Reverse proxy** — route by Host/SNI/path/src_ip, TLS termination, TLS passthrough by SNI, retry, health checks, header rewrite, path rewrite (strip/add/regex), canary traffic splitting, request mirroring, HTTP/3 termination.
+- **Reverse proxy** — route by Host/SNI/path/src_ip, TLS termination, TLS passthrough by SNI, retry, health checks, header rewrite, path rewrite (strip/add/regex), canary traffic splitting, request mirroring, HTTP/3 termination, FastCGI upstream forwarding.
+- **FastCGI gateway** — `qpxf` function executor: hardened FastCGI server with CGI script execution (path containment, concurrent I/O, size limits) and WASM module execution (via `wasmtime` with memory limits, epoch-based timeout). `qpxd` acts as FastCGI client via reverse route `fastcgi:` config (recommended) or `fastcgi://` upstream URLs (TCP/Unix).
 - **Transparent proxy** — Linux `SO_ORIGINAL_DST` or protocol metadata routing (SNI, Host), with optional TLS MITM inspection.
 - **TLS inspection (MITM)** — dynamic per-connection certificate impersonation via built-in CA (requires `tls-rustls` build).
-- **HTTP/3 (QUIC)** — forward, reverse, and transparent listeners. CONNECT-UDP / MASQUE support (requires `tls-rustls` build).
-- **Caching** — RFC 9111 compliant proxy cache with in-memory, Redis, and HTTP object-storage backends.
+- **HTTP/3 (QUIC)** — forward and reverse listeners. CONNECT-UDP / MASQUE support (requires `tls-rustls` build).
+- **Caching** — RFC 9111 (safe subset) + RFC 5861 (`stale-while-revalidate`, `stale-if-error`) proxy cache with in-memory, Redis, and HTTP object-storage backends.
 - **PCAPNG capture pipeline** — `qpxd` emits decrypted traffic events; `qpxr` writes PCAPNG; `qpxc` streams to Wireshark.
-- **XDP / PROXY protocol** — PROXY v1/v2 metadata for forwarding original client addresses from L4 frontends.
-- **Observability** — structured logging, Prometheus metrics endpoint, configurable identity and message strings.
+- **XDP / PROXY protocol** — PROXY v2 metadata for forwarding original client addresses from L4 frontends.
+- **Observability** — structured logging, Prometheus metrics endpoint, optional OpenTelemetry tracing (OTLP/Jaeger).
 
 ## Build
 
@@ -38,11 +39,17 @@ cargo build --release -p qpxc --no-default-features
 
 ## Platform support
 
-| Platform | Status |
+CI builds and tests run on Linux, macOS, and Windows (x86_64 and aarch64). Release binaries are published for:
+
+| Target | Notes |
 |---|---|
-| **macOS / Windows / Linux** | Tested and supported |
-| Linux with XDP | Supported (deployment mode) |
-| Other Unix (FreeBSD…) | Best-effort, not guaranteed |
+| `x86_64-unknown-linux-musl` | Static musl binary |
+| `aarch64-unknown-linux-musl` | Static musl binary |
+| `x86_64-apple-darwin` | macOS Intel |
+| `aarch64-apple-darwin` | macOS Apple Silicon |
+| `x86_64-pc-windows-msvc` | Windows |
+
+Other Unix systems (FreeBSD, etc.) are not tested and not guaranteed to work.
 
 **Platform-specific behavior:**
 
@@ -142,6 +149,27 @@ exporter:
     max_chunk_bytes: 16384
 ```
 
+## FastCGI gateway
+
+`qpxf` is a hardened FastCGI executor that runs alongside `qpxd`. `qpxd` routes requests to `qpxf` over the FastCGI protocol using a `fastcgi:` reverse route (recommended) or a `fastcgi://` upstream URL.
+
+`qpxf` supports two execution backends:
+
+| Backend | Description |
+|---------|-------------|
+| CGI scripts | Spawns external processes (RFC 3875). Path containment, size limits, concurrent I/O with deadlock prevention. |
+| WASM modules | Executes WASI-compatible modules via `wasmtime`. Memory limits via `ResourceLimiter`, epoch-based timeout. |
+
+```bash
+# Start the executor (listen on a Unix socket)
+cargo run -p qpxf -- --listen /run/qpxf/qpxf.sock --config config/usecases/12-fastcgi-gateway/qpxf.yaml
+
+# Start qpxd routed to it
+cargo run -p qpxd -- run --config config/usecases/12-fastcgi-gateway/qpx.yaml
+```
+
+See `config/usecases/12-fastcgi-gateway/` for sample configs.
+
 ## Configuration
 
 - **Canonical samples** (use-case oriented): `config/usecases/`
@@ -149,7 +177,7 @@ exporter:
 - **Full index and usage guidance**: [`config/README.md`](config/README.md)
 - **Full example config**: [`config/qpx.example.yaml`](config/qpx.example.yaml)
 
-> **Security note:** Forward and transparent samples default to `default_action: block` to prevent accidental open-proxy deployments.
+> **Security note:** Forward and transparent samples default to `default_action: block` to prevent accidental open-proxy deployments. Explicit exceptions are `*-local-dev-direct.yaml` and `config/usecases/99-test-fixtures/*` (loopback-only dev/test profiles).
 
 ### Include composition
 
@@ -176,11 +204,12 @@ tls:
 
 ### Hot reload
 
-`qpxd` watches the config file and all `include` targets for changes. On modification it reloads rules, auth, cache, identity, messages, and exporter settings without restarting.
+`qpxd` watches the config file and all `include` targets for changes. On modification it reloads rules, auth, cache (including RFC 5861 behavior), identity/messages, exporter, and reverse routing/LB/health/security settings without restarting.
 
 Reload constraints:
 - Listener and reverse section **topology** (names, modes, listen addresses) must not change — topology changes are rejected and the old config is kept.
 - Runtime thread pool settings (`worker_threads`, `max_blocking_threads`, etc.) are not reloaded.
+- Observability outputs (logging/metrics/OTel) are not reloaded.
 
 ### Local response policy
 
@@ -232,7 +261,7 @@ cargo build -p qpxd
 
 - Linux uses `SO_ORIGINAL_DST`; macOS/Windows fall back to protocol metadata routing (TLS SNI for HTTPS, `Host` header for HTTP).
 - The transparent path applies L7 rules for HTTP and supports opt-in TLS MITM for HTTPS flows.
-- `xdp.metadata_mode: proxy-v1|proxy-v2` allows transparent destination recovery from PROXY metadata (useful with XDP/L4 frontends).
+- `xdp.metadata_mode: proxy-v2` allows transparent destination recovery from PROXY metadata (useful with XDP/L4 frontends).
 
 </details>
 
@@ -251,7 +280,7 @@ cargo build -p qpxd
 <details>
 <summary>XDP metadata integration</summary>
 
-- Forward/reverse/transparent listeners can consume PROXY v1/v2 metadata (`xdp.enabled: true`, `metadata_mode: proxy-v1|proxy-v2`).
+- Forward/reverse/transparent listeners can consume PROXY v2 metadata (`xdp.enabled: true`, `metadata_mode: proxy-v2`).
 - Source address metadata is used for rule evaluation (`src_ip`) on forward listeners.
 - Reverse route matcher supports `src_ip` / `dst_port` / `host` / `sni` / `method` / `path` / `headers`.
 - When `xdp.enabled: true`, `trusted_peers` is required and metadata is accepted only from trusted peer CIDRs.

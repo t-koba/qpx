@@ -1,0 +1,36 @@
+# qpxf configuration — FastCGI function executor
+#
+# Runs as a FastCGI server, handling CGI scripts and WASM modules.
+
+listen: "127.0.0.1:9000"
+workers: 4
+
+# Request size limits (DoS protection).
+max_params_bytes: 1048576    # 1 MiB
+max_stdin_bytes: 33554432    # 32 MiB
+input_idle_timeout_ms: 30000 # Slowloris protection while reading PARAMS/STDIN
+conn_idle_timeout_ms: 60000  # Keep-alive idle timeout when no requests are in-flight
+
+handlers:
+  # CGI script handler — replace `root` with an existing directory on your host.
+  - match:
+      path_prefix: "/cgi-bin/"
+    backend:
+      type: cgi
+      root: /var/www/cgi-bin
+      timeout_ms: 30000
+      env_passthrough: [PATH, HOME]
+      max_stdout_bytes: 33554432   # 32 MiB
+      max_stderr_bytes: 1048576    # 1 MiB
+
+  # WASM module handler — replace `module` with an existing WASM file on your host.
+  - match:
+      path_prefix: "/wasm/"
+    backend:
+      type: wasm
+      module: /var/www/wasm/app.wasm
+      precompile: true
+      max_memory_mb: 128
+      timeout_ms: 10000
+      max_stdout_bytes: 33554432   # 32 MiB
+      max_stderr_bytes: 1048576    # 1 MiB

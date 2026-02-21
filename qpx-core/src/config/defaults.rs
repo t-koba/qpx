@@ -6,8 +6,32 @@ pub(super) fn default_log_format() -> String {
     "json".to_string()
 }
 
+pub(super) fn default_log_output_format() -> String {
+    "json".to_string()
+}
+
+pub(super) fn default_log_rotation() -> String {
+    "daily".to_string()
+}
+
+pub(super) fn default_log_rotation_count() -> usize {
+    30
+}
+
 pub(super) fn default_metrics_path() -> String {
     "/metrics".to_string()
+}
+
+pub(super) fn default_otel_protocol() -> String {
+    "grpc".to_string()
+}
+
+pub(super) fn default_otel_level() -> String {
+    "info".to_string()
+}
+
+pub(super) fn default_otel_sample_percent() -> u32 {
+    100
 }
 
 pub(super) fn default_user_filter() -> String {
@@ -83,7 +107,7 @@ pub(super) fn default_ftp_timeout_ms() -> u64 {
 }
 
 pub(super) fn default_xdp_metadata_mode() -> String {
-    "proxy-v1".to_string()
+    "proxy-v2".to_string()
 }
 
 pub(super) fn default_xdp_require_metadata() -> bool {
@@ -136,6 +160,10 @@ pub(super) fn default_runtime_tcp_backlog() -> i32 {
 
 pub(super) fn default_runtime_max_ftp_concurrency() -> usize {
     32
+}
+
+pub(super) fn default_runtime_max_concurrent_connections() -> usize {
+    8192
 }
 
 pub(super) fn default_runtime_max_h3_request_body_bytes() -> usize {
@@ -239,11 +267,11 @@ pub(super) fn default_exporter_max_queue_events() -> usize {
 }
 
 pub(super) fn default_exporter_capture_plaintext() -> bool {
-    true
+    false
 }
 
 pub(super) fn default_exporter_capture_encrypted() -> bool {
-    true
+    false
 }
 
 pub(super) fn default_exporter_max_chunk_bytes() -> usize {
@@ -260,4 +288,12 @@ pub(super) fn default_cache_timeout_ms() -> u64 {
 
 pub(super) fn default_cache_max_object_bytes() -> usize {
     1024 * 1024
+}
+
+pub(super) fn default_rate_limit_key() -> String {
+    "src_ip".to_string()
+}
+
+pub(super) fn default_fastcgi_timeout_ms() -> u64 {
+    30_000
 }

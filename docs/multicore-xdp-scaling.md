@@ -2,7 +2,7 @@
 
 This document focuses on practical scale-out settings for `qpxd` on multi-core hosts.
 
-## What `qpxd` now does internally
+## What `qpxd` does internally
 
 1. Runtime tuning from config (`runtime.*`)
    - `worker_threads`: Tokio worker thread count.
@@ -12,17 +12,17 @@ This document focuses on practical scale-out settings for `qpxd` on multi-core h
    - `tcp_backlog`: listen backlog.
 
 2. Listener fan-out with `SO_REUSEPORT`
-   - forward/reverse/transparent listeners now bind multiple sockets when configured.
+   - forward/reverse/transparent listeners bind multiple sockets when configured.
    - each socket has its own async accept loop.
    - this reduces lock contention around a single accept path and improves multicore scaling.
 
 3. Matcher hot path allocation control
-   - rule and reverse prefilter matching now reuses thread-local bitset buffers.
+   - rule and reverse prefilter matching reuses thread-local bitset buffers.
    - prefilter candidate traversal is bit-iteration based and avoids per-request candidate vector allocation.
 
 ## XDP and metadata scope
 
-`qpxd` currently integrates with XDP/L4 frontends by consuming PROXY metadata (`xdp.metadata_mode: proxy-v1` or `proxy-v2`).
+`qpxd` integrates with XDP/L4 frontends by consuming PROXY v2 metadata (`xdp.metadata_mode: proxy-v2`).
 
 - source/destination context can be injected by an external L4/XDP layer.
 - rule engine then uses that metadata for `src_ip` and transparent-destination matching.

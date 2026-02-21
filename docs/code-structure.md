@@ -4,16 +4,17 @@ Source-level guide to the qpx workspace.
 
 ## Architecture overview
 
-qpx is a Rust workspace with four crates:
+qpx is a Rust workspace with five crates:
 
 ```
 qpx-core   shared library: config loading, rule engine, auth, TLS, observability
 qpxd       daemon:         forward / reverse / transparent HTTP proxy
+qpxf       executor:       FastCGI function executor (CGI scripts + WASM modules)
 qpxr       reader:         receives traffic events from qpxd, writes PCAPNG
 qpxc       client:         streams PCAPNG from qpxr to Wireshark or stdout
 ```
 
-`qpxd` is the only component that touches network traffic. `qpxr` and `qpxc` are post-capture tooling and never participate in the proxy data path.
+`qpxd` is the main network proxy. It can forward requests to `qpxf` over the FastCGI protocol using reverse route `fastcgi:` config (recommended) or `fastcgi://` upstream URLs. `qpxr` and `qpxc` are post-capture tooling and never participate in the proxy data path.
 
 ### Request flow through qpxd
 
@@ -164,7 +165,7 @@ Outbound connection handling — how `qpxd` talks to origins and chained proxies
 - `pool.rs`: pooled connections to upstream proxies for forward-proxy chaining.
 - `connect.rs`: CONNECT-to-upstream helper — establishes a CONNECT tunnel through a chained proxy before forwarding.
 - `http1.rs`: HTTP/1.1 upstream proxy dispatch — absolute-form URI, WebSocket proxy, upstream endpoint parsing, Proxy-Authorization forwarding.
-- `origin.rs`: direct upstream dispatch (reverse/transparent) — plain/TLS, h2-aware sender selection, WebSocket upgrade, request URI rewriting.
+- `origin.rs`: direct upstream dispatch (reverse/transparent) — plain/TLS/FastCGI, h2-aware sender selection, WebSocket upgrade, request URI rewriting.
 - `mod.rs`: module re-exports.
 
 ### Cache (`cache/`)
@@ -191,8 +192,10 @@ RFC 9111 proxy cache implementation. Used by both forward listeners and reverse 
 ### Other daemon modules
 
 - `ftp.rs`: FTP-over-HTTP gateway — translates HTTP GET/PUT/LIST to FTP commands, PASV/PORT fallback, bounded transfer sizes.
+- `fastcgi_client.rs`: FastCGI client — encodes HTTP requests as FastCGI records, connects to FastCGI backends (TCP/Unix) with a small connection pool + `FCGI_KEEP_CONN`, decodes CGI-style responses back to HTTP with streaming body support. Used by `upstream/origin.rs` and reverse routes.
 - `exporter.rs`: capture event producer — TCP client to `qpxr`, event queue management, request/response body preview serialization.
 - `io_copy.rs`: bidirectional stream copy (used for CONNECT tunnels and WebSocket) with optional capture export hooks and idle timeout.
+- `io_prefix.rs`: `PrefixedIo` adapter — "unreads" a byte buffer back onto a stream after peeking (used for PROXY v2 metadata and TLS ClientHello inspection) so downstream consumers see the original byte stream from the beginning.
 - `net.rs`: socket helpers — `SO_REUSEPORT`, `SO_REUSEADDR`, TCP backlog, multi-socket listener binding.
 - `xdp/mod.rs`: PROXY protocol v1/v2 metadata parser.
 - `xdp/remote.rs`: resolves effective remote address — uses PROXY metadata when available and trusted, falls back to socket peer address.
@@ -213,9 +216,25 @@ Single-file crate. Connects to `qpxr` and relays the PCAPNG stream to Wireshark 
 
 ---
 
+## Function executor (`qpxf`)
+
+FastCGI server that executes CGI scripts and WASM modules. `qpxd` connects to `qpxf` as a FastCGI client using reverse route `fastcgi:` config or `fastcgi://` upstream URLs.
+
+- `main.rs`: CLI (`--listen`, `--config`, `--workers`), FastCGI connection accept loop, concurrency-limited request dispatch via `tokio::sync::Semaphore`. Safe Unix socket binding (verifies existing path is a socket before unlink).
+- `config.rs`: YAML configuration schema with `deny_unknown_fields` — listen address, workers (concurrency limit), request size limits, handler routing rules, CGI/WASM backend settings including per-backend stdout/stderr size limits.
+- `server.rs`: FastCGI connection handler — request_id state machine (multiplexing), BEGIN_REQUEST role/flags validation, management records (request_id=0), ABORT_REQUEST, keep-alive (`FCGI_KEEP_CONN`), streaming STDIN→executor and executor stdout/stderr→FastCGI, per-request input idle timeout + connection idle timeout.
+- `fastcgi.rs`: FastCGI protocol primitives — record read/write, name-value encoding/decoding, protocol constants, and version validation.
+- `router.rs`: path-based request routing — matches incoming requests by `path_prefix`, `path_regex`, and `host` to the appropriate executor. Returns matched prefix for prefix-stripping in executors.
+- `executor/mod.rs`: `Executor` trait definition and shared request/response types (`CgiRequest`, `CgiResponse`). `matched_prefix` field enables correct script path resolution.
+- `executor/cgi.rs`: RFC 3875 CGI script executor — spawns external processes via `tokio::process::Command`, sets CGI environment variables (including `SERVER_SOFTWARE`), pipes stdin/stdout/stderr. Security: canonicalizes CGI root on startup, rejects `..` paths and symlink escapes, enforces configurable stdout/stderr size limits, reads stdout/stderr concurrently (prevents deadlock), post-timeout `wait()` ensures zombie process cleanup. Hop-by-hop headers are excluded from HTTP_* env.
+- `executor/wasm.rs`: WASI-compatible WASM executor (feature `wasm`) — uses `wasmtime::Engine` + `wasmtime::Module` for module loading, `wasmtime_wasi` for WASI context (stdin/stdout/env). Security: `ResourceLimiter` enforces memory limits, a single global epoch ticker (10ms interval) drives all timeout deadlines (no per-request epoch increment side effects), configurable stdout/stderr capture with size limits. Stderr captured and logged instead of inherited. Trap detection uses structural `Trap::Interrupt` check instead of string matching.
+
+---
+
 ## Design rules
 
 1. Mode entry files (`forward/mod.rs`, `reverse/mod.rs`, `transparent/mod.rs`) own only mode-specific control flow. They must not contain shared HTTP logic.
 2. Shared protocol mechanics live in `http/`, `http3/`, `upstream/`, `xdp/`, or `tls/`.
 3. New features must not duplicate parsing, response building, or tunnel logic across mode files.
 4. `qpxd` never generates PCAP/PCAPNG. `qpxr` is the sole capture generator. `qpxc` is passthrough only.
+5. `qpxf` is the sole CGI/WASM execution environment. `qpxd` communicates with `qpxf` only via the FastCGI protocol.

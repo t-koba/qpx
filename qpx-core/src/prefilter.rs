@@ -740,7 +740,10 @@ pub(crate) fn compile_text_patterns(
     ))
 }
 
-pub(crate) fn dedup_uppercase_arc(items: &[String], interner: &mut StringInterner) -> Vec<Arc<str>> {
+pub(crate) fn dedup_uppercase_arc(
+    items: &[String],
+    interner: &mut StringInterner,
+) -> Vec<Arc<str>> {
     let mut out = Vec::with_capacity(items.len());
     let mut seen: HashSet<Arc<str>> = HashSet::new();
     for item in items {
@@ -977,4 +980,3 @@ mod tests {
         assert!(!host_matches_suffix("example.com", "example.com")); // equal length
     }
 }
-

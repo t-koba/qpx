@@ -1,5 +1,8 @@
 use crate::http::address::format_authority_host_port;
-use crate::http::common::{bad_request_response as bad_request, blocked_response as blocked};
+use crate::http::common::{
+    bad_request_response as bad_request, blocked_response as blocked,
+    too_many_requests_response as too_many_requests,
+};
 use crate::http::l7::{
     finalize_response_for_request, finalize_response_with_headers_in_place,
     handle_max_forwards_in_place, prepare_request_with_headers_in_place,
@@ -61,6 +64,19 @@ pub async fn proxy_mitm_request(
             false,
         ));
     }
+    if let Some(limits) = state.rate_limiters.listener(route.listener_name) {
+        if let Some(limiter) = limits.listener.requests.as_ref() {
+            if let Some(retry_after) = limiter.try_acquire(route.src_addr.ip(), 1) {
+                return Ok(finalize_response_for_request(
+                    req.method(),
+                    req.version(),
+                    proxy_name,
+                    too_many_requests(Some(retry_after)),
+                    false,
+                ));
+            }
+        }
+    }
 
     let engine = state
         .rules_by_listener
@@ -91,15 +107,43 @@ pub async fn proxy_mitm_request(
         blocked,
         state.messages.blocked.as_str(),
     )?;
-    let policy = match decision {
-        ListenerPolicyDecision::Proceed(policy) => policy,
-        ListenerPolicyDecision::Early(response) => return Ok(response),
+    let (policy, early_response, matched_rule) = match decision {
+        ListenerPolicyDecision::Proceed(mut policy) => {
+            let matched_rule = policy.matched_rule.take();
+            (Some(policy), None, matched_rule)
+        }
+        ListenerPolicyDecision::Early(response, matched_rule) => (None, Some(response), matched_rule),
     };
+    if let Some(rule) = matched_rule.as_deref() {
+        if let Some(limits) = state.rate_limiters.listener(route.listener_name) {
+            if let Some(rule_limits) = limits.rules.get(rule) {
+                if let Some(limiter) = rule_limits.requests.as_ref() {
+                    if let Some(retry_after) = limiter.try_acquire(route.src_addr.ip(), 1) {
+                        return Ok(finalize_response_for_request(
+                            req.method(),
+                            req.version(),
+                            proxy_name,
+                            too_many_requests(Some(retry_after)),
+                            false,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(response) = early_response {
+        return Ok(response);
+    }
+    let policy = policy.expect("policy");
 
     let req_method = req.method().clone();
     let export_server = format_authority_host_port(route.host, route.dst_port);
     let export_session = state.export_session(route.src_addr, export_server);
-    if let Some(response) = handle_max_forwards_in_place(&mut req, proxy_name) {
+    if let Some(response) = handle_max_forwards_in_place(
+        &mut req,
+        proxy_name,
+        state.config.runtime.trace_reflect_all_headers,
+    ) {
         return Ok(response);
     }
     prepare_request_with_headers_in_place(

@@ -48,10 +48,14 @@ pub(crate) fn encode_datagram_capsule(payload: &[u8]) -> Result<Bytes> {
     encode_quic_varint(0, &mut value)?; // context id
     value.extend_from_slice(payload);
 
+    encode_datagram_capsule_value(&value)
+}
+
+pub(crate) fn encode_datagram_capsule_value(value: &[u8]) -> Result<Bytes> {
     let mut capsule = Vec::with_capacity(2 + value.len());
     encode_quic_varint(0, &mut capsule)?; // DATAGRAM capsule type
     encode_quic_varint(value.len() as u64, &mut capsule)?;
-    capsule.extend_from_slice(&value);
+    capsule.extend_from_slice(value);
     Ok(Bytes::from(capsule))
 }
 

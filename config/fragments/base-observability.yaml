@@ -1,5 +1,5 @@
 state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
-logging:
+system_log:
   level: "${QPX_LOG_LEVEL:-info}"
   format: "${QPX_LOG_FORMAT:-json}"
 metrics:
@@ -9,6 +9,13 @@ metrics:
   # configure an explicit CIDR allowlist:
   # allow:
   #   - "10.0.0.0/8"
+otel:
+  enabled: false
+  endpoint: "http://127.0.0.1:4317"
+  level: "info"
+  sample_percent: 100
+  # headers:
+  #   Authorization: "Bearer ${OTEL_TOKEN}"
 exporter:
   enabled: false
   endpoint: "${QPX_EXPORTER_ENDPOINT:-127.0.0.1:19100}"

@@ -10,9 +10,12 @@ use hyper::service::service_fn;
 #[cfg(feature = "mitm")]
 use hyper::{Body, Request};
 use qpx_core::config::ActionKind;
+#[cfg(feature = "mitm")]
+use qpx_core::middleware::access_log::{AccessLogContext, AccessLogService};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
-use tokio::net::TcpStream;
+#[cfg(feature = "mitm")]
+use std::sync::Arc;
 #[cfg(feature = "mitm")]
 use tokio::time::timeout;
 use tokio::time::Duration;
@@ -42,30 +45,45 @@ impl TransparentTlsOutcome {
     }
 }
 
-pub(super) async fn handle_tls_connection(
-    stream: TcpStream,
+pub(super) async fn handle_tls_connection<I>(
+    stream: I,
     remote_addr: SocketAddr,
     original_target: Option<ConnectTarget>,
     listener_name: &str,
     runtime: Runtime,
     sni: Option<String>,
-) -> Result<TransparentTlsOutcome> {
-    let connect_target = if let Some(target) = original_target {
-        target
-    } else if let Some(host) = sni.clone() {
-        ConnectTarget::HostPort(host, 443)
-    } else {
-        return Err(anyhow!(
-            "transparent TLS on this OS requires SNI when original destination is unavailable"
-        ));
+) -> Result<TransparentTlsOutcome>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let connect_target = match original_target {
+        Some(target) => target,
+        None => match sni.clone() {
+            Some(host) => ConnectTarget::HostPort(host, 443),
+            None => {
+                return Err(anyhow!(
+                    "transparent TLS on this OS requires SNI when original destination is unavailable"
+                ));
+            }
+        },
     };
 
-    let host_for_match_owned = sni.clone().or_else(|| match &connect_target {
+    let host_for_match_owned = match &connect_target {
         ConnectTarget::HostPort(host, _) => Some(host.clone()),
-        ConnectTarget::Socket(_) => None,
-    });
+        ConnectTarget::Socket(addr) => Some(addr.ip().to_string()),
+    };
+    let sni_for_match = matches!(&connect_target, ConnectTarget::HostPort(_, _))
+        .then_some(sni.as_deref())
+        .flatten();
 
     let state = runtime.state();
+    if let Some(limits) = state.rate_limiters.listener(listener_name) {
+        if let Some(limiter) = limits.listener.requests.as_ref() {
+            if limiter.try_acquire(remote_addr.ip(), 1).is_some() {
+                return Ok(TransparentTlsOutcome::Blocked);
+            }
+        }
+    }
     let upstream_timeout = Duration::from_millis(state.config.runtime.upstream_http_timeout_ms);
     let listener_cfg = state
         .listener_config(listener_name)
@@ -79,13 +97,24 @@ pub(super) async fn handle_tls_connection(
         src_ip: Some(remote_addr.ip()),
         dst_port: Some(connect_target.port()),
         host: host_for_match_owned.as_deref(),
-        sni: sni.as_deref(),
+        sni: sni_for_match,
         method: None,
         path: None,
         headers: None,
         user_groups: &[],
     };
     let outcome = engine.evaluate_ref(&ctx);
+    if let Some(rule) = outcome.matched_rule {
+        if let Some(limits) = state.rate_limiters.listener(listener_name) {
+            if let Some(rule_limits) = limits.rules.get(rule) {
+                if let Some(limiter) = rule_limits.requests.as_ref() {
+                    if limiter.try_acquire(remote_addr.ip(), 1).is_some() {
+                        return Ok(TransparentTlsOutcome::Blocked);
+                    }
+                }
+            }
+        }
+    }
     let auth_required = outcome.auth.map(|a| !a.require.is_empty()).unwrap_or(false);
     if auth_required || matches!(outcome.action.kind, ActionKind::Block) {
         return Ok(TransparentTlsOutcome::Blocked);
@@ -162,11 +191,26 @@ pub(super) async fn handle_tls_connection(
         .peer_addr
         .and_then(|server_addr| runtime.state().export_session(remote_addr, server_addr));
     let idle_timeout = Duration::from_millis(runtime.state().config.runtime.tunnel_idle_timeout_ms);
+    let mut bandwidth_limiters = Vec::new();
+    if let Some(limits) = state.rate_limiters.listener(listener_name) {
+        if let Some(limiter) = limits.listener.bytes.as_ref() {
+            bandwidth_limiters.push(limiter.clone());
+        }
+        if let Some(rule) = outcome.matched_rule {
+            if let Some(rule_limits) = limits.rules.get(rule) {
+                if let Some(limiter) = rule_limits.bytes.as_ref() {
+                    bandwidth_limiters.push(limiter.clone());
+                }
+            }
+        }
+    }
+    let throttle = crate::io_copy::BandwidthThrottle::new(remote_addr.ip(), bandwidth_limiters);
     crate::io_copy::copy_bidirectional_with_export_and_idle(
         stream,
         upstream_connected.io,
         export,
         Some(idle_timeout),
+        throttle,
     )
     .await?;
     Ok(TransparentTlsOutcome::Tunneled)
@@ -185,7 +229,10 @@ struct TransparentMitmContext {
 }
 
 #[cfg(feature = "mitm")]
-async fn transparent_mitm(stream: TcpStream, ctx: TransparentMitmContext) -> Result<()> {
+async fn transparent_mitm<I>(stream: I, ctx: TransparentMitmContext) -> Result<()>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
     let TransparentMitmContext {
         connect_target,
         upstream_proxy,
@@ -218,6 +265,8 @@ async fn transparent_mitm(stream: TcpStream, ctx: TransparentMitmContext) -> Res
     let listener_for_service = listener_name.clone();
     let sni_for_service = sni.clone();
     let connect_target_for_service = connect_target.clone();
+    let access_cfg = runtime.state().config.access_log.clone();
+    let access_name = Arc::<str>::from(listener_name.as_str());
 
     let service = service_fn(move |req: Request<Body>| {
         let sender = sender.clone();
@@ -239,6 +288,15 @@ async fn transparent_mitm(stream: TcpStream, ctx: TransparentMitmContext) -> Res
             Ok::<_, anyhow::Error>(response)
         }
     });
+    let service = AccessLogService::new(
+        service,
+        remote_addr,
+        AccessLogContext {
+            kind: "transparent",
+            name: access_name,
+        },
+        &access_cfg,
+    );
 
     let header_read_timeout =
         Duration::from_millis(runtime.state().config.runtime.http_header_read_timeout_ms);

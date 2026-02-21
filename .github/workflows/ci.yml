@@ -1,0 +1,188 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  typos:
+    name: typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crate-ci/typos@master
+
+  doc:
+    name: doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  machete:
+    name: unused-dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: bnjbvr/cargo-machete@v0.6.0
+
+  e2e_tests:
+    name: e2e tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y netcat-openbsd lsof curl
+      - name: run e2e script
+        run: ./scripts/e2e-config-samples.sh
+
+
+
+  build_test:
+    name: build/test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build (no warnings)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo build --workspace --all-targets --locked
+
+      - name: test
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo test --workspace --locked
+
+      - name: clippy (default features)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  clippy_feature_matrix:
+    name: clippy (feature matrix, ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy (all valid feature combinations)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          set -euo pipefail
+
+          run_clippy() {
+            local pkg="$1"
+            local features="${2:-}"
+
+            if [[ -z "${features}" ]]; then
+              echo "::group::cargo clippy -p ${pkg} --no-default-features"
+              cargo clippy -p "${pkg}" --locked --all-targets --no-default-features -- -D warnings
+              echo "::endgroup::"
+              return 0
+            fi
+
+            echo "::group::cargo clippy -p ${pkg} --no-default-features --features ${features}"
+            cargo clippy -p "${pkg}" --locked --all-targets --no-default-features --features "${features}" -- -D warnings
+            echo "::endgroup::"
+          }
+
+          # qpx-core: tls backend (none|tls-rustls|tls-native) x digest-auth (on|off)
+          for tls in "" "tls-rustls" "tls-native"; do
+            for digest in "" "digest-auth"; do
+              feats=""
+              if [[ -n "${tls}" ]]; then feats="${tls}"; fi
+              if [[ -n "${digest}" ]]; then
+                if [[ -n "${feats}" ]]; then feats="${feats},${digest}"; else feats="${digest}"; fi
+              fi
+              run_clippy qpx-core "${feats}"
+            done
+          done
+
+          # qpxd:
+          # - tls backend: none | tls-native | tls-rustls
+          # - http3/mitm only valid with tls-rustls
+          # - digest-auth / sha2-hash independent
+          qpxd_tls_sets=(
+            ""
+            "tls-native"
+            "tls-rustls"
+            "tls-rustls,http3"
+            "tls-rustls,mitm"
+            "tls-rustls,http3,mitm"
+          )
+          qpxd_opt_sets=(
+            ""
+            "digest-auth"
+            "sha2-hash"
+            "digest-auth,sha2-hash"
+          )
+          for tls in "${qpxd_tls_sets[@]}"; do
+            for opt in "${qpxd_opt_sets[@]}"; do
+              feats="${tls}"
+              if [[ -n "${opt}" ]]; then
+                if [[ -n "${feats}" ]]; then feats="${feats},${opt}"; else feats="${opt}"; fi
+              fi
+              run_clippy qpxd "${feats}"
+            done
+          done
+
+          # qpxr / qpxc: tls backend (none|tls-rustls|tls-native)
+          for pkg in qpxr qpxc; do
+            for tls in "" "tls-rustls" "tls-native"; do
+              run_clippy "${pkg}" "${tls}"
+            done
+          done
+
+          # qpxf: wasm (on|off)
+          run_clippy qpxf ""
+          run_clippy qpxf "wasm"
+
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

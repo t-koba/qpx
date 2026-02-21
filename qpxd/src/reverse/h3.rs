@@ -1,16 +1,13 @@
 use anyhow::Result;
 use qpx_core::config::{ReverseConfig, ReverseHttp3Config};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::info;
 
 pub(crate) async fn run_http3(
     reverse: ReverseConfig,
     http3: ReverseHttp3Config,
-    router: Arc<super::router::ReverseRouter>,
-    runtime: crate::runtime::Runtime,
-    security_policy: Arc<super::security::ReverseTlsHostPolicy>,
+    reverse_rt: super::ReloadableReverse,
 ) -> Result<()> {
     let listen_addr: SocketAddr = http3
         .listen
@@ -21,7 +18,7 @@ pub(crate) async fn run_http3(
     let passthrough_targets = http3.passthrough_upstreams.clone();
     if !passthrough_targets.is_empty() {
         let resolve_timeout =
-            Duration::from_millis(runtime.state().config.runtime.upstream_http_timeout_ms);
+            Duration::from_millis(reverse_rt.runtime.state().config.runtime.upstream_http_timeout_ms);
         info!(
             reverse = %reverse.name,
             listen = %listen_addr,
@@ -42,6 +39,5 @@ pub(crate) async fn run_http3(
         listen = %listen_addr,
         "reverse HTTP/3 terminate listener starting"
     );
-    super::h3_terminate::run_http3_terminate(reverse, listen_addr, router, runtime, security_policy)
-        .await
+    super::h3_terminate::run_http3_terminate(reverse, listen_addr, reverse_rt).await
 }

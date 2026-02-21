@@ -5,15 +5,20 @@ use super::http1::{
 use crate::http::address::{format_authority_host_port, parse_authority_host_port};
 use crate::http::l7::prepare_request_with_headers_in_place;
 use crate::http::websocket::spawn_upgrade_tunnel;
-use crate::tls::client::{connect_tls_h2_h1, connect_tls_http1};
+use crate::tls::client::{connect_tls_h2_h1, connect_tls_http1, BoxTlsStream};
 use anyhow::{anyhow, Result};
+use hyper::client::connect::{Connected, Connection};
 use hyper::client::HttpConnector;
+use hyper::service::Service;
 use hyper::{Body, Request, Response};
+use hyper::Uri;
 #[cfg(feature = "http3")]
 use std::net::SocketAddr;
 use std::sync::OnceLock;
+use std::{future::Future, pin::Pin, task::Context, task::Poll};
 #[cfg(feature = "http3")]
 use tokio::net::lookup_host;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 use tracing::warn;
@@ -28,8 +33,11 @@ pub(crate) async fn proxy_http(
     match url.scheme() {
         "http" => proxy_http_plain(req, &url, proxy_name).await,
         "https" => proxy_http_tls(req, &url, proxy_name).await,
+        "fastcgi" | "fastcgi+unix" => {
+            crate::fastcgi_client::proxy_fastcgi(req, &url, proxy_name).await
+        }
         _ => Err(anyhow!(
-            "reverse currently supports only http/https upstream for HTTP requests"
+            "reverse currently supports only http/https/fastcgi upstream for HTTP requests"
         )),
     }
 }
@@ -155,28 +163,101 @@ async fn proxy_http_tls(
     proxy_name: &str,
 ) -> Result<Response<Body>> {
     let mut new_req = req;
-    rewrite_direct_upstream_request(&mut new_req, upstream_url, 443)?;
+    rewrite_client_upstream_request(&mut new_req, upstream_url, 443)?;
     prepare_request_with_headers_in_place(&mut new_req, proxy_name, None, false);
     *new_req.extensions_mut() = http::Extensions::new();
+    *new_req.version_mut() = http::Version::HTTP_11;
+    Ok(shared_reverse_https_client().request(new_req).await?)
+}
 
-    let upstream_timeout = Duration::from_secs(30);
-    let (mut sender, negotiated_h2) = open_tls_h2_aware_sender(
-        upstream_url,
-        443,
-        "reverse https upstream conn",
-        upstream_timeout,
-    )
-    .await?;
-    *new_req.version_mut() = if negotiated_h2 {
-        http::Version::HTTP_2
-    } else {
-        http::Version::HTTP_11
-    };
-    if negotiated_h2 {
-        let authority = parse_upstream_addr(upstream_url.as_str(), 443)?;
-        set_absolute_uri(&mut new_req, "https", authority.as_str())?;
+#[derive(Clone)]
+struct ReverseTlsConnector {
+    timeout_dur: Duration,
+}
+
+impl Default for ReverseTlsConnector {
+    fn default() -> Self {
+        Self {
+            timeout_dur: Duration::from_secs(30),
+        }
     }
-    Ok(sender.send_request(new_req).await?)
+}
+
+struct ReverseTlsStream {
+    io: BoxTlsStream,
+    negotiated_h2: bool,
+}
+
+impl AsyncRead for ReverseTlsStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ReverseTlsStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
+impl Connection for ReverseTlsStream {
+    fn connected(&self) -> Connected {
+        let mut connected = Connected::new();
+        if self.negotiated_h2 {
+            connected = connected.negotiated_h2();
+        }
+        connected
+    }
+}
+
+impl Service<Uri> for ReverseTlsConnector {
+    type Response = ReverseTlsStream;
+    type Error = anyhow::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, uri: Uri) -> Self::Future {
+        let timeout_dur = self.timeout_dur;
+        Box::pin(async move {
+            let host = uri
+                .host()
+                .ok_or_else(|| anyhow!("reverse https upstream missing host"))?;
+            let port = uri.port_u16().unwrap_or(443);
+            let addr = format_authority_host_port(host, port);
+            let tcp = timeout(timeout_dur, TcpStream::connect(addr)).await??;
+            let (tls_stream, negotiated_h2) =
+                timeout(timeout_dur, connect_tls_h2_h1(host, tcp)).await??;
+            Ok(ReverseTlsStream {
+                io: tls_stream,
+                negotiated_h2,
+            })
+        })
+    }
 }
 
 fn shared_reverse_http_client() -> &'static hyper::Client<HttpConnector, Body> {
@@ -187,6 +268,15 @@ fn shared_reverse_http_client() -> &'static hyper::Client<HttpConnector, Body> {
         hyper::Client::builder()
             .pool_max_idle_per_host(256)
             .build(connector)
+    })
+}
+
+fn shared_reverse_https_client() -> &'static hyper::Client<ReverseTlsConnector, Body> {
+    static CLIENT: OnceLock<hyper::Client<ReverseTlsConnector, Body>> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        hyper::Client::builder()
+            .pool_max_idle_per_host(256)
+            .build(ReverseTlsConnector::default())
     })
 }
 
@@ -236,31 +326,4 @@ async fn open_tls_http1_sender(
         }
     });
     Ok(sender)
-}
-
-async fn open_tls_h2_aware_sender(
-    upstream_url: &Url,
-    default_port: u16,
-    context: &str,
-    timeout_dur: Duration,
-) -> Result<(hyper::client::conn::SendRequest<Body>, bool)> {
-    let host = upstream_url
-        .host_str()
-        .ok_or_else(|| anyhow!("missing upstream host"))?;
-    let addr = parse_upstream_addr(upstream_url.as_str(), default_port)?;
-    let tcp = timeout(timeout_dur, TcpStream::connect(addr)).await??;
-    let (tls_stream, negotiated_h2) = timeout(timeout_dur, connect_tls_h2_h1(host, tcp)).await??;
-
-    let mut builder = hyper::client::conn::Builder::new();
-    if negotiated_h2 {
-        builder.http2_only(true);
-    }
-    let (sender, conn) = timeout(timeout_dur, builder.handshake(tls_stream)).await??;
-    let context = context.to_string();
-    tokio::spawn(async move {
-        if let Err(err) = conn.await {
-            warn!(error = ?err, context = %context, "reverse upstream TLS conn closed");
-        }
-    });
-    Ok((sender, negotiated_h2))
 }

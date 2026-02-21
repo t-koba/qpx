@@ -2,25 +2,33 @@ use super::health::{now_millis, probe_upstream, HealthCheckRuntime, UpstreamEndp
 use anyhow::Result;
 use metrics::gauge;
 use qpx_core::config::ReverseRouteBackendConfig;
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+use qpx_core::config::ReverseTlsPassthroughRouteConfig;
 use qpx_core::config::{
     CachePolicyConfig, PathRewriteConfig, RetryConfig, ReverseConfig, ReverseRouteConfig,
-    ReverseTlsPassthroughRouteConfig,
 };
 use qpx_core::matchers::CompiledMatch;
 use qpx_core::prefilter::{MatchPrefilterContext, MatchPrefilterIndex, StringInterner};
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
 use rand::Rng;
 use regex::Regex;
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio::time::{timeout, Duration};
+
+use crate::fastcgi_client::FastCgiUpstream;
 
 pub(crate) struct ReverseRouter {
     http_routes: Vec<HttpRoute>,
     http_prefilter: MatchPrefilterIndex,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_routes: Vec<TlsPassthroughRoute>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_prefilter: MatchPrefilterIndex,
+    health_shutdown: watch::Sender<()>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -28,6 +36,8 @@ enum LoadBalanceStrategy {
     RoundRobin,
     Random,
     LeastConnections,
+    ConsistentHash,
+    Sticky,
 }
 
 #[derive(Debug, Clone)]
@@ -71,12 +81,14 @@ pub(super) struct HttpRoute {
     pub(super) local_response: Option<qpx_core::config::LocalResponseConfig>,
     pub(super) cache_policy: Option<CachePolicyConfig>,
     pub(super) headers: Option<Arc<CompiledHeaderControl>>,
+    pub(super) fastcgi: Option<FastCgiUpstream>,
     backends: Vec<WeightedBackend>,
     mirrors: Vec<MirrorTarget>,
     pub(super) path_rewrite: Option<CompiledPathRewrite>,
     pub(super) policy: RoutePolicy,
 }
 
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(super) struct TlsPassthroughRoute {
     matcher: CompiledMatch,
     upstreams: Vec<Arc<UpstreamEndpoint>>,
@@ -101,23 +113,31 @@ impl ReverseRouter {
             http_prefilter.insert_hint(idx, hint, &mut interner);
         }
 
-        let mut tls_routes = Vec::with_capacity(config.tls_passthrough_routes.len());
-        let mut tls_hints = Vec::with_capacity(config.tls_passthrough_routes.len());
-        for route in config.tls_passthrough_routes {
-            let (route, hint) = TlsPassthroughRoute::from_config(route, &mut interner)?;
-            tls_routes.push(route);
-            tls_hints.push(hint);
-        }
-        let mut tls_prefilter = MatchPrefilterIndex::new(tls_routes.len());
-        for (idx, hint) in tls_hints.iter().enumerate() {
-            tls_prefilter.insert_hint(idx, hint, &mut interner);
-        }
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+        let (tls_routes, tls_prefilter) = {
+            let mut tls_routes = Vec::with_capacity(config.tls_passthrough_routes.len());
+            let mut tls_hints = Vec::with_capacity(config.tls_passthrough_routes.len());
+            for route in config.tls_passthrough_routes {
+                let (route, hint) = TlsPassthroughRoute::from_config(route, &mut interner)?;
+                tls_routes.push(route);
+                tls_hints.push(hint);
+            }
+            let mut tls_prefilter = MatchPrefilterIndex::new(tls_routes.len());
+            for (idx, hint) in tls_hints.iter().enumerate() {
+                tls_prefilter.insert_hint(idx, hint, &mut interner);
+            }
+            (tls_routes, tls_prefilter)
+        };
 
+        let (health_shutdown, _) = watch::channel(());
         Ok(Self {
             http_routes,
             http_prefilter,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_routes,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_prefilter,
+            health_shutdown,
         })
     }
 
@@ -131,7 +151,8 @@ impl ReverseRouter {
                          upstreams: Vec<Arc<UpstreamEndpoint>>,
                          policy: HealthCheckRuntime,
                          reverse_name: Arc<str>,
-                         unhealthy_metric: Arc<str>| {
+                         unhealthy_metric: Arc<str>,
+                         mut shutdown: watch::Receiver<()>| {
             tokio::spawn(async move {
                 let route_idx_label = route_idx.to_string();
                 let unhealthy_gauge = gauge!(
@@ -142,10 +163,22 @@ impl ReverseRouter {
                 );
                 let mut ticker = tokio::time::interval(policy.interval);
                 loop {
-                    ticker.tick().await;
+                    tokio::select! {
+                        _ = ticker.tick() => {}
+                        res = shutdown.changed() => {
+                            if res.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
                     for upstream in &upstreams {
                         let healthy = matches!(
-                            timeout(policy.timeout, probe_upstream(&upstream.target)).await,
+                            timeout(
+                                policy.timeout,
+                                probe_upstream(&upstream.target, policy.http.as_deref())
+                            )
+                            .await,
                             Ok(Ok(_))
                         );
                         if healthy {
@@ -175,20 +208,25 @@ impl ReverseRouter {
                 route.policy.health.clone(),
                 reverse_name.clone(),
                 unhealthy_metric.clone(),
+                self.health_shutdown.subscribe(),
             );
         }
-        for (idx, route) in self.tls_routes.iter().enumerate() {
-            if route.upstreams.is_empty() {
-                continue;
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+        {
+            for (idx, route) in self.tls_routes.iter().enumerate() {
+                if route.upstreams.is_empty() {
+                    continue;
+                }
+                spawn_one(
+                    "tls_passthrough",
+                    idx,
+                    route.upstreams.clone(),
+                    route.policy.health.clone(),
+                    reverse_name.clone(),
+                    unhealthy_metric.clone(),
+                    self.health_shutdown.subscribe(),
+                );
             }
-            spawn_one(
-                "tls_passthrough",
-                idx,
-                route.upstreams.clone(),
-                route.policy.health.clone(),
-                reverse_name.clone(),
-                unhealthy_metric.clone(),
-            );
         }
     }
 
@@ -211,12 +249,37 @@ impl ReverseRouter {
         })
     }
 
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub(super) fn select_tls_passthrough_upstream(
         &self,
         remote_ip: IpAddr,
         dst_port: u16,
         sni: Option<&str>,
     ) -> Option<String> {
+        // Deterministic hashing for stable selection across connections.
+        const FNV_OFFSET: u64 = 14695981039346656037;
+        const FNV_PRIME: u64 = 1099511628211;
+        fn feed(mut hash: u64, bytes: &[u8]) -> u64 {
+            for b in bytes {
+                hash ^= *b as u64;
+                hash = hash.wrapping_mul(FNV_PRIME);
+            }
+            hash
+        }
+        let mut tls_seed = FNV_OFFSET;
+        match remote_ip {
+            IpAddr::V4(ip) => {
+                tls_seed = feed(tls_seed, &ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                tls_seed = feed(tls_seed, &ip.octets());
+            }
+        }
+        tls_seed = feed(tls_seed, &dst_port.to_be_bytes());
+        if let Some(sni) = sni {
+            tls_seed = feed(tls_seed, sni.as_bytes());
+        }
+
         let ctx = RuleMatchContext {
             src_ip: Some(remote_ip),
             dst_port: Some(dst_port),
@@ -238,7 +301,9 @@ impl ReverseRouter {
         self.tls_prefilter.find_first(&prefilter_ctx, |idx| {
             let route = &self.tls_routes[idx];
             if route.matches(&ctx) {
-                return route.select_upstream().map(|u| u.target.clone());
+                return route
+                    .select_upstream(tls_seed, tls_seed)
+                    .map(|u| u.target.clone());
             }
             None
         })
@@ -249,19 +314,41 @@ fn select_upstream_inner(
     upstreams: &[Arc<UpstreamEndpoint>],
     policy: &RoutePolicy,
     rr_counter: &AtomicUsize,
+    request_seed: u64,
+    sticky_seed: u64,
 ) -> Option<Arc<UpstreamEndpoint>> {
     if upstreams.is_empty() {
         return None;
     }
     let now_ms = now_millis();
-    let mut candidates: Vec<Arc<UpstreamEndpoint>> = upstreams
+    let candidates: Vec<Arc<UpstreamEndpoint>> = upstreams
         .iter()
         .filter(|u| u.is_healthy(now_ms))
         .cloned()
         .collect();
     if candidates.is_empty() {
-        candidates = upstreams.to_vec();
+        return None;
     }
+
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+    let rendezvous = |seed: u64| -> Arc<UpstreamEndpoint> {
+        let mut best = None;
+        for u in &candidates {
+            let mut hash = seed ^ FNV_OFFSET;
+            for b in u.target.as_bytes() {
+                hash ^= *b as u64;
+                hash = hash.wrapping_mul(FNV_PRIME);
+            }
+            match best {
+                Some((_, score)) if score >= hash => {}
+                _ => {
+                    best = Some((u.clone(), hash));
+                }
+            }
+        }
+        best.map(|(u, _)| u).unwrap_or_else(|| candidates[0].clone())
+    };
 
     let selected = match policy.lb {
         LoadBalanceStrategy::RoundRobin => {
@@ -276,6 +363,8 @@ fn select_upstream_inner(
             .into_iter()
             .min_by_key(|u| u.inflight.load(Ordering::Relaxed))
             .unwrap_or_else(|| upstreams[0].clone()),
+        LoadBalanceStrategy::ConsistentHash => rendezvous(request_seed),
+        LoadBalanceStrategy::Sticky => rendezvous(sticky_seed),
     };
     Some(selected)
 }
@@ -286,7 +375,7 @@ impl HttpRoute {
         interner: &mut StringInterner,
     ) -> Result<(Self, qpx_core::prefilter::MatchPrefilterHint)> {
         let (matcher, hint) = CompiledMatch::compile(&config.r#match, interner)?;
-        let policy = RoutePolicy::from_http_config(&config);
+        let policy = RoutePolicy::from_http_config(&config)?;
         let cache_policy = config.cache.clone();
         let path_rewrite = config
             .path_rewrite
@@ -299,7 +388,22 @@ impl HttpRoute {
             .map(CompiledHeaderControl::compile)
             .transpose()?
             .map(Arc::new);
-        let backends = compile_backends(config.upstreams, config.backends);
+
+        let fastcgi = config
+            .fastcgi
+            .as_ref()
+            .map(FastCgiUpstream::from_config)
+            .transpose()?;
+        if fastcgi.is_some() && (!config.upstreams.is_empty() || !config.backends.is_empty()) {
+            return Err(anyhow::anyhow!(
+                "reverse route fastcgi cannot be combined with upstreams/backends"
+            ));
+        }
+        let backends = if fastcgi.is_some() {
+            Vec::new()
+        } else {
+            compile_backends(config.upstreams, config.backends)
+        };
         let mirrors = compile_mirrors(config.mirrors);
         Ok((
             Self {
@@ -307,6 +411,7 @@ impl HttpRoute {
                 local_response: config.local_response.clone(),
                 cache_policy,
                 headers,
+                fastcgi,
                 backends,
                 mirrors,
                 path_rewrite,
@@ -320,21 +425,46 @@ impl HttpRoute {
         self.matcher.matches(ctx)
     }
 
-    pub(super) fn select_upstream(&self, seed: u64) -> Option<Arc<UpstreamEndpoint>> {
-        let idx = select_weighted_backend_idx(&self.backends, seed)?;
+    pub(super) fn select_upstream(
+        &self,
+        request_seed: u64,
+        sticky_seed: u64,
+    ) -> Option<Arc<UpstreamEndpoint>> {
+        let idx = select_weighted_backend_idx(&self.backends, request_seed)?;
         let backend = &self.backends[idx];
-        select_upstream_inner(&backend.upstreams, &self.policy, &backend.rr_counter)
+        select_upstream_inner(
+            &backend.upstreams,
+            &self.policy,
+            &backend.rr_counter,
+            request_seed,
+            sticky_seed,
+        )
     }
 
-    pub(super) fn select_mirror_upstreams(&self, seed: u64) -> Vec<Arc<UpstreamEndpoint>> {
+    pub(super) fn select_mirror_upstreams(
+        &self,
+        request_seed: u64,
+        sticky_seed: u64,
+    ) -> Vec<Arc<UpstreamEndpoint>> {
         let mut out = Vec::new();
         for (idx, mirror) in self.mirrors.iter().enumerate() {
             // 0..9999 range; percent has 0.01% resolution.
-            let sample = (seed.wrapping_add((idx as u64 + 1) * 0x9e3779b97f4a7c15) % 10_000) as u32;
+            let sample = (request_seed
+                .wrapping_add((idx as u64 + 1) * 0x9e3779b97f4a7c15)
+                % 10_000) as u32;
             if sample >= mirror.percent.saturating_mul(100) {
                 continue;
             }
-            if let Some(upstream) = select_upstream_inner(&mirror.upstreams, &self.policy, &mirror.rr_counter) {
+            let mirror_seed = request_seed.wrapping_add((idx as u64 + 1) * 0x517cc1b727220a95);
+            if let Some(upstream) =
+                select_upstream_inner(
+                    &mirror.upstreams,
+                    &self.policy,
+                    &mirror.rr_counter,
+                    mirror_seed,
+                    sticky_seed,
+                )
+            {
                 out.push(upstream);
             }
         }
@@ -426,10 +556,7 @@ fn select_weighted_backend_idx(backends: &[WeightedBackend], seed: u64) -> Optio
     if backends.is_empty() {
         return None;
     }
-    let total = backends
-        .iter()
-        .map(|b| b.weight as u64)
-        .sum::<u64>();
+    let total = backends.iter().map(|b| b.weight as u64).sum::<u64>();
     if total == 0 {
         return None;
     }
@@ -444,13 +571,14 @@ fn select_weighted_backend_idx(backends: &[WeightedBackend], seed: u64) -> Optio
     Some(backends.len().saturating_sub(1))
 }
 
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 impl TlsPassthroughRoute {
     fn from_config(
         config: ReverseTlsPassthroughRouteConfig,
         interner: &mut StringInterner,
     ) -> Result<(Self, qpx_core::prefilter::MatchPrefilterHint)> {
         let (matcher, hint) = CompiledMatch::compile_tls_passthrough(&config.r#match, interner)?;
-        let policy = RoutePolicy::from_tls_config(&config);
+        let policy = RoutePolicy::from_tls_config(&config)?;
         let upstreams = config
             .upstreams
             .into_iter()
@@ -472,13 +600,23 @@ impl TlsPassthroughRoute {
         self.matcher.matches(ctx)
     }
 
-    pub(super) fn select_upstream(&self) -> Option<Arc<UpstreamEndpoint>> {
-        select_upstream_inner(&self.upstreams, &self.policy, &self.rr_counter)
+    pub(super) fn select_upstream(
+        &self,
+        request_seed: u64,
+        sticky_seed: u64,
+    ) -> Option<Arc<UpstreamEndpoint>> {
+        select_upstream_inner(
+            &self.upstreams,
+            &self.policy,
+            &self.rr_counter,
+            request_seed,
+            sticky_seed,
+        )
     }
 }
 
 impl RoutePolicy {
-    fn from_http_config(config: &ReverseRouteConfig) -> Self {
+    fn from_http_config(config: &ReverseRouteConfig) -> Result<Self> {
         Self::from_parts(
             config.lb.as_str(),
             config.retry.as_ref(),
@@ -487,7 +625,8 @@ impl RoutePolicy {
         )
     }
 
-    fn from_tls_config(config: &ReverseTlsPassthroughRouteConfig) -> Self {
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+    fn from_tls_config(config: &ReverseTlsPassthroughRouteConfig) -> Result<Self> {
         Self::from_parts(
             config.lb.as_str(),
             config.retry.as_ref(),
@@ -501,24 +640,30 @@ impl RoutePolicy {
         retry: Option<&RetryConfig>,
         timeout_ms: Option<u64>,
         health_check: Option<&qpx_core::config::HealthCheckConfig>,
-    ) -> Self {
-        let lb_lower = lb.to_ascii_lowercase();
+    ) -> Result<Self> {
+        let lb_lower = lb.trim().to_ascii_lowercase();
         let lb = match lb_lower.as_str() {
+            "round_robin" | "roundrobin" => LoadBalanceStrategy::RoundRobin,
             "random" => LoadBalanceStrategy::Random,
             "least_conn" | "least_connections" => LoadBalanceStrategy::LeastConnections,
-            _ => LoadBalanceStrategy::RoundRobin,
+            "consistent_hash" | "consistent-hash" => LoadBalanceStrategy::ConsistentHash,
+            "sticky" | "sticky_ip" | "sticky-src-ip" => LoadBalanceStrategy::Sticky,
+            other => return Err(anyhow::anyhow!("unknown lb strategy: {}", other)),
         };
         let retry = retry.cloned().unwrap_or(RetryConfig {
             attempts: 1,
             backoff_ms: 0,
         });
-        Self {
+        if retry.attempts == 0 {
+            return Err(anyhow::anyhow!("retry.attempts must be >= 1"));
+        }
+        Ok(Self {
             lb,
-            retry_attempts: retry.attempts.max(1),
+            retry_attempts: retry.attempts,
             retry_backoff: Duration::from_millis(retry.backoff_ms),
             timeout: Duration::from_millis(timeout_ms.unwrap_or(30_000)),
             health: HealthCheckRuntime::from_config(health_check),
-        }
+        })
     }
 }
 
@@ -576,11 +721,13 @@ mod tests {
                 timeout_ms: 700,
                 fail_threshold: 5,
                 cooldown_ms: 9_000,
+                http: None,
             }),
             cache: None,
             path_rewrite: None,
+            fastcgi: None,
         };
-        let policy = RoutePolicy::from_http_config(&cfg);
+        let policy = RoutePolicy::from_http_config(&cfg).expect("policy");
         assert!(matches!(policy.lb, LoadBalanceStrategy::LeastConnections));
         assert_eq!(policy.retry_attempts, 4);
         assert_eq!(policy.retry_backoff, Duration::from_millis(250));
@@ -606,8 +753,9 @@ mod tests {
             health_check: None,
             cache: None,
             path_rewrite: None,
+            fastcgi: None,
         };
-        let policy = RoutePolicy::from_http_config(&cfg);
+        let policy = RoutePolicy::from_http_config(&cfg).expect("policy");
         assert!(matches!(policy.lb, LoadBalanceStrategy::RoundRobin));
         assert_eq!(policy.retry_attempts, 1);
         assert_eq!(policy.retry_backoff, Duration::from_millis(0));
@@ -619,12 +767,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     fn tls_passthrough_prefilter_does_not_require_host_or_path() {
         let cfg = ReverseConfig {
             name: "rev".to_string(),
             listen: "127.0.0.1:0".to_string(),
             tls: Some(qpx_core::config::ReverseTlsConfig {
                 certificates: Vec::new(),
+                client_ca: None,
             }),
             http3: None,
             xdp: None,

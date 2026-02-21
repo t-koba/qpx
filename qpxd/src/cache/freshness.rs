@@ -57,17 +57,20 @@ pub(super) fn freshness_lifetime_secs(
         return Some(ttl);
     }
     if let Some(expires_raw) = headers.get(EXPIRES).and_then(|v| v.to_str().ok()) {
-        if let Some(expires_secs) = parse_http_date_secs(expires_raw) {
-            let date_secs = headers
-                .get(DATE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_http_date_secs)
-                .unwrap_or(now_ms / 1000);
-            if expires_secs > date_secs {
-                return Some(expires_secs - date_secs);
-            }
+        let Some(expires_secs) = parse_http_date_secs(expires_raw) else {
+            // RFC 9111: invalid Expires must be treated as already expired (stale), not a
+            // reason to fall back to heuristic/default freshness.
             return Some(0);
+        };
+        let date_secs = headers
+            .get(DATE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_http_date_secs)
+            .unwrap_or(now_ms / 1000);
+        if expires_secs > date_secs {
+            return Some(expires_secs - date_secs);
         }
+        return Some(0);
     }
     policy.default_ttl_secs
 }

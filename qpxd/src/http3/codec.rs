@@ -66,6 +66,7 @@ pub fn h3_request_to_hyper(
 
 pub async fn hyper_response_to_h3(
     response: Response<Body>,
+    request_method: &http::Method,
     max_body_bytes: usize,
 ) -> Result<(Http1Response<()>, Bytes, Option<http1::HeaderMap>)> {
     let (parts, body) = response.into_parts();
@@ -81,14 +82,14 @@ pub async fn hyper_response_to_h3(
         headers.remove(http::header::CONTENT_LENGTH);
         headers.remove(http::header::TRANSFER_ENCODING);
         headers.remove(http::header::TRAILER);
-    } else if !bytes.is_empty() {
+    } else {
         let body_len = bytes.len() as u64;
         let content_length = headers
             .get(http::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<u64>().ok());
         if let Some(expected) = content_length {
-            if expected != body_len {
+            if *request_method != http::Method::HEAD && expected != body_len {
                 headers.remove(http::header::CONTENT_LENGTH);
             }
         } else if headers.contains_key(http::header::CONTENT_LENGTH) {

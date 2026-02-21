@@ -62,10 +62,12 @@ pub async fn read_h3_request_body(
 
 pub async fn send_h3_response(
     response: Response<Body>,
+    request_method: &http::Method,
     req_stream: &mut H3ServerRequestStream,
     max_h3_response_body_bytes: usize,
 ) -> Result<()> {
-    let (head, body, trailers) = hyper_response_to_h3(response, max_h3_response_body_bytes).await?;
+    let (head, body, trailers) =
+        hyper_response_to_h3(response, request_method, max_h3_response_body_bytes).await?;
     req_stream.send_response(head).await?;
     if !body.is_empty() {
         req_stream.send_data(body).await?;
@@ -94,5 +96,5 @@ pub async fn send_h3_static_response(
             .body(Body::from(body.to_vec()))?,
         false,
     );
-    send_h3_response(response, req_stream, max_h3_response_body_bytes).await
+    send_h3_response(response, request_method, req_stream, max_h3_response_body_bytes).await
 }

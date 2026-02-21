@@ -1,0 +1,26 @@
+# qpxd reverse proxy configuration — FastCGI upstream
+#
+# Routes requests to a qpxf FastCGI backend.
+# Start qpxf first:  qpxf --config qpxf.yaml
+# Then start qpxd:   qpxd run --config qpx.yaml
+
+version: 1
+
+reverse:
+  - name: fastcgi-gateway
+    listen: "127.0.0.1:8080"
+    routes:
+      # Route /cgi-bin/ and /wasm/ to the qpxf FastCGI backend.
+      - match:
+          path: ["/cgi-bin/*", "/wasm/*"]
+        fastcgi:
+          address: "127.0.0.1:9000"
+          timeout_ms: 30000
+
+      # All other requests get a 404.
+      - match:
+          path: ["/*"]
+        local_response:
+          status: 404
+          content_type: "text/plain"
+          body: "not found"

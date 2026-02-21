@@ -28,6 +28,7 @@ pub async fn connect_via_upstream(
         TcpStream::connect(endpoint.authority.as_str()),
     )
     .await??;
+    let _ = tcp.set_nodelay(true);
     let peer_addr = tcp.peer_addr().ok();
     let mut stream: TunnelIo = match endpoint.scheme {
         UpstreamProxyScheme::Http => Box::new(tcp),
@@ -40,10 +41,16 @@ pub async fn connect_via_upstream(
         }
     };
     let authority = format_authority_host_port(host, port);
-    let connect_req = format!(
-        "CONNECT {} HTTP/1.1\r\nHost: {}\r\n\r\n",
-        authority, authority
-    );
+    let mut connect_req = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n", authority, authority);
+    if let Some(value) = endpoint.proxy_authorization.as_ref() {
+        let value = value
+            .to_str()
+            .map_err(|_| anyhow!("invalid upstream proxy auth header"))?;
+        connect_req.push_str("Proxy-Authorization: ");
+        connect_req.push_str(value);
+        connect_req.push_str("\r\n");
+    }
+    connect_req.push_str("\r\n");
     timeout(CONNECT_IO_TIMEOUT, stream.write_all(connect_req.as_bytes())).await??;
 
     let mut raw = Vec::with_capacity(256);
@@ -104,6 +111,7 @@ pub async fn connect_tunnel_target(
         return timeout(timeout_dur, connect_via_upstream(upstream, host, port)).await?;
     }
     let stream = timeout(timeout_dur, TcpStream::connect((host, port))).await??;
+    let _ = stream.set_nodelay(true);
     let peer_addr = stream.peer_addr().ok();
     Ok(ConnectedTunnel {
         io: Box::new(stream),

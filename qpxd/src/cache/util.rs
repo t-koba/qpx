@@ -1,15 +1,11 @@
 use super::types::{CacheBackend, ResponseDirectives, VariantIndex, MAX_VARIANTS_PER_PRIMARY};
 use super::vary::index_storage_key;
 use anyhow::Result;
-use http::header::{CONTENT_LENGTH, ETAG, LAST_MODIFIED, TRANSFER_ENCODING};
+use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use qpx_core::config::CachePolicyConfig;
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-pub(super) fn has_validators(headers: &[(String, String)]) -> bool {
-    header_value(headers, ETAG.as_str()).is_some()
-        || header_value(headers, LAST_MODIFIED.as_str()).is_some()
-}
+use tracing::warn;
 
 pub(super) fn header_value(headers: &[(String, String)], key: &str) -> Option<String> {
     headers
@@ -88,7 +84,21 @@ pub(super) async fn load_variant_index(
     let Some(raw) = raw else {
         return Ok(VariantIndex::default());
     };
-    let parsed = serde_json::from_slice::<VariantIndex>(&raw).unwrap_or_default();
+    let parsed = match serde_json::from_slice::<VariantIndex>(&raw) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            warn!(
+                error = ?err,
+                namespace = %namespace,
+                primary = %primary,
+                "cache variant index parse failed; treating as empty"
+            );
+            let _ = backend
+                .delete(namespace, index_storage_key(primary).as_str())
+                .await;
+            VariantIndex::default()
+        }
+    };
     Ok(parsed)
 }
 

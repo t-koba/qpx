@@ -1,6 +1,6 @@
 version: 1
 state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
-logging:
+system_log:
   level: info
   format: json
 listeners:

@@ -251,6 +251,7 @@ fn connect_with_mode(
     let tcp =
         TcpStream::connect(endpoint).with_context(|| format!("failed to connect: {}", endpoint))?;
     let mut stream = if tls.enabled {
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let server_name = tls
             .server_name
             .clone()
@@ -323,6 +324,11 @@ fn connect_with_mode(
 
         #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
         {
+            // Keep CLI options consistent (they may be provided) and avoid dead_code lints in
+            // no-TLS builds.
+            let _ = tls.ca_cert.as_deref();
+            let _ = tls.server_name.as_deref();
+            let _ = tls.insecure_skip_verify;
             return Err(anyhow::anyhow!(
                 "TLS requested but qpxc was built without TLS support"
             ));
@@ -350,6 +356,7 @@ fn load_required_env(name: &str) -> Result<String> {
     Ok(value)
 }
 
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 fn parse_host_from_endpoint(endpoint: &str) -> Option<String> {
     let authority: http::uri::Authority = endpoint.parse().ok()?;
     Some(authority.host().to_string())

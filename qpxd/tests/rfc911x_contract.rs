@@ -1,3 +1,5 @@
+#![cfg(all(feature = "http3", feature = "tls-rustls"))]
+
 use anyhow::{anyhow, Context, Result};
 use bytes::{Buf, Bytes};
 use hyper::body::to_bytes;
@@ -38,9 +40,10 @@ async fn rfc911x_contract_inner() -> Result<()> {
         let cfg_path = dir.join("qpxd-forward.yaml");
         let (forward_port, _qpxd) =
             spawn_qpxd_on_random_port(&cfg_path, dir.join("qpxd-forward.log"), |port| {
+                let state_dir_yaml = yaml_quote_path(&state_dir);
                 format!(
                     r#"version: 1
-state_dir: "{}"
+state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
@@ -51,7 +54,7 @@ listeners:
     default_action: {{ type: direct }}
     rules: []
 "#,
-                    state_dir.display()
+                    state_dir_yaml = state_dir_yaml
                 )
             })?;
 
@@ -402,9 +405,10 @@ async fn cache_contract() -> Result<()> {
     let cfg_path = dir.join("qpxd-cache-forward.yaml");
     let (forward_port, _qpxd) =
         spawn_qpxd_on_random_port(&cfg_path, dir.join("qpxd-cache-forward.log"), |port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
             format!(
                 r#"version: 1
-state_dir: "{}"
+state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
@@ -428,7 +432,7 @@ listeners:
       max_object_bytes: 1048576
     rules: []
 "#,
-                state_dir.display()
+                state_dir_yaml = state_dir_yaml
             )
         })?;
 
@@ -473,9 +477,10 @@ async fn http2_h2c_contract() -> Result<()> {
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
         let cfg = dir.join("rev-h2c.yaml");
         let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("rev-h2c.log"), |port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
             format!(
                 r#"version: 1
-state_dir: "{}"
+state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
@@ -491,7 +496,7 @@ reverse:
           status: 200
           body: "H2OK"
 "#,
-                state_dir.display()
+                state_dir_yaml = state_dir_yaml
             )
         })?;
 
@@ -544,9 +549,10 @@ reverse:
 
         let cfg = dir.join("trans-h2c.yaml");
         let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("trans-h2c.log"), |port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
             format!(
                 r#"version: 1
-state_dir: "{}"
+state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
@@ -565,7 +571,7 @@ listeners:
           request_set:
             X-Transparent-Test: enabled
 "#,
-                state_dir.display()
+                state_dir_yaml = state_dir_yaml
             )
         })?;
 
@@ -631,9 +637,12 @@ async fn http2_tls_alpn_contract() -> Result<()> {
     let (cert_path, key_path) = write_self_signed_cert(&dir, "reverse.local")?;
     let cfg = dir.join("rev-h2-tls.yaml");
     let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("rev-h2-tls.log"), |port| {
+        let state_dir_yaml = yaml_quote_path(&state_dir);
+        let cert_yaml = yaml_quote_path(&cert_path);
+        let key_yaml = yaml_quote_path(&key_path);
         format!(
             r#"version: 1
-state_dir: "{}"
+state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
@@ -643,8 +652,8 @@ reverse:
     tls:
       certificates:
         - sni: "reverse.local"
-          cert: "{}"
-          key: "{}"
+          cert: {cert_yaml}
+          key: {key_yaml}
     routes:
       - match:
           host: ["reverse.local"]
@@ -654,9 +663,9 @@ reverse:
           status: 200
           body: "H2TLS"
 "#,
-            state_dir.display(),
-            cert_path.display(),
-            key_path.display()
+            state_dir_yaml = state_dir_yaml,
+            cert_yaml = cert_yaml,
+            key_yaml = key_yaml
         )
     })?;
 
@@ -710,9 +719,12 @@ async fn http3_reverse_terminate_smoke() -> Result<()> {
     let (cert_path, key_path) = write_self_signed_cert(&dir, "reverse.local")?;
     let cfg = dir.join("rev-h3.yaml");
     let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("rev-h3.log"), |port| {
+        let state_dir_yaml = yaml_quote_path(&state_dir);
+        let cert_yaml = yaml_quote_path(&cert_path);
+        let key_yaml = yaml_quote_path(&key_path);
         format!(
             r#"version: 1
-state_dir: "{}"
+state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
@@ -722,8 +734,8 @@ reverse:
     tls:
       certificates:
         - sni: "reverse.local"
-          cert: "{}"
-          key: "{}"
+          cert: {cert_yaml}
+          key: {key_yaml}
     http3:
       enabled: true
     routes:
@@ -735,9 +747,9 @@ reverse:
           status: 200
           body: "H3OK"
 "#,
-            state_dir.display(),
-            cert_path.display(),
-            key_path.display(),
+            state_dir_yaml = state_dir_yaml,
+            cert_yaml = cert_yaml,
+            key_yaml = key_yaml,
         )
     })?;
 
@@ -858,7 +870,23 @@ fn temp_dir(prefix: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
+fn yaml_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
 
+fn yaml_quote_path(path: &Path) -> String {
+    yaml_single_quote(path.to_string_lossy().as_ref())
+}
 
 const PORT_PICK_ATTEMPTS: usize = 256;
 
@@ -909,8 +937,6 @@ fn spawn_qpxd_on_random_port(
     }))
 }
 
-
-
 fn build_quinn_client_endpoint() -> Result<quinn::Endpoint> {
     let addr: SocketAddr = SocketAddr::from(([127, 0, 0, 1], 0));
     quinn::Endpoint::client(addr)
@@ -946,10 +972,9 @@ async fn assert_status(addr: SocketAddr, req: String, expected: u16) -> Result<(
     Ok(())
 }
 
-async fn send_http1_and_read_head(
-    addr: SocketAddr,
-    request_bytes: &[u8],
-) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
+type Http1Head = (u16, Vec<(String, String)>, Vec<u8>);
+
+async fn send_http1_and_read_head(addr: SocketAddr, request_bytes: &[u8]) -> Result<Http1Head> {
     let mut stream = timeout(Duration::from_secs(3), TcpStream::connect(addr))
         .await
         .context("connect timed out")??;
@@ -958,7 +983,7 @@ async fn send_http1_and_read_head(
     read_http1_head(&mut stream).await
 }
 
-async fn read_http1_head(stream: &mut TcpStream) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
+async fn read_http1_head(stream: &mut TcpStream) -> Result<Http1Head> {
     let buf = read_until(stream, b"\r\n\r\n", 128 * 1024, Duration::from_secs(3)).await?;
     parse_http1_head(&buf)
 }
@@ -991,7 +1016,7 @@ async fn read_until(
     Ok(out)
 }
 
-fn parse_http1_head(buf: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
+fn parse_http1_head(buf: &[u8]) -> Result<Http1Head> {
     let s = String::from_utf8_lossy(buf);
     let Some(idx) = s.find("\r\n\r\n") else {
         return Err(anyhow!("missing header delimiter"));
@@ -1053,7 +1078,9 @@ fn assert_header_present_contains(headers: &[(String, String)], name: &str, need
 async fn serve_http1_capture_once(
     response_bytes: Vec<u8>,
 ) -> Result<(SocketAddr, oneshot::Receiver<Vec<u8>>)> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.context("bind tcp")?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .context("bind tcp")?;
     let addr = listener.local_addr()?;
     let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
@@ -1076,7 +1103,9 @@ async fn run_http1_capture_once(
 }
 
 async fn serve_tcp_echo_once() -> Result<(SocketAddr, oneshot::Receiver<Vec<u8>>)> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.context("bind tcp")?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .context("bind tcp")?;
     let addr = listener.local_addr()?;
     let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
@@ -1105,7 +1134,9 @@ async fn serve_websocket_stub_once() -> Result<(
     oneshot::Receiver<Vec<u8>>,
     oneshot::Receiver<Vec<u8>>,
 )> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.context("bind tcp")?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .context("bind tcp")?;
     let addr = listener.local_addr()?;
     let (captured_tx, captured_rx) = oneshot::channel();
     let (upgraded_tx, upgraded_rx) = oneshot::channel();
@@ -1276,7 +1307,7 @@ async fn connect_tls_with_alpn_h2(
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let mut roots = rustls::RootCertStore::empty();
     let certs = qpx_core::tls::load_cert_chain(ca_cert_pem)?;
-    let (added, _) = roots.add_parsable_certificates(certs.into_iter());
+    let (added, _) = roots.add_parsable_certificates(certs);
     if added == 0 {
         return Err(anyhow!("no certs loaded from {}", ca_cert_pem.display()));
     }
@@ -1297,7 +1328,7 @@ fn build_h3_test_client_config(ca_cert_pem: &Path) -> Result<quinn::ClientConfig
     use quinn::crypto::rustls::QuicClientConfig;
     let mut roots = quinn::rustls::RootCertStore::empty();
     let certs = qpx_core::tls::load_cert_chain(ca_cert_pem)?;
-    let (added, _) = roots.add_parsable_certificates(certs.into_iter());
+    let (added, _) = roots.add_parsable_certificates(certs);
     if added == 0 {
         return Err(anyhow!("no certs loaded from {}", ca_cert_pem.display()));
     }

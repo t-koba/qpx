@@ -30,6 +30,7 @@ pub(crate) async fn run_http3_listener(
     let quic_config = build_h3_server_config_from_tls(tls_config, 2048, 256)?;
     let endpoint = quinn::Endpoint::server(quic_config, listen_addr)?;
 
+    let semaphore = runtime.state().connection_semaphore.clone();
     let handler = ForwardH3Handler {
         runtime,
         listener_name: Arc::<str>::from(listener.name.as_str()),
@@ -41,7 +42,14 @@ pub(crate) async fn run_http3_listener(
         connect_udp = handler.connect_udp.enabled,
         "forward HTTP/3 listener starting"
     );
-    crate::http3::listener::serve_endpoint(endpoint, listen_addr.port(), handler, "forward").await
+    crate::http3::listener::serve_endpoint(
+        endpoint,
+        listen_addr.port(),
+        handler,
+        "forward",
+        semaphore,
+    )
+    .await
 }
 
 fn build_forward_tls_config(
@@ -139,9 +147,11 @@ impl H3RequestHandler for ForwardH3Handler {
         req_stream: crate::http3::server::H3ServerRequestStream,
         conn: H3ConnInfo,
         kind: H3ConnectKind,
+        datagrams: Option<crate::http3::datagram::H3StreamDatagrams>,
     ) -> Result<()> {
         match kind {
             H3ConnectKind::Connect => {
+                let _ = datagrams;
                 super::h3_connect::handle_h3_connect(req_head, req_stream, self.clone(), conn).await
             }
             H3ConnectKind::ConnectUdp => {
@@ -150,6 +160,7 @@ impl H3RequestHandler for ForwardH3Handler {
                     req_stream,
                     self.clone(),
                     conn,
+                    datagrams,
                 )
                 .await
             }

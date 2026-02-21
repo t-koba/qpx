@@ -10,11 +10,12 @@ use std::sync::Arc;
 pub struct EvaluatedAction {
     pub action: ActionConfig,
     pub headers: Option<Arc<CompiledHeaderControl>>,
+    pub matched_rule: Option<String>,
 }
 
 pub enum ListenerPolicyDecision {
     Proceed(Box<EvaluatedAction>),
-    Early(Response<Body>),
+    Early(Response<Body>, Option<String>),
 }
 
 pub fn evaluate_listener_policy(
@@ -28,6 +29,7 @@ pub fn evaluate_listener_policy(
 ) -> Result<ListenerPolicyDecision> {
     let outcome = engine.evaluate_ref(ctx);
     let auth_required = outcome.auth.map(|a| !a.require.is_empty()).unwrap_or(false);
+    let matched_rule = outcome.matched_rule.map(|s| s.to_string());
 
     if auth_required || matches!(outcome.action.kind, ActionKind::Block) {
         return Ok(ListenerPolicyDecision::Early(
@@ -38,6 +40,7 @@ pub fn evaluate_listener_policy(
                 deny_builder(deny_message),
                 false,
             ),
+            matched_rule,
         ));
     }
 
@@ -56,11 +59,13 @@ pub fn evaluate_listener_policy(
                 outcome.headers.map(|h| h.as_ref()),
                 false,
             ),
+            matched_rule,
         ));
     }
 
     Ok(ListenerPolicyDecision::Proceed(Box::new(EvaluatedAction {
         action: outcome.action.clone(),
         headers: outcome.headers.cloned(),
+        matched_rule,
     })))
 }

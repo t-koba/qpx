@@ -79,3 +79,4 @@ clap.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+qpxf = { path = "../qpxf", default-features = false }

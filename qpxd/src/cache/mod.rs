@@ -16,8 +16,12 @@ mod util;
 
 pub use backends::build_backends;
 pub use invalidate::maybe_invalidate;
-pub use lookup_ops::{attach_revalidation_headers, build_only_if_cached_miss_response, lookup};
+pub use lookup_ops::{
+    attach_revalidation_headers, build_only_if_cached_miss_response, lookup,
+    maybe_build_stale_if_error_response,
+};
 pub use store::{maybe_store, revalidate_not_modified};
+pub(crate) use types::try_begin_background_revalidation;
 pub use types::{CacheBackend, CacheRequestKey, LookupOutcome, RevalidationState};
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
 ## Implemented compliance points
 
 1. RFC 9110 section 7.6.1 (`Connection` and hop-by-hop fields)
-   - `qpxd` now strips hop-by-hop fields for normal forwarding paths.
+   - `qpxd` strips hop-by-hop fields for normal forwarding paths.
    - It also parses `Connection` tokens and removes referenced header fields.
    - For WebSocket upgrade only, it preserves the required `Connection: upgrade` + `Upgrade` pair.
    - Code: `qpxd/src/http/semantics.rs`, applied in:
@@ -14,7 +14,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - `qpxd/src/reverse/transport.rs`
 
 2. RFC 9110 section 7.6.3 (`Via`)
-   - Forwarded HTTP messages now carry version-aware `Via` entries (`1.1`, `2`, `3`) on request and response paths.
+   - Forwarded HTTP messages carry version-aware `Via` entries (`1.1`, `2`, `3`) on request and response paths.
    - Code: `qpxd/src/http/semantics.rs` (`append_via_for_version`) and call sites in forward/reverse/transparent handlers.
 
 3. RFC 9112 section 3.2.2 (request target forms in proxying)
@@ -97,7 +97,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - `qpxd/src/runtime.rs`
 
 9. PROXY protocol metadata integration (operational extension)
-   - `qpxd` can consume PROXY v1/v2 metadata on forward/reverse/transparent listeners when `xdp.enabled: true` and `xdp.metadata_mode: proxy-v1|proxy-v2`.
+   - `qpxd` can consume PROXY v2 metadata on forward/reverse/transparent listeners when `xdp.enabled: true` and `xdp.metadata_mode: proxy-v2`.
    - This enables XDP/L4 frontends to pass source/destination context into L7 rules.
    - Code:
      - `qpxd/src/xdp/mod.rs`
@@ -120,7 +120,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
    - Cache lookup/store pipeline is implemented for:
      - forward listeners (`listeners[].cache`)
      - reverse routes (`reverse[].routes[].cache`)
-   - Cache-control handling currently includes:
+   - Cache-control handling includes:
      - request directives: `no-store`, `no-cache`, `max-age`, `max-stale`, `min-fresh`, `only-if-cached`
      - response directives: `no-store`, `private`, `public`, `no-cache`, `must-revalidate`, `proxy-revalidate`, `s-maxage`, `max-age`
      - freshness lifetime from `s-maxage` / `max-age` / `Expires` / policy default
@@ -153,7 +153,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - call sites in forward/reverse/transparent handlers
 
 13. TLS terminate anti-fronting policy (operational security hardening)
-   - Reverse TLS and reverse HTTP/3 terminate now enforce SNI and Host/authority consistency by default.
+   - Reverse TLS and reverse HTTP/3 terminate enforce SNI and Host/authority consistency by default.
    - Config:
      - `reverse[].enforce_sni_host_match` (default `true`)
      - `reverse[].sni_host_exceptions` (explicit opt-out allowlist globs)
@@ -243,5 +243,14 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
 
 ## Scope limits
 
-1. RFC 9111 extension directives outside core semantics are not implemented by default.
-   - Examples: `stale-while-revalidate`, `stale-if-error` (RFC 5861 extensions).
+1. RFC 5861 extensions are implemented.
+    - Supported: `stale-while-revalidate`, `stale-if-error` (best-effort background revalidation).
+
+2. RFC 9111 cache behavior is intentionally a safe subset (not a full-featured shared-cache).
+    - Storage is limited to `GET` responses (no `POST`/`PUT`/etc storage).
+    - Storable status codes are an explicit allowlist (see `qpxd/src/cache/store.rs`).
+    - Requests with unsupported conditionals (`Range`, `If-Range`, `If-Match`, `If-Unmodified-Since`) bypass cache lookup/store.
+
+3. TRACE is implemented with a security-first local response shape rather than full request loop-back.
+    - Default `TRACE` reflection is **headers-only** and uses an allowlist to reduce secret header leakage risk.
+    - `runtime.trace_reflect_all_headers: true` can enable full header reflection (DANGEROUS).

@@ -110,6 +110,14 @@ pub(super) fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDi
                 if let Some(value) = value.as_deref() {
                     out.s_maxage = parse_u64_directive(value);
                 }
+            } else if directive == "stale-while-revalidate" {
+                if let Some(value) = value.as_deref() {
+                    out.stale_while_revalidate = parse_u64_directive(value);
+                }
+            } else if directive == "stale-if-error" {
+                if let Some(value) = value.as_deref() {
+                    out.stale_if_error = parse_u64_directive(value);
+                }
             }
         }
     }

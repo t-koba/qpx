@@ -5,8 +5,18 @@ use qpx_core::config::CachePolicyConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub fn clone_request_head_for_revalidation(req: &Request<Body>) -> Request<Body> {
+    let mut out = Request::new(Body::empty());
+    *out.method_mut() = req.method().clone();
+    *out.uri_mut() = req.uri().clone();
+    *out.version_mut() = req.version();
+    *out.headers_mut() = req.headers().clone();
+    out
+}
+
 pub enum CacheLookupDecision {
     Hit(Response<Body>),
+    StaleWhileRevalidate(Response<Body>, RevalidationState),
     OnlyIfCachedMiss(Response<Body>),
     Miss,
 }
@@ -39,6 +49,10 @@ pub async fn lookup_with_revalidation(
 
     match cache::lookup(request_headers_snapshot, key, policy, backends).await? {
         LookupOutcome::Hit(hit) => Ok((CacheLookupDecision::Hit(hit), None)),
+        LookupOutcome::StaleWhileRevalidate(hit, state) => {
+            cache::attach_revalidation_headers(req.headers_mut(), &state);
+            Ok((CacheLookupDecision::StaleWhileRevalidate(hit, state), None))
+        }
         LookupOutcome::Revalidate(state) => {
             cache::attach_revalidation_headers(req.headers_mut(), &state);
             Ok((CacheLookupDecision::Miss, Some(state)))

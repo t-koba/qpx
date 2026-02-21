@@ -23,7 +23,8 @@ Most samples assume the default `qpxd` build (`tls-rustls`).
 - Transparent-mode samples also default to `default_action: block` and require explicit allow rules (typically `src_ip` allowlists) because a transparent listener can be abused as a generic proxy if exposed.
 - When changing a sample from loopback-only (`127.0.0.1`) to `0.0.0.0`, review the allow rules first and add an explicit client allowlist or authentication.
 - Metrics endpoint defaults to loopback-only; to bind `metrics.listen` to non-loopback, configure `metrics.allow` (CIDR allowlist).
-- `forward-local-dev-direct.yaml` is the exception: it intentionally uses `default_action: direct` for local development and is bound to loopback.
+- `forward-local-dev-direct.yaml` and `forward-http3-connect-udp-local-dev-direct.yaml` are exceptions: they intentionally use `default_action: direct` for local development and are bound to loopback.
+- `99-test-fixtures/` samples are for automated tests only and may use `default_action: direct` on loopback listeners.
 
 ## Use-case index
 
@@ -35,12 +36,12 @@ Most samples assume the default `qpxd` build (`tls-rustls`).
 
 ### 02-secure-egress (`config/usecases/02-secure-egress`)
 - `forward-upstream-chain.yaml`: forward proxy chained to upstream proxy.
-- `forward-local-auth-basic-digest.yaml`: local user auth (Basic/Digest) baseline.
+- `forward-local-auth-basic-digest.yaml`: multi-user local auth (Basic/Digest) baseline using `.example.invalid` sample usernames and `1234567890` sample passwords.
 - `forward-ldap-group-policy.yaml`: LDAP auth with group-based policy.
 - `forward-tls-inspection-selective.yaml`: selective TLS inspection/tunnel/block.
 - `forward-adblock-privacy.yaml`: ad/tracker blocking profile.
 - `forward-firewall-style-policy.yaml`: firewall-style multi-condition rules.
-- `forward-authenticated-upstream.yaml`: **new common pattern** for authenticated users + upstream egress chaining.
+- `forward-authenticated-upstream.yaml`: authenticated users + upstream egress chaining.
 
 ### 03-service-publishing (`config/usecases/03-service-publishing`)
 - `reverse-load-balance-retry.yaml`: load balancing, retry, health-check policy.
@@ -76,7 +77,7 @@ Most samples assume the default `qpxd` build (`tls-rustls`).
 
 ### 08-performance-and-xdp (`config/usecases/08-performance-and-xdp`)
 - `runtime-multicore-scaling.yaml`: runtime thread/backlog/reuse-port tuning.
-- `xdp-forward-reverse-proxy-metadata.yaml`: PROXY v1/v2 metadata integration (trusted peers).
+- `xdp-forward-reverse-proxy-metadata.yaml`: PROXY v2 metadata integration (trusted peers).
 
 ### 09-composition (`config/usecases/09-composition`)
 - `multi-mode-office-gateway.yaml`: forward + transparent + reverse in one config.
@@ -89,6 +90,10 @@ Most samples assume the default `qpxd` build (`tls-rustls`).
 ### 11-transparent-intercept (`config/usecases/11-transparent-intercept`)
 - `transparent-macos-windows-fallback.yaml`: transparent mode fallback path for non-Linux hosts.
 - `transparent-mitm-selective.yaml`: transparent mode with selective TLS MITM.
+
+### 12-fastcgi-gateway (`config/usecases/12-fastcgi-gateway`)
+- `qpx.yaml`: `qpxd` reverse proxy sample routing to a FastCGI backend.
+- `qpxf.yaml`: `qpxf` executor sample (CGI/WASM handlers).
 
 ### 99-test-fixtures (`config/usecases/99-test-fixtures`)
 - `e2e-forward.yaml`
@@ -105,13 +110,17 @@ Use these only through `include` composition samples.
 
 ## Validation
 
+`qpxd` and `qpxf` use different config schemas.
+
 ```bash
 cargo build -p qpxd
-find config/usecases -name '*.yaml' -print | sort | while read -r f; do
+find config/usecases -name '*.yaml' ! -name 'qpxf.yaml' -print | sort | while read -r f; do
   echo "==> $f"
   target/debug/qpxd check --config "$f"
 done
 ```
+
+`qpxf` has no `check` subcommand. Validate `config/usecases/12-fastcgi-gateway/qpxf.yaml` by starting `qpxf` with real handler paths (`backend.root`, `backend.module`) on your host.
 
 ## End-to-end checks
 

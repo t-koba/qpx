@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use byteorder_slice::LittleEndian;
+use bytes::Bytes;
 use cidr::IpCidr;
 use clap::Parser;
 use etherparse::PacketBuilder;
@@ -24,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Semaphore};
 use tokio::time::timeout;
 use tracing::{info, warn};
 
@@ -45,12 +46,18 @@ type TlsAcceptor = tokio_rustls::TlsAcceptor;
 type TlsAcceptor = tokio_native_tls::TlsAcceptor;
 
 #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
-type TlsAcceptor = ();
+#[derive(Clone)]
+struct NoTlsAcceptor;
+
+#[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+type TlsAcceptor = NoTlsAcceptor;
 
 const DEFAULT_HISTORY_SECS: u64 = 3600;
 const DEFAULT_MAX_CONTROL_LINE_BYTES: usize = 64 * 1024;
 const DEFAULT_MAX_EVENT_LINE_BYTES: usize = 512 * 1024;
 const DEFAULT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+const MAX_SEQUENCE_KEYS: usize = 100_000;
+const SEQUENCE_GC_INTERVAL_NANOS: u64 = 5_000_000_000;
 
 #[derive(Parser)]
 #[command(name = "qpxr", about = "qpx capture reader")]
@@ -99,6 +106,13 @@ struct Cli {
     #[arg(long)]
     unsafe_allow_insecure: bool,
 
+    #[arg(long, default_value_t = 1024)]
+    max_connections: usize,
+    #[arg(long, default_value_t = 10_000)]
+    handshake_timeout_ms: u64,
+    #[arg(long, default_value_t = 300_000)]
+    event_read_timeout_ms: u64,
+
     #[arg(short = 'd', long)]
     save_dir: Option<PathBuf>,
     #[arg(short = 'r', long, default_value_t = 100 * 1024 * 1024)]
@@ -118,7 +132,7 @@ struct Cli {
 #[derive(Clone)]
 struct ExporterHub {
     state: Arc<Mutex<HubState>>,
-    live_tx: broadcast::Sender<Vec<u8>>,
+    live_tx: broadcast::Sender<Bytes>,
     history_limit_bytes: usize,
     history_limit_age: Duration,
     pcap_preface: Arc<Vec<u8>>,
@@ -126,7 +140,8 @@ struct ExporterHub {
 }
 
 struct HubState {
-    sequences: HashMap<SequenceKey, u32>,
+    sequences: HashMap<SequenceKey, SequenceState>,
+    sequences_last_gc_unix_nanos: u64,
     history: VecDeque<HistoryItem>,
     history_bytes: usize,
     file_sink: Option<RotatingFileSink>,
@@ -134,7 +149,7 @@ struct HubState {
 
 struct HistoryItem {
     ts_unix_nanos: u64,
-    bytes: Vec<u8>,
+    bytes: Bytes,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -142,6 +157,12 @@ struct SequenceKey {
     session_id: String,
     plane: CapturePlane,
     direction: CaptureDirection,
+}
+
+#[derive(Clone, Copy)]
+struct SequenceState {
+    next: u32,
+    last_seen_unix_nanos: u64,
 }
 
 struct RotatingFileSink {
@@ -226,6 +247,9 @@ async fn main() -> Result<()> {
     let tls_accept_timeout = Duration::from_millis(cli.tls_accept_timeout_ms.max(1));
     let max_control = cli.max_control_line_bytes.max(1);
     let max_event = cli.max_event_line_bytes.max(1);
+    let handshake_timeout = Duration::from_millis(cli.handshake_timeout_ms.max(1));
+    let event_read_timeout = Duration::from_millis(cli.event_read_timeout_ms.max(1));
+    let connections = Arc::new(Semaphore::new(cli.max_connections.max(1)));
 
     let event_task = tokio::spawn(run_event_accept_loop(
         event_listener,
@@ -237,6 +261,9 @@ async fn main() -> Result<()> {
             tls_accept_timeout,
             max_control_line_bytes: max_control,
             max_event_line_bytes: max_event,
+            handshake_timeout,
+            event_read_timeout,
+            connections: connections.clone(),
         },
     ));
     let stream_task = tokio::spawn(run_stream_accept_loop(
@@ -247,6 +274,8 @@ async fn main() -> Result<()> {
         tls,
         tls_accept_timeout,
         max_control,
+        handshake_timeout,
+        connections,
     ));
     let _ = tokio::try_join!(event_task, stream_task)?;
     Ok(())
@@ -438,10 +467,11 @@ impl ExporterHub {
             )?),
             None => None,
         };
-        let (live_tx, _) = broadcast::channel(4096);
+        let (live_tx, _) = broadcast::channel::<Bytes>(4096);
         Ok(Self {
             state: Arc::new(Mutex::new(HubState {
                 sequences: HashMap::new(),
+                sequences_last_gc_unix_nanos: 0,
                 history: VecDeque::new(),
                 history_bytes: 0,
                 file_sink,
@@ -477,6 +507,7 @@ impl ExporterHub {
                 Some(packet) => packet,
                 None => return,
             };
+            self.gc_sequences_locked(&mut state, event.timestamp_unix_nanos);
             let interface_id = interface_id(event.plane.clone());
             let encoded =
                 match encode_enhanced_packet(interface_id, event.timestamp_unix_nanos, packet) {
@@ -486,9 +517,10 @@ impl ExporterHub {
                         return;
                     }
                 };
+            let encoded = Bytes::from(encoded);
 
             if let Some(file_sink) = state.file_sink.as_mut() {
-                if let Err(err) = file_sink.write_block(&encoded) {
+                if let Err(err) = file_sink.write_block(encoded.as_ref()) {
                     warn!(error = ?err, "failed to persist pcapng block");
                 }
             }
@@ -498,7 +530,7 @@ impl ExporterHub {
         let _ = self.live_tx.send(encoded);
     }
 
-    fn push_history_locked(&self, state: &mut HubState, ts_unix_nanos: u64, bytes: Vec<u8>) {
+    fn push_history_locked(&self, state: &mut HubState, ts_unix_nanos: u64, bytes: Bytes) {
         if self.history_limit_bytes == 0 {
             return;
         }
@@ -529,9 +561,34 @@ impl ExporterHub {
         }
     }
 
-    async fn history_snapshot(&self) -> Vec<Vec<u8>> {
+    async fn history_snapshot(&self) -> Vec<Bytes> {
         let state = self.state.lock().await;
         state.history.iter().map(|h| h.bytes.clone()).collect()
+    }
+
+    fn gc_sequences_locked(&self, state: &mut HubState, now_unix_nanos: u64) {
+        if state.sequences.len() <= MAX_SEQUENCE_KEYS
+            && now_unix_nanos.saturating_sub(state.sequences_last_gc_unix_nanos)
+                < SEQUENCE_GC_INTERVAL_NANOS
+        {
+            return;
+        }
+        state.sequences_last_gc_unix_nanos = now_unix_nanos;
+
+        let cutoff =
+            now_unix_nanos.saturating_sub(self.history_limit_age.as_nanos().min(u64::MAX as u128) as u64);
+        state
+            .sequences
+            .retain(|_, v| v.last_seen_unix_nanos >= cutoff);
+
+        if state.sequences.len() > MAX_SEQUENCE_KEYS {
+            warn!(
+                sequences = state.sequences.len(),
+                max = MAX_SEQUENCE_KEYS,
+                "sequence state too large; clearing"
+            );
+            state.sequences.clear();
+        }
     }
 }
 
@@ -628,6 +685,9 @@ struct EventAcceptConfig {
     tls_accept_timeout: Duration,
     max_control_line_bytes: usize,
     max_event_line_bytes: usize,
+    handshake_timeout: Duration,
+    event_read_timeout: Duration,
+    connections: Arc<Semaphore>,
 }
 
 async fn run_event_accept_loop(
@@ -636,6 +696,7 @@ async fn run_event_accept_loop(
     cfg: EventAcceptConfig,
 ) -> Result<()> {
     loop {
+        let permit = cfg.connections.clone().acquire_owned().await?;
         let (stream, peer) = listener.accept().await?;
         if !ip_allowed(peer.ip(), &cfg.allow) {
             continue;
@@ -643,10 +704,16 @@ async fn run_event_accept_loop(
         let hub = hub.clone();
         let token = cfg.token.clone();
         let tls = cfg.tls.clone();
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_accept_timeout = cfg.tls_accept_timeout;
+        #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+        let _tls_accept_timeout = cfg.tls_accept_timeout;
         let max_control_line_bytes = cfg.max_control_line_bytes;
         let max_event_line_bytes = cfg.max_event_line_bytes;
+        let handshake_timeout = cfg.handshake_timeout;
+        let event_read_timeout = cfg.event_read_timeout;
         tokio::spawn(async move {
+            let _permit = permit;
             let res = match tls {
                 Some(acceptor) => {
                     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -659,6 +726,8 @@ async fn run_event_accept_loop(
                                     token,
                                     max_control_line_bytes,
                                     max_event_line_bytes,
+                                    handshake_timeout,
+                                    event_read_timeout,
                                 )
                                 .await
                             }
@@ -669,7 +738,7 @@ async fn run_event_accept_loop(
                     #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
                     {
                         let _ = acceptor;
-                        let _ = stream;
+                        drop(stream);
                         Err(anyhow!("TLS is not supported in this build"))
                     }
                 }
@@ -680,6 +749,8 @@ async fn run_event_accept_loop(
                         token,
                         max_control_line_bytes,
                         max_event_line_bytes,
+                        handshake_timeout,
+                        event_read_timeout,
                     )
                     .await
                 }
@@ -697,12 +768,17 @@ async fn handle_event_stream<S>(
     token: Option<String>,
     max_control_line_bytes: usize,
     max_event_line_bytes: usize,
+    handshake_timeout: Duration,
+    event_read_timeout: Duration,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut reader = BufReader::new(stream);
-    let Some(preface) = read_line_limited(&mut reader, max_control_line_bytes).await? else {
+    let Some(preface) =
+        read_line_limited_with_timeout(&mut reader, max_control_line_bytes, handshake_timeout)
+            .await?
+    else {
         return Ok(());
     };
     if preface != EVENT_PREFACE_LINE.as_bytes() {
@@ -710,7 +786,9 @@ where
     }
 
     let mut first_event_line: Option<Vec<u8>> = None;
-    if let Some(line) = read_line_limited(&mut reader, max_event_line_bytes).await? {
+    if let Some(line) =
+        read_line_limited_with_timeout(&mut reader, max_event_line_bytes, handshake_timeout).await?
+    {
         if let Some(provided) = parse_auth_line(&line) {
             if let Some(expected) = token.as_deref() {
                 if !constant_time_eq(provided, expected) {
@@ -730,7 +808,9 @@ where
     if let Some(line) = first_event_line {
         handle_event_line(&hub, &line).await;
     }
-    while let Some(line) = read_line_limited(&mut reader, max_event_line_bytes).await? {
+    while let Some(line) =
+        read_line_limited_with_timeout(&mut reader, max_event_line_bytes, event_read_timeout).await?
+    {
         handle_event_line(&hub, &line).await;
     }
     Ok(())
@@ -750,6 +830,7 @@ async fn handle_event_line(hub: &ExporterHub, line: &[u8]) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_stream_accept_loop(
     listener: TcpListener,
     hub: ExporterHub,
@@ -758,8 +839,13 @@ async fn run_stream_accept_loop(
     tls: Option<TlsAcceptor>,
     tls_accept_timeout: Duration,
     max_control_line_bytes: usize,
+    handshake_timeout: Duration,
+    connections: Arc<Semaphore>,
 ) -> Result<()> {
+    #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+    let _ = tls_accept_timeout;
     loop {
+        let permit = connections.clone().acquire_owned().await?;
         let (stream, peer) = listener.accept().await?;
         if !ip_allowed(peer.ip(), &allow) {
             continue;
@@ -768,14 +854,21 @@ async fn run_stream_accept_loop(
         let token = token.clone();
         let tls = tls.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             let res = match tls {
                 Some(acceptor) => {
                     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
                     {
                         match timeout(tls_accept_timeout, acceptor.accept(stream)).await {
                             Ok(Ok(tls_stream)) => {
-                                handle_stream_client(tls_stream, hub, token, max_control_line_bytes)
-                                    .await
+                                handle_stream_client(
+                                    tls_stream,
+                                    hub,
+                                    token,
+                                    max_control_line_bytes,
+                                    handshake_timeout,
+                                )
+                                .await
                             }
                             Ok(Err(err)) => Err(anyhow!("tls accept failed: {err}")),
                             Err(_) => Err(anyhow!("tls accept timed out")),
@@ -784,11 +877,20 @@ async fn run_stream_accept_loop(
                     #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
                     {
                         let _ = acceptor;
-                        let _ = stream;
+                        drop(stream);
                         Err(anyhow!("TLS is not supported in this build"))
                     }
                 }
-                None => handle_stream_client(stream, hub, token, max_control_line_bytes).await,
+                None => {
+                    handle_stream_client(
+                        stream,
+                        hub,
+                        token,
+                        max_control_line_bytes,
+                        handshake_timeout,
+                    )
+                    .await
+                }
             };
             if let Err(err) = res {
                 warn!(error = ?err, peer = %peer, "stream client disconnected");
@@ -802,6 +904,7 @@ async fn handle_stream_client<S>(
     hub: ExporterHub,
     token: Option<String>,
     max_control_line_bytes: usize,
+    handshake_timeout: Duration,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -809,14 +912,19 @@ where
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
 
-    let Some(preface) = read_line_limited(&mut reader, max_control_line_bytes).await? else {
+    let Some(preface) =
+        read_line_limited_with_timeout(&mut reader, max_control_line_bytes, handshake_timeout)
+            .await?
+    else {
         return Ok(());
     };
     if preface != STREAM_PREFACE_LINE.as_bytes() {
         return Err(anyhow!("invalid stream preface"));
     }
 
-    let mut next = read_line_limited(&mut reader, max_control_line_bytes).await?;
+    let mut next =
+        read_line_limited_with_timeout(&mut reader, max_control_line_bytes, handshake_timeout)
+            .await?;
     if let Some(line) = next.as_ref().and_then(|l| parse_auth_line(l)) {
         if let Some(expected) = token.as_deref() {
             if !constant_time_eq(line, expected) {
@@ -825,7 +933,8 @@ where
         } else {
             // AUTH provided but not required: accept.
         }
-        next = read_line_limited(&mut reader, max_control_line_bytes).await?;
+        next = read_line_limited_with_timeout(&mut reader, max_control_line_bytes, handshake_timeout)
+            .await?;
     } else if token.is_some() {
         return Err(anyhow!("missing AUTH line"));
     }
@@ -892,6 +1001,16 @@ async fn read_line_limited<R: AsyncBufRead + Unpin>(
     Ok(Some(out))
 }
 
+async fn read_line_limited_with_timeout<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+    timeout_dur: Duration,
+) -> Result<Option<Vec<u8>>> {
+    timeout(timeout_dur, read_line_limited(reader, max_bytes))
+        .await
+        .map_err(|_| anyhow!("read timed out"))?
+}
+
 fn parse_auth_line(line: &[u8]) -> Option<&str> {
     let text = std::str::from_utf8(line).ok()?;
     let text = text.trim();
@@ -934,7 +1053,7 @@ fn ip_allowed(peer: IpAddr, allow: &[IpCidr]) -> bool {
 fn build_packet_from_event(
     event: &CaptureEvent,
     payload: &[u8],
-    sequences: &mut HashMap<SequenceKey, u32>,
+    sequences: &mut HashMap<SequenceKey, SequenceState>,
 ) -> Option<Vec<u8>> {
     let (src, dst) = endpoints_for_event(event);
     let seq_key = SequenceKey {
@@ -942,9 +1061,13 @@ fn build_packet_from_event(
         plane: event.plane.clone(),
         direction: event.direction.clone(),
     };
-    let seq = sequences.entry(seq_key).or_insert(1);
-    let sequence_number = *seq;
-    *seq = seq.wrapping_add(payload.len() as u32);
+    let seq = sequences.entry(seq_key).or_insert(SequenceState {
+        next: 1,
+        last_seen_unix_nanos: event.timestamp_unix_nanos,
+    });
+    let sequence_number = seq.next;
+    seq.next = seq.next.wrapping_add(payload.len() as u32);
+    seq.last_seen_unix_nanos = event.timestamp_unix_nanos;
 
     let builder = PacketBuilder::ipv4(src.ip.octets(), dst.ip.octets(), 64).tcp(
         src.port,
@@ -1121,10 +1244,7 @@ mod tests {
 
     #[test]
     fn parse_mode_without_prefix() {
-        assert!(matches!(
-            parse_mode(b"FOLLOW").unwrap(),
-            StreamMode::Follow
-        ));
+        assert!(matches!(parse_mode(b"FOLLOW").unwrap(), StreamMode::Follow));
     }
 
     #[test]

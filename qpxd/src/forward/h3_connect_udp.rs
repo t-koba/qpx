@@ -3,8 +3,10 @@ use super::h3_connect::{
     build_h3_connect_success_response, prepare_h3_connect_request, H3ConnectPreparation,
 };
 use crate::http3::capsule::{
-    append_capsule_chunk, decode_quic_varint, encode_datagram_capsule, take_next_capsule,
+    append_capsule_chunk, decode_quic_varint, encode_datagram_capsule, encode_datagram_capsule_value,
+    take_next_capsule,
 };
+use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::quic::build_h3_client_config;
 use crate::http3::server::{send_h3_static_response, H3ServerRequestStream};
@@ -12,16 +14,28 @@ use anyhow::{anyhow, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use qpx_core::config::ConnectUdpConfig;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::{lookup_host, UdpSocket};
 use tokio::time::{timeout, Duration, Instant};
 use tracing::warn;
 use url::Url;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+
+const TARGET_HOST_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b':')
+    .add(b'%')
+    .add(b'/')
+    .add(b'?')
+    .add(b'#')
+    .add(b'[')
+    .add(b']');
 
 pub(super) async fn handle_h3_connect_udp(
     req_head: http1::Request<()>,
     mut req_stream: H3ServerRequestStream,
     handler: ForwardH3Handler,
     conn: H3ConnInfo,
+    datagrams: Option<H3StreamDatagrams>,
 ) -> Result<()> {
     let connect_udp_cfg = handler.connect_udp.clone();
     let prepared = match prepare_h3_connect_request(
@@ -41,7 +55,7 @@ pub(super) async fn handle_h3_connect_udp(
     let upstream_timeout = Duration::from_millis(state.config.runtime.upstream_http_timeout_ms);
     let proxy_name = state.config.identity.proxy_name.clone();
     let super::h3_connect::PreparedH3Connect {
-        authority,
+        authority: _authority,
         host,
         port,
         action,
@@ -72,7 +86,7 @@ pub(super) async fn handle_h3_connect_udp(
 
     if let Some(upstream) = upstream {
         let upstream_chain =
-            match open_upstream_connect_udp_stream(&upstream, &authority, upstream_timeout).await {
+            match open_upstream_connect_udp_stream(&upstream, host.as_str(), port, upstream_timeout).await {
                 Ok(chain) => chain,
                 Err(err) => {
                     let upstream_target = parse_connect_udp_upstream(&upstream)
@@ -103,13 +117,17 @@ pub(super) async fn handle_h3_connect_udp(
 
         let relay_result = relay_h3_connect_udp_stream_chained(
             req_stream,
+            datagrams,
             upstream_chain.req_stream,
+            upstream_chain.datagrams,
             connect_udp_cfg,
         )
         .await;
 
         upstream_chain.driver.abort();
         let _ = upstream_chain.driver.await;
+        upstream_chain.datagram_task.abort();
+        let _ = upstream_chain.datagram_task.await;
         return relay_result;
     }
 
@@ -212,7 +230,9 @@ pub(super) async fn handle_h3_connect_udp(
         build_h3_connect_success_response(proxy_name.as_str(), &http::Method::CONNECT, true)?;
     req_stream.send_response(response).await?;
 
-    if let Err(err) = relay_h3_connect_udp_stream(req_stream, udp, connect_udp_cfg).await {
+    if let Err(err) =
+        relay_h3_connect_udp_stream(req_stream, udp, connect_udp_cfg, datagrams).await
+    {
         warn!(error = ?err, "forward HTTP/3 CONNECT-UDP relay failed");
     }
     Ok(())
@@ -221,12 +241,15 @@ pub(super) async fn handle_h3_connect_udp(
 struct UpstreamConnectUdpStream {
     _endpoint: quinn::Endpoint,
     driver: tokio::task::JoinHandle<()>,
+    datagram_task: tokio::task::JoinHandle<()>,
+    datagrams: Option<H3StreamDatagrams>,
     req_stream: ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
 }
 
 async fn open_upstream_connect_udp_stream(
     upstream: &str,
-    authority: &str,
+    target_host: &str,
+    target_port: u16,
     timeout_dur: Duration,
 ) -> Result<UpstreamConnectUdpStream> {
     let (upstream_host, upstream_port) = parse_connect_udp_upstream(upstream)?;
@@ -255,14 +278,32 @@ async fn open_upstream_connect_udp_stream(
     builder.enable_extended_connect(true).enable_datagram(true);
     let h3_build = builder.build::<_, _, Bytes>(h3_quinn::Connection::new(connection));
     let (mut h3_conn, mut sender) = timeout(timeout_dur, h3_build).await??;
-    let driver = tokio::spawn(async move {
-        let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
-    });
+    use h3_datagram::datagram_handler::HandleDatagramsExt as _;
+    let datagram_dispatch = Arc::new(H3DatagramDispatch::new(64));
+    let reader = h3_conn.get_datagram_reader();
+    let datagram_task = {
+        let dispatch = datagram_dispatch.clone();
+        tokio::spawn(async move {
+            dispatch.run(reader).await;
+        })
+    };
 
+    let proxy_authority = if upstream_host.contains(':') && !upstream_host.starts_with('[') {
+        format!("[{}]:{}", upstream_host, upstream_port)
+    } else if upstream_port == 443 {
+        upstream_host.to_string()
+    } else {
+        format!("{}:{}", upstream_host, upstream_port)
+    };
+    let encoded_host = utf8_percent_encode(target_host, TARGET_HOST_ENCODE_SET).to_string();
+    let path = format!(
+        "/.well-known/masque/udp/{}/{}/",
+        encoded_host, target_port
+    );
     let uri = http1::Uri::builder()
         .scheme("https")
-        .authority(authority)
-        .path_and_query("/")
+        .authority(proxy_authority.as_str())
+        .path_and_query(path.as_str())
         .build()?;
     let mut request = http1::Request::builder()
         .method(http1::Method::CONNECT)
@@ -279,41 +320,66 @@ async fn open_upstream_connect_udp_stream(
     let mut req_stream = match timeout(timeout_dur, sender.send_request(request)).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(err)) => {
-            driver.abort();
-            let _ = driver.await;
+            datagram_task.abort();
+            let _ = datagram_task.await;
             return Err(err.into());
         }
         Err(_) => {
-            driver.abort();
-            let _ = driver.await;
+            datagram_task.abort();
+            let _ = datagram_task.await;
             return Err(anyhow!("upstream CONNECT-UDP request timed out"));
         }
     };
     let response = match timeout(timeout_dur, req_stream.recv_response()).await {
         Ok(Ok(response)) => response,
         Ok(Err(err)) => {
-            driver.abort();
-            let _ = driver.await;
+            datagram_task.abort();
+            let _ = datagram_task.await;
             return Err(err.into());
         }
         Err(_) => {
-            driver.abort();
-            let _ = driver.await;
+            datagram_task.abort();
+            let _ = datagram_task.await;
             return Err(anyhow!("upstream CONNECT-UDP response timed out"));
         }
     };
-    if response.status() != http1::StatusCode::OK {
-        driver.abort();
-        let _ = driver.await;
+    if !response.status().is_success() {
+        datagram_task.abort();
+        let _ = datagram_task.await;
         return Err(anyhow!(
             "upstream CONNECT-UDP failed with status {}",
             response.status()
         ));
     }
+    let capsule = response
+        .headers()
+        .get(http1::header::HeaderName::from_static("capsule-protocol"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim);
+    if capsule != Some("?1") {
+        datagram_task.abort();
+        let _ = datagram_task.await;
+        return Err(anyhow!(
+            "upstream CONNECT-UDP missing required response header: Capsule-Protocol: ?1"
+        ));
+    }
+
+    let stream_id = req_stream.id();
+    let upstream_datagrams = Some(
+        datagram_dispatch
+            .register_stream(stream_id, h3_conn.get_datagram_sender(stream_id))
+            .await,
+    );
+
+    let driver = tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
+    });
 
     Ok(UpstreamConnectUdpStream {
         _endpoint: endpoint,
         driver,
+        datagram_task,
+        datagrams: upstream_datagrams,
         req_stream,
     })
 }
@@ -344,6 +410,7 @@ async fn relay_h3_connect_udp_stream(
     req_stream: ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     udp: UdpSocket,
     connect_udp_cfg: ConnectUdpConfig,
+    mut datagrams: Option<H3StreamDatagrams>,
 ) -> Result<()> {
     let (mut req_send, mut req_recv) = req_stream.split();
     let idle_timeout = Duration::from_secs(connect_udp_cfg.idle_timeout_secs.max(1));
@@ -386,13 +453,44 @@ async fn relay_h3_connect_udp_stream(
                     None => break,
                 }
             }
+            payload = async {
+                if let Some(datagrams) = datagrams.as_mut() {
+                    datagrams.receiver.recv().await
+                } else {
+                    std::future::pending::<Option<Bytes>>().await
+                }
+            } => {
+                let Some(payload) = payload else {
+                    break;
+                };
+                let (context_id, offset) = match decode_quic_varint(payload.as_ref()) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                if context_id != 0 || offset > payload.len() {
+                    continue;
+                }
+                udp.send(&payload[offset..]).await?;
+                idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
+            }
             recv = udp.recv(&mut udp_buf) => {
                 let n = recv?;
                 if n == 0 {
                     continue;
                 }
-                let capsule = encode_datagram_capsule(&udp_buf[..n])?;
-                req_send.send_data(capsule).await?;
+                let mut sent = false;
+                if let Some(datagrams) = datagrams.as_mut() {
+                    let mut value = Vec::with_capacity(1 + n);
+                    value.push(0); // context id = 0
+                    value.extend_from_slice(&udp_buf[..n]);
+                    if datagrams.sender.send_datagram(Bytes::from(value)).is_ok() {
+                        sent = true;
+                    }
+                }
+                if !sent {
+                    let capsule = encode_datagram_capsule(&udp_buf[..n])?;
+                    req_send.send_data(capsule).await?;
+                }
                 idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
             }
         }
@@ -404,7 +502,9 @@ async fn relay_h3_connect_udp_stream(
 
 async fn relay_h3_connect_udp_stream_chained(
     downstream: ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    mut downstream_datagrams: Option<H3StreamDatagrams>,
     upstream: ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    mut upstream_datagrams: Option<H3StreamDatagrams>,
     connect_udp_cfg: ConnectUdpConfig,
 ) -> Result<()> {
     let (mut downstream_send, mut downstream_recv) = downstream.split();
@@ -440,6 +540,52 @@ async fn relay_h3_connect_udp_stream_chained(
                     }
                     None => break,
                 }
+            }
+            down_payload = async {
+                if let Some(datagrams) = downstream_datagrams.as_mut() {
+                    datagrams.receiver.recv().await
+                } else {
+                    std::future::pending::<Option<Bytes>>().await
+                }
+            } => {
+                let Some(payload) = down_payload else {
+                    break;
+                };
+                let fallback = payload.clone();
+                let mut sent = false;
+                if let Some(datagrams) = upstream_datagrams.as_mut() {
+                    if datagrams.sender.send_datagram(payload).is_ok() {
+                        sent = true;
+                    }
+                }
+                if !sent {
+                    let capsule = encode_datagram_capsule_value(fallback.as_ref())?;
+                    upstream_send.send_data(capsule).await?;
+                }
+                idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
+            }
+            up_payload = async {
+                if let Some(datagrams) = upstream_datagrams.as_mut() {
+                    datagrams.receiver.recv().await
+                } else {
+                    std::future::pending::<Option<Bytes>>().await
+                }
+            } => {
+                let Some(payload) = up_payload else {
+                    break;
+                };
+                let fallback = payload.clone();
+                let mut sent = false;
+                if let Some(datagrams) = downstream_datagrams.as_mut() {
+                    if datagrams.sender.send_datagram(payload).is_ok() {
+                        sent = true;
+                    }
+                }
+                if !sent {
+                    let capsule = encode_datagram_capsule_value(fallback.as_ref())?;
+                    downstream_send.send_data(capsule).await?;
+                }
+                idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
             }
         }
     }

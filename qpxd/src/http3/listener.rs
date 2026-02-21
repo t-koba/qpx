@@ -1,4 +1,5 @@
 use crate::http3::codec::h3_request_to_hyper;
+use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::server::{
     read_h3_request_body, send_h3_response, send_h3_static_response, H3ReadBodyError,
     H3ServerRequestStream,
@@ -9,6 +10,7 @@ use bytes::Bytes;
 use hyper::{Body, Request, Response};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tokio::time::Duration;
 use tracing::{info, warn};
 
@@ -54,6 +56,7 @@ pub(crate) trait H3RequestHandler: Clone + Send + Sync + 'static {
         req_stream: H3ServerRequestStream,
         conn: H3ConnInfo,
         kind: H3ConnectKind,
+        datagrams: Option<H3StreamDatagrams>,
     ) -> Result<()>;
 }
 
@@ -62,12 +65,15 @@ pub(crate) async fn serve_endpoint<H: H3RequestHandler>(
     dst_port: u16,
     handler: H,
     label: &str,
+    connection_semaphore: Arc<Semaphore>,
 ) -> Result<()> {
     info!(label = %label, "HTTP/3 listener starting");
     while let Some(connecting) = endpoint.accept().await {
         let handler = handler.clone();
         let label = label.to_string();
+        let permit = connection_semaphore.clone().acquire_owned().await?;
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(err) = serve_connection(connecting, dst_port, handler).await {
                 warn!(label = %label, error = ?err, "HTTP/3 connection failed");
             }
@@ -103,13 +109,46 @@ async fn serve_connection<H: H3RequestHandler>(
         .build::<_, Bytes>(h3_quinn::Connection::new(connection))
         .await?;
 
+    let datagram_dispatch = if handler.enable_datagram() {
+        use h3_datagram::datagram_handler::HandleDatagramsExt as _;
+
+        let dispatch = Arc::new(H3DatagramDispatch::new(64));
+        let reader = h3_conn.get_datagram_reader();
+        let dispatch_task = dispatch.clone();
+        tokio::spawn(async move {
+            dispatch_task.run(reader).await;
+        });
+        Some(dispatch)
+    } else {
+        None
+    };
+
     while let Some(resolver) = h3_conn.accept().await? {
         let (req_head, req_stream) = resolver.resolve_request().await?;
+        let datagrams = if req_head.method() == http1::Method::CONNECT
+            && req_head
+                .extensions()
+                .get::<::h3::ext::Protocol>()
+                .map(|p| *p == ::h3::ext::Protocol::CONNECT_UDP)
+                .unwrap_or(false)
+        {
+            match datagram_dispatch.as_ref() {
+                Some(dispatch) => {
+                    use h3_datagram::datagram_handler::HandleDatagramsExt as _;
+                    let stream_id = req_stream.id();
+                    let sender = h3_conn.get_datagram_sender(stream_id);
+                    Some(dispatch.register_stream(stream_id, sender).await)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         let handler = handler.clone();
         let conn_info = conn_info.clone();
         let limits = limits.clone();
         tokio::spawn(async move {
-            handle_stream(req_head, req_stream, conn_info, handler, limits).await;
+            handle_stream(req_head, req_stream, conn_info, handler, limits, datagrams).await;
         });
     }
     Ok(())
@@ -121,6 +160,7 @@ async fn handle_stream<H: H3RequestHandler>(
     conn_info: H3ConnInfo,
     handler: H,
     limits: H3Limits,
+    datagrams: Option<H3StreamDatagrams>,
 ) {
     let request_method = req_head
         .method()
@@ -140,7 +180,7 @@ async fn handle_stream<H: H3RequestHandler>(
             H3ConnectKind::Connect
         };
         if let Err(err) = handler
-            .handle_connect(req_head, req_stream, conn_info, kind)
+            .handle_connect(req_head, req_stream, conn_info, kind, datagrams)
             .await
         {
             warn!(error = ?err, "HTTP/3 CONNECT handling failed");
@@ -232,8 +272,13 @@ async fn handle_stream<H: H3RequestHandler>(
     }
 
     let response = handler.handle_http(req, conn_info).await;
-    if let Err(err) =
-        send_h3_response(response, &mut req_stream, limits.max_response_body_bytes).await
+    if let Err(err) = send_h3_response(
+        response,
+        &request_method,
+        &mut req_stream,
+        limits.max_response_body_bytes,
+    )
+    .await
     {
         warn!(error = ?err, "HTTP/3 response stream failed");
         let _ = send_h3_static_response(

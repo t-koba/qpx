@@ -198,6 +198,10 @@ impl Rule {
         self.name.as_ref()
     }
 
+    pub fn name_arc(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
     pub fn auth(&self) -> Option<&RuleAuthConfig> {
         self.auth.as_deref()
     }
@@ -348,6 +352,7 @@ mod tests {
                 auth: None,
                 action: Some(action(ActionKind::Block)),
                 headers: None,
+                rate_limit: None,
             },
             RuleConfig {
                 name: "second".to_string(),
@@ -358,6 +363,7 @@ mod tests {
                 auth: None,
                 action: Some(action(ActionKind::Proxy)),
                 headers: None,
+                rate_limit: None,
             },
         ];
         let engine = RuleEngine::new(rules, action(ActionKind::Direct)).expect("engine");
@@ -388,6 +394,7 @@ mod tests {
             }),
             action: Some(action(ActionKind::Proxy)),
             headers: None,
+            rate_limit: None,
         }];
         let engine = RuleEngine::new(rules, action(ActionKind::Direct)).expect("engine");
 
@@ -427,6 +434,7 @@ mod tests {
                 auth: None,
                 action: Some(action(ActionKind::Block)),
                 headers: None,
+                rate_limit: None,
             },
             RuleConfig {
                 name: "wildcard".to_string(),
@@ -437,6 +445,7 @@ mod tests {
                 auth: None,
                 action: Some(action(ActionKind::Proxy)),
                 headers: None,
+                rate_limit: None,
             },
         ];
         let engine = RuleEngine::new(rules, action(ActionKind::Direct)).expect("engine");
@@ -476,6 +485,7 @@ mod tests {
                 auth: None,
                 action: Some(action(ActionKind::Block)),
                 headers: None,
+                rate_limit: None,
             },
             RuleConfig {
                 name: "v6".to_string(),
@@ -486,6 +496,7 @@ mod tests {
                 auth: None,
                 action: Some(action(ActionKind::Proxy)),
                 headers: None,
+                rate_limit: None,
             },
         ];
         let engine = RuleEngine::new(rules, action(ActionKind::Direct)).expect("engine");
@@ -528,6 +539,7 @@ mod tests {
             auth: None,
             action: Some(action(ActionKind::Block)),
             headers: None,
+            rate_limit: None,
         }];
 
         let engine = RuleEngine::new(rules, action(ActionKind::Direct)).expect("engine");

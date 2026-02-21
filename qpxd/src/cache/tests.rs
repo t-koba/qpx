@@ -9,8 +9,10 @@ use super::vary::{matches_vary, parse_vary};
 use super::*;
 use anyhow::Result;
 use async_trait::async_trait;
+use base64::Engine;
 use http::header::{CACHE_CONTROL, DATE, VARY};
 use http::header::{CONTENT_LENGTH, ETAG, HOST, IF_NONE_MATCH, SET_COOKIE, TRANSFER_ENCODING};
+use http::header::WARNING;
 use hyper::{Body, Method, Request, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
 use std::collections::HashMap;
@@ -160,6 +162,19 @@ fn parse_response_directives_no_cache_with_field_names() {
 }
 
 #[test]
+fn parse_response_directives_rfc5861_extensions() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        CACHE_CONTROL,
+        http::HeaderValue::from_static("max-age=60, stale-while-revalidate=30, stale-if-error=120"),
+    );
+    let parsed = parse_response_directives(&headers);
+    assert_eq!(parsed.max_age, Some(60));
+    assert_eq!(parsed.stale_while_revalidate, Some(30));
+    assert_eq!(parsed.stale_if_error, Some(120));
+}
+
+#[test]
 fn parse_vary_star_is_uncacheable() {
     let mut headers = http::HeaderMap::new();
     headers.insert(VARY, http::HeaderValue::from_static("*"));
@@ -237,6 +252,85 @@ fn stale_can_be_served_with_max_stale() {
     };
     let disposition = classify_for_request(&req, &envelope, 40_000);
     assert!(matches!(disposition, CacheEntryDisposition::ServeStale));
+}
+
+#[test]
+fn stale_while_revalidate_allows_serving_stale_without_max_stale() {
+    let req = RequestDirectives::default();
+    let envelope = CachedResponseEnvelope {
+        status: 200,
+        headers: vec![(
+            "cache-control".to_string(),
+            "max-age=10, stale-while-revalidate=60".to_string(),
+        )],
+        body_b64: String::new(),
+        stored_at_ms: 0,
+        initial_age_secs: 0,
+        response_delay_secs: 0,
+        freshness_lifetime_secs: 10,
+        vary_headers: Vec::new(),
+        vary_values: Vec::new(),
+    };
+    let disposition = classify_for_request(&req, &envelope, 40_000);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::ServeStaleWhileRevalidate
+    ));
+}
+
+#[test]
+fn only_if_cached_swr_does_not_trigger_background_revalidation() {
+    let req = RequestDirectives {
+        only_if_cached: true,
+        ..RequestDirectives::default()
+    };
+    let envelope = CachedResponseEnvelope {
+        status: 200,
+        headers: vec![(
+            "cache-control".to_string(),
+            "max-age=10, stale-while-revalidate=60".to_string(),
+        )],
+        body_b64: String::new(),
+        stored_at_ms: 0,
+        initial_age_secs: 0,
+        response_delay_secs: 0,
+        freshness_lifetime_secs: 10,
+        vary_headers: Vec::new(),
+        vary_values: Vec::new(),
+    };
+    let disposition = classify_for_request(&req, &envelope, 40_000);
+    assert!(matches!(disposition, CacheEntryDisposition::ServeStale));
+}
+
+#[test]
+fn stale_if_error_fallback_builds_warning_response() {
+    let now = super::util::now_millis();
+    let body = base64::engine::general_purpose::STANDARD.encode("hello");
+    let state = RevalidationState {
+        namespace: "ns".to_string(),
+        variant_key: "obj:x:y".to_string(),
+        stale_if_error_secs: Some(60),
+        envelope: CachedResponseEnvelope {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            body_b64: body,
+            stored_at_ms: now.saturating_sub(40_000),
+            initial_age_secs: 0,
+            response_delay_secs: 0,
+            freshness_lifetime_secs: 10,
+            vary_headers: Vec::new(),
+            vary_values: Vec::new(),
+        },
+    };
+    let response = maybe_build_stale_if_error_response(&state).expect("stale response");
+    let warnings = response
+        .headers()
+        .get_all(WARNING)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect::<Vec<_>>();
+    assert!(warnings.iter().any(|v| v.contains("110")));
+    assert!(warnings.iter().any(|v| v.contains("111")));
 }
 
 #[tokio::test]

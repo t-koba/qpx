@@ -139,7 +139,7 @@ pub async fn maybe_store(
 
     let payload = serde_json::to_vec(&envelope)?;
     let namespace = cache_namespace(policy, "default");
-    let ttl = freshness_lifetime_secs.max(1);
+    let ttl = object_retention_ttl_secs(freshness_lifetime_secs, &resp_directives);
     let _ = backend
         .put(namespace.as_str(), variant_key.as_str(), &payload, ttl)
         .await;
@@ -216,14 +216,14 @@ pub async fn revalidate_not_modified(
                 .delete(state.namespace.as_str(), state.variant_key.as_str())
                 .await;
         }
-        let volatile = CachedResponseEnvelope {
+    let volatile = CachedResponseEnvelope {
             status: state.envelope.status,
             headers: merged_headers,
             body_b64: state.envelope.body_b64,
             stored_at_ms: now,
             initial_age_secs,
             response_delay_secs,
-            freshness_lifetime_secs: freshness.max(1),
+            freshness_lifetime_secs: freshness,
             vary_headers: vary_headers.clone(),
             vary_values: vary_values_from_request_headers(request_headers, &vary_headers),
         };
@@ -238,12 +238,12 @@ pub async fn revalidate_not_modified(
         stored_at_ms: now,
         initial_age_secs,
         response_delay_secs,
-        freshness_lifetime_secs: freshness.max(1),
+        freshness_lifetime_secs: freshness,
         vary_headers: vary_headers.clone(),
         vary_values: vary_values_from_request_headers(request_headers, &vary_headers),
     };
 
-    let ttl = updated.freshness_lifetime_secs.max(1);
+    let ttl = object_retention_ttl_secs(updated.freshness_lifetime_secs, &directives);
     let payload = serde_json::to_vec(&updated)?;
     let _ = backend
         .put(
@@ -257,6 +257,14 @@ pub async fn revalidate_not_modified(
     response_from_envelope(&updated, now, "REVALIDATED", false)
 }
 
+fn object_retention_ttl_secs(freshness_lifetime_secs: u64, directives: &ResponseDirectives) -> u64 {
+    let extra = directives
+        .stale_while_revalidate
+        .unwrap_or(0)
+        .max(directives.stale_if_error.unwrap_or(0));
+    freshness_lifetime_secs.saturating_add(extra).max(1)
+}
+
 fn is_response_storable(
     request_headers: &http::HeaderMap,
     request_method: &Method,
@@ -268,12 +276,9 @@ fn is_response_storable(
     if request_method != Method::GET {
         return false;
     }
-    let Some(ttl) = freshness_lifetime else {
+    if freshness_lifetime.is_none() {
         return false;
     };
-    if ttl == 0 {
-        return false;
-    }
     if directives.no_store || (directives.private && directives.private_fields.is_empty()) {
         return false;
     }

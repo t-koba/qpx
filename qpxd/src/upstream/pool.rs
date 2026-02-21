@@ -3,6 +3,7 @@ use crate::upstream::http1::{
     UpstreamProxyEndpoint,
 };
 use anyhow::{anyhow, Result};
+use http::header::PROXY_AUTHORIZATION;
 use hyper::{Body, Request, Response};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -20,11 +21,15 @@ fn upstream_proxy_pool() -> &'static UpstreamProxyPool {
 }
 
 pub async fn send_via_upstream_proxy(
-    req: Request<Body>,
+    mut req: Request<Body>,
     upstream: &str,
     timeout_dur: Duration,
 ) -> Result<Response<Body>> {
     let endpoint = parse_upstream_proxy_endpoint(upstream)?;
+    req.headers_mut().remove(PROXY_AUTHORIZATION);
+    if let Some(value) = endpoint.proxy_authorization.as_ref() {
+        req.headers_mut().insert(PROXY_AUTHORIZATION, value.clone());
+    }
     let pool_key = endpoint.cache_key();
 
     let slot = {

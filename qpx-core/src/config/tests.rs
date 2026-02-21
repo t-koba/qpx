@@ -13,6 +13,58 @@ fn unique_tmp_dir() -> PathBuf {
 }
 
 #[test]
+fn load_config_supports_multiple_files_last_wins() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+
+    let base = dir.join("base.yaml");
+    let overlay = dir.join("overlay.yaml");
+
+    fs::write(
+        &base,
+        r#"
+version: 1
+system_log:
+  level: info
+  format: json
+listeners:
+  - name: forward
+    mode: forward
+    listen: "127.0.0.1:18080"
+    default_action: { type: direct }
+"#,
+    )
+    .expect("write base");
+
+    fs::write(
+        &overlay,
+        r#"
+system_log:
+  level: debug
+  format: json
+reverse:
+  - name: api
+    listen: "127.0.0.1:19080"
+    routes:
+      - match:
+          host: ["example.com"]
+        upstreams: ["http://127.0.0.1:8080"]
+"#,
+    )
+    .expect("write overlay");
+
+    let loaded = load_configs(&[base.clone(), overlay.clone()]).expect("load config");
+    fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(loaded.version, 1);
+    assert_eq!(loaded.system_log.level, "debug");
+    assert_eq!(loaded.listeners.len(), 1);
+    assert_eq!(loaded.listeners[0].name, "forward");
+    assert_eq!(loaded.reverse.len(), 1);
+    assert_eq!(loaded.reverse[0].name, "api");
+}
+
+#[test]
 fn load_config_supports_include_and_env() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");
@@ -106,6 +158,34 @@ listeners:
     assert!(
         err.to_string()
             .contains("messages.proxy_error must not be empty"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn load_config_rejects_enabled_otel_without_endpoint() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("invalid-otel.yaml");
+    fs::write(
+        &cfg,
+        r#"
+version: 1
+otel:
+  enabled: true
+listeners:
+  - name: forward
+    mode: forward
+    listen: "127.0.0.1:18080"
+    default_action: { type: direct }
+"#,
+    )
+    .expect("write");
+    let err = load_config(&cfg).expect_err("must fail");
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        err.to_string()
+            .contains("otel.endpoint must be set when otel.enabled=true"),
         "unexpected error: {err}"
     );
 }
@@ -410,5 +490,50 @@ reverse:
     assert_eq!(route.backends.len(), 2);
     assert_eq!(route.mirrors.len(), 1);
     assert!(route.headers.is_some());
-    assert!(route.path_rewrite.as_ref().and_then(|r| r.regex.as_ref()).is_some());
+    assert!(route
+        .path_rewrite
+        .as_ref()
+        .and_then(|r| r.regex.as_ref())
+        .is_some());
+}
+
+#[test]
+fn load_config_allows_access_and_audit_logs() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("logs.yaml");
+    fs::write(
+        &cfg,
+        r#"
+version: 1
+system_log:
+  level: info
+  format: json
+access_log:
+  enabled: true
+  path: "/tmp/qpx-access.log"
+  format: json
+  rotation: daily
+  rotation_count: 30
+  exclude: ["/health", "/metrics"]
+audit_log:
+  enabled: true
+  path: "/tmp/qpx-audit.log"
+  format: json
+  rotation: daily
+  rotation_count: 365
+listeners:
+  - name: forward
+    mode: forward
+    listen: "127.0.0.1:18080"
+    default_action: { type: direct }
+"#,
+    )
+    .expect("write");
+    let loaded = load_config(&cfg).expect("load config");
+    fs::remove_dir_all(&dir).ok();
+
+    assert!(loaded.access_log.output.enabled);
+    assert!(loaded.audit_log.output.enabled);
+    assert_eq!(loaded.access_log.exclude, vec!["/health", "/metrics"]);
 }

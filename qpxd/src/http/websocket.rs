@@ -42,6 +42,7 @@ pub fn spawn_upgrade_tunnel(
                     &mut server,
                     None,
                     Some(idle_timeout),
+                    None,
                 )
                 .await
                 {

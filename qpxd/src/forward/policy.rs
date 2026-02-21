@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub(crate) struct AllowedPolicy {
     pub(crate) action: ActionConfig,
     pub(crate) headers: Option<Arc<CompiledHeaderControl>>,
+    pub(crate) matched_rule: Option<Arc<str>>,
 }
 
 pub(crate) enum ForwardPolicyDecision {
@@ -38,6 +39,7 @@ pub(crate) async fn evaluate_forward_policy(
         return Ok(ForwardPolicyDecision::Allow(Box::new(AllowedPolicy {
             action: engine.default_action().clone(),
             headers: None,
+            matched_rule: None,
         })));
     }
 
@@ -57,6 +59,7 @@ pub(crate) async fn evaluate_forward_policy(
                         let outcome = state
                             .auth
                             .authenticate_proxy(
+                                ctx.src_ip,
                                 request_headers,
                                 &auth_cfg.require,
                                 auth_method,
@@ -92,12 +95,14 @@ pub(crate) async fn evaluate_forward_policy(
                 .cloned()
                 .unwrap_or_else(|| engine.default_action().clone()),
             headers: rule.headers().cloned(),
+            matched_rule: Some(rule.name_arc()),
         })));
     }
 
     Ok(ForwardPolicyDecision::Allow(Box::new(AllowedPolicy {
         action: engine.default_action().clone(),
         headers: None,
+        matched_rule: None,
     })))
 }
 
@@ -117,9 +122,9 @@ mod tests {
     use hyper::header::HeaderValue;
     use hyper::HeaderMap;
     use qpx_core::config::{
-        ActionConfig, ActionKind, AuthConfig, CacheConfig, Config, IdentityConfig, ListenerConfig,
-        ListenerMode, LocalUser, LoggingConfig, MessagesConfig, RuleAuthConfig, RuleConfig,
-        RuntimeConfig,
+        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CacheConfig, Config,
+        IdentityConfig, ListenerConfig, ListenerMode, LocalUser, MessagesConfig, RuleAuthConfig,
+        RuleConfig, RuntimeConfig, SystemLogConfig,
     };
 
     #[tokio::test]
@@ -130,8 +135,11 @@ mod tests {
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime: RuntimeConfig::default(),
-            logging: LoggingConfig::default(),
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
             metrics: None,
+            otel: None,
             exporter: None,
             auth: AuthConfig {
                 users: vec![LocalUser {
@@ -165,6 +173,7 @@ mod tests {
                             local_response: None,
                         }),
                         headers: None,
+                        rate_limit: None,
                     },
                     RuleConfig {
                         name: "fallback".to_string(),
@@ -176,6 +185,7 @@ mod tests {
                             local_response: None,
                         }),
                         headers: None,
+                        rate_limit: None,
                     },
                 ],
                 upstream_proxy: None,
@@ -183,6 +193,7 @@ mod tests {
                 ftp: Default::default(),
                 xdp: None,
                 cache: None,
+                rate_limit: None,
             }],
             reverse: Vec::new(),
             upstreams: Vec::new(),

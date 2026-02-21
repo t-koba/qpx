@@ -7,8 +7,10 @@ use hyper::service::service_fn;
 use hyper::{Body, Request, Response, StatusCode};
 use metrics::{counter, histogram};
 use qpx_core::config::ListenerConfig;
+use qpx_core::middleware::access_log::{AccessLogContext, AccessLogService};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -106,35 +108,41 @@ async fn run_forward_acceptor(
     listener_name: String,
     xdp_cfg: Option<crate::xdp::CompiledXdpConfig>,
 ) -> Result<()> {
+    let semaphore = runtime.state().connection_semaphore.clone();
     loop {
-        let (mut stream, remote_addr) = match tcp_listener.accept().await {
+        let permit = semaphore.clone().acquire_owned().await?;
+        let (stream, remote_addr) = match tcp_listener.accept().await {
             Ok(accepted) => accepted,
             Err(err) => {
                 warn!(error = ?err, "forward accept failed");
                 continue;
             }
         };
+        let _ = stream.set_nodelay(true);
         let runtime = runtime.clone();
         let listener_name = listener_name.clone();
         let xdp_cfg = xdp_cfg.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             let header_read_timeout =
                 Duration::from_millis(runtime.state().config.runtime.http_header_read_timeout_ms);
             let metadata_timeout = header_read_timeout;
-            let effective_remote_addr = match resolve_remote_addr_with_xdp(
-                &mut stream,
+            let (stream, effective_remote_addr) = match resolve_remote_addr_with_xdp(
+                stream,
                 remote_addr,
                 xdp_cfg.as_ref(),
                 metadata_timeout,
             )
             .await
             {
-                Ok(addr) => addr,
+                Ok(resolved) => resolved,
                 Err(err) => {
                     warn!(error = ?err, "failed to resolve xdp remote metadata");
                     return;
                 }
             };
+            let access_cfg = runtime.state().config.access_log.clone();
+            let access_name = Arc::<str>::from(listener_name.as_str());
             let service = service_fn(move |req| {
                 handle_request(
                     req,
@@ -143,6 +151,15 @@ async fn run_forward_acceptor(
                     effective_remote_addr,
                 )
             });
+            let service = AccessLogService::new(
+                service,
+                effective_remote_addr,
+                AccessLogContext {
+                    kind: "forward",
+                    name: access_name,
+                },
+                &access_cfg,
+            );
             if let Err(err) =
                 serve_http1_with_upgrades(stream, service, header_read_timeout, true).await
             {

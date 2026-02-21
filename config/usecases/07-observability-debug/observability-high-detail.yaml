@@ -1,8 +1,27 @@
 version: 1
 state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
-logging:
+system_log:
   level: debug
   format: json
+
+# High-frequency access log (non-blocking). Prefer a file path in production.
+access_log:
+  enabled: true
+  path: "${QPX_STATE_DIR:-~/.local/share/qpx}/access.log"
+  format: combined
+  rotation: daily
+  rotation_count: 7
+  exclude:
+    - /health
+    - /metrics
+
+# Low-frequency security/audit log (non-blocking, reliability-focused).
+audit_log:
+  enabled: true
+  path: "${QPX_STATE_DIR:-~/.local/share/qpx}/audit.log"
+  format: json
+  rotation: daily
+  rotation_count: 30
 metrics:
   listen: "127.0.0.1:19901"
   path: "/metrics"

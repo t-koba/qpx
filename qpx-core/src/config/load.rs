@@ -51,6 +51,86 @@ pub fn load_config_with_sources(path: &Path) -> Result<(Config, Vec<PathBuf>)> {
     Ok((config, sources))
 }
 
+pub fn load_configs(paths: &[PathBuf]) -> Result<Config> {
+    use serde::de::IntoDeserializer;
+
+    if paths.is_empty() {
+        return Err(anyhow!("no config files provided"));
+    }
+
+    let mut sources = Vec::new();
+    let mut merged = Value::Mapping(Mapping::new());
+    for path in paths {
+        let mut stack = Vec::new();
+        let value = load_value(path, &mut stack, &mut sources)?;
+        merged = merge_values(merged, value);
+    }
+
+    let mut ignored = Vec::new();
+    let de = merged.into_deserializer();
+    let config: Config = serde_ignored::deserialize(de, |path| ignored.push(path.to_string()))
+        .with_context(|| {
+            format!(
+                "failed to deserialize config (merged): {}",
+                paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    if !ignored.is_empty() {
+        ignored.sort();
+        ignored.dedup();
+        return Err(anyhow!(
+            "unknown config keys (fix typos to avoid unexpected defaults): {}",
+            ignored.join(", ")
+        ));
+    }
+    validate_config(&config)?;
+    Ok(config)
+}
+
+pub fn load_configs_with_sources(paths: &[PathBuf]) -> Result<(Config, Vec<PathBuf>)> {
+    use serde::de::IntoDeserializer;
+
+    if paths.is_empty() {
+        return Err(anyhow!("no config files provided"));
+    }
+
+    let mut sources = Vec::new();
+    let mut merged = Value::Mapping(Mapping::new());
+    for path in paths {
+        let mut stack = Vec::new();
+        let value = load_value(path, &mut stack, &mut sources)?;
+        merged = merge_values(merged, value);
+    }
+
+    let mut ignored = Vec::new();
+    let de = merged.into_deserializer();
+    let config: Config = serde_ignored::deserialize(de, |path| ignored.push(path.to_string()))
+        .with_context(|| {
+            format!(
+                "failed to deserialize config (merged): {}",
+                paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    if !ignored.is_empty() {
+        ignored.sort();
+        ignored.dedup();
+        return Err(anyhow!(
+            "unknown config keys (fix typos to avoid unexpected defaults): {}",
+            ignored.join(", ")
+        ));
+    }
+    validate_config(&config)?;
+    Ok((config, sources))
+}
+
 fn load_value(path: &Path, stack: &mut Vec<PathBuf>, sources: &mut Vec<PathBuf>) -> Result<Value> {
     let canonical =
         fs::canonicalize(path).with_context(|| format!("config not found: {}", path.display()))?;
