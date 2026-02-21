@@ -5,8 +5,8 @@ use crate::fastcgi_client::{
     proxy_fastcgi_upstream, proxy_fastcgi_url_with_timeout, ClientConnInfo,
 };
 use crate::http::cache_flow::{
-    clone_request_head_for_revalidation, lookup_with_revalidation, process_upstream_response_for_cache,
-    CacheLookupDecision, CacheWritebackContext,
+    clone_request_head_for_revalidation, lookup_with_revalidation,
+    process_upstream_response_for_cache, CacheLookupDecision, CacheWritebackContext,
 };
 use crate::http::common::bad_request_response as bad_request;
 use crate::http::header_control::apply_request_headers;
@@ -310,9 +310,7 @@ pub(crate) async fn handle_request_inner(
                 return Ok(hit);
             }
             CacheLookupDecision::StaleWhileRevalidate(mut hit, state) => {
-                if request_method == Method::GET
-                    && route.fastcgi.is_none()
-                {
+                if request_method == Method::GET && route.fastcgi.is_none() {
                     if let (Some(policy), Some(snapshot), Some(lookup_key), Some(target_key)) = (
                         cache_policy,
                         request_headers_snapshot.as_ref(),
@@ -340,7 +338,11 @@ pub(crate) async fn handle_request_inner(
                                         let started = Instant::now();
                                         let resp = timeout(
                                             timeout_dur,
-                                            proxy_http(bg_req, target.as_str(), proxy_name.as_str()),
+                                            proxy_http(
+                                                bg_req,
+                                                target.as_str(),
+                                                proxy_name.as_str(),
+                                            ),
                                         )
                                         .await;
                                         let Ok(Ok(resp)) = resp else {
@@ -655,7 +657,8 @@ pub(crate) async fn handle_request_inner(
                     "result" => "ok"
                 )
                 .increment(1);
-                if let (Some(policy), Some(snapshot)) = (cache_policy, request_headers_snapshot.as_ref())
+                if let (Some(policy), Some(snapshot)) =
+                    (cache_policy, request_headers_snapshot.as_ref())
                 {
                     resp = process_upstream_response_for_cache(
                         resp,

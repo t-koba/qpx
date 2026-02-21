@@ -247,23 +247,37 @@ async fn handle_tls_connection(
     let stream = crate::io_prefix::PrefixedIo::new(stream, Bytes::from(peek));
 
     let compiled = reverse.compiled().await;
-    if let Some(upstream) =
-        compiled
-            .router
-            .select_tls_passthrough_upstream(remote_addr.ip(), local_port, sni.as_deref())
-    {
+    if let Some(upstream) = compiled.router.select_tls_passthrough_upstream(
+        remote_addr.ip(),
+        local_port,
+        sni.as_deref(),
+    ) {
         let addr = parse_upstream_addr(&upstream, 443)?;
-        let upstream_timeout =
-            Duration::from_millis(reverse.runtime.state().config.runtime.upstream_http_timeout_ms);
+        let upstream_timeout = Duration::from_millis(
+            reverse
+                .runtime
+                .state()
+                .config
+                .runtime
+                .upstream_http_timeout_ms,
+        );
         let upstream_stream =
             tokio::time::timeout(upstream_timeout, TcpStream::connect(&addr)).await??;
         let _ = upstream_stream.set_nodelay(true);
-        let export = upstream_stream
-            .peer_addr()
-            .ok()
-            .and_then(|server_addr| reverse.runtime.state().export_session(remote_addr, server_addr));
-        let idle_timeout =
-            Duration::from_millis(reverse.runtime.state().config.runtime.tunnel_idle_timeout_ms);
+        let export = upstream_stream.peer_addr().ok().and_then(|server_addr| {
+            reverse
+                .runtime
+                .state()
+                .export_session(remote_addr, server_addr)
+        });
+        let idle_timeout = Duration::from_millis(
+            reverse
+                .runtime
+                .state()
+                .config
+                .runtime
+                .tunnel_idle_timeout_ms,
+        );
         copy_bidirectional_with_export_and_idle(
             stream,
             upstream_stream,
@@ -275,22 +289,32 @@ async fn handle_tls_connection(
         return Ok(());
     }
 
-    let tls_accept_timeout =
-        Duration::from_millis(reverse.runtime.state().config.runtime.upstream_http_timeout_ms);
+    let tls_accept_timeout = Duration::from_millis(
+        reverse
+            .runtime
+            .state()
+            .config
+            .runtime
+            .upstream_http_timeout_ms,
+    );
     let acceptor = compiled
         .tls_acceptor
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("reverse tls acceptor missing"))?
         .clone();
     let tls_stream = timeout(tls_accept_timeout, acceptor.accept(stream)).await??;
-    let header_read_timeout =
-        Duration::from_millis(reverse.runtime.state().config.runtime.http_header_read_timeout_ms);
+    let header_read_timeout = Duration::from_millis(
+        reverse
+            .runtime
+            .state()
+            .config
+            .runtime
+            .http_header_read_timeout_ms,
+    );
     let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone());
     let access_cfg = reverse.runtime.state().config.access_log.clone();
     let reverse_name = reverse.name.clone();
-    let service = service_fn(move |req| {
-        handle_request(req, reverse.clone(), conn.clone())
-    });
+    let service = service_fn(move |req| handle_request(req, reverse.clone(), conn.clone()));
     let service = AccessLogService::new(
         service,
         remote_addr,
@@ -320,23 +344,37 @@ async fn handle_tls_connection(
     let stream = crate::io_prefix::PrefixedIo::new(stream, Bytes::from(peek));
 
     let compiled = reverse.compiled().await;
-    if let Some(upstream) =
-        compiled
-            .router
-            .select_tls_passthrough_upstream(remote_addr.ip(), local_port, sni.as_deref())
-    {
+    if let Some(upstream) = compiled.router.select_tls_passthrough_upstream(
+        remote_addr.ip(),
+        local_port,
+        sni.as_deref(),
+    ) {
         let addr = parse_upstream_addr(&upstream, 443)?;
-        let upstream_timeout =
-            Duration::from_millis(reverse.runtime.state().config.runtime.upstream_http_timeout_ms);
+        let upstream_timeout = Duration::from_millis(
+            reverse
+                .runtime
+                .state()
+                .config
+                .runtime
+                .upstream_http_timeout_ms,
+        );
         let upstream_stream =
             tokio::time::timeout(upstream_timeout, TcpStream::connect(&addr)).await??;
         let _ = upstream_stream.set_nodelay(true);
-        let export = upstream_stream
-            .peer_addr()
-            .ok()
-            .and_then(|server_addr| reverse.runtime.state().export_session(remote_addr, server_addr));
-        let idle_timeout =
-            Duration::from_millis(reverse.runtime.state().config.runtime.tunnel_idle_timeout_ms);
+        let export = upstream_stream.peer_addr().ok().and_then(|server_addr| {
+            reverse
+                .runtime
+                .state()
+                .export_session(remote_addr, server_addr)
+        });
+        let idle_timeout = Duration::from_millis(
+            reverse
+                .runtime
+                .state()
+                .config
+                .runtime
+                .tunnel_idle_timeout_ms,
+        );
         copy_bidirectional_with_export_and_idle(
             stream,
             upstream_stream,
@@ -348,22 +386,32 @@ async fn handle_tls_connection(
         return Ok(());
     }
 
-    let tls_accept_timeout =
-        Duration::from_millis(reverse.runtime.state().config.runtime.upstream_http_timeout_ms);
+    let tls_accept_timeout = Duration::from_millis(
+        reverse
+            .runtime
+            .state()
+            .config
+            .runtime
+            .upstream_http_timeout_ms,
+    );
     let acceptor = compiled
         .tls_acceptor
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("reverse tls acceptor missing"))?
         .clone();
     let tls_stream = timeout(tls_accept_timeout, acceptor.accept(stream, sni.as_deref())).await??;
-    let header_read_timeout =
-        Duration::from_millis(reverse.runtime.state().config.runtime.http_header_read_timeout_ms);
+    let header_read_timeout = Duration::from_millis(
+        reverse
+            .runtime
+            .state()
+            .config
+            .runtime
+            .http_header_read_timeout_ms,
+    );
     let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone());
     let access_cfg = reverse.runtime.state().config.access_log.clone();
     let reverse_name = reverse.name.clone();
-    let service = service_fn(move |req| {
-        handle_request(req, reverse.clone(), conn.clone())
-    });
+    let service = service_fn(move |req| handle_request(req, reverse.clone(), conn.clone()));
     let service = AccessLogService::new(
         service,
         remote_addr,

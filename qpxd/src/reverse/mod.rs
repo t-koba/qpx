@@ -11,9 +11,9 @@ mod router;
 mod security;
 mod transport;
 
-use arc_swap::ArcSwap;
 use crate::runtime::Runtime;
 use anyhow::{anyhow, Result};
+use arc_swap::ArcSwap;
 use qpx_core::config::{Config, ReverseConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -54,7 +54,10 @@ pub(crate) fn compile_reverse(reverse: &ReverseConfig) -> Result<CompiledReverse
                 reverse.name
             ));
         }
-        Ok(CompiledReverse { router, security_policy })
+        Ok(CompiledReverse {
+            router,
+            security_policy,
+        })
     }
 }
 
@@ -107,10 +110,8 @@ impl ReloadableReverse {
         match next_reverse {
             Some(reverse_cfg) => match compile_reverse(&reverse_cfg) {
                 Ok(next) => {
-                    next.router.spawn_health_tasks(
-                        self.name.clone(),
-                        self.unhealthy_metric.clone(),
-                    );
+                    next.router
+                        .spawn_health_tasks(self.name.clone(), self.unhealthy_metric.clone());
                     self.compiled.store(Arc::new(next));
                 }
                 Err(err) => {
@@ -227,12 +228,7 @@ pub async fn run(reverse: ReverseConfig, runtime: Runtime) -> Result<()> {
                 let xdp_cfg = xdp_cfg.clone();
                 let reverse_rt = reverse_rt.clone();
                 accept_tasks.push(tokio::spawn(async move {
-                    listener::run_reverse_tls_acceptor(
-                        listener,
-                        xdp_cfg,
-                        reverse_rt,
-                    )
-                    .await
+                    listener::run_reverse_tls_acceptor(listener, xdp_cfg, reverse_rt).await
                 }));
             }
             let tls_server = async move {
@@ -284,12 +280,7 @@ pub async fn run(reverse: ReverseConfig, runtime: Runtime) -> Result<()> {
         let xdp_cfg = xdp_cfg.clone();
         let reverse_rt = reverse_rt.clone();
         accept_tasks.push(tokio::spawn(async move {
-            listener::run_reverse_http_acceptor(
-                tcp_listener,
-                xdp_cfg,
-                reverse_rt,
-            )
-            .await
+            listener::run_reverse_http_acceptor(tcp_listener, xdp_cfg, reverse_rt).await
         }));
     }
     let http_server = async move {

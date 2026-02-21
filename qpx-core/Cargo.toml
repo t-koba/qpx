@@ -25,16 +25,13 @@ digest-auth = ["dep:sha2"]
 
 [dependencies]
 anyhow.workspace = true
-thiserror.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
-serde_json.workspace = true
 serde_ignored.workspace = true
 regex.workspace = true
 cidr.workspace = true
 globset.workspace = true
 url.workspace = true
-bytes.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true

@@ -10,15 +10,15 @@ use anyhow::{anyhow, Result};
 use hyper::client::connect::{Connected, Connection};
 use hyper::client::HttpConnector;
 use hyper::service::Service;
-use hyper::{Body, Request, Response};
 use hyper::Uri;
+use hyper::{Body, Request, Response};
 #[cfg(feature = "http3")]
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::{future::Future, pin::Pin, task::Context, task::Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 #[cfg(feature = "http3")]
 use tokio::net::lookup_host;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 use tracing::warn;
@@ -207,17 +207,11 @@ impl AsyncWrite for ReverseTlsStream {
         Pin::new(&mut self.io).poll_write(cx, buf)
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.io).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.io).poll_shutdown(cx)
     }
 }

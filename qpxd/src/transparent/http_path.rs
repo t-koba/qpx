@@ -120,7 +120,9 @@ where
                     let matched_rule = policy.matched_rule.take();
                     (Some(policy), None, matched_rule)
                 }
-                ListenerPolicyDecision::Early(response, matched_rule) => (None, Some(response), matched_rule),
+                ListenerPolicyDecision::Early(response, matched_rule) => {
+                    (None, Some(response), matched_rule)
+                }
             };
             if let Some(rule) = matched_rule.as_deref() {
                 if let Some(limits) = state.rate_limiters.listener(listener_name.as_str()) {

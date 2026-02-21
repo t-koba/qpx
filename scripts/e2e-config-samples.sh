@@ -256,6 +256,17 @@ run_reverse_suite() {
   serve_once 19092 "$response_file" "$capture_file"
   backend_pid="$LAST_PID"
 
+  # Reverse has background upstream health checks that may connect immediately on startup.
+  # If the first probe consumes our one-shot backend stub, restart it before issuing the request.
+  for _ in {1..5}; do
+    sleep 0.1
+    if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
+      serve_once 19092 "$response_file" "$capture_file"
+      backend_pid="$LAST_PID"
+      break
+    fi
+  done
+
   local status
   status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 \
     -H 'Host: reverse.local' \

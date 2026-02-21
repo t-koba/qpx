@@ -575,8 +575,8 @@ impl ExporterHub {
         }
         state.sequences_last_gc_unix_nanos = now_unix_nanos;
 
-        let cutoff =
-            now_unix_nanos.saturating_sub(self.history_limit_age.as_nanos().min(u64::MAX as u128) as u64);
+        let cutoff = now_unix_nanos
+            .saturating_sub(self.history_limit_age.as_nanos().min(u64::MAX as u128) as u64);
         state
             .sequences
             .retain(|_, v| v.last_seen_unix_nanos >= cutoff);
@@ -809,7 +809,8 @@ where
         handle_event_line(&hub, &line).await;
     }
     while let Some(line) =
-        read_line_limited_with_timeout(&mut reader, max_event_line_bytes, event_read_timeout).await?
+        read_line_limited_with_timeout(&mut reader, max_event_line_bytes, event_read_timeout)
+            .await?
     {
         handle_event_line(&hub, &line).await;
     }
@@ -933,8 +934,9 @@ where
         } else {
             // AUTH provided but not required: accept.
         }
-        next = read_line_limited_with_timeout(&mut reader, max_control_line_bytes, handshake_timeout)
-            .await?;
+        next =
+            read_line_limited_with_timeout(&mut reader, max_control_line_bytes, handshake_timeout)
+                .await?;
     } else if token.is_some() {
         return Err(anyhow!("missing AUTH line"));
     }
@@ -1269,7 +1271,7 @@ mod tests {
     #[test]
     fn constant_time_eq_rejects_different_strings() {
         assert!(!constant_time_eq("secret", "Secret"));
-        assert!(!constant_time_eq("abc", "abd"));
+        assert!(!constant_time_eq("abc", "abx"));
     }
 
     #[test]

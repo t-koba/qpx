@@ -347,7 +347,8 @@ fn select_upstream_inner(
                 }
             }
         }
-        best.map(|(u, _)| u).unwrap_or_else(|| candidates[0].clone())
+        best.map(|(u, _)| u)
+            .unwrap_or_else(|| candidates[0].clone())
     };
 
     let selected = match policy.lb {
@@ -449,22 +450,19 @@ impl HttpRoute {
         let mut out = Vec::new();
         for (idx, mirror) in self.mirrors.iter().enumerate() {
             // 0..9999 range; percent has 0.01% resolution.
-            let sample = (request_seed
-                .wrapping_add((idx as u64 + 1) * 0x9e3779b97f4a7c15)
-                % 10_000) as u32;
+            let sample =
+                (request_seed.wrapping_add((idx as u64 + 1) * 0x9e3779b97f4a7c15) % 10_000) as u32;
             if sample >= mirror.percent.saturating_mul(100) {
                 continue;
             }
             let mirror_seed = request_seed.wrapping_add((idx as u64 + 1) * 0x517cc1b727220a95);
-            if let Some(upstream) =
-                select_upstream_inner(
-                    &mirror.upstreams,
-                    &self.policy,
-                    &mirror.rr_counter,
-                    mirror_seed,
-                    sticky_seed,
-                )
-            {
+            if let Some(upstream) = select_upstream_inner(
+                &mirror.upstreams,
+                &self.policy,
+                &mirror.rr_counter,
+                mirror_seed,
+                sticky_seed,
+            ) {
                 out.push(upstream);
             }
         }

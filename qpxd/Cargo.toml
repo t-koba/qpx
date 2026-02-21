@@ -34,13 +34,10 @@ percent-encoding.workspace = true
 httpdate.workspace = true
 bytes.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 metrics.workspace = true
-metrics-exporter-prometheus.workspace = true
 arc-swap.workspace = true
 notify.workspace = true
 async-trait.workspace = true
-chrono.workspace = true
 dirs-next.workspace = true
 
 # TLS
@@ -54,7 +51,6 @@ tokio-native-tls = { workspace = true, optional = true }
 hyper.workspace = true
 http.workspace = true
 http1.workspace = true
-http-body.workspace = true
 httparse.workspace = true
 libc.workspace = true
 quinn = { workspace = true, optional = true }
