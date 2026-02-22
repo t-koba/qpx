@@ -16,7 +16,9 @@ use qpx_core::exporter::{CaptureDirection, CaptureEvent, CapturePlane, EVENT_PRE
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

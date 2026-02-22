@@ -66,9 +66,16 @@ impl DestinationResolver {
         Option<ConnectTarget>,
     )> {
         let mut stream = stream;
+        let local_addr = stream.local_addr().ok();
         match self {
             Self::Kernel => {
-                let target = original_dst_socket(&stream).ok().map(ConnectTarget::Socket);
+                let target = original_dst_socket(&stream)
+                    .ok()
+                    // When a connection is made directly to the transparent listener (no NAT),
+                    // SO_ORIGINAL_DST can be equal to the listener address. Treat that as
+                    // "unavailable" to avoid proxying back into ourselves.
+                    .filter(|dst| local_addr != Some(*dst))
+                    .map(ConnectTarget::Socket);
                 Ok((
                     crate::io_prefix::PrefixedIo::new(stream, Bytes::new()),
                     remote_addr,
@@ -87,7 +94,10 @@ impl DestinationResolver {
                             remote_addr
                         ));
                     }
-                    let target = original_dst_socket(&stream).ok().map(ConnectTarget::Socket);
+                    let target = original_dst_socket(&stream)
+                        .ok()
+                        .filter(|dst| local_addr != Some(*dst))
+                        .map(ConnectTarget::Socket);
                     return Ok((
                         crate::io_prefix::PrefixedIo::new(stream, Bytes::new()),
                         remote_addr,
@@ -103,8 +113,14 @@ impl DestinationResolver {
                 };
                 let effective_remote = src.unwrap_or(remote_addr);
                 let target = dst
+                    .filter(|dst| local_addr != Some(*dst))
                     .map(ConnectTarget::Socket)
-                    .or_else(|| original_dst_socket(&stream).ok().map(ConnectTarget::Socket));
+                    .or_else(|| {
+                        original_dst_socket(&stream)
+                            .ok()
+                            .filter(|dst| local_addr != Some(*dst))
+                            .map(ConnectTarget::Socket)
+                    });
                 Ok((
                     crate::io_prefix::PrefixedIo::new(stream, result.prefix),
                     effective_remote,
