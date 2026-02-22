@@ -5,6 +5,7 @@ use hyper::{Body, Request, Response, StatusCode};
 use qpx_core::config::FastCgiUpstreamConfig;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

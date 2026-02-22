@@ -69,6 +69,15 @@ fn bind_single(
         .set_reuse_address(true)
         .context("failed to set SO_REUSEADDR")?;
 
+    #[cfg(not(unix))]
+    {
+        // This should not be reachable because bind_tcp_listeners() falls back to a single acceptor
+        // when SO_REUSEPORT isn't supported, but keep behavior explicit and avoid unused warnings.
+        if use_reuse_port {
+            warn!("SO_REUSEPORT requested but unsupported on this platform");
+        }
+    }
+
     #[cfg(unix)]
     {
         if use_reuse_port {
