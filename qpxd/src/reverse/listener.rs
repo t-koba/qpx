@@ -10,8 +10,6 @@ use tokio::time::Duration;
 use tracing::warn;
 
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
-use std::sync::Arc;
-#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use crate::io_copy::copy_bidirectional_with_export_and_idle;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use crate::tls::{extract_sni, read_client_hello_with_timeout};
@@ -19,6 +17,8 @@ use crate::tls::{extract_sni, read_client_hello_with_timeout};
 use crate::upstream::origin::parse_upstream_addr;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use bytes::Bytes;
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+use std::sync::Arc;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use tokio::net::TcpStream;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -58,8 +58,14 @@ pub(super) async fn run_reverse_tls_acceptor(
         let reverse_name = reverse.name.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let header_read_timeout =
-                Duration::from_millis(reverse.runtime.state().config.runtime.http_header_read_timeout_ms);
+            let header_read_timeout = Duration::from_millis(
+                reverse
+                    .runtime
+                    .state()
+                    .config
+                    .runtime
+                    .http_header_read_timeout_ms,
+            );
             let (stream, remote_addr) = match resolve_remote_addr_with_xdp(
                 stream,
                 remote_addr,
@@ -75,9 +81,7 @@ pub(super) async fn run_reverse_tls_acceptor(
                 }
             };
             let reverse_name_for_log = reverse_name.clone();
-            let ctx = ReverseTlsContext {
-                reverse,
-            };
+            let ctx = ReverseTlsContext { reverse };
             if let Err(err) = handle_tls_connection(stream, remote_addr, local_port, ctx).await {
                 warn!(error = ?err, "reverse tls connection failed");
                 if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
@@ -128,8 +132,14 @@ pub(super) async fn run_reverse_tls_acceptor(
         let reverse_name = reverse.name.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let header_read_timeout =
-                Duration::from_millis(reverse.runtime.state().config.runtime.http_header_read_timeout_ms);
+            let header_read_timeout = Duration::from_millis(
+                reverse
+                    .runtime
+                    .state()
+                    .config
+                    .runtime
+                    .http_header_read_timeout_ms,
+            );
             let (stream, remote_addr) = match resolve_remote_addr_with_xdp(
                 stream,
                 remote_addr,
@@ -145,9 +155,7 @@ pub(super) async fn run_reverse_tls_acceptor(
                 }
             };
             let reverse_name_for_log = reverse_name.clone();
-            let ctx = ReverseTlsContext {
-                reverse,
-            };
+            let ctx = ReverseTlsContext { reverse };
             if let Err(err) = handle_tls_connection(stream, remote_addr, local_port, ctx).await {
                 warn!(error = ?err, "reverse tls connection failed");
                 if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
@@ -192,8 +200,14 @@ pub(super) async fn run_reverse_http_acceptor(
         let reverse_name = reverse.name.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let header_read_timeout =
-                Duration::from_millis(reverse.runtime.state().config.runtime.http_header_read_timeout_ms);
+            let header_read_timeout = Duration::from_millis(
+                reverse
+                    .runtime
+                    .state()
+                    .config
+                    .runtime
+                    .http_header_read_timeout_ms,
+            );
             let (stream, remote_addr) = match resolve_remote_addr_with_xdp(
                 stream,
                 remote_addr,
@@ -210,9 +224,7 @@ pub(super) async fn run_reverse_http_acceptor(
             };
             let conn = ReverseConnInfo::plain(remote_addr, local_port);
             let access_cfg = reverse.runtime.state().config.access_log.clone();
-            let service = service_fn(move |req| {
-                handle_request(req, reverse.clone(), conn.clone())
-            });
+            let service = service_fn(move |req| handle_request(req, reverse.clone(), conn.clone()));
             let service = AccessLogService::new(
                 service,
                 remote_addr,

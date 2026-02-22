@@ -105,9 +105,10 @@ pub(crate) struct BackgroundRevalidationGuard {
     key: String,
 }
 
-pub(crate) fn try_begin_background_revalidation(state: &RevalidationState) -> Option<BackgroundRevalidationGuard> {
-    let in_flight =
-        BACKGROUND_REVALIDATIONS_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
+pub(crate) fn try_begin_background_revalidation(
+    state: &RevalidationState,
+) -> Option<BackgroundRevalidationGuard> {
+    let in_flight = BACKGROUND_REVALIDATIONS_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
 
     let key = format!("{}::{}", state.namespace, state.variant_key);
     match in_flight.lock() {

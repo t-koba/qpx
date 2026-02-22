@@ -235,11 +235,11 @@ pub(super) async fn handle_connect(
                             Response::builder()
                                 .status(hyper::StatusCode::BAD_GATEWAY)
                                 .body(Body::from(state.messages.proxy_error.clone()))
-                     .unwrap(),
-                             false,
-                         ))
-                     }
-                 };
+                                .unwrap(),
+                            false,
+                        ))
+                    }
+                };
             let mut bandwidth_limiters = Vec::new();
             if let Some(limits) = state.rate_limiters.listener(listener_name) {
                 if let Some(limiter) = limits.listener.bytes.as_ref() {

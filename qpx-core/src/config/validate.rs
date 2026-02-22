@@ -17,14 +17,8 @@ const UPSTREAM_URL_SCHEMES: &[&str] = &[
 
 const UPSTREAM_PROXY_URL_SCHEMES: &[&str] = &["http", "https"];
 
-const REVERSE_UPSTREAM_URL_SCHEMES: &[&str] = &[
-    "http",
-    "https",
-    "ws",
-    "wss",
-    "fastcgi",
-    "fastcgi+unix",
-];
+const REVERSE_UPSTREAM_URL_SCHEMES: &[&str] =
+    &["http", "https", "ws", "wss", "fastcgi", "fastcgi+unix"];
 
 const REVERSE_PASSTHROUGH_UPSTREAM_URL_SCHEMES: &[&str] = &["https", "h3"];
 
@@ -253,9 +247,7 @@ fn validate_otel_config(otel: &OtelConfig) -> Result<()> {
 
     let Some(endpoint) = otel.endpoint.as_deref() else {
         if otel.enabled {
-            return Err(anyhow!(
-                "otel.endpoint must be set when otel.enabled=true"
-            ));
+            return Err(anyhow!("otel.endpoint must be set when otel.enabled=true"));
         }
         return Ok(());
     };
@@ -268,8 +260,7 @@ fn validate_otel_config(otel: &OtelConfig) -> Result<()> {
     } else {
         format!("http://{}", endpoint)
     };
-    let url = url::Url::parse(&raw)
-        .map_err(|e| anyhow!("otel.endpoint is invalid: {e}"))?;
+    let url = url::Url::parse(&raw).map_err(|e| anyhow!("otel.endpoint is invalid: {e}"))?;
     if url.scheme() != "http" && url.scheme() != "https" {
         return Err(anyhow!(
             "otel.endpoint must use http:// or https:// (got {})",
@@ -501,9 +492,7 @@ fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
         return Err(anyhow!("runtime.max_ftp_concurrency must be >= 1"));
     }
     if runtime.max_concurrent_connections == 0 {
-        return Err(anyhow!(
-            "runtime.max_concurrent_connections must be >= 1"
-        ));
+        return Err(anyhow!("runtime.max_concurrent_connections must be >= 1"));
     }
     if runtime.upstream_http_timeout_ms == 0 {
         return Err(anyhow!("runtime.upstream_http_timeout_ms must be >= 1"));
@@ -739,7 +728,10 @@ fn validate_listener_configs(
             .listen
             .parse()
             .map_err(|e| anyhow!("listener {} listen is invalid: {}", listener.name, e))?;
-        validate_rate_limit_config(listener.rate_limit.as_ref(), &format!("listener {}", listener.name))?;
+        validate_rate_limit_config(
+            listener.rate_limit.as_ref(),
+            &format!("listener {}", listener.name),
+        )?;
         validate_action_config(
             &listener.default_action,
             &format!("listener {}", listener.name),
@@ -864,11 +856,7 @@ fn validate_listener_configs(
             if http3.enabled {
                 if let Some(http3_listen) = http3.listen.as_deref() {
                     let _: std::net::SocketAddr = http3_listen.parse().map_err(|e| {
-                        anyhow!(
-                            "listener {} http3.listen is invalid: {}",
-                            listener.name,
-                            e
-                        )
+                        anyhow!("listener {} http3.listen is invalid: {}", listener.name, e)
                     })?;
                 }
             }
@@ -918,14 +906,10 @@ fn validate_rate_limit_config(rate: Option<&RateLimitConfig>, context: &str) -> 
     }
 
     if matches!(rate.bytes_per_sec, Some(0)) {
-        return Err(anyhow!(
-            "{context} rate_limit.bytes_per_sec must be >= 1"
-        ));
+        return Err(anyhow!("{context} rate_limit.bytes_per_sec must be >= 1"));
     }
     if matches!(rate.bytes_burst, Some(0)) {
-        return Err(anyhow!(
-            "{context} rate_limit.bytes_burst must be >= 1"
-        ));
+        return Err(anyhow!("{context} rate_limit.bytes_burst must be >= 1"));
     }
     if rate.bytes_burst.is_some() && rate.bytes_per_sec.is_none() {
         return Err(anyhow!(
@@ -971,13 +955,10 @@ fn validate_named_upstream_ref(
             )
         })?
     } else {
-        upstreams.get(upstream_ref).cloned().ok_or_else(|| {
-            anyhow!(
-                "{} references unknown upstream: {}",
-                context,
-                upstream_ref
-            )
-        })?
+        upstreams
+            .get(upstream_ref)
+            .cloned()
+            .ok_or_else(|| anyhow!("{} references unknown upstream: {}", context, upstream_ref))?
     };
 
     if (!url.username().is_empty() || url.password().is_some()) && !allow_userinfo {
@@ -985,7 +966,11 @@ fn validate_named_upstream_ref(
     }
 
     let scheme = url.scheme();
-    if !allowed_schemes.iter().copied().any(|allowed| allowed == scheme) {
+    if !allowed_schemes
+        .iter()
+        .copied()
+        .any(|allowed| allowed == scheme)
+    {
         return Err(anyhow!(
             "{context} has unsupported upstream URL scheme: {}",
             scheme
@@ -997,16 +982,10 @@ fn validate_named_upstream_ref(
 fn validate_lb_config(lb: &str, context: &str) -> Result<()> {
     let lb = lb.trim().to_ascii_lowercase();
     match lb.as_str() {
-        "round_robin"
-        | "roundrobin"
-        | "random"
-        | "least_conn"
-        | "least_connections"
-        | "consistent_hash"
-        | "consistent-hash"
-        | "sticky"
-        | "sticky_ip"
-        | "sticky-src-ip" => Ok(()),
+        "round_robin" | "roundrobin" | "random" | "least_conn" | "least_connections"
+        | "consistent_hash" | "consistent-hash" | "sticky" | "sticky_ip" | "sticky-src-ip" => {
+            Ok(())
+        }
         other => Err(anyhow!("{context} has unknown lb strategy: {other}")),
     }
 }

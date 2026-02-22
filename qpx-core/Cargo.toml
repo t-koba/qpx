@@ -14,7 +14,7 @@ tls-rustls = [
   "dep:rcgen",
   "dep:rustls-pemfile",
   "dep:lru",
-  "ldap3/tls-rustls",
+  "ldap3/tls-rustls-ring",
 ]
 
 # native-tls backend: currently used for LDAP TLS.

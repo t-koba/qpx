@@ -183,8 +183,12 @@ where
                 .path_and_query()
                 .map(|pq| pq.as_str())
                 .unwrap_or("/");
-            let span_name =
-                format!("{} {} {}", self.context.kind, req.method().as_str(), path_and_query);
+            let span_name = format!(
+                "{} {} {}",
+                self.context.kind,
+                req.method().as_str(),
+                path_and_query
+            );
             let span = tracing::info_span!(
                 target: "otel",
                 "http",
@@ -232,12 +236,12 @@ where
                     name: self.context.name.clone(),
                     method: req.method().clone(),
                     uri: req.uri().to_string(),
-                     version: req.version(),
-                     host,
-                     referer,
-                     user_agent,
-                 }),
-             )
+                    version: req.version(),
+                    host,
+                    referer,
+                    user_agent,
+                }),
+            )
         } else {
             (None, None)
         };

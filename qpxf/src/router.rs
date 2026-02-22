@@ -3,9 +3,9 @@ use crate::executor::cgi::CgiExecutor;
 #[cfg(feature = "wasm")]
 use crate::executor::wasm::WasmExecutor;
 use crate::executor::Executor;
-use anyhow::Result;
 #[cfg(not(feature = "wasm"))]
 use anyhow::anyhow;
+use anyhow::Result;
 use regex::Regex;
 use std::sync::Arc;
 

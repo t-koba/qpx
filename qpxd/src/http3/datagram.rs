@@ -6,10 +6,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing::warn;
 
-pub(crate) type H3DatagramSender = h3_datagram::datagram_handler::DatagramSender<
-    h3_quinn::datagram::SendDatagramHandler,
-    Bytes,
->;
+pub(crate) type H3DatagramSender =
+    h3_datagram::datagram_handler::DatagramSender<h3_quinn::datagram::SendDatagramHandler, Bytes>;
 pub(crate) type H3DatagramReader =
     h3_datagram::datagram_handler::DatagramReader<h3_quinn::datagram::RecvDatagramHandler>;
 

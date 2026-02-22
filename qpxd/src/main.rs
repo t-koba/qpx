@@ -157,7 +157,12 @@ async fn run(config_paths: Vec<PathBuf>, config: Config) -> Result<()> {
     for reverse_cfg in config.reverse.clone() {
         let rt = runtime.clone();
         let name = reverse_cfg.name.clone();
-        tasks.spawn(async move { (format!("reverse {}", name), reverse::run(reverse_cfg, rt).await) });
+        tasks.spawn(async move {
+            (
+                format!("reverse {}", name),
+                reverse::run(reverse_cfg, rt).await,
+            )
+        });
     }
 
     let reload_rt = runtime.clone();

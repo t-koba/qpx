@@ -9,7 +9,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use tracing::info;
 use wasmtime::*;
-use wasmtime_wasi::preview1::{self, WasiP1Ctx};
+use wasmtime_wasi::p1::{self, WasiP1Ctx};
+use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{I32Exit, WasiCtxBuilder};
 
 pub struct WasmExecutor {
@@ -61,7 +62,7 @@ impl WasmExecutor {
         }
 
         let mut linker = Linker::<WasmStoreData>::new(&engine);
-        preview1::add_to_linker_async(&mut linker, |ctx| &mut ctx.wasi)?;
+        p1::add_to_linker_async(&mut linker, |ctx| &mut ctx.wasi)?;
         let linker = Arc::new(linker);
         let instance_pre = Arc::new(OnceCell::new());
 
@@ -226,15 +227,13 @@ impl Executor for WasmExecutor {
 
             // Build WASI ctx and pipes.
             let mut wasi_builder = build_wasi_ctx(&req, &env);
-            wasi_builder.stdin(wasmtime_wasi::pipe::MemoryInputPipe::new(Bytes::from(
-                stdin_data,
-            )));
+            wasi_builder.stdin(MemoryInputPipe::new(Bytes::from(stdin_data)));
 
-            let stdout_pipe = wasmtime_wasi::pipe::MemoryOutputPipe::new(max_stdout_bytes);
+            let stdout_pipe = MemoryOutputPipe::new(max_stdout_bytes);
             let stdout_pipe_clone = stdout_pipe.clone();
             wasi_builder.stdout(stdout_pipe);
 
-            let stderr_pipe = wasmtime_wasi::pipe::MemoryOutputPipe::new(max_stderr_bytes);
+            let stderr_pipe = MemoryOutputPipe::new(max_stderr_bytes);
             let stderr_pipe_clone = stderr_pipe.clone();
             wasi_builder.stderr(stderr_pipe);
 

@@ -96,5 +96,11 @@ pub async fn send_h3_static_response(
             .body(Body::from(body.to_vec()))?,
         false,
     );
-    send_h3_response(response, request_method, req_stream, max_h3_response_body_bytes).await
+    send_h3_response(
+        response,
+        request_method,
+        req_stream,
+        max_h3_response_body_bytes,
+    )
+    .await
 }

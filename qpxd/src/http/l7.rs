@@ -232,7 +232,10 @@ pub fn handle_max_forwards_in_place(
     None
 }
 
-fn serialize_request_headers_only(request: &Request<Body>, trace_reflect_all_headers: bool) -> String {
+fn serialize_request_headers_only(
+    request: &Request<Body>,
+    trace_reflect_all_headers: bool,
+) -> String {
     let mut out = String::new();
     let version = match request.version() {
         http::Version::HTTP_09 => "HTTP/0.9",

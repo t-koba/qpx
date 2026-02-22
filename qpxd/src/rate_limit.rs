@@ -154,11 +154,14 @@ impl RateLimiter {
         inner.prune(now);
         let key = self.make_key(src_ip);
         let (gen, decision) = {
-            let entry = inner.buckets.entry(key.clone()).or_insert_with(|| BucketEntry {
-                bucket: TokenBucket::new(self.capacity, self.refill_per_sec, now),
-                last_seen: now,
-                gen: 0,
-            });
+            let entry = inner
+                .buckets
+                .entry(key.clone())
+                .or_insert_with(|| BucketEntry {
+                    bucket: TokenBucket::new(self.capacity, self.refill_per_sec, now),
+                    last_seen: now,
+                    gen: 0,
+                });
             entry.last_seen = now;
             entry.gen = entry.gen.wrapping_add(1);
             let gen = entry.gen;
@@ -176,11 +179,14 @@ impl RateLimiter {
         inner.prune(now);
         let key = self.make_key(src_ip);
         let (gen, delay) = {
-            let entry = inner.buckets.entry(key.clone()).or_insert_with(|| BucketEntry {
-                bucket: TokenBucket::new(self.capacity, self.refill_per_sec, now),
-                last_seen: now,
-                gen: 0,
-            });
+            let entry = inner
+                .buckets
+                .entry(key.clone())
+                .or_insert_with(|| BucketEntry {
+                    bucket: TokenBucket::new(self.capacity, self.refill_per_sec, now),
+                    last_seen: now,
+                    gen: 0,
+                });
             entry.last_seen = now;
             entry.gen = entry.gen.wrapping_add(1);
             let gen = entry.gen;

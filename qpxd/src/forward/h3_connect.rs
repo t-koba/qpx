@@ -10,12 +10,12 @@ use crate::upstream::http1::parse_upstream_proxy_endpoint;
 use anyhow::{anyhow, Result};
 use bytes::Buf;
 use bytes::Bytes;
-use percent_encoding::percent_decode_str;
 #[cfg(feature = "mitm")]
 use hyper::service::service_fn;
-use hyper::{Body, Response, StatusCode};
 #[cfg(feature = "mitm")]
 use hyper::Request;
+use hyper::{Body, Response, StatusCode};
+use percent_encoding::percent_decode_str;
 use qpx_core::config::{ActionConfig, ActionKind, ConnectUdpConfig};
 #[cfg(feature = "mitm")]
 use qpx_core::middleware::access_log::{AccessLogContext, AccessLogService};
@@ -121,76 +121,77 @@ pub(super) async fn prepare_h3_connect_request(
         }
     };
 
-    let (host, port, authority_host_for_validation, authority_port_for_validation, auth_uri) = if is_connect_udp {
-        let (host, port) = match parse_connect_udp_target(req_head.uri()) {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                send_h3_static_response(
-                    req_stream,
-                    http1::StatusCode::BAD_REQUEST,
-                    b"invalid CONNECT-UDP target",
-                    &http::Method::CONNECT,
-                    proxy_name,
-                    max_h3_response_body_bytes,
-                )
-                .await?;
-                return Ok(H3ConnectPreparation::Responded);
-            }
+    let (host, port, authority_host_for_validation, authority_port_for_validation, auth_uri) =
+        if is_connect_udp {
+            let (host, port) = match parse_connect_udp_target(req_head.uri()) {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    send_h3_static_response(
+                        req_stream,
+                        http1::StatusCode::BAD_REQUEST,
+                        b"invalid CONNECT-UDP target",
+                        &http::Method::CONNECT,
+                        proxy_name,
+                        max_h3_response_body_bytes,
+                    )
+                    .await?;
+                    return Ok(H3ConnectPreparation::Responded);
+                }
+            };
+            let scheme = match req_head.uri().scheme_str() {
+                Some(scheme) => scheme,
+                None => {
+                    send_h3_static_response(
+                        req_stream,
+                        http1::StatusCode::BAD_REQUEST,
+                        b"missing CONNECT-UDP :scheme",
+                        &http::Method::CONNECT,
+                        proxy_name,
+                        max_h3_response_body_bytes,
+                    )
+                    .await?;
+                    return Ok(H3ConnectPreparation::Responded);
+                }
+            };
+            let default_port = default_port_for_scheme(scheme);
+            let authority = req_head.uri().authority().expect("checked above");
+            let authority_host = authority.host().to_string();
+            let authority_port = authority.port_u16().unwrap_or(default_port);
+            let path = match req_head.uri().path_and_query().map(|pq| pq.as_str()) {
+                Some(path) => path,
+                None => {
+                    send_h3_static_response(
+                        req_stream,
+                        http1::StatusCode::BAD_REQUEST,
+                        b"missing CONNECT-UDP :path",
+                        &http::Method::CONNECT,
+                        proxy_name,
+                        max_h3_response_body_bytes,
+                    )
+                    .await?;
+                    return Ok(H3ConnectPreparation::Responded);
+                }
+            };
+            let auth_uri = format!("{scheme}://{req_authority}{path}");
+            (host, port, authority_host, authority_port, auth_uri)
+        } else {
+            let (host, port) = match parse_connect_authority_required(&req_authority) {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    send_h3_static_response(
+                        req_stream,
+                        http1::StatusCode::BAD_REQUEST,
+                        b"invalid CONNECT authority",
+                        &http::Method::CONNECT,
+                        proxy_name,
+                        max_h3_response_body_bytes,
+                    )
+                    .await?;
+                    return Ok(H3ConnectPreparation::Responded);
+                }
+            };
+            (host.clone(), port, host, port, req_authority.clone())
         };
-        let scheme = match req_head.uri().scheme_str() {
-            Some(scheme) => scheme,
-            None => {
-                send_h3_static_response(
-                    req_stream,
-                    http1::StatusCode::BAD_REQUEST,
-                    b"missing CONNECT-UDP :scheme",
-                    &http::Method::CONNECT,
-                    proxy_name,
-                    max_h3_response_body_bytes,
-                )
-                .await?;
-                return Ok(H3ConnectPreparation::Responded);
-            }
-        };
-        let default_port = default_port_for_scheme(scheme);
-        let authority = req_head.uri().authority().expect("checked above");
-        let authority_host = authority.host().to_string();
-        let authority_port = authority.port_u16().unwrap_or(default_port);
-        let path = match req_head.uri().path_and_query().map(|pq| pq.as_str()) {
-            Some(path) => path,
-            None => {
-                send_h3_static_response(
-                    req_stream,
-                    http1::StatusCode::BAD_REQUEST,
-                    b"missing CONNECT-UDP :path",
-                    &http::Method::CONNECT,
-                    proxy_name,
-                    max_h3_response_body_bytes,
-                )
-                .await?;
-                return Ok(H3ConnectPreparation::Responded);
-            }
-        };
-        let auth_uri = format!("{scheme}://{req_authority}{path}");
-        (host, port, authority_host, authority_port, auth_uri)
-    } else {
-        let (host, port) = match parse_connect_authority_required(&req_authority) {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                send_h3_static_response(
-                    req_stream,
-                    http1::StatusCode::BAD_REQUEST,
-                    b"invalid CONNECT authority",
-                    &http::Method::CONNECT,
-                    proxy_name,
-                    max_h3_response_body_bytes,
-                )
-                .await?;
-                return Ok(H3ConnectPreparation::Responded);
-            }
-        };
-        (host.clone(), port, host, port, req_authority.clone())
-    };
 
     let headers = match h1_headers_to_http(req_head.headers()) {
         Ok(headers) => headers,
@@ -254,26 +255,26 @@ pub(super) async fn prepare_h3_connect_request(
     {
         Ok(decision) => decision,
         Err(err) => {
-                if is_connect_udp {
-                    warn!(
-                        error = ?err,
-                        "forward HTTP/3 CONNECT-UDP policy evaluation failed"
-                    );
-                } else {
-                    warn!(error = ?err, "forward HTTP/3 CONNECT policy evaluation failed");
-                }
-                send_h3_static_response(
-                    req_stream,
-                    http1::StatusCode::BAD_GATEWAY,
-                    state.messages.proxy_error.as_bytes(),
-                    &http::Method::CONNECT,
-                    proxy_name,
-                    max_h3_response_body_bytes,
-                )
-                .await?;
-                return Ok(H3ConnectPreparation::Responded);
+            if is_connect_udp {
+                warn!(
+                    error = ?err,
+                    "forward HTTP/3 CONNECT-UDP policy evaluation failed"
+                );
+            } else {
+                warn!(error = ?err, "forward HTTP/3 CONNECT policy evaluation failed");
             }
-        };
+            send_h3_static_response(
+                req_stream,
+                http1::StatusCode::BAD_GATEWAY,
+                state.messages.proxy_error.as_bytes(),
+                &http::Method::CONNECT,
+                proxy_name,
+                max_h3_response_body_bytes,
+            )
+            .await?;
+            return Ok(H3ConnectPreparation::Responded);
+        }
+    };
 
     let action = match decision {
         ConnectPolicy::RateLimited => {
@@ -461,7 +462,8 @@ pub(super) async fn handle_h3_connect(
             let verify_upstream = tls_inspection
                 .map(|t| {
                     t.verify_upstream
-                        && !state.tls_verify_exception_matches(handler.listener_name.as_ref(), &host)
+                        && !state
+                            .tls_verify_exception_matches(handler.listener_name.as_ref(), &host)
                 })
                 .unwrap_or(true);
             let mitm = match state.mitm.clone() {
@@ -501,7 +503,8 @@ pub(super) async fn handle_h3_connect(
                 }
             };
             let upstream_connected =
-                match connect_tunnel_target(&host, port, upstream.as_deref(), upstream_timeout).await
+                match connect_tunnel_target(&host, port, upstream.as_deref(), upstream_timeout)
+                    .await
                 {
                     Ok(stream) => stream.io,
                     Err(err) => {
@@ -980,7 +983,11 @@ fn parse_connect_udp_target(uri: &http1::Uri) -> Result<(String, u16)> {
         .split('/')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
-    if segments.len() >= 5 && segments[0] == ".well-known" && segments[1] == "masque" && segments[2] == "udp" {
+    if segments.len() >= 5
+        && segments[0] == ".well-known"
+        && segments[1] == "masque"
+        && segments[2] == "udp"
+    {
         let host = percent_decode_str(segments[3])
             .decode_utf8()
             .map_err(|_| anyhow!("invalid CONNECT-UDP target_host encoding"))?;
@@ -992,7 +999,9 @@ fn parse_connect_udp_target(uri: &http1::Uri) -> Result<(String, u16)> {
             .parse()
             .map_err(|_| anyhow!("invalid CONNECT-UDP target_port"))?;
         if port == 0 {
-            return Err(anyhow!("CONNECT-UDP target_port must be in range 1..=65535"));
+            return Err(anyhow!(
+                "CONNECT-UDP target_port must be in range 1..=65535"
+            ));
         }
         return Ok((host.to_string(), port));
     }

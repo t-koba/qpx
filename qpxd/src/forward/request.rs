@@ -4,8 +4,8 @@ use crate::cache::CacheRequestKey;
 use crate::ftp;
 use crate::http::address::{format_authority_host_port, parse_authority_host_port};
 use crate::http::cache_flow::{
-    clone_request_head_for_revalidation, lookup_with_revalidation, process_upstream_response_for_cache,
-    CacheLookupDecision, CacheWritebackContext,
+    clone_request_head_for_revalidation, lookup_with_revalidation,
+    process_upstream_response_for_cache, CacheLookupDecision, CacheWritebackContext,
 };
 use crate::http::common::{
     bad_request_response as bad_request, blocked_response as blocked,
@@ -138,7 +138,9 @@ pub(crate) async fn handle_request_inner(
     )
     .await?;
     let (action, headers, matched_rule) = match policy {
-        ForwardPolicyDecision::Allow(allowed) => (allowed.action, allowed.headers, allowed.matched_rule),
+        ForwardPolicyDecision::Allow(allowed) => {
+            (allowed.action, allowed.headers, allowed.matched_rule)
+        }
         ForwardPolicyDecision::Challenge(chal) => {
             let response = proxy_auth_required(chal, state.messages.proxy_auth_required.as_str());
             return Ok(finalize_response_for_request(
@@ -238,7 +240,9 @@ pub(crate) async fn handle_request_inner(
             _ => 80,
         };
         let host_value = match host.port {
-            Some(port) if port != default_port => format_authority_host_port(host.host.as_str(), port),
+            Some(port) if port != default_port => {
+                format_authority_host_port(host.host.as_str(), port)
+            }
             _ => host.host.clone(),
         };
         req.headers_mut()

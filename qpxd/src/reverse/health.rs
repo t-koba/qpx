@@ -159,7 +159,9 @@ async fn probe_http_plain(url: &Url, cfg: &HttpHealthCheckRuntime) -> Result<()>
         .method(cfg.method.clone())
         .uri(uri)
         .body(Body::empty())?;
-    let resp = crate::http::common::shared_http_client().request(req).await?;
+    let resp = crate::http::common::shared_http_client()
+        .request(req)
+        .await?;
     validate_probe_status(resp.status(), cfg)
 }
 

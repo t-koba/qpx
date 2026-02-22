@@ -2,9 +2,10 @@
 mod imp {
 
     use anyhow::{anyhow, Context, Result};
+    use chrono::Datelike as _;
     use lru::LruCache;
     use rcgen::{
-        BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
     };
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::crypto::ring::sign::any_supported_type;
@@ -15,18 +16,15 @@ mod imp {
     use rustls::{ClientConfig, RootCertStore, ServerConfig};
     use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
     use std::fs;
-    use std::fs::OpenOptions;
     use std::io::BufReader;
-    use std::io::Write;
     use std::num::NonZeroUsize;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
-    use std::time::SystemTime;
     use webpki_roots::TLS_SERVER_ROOTS;
 
     #[derive(Clone)]
     pub struct CaStore {
-        ca_cert: Arc<Certificate>,
+        issuer: Arc<Issuer<'static, KeyPair>>,
         ca_pem: String,
         ca_key_pem: String,
         ca_der: Vec<u8>,
@@ -53,8 +51,7 @@ mod imp {
             let ca_pem = fs::read_to_string(&cert_path)?;
             let ca_key_pem = fs::read_to_string(&key_path)?;
             let key_pair = KeyPair::from_pem(&ca_key_pem)?;
-            let params = CertificateParams::from_ca_cert_pem(&ca_pem, key_pair)?;
-            let ca_cert = Certificate::from_params(params)?;
+            let issuer = Issuer::from_ca_cert_pem(&ca_pem, key_pair)?;
             let ca_der = {
                 let mut reader = BufReader::new(ca_pem.as_bytes());
                 let mut certs = certs(&mut reader)
@@ -63,7 +60,7 @@ mod imp {
                 certs.pop().ok_or_else(|| anyhow!("no CA cert found"))?
             };
             return Ok(CaStore {
-                ca_cert: Arc::new(ca_cert),
+                issuer: Arc::new(issuer),
                 ca_pem,
                 ca_key_pem,
                 ca_der: ca_der.to_vec(),
@@ -71,24 +68,36 @@ mod imp {
             });
         }
 
-        let mut params = CertificateParams::new(Vec::new());
+        let mut params = CertificateParams::new(Vec::<String>::new())?;
         params.distinguished_name = DistinguishedName::new();
         params
             .distinguished_name
             .push(DnType::CommonName, "qpx Proxy CA");
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.not_before = SystemTime::now().into();
-        params.not_after =
-            (SystemTime::now() + std::time::Duration::from_secs(60 * 60 * 24 * 365 * 10)).into();
+        let now = chrono::Utc::now();
+        let not_before = now.date_naive();
+        let not_after = (now + chrono::Duration::days(365 * 10)).date_naive();
+        params.not_before = rcgen::date_time_ymd(
+            not_before.year(),
+            not_before.month() as u8,
+            not_before.day() as u8,
+        );
+        params.not_after = rcgen::date_time_ymd(
+            not_after.year(),
+            not_after.month() as u8,
+            not_after.day() as u8,
+        );
 
-        let ca_cert = Certificate::from_params(params)?;
-        let ca_pem = ca_cert.serialize_pem()?;
-        let ca_key_pem = ca_cert.serialize_private_key_pem();
+        let key_pair = KeyPair::generate()?;
+        let ca_cert = params.self_signed(&key_pair)?;
+        let ca_pem = ca_cert.pem();
+        let ca_key_pem = key_pair.serialize_pem();
         write_cert_file(&cert_path, &ca_pem)?;
         write_private_key_file(&key_path, &ca_key_pem)?;
-        let ca_der = ca_cert.serialize_der()?;
+        let ca_der = ca_cert.der().to_vec();
+        let issuer = Issuer::new(params, key_pair);
         Ok(CaStore {
-            ca_cert: Arc::new(ca_cert),
+            issuer: Arc::new(issuer),
             ca_pem,
             ca_key_pem,
             ca_der,
@@ -105,52 +114,73 @@ mod imp {
         Ok((cert_path, key_path))
     }
 
+    #[cfg(unix)]
     fn write_cert_file(path: &Path, contents: &str) -> Result<()> {
         write_text_file(path, contents, 0o644)
     }
 
+    #[cfg(not(unix))]
+    fn write_cert_file(path: &Path, contents: &str) -> Result<()> {
+        write_text_file(path, contents)
+    }
+
+    #[cfg(unix)]
     fn write_private_key_file(path: &Path, contents: &str) -> Result<()> {
         write_text_file(path, contents, 0o600)?;
         enforce_private_key_permissions(path)?;
         Ok(())
     }
 
-    fn write_text_file(path: &Path, contents: &str, mode: u32) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-            let mut file = OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .mode(mode)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(path)?;
-            file.write_all(contents.as_bytes())?;
-            file.sync_all()?;
-            fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-            Ok(())
-        }
-
-        #[cfg(not(unix))]
-        {
-            fs::write(path, contents)?;
-            Ok(())
-        }
+    #[cfg(not(unix))]
+    fn write_private_key_file(path: &Path, contents: &str) -> Result<()> {
+        write_text_file(path, contents)?;
+        enforce_private_key_permissions(path)?;
+        Ok(())
     }
 
-    fn enforce_private_key_permissions(path: &Path) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    fn write_text_file(path: &Path, contents: &str, mode: u32) -> Result<()> {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-            let metadata = fs::metadata(path)?;
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode != 0o600 {
-                fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-            }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn write_text_file(path: &Path, contents: &str) -> Result<()> {
+        // Best-effort protection: do not write through a symlink on platforms without O_NOFOLLOW.
+        ensure_path_not_symlink(path, "output file")?;
+        fs::write(path, contents)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn enforce_private_key_permissions(path: &Path) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = fs::metadata(path)?;
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn enforce_private_key_permissions(path: &Path) -> Result<()> {
+        // Best-effort: ensure we didn't resolve a symlink path for sensitive key material.
+        ensure_path_not_symlink(path, "private key")?;
         Ok(())
     }
 
@@ -227,19 +257,18 @@ mod imp {
                 sans.push("localhost".to_string());
             }
 
-            let mut params = CertificateParams::new(sans.clone());
+            let mut params = CertificateParams::new(sans.clone())?;
             params.distinguished_name = DistinguishedName::new();
             params
                 .distinguished_name
                 .push(DnType::CommonName, sans[0].clone());
-            let leaf = Certificate::from_params(params)?;
-            let cert_der = leaf.serialize_der_with_signer(&self.ca_cert)?;
-            let key_der = leaf.serialize_private_key_der();
+            let key_pair = KeyPair::generate()?;
+            let leaf = params.signed_by(&key_pair, self.issuer.as_ref())?;
             let chain = vec![
-                CertificateDer::from(cert_der),
+                leaf.der().clone(),
                 CertificateDer::from(self.ca_der.clone()),
             ];
-            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
+            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
             Ok((chain, key))
         }
     }
@@ -310,18 +339,17 @@ mod imp {
         }
 
         fn issue_cert(&self, host: &str) -> Result<Arc<CertifiedKey>> {
-            let mut params = CertificateParams::new(vec![host.to_string()]);
+            let mut params = CertificateParams::new(vec![host.to_string()])?;
             params.distinguished_name = DistinguishedName::new();
             params.distinguished_name.push(DnType::CommonName, host);
-            let leaf = Certificate::from_params(params)?;
-            let cert_der = leaf.serialize_der_with_signer(&self.ca.ca_cert)?;
-            let key_der = leaf.serialize_private_key_der();
+            let key_pair = KeyPair::generate()?;
+            let leaf = params.signed_by(&key_pair, self.ca.issuer.as_ref())?;
 
             let cert_chain = vec![
-                CertificateDer::from(cert_der),
+                leaf.der().clone(),
                 CertificateDer::from(self.ca.ca_der.clone()),
             ];
-            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
+            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
             let signing_key =
                 any_supported_type(&key).map_err(|_| anyhow!("failed to create signing key"))?;
             Ok(Arc::new(CertifiedKey::new(cert_chain, signing_key)))

@@ -23,7 +23,9 @@ pub(super) async fn run_http3_terminate(
     let endpoint = quinn::Endpoint::server(server_config, listen_addr)?;
 
     let semaphore = reverse_rt.runtime.state().connection_semaphore.clone();
-    let handler = ReverseH3Handler { reverse: reverse_rt };
+    let handler = ReverseH3Handler {
+        reverse: reverse_rt,
+    };
     crate::http3::listener::serve_endpoint(
         endpoint,
         listen_addr.port(),
@@ -34,7 +36,9 @@ pub(super) async fn run_http3_terminate(
     .await
 }
 
-pub(super) fn build_reverse_tls_config(reverse: &ReverseConfig) -> Result<quinn::rustls::ServerConfig> {
+pub(super) fn build_reverse_tls_config(
+    reverse: &ReverseConfig,
+) -> Result<quinn::rustls::ServerConfig> {
     let tls = reverse
         .tls
         .as_ref()
@@ -49,8 +53,7 @@ pub(super) fn build_reverse_tls_config(reverse: &ReverseConfig) -> Result<quinn:
     let provider = quinn::rustls::crypto::ring::default_provider();
     let base = quinn::rustls::ServerConfig::builder_with_provider(provider.into())
         .with_protocol_versions(&[&quinn::rustls::version::TLS13])
-        .map_err(|_| anyhow!("failed to configure TLS versions for HTTP/3"))?
-        ;
+        .map_err(|_| anyhow!("failed to configure TLS versions for HTTP/3"))?;
     let tls_config = if let Some(client_ca) = tls
         .client_ca
         .as_deref()
@@ -68,7 +71,8 @@ pub(super) fn build_reverse_tls_config(reverse: &ReverseConfig) -> Result<quinn:
         let verifier = WebPkiClientVerifier::builder(roots.into())
             .build()
             .map_err(|_| anyhow!("invalid reverse.tls.client_ca"))?;
-        base.with_client_cert_verifier(verifier).with_cert_resolver(resolver)
+        base.with_client_cert_verifier(verifier)
+            .with_cert_resolver(resolver)
     } else {
         base.with_no_client_auth().with_cert_resolver(resolver)
     };
@@ -139,8 +143,7 @@ impl H3RequestHandler for ReverseH3Handler {
             conn.dst_port,
             conn.tls_sni.clone(),
         );
-        match super::transport::handle_request(req, self.reverse.clone(), reverse_conn).await
-        {
+        match super::transport::handle_request(req, self.reverse.clone(), reverse_conn).await {
             Ok(resp) => resp,
             Err(impossible) => match impossible {},
         }

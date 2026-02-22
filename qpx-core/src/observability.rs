@@ -366,8 +366,7 @@ fn build_otel_layer(
         let encoded = entries
             .into_iter()
             .map(|(k, v)| {
-                let v = url::form_urlencoded::byte_serialize(v.as_bytes())
-                    .collect::<String>();
+                let v = url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
                 format!("{k}={v}")
             })
             .collect::<Vec<_>>()
@@ -416,8 +415,8 @@ fn build_otel_layer(
     global::set_tracer_provider(provider.clone());
 
     let tracer = global::tracer("qpx");
-    let mut otel_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(cfg.level.clone()));
+    let mut otel_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(cfg.level.clone()));
     otel_filter = otel_filter
         .add_directive("access_log=off".parse::<Directive>()?)
         .add_directive("audit_log=off".parse::<Directive>()?);

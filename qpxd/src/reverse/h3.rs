@@ -17,8 +17,14 @@ pub(crate) async fn run_http3(
 
     let passthrough_targets = http3.passthrough_upstreams.clone();
     if !passthrough_targets.is_empty() {
-        let resolve_timeout =
-            Duration::from_millis(reverse_rt.runtime.state().config.runtime.upstream_http_timeout_ms);
+        let resolve_timeout = Duration::from_millis(
+            reverse_rt
+                .runtime
+                .state()
+                .config
+                .runtime
+                .upstream_http_timeout_ms,
+        );
         info!(
             reverse = %reverse.name,
             listen = %listen_addr,

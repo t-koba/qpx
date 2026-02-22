@@ -3,8 +3,8 @@ use super::h3_connect::{
     build_h3_connect_success_response, prepare_h3_connect_request, H3ConnectPreparation,
 };
 use crate::http3::capsule::{
-    append_capsule_chunk, decode_quic_varint, encode_datagram_capsule, encode_datagram_capsule_value,
-    take_next_capsule,
+    append_capsule_chunk, decode_quic_varint, encode_datagram_capsule,
+    encode_datagram_capsule_value, take_next_capsule,
 };
 use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::listener::H3ConnInfo;
@@ -12,6 +12,7 @@ use crate::http3::quic::build_h3_client_config;
 use crate::http3::server::{send_h3_static_response, H3ServerRequestStream};
 use anyhow::{anyhow, Result};
 use bytes::{Buf, Bytes, BytesMut};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use qpx_core::config::ConnectUdpConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,7 +20,6 @@ use tokio::net::{lookup_host, UdpSocket};
 use tokio::time::{timeout, Duration, Instant};
 use tracing::warn;
 use url::Url;
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 
 const TARGET_HOST_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b':')
@@ -85,31 +85,37 @@ pub(super) async fn handle_h3_connect_udp(
     };
 
     if let Some(upstream) = upstream {
-        let upstream_chain =
-            match open_upstream_connect_udp_stream(&upstream, host.as_str(), port, upstream_timeout).await {
-                Ok(chain) => chain,
-                Err(err) => {
-                    let upstream_target = parse_connect_udp_upstream(&upstream)
-                        .ok()
-                        .map(|(host, port)| format!("{}:{}", host, port))
-                        .unwrap_or_else(|| "<invalid>".to_string());
-                    warn!(
-                        error = ?err,
-                        upstream = %upstream_target,
-                        "failed to establish CONNECT-UDP upstream chain"
-                    );
-                    send_h3_static_response(
-                        &mut req_stream,
-                        http1::StatusCode::BAD_GATEWAY,
-                        state.messages.upstream_connect_udp_failed.as_bytes(),
-                        &http::Method::CONNECT,
-                        proxy_name.as_str(),
-                        state.config.runtime.max_h3_response_body_bytes,
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
+        let upstream_chain = match open_upstream_connect_udp_stream(
+            &upstream,
+            host.as_str(),
+            port,
+            upstream_timeout,
+        )
+        .await
+        {
+            Ok(chain) => chain,
+            Err(err) => {
+                let upstream_target = parse_connect_udp_upstream(&upstream)
+                    .ok()
+                    .map(|(host, port)| format!("{}:{}", host, port))
+                    .unwrap_or_else(|| "<invalid>".to_string());
+                warn!(
+                    error = ?err,
+                    upstream = %upstream_target,
+                    "failed to establish CONNECT-UDP upstream chain"
+                );
+                send_h3_static_response(
+                    &mut req_stream,
+                    http1::StatusCode::BAD_GATEWAY,
+                    state.messages.upstream_connect_udp_failed.as_bytes(),
+                    &http::Method::CONNECT,
+                    proxy_name.as_str(),
+                    state.config.runtime.max_h3_response_body_bytes,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
         let response =
             build_h3_connect_success_response(proxy_name.as_str(), &http::Method::CONNECT, true)?;
@@ -230,8 +236,7 @@ pub(super) async fn handle_h3_connect_udp(
         build_h3_connect_success_response(proxy_name.as_str(), &http::Method::CONNECT, true)?;
     req_stream.send_response(response).await?;
 
-    if let Err(err) =
-        relay_h3_connect_udp_stream(req_stream, udp, connect_udp_cfg, datagrams).await
+    if let Err(err) = relay_h3_connect_udp_stream(req_stream, udp, connect_udp_cfg, datagrams).await
     {
         warn!(error = ?err, "forward HTTP/3 CONNECT-UDP relay failed");
     }
@@ -296,10 +301,7 @@ async fn open_upstream_connect_udp_stream(
         format!("{}:{}", upstream_host, upstream_port)
     };
     let encoded_host = utf8_percent_encode(target_host, TARGET_HOST_ENCODE_SET).to_string();
-    let path = format!(
-        "/.well-known/masque/udp/{}/{}/",
-        encoded_host, target_port
-    );
+    let path = format!("/.well-known/masque/udp/{}/{}/", encoded_host, target_port);
     let uri = http1::Uri::builder()
         .scheme("https")
         .authority(proxy_authority.as_str())

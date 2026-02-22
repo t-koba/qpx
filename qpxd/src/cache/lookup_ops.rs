@@ -3,7 +3,7 @@ use super::entry::{not_modified_from_envelope, response_from_envelope};
 use super::freshness::{conditional_not_modified, current_age_secs};
 use super::types::{
     CacheBackend, CacheEntryDisposition, CacheRequestKey, CachedResponseEnvelope, LookupOutcome,
-    RequestDirectives, RevalidationState, ResponseDirectives, CACHE_HEADER,
+    RequestDirectives, ResponseDirectives, RevalidationState, CACHE_HEADER,
     CACHE_WARNING_REVALIDATION_FAILED,
 };
 use super::util::{cache_namespace, header_value, load_variant_index, now_millis};
@@ -192,9 +192,10 @@ pub fn maybe_build_stale_if_error_response(state: &RevalidationState) -> Option<
         return None;
     }
     let mut response = response_from_envelope(&state.envelope, now, "HIT", true).ok()?;
-    response
-        .headers_mut()
-        .append(WARNING, http::HeaderValue::from_static(CACHE_WARNING_REVALIDATION_FAILED));
+    response.headers_mut().append(
+        WARNING,
+        http::HeaderValue::from_static(CACHE_WARNING_REVALIDATION_FAILED),
+    );
     Some(response)
 }
 

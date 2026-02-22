@@ -216,7 +216,7 @@ pub async fn revalidate_not_modified(
                 .delete(state.namespace.as_str(), state.variant_key.as_str())
                 .await;
         }
-    let volatile = CachedResponseEnvelope {
+        let volatile = CachedResponseEnvelope {
             status: state.envelope.status,
             headers: merged_headers,
             body_b64: state.envelope.body_b64,

@@ -202,6 +202,16 @@ run_forward_suite() {
   local backend_pid
   serve_once 19091 "$response_file" "$capture_file"
   backend_pid="$LAST_PID"
+  # Forward may perform background connections (e.g. proxy readiness checks) that can consume our
+  # one-shot backend stub. If that happens, restart it before issuing the request.
+  for _ in {1..5}; do
+    sleep 0.1
+    if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
+      serve_once 19091 "$response_file" "$capture_file"
+      backend_pid="$LAST_PID"
+      break
+    fi
+  done
   status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 --noproxy '' -x http://127.0.0.1:18150 \
     -o "$TMP_DIR/forward_headers.body" \
     -D "$TMP_DIR/forward_headers.headers" \
