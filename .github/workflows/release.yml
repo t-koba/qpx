@@ -39,7 +39,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cargo-about
-        uses: taiki-e/install-action@cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
 
       - name: Build
         run: |

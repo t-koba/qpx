@@ -9,8 +9,20 @@ STATE_DIR="$TMP_DIR/state"
 LOG_DIR="$TMP_DIR/logs"
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 CURL_MAX_TIME_SEC="${CURL_MAX_TIME_SEC:-8}"
+CURL_RETRY_COUNT="${CURL_RETRY_COUNT:-12}"
+CURL_RETRY_DELAY_SEC="${CURL_RETRY_DELAY_SEC:-0}"
+CURL_RETRY_MAX_TIME_SEC="${CURL_RETRY_MAX_TIME_SEC:-12}"
 WAIT_PID_TIMEOUT_SEC="${WAIT_PID_TIMEOUT_SEC:-10}"
 NC_TIMEOUT_SEC="${NC_TIMEOUT_SEC:-10}"
+
+# Retry transient curl failures (e.g. empty reply) to reduce CI flakiness.
+CURL_RETRY_ARGS=(
+  --retry "$CURL_RETRY_COUNT"
+  --retry-all-errors
+  --retry-connrefused
+  --retry-delay "$CURL_RETRY_DELAY_SEC"
+  --retry-max-time "$CURL_RETRY_MAX_TIME_SEC"
+)
 
 PIDS=()
 LAST_PID=""
@@ -188,7 +200,7 @@ run_forward_suite() {
   qpx_pid="$LAST_PID"
 
   local status
-  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 --noproxy '' -x http://127.0.0.1:18150 \
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" --noproxy '' -x http://127.0.0.1:18150 \
     -o "$TMP_DIR/forward_block.body" \
     -D "$TMP_DIR/forward_block.headers" \
     -w '%{http_code}' \
@@ -212,7 +224,7 @@ run_forward_suite() {
       break
     fi
   done
-  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 --noproxy '' -x http://127.0.0.1:18150 \
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" --noproxy '' -x http://127.0.0.1:18150 \
     -o "$TMP_DIR/forward_headers.body" \
     -D "$TMP_DIR/forward_headers.headers" \
     -w '%{http_code}' \
@@ -225,7 +237,7 @@ run_forward_suite() {
   normalize_headers "$capture_file" "$capture_file.norm"
   assert_file_contains "$capture_file.norm" '^x-test-proxy: qpx-e2e$' "forward request header rewrite"
 
-  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 --noproxy '' -x http://127.0.0.1:18150 \
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" --noproxy '' -x http://127.0.0.1:18150 \
     -o "$TMP_DIR/forward_auth_challenge.body" \
     -D "$TMP_DIR/forward_auth_challenge.headers" \
     -w '%{http_code}' \
@@ -239,7 +251,7 @@ run_forward_suite() {
   write_http_response "$response_file" "AUTH_OK"
   serve_once 19091 "$response_file" "$capture_file"
   backend_pid="$LAST_PID"
-  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 --noproxy '' -x http://127.0.0.1:18150 \
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" --noproxy '' -x http://127.0.0.1:18150 \
     --proxy-user tester:secret \
     -o "$TMP_DIR/forward_auth_ok.body" \
     -D "$TMP_DIR/forward_auth_ok.headers" \
@@ -278,7 +290,7 @@ run_reverse_suite() {
   done
 
   local status
-  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 \
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" \
     -H 'Host: reverse.local' \
     -o "$TMP_DIR/reverse.body" \
     -D "$TMP_DIR/reverse.headers" \
@@ -302,7 +314,7 @@ run_transparent_suite() {
   qpx_pid="$LAST_PID"
 
   local status
-  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 \
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" \
     -H 'Host: blocked.invalid' \
     -o "$TMP_DIR/transparent_block.body" \
     -D "$TMP_DIR/transparent_block.headers" \
@@ -318,7 +330,7 @@ run_transparent_suite() {
   serve_once 19093 "$response_file" "$capture_file"
   backend_pid="$LAST_PID"
 
-  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 \
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" \
     -H 'Host: 127.0.0.1:19093' \
     -o "$TMP_DIR/transparent_trace.body" \
     -D "$TMP_DIR/transparent_trace.headers" \
