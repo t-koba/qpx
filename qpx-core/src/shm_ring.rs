@@ -464,7 +464,6 @@ impl Drop for ShmDoorbell {
 #[cfg(windows)]
 struct ShmDoorbell {
     handle: windows_sys::Win32::Foundation::HANDLE,
-    name: Vec<u16>,
 }
 
 #[cfg(windows)]
@@ -480,13 +479,13 @@ impl ShmDoorbell {
             .collect();
         // Auto-reset event (manual_reset = FALSE) with initial_state = FALSE.
         let handle = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
-        if handle == 0 {
+        if handle.is_null() {
             return Err(anyhow!(
                 "failed to create/open shared memory doorbell event: {}",
                 std::io::Error::last_os_error()
             ));
         }
-        Ok(Self { handle, name })
+        Ok(Self { handle })
     }
 
     fn signal(&self) -> Result<()> {
@@ -504,8 +503,10 @@ impl ShmDoorbell {
         use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
         use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
 
-        let handle = self.handle;
+        // HANDLE is a raw pointer type and not Send; capture as usize for spawn_blocking.
+        let handle = self.handle as usize;
         tokio::task::spawn_blocking(move || {
+            let handle = handle as windows_sys::Win32::Foundation::HANDLE;
             let rc = unsafe { WaitForSingleObject(handle, INFINITE) };
             if rc != WAIT_OBJECT_0 {
                 return Err(anyhow!(
@@ -536,6 +537,7 @@ impl Drop for ShmDoorbell {
 
 fn open_shm_file(path: &Path) -> Result<File> {
     if let Some(parent) = path.parent() {
+        #[cfg(unix)]
         let existed = parent.exists();
         ensure_not_symlink_under_default_dir(parent, "shared memory directory")?;
         ensure_not_symlink(parent, "shared memory directory")?;
