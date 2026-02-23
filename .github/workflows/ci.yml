@@ -55,8 +55,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y netcat-openbsd lsof curl
-      - name: generate Cargo.lock
-        run: cargo generate-lockfile
       - name: build qpxd (no warnings)
         env:
           RUSTFLAGS: "-D warnings"
@@ -81,9 +79,6 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: generate Cargo.lock
-        run: cargo generate-lockfile
 
       - name: build (no warnings)
         env:
@@ -111,9 +106,6 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: generate Cargo.lock
-        run: cargo generate-lockfile
 
       - name: clippy (all valid feature combinations)
         env:
@@ -197,8 +189,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: generate Cargo.lock
-        run: cargo generate-lockfile
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
