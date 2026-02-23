@@ -263,7 +263,7 @@ impl Executor for CgiExecutor {
                     if total > limit {
                         return Err(anyhow!("cgi {} exceeded size limit", label));
                     }
-                    // Zero-copy: freeze the just-read bytes and send them downstream.
+                    // No extra copy: freeze the just-read bytes and send them downstream.
                     tx.send(buf.split_to(n).freeze())
                         .await
                         .map_err(|_| anyhow!("cgi {} receiver dropped", label))?;

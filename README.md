@@ -1,6 +1,6 @@
 # qpx
 
-Async HTTP proxy server in Rust. Supports forward, reverse, and transparent proxy modes with HTTP/1.1, HTTP/2, HTTP/3, TLS inspection (MITM), and a function executor (`qpxf`) for CGI scripts and WASM modules over QPX-IPC.
+Quick HTTP proxy and server in Rust. Supports forward, reverse, and transparent proxy modes with HTTP/1.1, HTTP/2, HTTP/3, TLS inspection (MITM), and a function executor for CGI scripts and WASM modules.
 
 ## Features
 
@@ -82,7 +82,7 @@ The capture pipeline consists of three components:
 
 | Binary | Role |
 |--------|------|
-| `qpxd` (daemon) | Traffic processing and TLS termination/decryption; writes capture events to a shared-memory ring (does not generate PCAP) |
+| `qpxd` (daemon) | Traffic processing and TLS termination/decryption; writes capture events to a shared-memory ring |
 | `qpxr` (reader) | Reads the shared-memory ring written by `qpxd`, generates PCAPNG files, and serves live/history streams |
 | `qpxc` (client) | Connects to `qpxr` and relays PCAPNG to Wireshark (extcap) or a simple packet viewer |
 

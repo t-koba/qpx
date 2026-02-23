@@ -76,7 +76,7 @@ Shared building blocks that `qpxd`, `qpxr`, and `qpxc` all depend on. This crate
 - `tls.rs`: TLS helpers: CA management and MITM certificate generation (feature `tls-rustls`); stub implementation when `tls-rustls` is disabled.
 - `observability.rs`: logging initialization (tracing subscriber), Prometheus metrics endpoint bootstrap, and optional OpenTelemetry tracing (OTLP exporter).
 - `exporter.rs`: capture event schema — shared between `qpxd` (producer) and `qpxr` (consumer) for serialization compatibility.
-- `shm_ring.rs`: shared-memory ring buffer (`ShmRingBuffer`) backed by a memory-mapped file (`memmap2`). Used by `qpxd` to produce capture events and by `qpxr` to consume them. Also used by QPX-IPC for zero-copy request/response body transfer between `qpxd` and `qpxf`.
+- `shm_ring.rs`: shared-memory ring buffer (`ShmRingBuffer`) backed by a memory-mapped file (`memmap2`). Used by `qpxd` to produce capture events and by `qpxr` to consume them. Also used by QPX-IPC for shared-memory request/response body transfer between `qpxd` and `qpxf` (bodies are copied into/out of the ring).
 - `ipc/meta.rs`: QPX-IPC request/response metadata types (`IpcRequestMeta`, `IpcResponseMeta`) — JSON-serialized header frame sent before body data.
 - `ipc/protocol.rs`: QPX-IPC framing helpers (`read_frame`, `write_frame`) — length-prefixed JSON frame encoding shared by `qpxd` (client) and `qpxf` (server).
 

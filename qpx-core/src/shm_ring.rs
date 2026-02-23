@@ -463,7 +463,9 @@ impl Drop for ShmDoorbell {
 
 #[cfg(windows)]
 struct ShmDoorbell {
-    handle: windows_sys::Win32::Foundation::HANDLE,
+    // Store as usize so ShmDoorbell/ShmRingBuffer remain Send+Sync on Windows.
+    // (windows-sys defines HANDLE as *mut c_void, which is not Send/Sync.)
+    handle: usize,
 }
 
 #[cfg(windows)]
@@ -485,12 +487,15 @@ impl ShmDoorbell {
                 std::io::Error::last_os_error()
             ));
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle: handle as usize,
+        })
     }
 
     fn signal(&self) -> Result<()> {
         use windows_sys::Win32::System::Threading::SetEvent;
-        if unsafe { SetEvent(self.handle) } == 0 {
+        let handle = self.handle as windows_sys::Win32::Foundation::HANDLE;
+        if unsafe { SetEvent(handle) } == 0 {
             return Err(anyhow!(
                 "failed to signal shared memory doorbell event: {}",
                 std::io::Error::last_os_error()
@@ -503,8 +508,7 @@ impl ShmDoorbell {
         use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
         use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
 
-        // HANDLE is a raw pointer type and not Send; capture as usize for spawn_blocking.
-        let handle = self.handle as usize;
+        let handle = self.handle;
         tokio::task::spawn_blocking(move || {
             let handle = handle as windows_sys::Win32::Foundation::HANDLE;
             let rc = unsafe { WaitForSingleObject(handle, INFINITE) };
@@ -529,8 +533,9 @@ impl ShmDoorbell {
 #[cfg(windows)]
 impl Drop for ShmDoorbell {
     fn drop(&mut self) {
+        let handle = self.handle as windows_sys::Win32::Foundation::HANDLE;
         unsafe {
-            let _ = windows_sys::Win32::Foundation::CloseHandle(self.handle);
+            let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
         }
     }
 }
