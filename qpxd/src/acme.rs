@@ -519,6 +519,10 @@ mod imp {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
         }
+        #[cfg(not(unix))]
+        {
+            let _ = mode;
+        }
         Ok(())
     }
 
@@ -542,6 +546,7 @@ mod imp {
         }
         #[cfg(not(unix))]
         {
+            let _ = mode;
             // Best-effort protection: avoid following symlinks on platforms without O_NOFOLLOW.
             if let Ok(meta) = fs::symlink_metadata(path) {
                 if meta.file_type().is_symlink() {
