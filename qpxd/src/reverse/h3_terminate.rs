@@ -19,7 +19,11 @@ pub(super) async fn run_http3_terminate(
     reverse_rt: super::ReloadableReverse,
 ) -> Result<()> {
     let tls_config = build_reverse_tls_config(&reverse)?;
-    let server_config = build_h3_server_config_from_tls(tls_config, 1024, 1024)?;
+    let runtime_cfg = reverse_rt.runtime.state().config.runtime.clone();
+    let max_bidi = runtime_cfg
+        .max_h3_streams_per_connection
+        .min(u32::MAX as usize) as u32;
+    let server_config = build_h3_server_config_from_tls(tls_config, max_bidi.max(1), 1024)?;
     let endpoint = quinn::Endpoint::server(server_config, listen_addr)?;
 
     let semaphore = reverse_rt.runtime.state().connection_semaphore.clone();
@@ -82,28 +86,35 @@ pub(super) fn build_reverse_tls_config(
 #[derive(Debug)]
 struct QuicSniResolver {
     certs: HashMap<String, Arc<quinn::rustls::sign::CertifiedKey>>,
+    acme_snis: std::collections::HashSet<String>,
 }
 
 impl QuicSniResolver {
     fn new(tls: &qpx_core::config::ReverseTlsConfig) -> Result<Self> {
         let mut certs = HashMap::new();
+        let mut acme_snis = std::collections::HashSet::new();
         for cert in &tls.certificates {
             let cert_path = cert.cert.as_deref().unwrap_or("").trim();
-            if cert_path.is_empty() {
-                return Err(anyhow!("reverse.tls.certificates[].cert must not be empty"));
-            }
             let key_path = cert.key.as_deref().unwrap_or("").trim();
-            if key_path.is_empty() {
-                return Err(anyhow!("reverse.tls.certificates[].key must not be empty"));
+            if cert_path.is_empty() && key_path.is_empty() {
+                acme_snis.insert(cert.sni.to_ascii_lowercase());
+            } else {
+                if cert_path.is_empty() {
+                    return Err(anyhow!("reverse.tls.certificates[].cert must not be empty"));
+                }
+                if key_path.is_empty() {
+                    return Err(anyhow!("reverse.tls.certificates[].key must not be empty"));
+                }
+                let chain = load_cert_chain(Path::new(cert_path))?;
+                let key = load_private_key(Path::new(key_path))?;
+                let signing_key = quinn::rustls::crypto::ring::sign::any_supported_type(&key)
+                    .map_err(|_| anyhow!("unsupported key"))?;
+                let certified =
+                    Arc::new(quinn::rustls::sign::CertifiedKey::new(chain, signing_key));
+                certs.insert(cert.sni.to_ascii_lowercase(), certified);
             }
-            let chain = load_cert_chain(Path::new(cert_path))?;
-            let key = load_private_key(Path::new(key_path))?;
-            let signing_key = quinn::rustls::crypto::ring::sign::any_supported_type(&key)
-                .map_err(|_| anyhow!("unsupported key"))?;
-            let certified = Arc::new(quinn::rustls::sign::CertifiedKey::new(chain, signing_key));
-            certs.insert(cert.sni.to_ascii_lowercase(), certified);
         }
-        Ok(Self { certs })
+        Ok(Self { certs, acme_snis })
     }
 }
 
@@ -112,9 +123,14 @@ impl quinn::rustls::server::ResolvesServerCert for QuicSniResolver {
         &self,
         client_hello: quinn::rustls::server::ClientHello<'_>,
     ) -> Option<Arc<quinn::rustls::sign::CertifiedKey>> {
-        client_hello
-            .server_name()
-            .and_then(|name| self.certs.get(&name.to_ascii_lowercase()).cloned())
+        let name = client_hello.server_name()?.to_ascii_lowercase();
+        if let Some(key) = self.certs.get(&name) {
+            return Some(key.clone());
+        }
+        if self.acme_snis.contains(&name) {
+            return crate::acme::quic_cert_store().and_then(|store| store.get(&name));
+        }
+        None
     }
 }
 
@@ -131,6 +147,7 @@ impl H3RequestHandler for ReverseH3Handler {
         H3Limits {
             max_request_body_bytes: limits.max_h3_request_body_bytes,
             max_response_body_bytes: limits.max_h3_response_body_bytes,
+            max_concurrent_streams_per_connection: limits.max_h3_streams_per_connection,
             read_timeout: Duration::from_millis(limits.h3_read_timeout_ms),
             proxy_name: Arc::<str>::from(state.config.identity.proxy_name.as_str()),
             error_body: Arc::<str>::from(state.messages.reverse_error.as_str()),

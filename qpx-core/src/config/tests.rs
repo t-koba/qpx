@@ -325,17 +325,17 @@ listeners:
 }
 
 #[test]
-fn load_config_rejects_invalid_exporter_endpoint() {
+fn load_config_allows_empty_exporter_shm_path() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");
-    let cfg = dir.join("invalid-exporter-endpoint.yaml");
+    let cfg = dir.join("invalid-exporter-shm-path.yaml");
     fs::write(
         &cfg,
         r#"
 version: 1
 exporter:
   enabled: true
-  endpoint: "not-an-endpoint"
+  shm_path: ""
 listeners:
   - name: forward
     mode: forward
@@ -344,45 +344,13 @@ listeners:
 "#,
     )
     .expect("write");
-    let err = load_config(&cfg).expect_err("must fail");
+    let loaded = load_config(&cfg).expect("load config");
     fs::remove_dir_all(&dir).ok();
-    assert!(
-        err.to_string().contains("exporter.endpoint is invalid"),
-        "unexpected error: {err}"
-    );
+    assert!(loaded.exporter.is_some());
 }
 
 #[test]
-fn load_config_rejects_non_loopback_exporter_without_tls_by_default() {
-    let dir = unique_tmp_dir();
-    fs::create_dir_all(&dir).expect("mkdir");
-    let cfg = dir.join("non-loopback-exporter-insecure.yaml");
-    fs::write(
-        &cfg,
-        r#"
-version: 1
-exporter:
-  enabled: true
-  endpoint: "10.0.0.1:19100"
-listeners:
-  - name: forward
-    mode: forward
-    listen: "127.0.0.1:18080"
-    default_action: { type: direct }
-"#,
-    )
-    .expect("write");
-    let err = load_config(&cfg).expect_err("must fail");
-    fs::remove_dir_all(&dir).ok();
-    assert!(
-        err.to_string()
-            .contains("exporter.endpoint is not loopback"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn load_config_allows_disabled_exporter_without_tls() {
+fn load_config_allows_disabled_exporter_with_empty_shm_path() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");
     let cfg = dir.join("disabled-exporter.yaml");
@@ -392,7 +360,7 @@ fn load_config_allows_disabled_exporter_without_tls() {
 version: 1
 exporter:
   enabled: false
-  endpoint: "10.0.0.1:19100"
+  shm_path: ""
 listeners:
   - name: forward
     mode: forward

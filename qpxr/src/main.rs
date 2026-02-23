@@ -11,8 +11,10 @@ use pcap_file::pcapng::blocks::interface_description::{
 use pcap_file::pcapng::blocks::section_header::{SectionHeaderBlock, SectionHeaderOption};
 use pcap_file::pcapng::Block;
 use pcap_file::{DataLink, Endianness};
+
 use qpx_core::exporter::STREAM_PREFACE_LINE;
-use qpx_core::exporter::{CaptureDirection, CaptureEvent, CapturePlane, EVENT_PREFACE_LINE};
+use qpx_core::exporter::{CaptureDirection, CaptureEvent, CapturePlane};
+use qpx_core::shm_ring::ShmRingBuffer;
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
@@ -27,7 +29,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, Mutex, Semaphore};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock, Semaphore};
+use tokio::task::spawn_blocking;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
@@ -56,7 +59,6 @@ type TlsAcceptor = NoTlsAcceptor;
 
 const DEFAULT_HISTORY_SECS: u64 = 3600;
 const DEFAULT_MAX_CONTROL_LINE_BYTES: usize = 64 * 1024;
-const DEFAULT_MAX_EVENT_LINE_BYTES: usize = 512 * 1024;
 const DEFAULT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_SEQUENCE_KEYS: usize = 100_000;
 const SEQUENCE_GC_INTERVAL_NANOS: u64 = 5_000_000_000;
@@ -64,14 +66,14 @@ const SEQUENCE_GC_INTERVAL_NANOS: u64 = 5_000_000_000;
 #[derive(Parser)]
 #[command(name = "qpxr", about = "qpx capture reader")]
 struct Cli {
-    #[arg(short = 'e', long, default_value = "127.0.0.1:19100")]
-    event_listen: String,
+    #[arg(long)]
+    shm_path: Option<String>,
+    #[arg(long, default_value_t = 16)]
+    shm_size_mb: usize,
+
     #[arg(short = 's', long, default_value = "127.0.0.1:19101")]
     stream_listen: String,
 
-    /// Allowlist for qpxd event ingest (repeatable CIDR)
-    #[arg(short = 'E', long, value_name = "CIDR")]
-    event_allow: Vec<String>,
     /// Allowlist for qpxc stream clients (repeatable CIDR)
     #[arg(short = 'S', long, value_name = "CIDR")]
     stream_allow: Vec<String>,
@@ -112,8 +114,6 @@ struct Cli {
     max_connections: usize,
     #[arg(long, default_value_t = 10_000)]
     handshake_timeout_ms: u64,
-    #[arg(long, default_value_t = 300_000)]
-    event_read_timeout_ms: u64,
 
     #[arg(short = 'd', long)]
     save_dir: Option<PathBuf>,
@@ -125,15 +125,15 @@ struct Cli {
     history_secs: u64,
     #[arg(long, default_value_t = DEFAULT_MAX_CONTROL_LINE_BYTES)]
     max_control_line_bytes: usize,
-    #[arg(long, default_value_t = DEFAULT_MAX_EVENT_LINE_BYTES)]
-    max_event_line_bytes: usize,
     #[arg(short = 'p', long, default_value_t = DEFAULT_MAX_PAYLOAD_BYTES)]
     max_payload_bytes: usize,
 }
 
 #[derive(Clone)]
 struct ExporterHub {
-    state: Arc<Mutex<HubState>>,
+    sequences: Arc<Mutex<SequencesState>>,
+    history: Arc<RwLock<HistoryState>>,
+    file_sink: Option<mpsc::Sender<Bytes>>,
     live_tx: broadcast::Sender<Bytes>,
     history_limit_bytes: usize,
     history_limit_age: Duration,
@@ -141,12 +141,14 @@ struct ExporterHub {
     max_payload_bytes: usize,
 }
 
-struct HubState {
+struct SequencesState {
     sequences: HashMap<SequenceKey, SequenceState>,
     sequences_last_gc_unix_nanos: u64,
+}
+
+struct HistoryState {
     history: VecDeque<HistoryItem>,
     history_bytes: usize,
-    file_sink: Option<RotatingFileSink>,
 }
 
 struct HistoryItem {
@@ -174,6 +176,7 @@ struct RotatingFileSink {
     index: u64,
     file: File,
     preface: Arc<Vec<u8>>,
+    blocks_since_flush: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -198,10 +201,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let event_listen: SocketAddr = cli.event_listen.parse()?;
     let stream_listen: SocketAddr = cli.stream_listen.parse()?;
-
-    let event_allow = parse_allowlist(&cli.event_allow)?;
     let stream_allow = parse_allowlist(&cli.stream_allow)?;
 
     let token = match cli.token_env.as_deref() {
@@ -211,10 +211,8 @@ async fn main() -> Result<()> {
 
     let tls = build_tls_acceptor(&cli)?;
     validate_security_posture(&SecurityPosture {
-        event_listen,
         stream_listen,
         tls_enabled: tls.is_some(),
-        event_allow_configured: !event_allow.is_empty(),
         stream_allow_configured: !stream_allow.is_empty(),
         token_enabled: token.is_some(),
         #[cfg(feature = "tls-rustls")]
@@ -232,15 +230,20 @@ async fn main() -> Result<()> {
         cli.max_payload_bytes.max(1),
     )?;
 
-    let event_listener = TcpListener::bind(event_listen)
-        .await
-        .with_context(|| format!("failed to bind event listener: {}", event_listen))?;
+    let shm_path = cli.shm_path.unwrap_or_else(|| {
+        ShmRingBuffer::default_capture_shm_path()
+            .to_string_lossy()
+            .into_owned()
+    });
+    let shm_size_bytes = cli.shm_size_mb * 1024 * 1024;
+    let ring = ShmRingBuffer::create_or_open(&shm_path, shm_size_bytes)?;
+
     let stream_listener = TcpListener::bind(stream_listen)
         .await
         .with_context(|| format!("failed to bind stream listener: {}", stream_listen))?;
 
     info!(
-        event_listen = %event_listen,
+        shm_path = %shm_path,
         stream_listen = %stream_listen,
         tls = %tls.is_some(),
         "qpxr started"
@@ -248,26 +251,10 @@ async fn main() -> Result<()> {
 
     let tls_accept_timeout = Duration::from_millis(cli.tls_accept_timeout_ms.max(1));
     let max_control = cli.max_control_line_bytes.max(1);
-    let max_event = cli.max_event_line_bytes.max(1);
     let handshake_timeout = Duration::from_millis(cli.handshake_timeout_ms.max(1));
-    let event_read_timeout = Duration::from_millis(cli.event_read_timeout_ms.max(1));
     let connections = Arc::new(Semaphore::new(cli.max_connections.max(1)));
 
-    let event_task = tokio::spawn(run_event_accept_loop(
-        event_listener,
-        hub.clone(),
-        EventAcceptConfig {
-            allow: event_allow,
-            token: token.clone(),
-            tls: tls.clone(),
-            tls_accept_timeout,
-            max_control_line_bytes: max_control,
-            max_event_line_bytes: max_event,
-            handshake_timeout,
-            event_read_timeout,
-            connections: connections.clone(),
-        },
-    ));
+    let event_task = tokio::spawn(run_event_ingest_loop(ring, hub.clone()));
     let stream_task = tokio::spawn(run_stream_accept_loop(
         stream_listener,
         hub,
@@ -306,10 +293,8 @@ fn load_required_env(name: &str) -> Result<String> {
 }
 
 struct SecurityPosture {
-    event_listen: SocketAddr,
     stream_listen: SocketAddr,
     tls_enabled: bool,
-    event_allow_configured: bool,
     stream_allow_configured: bool,
     token_enabled: bool,
     #[cfg(feature = "tls-rustls")]
@@ -318,10 +303,7 @@ struct SecurityPosture {
 }
 
 fn validate_security_posture(sp: &SecurityPosture) -> Result<()> {
-    for (label, addr, allow) in [
-        ("event", sp.event_listen, sp.event_allow_configured),
-        ("stream", sp.stream_listen, sp.stream_allow_configured),
-    ] {
+    for (label, addr, allow) in [("stream", sp.stream_listen, sp.stream_allow_configured)] {
         if addr.ip().is_loopback() {
             continue;
         }
@@ -462,22 +444,33 @@ impl ExporterHub {
         max_payload_bytes: usize,
     ) -> Result<Self> {
         let file_sink = match save_dir {
-            Some(dir) => Some(RotatingFileSink::new(
-                dir,
-                rotate_bytes.max(1),
-                pcap_preface.clone(),
-            )?),
+            Some(dir) => {
+                const FILE_SINK_QUEUE: usize = 4096;
+                let sink = RotatingFileSink::new(dir, rotate_bytes.max(1), pcap_preface.clone())?;
+                let (tx, mut rx) = mpsc::channel::<Bytes>(FILE_SINK_QUEUE);
+                spawn_blocking(move || {
+                    let mut sink = sink;
+                    while let Some(block) = rx.blocking_recv() {
+                        if let Err(err) = sink.write_block(block.as_ref()) {
+                            warn!(error = ?err, "failed to persist pcapng block");
+                        }
+                    }
+                });
+                Some(tx)
+            }
             None => None,
         };
         let (live_tx, _) = broadcast::channel::<Bytes>(4096);
         Ok(Self {
-            state: Arc::new(Mutex::new(HubState {
+            sequences: Arc::new(Mutex::new(SequencesState {
                 sequences: HashMap::new(),
                 sequences_last_gc_unix_nanos: 0,
+            })),
+            history: Arc::new(RwLock::new(HistoryState {
                 history: VecDeque::new(),
                 history_bytes: 0,
-                file_sink,
             })),
+            file_sink,
             live_tx,
             history_limit_bytes,
             history_limit_age,
@@ -486,53 +479,20 @@ impl ExporterHub {
         })
     }
 
-    async fn ingest(&self, event: CaptureEvent) {
-        let payload = match event.payload() {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                warn!(error = ?err, "invalid payload in capture event");
-                return;
+    async fn publish_encoded_block(&self, ts_unix_nanos: u64, encoded: Bytes) {
+        if let Some(tx) = self.file_sink.as_ref() {
+            if let Err(err) = tx.send(encoded.clone()).await {
+                warn!(error = ?err, "pcapng file sink disconnected");
             }
-        };
-        if payload.len() > self.max_payload_bytes {
-            warn!(
-                payload_len = payload.len(),
-                max_payload_bytes = self.max_payload_bytes,
-                "payload too large; dropped"
-            );
-            return;
         }
-
-        let encoded = {
-            let mut state = self.state.lock().await;
-            let packet = match build_packet_from_event(&event, &payload, &mut state.sequences) {
-                Some(packet) => packet,
-                None => return,
-            };
-            self.gc_sequences_locked(&mut state, event.timestamp_unix_nanos);
-            let interface_id = interface_id(event.plane.clone());
-            let encoded =
-                match encode_enhanced_packet(interface_id, event.timestamp_unix_nanos, packet) {
-                    Ok(bytes) => bytes,
-                    Err(err) => {
-                        warn!(error = ?err, "failed to encode enhanced packet");
-                        return;
-                    }
-                };
-            let encoded = Bytes::from(encoded);
-
-            if let Some(file_sink) = state.file_sink.as_mut() {
-                if let Err(err) = file_sink.write_block(encoded.as_ref()) {
-                    warn!(error = ?err, "failed to persist pcapng block");
-                }
-            }
-            self.push_history_locked(&mut state, event.timestamp_unix_nanos, encoded.clone());
-            encoded
-        };
+        {
+            let mut history = self.history.write().await;
+            self.push_history_locked(&mut history, ts_unix_nanos, encoded.clone());
+        }
         let _ = self.live_tx.send(encoded);
     }
 
-    fn push_history_locked(&self, state: &mut HubState, ts_unix_nanos: u64, bytes: Bytes) {
+    fn push_history_locked(&self, state: &mut HistoryState, ts_unix_nanos: u64, bytes: Bytes) {
         if self.history_limit_bytes == 0 {
             return;
         }
@@ -544,7 +504,7 @@ impl ExporterHub {
         self.evict_history_locked(state, ts_unix_nanos);
     }
 
-    fn evict_history_locked(&self, state: &mut HubState, now_unix_nanos: u64) {
+    fn evict_history_locked(&self, state: &mut HistoryState, now_unix_nanos: u64) {
         let min_ts = now_unix_nanos.saturating_sub(self.history_limit_age.as_nanos() as u64);
         while let Some(front) = state.history.front() {
             if front.ts_unix_nanos >= min_ts {
@@ -564,11 +524,11 @@ impl ExporterHub {
     }
 
     async fn history_snapshot(&self) -> Vec<Bytes> {
-        let state = self.state.lock().await;
+        let state = self.history.read().await;
         state.history.iter().map(|h| h.bytes.clone()).collect()
     }
 
-    fn gc_sequences_locked(&self, state: &mut HubState, now_unix_nanos: u64) {
+    fn gc_sequences_locked(&self, state: &mut SequencesState, now_unix_nanos: u64) {
         if state.sequences.len() <= MAX_SEQUENCE_KEYS
             && now_unix_nanos.saturating_sub(state.sequences_last_gc_unix_nanos)
                 < SEQUENCE_GC_INTERVAL_NANOS
@@ -606,6 +566,7 @@ impl RotatingFileSink {
             index: 0,
             file,
             preface,
+            blocks_since_flush: 0,
         };
         sink.rotate()?;
         let _ = fs::remove_file(tmp);
@@ -613,12 +574,17 @@ impl RotatingFileSink {
     }
 
     fn write_block(&mut self, block: &[u8]) -> Result<()> {
+        const FLUSH_EVERY_BLOCKS: usize = 128;
         if self.current_size > 0 && self.current_size + block.len() as u64 > self.rotate_bytes {
             self.rotate()?;
         }
         self.file.write_all(block)?;
-        self.file.flush()?;
         self.current_size += block.len() as u64;
+        self.blocks_since_flush = self.blocks_since_flush.saturating_add(1);
+        if self.blocks_since_flush >= FLUSH_EVERY_BLOCKS {
+            self.file.flush()?;
+            self.blocks_since_flush = 0;
+        }
         Ok(())
     }
 
@@ -635,6 +601,7 @@ impl RotatingFileSink {
         self.file.write_all(&self.preface)?;
         self.file.flush()?;
         self.current_size = self.preface.len() as u64;
+        self.blocks_since_flush = 0;
         Ok(())
     }
 }
@@ -680,157 +647,169 @@ fn ensure_not_symlink(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-struct EventAcceptConfig {
-    allow: Vec<IpCidr>,
-    token: Option<String>,
-    tls: Option<TlsAcceptor>,
-    tls_accept_timeout: Duration,
-    max_control_line_bytes: usize,
-    max_event_line_bytes: usize,
-    handshake_timeout: Duration,
-    event_read_timeout: Duration,
-    connections: Arc<Semaphore>,
-}
+async fn run_event_ingest_loop(mut ring: ShmRingBuffer, hub: ExporterHub) -> Result<()> {
+    use std::collections::BTreeMap;
 
-async fn run_event_accept_loop(
-    listener: TcpListener,
-    hub: ExporterHub,
-    cfg: EventAcceptConfig,
-) -> Result<()> {
-    loop {
-        let permit = cfg.connections.clone().acquire_owned().await?;
-        let (stream, peer) = listener.accept().await?;
-        if !ip_allowed(peer.ip(), &cfg.allow) {
-            continue;
-        }
-        let hub = hub.clone();
-        let token = cfg.token.clone();
-        let tls = cfg.tls.clone();
-        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
-        let tls_accept_timeout = cfg.tls_accept_timeout;
-        #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
-        let _tls_accept_timeout = cfg.tls_accept_timeout;
-        let max_control_line_bytes = cfg.max_control_line_bytes;
-        let max_event_line_bytes = cfg.max_event_line_bytes;
-        let handshake_timeout = cfg.handshake_timeout;
-        let event_read_timeout = cfg.event_read_timeout;
+    const MAX_ENCODE_WORKERS: usize = 32;
+    const WORKER_QUEUE_DEPTH: usize = 256;
+    const RESULT_QUEUE_DEPTH: usize = 4096;
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, MAX_ENCODE_WORKERS);
+
+    #[derive(Clone, Copy)]
+    struct EncodeJob {
+        index: u64,
+        interface_id: u32,
+        timestamp_unix_nanos: u64,
+        src: Endpoint,
+        dst: Endpoint,
+        sequence_number: u32,
+    }
+
+    struct EncodeResult {
+        index: u64,
+        timestamp_unix_nanos: u64,
+        encoded: Option<Bytes>,
+    }
+
+    let (res_tx, mut res_rx) = mpsc::channel::<EncodeResult>(RESULT_QUEUE_DEPTH);
+    let mut job_txs = Vec::with_capacity(workers);
+
+    for _ in 0..workers {
+        let (job_tx, mut job_rx) = mpsc::channel::<(EncodeJob, Bytes)>(WORKER_QUEUE_DEPTH);
+        job_txs.push(job_tx);
+        let res_tx = res_tx.clone();
         tokio::spawn(async move {
-            let _permit = permit;
-            let res = match tls {
-                Some(acceptor) => {
-                    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
-                    {
-                        match timeout(tls_accept_timeout, acceptor.accept(stream)).await {
-                            Ok(Ok(tls_stream)) => {
-                                handle_event_stream(
-                                    tls_stream,
-                                    hub,
-                                    token,
-                                    max_control_line_bytes,
-                                    max_event_line_bytes,
-                                    handshake_timeout,
-                                    event_read_timeout,
-                                )
-                                .await
-                            }
-                            Ok(Err(err)) => Err(anyhow!("tls accept failed: {err}")),
-                            Err(_) => Err(anyhow!("tls accept timed out")),
-                        }
-                    }
-                    #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
-                    {
-                        let _ = acceptor;
-                        drop(stream);
-                        Err(anyhow!("TLS is not supported in this build"))
-                    }
+            while let Some((job, payload)) = job_rx.recv().await {
+                let builder = PacketBuilder::ipv4(job.src.ip.octets(), job.dst.ip.octets(), 64)
+                    .tcp(job.src.port, job.dst.port, job.sequence_number, 1024);
+                let mut packet = Vec::with_capacity(payload.len() + 96);
+                if builder.write(&mut packet, payload.as_ref()).is_err() {
+                    let _ = res_tx
+                        .send(EncodeResult {
+                            index: job.index,
+                            timestamp_unix_nanos: job.timestamp_unix_nanos,
+                            encoded: None,
+                        })
+                        .await;
+                    continue;
                 }
-                None => {
-                    handle_event_stream(
-                        stream,
-                        hub,
-                        token,
-                        max_control_line_bytes,
-                        max_event_line_bytes,
-                        handshake_timeout,
-                        event_read_timeout,
-                    )
-                    .await
-                }
-            };
-            if let Err(err) = res {
-                warn!(error = ?err, peer = %peer, "event stream closed");
+                let encoded = match encode_enhanced_packet(
+                    job.interface_id,
+                    job.timestamp_unix_nanos,
+                    packet,
+                ) {
+                    Ok(bytes) => Some(Bytes::from(bytes)),
+                    Err(err) => {
+                        warn!(error = ?err, "failed to encode enhanced packet");
+                        None
+                    }
+                };
+                let _ = res_tx
+                    .send(EncodeResult {
+                        index: job.index,
+                        timestamp_unix_nanos: job.timestamp_unix_nanos,
+                        encoded,
+                    })
+                    .await;
             }
         });
     }
-}
+    drop(res_tx);
 
-async fn handle_event_stream<S>(
-    stream: S,
-    hub: ExporterHub,
-    token: Option<String>,
-    max_control_line_bytes: usize,
-    max_event_line_bytes: usize,
-    handshake_timeout: Duration,
-    event_read_timeout: Duration,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut reader = BufReader::new(stream);
-    let Some(preface) =
-        read_line_limited_with_timeout(&mut reader, max_control_line_bytes, handshake_timeout)
-            .await?
-    else {
-        return Ok(());
-    };
-    if preface != EVENT_PREFACE_LINE.as_bytes() {
-        return Err(anyhow!("invalid event preface"));
-    }
-
-    let mut first_event_line: Option<Vec<u8>> = None;
-    if let Some(line) =
-        read_line_limited_with_timeout(&mut reader, max_event_line_bytes, handshake_timeout).await?
-    {
-        if let Some(provided) = parse_auth_line(&line) {
-            if let Some(expected) = token.as_deref() {
-                if !constant_time_eq(provided, expected) {
-                    return Err(anyhow!("invalid token"));
+    let publish_hub = hub.clone();
+    let publish_task = tokio::spawn(async move {
+        let mut pending: BTreeMap<u64, EncodeResult> = BTreeMap::new();
+        let mut next = 0u64;
+        while let Some(res) = res_rx.recv().await {
+            pending.insert(res.index, res);
+            while let Some(res) = pending.remove(&next) {
+                if let Some(encoded) = res.encoded {
+                    publish_hub
+                        .publish_encoded_block(res.timestamp_unix_nanos, encoded)
+                        .await;
                 }
-            } else {
-                // AUTH provided but not required: accept.
+                next = next.saturating_add(1);
             }
-        } else {
-            if token.is_some() {
-                return Err(anyhow!("missing AUTH line"));
+        }
+    });
+
+    let mut index = 0u64;
+    loop {
+        match ring.try_pop() {
+            Ok(Some(frame)) => {
+                if frame.is_empty() {
+                    continue;
+                }
+                let event = match CaptureEvent::decode_wire(Bytes::from(frame)) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        warn!(error = ?err, "failed to decode capture event frame");
+                        continue;
+                    }
+                };
+                if event.payload.len() > hub.max_payload_bytes {
+                    warn!(
+                        payload_len = event.payload.len(),
+                        max_payload_bytes = hub.max_payload_bytes,
+                        "payload too large; dropped"
+                    );
+                    continue;
+                }
+
+                let sequence_number = {
+                    let seq_key = SequenceKey {
+                        session_id: event.session_id.clone(),
+                        plane: event.plane.clone(),
+                        direction: event.direction.clone(),
+                    };
+                    let mut state = hub.sequences.lock().await;
+                    let seq = state.sequences.entry(seq_key).or_insert(SequenceState {
+                        next: 1,
+                        last_seen_unix_nanos: event.timestamp_unix_nanos,
+                    });
+                    let sequence_number = seq.next;
+                    seq.next = seq.next.wrapping_add(event.payload.len() as u32);
+                    seq.last_seen_unix_nanos = event.timestamp_unix_nanos;
+                    hub.gc_sequences_locked(&mut state, event.timestamp_unix_nanos);
+                    sequence_number
+                };
+
+                let (src, dst) = endpoints_for_event(&event);
+                let job = EncodeJob {
+                    index,
+                    interface_id: interface_id(event.plane.clone()),
+                    timestamp_unix_nanos: event.timestamp_unix_nanos,
+                    src,
+                    dst,
+                    sequence_number,
+                };
+                let worker = (index as usize) % job_txs.len();
+                if job_txs[worker]
+                    .send((job, event.payload.clone()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                index = index.saturating_add(1);
             }
-            first_event_line = Some(line);
+            Ok(None) => {
+                ring.wait_for_data().await?;
+            }
+            Err(e) => {
+                warn!(error = ?e, "fatal error reading from shared memory ring buffer");
+                break;
+            }
         }
     }
 
-    if let Some(line) = first_event_line {
-        handle_event_line(&hub, &line).await;
-    }
-    while let Some(line) =
-        read_line_limited_with_timeout(&mut reader, max_event_line_bytes, event_read_timeout)
-            .await?
-    {
-        handle_event_line(&hub, &line).await;
-    }
+    drop(job_txs);
+    let _ = publish_task.await;
     Ok(())
-}
-
-async fn handle_event_line(hub: &ExporterHub, line: &[u8]) {
-    let Ok(text) = std::str::from_utf8(line) else {
-        warn!("event line is not utf-8");
-        return;
-    };
-    if text.trim().is_empty() {
-        return;
-    }
-    match serde_json::from_str::<CaptureEvent>(text) {
-        Ok(event) => hub.ingest(event).await,
-        Err(err) => warn!(error = ?err, "failed to decode capture event"),
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1052,38 +1031,6 @@ fn ip_allowed(peer: IpAddr, allow: &[IpCidr]) -> bool {
         return true;
     }
     allow.iter().any(|cidr| cidr.contains(&peer))
-}
-
-fn build_packet_from_event(
-    event: &CaptureEvent,
-    payload: &[u8],
-    sequences: &mut HashMap<SequenceKey, SequenceState>,
-) -> Option<Vec<u8>> {
-    let (src, dst) = endpoints_for_event(event);
-    let seq_key = SequenceKey {
-        session_id: event.session_id.clone(),
-        plane: event.plane.clone(),
-        direction: event.direction.clone(),
-    };
-    let seq = sequences.entry(seq_key).or_insert(SequenceState {
-        next: 1,
-        last_seen_unix_nanos: event.timestamp_unix_nanos,
-    });
-    let sequence_number = seq.next;
-    seq.next = seq.next.wrapping_add(payload.len() as u32);
-    seq.last_seen_unix_nanos = event.timestamp_unix_nanos;
-
-    let builder = PacketBuilder::ipv4(src.ip.octets(), dst.ip.octets(), 64).tcp(
-        src.port,
-        dst.port,
-        sequence_number,
-        1024,
-    );
-    let mut packet = Vec::with_capacity(payload.len() + 96);
-    if builder.write(&mut packet, payload).is_err() {
-        return None;
-    }
-    Some(packet)
 }
 
 fn encode_enhanced_packet(

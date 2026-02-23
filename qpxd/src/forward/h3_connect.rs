@@ -1,9 +1,15 @@
 use super::h3::ForwardH3Handler;
 use crate::http::l7::finalize_response_for_request;
 use crate::http::local_response::build_local_response;
+#[cfg(feature = "mitm")]
+use crate::http::mitm::{proxy_mitm_request, MitmRouteContext};
+#[cfg(feature = "mitm")]
+use crate::http::server::serve_http1_with_upgrades;
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{send_h3_response, send_h3_static_response, H3ServerRequestStream};
+#[cfg(feature = "mitm")]
+use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream};
 use crate::upstream::connect::connect_tunnel_target;
 use crate::upstream::connect::TunnelIo;
 use crate::upstream::http1::parse_upstream_proxy_endpoint;
@@ -26,14 +32,6 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Duration, Instant};
 use tracing::warn;
-use url::form_urlencoded;
-
-#[cfg(feature = "mitm")]
-use crate::http::mitm::{proxy_mitm_request, MitmRouteContext};
-#[cfg(feature = "mitm")]
-use crate::http::server::serve_http1_with_upgrades;
-#[cfg(feature = "mitm")]
-use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream};
 
 #[derive(Debug)]
 enum ConnectPolicy {
@@ -123,7 +121,8 @@ pub(super) async fn prepare_h3_connect_request(
 
     let (host, port, authority_host_for_validation, authority_port_for_validation, auth_uri) =
         if is_connect_udp {
-            let (host, port) = match parse_connect_udp_target(req_head.uri()) {
+            let uri_template = connect_udp_cfg.and_then(|cfg| cfg.uri_template.as_deref());
+            let (host, port) = match parse_connect_udp_target(req_head.uri(), uri_template) {
                 Ok(parsed) => parsed,
                 Err(_) => {
                     send_h3_static_response(
@@ -877,6 +876,8 @@ fn validate_h3_connect_head(
 ) -> Result<()> {
     crate::http::semantics::validate_h2_h3_connect_headers(headers)
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
+    crate::http::semantics::validate_expect_header(headers)
+        .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
     if req_head.method() != http1::Method::CONNECT {
         return Err(anyhow!("CONNECT method required"));
     }
@@ -918,12 +919,20 @@ fn validate_h3_connect_head(
             "CONNECT request target must be authority-form without scheme/path"
         ));
     }
-    if let Some(host) = headers
-        .get(http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-    {
+    let host_values: Vec<_> = headers.get_all(http::header::HOST).iter().collect();
+    if host_values.len() > 1 {
+        return Err(anyhow!("multiple Host headers are not allowed"));
+    }
+    if let Some(value) = host_values.first() {
+        let raw = value
+            .to_str()
+            .map_err(|_| anyhow!("invalid Host header"))?
+            .trim();
+        if raw.is_empty() {
+            return Err(anyhow!("Host header must not be empty"));
+        }
         let (host_name, host_port) =
-            crate::http::address::parse_authority_host_port(host, authority_port)
+            crate::http::address::parse_authority_host_port(raw, authority_port)
                 .ok_or_else(|| anyhow!("invalid Host header"))?;
         if host_port != authority_port || !host_name.eq_ignore_ascii_case(authority_host) {
             return Err(anyhow!("Host header does not match CONNECT authority"));
@@ -972,7 +981,12 @@ fn parse_connect_authority_required(authority: &str) -> Result<(String, u16)> {
     Ok((parsed.host().to_string(), port))
 }
 
-fn parse_connect_udp_target(uri: &http1::Uri) -> Result<(String, u16)> {
+fn parse_connect_udp_target(uri: &http1::Uri, uri_template: Option<&str>) -> Result<(String, u16)> {
+    if let Some(template) = uri_template {
+        // Strict mode: when a template is configured, only that template is accepted.
+        return parse_connect_udp_target_from_template(uri, template);
+    }
+
     let path_and_query = uri
         .path_and_query()
         .ok_or_else(|| anyhow!("CONNECT-UDP requires :path"))?;
@@ -1012,38 +1026,205 @@ fn parse_connect_udp_target(uri: &http1::Uri) -> Result<(String, u16)> {
     if let Some(query) = path_and_query.query() {
         let mut target_host: Option<String> = None;
         let mut target_port: Option<u16> = None;
-        for (k, v) in form_urlencoded::parse(query.as_bytes()) {
-            match k.as_ref() {
-                "target_host" | "h" => {
-                    if !v.trim().is_empty() {
-                        target_host = Some(v.into_owned());
-                    }
-                }
-                "target_port" | "p" => {
-                    if let Ok(p) = v.parse::<u16>() {
-                        if p != 0 {
-                            target_port = Some(p);
-                        }
-                    }
-                }
-                _ => {}
-            }
+        if let Some(host) = query_get_single(query, "target_host")? {
+            target_host = Some(decode_connect_udp_host(host)?);
+        } else if let Some(host) = query_get_single(query, "h")? {
+            target_host = Some(decode_connect_udp_host(host)?);
+        }
+        if let Some(port) = query_get_single(query, "target_port")? {
+            target_port = Some(parse_connect_udp_port(port)?);
+        } else if let Some(port) = query_get_single(query, "p")? {
+            target_port = Some(parse_connect_udp_port(port)?);
         }
         if let (Some(h), Some(p)) = (target_host, target_port) {
             return Ok((h, p));
         }
     }
 
-    // Legacy interop (pre-RFC): :authority is treated as target and :path is "/".
-    if path_and_query.as_str() == "/" {
-        if let Some(authority) = uri.authority() {
-            if let Some(port) = authority.port_u16() {
-                return Ok((authority.host().to_string(), port));
+    Err(anyhow!("unsupported CONNECT-UDP request target"))
+}
+
+fn parse_connect_udp_target_from_template(
+    uri: &http1::Uri,
+    template: &str,
+) -> Result<(String, u16)> {
+    let path_and_query = uri
+        .path_and_query()
+        .ok_or_else(|| anyhow!("CONNECT-UDP requires :path"))?;
+    let req_segments = path_and_query
+        .path()
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+
+    let template_path_and_query = if template.starts_with('/') {
+        template
+    } else {
+        let (_, rest) = template
+            .split_once("://")
+            .ok_or_else(|| anyhow!("invalid CONNECT-UDP uri_template"))?;
+        let idx = rest
+            .find('/')
+            .ok_or_else(|| anyhow!("CONNECT-UDP uri_template must include a path"))?;
+        &rest[idx..]
+    };
+    let (template_path, template_query) = match template_path_and_query.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (template_path_and_query, None),
+    };
+
+    let template_segments = template_path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    if template_segments.len() != req_segments.len() {
+        return Err(anyhow!("CONNECT-UDP uri_template path mismatch"));
+    }
+
+    let mut host: Option<String> = None;
+    let mut port: Option<u16> = None;
+    for (tpl, actual) in template_segments.iter().zip(req_segments.iter()) {
+        match *tpl {
+            "{target_host}" => host = Some(decode_connect_udp_host(actual)?),
+            "{target_port}" => port = Some(parse_connect_udp_port(actual)?),
+            _ if tpl.starts_with('{') && tpl.ends_with('}') => {
+                // Other template variables are treated as wildcard segments.
+            }
+            _ if tpl == actual => {}
+            _ => return Err(anyhow!("CONNECT-UDP uri_template path mismatch")),
+        }
+    }
+
+    if let (Some(host), Some(port)) = (host.take(), port.take()) {
+        return Ok((host, port));
+    }
+
+    if let (Some(query), Some(template_query)) = (path_and_query.query(), template_query) {
+        let (host_key, port_key) = connect_udp_query_keys_from_template(template_query);
+        if host.is_none() {
+            if let Some(key) = host_key.as_deref() {
+                if let Some(value) = query_get_single(query, key)? {
+                    host = Some(decode_connect_udp_host(value)?);
+                }
+            }
+        }
+        if port.is_none() {
+            if let Some(key) = port_key.as_deref() {
+                if let Some(value) = query_get_single(query, key)? {
+                    port = Some(parse_connect_udp_port(value)?);
+                }
             }
         }
     }
 
-    Err(anyhow!("unsupported CONNECT-UDP request target"))
+    match (host, port) {
+        (Some(h), Some(p)) => Ok((h, p)),
+        _ => Err(anyhow!("unsupported CONNECT-UDP request target")),
+    }
+}
+
+fn connect_udp_query_keys_from_template(query_template: &str) -> (Option<String>, Option<String>) {
+    let mut host_key: Option<String> = None;
+    let mut port_key: Option<String> = None;
+
+    // Query expansion: {?target_host,target_port} / {&target_host,target_port}
+    let mut rest = query_template;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            break;
+        };
+        let inside = &after[..close];
+        let mut chars = inside.chars();
+        let op = chars.next();
+        if matches!(op, Some('?') | Some('&')) {
+            for var in inside[1..].split(',').map(|v| v.trim()) {
+                match var {
+                    "target_host" => host_key = Some("target_host".to_string()),
+                    "target_port" => port_key = Some("target_port".to_string()),
+                    _ => {}
+                }
+            }
+        }
+        rest = &after[close + 1..];
+    }
+
+    // Literal key=value pairs: h={target_host}&p={target_port}
+    let mut depth = 0u32;
+    let mut start = 0usize;
+    for (idx, ch) in query_template.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            '&' if depth == 0 => {
+                connect_udp_parse_query_kv_template(
+                    &query_template[start..idx],
+                    &mut host_key,
+                    &mut port_key,
+                );
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    connect_udp_parse_query_kv_template(&query_template[start..], &mut host_key, &mut port_key);
+
+    (host_key, port_key)
+}
+
+fn connect_udp_parse_query_kv_template(
+    part: &str,
+    host_key: &mut Option<String>,
+    port_key: &mut Option<String>,
+) {
+    let Some((k, v)) = part.split_once('=') else {
+        return;
+    };
+    match v.trim() {
+        "{target_host}" => *host_key = Some(k.trim().to_string()),
+        "{target_port}" => *port_key = Some(k.trim().to_string()),
+        _ => {}
+    }
+}
+
+fn query_get_single<'a>(query: &'a str, key: &str) -> Result<Option<&'a str>> {
+    let mut found = None::<&'a str>;
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == key {
+            if found.is_some() {
+                return Err(anyhow!("duplicate query parameter: {}", key));
+            }
+            found = Some(v);
+        }
+    }
+    Ok(found)
+}
+
+fn decode_connect_udp_host(raw: &str) -> Result<String> {
+    let host = percent_decode_str(raw)
+        .decode_utf8()
+        .map_err(|_| anyhow!("invalid CONNECT-UDP target_host encoding"))?;
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(anyhow!("CONNECT-UDP target_host must not be empty"));
+    }
+    Ok(host.to_string())
+}
+
+fn parse_connect_udp_port(raw: &str) -> Result<u16> {
+    let port: u16 = raw
+        .parse()
+        .map_err(|_| anyhow!("invalid CONNECT-UDP target_port"))?;
+    if port == 0 {
+        return Err(anyhow!(
+            "CONNECT-UDP target_port must be in range 1..=65535"
+        ));
+    }
+    Ok(port)
 }
 
 fn default_port_for_scheme(scheme: &str) -> u16 {
@@ -1082,7 +1263,7 @@ mod tests {
             .path_and_query("/.well-known/masque/udp/192.0.2.6/443/")
             .build()
             .unwrap();
-        let (host, port) = parse_connect_udp_target(&uri).expect("valid");
+        let (host, port) = parse_connect_udp_target(&uri, None).expect("valid");
         assert_eq!(host, "192.0.2.6");
         assert_eq!(port, 443);
 
@@ -1092,7 +1273,7 @@ mod tests {
             .path_and_query("/.well-known/masque/udp/2001%3Adb8%3A%3A42/8443/")
             .build()
             .unwrap();
-        let (host, port) = parse_connect_udp_target(&uri).expect("valid");
+        let (host, port) = parse_connect_udp_target(&uri, None).expect("valid");
         assert_eq!(host, "2001:db8::42");
         assert_eq!(port, 8443);
     }
@@ -1105,7 +1286,21 @@ mod tests {
             .path_and_query("/masque?h=example.com&p=8443")
             .build()
             .unwrap();
-        let (host, port) = parse_connect_udp_target(&uri).expect("valid");
+        let (host, port) = parse_connect_udp_target(&uri, None).expect("valid");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 8443);
+    }
+
+    #[test]
+    fn connect_udp_target_from_custom_template_path() {
+        let uri = http1::Uri::builder()
+            .scheme("https")
+            .authority("proxy.example")
+            .path_and_query("/masque/udp/example.com/8443")
+            .build()
+            .unwrap();
+        let template = "https://proxy.example/masque/udp/{target_host}/{target_port}";
+        let (host, port) = parse_connect_udp_target(&uri, Some(template)).expect("valid");
         assert_eq!(host, "example.com");
         assert_eq!(port, 8443);
     }

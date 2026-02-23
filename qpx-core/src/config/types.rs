@@ -24,6 +24,8 @@ pub struct Config {
     #[serde(default)]
     pub otel: Option<OtelConfig>,
     #[serde(default)]
+    pub acme: Option<AcmeConfig>,
+    #[serde(default)]
     pub exporter: Option<ExporterConfig>,
     #[serde(default)]
     pub auth: AuthConfig,
@@ -114,6 +116,8 @@ pub struct RuntimeConfig {
     pub max_ftp_concurrency: usize,
     #[serde(default = "default_runtime_max_concurrent_connections")]
     pub max_concurrent_connections: usize,
+    #[serde(default = "default_runtime_max_h3_streams_per_connection")]
+    pub max_h3_streams_per_connection: usize,
     #[serde(default)]
     pub trace_enabled: bool,
     #[serde(default)]
@@ -132,6 +136,8 @@ pub struct RuntimeConfig {
     pub max_reverse_retry_template_body_bytes: usize,
     #[serde(default = "default_runtime_upstream_http_timeout_ms")]
     pub upstream_http_timeout_ms: u64,
+    #[serde(default = "default_runtime_upstream_proxy_max_concurrent_per_endpoint")]
+    pub upstream_proxy_max_concurrent_per_endpoint: usize,
     #[serde(default = "default_runtime_tls_peek_timeout_ms")]
     pub tls_peek_timeout_ms: u64,
     #[serde(default = "default_runtime_http_header_read_timeout_ms")]
@@ -151,6 +157,7 @@ impl Default for RuntimeConfig {
             max_blocking_threads: None,
             max_ftp_concurrency: default_runtime_max_ftp_concurrency(),
             max_concurrent_connections: default_runtime_max_concurrent_connections(),
+            max_h3_streams_per_connection: default_runtime_max_h3_streams_per_connection(),
             trace_enabled: false,
             trace_reflect_all_headers: false,
             acceptor_tasks_per_listener: None,
@@ -161,6 +168,8 @@ impl Default for RuntimeConfig {
             max_reverse_retry_template_body_bytes:
                 default_runtime_max_reverse_retry_template_body_bytes(),
             upstream_http_timeout_ms: default_runtime_upstream_http_timeout_ms(),
+            upstream_proxy_max_concurrent_per_endpoint:
+                default_runtime_upstream_proxy_max_concurrent_per_endpoint(),
             tls_peek_timeout_ms: default_runtime_tls_peek_timeout_ms(),
             http_header_read_timeout_ms: default_runtime_http_header_read_timeout_ms(),
             upgrade_wait_timeout_ms: default_runtime_upgrade_wait_timeout_ms(),
@@ -243,6 +252,31 @@ pub struct MetricsConfig {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct AcmeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Use the Let's Encrypt staging environment (DANGEROUS for production).
+    #[serde(default)]
+    pub staging: bool,
+    /// Override the ACME directory URL (defaults to Let's Encrypt).
+    #[serde(default)]
+    pub directory_url: Option<String>,
+    /// Optional account contact email (recommended).
+    #[serde(default)]
+    pub email: Option<String>,
+    /// Required to enable ACME issuance.
+    #[serde(default)]
+    pub terms_of_service_agreed: bool,
+    /// Address for serving HTTP-01 challenge responses (e.g. "0.0.0.0:80").
+    #[serde(default)]
+    pub http01_listen: Option<String>,
+    /// Renew certificates this many days before expiry.
+    #[serde(default = "default_acme_renew_before_days")]
+    pub renew_before_days: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct OtelConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -265,43 +299,16 @@ pub struct OtelConfig {
 pub struct ExporterConfig {
     #[serde(default)]
     pub enabled: bool,
-    pub endpoint: String,
+    #[serde(default)]
+    pub shm_path: String,
+    #[serde(default = "default_exporter_shm_size_mb")]
+    pub shm_size_mb: usize,
+    #[serde(default)]
+    pub lossy: bool,
     #[serde(default = "default_exporter_max_queue_events")]
     pub max_queue_events: usize,
     #[serde(default)]
-    pub allow_insecure: bool,
-    #[serde(default)]
-    pub auth: Option<ExporterAuthConfig>,
-    #[serde(default)]
-    pub tls: Option<ExporterTlsConfig>,
-    #[serde(default)]
     pub capture: ExporterCaptureConfig,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct ExporterAuthConfig {
-    #[serde(default)]
-    pub token_env: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct ExporterTlsConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub ca_cert: Option<String>,
-    #[serde(default)]
-    pub client_cert: Option<String>,
-    #[serde(default)]
-    pub client_key: Option<String>,
-    #[serde(default)]
-    pub client_pkcs12: Option<String>,
-    #[serde(default)]
-    pub client_pkcs12_password_env: Option<String>,
-    #[serde(default)]
-    pub server_name: Option<String>,
-    #[serde(default)]
-    pub insecure_skip_verify: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -497,6 +504,11 @@ pub struct ConnectUdpConfig {
     pub idle_timeout_secs: u64,
     #[serde(default = "default_connect_udp_max_capsule_buffer_bytes")]
     pub max_capsule_buffer_bytes: usize,
+    /// Optional RFC 9298 URI Template used to extract target_host/target_port from CONNECT-UDP.
+    /// If set, only this template is accepted (no fallback to default/query forms).
+    /// If unset, the default template and query-based forms are accepted.
+    #[serde(default)]
+    pub uri_template: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -730,19 +742,27 @@ pub struct ReverseRouteConfig {
     #[serde(default)]
     pub path_rewrite: Option<PathRewriteConfig>,
     #[serde(default)]
-    pub fastcgi: Option<FastCgiUpstreamConfig>,
+    pub ipc: Option<IpcUpstreamConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IpcMode {
+    #[default]
+    Shm,
+    Tcp,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct FastCgiUpstreamConfig {
-    /// FastCGI server address: "127.0.0.1:9000" or "unix:///var/run/qpxf.sock".
-    pub address: String,
-    #[serde(default = "default_fastcgi_timeout_ms")]
-    pub timeout_ms: u64,
-    /// Additional FastCGI params to send with every request.
+pub struct IpcUpstreamConfig {
+    /// IPC mode: "shm" or "tcp"
     #[serde(default)]
-    pub params: HashMap<String, String>,
+    pub mode: IpcMode,
+    /// Target address for network IPC ("127.0.0.1:9000") or base path for SHM IPC.
+    pub address: String,
+    #[serde(default = "default_ipc_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

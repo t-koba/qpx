@@ -22,6 +22,10 @@ pub(super) fn default_metrics_path() -> String {
     "/metrics".to_string()
 }
 
+pub(super) fn default_acme_renew_before_days() -> u64 {
+    30
+}
+
 pub(super) fn default_otel_protocol() -> String {
     "grpc".to_string()
 }
@@ -166,6 +170,14 @@ pub(super) fn default_runtime_max_concurrent_connections() -> usize {
     8192
 }
 
+pub(super) fn default_runtime_max_h3_streams_per_connection() -> usize {
+    128
+}
+
+pub(super) fn default_runtime_upstream_proxy_max_concurrent_per_endpoint() -> usize {
+    8
+}
+
 pub(super) fn default_runtime_max_h3_request_body_bytes() -> usize {
     16 * 1024 * 1024
 }
@@ -266,6 +278,10 @@ pub(super) fn default_exporter_max_queue_events() -> usize {
     4096
 }
 
+pub(super) fn default_exporter_shm_size_mb() -> usize {
+    16
+}
+
 pub(super) fn default_exporter_capture_plaintext() -> bool {
     false
 }
@@ -294,6 +310,6 @@ pub(super) fn default_rate_limit_key() -> String {
     "src_ip".to_string()
 }
 
-pub(super) fn default_fastcgi_timeout_ms() -> u64 {
+pub(super) fn default_ipc_timeout_ms() -> u64 {
     30_000
 }

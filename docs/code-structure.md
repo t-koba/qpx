@@ -7,14 +7,14 @@ Source-level guide to the qpx workspace.
 qpx is a Rust workspace with five crates:
 
 ```
-qpx-core   shared library: config loading, rule engine, auth, TLS, observability
+qpx-core   shared library: config loading, rule engine, auth, TLS, observability, IPC/SHM types
 qpxd       daemon:         forward / reverse / transparent HTTP proxy
-qpxf       executor:       FastCGI function executor (CGI scripts + WASM modules)
-qpxr       reader:         receives traffic events from qpxd, writes PCAPNG
+qpxf       executor:       function executor (CGI scripts + WASM modules) over QPX-IPC
+qpxr       reader:         reads capture events from qpxd's SHM ring, writes PCAPNG
 qpxc       client:         streams PCAPNG from qpxr to Wireshark or stdout
 ```
 
-`qpxd` is the main network proxy. It can forward requests to `qpxf` over the FastCGI protocol using reverse route `fastcgi:` config (recommended) or `fastcgi://` upstream URLs. `qpxr` and `qpxc` are post-capture tooling and never participate in the proxy data path.
+`qpxd` is the main network proxy. It forwards requests to `qpxf` over the QPX-IPC protocol using `ipc:` reverse route config (recommended) or `ipc://` upstream URLs. QPX-IPC uses a shared-memory ring buffer for body transfer when both processes share a host, and falls back to a plain TCP/Unix stream otherwise. `qpxr` and `qpxc` are post-capture tooling and never participate in the proxy data path.
 
 ### Request flow through qpxd
 
@@ -37,6 +37,7 @@ listener accept (mode-specific: forward/ reverse/ transparent/)
   │
   ├─ Action dispatch
   │   ├─ direct / proxy upstream         (upstream/)
+  │   ├─ function executor (IPC)         (ipc_client.rs → qpxf)
   │   ├─ CONNECT tunnel                  (forward/connect.rs)
   │   ├─ cache lookup + store            (cache/, http/cache_flow.rs)
   │   ├─ local response                  (http/local_response.rs)
@@ -45,14 +46,14 @@ listener accept (mode-specific: forward/ reverse/ transparent/)
   │
   ├─ Response finalization               (http/l7.rs: Via, Date, header control)
   │
-  └─ Capture export                      (exporter.rs → qpxr)
+  └─ Capture export                      (exporter.rs → SHM ring → qpxr)
 ```
 
 The key boundary rule is: mode directories (`forward/`, `reverse/`, `transparent/`) own **only** mode-specific control flow. Shared protocol mechanics live in `http/`, `http3/`, `upstream/`, `tls/`, and `cache/`. New features must not duplicate parsing, response building, or tunnel logic across modes.
 
 ### Capture pipeline boundary
 
-`qpxd` never generates PCAP/PCAPNG. It emits structured capture events via TCP to `qpxr`. `qpxr` is the sole PCAPNG generator. `qpxc` is a passthrough viewer (extcap bridge or simple packet dump).
+`qpxd` never generates PCAP/PCAPNG. It emits structured capture events into a shared-memory ring buffer (`exporter.shm_path`), and `qpxr` is the sole PCAPNG generator that consumes that ring. `qpxc` is a passthrough viewer (extcap bridge or simple packet dump).
 
 ---
 
@@ -73,8 +74,11 @@ Shared building blocks that `qpxd`, `qpxr`, and `qpxc` all depend on. This crate
 - `matchers.rs`: low-level match primitives (CIDR, glob, regex, header value matchers) used by the rule engine.
 - `auth.rs`: authentication providers (local user file + LDAP), Basic/Digest HTTP auth, and an in-memory auth result cache.
 - `tls.rs`: TLS helpers: CA management and MITM certificate generation (feature `tls-rustls`); stub implementation when `tls-rustls` is disabled.
-- `observability.rs`: logging initialization (tracing subscriber) and Prometheus metrics endpoint bootstrap.
+- `observability.rs`: logging initialization (tracing subscriber), Prometheus metrics endpoint bootstrap, and optional OpenTelemetry tracing (OTLP exporter).
 - `exporter.rs`: capture event schema — shared between `qpxd` (producer) and `qpxr` (consumer) for serialization compatibility.
+- `shm_ring.rs`: shared-memory ring buffer (`ShmRingBuffer`) backed by a memory-mapped file (`memmap2`). Used by `qpxd` to produce capture events and by `qpxr` to consume them. Also used by QPX-IPC for zero-copy request/response body transfer between `qpxd` and `qpxf`.
+- `ipc/meta.rs`: QPX-IPC request/response metadata types (`IpcRequestMeta`, `IpcResponseMeta`) — JSON-serialized header frame sent before body data.
+- `ipc/protocol.rs`: QPX-IPC framing helpers (`read_frame`, `write_frame`) — length-prefixed JSON frame encoding shared by `qpxd` (client) and `qpxf` (server).
 
 ---
 
@@ -165,7 +169,7 @@ Outbound connection handling — how `qpxd` talks to origins and chained proxies
 - `pool.rs`: pooled connections to upstream proxies for forward-proxy chaining.
 - `connect.rs`: CONNECT-to-upstream helper — establishes a CONNECT tunnel through a chained proxy before forwarding.
 - `http1.rs`: HTTP/1.1 upstream proxy dispatch — absolute-form URI, WebSocket proxy, upstream endpoint parsing, Proxy-Authorization forwarding.
-- `origin.rs`: direct upstream dispatch (reverse/transparent) — plain/TLS/FastCGI, h2-aware sender selection, WebSocket upgrade, request URI rewriting.
+- `origin.rs`: direct upstream dispatch (reverse/transparent) — dispatches `http://`, `https://`, `ipc://`, and `ipc+unix://` upstream URLs. Routes `ipc`/`ipc+unix` schemes to `ipc_client::proxy_ipc()`; selects h2-aware hyper sender for HTTP/HTTPS; handles WebSocket upgrade and request URI rewriting.
 - `mod.rs`: module re-exports.
 
 ### Cache (`cache/`)
@@ -192,8 +196,8 @@ RFC 9111 proxy cache implementation. Used by both forward listeners and reverse 
 ### Other daemon modules
 
 - `ftp.rs`: FTP-over-HTTP gateway — translates HTTP GET/PUT/LIST to FTP commands, PASV/PORT fallback, bounded transfer sizes.
-- `fastcgi_client.rs`: FastCGI client — encodes HTTP requests as FastCGI records, connects to FastCGI backends (TCP/Unix) with a small connection pool + `FCGI_KEEP_CONN`, decodes CGI-style responses back to HTTP with streaming body support. Used by `upstream/origin.rs` and reverse routes.
-- `exporter.rs`: capture event producer — TCP client to `qpxr`, event queue management, request/response body preview serialization.
+- `ipc_client.rs`: QPX-IPC client used by reverse `ipc:` routes and `ipc://`/`ipc+unix://` upstream URLs. Sends an `IpcRequestMeta` JSON frame, then transfers request/response bodies: in `shm` mode via per-request `ShmRingBuffer` files (64 KiB chunks, EOF signalled by empty push); in `tcp` mode by streaming bytes directly over the connection. Maintains a small idle-connection pool per backend. Entry point: `proxy_ipc()`.
+- `exporter.rs`: capture event producer — writes serialized capture events to a shared-memory ring buffer (`ShmRingBuffer`), with queue/backpressure behavior controlled by config.
 - `io_copy.rs`: bidirectional stream copy (used for CONNECT tunnels and WebSocket) with optional capture export hooks and idle timeout.
 - `io_prefix.rs`: `PrefixedIo` adapter — "unreads" a byte buffer back onto a stream after peeking (used for PROXY v2 metadata and TLS ClientHello inspection) so downstream consumers see the original byte stream from the beginning.
 - `net.rs`: socket helpers — `SO_REUSEPORT`, `SO_REUSEADDR`, TCP backlog, multi-socket listener binding.
@@ -204,7 +208,7 @@ RFC 9111 proxy cache implementation. Used by both forward listeners and reverse 
 
 ## Reader (`qpxr`)
 
-Single-file crate. Receives structured capture events from `qpxd` over TCP, generates PCAPNG blocks, manages local file rotation, and serves live/history streams to `qpxc` clients. Security: TLS, bearer token, CIDR allowlists.
+Single-file crate. Consumes structured capture events from the shared-memory ring buffer produced by `qpxd`, generates PCAPNG blocks, manages local file rotation, and serves live/history streams to `qpxc` clients. Security: TLS, bearer token, CIDR allowlists.
 
 - `main.rs`: all logic in one file.
 
@@ -218,12 +222,11 @@ Single-file crate. Connects to `qpxr` and relays the PCAPNG stream to Wireshark 
 
 ## Function executor (`qpxf`)
 
-FastCGI server that executes CGI scripts and WASM modules. `qpxd` connects to `qpxf` as a FastCGI client using reverse route `fastcgi:` config or `fastcgi://` upstream URLs.
+QPX-IPC server that executes CGI scripts and WASM modules on behalf of `qpxd`. `qpxd` connects to `qpxf` using the QPX-IPC protocol via `ipc:` reverse route config or `ipc://` upstream URLs. The protocol sends a JSON metadata frame first, then streams request/response bodies either over the same connection or via shared-memory ring buffers when both processes are on the same host.
 
-- `main.rs`: CLI (`--listen`, `--config`, `--workers`), FastCGI connection accept loop, concurrency-limited request dispatch via `tokio::sync::Semaphore`. Safe Unix socket binding (verifies existing path is a socket before unlink).
-- `config.rs`: YAML configuration schema with `deny_unknown_fields` — listen address, workers (concurrency limit), request size limits, handler routing rules, CGI/WASM backend settings including per-backend stdout/stderr size limits.
-- `server.rs`: FastCGI connection handler — request_id state machine (multiplexing), BEGIN_REQUEST role/flags validation, management records (request_id=0), ABORT_REQUEST, keep-alive (`FCGI_KEEP_CONN`), streaming STDIN→executor and executor stdout/stderr→FastCGI, per-request input idle timeout + connection idle timeout.
-- `fastcgi.rs`: FastCGI protocol primitives — record read/write, name-value encoding/decoding, protocol constants, and version validation.
+- `main.rs`: CLI (`--listen`, `--config`, `--workers`), QPX-IPC connection accept loop, concurrency-limited request dispatch via `tokio::sync::Semaphore`. Listen address accepts TCP (`host:port`) or Unix socket (`unix:///path`). Safe Unix socket binding (verifies existing path is a socket before unlinking).
+- `config.rs`: YAML configuration schema with `deny_unknown_fields` — listen address, workers (concurrency limit), request and connection idle timeouts, size limits (`max_params_bytes`, `max_stdin_bytes`), handler routing rules, CGI/WASM backend settings including per-backend stdout/stderr size limits.
+- `server.rs`: QPX-IPC connection handler — reads `IpcRequestMeta` frame, routes to executor, streams body, writes `IpcResponseMeta` response frame, handles keep-alive, input idle timeout, and connection idle timeout.
 - `router.rs`: path-based request routing — matches incoming requests by `path_prefix`, `path_regex`, and `host` to the appropriate executor. Returns matched prefix for prefix-stripping in executors.
 - `executor/mod.rs`: `Executor` trait definition and shared request/response types (`CgiRequest`, `CgiResponse`). `matched_prefix` field enables correct script path resolution.
 - `executor/cgi.rs`: RFC 3875 CGI script executor — spawns external processes via `tokio::process::Command`, sets CGI environment variables (including `SERVER_SOFTWARE`), pipes stdin/stdout/stderr. Security: canonicalizes CGI root on startup, rejects `..` paths and symlink escapes, enforces configurable stdout/stderr size limits, reads stdout/stderr concurrently (prevents deadlock), post-timeout `wait()` ensures zombie process cleanup. Hop-by-hop headers are excluded from HTTP_* env.
@@ -237,4 +240,4 @@ FastCGI server that executes CGI scripts and WASM modules. `qpxd` connects to `q
 2. Shared protocol mechanics live in `http/`, `http3/`, `upstream/`, `xdp/`, or `tls/`.
 3. New features must not duplicate parsing, response building, or tunnel logic across mode files.
 4. `qpxd` never generates PCAP/PCAPNG. `qpxr` is the sole capture generator. `qpxc` is passthrough only.
-5. `qpxf` is the sole CGI/WASM execution environment. `qpxd` communicates with `qpxf` only via the FastCGI protocol.
+5. `qpxf` is the sole CGI/WASM execution environment. `qpxd` communicates with `qpxf` only via the QPX-IPC protocol (`ipc_client.rs` → `qpxf/server.rs`).

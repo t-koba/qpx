@@ -1,16 +1,20 @@
 version: 1
 state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+# WARNING: This is a sample config. Do not expose it to untrusted networks as-is.
+# - Binds default to loopback; set QPX_FIREWALL_LISTEN explicitly if publishing.
+# - Replace auth.users passwords before use.
 auth:
   users:
     - username: secops
-      password: secops-password
+      password: change-me
 upstreams:
   - name: security-egress
     url: "http://proxy.security.example:3128"
 listeners:
   - name: firewall-forward
     mode: forward
-    listen: "0.0.0.0:18090"
+    listen: "${QPX_FIREWALL_LISTEN:-127.0.0.1:18090}"
     default_action: { type: block }
     tls_inspection:
       enabled: true

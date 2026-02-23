@@ -47,10 +47,11 @@ rustls = "0.22"
 tokio-rustls = "0.25"
 webpki-roots = "0.26"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
-rustls-pemfile = "2"
-lru = "0.12"
+lru = "0.16.3"
 native-tls = { version = "0.2", features = ["alpn"] }
 tokio-native-tls = "0.3"
+x509-parser = { version = "0.18", default-features = false }
+instant-acme = { version = "0.8.4", default-features = false }
 
 # HTTP
 hyper = { version = "0.14", features = ["full"] }

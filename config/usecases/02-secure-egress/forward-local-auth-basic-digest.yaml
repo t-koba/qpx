@@ -1,16 +1,16 @@
 version: 1
 state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 
-# Sample accounts for proxy auth (intentionally weak password for examples).
-# Use strong, unique passwords in real deployments.
+# Sample accounts for proxy auth (placeholder password).
+# Replace the passwords (or use Digest HA1) before any real deployment.
 auth:
   users:
     - username: alice@example.invalid
-      password: "1234567890"
+      password: change-me
     - username: bob@example.invalid
-      password: "1234567890"
+      password: change-me
     - username: ops@example.invalid
-      password: "1234567890"
+      password: change-me
 listeners:
   - name: local-auth-forward
     mode: forward

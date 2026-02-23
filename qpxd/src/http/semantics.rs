@@ -85,6 +85,7 @@ pub enum RequestValidationError {
     InvalidH2H3ConnectionHeader,
     InvalidH2H3TeHeader,
     InvalidExpectHeader,
+    InvalidTrailerField,
 }
 
 impl fmt::Display for RequestValidationError {
@@ -107,6 +108,7 @@ impl fmt::Display for RequestValidationError {
             }
             Self::InvalidH2H3TeHeader => "HTTP/2 and HTTP/3 requests may only use TE: trailers",
             Self::InvalidExpectHeader => "invalid Expect header",
+            Self::InvalidTrailerField => "invalid trailer field",
         };
         f.write_str(message)
     }
@@ -196,6 +198,70 @@ pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), Reques
     }
 
     Ok(())
+}
+
+pub fn validate_request_trailers(trailers: &HeaderMap) -> Result<(), RequestValidationError> {
+    // RFC 9110 Section 6.5.1: only fields explicitly defined as safe-in-trailers are allowed.
+    // As an intermediary, we at least reject known-framing/routing/auth/content-format fields.
+    // (Header values are already validated by HeaderMap construction.)
+    if trailers
+        .keys()
+        .any(|name| is_prohibited_trailer_field(name.as_str()))
+    {
+        return Err(RequestValidationError::InvalidTrailerField);
+    }
+    Ok(())
+}
+
+pub fn sanitize_response_trailers(trailers: &mut HeaderMap) -> usize {
+    let mut removed = Vec::new();
+    for name in trailers.keys() {
+        if is_prohibited_trailer_field(name.as_str()) {
+            removed.push(name.clone());
+        }
+    }
+    for name in removed.iter() {
+        trailers.remove(name);
+    }
+    removed.len()
+}
+
+fn is_prohibited_trailer_field(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if is_hop_by_hop_header_name(lower.as_str()) {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        // Message framing / routing
+        "content-length"
+            | "host"
+            // Authentication
+            | "authorization"
+            | "www-authenticate"
+            | "authentication-info"
+            | "cookie"
+            | "set-cookie"
+            // Request modifiers / response controls
+            | "expect"
+            | "range"
+            | "if-match"
+            | "if-none-match"
+            | "if-modified-since"
+            | "if-unmodified-since"
+            | "if-range"
+            | "max-forwards"
+            | "cache-control"
+            | "expires"
+            | "pragma"
+            | "age"
+            // Content format / interpretation
+            | "content-type"
+            | "content-encoding"
+            | "content-language"
+            | "content-location"
+            | "content-range"
+    )
 }
 
 #[cfg(feature = "http3")]
@@ -397,7 +463,7 @@ fn validate_request_body_length_headers(headers: &HeaderMap) -> Result<(), Reque
     Ok(())
 }
 
-fn validate_expect_header(headers: &HeaderMap) -> Result<(), RequestValidationError> {
+pub(crate) fn validate_expect_header(headers: &HeaderMap) -> Result<(), RequestValidationError> {
     let mut saw_expect = false;
     for value in headers.get_all(EXPECT).iter() {
         let raw = value

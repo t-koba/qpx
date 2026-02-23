@@ -1,24 +1,14 @@
 use anyhow::{anyhow, Result};
 use cidr::IpCidr;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
 
 use super::types::*;
 
-const UPSTREAM_URL_SCHEMES: &[&str] = &[
-    "http",
-    "https",
-    "h3",
-    "ws",
-    "wss",
-    "fastcgi",
-    "fastcgi+unix",
-];
+const UPSTREAM_URL_SCHEMES: &[&str] = &["http", "https", "h3", "ws", "wss"];
 
 const UPSTREAM_PROXY_URL_SCHEMES: &[&str] = &["http", "https"];
 
-const REVERSE_UPSTREAM_URL_SCHEMES: &[&str] =
-    &["http", "https", "ws", "wss", "fastcgi", "fastcgi+unix"];
+const REVERSE_UPSTREAM_URL_SCHEMES: &[&str] = &["http", "https", "ws", "wss"];
 
 const REVERSE_PASSTHROUGH_UPSTREAM_URL_SCHEMES: &[&str] = &["https", "h3"];
 
@@ -41,6 +31,9 @@ pub(super) fn validate_config(config: &Config) -> Result<()> {
     }
     if let Some(otel) = config.otel.as_ref() {
         validate_otel_config(otel)?;
+    }
+    if let Some(acme) = config.acme.as_ref() {
+        validate_acme_config(config, acme)?;
     }
     if let Some(exporter) = config.exporter.as_ref() {
         validate_exporter_config(exporter)?;
@@ -276,145 +269,87 @@ fn validate_otel_config(otel: &OtelConfig) -> Result<()> {
     Ok(())
 }
 
-fn validate_exporter_config(exporter: &ExporterConfig) -> Result<()> {
-    if exporter.endpoint.trim().is_empty() {
-        return Err(anyhow!("exporter.endpoint must not be empty"));
+#[cfg(feature = "tls-rustls")]
+fn validate_acme_config(config: &Config, acme: &AcmeConfig) -> Result<()> {
+    if !acme.enabled {
+        return Ok(());
     }
-    let authority: http::uri::Authority = exporter
-        .endpoint
+    if config
+        .state_dir
+        .as_deref()
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return Err(anyhow!(
+            "state_dir must be set when acme.enabled=true (used for account/cert persistence)"
+        ));
+    }
+    if !acme.terms_of_service_agreed {
+        return Err(anyhow!(
+            "acme.terms_of_service_agreed must be true when acme.enabled=true"
+        ));
+    }
+    if acme.renew_before_days == 0 {
+        return Err(anyhow!("acme.renew_before_days must be >= 1"));
+    }
+    if acme.staging && acme.directory_url.is_some() {
+        return Err(anyhow!(
+            "acme.staging and acme.directory_url are mutually exclusive"
+        ));
+    }
+    if let Some(email) = acme.email.as_deref() {
+        if email.trim().is_empty() {
+            return Err(anyhow!("acme.email must not be empty when set"));
+        }
+    }
+    let Some(listen) = acme.http01_listen.as_deref() else {
+        return Err(anyhow!(
+            "acme.http01_listen must be set when acme.enabled=true (HTTP-01 challenge server)"
+        ));
+    };
+    let _: std::net::SocketAddr = listen
         .parse()
-        .map_err(|_| anyhow!("exporter.endpoint is invalid: expected host:port"))?;
-    if authority.port_u16().is_none() {
-        return Err(anyhow!("exporter.endpoint is invalid: missing port"));
+        .map_err(|e| anyhow!("acme.http01_listen is invalid: {}", e))?;
+
+    if let Some(dir) = acme.directory_url.as_deref() {
+        let raw = dir.trim();
+        if raw.is_empty() {
+            return Err(anyhow!("acme.directory_url must not be empty when set"));
+        }
+        let url =
+            url::Url::parse(raw).map_err(|e| anyhow!("acme.directory_url is invalid: {e}"))?;
+        if url.scheme() != "http" && url.scheme() != "https" {
+            return Err(anyhow!(
+                "acme.directory_url must use http:// or https:// (got {})",
+                url.scheme()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "tls-rustls"))]
+fn validate_acme_config(_config: &Config, acme: &AcmeConfig) -> Result<()> {
+    if acme.enabled {
+        return Err(anyhow!(
+            "acme is only supported on tls-rustls builds (this build does not enable tls-rustls)"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exporter_config(exporter: &ExporterConfig) -> Result<()> {
+    if !exporter.enabled {
+        return Ok(());
+    }
+    if exporter.shm_size_mb == 0 {
+        return Err(anyhow!("exporter.shm_size_mb must be >= 1"));
     }
     if exporter.max_queue_events == 0 {
         return Err(anyhow!("exporter.max_queue_events must be >= 1"));
     }
     if exporter.capture.max_chunk_bytes == 0 {
         return Err(anyhow!("exporter.capture.max_chunk_bytes must be >= 1"));
-    }
-
-    if let Some(auth) = exporter.auth.as_ref() {
-        if let Some(env) = auth.token_env.as_deref() {
-            if env.trim().is_empty() {
-                return Err(anyhow!(
-                    "exporter.auth.token_env must not be empty when set"
-                ));
-            }
-        }
-    }
-    if let Some(tls) = exporter.tls.as_ref() {
-        if tls.enabled {
-            #[cfg(feature = "tls-rustls")]
-            {
-                match (tls.client_cert.as_deref(), tls.client_key.as_deref()) {
-                    (Some(cert), Some(key)) => {
-                        if cert.trim().is_empty() || key.trim().is_empty() {
-                            return Err(anyhow!(
-                                "exporter.tls.client_cert/client_key must not be empty when set"
-                            ));
-                        }
-                    }
-                    (None, None) => {}
-                    _ => {
-                        return Err(anyhow!(
-                            "exporter.tls.client_cert and exporter.tls.client_key must be set together"
-                        ));
-                    }
-                }
-                let pkcs12_set = !tls.client_pkcs12.as_deref().unwrap_or("").trim().is_empty();
-                let pkcs12_password_env_set = !tls
-                    .client_pkcs12_password_env
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim()
-                    .is_empty();
-                if pkcs12_set || pkcs12_password_env_set {
-                    return Err(anyhow!(
-                        "exporter.tls.client_pkcs12 is not supported on rustls builds (use client_cert/client_key)"
-                    ));
-                }
-            }
-
-            #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
-            {
-                if !tls.client_cert.as_deref().unwrap_or("").trim().is_empty()
-                    || !tls.client_key.as_deref().unwrap_or("").trim().is_empty()
-                {
-                    return Err(anyhow!(
-                        "exporter.tls.client_cert/client_key is not supported on tls-native builds (use client_pkcs12)"
-                    ));
-                }
-                if let Some(path) = tls.client_pkcs12.as_deref() {
-                    if path.trim().is_empty() {
-                        return Err(anyhow!(
-                            "exporter.tls.client_pkcs12 must not be empty when set"
-                        ));
-                    }
-                }
-                if let Some(env) = tls.client_pkcs12_password_env.as_deref() {
-                    if env.trim().is_empty() {
-                        return Err(anyhow!(
-                            "exporter.tls.client_pkcs12_password_env must not be empty when set"
-                        ));
-                    }
-                    if tls.client_pkcs12.as_deref().unwrap_or("").trim().is_empty() {
-                        return Err(anyhow!(
-                            "exporter.tls.client_pkcs12_password_env requires exporter.tls.client_pkcs12"
-                        ));
-                    }
-                }
-            }
-
-            #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
-            {
-                return Err(anyhow!(
-                    "exporter.tls is enabled, but this build has no TLS backend enabled"
-                ));
-            }
-
-            #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
-            {
-                if let Some(ca) = tls.ca_cert.as_deref() {
-                    if ca.trim().is_empty() {
-                        return Err(anyhow!("exporter.tls.ca_cert must not be empty when set"));
-                    }
-                }
-                if let Some(name) = tls.server_name.as_deref() {
-                    if name.trim().is_empty() {
-                        return Err(anyhow!(
-                            "exporter.tls.server_name must not be empty when set"
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    let host = authority.host();
-    let is_loopback = host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false);
-    let tls_enabled = exporter.tls.as_ref().map(|t| t.enabled).unwrap_or(false);
-    let tls_insecure = exporter
-        .tls
-        .as_ref()
-        .map(|t| t.insecure_skip_verify)
-        .unwrap_or(false);
-    if tls_insecure && !exporter.allow_insecure {
-        return Err(anyhow!(
-            "exporter.tls.insecure_skip_verify requires exporter.allow_insecure: true"
-        ));
-    }
-    if !exporter.enabled {
-        return Ok(());
-    }
-    if !tls_enabled && !is_loopback && !exporter.allow_insecure {
-        return Err(anyhow!(
-            "exporter.endpoint is not loopback; enable exporter.tls or set exporter.allow_insecure: true"
-        ));
     }
     Ok(())
 }
@@ -494,8 +429,18 @@ fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
     if runtime.max_concurrent_connections == 0 {
         return Err(anyhow!("runtime.max_concurrent_connections must be >= 1"));
     }
+    if runtime.max_h3_streams_per_connection == 0 {
+        return Err(anyhow!(
+            "runtime.max_h3_streams_per_connection must be >= 1"
+        ));
+    }
     if runtime.upstream_http_timeout_ms == 0 {
         return Err(anyhow!("runtime.upstream_http_timeout_ms must be >= 1"));
+    }
+    if runtime.upstream_proxy_max_concurrent_per_endpoint == 0 {
+        return Err(anyhow!(
+            "runtime.upstream_proxy_max_concurrent_per_endpoint must be >= 1"
+        ));
     }
     if runtime.tls_peek_timeout_ms == 0 {
         return Err(anyhow!("runtime.tls_peek_timeout_ms must be >= 1"));
@@ -873,6 +818,89 @@ fn validate_listener_configs(
                         listener.name
                     ));
                 }
+                if let Some(uri_template) = connect_udp.uri_template.as_deref() {
+                    let template = uri_template.trim();
+                    if template.is_empty() {
+                        return Err(anyhow!(
+                            "listener {} http3.connect_udp.uri_template must not be empty",
+                            listener.name
+                        ));
+                    }
+                    if !template.is_ascii() {
+                        return Err(anyhow!(
+                            "listener {} http3.connect_udp.uri_template must be ASCII",
+                            listener.name
+                        ));
+                    }
+                    let is_https = template
+                        .get(..8)
+                        .map(|p| p.eq_ignore_ascii_case("https://"))
+                        .unwrap_or(false);
+                    if !(template.starts_with('/') || is_https) {
+                        return Err(anyhow!(
+                            "listener {} http3.connect_udp.uri_template must start with '/' or 'https://'",
+                            listener.name
+                        ));
+                    }
+                    if !template.contains("target_host") || !template.contains("target_port") {
+                        return Err(anyhow!(
+                            "listener {} http3.connect_udp.uri_template must contain target_host and target_port",
+                            listener.name
+                        ));
+                    }
+                    let mut depth = 0u32;
+                    for ch in template.chars() {
+                        match ch {
+                            '{' => {
+                                depth += 1;
+                                if depth > 1 {
+                                    return Err(anyhow!(
+                                        "listener {} http3.connect_udp.uri_template must not contain nested braces",
+                                        listener.name
+                                    ));
+                                }
+                            }
+                            '}' => {
+                                if depth == 0 {
+                                    return Err(anyhow!(
+                                        "listener {} http3.connect_udp.uri_template has unmatched '}}'",
+                                        listener.name
+                                    ));
+                                }
+                                depth -= 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if depth != 0 {
+                        return Err(anyhow!(
+                            "listener {} http3.connect_udp.uri_template has unmatched '{{'",
+                            listener.name
+                        ));
+                    }
+                    for bad in ["{+", "{#", "{.", "{/", "{;"] {
+                        if template.contains(bad) {
+                            return Err(anyhow!(
+                                "listener {} http3.connect_udp.uri_template uses unsupported RFC6570 operator: {}",
+                                listener.name,
+                                bad
+                            ));
+                        }
+                    }
+                    for expr in template.split('{').skip(1) {
+                        let Some(end) = expr.find('}') else {
+                            continue;
+                        };
+                        let inside = &expr[..end];
+                        let inside = inside.trim_start_matches(&['?', '&'][..]);
+                        if inside.contains('*') || inside.contains(':') {
+                            return Err(anyhow!(
+                                "listener {} http3.connect_udp.uri_template uses unsupported RFC6570 modifier",
+                                listener.name
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -1068,9 +1096,25 @@ fn validate_reverse_configs(
                     {
                         let cert_path = cert.cert.as_deref().unwrap_or("").trim();
                         let key_path = cert.key.as_deref().unwrap_or("").trim();
-                        if cert_path.is_empty() || key_path.is_empty() {
+                        let acme_enabled = config.acme.as_ref().map(|a| a.enabled).unwrap_or(false);
+                        let acme_managed = cert_path.is_empty() && key_path.is_empty();
+                        if acme_managed {
+                            if !acme_enabled {
+                                return Err(anyhow!(
+                                    "reverse {} tls.certificates[] must set cert+key (PEM) on rustls builds (or leave both empty with acme.enabled=true)",
+                                    reverse.name
+                                ));
+                            }
+                            if cert.sni.contains('*') {
+                                return Err(anyhow!(
+                                    "reverse {} tls.certificates[] uses wildcard sni ({}), but ACME HTTP-01 does not support wildcard certificates",
+                                    reverse.name,
+                                    cert.sni
+                                ));
+                            }
+                        } else if cert_path.is_empty() || key_path.is_empty() {
                             return Err(anyhow!(
-                                "reverse {} tls.certificates[] must set cert+key (PEM) on rustls builds",
+                                "reverse {} tls.certificates[] must set both cert+key (PEM) on rustls builds",
                                 reverse.name
                             ));
                         }
@@ -1232,27 +1276,25 @@ fn validate_reverse_configs(
             let has_upstream = !route.upstreams.is_empty();
             let has_backends = !route.backends.is_empty();
             let has_local = route.local_response.is_some();
-            let has_fastcgi = route.fastcgi.is_some();
-            let configured_kinds = (has_upstream as u8)
-                + (has_backends as u8)
-                + (has_local as u8)
-                + (has_fastcgi as u8);
+            let has_ipc = route.ipc.is_some();
+            let configured_kinds =
+                (has_upstream as u8) + (has_backends as u8) + (has_local as u8) + (has_ipc as u8);
             if configured_kinds != 1 {
                 return Err(anyhow!(
-                    "reverse {} route must set exactly one of upstreams, backends, fastcgi, or local_response",
+                    "reverse {} route must set exactly one of upstreams, backends, ipc, or local_response",
                     reverse.name
                 ));
             }
-            if let Some(fcgi) = route.fastcgi.as_ref() {
-                if fcgi.address.trim().is_empty() {
+            if let Some(ipc) = route.ipc.as_ref() {
+                if ipc.address.trim().is_empty() {
                     return Err(anyhow!(
-                        "reverse {} route fastcgi.address must not be empty",
+                        "reverse {} route ipc.address must not be empty",
                         reverse.name
                     ));
                 }
-                if fcgi.timeout_ms == 0 {
+                if ipc.timeout_ms == 0 {
                     return Err(anyhow!(
-                        "reverse {} route fastcgi.timeout_ms must be >= 1",
+                        "reverse {} route ipc.timeout_ms must be >= 1",
                         reverse.name
                     ));
                 }

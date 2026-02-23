@@ -1,5 +1,7 @@
 use qpx_core::config::{ListenerConfig, RateLimitConfig};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -7,6 +9,7 @@ use tokio::time::Instant;
 
 const DEFAULT_MAX_ENTRIES: usize = 65_536;
 const DEFAULT_ENTRY_TTL: Duration = Duration::from_secs(600);
+const SRC_IP_SHARDS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyKind {
@@ -119,7 +122,8 @@ pub(crate) struct RateLimiter {
     key_kind: KeyKind,
     capacity: f64,
     refill_per_sec: f64,
-    inner: Arc<Mutex<LimiterInner>>,
+    shards: Arc<Vec<Mutex<LimiterInner>>>,
+    shard_mask: usize,
 }
 
 impl RateLimiter {
@@ -132,11 +136,22 @@ impl RateLimiter {
             KeyKind::Global => DEFAULT_ENTRY_TTL,
             KeyKind::SrcIp => DEFAULT_ENTRY_TTL,
         };
+        let shard_count = match key_kind {
+            KeyKind::Global => 1,
+            KeyKind::SrcIp => SRC_IP_SHARDS,
+        }
+        .max(1);
+        debug_assert!(shard_count.is_power_of_two());
+        let per_shard_max_entries = (max_entries / shard_count).max(1);
+        let shards = (0..shard_count)
+            .map(|_| Mutex::new(LimiterInner::new(per_shard_max_entries, ttl)))
+            .collect::<Vec<_>>();
         Self {
             key_kind,
             capacity,
             refill_per_sec,
-            inner: Arc::new(Mutex::new(LimiterInner::new(max_entries, ttl))),
+            shards: Arc::new(shards),
+            shard_mask: shard_count.saturating_sub(1),
         }
     }
 
@@ -147,12 +162,22 @@ impl RateLimiter {
         }
     }
 
+    fn shard_for(&self, key: &LimiterKey) -> usize {
+        if self.shard_mask == 0 {
+            return 0;
+        }
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) & self.shard_mask
+    }
+
     pub(crate) fn try_acquire(&self, src_ip: IpAddr, cost: u64) -> Option<Duration> {
         let now = Instant::now();
         let cost = cost as f64;
-        let mut inner = self.inner.lock().expect("rate limiter mutex");
-        inner.prune(now);
         let key = self.make_key(src_ip);
+        let shard = self.shard_for(&key);
+        let mut inner = self.shards[shard].lock().expect("rate limiter mutex");
+        inner.prune(now);
         let (gen, decision) = {
             let entry = inner
                 .buckets
@@ -175,9 +200,10 @@ impl RateLimiter {
     pub(crate) fn reserve_delay(&self, src_ip: IpAddr, cost: u64) -> Duration {
         let now = Instant::now();
         let cost = cost as f64;
-        let mut inner = self.inner.lock().expect("rate limiter mutex");
-        inner.prune(now);
         let key = self.make_key(src_ip);
+        let shard = self.shard_for(&key);
+        let mut inner = self.shards[shard].lock().expect("rate limiter mutex");
+        inner.prune(now);
         let (gen, delay) = {
             let entry = inner
                 .buckets

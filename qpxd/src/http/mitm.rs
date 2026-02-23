@@ -1,19 +1,21 @@
+use crate::forward::{evaluate_forward_policy, proxy_auth_required, ForwardPolicyDecision};
 use crate::http::address::format_authority_host_port;
 use crate::http::common::{
     bad_request_response as bad_request, blocked_response as blocked,
-    too_many_requests_response as too_many_requests,
+    forbidden_response as forbidden, too_many_requests_response as too_many_requests,
 };
 use crate::http::l7::{
     finalize_response_for_request, finalize_response_with_headers_in_place,
     handle_max_forwards_in_place, prepare_request_with_headers_in_place,
 };
-use crate::http::policy::{evaluate_listener_policy, ListenerPolicyDecision};
+use crate::http::local_response::build_local_response;
 use crate::http::semantics::validate_incoming_request;
 use crate::http::websocket::{is_websocket_upgrade, spawn_upgrade_tunnel};
 use crate::runtime::Runtime;
 use anyhow::{anyhow, Result};
 use hyper::client::conn::SendRequest;
 use hyper::{Body, Request, Response};
+use qpx_core::config::ActionKind;
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -78,11 +80,6 @@ pub async fn proxy_mitm_request(
         }
     }
 
-    let engine = state
-        .rules_by_listener
-        .get(route.listener_name)
-        .ok_or_else(|| anyhow!("rule engine not found"))?;
-
     let path = req
         .uri()
         .path_and_query()
@@ -98,23 +95,79 @@ pub async fn proxy_mitm_request(
         headers: Some(req.headers()),
         user_groups: &[],
     };
-    let decision = evaluate_listener_policy(
-        engine,
-        &ctx,
-        req.method(),
-        req.version(),
-        proxy_name,
-        blocked,
-        state.messages.blocked.as_str(),
-    )?;
-    let (policy, early_response, matched_rule) = match decision {
-        ListenerPolicyDecision::Proceed(mut policy) => {
-            let matched_rule = policy.matched_rule.take();
-            (Some(policy), None, matched_rule)
+    let decision = evaluate_forward_policy(
+        &runtime,
+        route.listener_name,
+        ctx,
+        req.headers(),
+        req.method().as_str(),
+        &req.uri().to_string(),
+    )
+    .await?;
+    let (headers, matched_rule, early_response) = match decision {
+        ForwardPolicyDecision::Allow(allowed) => {
+            if matches!(allowed.action.kind, ActionKind::Block) {
+                (
+                    None,
+                    allowed.matched_rule.map(|s| s.to_string()),
+                    Some(finalize_response_for_request(
+                        req.method(),
+                        req.version(),
+                        proxy_name,
+                        blocked(state.messages.blocked.as_str()),
+                        false,
+                    )),
+                )
+            } else if matches!(allowed.action.kind, ActionKind::Respond) {
+                let local = allowed
+                    .action
+                    .local_response
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("respond action requires local_response"))?;
+                (
+                    None,
+                    allowed.matched_rule.map(|s| s.to_string()),
+                    Some(finalize_response_for_request(
+                        req.method(),
+                        req.version(),
+                        proxy_name,
+                        build_local_response(local)?,
+                        false,
+                    )),
+                )
+            } else {
+                (
+                    allowed.headers,
+                    allowed.matched_rule.map(|s| s.to_string()),
+                    None,
+                )
+            }
         }
-        ListenerPolicyDecision::Early(response, matched_rule) => {
-            (None, Some(response), matched_rule)
+        ForwardPolicyDecision::Challenge(chal) => {
+            let response = proxy_auth_required(chal, state.messages.proxy_auth_required.as_str());
+            (
+                None,
+                None,
+                Some(finalize_response_for_request(
+                    req.method(),
+                    req.version(),
+                    proxy_name,
+                    response,
+                    false,
+                )),
+            )
         }
+        ForwardPolicyDecision::Forbidden => (
+            None,
+            None,
+            Some(finalize_response_for_request(
+                req.method(),
+                req.version(),
+                proxy_name,
+                forbidden(state.messages.forbidden.as_str()),
+                false,
+            )),
+        ),
     };
     if let Some(rule) = matched_rule.as_deref() {
         if let Some(limits) = state.rate_limiters.listener(route.listener_name) {
@@ -136,7 +189,6 @@ pub async fn proxy_mitm_request(
     if let Some(response) = early_response {
         return Ok(response);
     }
-    let policy = policy.expect("policy");
 
     let req_method = req.method().clone();
     let export_server = format_authority_host_port(route.host, route.dst_port);
@@ -148,12 +200,7 @@ pub async fn proxy_mitm_request(
     ) {
         return Ok(response);
     }
-    prepare_request_with_headers_in_place(
-        &mut req,
-        proxy_name,
-        policy.headers.as_deref(),
-        websocket,
-    );
+    prepare_request_with_headers_in_place(&mut req, proxy_name, headers.as_deref(), websocket);
     *req.version_mut() = http::Version::HTTP_11;
     if !req.headers().contains_key(http::header::HOST) {
         let authority = format_authority_host_port(route.host, route.dst_port);
@@ -193,7 +240,7 @@ pub async fn proxy_mitm_request(
         response_version,
         proxy_name,
         &mut response,
-        policy.headers.as_deref(),
+        headers.as_deref(),
         keep_upgrade,
     );
     Ok(response)

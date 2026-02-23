@@ -257,7 +257,8 @@ async fn open_upstream_connect_udp_stream(
     target_port: u16,
     timeout_dur: Duration,
 ) -> Result<UpstreamConnectUdpStream> {
-    let (upstream_host, upstream_port) = parse_connect_udp_upstream(upstream)?;
+    let (upstream_host, upstream_port, uri) =
+        build_upstream_connect_udp_uri(upstream, target_host, target_port)?;
     let upstream_addr = timeout(
         timeout_dur,
         lookup_host((upstream_host.as_str(), upstream_port)),
@@ -293,20 +294,6 @@ async fn open_upstream_connect_udp_stream(
         })
     };
 
-    let proxy_authority = if upstream_host.contains(':') && !upstream_host.starts_with('[') {
-        format!("[{}]:{}", upstream_host, upstream_port)
-    } else if upstream_port == 443 {
-        upstream_host.to_string()
-    } else {
-        format!("{}:{}", upstream_host, upstream_port)
-    };
-    let encoded_host = utf8_percent_encode(target_host, TARGET_HOST_ENCODE_SET).to_string();
-    let path = format!("/.well-known/masque/udp/{}/{}/", encoded_host, target_port);
-    let uri = http1::Uri::builder()
-        .scheme("https")
-        .authority(proxy_authority.as_str())
-        .path_and_query(path.as_str())
-        .build()?;
     let mut request = http1::Request::builder()
         .method(http1::Method::CONNECT)
         .uri(uri)
@@ -386,7 +373,216 @@ async fn open_upstream_connect_udp_stream(
     })
 }
 
+fn build_upstream_connect_udp_uri(
+    upstream: &str,
+    target_host: &str,
+    target_port: u16,
+) -> Result<(String, u16, http1::Uri)> {
+    let encoded_host = utf8_percent_encode(target_host, TARGET_HOST_ENCODE_SET).to_string();
+
+    // RFC 9298 section 2: upstream configuration is a URI Template containing target_host/target_port.
+    // We also support a convenience short form:
+    // - authority-form "proxy.example:443" (uses the RFC 9298 default template)
+    // - origin URL "https://proxy.example:443" (only if it has no path/query; uses the default template)
+    if upstream.contains('{') || upstream.contains('}') {
+        let (scheme, authority, path_query_tmpl) = split_uri_template(upstream)?;
+        match scheme {
+            "https" | "h3" => {}
+            _ => {
+                return Err(anyhow!(
+                    "CONNECT-UDP upstream URI template requires https/h3 scheme"
+                ))
+            }
+        }
+        let (connect_host, connect_port) =
+            crate::http::address::parse_authority_host_port(authority, 443)
+                .ok_or_else(|| anyhow!("invalid CONNECT-UDP upstream authority"))?;
+        let request_scheme = if scheme == "h3" { "https" } else { scheme };
+        let path_and_query =
+            expand_connect_udp_uri_template(path_query_tmpl, &encoded_host, target_port)?;
+        let uri = http1::Uri::builder()
+            .scheme(request_scheme)
+            .authority(authority)
+            .path_and_query(path_and_query.as_str())
+            .build()?;
+        return Ok((connect_host, connect_port, uri));
+    }
+
+    if upstream.contains("://") {
+        let parsed = Url::parse(upstream)?;
+        match parsed.scheme() {
+            "https" | "h3" => {}
+            _ => {
+                return Err(anyhow!(
+                    "CONNECT-UDP upstream chain requires https/h3 proxy URL"
+                ))
+            }
+        }
+        if parsed.path() != "/" || parsed.query().is_some() {
+            return Err(anyhow!(
+                "CONNECT-UDP upstream URL must be a URI template when it includes path/query"
+            ));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| anyhow!("CONNECT-UDP upstream host missing"))?
+            .to_string();
+        let port = parsed.port().unwrap_or(443);
+        let authority = format_proxy_authority(host.as_str(), port);
+        let path_and_query = format!("/.well-known/masque/udp/{encoded_host}/{target_port}/");
+        let uri = http1::Uri::builder()
+            .scheme("https")
+            .authority(authority.as_str())
+            .path_and_query(path_and_query.as_str())
+            .build()?;
+        return Ok((host, port, uri));
+    }
+
+    let (host, port) = crate::http::address::parse_authority_host_port(upstream, 443)
+        .ok_or_else(|| anyhow!("invalid CONNECT-UDP upstream authority"))?;
+    let authority = format_proxy_authority(host.as_str(), port);
+    let path_and_query = format!("/.well-known/masque/udp/{encoded_host}/{target_port}/");
+    let uri = http1::Uri::builder()
+        .scheme("https")
+        .authority(authority.as_str())
+        .path_and_query(path_and_query.as_str())
+        .build()?;
+    Ok((host, port, uri))
+}
+
+fn split_uri_template(template: &str) -> Result<(&str, &str, &str)> {
+    let scheme_end = template
+        .find("://")
+        .ok_or_else(|| anyhow!("CONNECT-UDP upstream URI template must be absolute"))?;
+    let scheme = &template[..scheme_end];
+    let rest = &template[scheme_end + 3..];
+    let slash = rest
+        .find('/')
+        .ok_or_else(|| anyhow!("CONNECT-UDP upstream URI template must include a path"))?;
+    let authority = &rest[..slash];
+    if authority.is_empty() {
+        return Err(anyhow!(
+            "CONNECT-UDP upstream URI template authority is empty"
+        ));
+    }
+    if authority.contains('{') || authority.contains('}') {
+        return Err(anyhow!(
+            "CONNECT-UDP upstream URI template must not contain variables in authority"
+        ));
+    }
+    let path_query = &rest[slash..];
+    if !path_query.starts_with('/') {
+        return Err(anyhow!(
+            "CONNECT-UDP upstream URI template path must start with '/'"
+        ));
+    }
+    Ok((scheme, authority, path_query))
+}
+
+fn expand_connect_udp_uri_template(
+    template: &str,
+    encoded_target_host: &str,
+    target_port: u16,
+) -> Result<String> {
+    let mut out = String::with_capacity(template.len() + encoded_target_host.len());
+    let mut i = 0usize;
+    while let Some(rel_start) = template[i..].find('{') {
+        let start = i + rel_start;
+        out.push_str(&template[i..start]);
+        let end = template[start + 1..]
+            .find('}')
+            .map(|idx| start + 1 + idx)
+            .ok_or_else(|| anyhow!("CONNECT-UDP upstream URI template has unterminated '{{'"))?;
+        let expr = &template[start + 1..end];
+        if expr.starts_with('+')
+            || expr.starts_with('#')
+            || expr.starts_with('.')
+            || expr.starts_with('/')
+            || expr.starts_with(';')
+        {
+            return Err(anyhow!("unsupported URI template operator: {{{}}}", expr));
+        }
+        let (op, vars) = match expr.chars().next() {
+            Some('?') | Some('&') => (expr.chars().next().unwrap(), &expr[1..]),
+            _ => ('\0', expr),
+        };
+        let mut values = Vec::new();
+        for var in vars.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+            match var {
+                "target_host" => values.push((var, encoded_target_host.to_string())),
+                "target_port" => values.push((var, target_port.to_string())),
+                other => {
+                    return Err(anyhow!(
+                        "unsupported CONNECT-UDP URI template variable: {}",
+                        other
+                    ))
+                }
+            }
+        }
+        if values.is_empty() {
+            return Err(anyhow!("empty URI template expression is not allowed"));
+        }
+        match op {
+            '\0' => {
+                // Simple string expansion; RFC 6570 uses comma separators for var lists.
+                out.push_str(
+                    values
+                        .into_iter()
+                        .map(|(_, v)| v)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                        .as_str(),
+                );
+            }
+            '?' | '&' => {
+                out.push(op);
+                for (idx, (k, v)) in values.into_iter().enumerate() {
+                    if idx > 0 {
+                        out.push('&');
+                    }
+                    out.push_str(k);
+                    out.push('=');
+                    out.push_str(v.as_str());
+                }
+            }
+            _ => return Err(anyhow!("unsupported URI template operator")),
+        }
+        i = end + 1;
+    }
+    out.push_str(&template[i..]);
+    if out.contains('{') || out.contains('}') {
+        return Err(anyhow!("CONNECT-UDP URI template expansion failed"));
+    }
+    if !out.starts_with('/') {
+        return Err(anyhow!("expanded CONNECT-UDP path must start with '/'"));
+    }
+    Ok(out)
+}
+
+fn format_proxy_authority(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]:{}", host, port)
+    } else if port == 443 {
+        host.to_string()
+    } else {
+        format!("{}:{}", host, port)
+    }
+}
+
 fn parse_connect_udp_upstream(upstream: &str) -> Result<(String, u16)> {
+    if upstream.contains('{') || upstream.contains('}') {
+        let (scheme, authority, _path) = split_uri_template(upstream)?;
+        match scheme {
+            "https" | "h3" => {}
+            _ => {
+                return Err(anyhow!(
+                    "CONNECT-UDP upstream chain requires https/h3 proxy URL"
+                ))
+            }
+        }
+        return crate::http::address::parse_authority_host_port(authority, 443)
+            .ok_or_else(|| anyhow!("invalid CONNECT-UDP upstream authority"));
+    }
     if upstream.contains("://") {
         let parsed = Url::parse(upstream)?;
         match parsed.scheme() {

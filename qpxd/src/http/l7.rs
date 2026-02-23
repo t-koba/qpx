@@ -3,10 +3,12 @@ use crate::http::semantics::{
     append_via_for_version, normalize_response_for_request, sanitize_hop_by_hop_headers,
     sync_host_header_from_absolute_target,
 };
+use hyper::body::HttpBody as _;
 use hyper::{Body, Method, Request, Response, StatusCode};
 use qpx_core::rules::CompiledHeaderControl;
 use std::collections::HashSet;
 use std::time::SystemTime;
+use tracing::warn;
 
 pub fn finalize_response_for_request(
     request_method: &Method,
@@ -32,6 +34,8 @@ pub fn finalize_response_in_place(
     response: &mut Response<Body>,
     preserve_upgrade: bool,
 ) {
+    let sanitize_trailers = request_version == http::Version::HTTP_2
+        || response.headers().contains_key(http::header::TRAILER);
     let preserve_proxy_auth = response.status() == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED;
     let proxy_authenticate = if preserve_proxy_auth {
         collect_header_values(response.headers(), "proxy-authenticate")
@@ -60,6 +64,9 @@ pub fn finalize_response_in_place(
     ensure_date_header(response.headers_mut());
     append_via_for_version(response.headers_mut(), request_version, proxy_name);
     normalize_response_for_request(request_method, response);
+    if sanitize_trailers {
+        wrap_body_sanitizing_response_trailers(response);
+    }
 }
 
 fn collect_header_values(headers: &http::HeaderMap, name: &str) -> Vec<http::HeaderValue> {
@@ -133,12 +140,17 @@ pub fn prepare_request_with_headers_in_place(
     preserve_upgrade: bool,
 ) {
     let request_version = request.version();
+    let validate_trailers = request_version == http::Version::HTTP_2
+        || request.headers().contains_key(http::header::TRAILER);
     apply_request_headers(request.headers_mut(), header_control);
     let request_uri = request.uri().clone();
     sync_host_header_from_absolute_target(request.headers_mut(), &request_uri);
     sanitize_hop_by_hop_headers(request.headers_mut(), preserve_upgrade);
     append_via_for_version(request.headers_mut(), request_version, proxy_name);
     qpx_core::observability::inject_trace_context(request.headers_mut());
+    if validate_trailers {
+        wrap_body_validating_request_trailers(request);
+    }
 }
 
 pub fn handle_max_forwards_in_place(
@@ -323,4 +335,72 @@ fn should_reflect_trace_header(
             | "traceparent"
             | "tracestate"
     )
+}
+
+fn wrap_body_validating_request_trailers(request: &mut Request<Body>) {
+    let mut inner = std::mem::replace(request.body_mut(), Body::empty());
+    let (mut sender, out) = Body::channel();
+    tokio::spawn(async move {
+        while let Some(frame) = inner.data().await {
+            let chunk = match frame {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    warn!(error = ?err, "request body stream failed");
+                    return;
+                }
+            };
+            if sender.send_data(chunk).await.is_err() {
+                return;
+            }
+        }
+        let trailers = match inner.trailers().await {
+            Ok(trailers) => trailers,
+            Err(err) => {
+                warn!(error = ?err, "request body trailers failed");
+                return;
+            }
+        };
+        if let Some(trailers) = trailers {
+            if let Err(err) = crate::http::semantics::validate_request_trailers(&trailers) {
+                warn!(error = ?err, "dropping forbidden request trailers");
+                return;
+            }
+            let _ = sender.send_trailers(trailers).await;
+        }
+    });
+    *request.body_mut() = out;
+}
+
+fn wrap_body_sanitizing_response_trailers(response: &mut Response<Body>) {
+    let mut inner = std::mem::replace(response.body_mut(), Body::empty());
+    let (mut sender, out) = Body::channel();
+    tokio::spawn(async move {
+        while let Some(frame) = inner.data().await {
+            let chunk = match frame {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    warn!(error = ?err, "response body stream failed");
+                    return;
+                }
+            };
+            if sender.send_data(chunk).await.is_err() {
+                return;
+            }
+        }
+        let trailers = match inner.trailers().await {
+            Ok(trailers) => trailers,
+            Err(err) => {
+                warn!(error = ?err, "response body trailers failed");
+                return;
+            }
+        };
+        if let Some(mut trailers) = trailers {
+            let removed = crate::http::semantics::sanitize_response_trailers(&mut trailers);
+            if removed > 0 {
+                warn!(removed, "dropping forbidden response trailers");
+            }
+            let _ = sender.send_trailers(trailers).await;
+        }
+    });
+    *response.body_mut() = out;
 }

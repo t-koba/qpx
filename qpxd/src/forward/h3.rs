@@ -24,10 +24,15 @@ pub(crate) async fn run_http3_listener(
         enabled: false,
         idle_timeout_secs: 30,
         max_capsule_buffer_bytes: 256 * 1024,
+        uri_template: None,
     });
 
+    let runtime_cfg = runtime.state().config.runtime.clone();
     let tls_config = build_forward_tls_config(&listener, &runtime, listen_addr)?;
-    let quic_config = build_h3_server_config_from_tls(tls_config, 2048, 256)?;
+    let max_bidi = runtime_cfg
+        .max_h3_streams_per_connection
+        .min(u32::MAX as usize) as u32;
+    let quic_config = build_h3_server_config_from_tls(tls_config, max_bidi.max(1), 256)?;
     let endpoint = quinn::Endpoint::server(quic_config, listen_addr)?;
 
     let semaphore = runtime.state().connection_semaphore.clone();
@@ -98,6 +103,7 @@ impl H3RequestHandler for ForwardH3Handler {
         H3Limits {
             max_request_body_bytes: limits.max_h3_request_body_bytes,
             max_response_body_bytes: limits.max_h3_response_body_bytes,
+            max_concurrent_streams_per_connection: limits.max_h3_streams_per_connection,
             read_timeout: Duration::from_millis(limits.h3_read_timeout_ms),
             proxy_name: Arc::<str>::from(state.config.identity.proxy_name.as_str()),
             error_body: Arc::<str>::from(state.messages.proxy_error.as_str()),

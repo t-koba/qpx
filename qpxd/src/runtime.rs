@@ -272,6 +272,9 @@ pub fn ensure_hot_reload_compatible(old: &Config, new: &Config) -> Result<()> {
     if old.audit_log != new.audit_log {
         return Err(anyhow!("audit_log changed; restart required"));
     }
+    if old.acme != new.acme {
+        return Err(anyhow!("acme changed; restart required"));
+    }
     if old.otel != new.otel {
         return Err(anyhow!("otel changed; restart required"));
     }

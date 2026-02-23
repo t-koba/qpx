@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::time::{timeout, Duration};
 
-use crate::fastcgi_client::FastCgiUpstream;
+use crate::ipc_client::IpcUpstream;
 
 pub(crate) struct ReverseRouter {
     http_routes: Vec<HttpRoute>,
@@ -81,7 +81,7 @@ pub(super) struct HttpRoute {
     pub(super) local_response: Option<qpx_core::config::LocalResponseConfig>,
     pub(super) cache_policy: Option<CachePolicyConfig>,
     pub(super) headers: Option<Arc<CompiledHeaderControl>>,
-    pub(super) fastcgi: Option<FastCgiUpstream>,
+    pub(super) ipc: Option<IpcUpstream>,
     backends: Vec<WeightedBackend>,
     mirrors: Vec<MirrorTarget>,
     pub(super) path_rewrite: Option<CompiledPathRewrite>,
@@ -390,17 +390,17 @@ impl HttpRoute {
             .transpose()?
             .map(Arc::new);
 
-        let fastcgi = config
-            .fastcgi
+        let ipc = config
+            .ipc
             .as_ref()
-            .map(FastCgiUpstream::from_config)
+            .map(IpcUpstream::from_config)
             .transpose()?;
-        if fastcgi.is_some() && (!config.upstreams.is_empty() || !config.backends.is_empty()) {
+        if ipc.is_some() && (!config.upstreams.is_empty() || !config.backends.is_empty()) {
             return Err(anyhow::anyhow!(
-                "reverse route fastcgi cannot be combined with upstreams/backends"
+                "reverse route ipc cannot be combined with upstreams/backends"
             ));
         }
-        let backends = if fastcgi.is_some() {
+        let backends = if ipc.is_some() {
             Vec::new()
         } else {
             compile_backends(config.upstreams, config.backends)
@@ -412,7 +412,7 @@ impl HttpRoute {
                 local_response: config.local_response.clone(),
                 cache_policy,
                 headers,
-                fastcgi,
+                ipc,
                 backends,
                 mirrors,
                 path_rewrite,
@@ -723,7 +723,7 @@ mod tests {
             }),
             cache: None,
             path_rewrite: None,
-            fastcgi: None,
+            ipc: None,
         };
         let policy = RoutePolicy::from_http_config(&cfg).expect("policy");
         assert!(matches!(policy.lb, LoadBalanceStrategy::LeastConnections));
@@ -751,7 +751,7 @@ mod tests {
             health_check: None,
             cache: None,
             path_rewrite: None,
-            fastcgi: None,
+            ipc: None,
         };
         let policy = RoutePolicy::from_http_config(&cfg).expect("policy");
         assert!(matches!(policy.lb, LoadBalanceStrategy::RoundRobin));

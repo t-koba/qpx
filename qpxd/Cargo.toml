@@ -7,7 +7,14 @@ license.workspace = true
 [features]
 default = ["tls-rustls", "http3", "mitm", "digest-auth", "sha2-hash"]
 
-tls-rustls = ["dep:rustls", "dep:tokio-rustls", "dep:webpki-roots", "qpx-core/tls-rustls"]
+tls-rustls = [
+  "dep:rustls",
+  "dep:tokio-rustls",
+  "dep:webpki-roots",
+  "dep:instant-acme",
+  "dep:x509-parser",
+  "qpx-core/tls-rustls",
+]
 tls-native = ["dep:native-tls", "dep:tokio-native-tls", "qpx-core/tls-native"]
 
 # QUIC/HTTP/3 requires rustls (via quinn).
@@ -46,6 +53,8 @@ tokio-rustls = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 native-tls = { workspace = true, optional = true }
 tokio-native-tls = { workspace = true, optional = true }
+instant-acme = { workspace = true, optional = true, features = ["hyper-rustls", "ring", "rcgen"] }
+x509-parser = { workspace = true, optional = true }
 
 # HTTP
 hyper.workspace = true
@@ -72,7 +81,9 @@ suppaftp.workspace = true
 
 # CLI
 clap.workspace = true
+uuid = { version = "1.21.0", features = ["v4"] }
 
 [dev-dependencies]
 rcgen.workspace = true
 qpxf = { path = "../qpxf", default-features = false }
+tracing-subscriber.workspace = true

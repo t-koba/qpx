@@ -7,13 +7,13 @@
 version: 1
 
 reverse:
-  - name: fastcgi-gateway
+  - name: ipc-gateway
     listen: "127.0.0.1:8080"
     routes:
       # Route /cgi-bin/ and /wasm/ to the qpxf FastCGI backend.
       - match:
           path: ["/cgi-bin/*", "/wasm/*"]
-        fastcgi:
+        ipc:
           address: "127.0.0.1:9000"
           timeout_ms: 30000
 

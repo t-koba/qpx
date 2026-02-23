@@ -13,7 +13,6 @@ tls-native = ["dep:native-tls", "dep:tokio-native-tls", "qpx-core/tls-native"]
 [dependencies]
 qpx-core = { path = "../qpx-core", default-features = false }
 anyhow.workspace = true
-serde_json.workspace = true
 bytes.workspace = true
 tokio.workspace = true
 clap.workspace = true

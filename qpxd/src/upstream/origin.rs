@@ -33,11 +33,9 @@ pub(crate) async fn proxy_http(
     match url.scheme() {
         "http" => proxy_http_plain(req, &url, proxy_name).await,
         "https" => proxy_http_tls(req, &url, proxy_name).await,
-        "fastcgi" | "fastcgi+unix" => {
-            crate::fastcgi_client::proxy_fastcgi(req, &url, proxy_name).await
-        }
+        "ipc" | "ipc+unix" => crate::ipc_client::proxy_ipc(req, &url, proxy_name).await,
         _ => Err(anyhow!(
-            "reverse currently supports only http/https/fastcgi upstream for HTTP requests"
+            "reverse currently supports only http/https/ipc upstream for HTTP requests"
         )),
     }
 }

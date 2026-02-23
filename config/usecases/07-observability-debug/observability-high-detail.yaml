@@ -27,8 +27,14 @@ metrics:
   path: "/metrics"
 exporter:
   enabled: true
-  endpoint: "127.0.0.1:19100"
+  shm_path: ""
+  shm_size_mb: 16
+  lossy: false
   max_queue_events: 4096
+  capture:
+    plaintext: true
+    encrypted: true
+    max_chunk_bytes: 16384
 listeners:
   - name: obs-forward
     mode: forward

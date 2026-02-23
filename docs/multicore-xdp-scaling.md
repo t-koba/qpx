@@ -17,8 +17,13 @@ This document focuses on practical scale-out settings for `qpxd` on multi-core h
    - this reduces lock contention around a single accept path and improves multicore scaling.
 
 3. Matcher hot path allocation control
-   - rule and reverse prefilter matching reuses thread-local bitset buffers.
-   - prefilter candidate traversal is bit-iteration based and avoids per-request candidate vector allocation.
+    - rule and reverse prefilter matching reuses thread-local bitset buffers.
+    - prefilter candidate traversal is bit-iteration based and avoids per-request candidate vector allocation.
+
+## What `qpxd` does not do (by design)
+
+- `qpxd` does **not** set CPU affinity or NUMA memory policy from config.
+- For production NUMA placement, rely on the process manager / OS tooling (e.g. `taskset`, `numactl`, systemd CPUAffinity, Windows process affinity) and align it with NIC RSS/IRQ policy.
 
 ## XDP and metadata scope
 

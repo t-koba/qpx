@@ -19,6 +19,8 @@ async-trait.workspace = true
 bytes.workspace = true
 tokio.workspace = true
 clap.workspace = true
+http.workspace = true
 
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
+qpx-core = { version = "0.1.0", path = "../qpx-core", default-features = false }

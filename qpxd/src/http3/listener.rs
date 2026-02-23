@@ -18,6 +18,7 @@ use tracing::{info, warn};
 pub(crate) struct H3Limits {
     pub(crate) max_request_body_bytes: usize,
     pub(crate) max_response_body_bytes: usize,
+    pub(crate) max_concurrent_streams_per_connection: usize,
     pub(crate) read_timeout: Duration,
     pub(crate) proxy_name: Arc<str>,
     pub(crate) error_body: Arc<str>,
@@ -95,6 +96,9 @@ async fn serve_connection<H: H3RequestHandler>(
     handler: H,
 ) -> Result<()> {
     let limits = handler.limits();
+    let stream_semaphore = Arc::new(Semaphore::new(
+        limits.max_concurrent_streams_per_connection.max(1),
+    ));
     let connection = connecting.await?;
     let conn_info = H3ConnInfo {
         remote_addr: connection.remote_address(),
@@ -124,6 +128,10 @@ async fn serve_connection<H: H3RequestHandler>(
     };
 
     while let Some(resolver) = h3_conn.accept().await? {
+        let permit = match stream_semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => return Ok(()),
+        };
         let (req_head, req_stream) = resolver.resolve_request().await?;
         let datagrams = if req_head.method() == http1::Method::CONNECT
             && req_head
@@ -148,6 +156,7 @@ async fn serve_connection<H: H3RequestHandler>(
         let conn_info = conn_info.clone();
         let limits = limits.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             handle_stream(req_head, req_stream, conn_info, handler, limits, datagrams).await;
         });
     }
@@ -169,15 +178,22 @@ async fn handle_stream<H: H3RequestHandler>(
         .unwrap_or(http::Method::GET);
 
     if req_head.method() == http1::Method::CONNECT {
-        let is_connect_udp = req_head
-            .extensions()
-            .get::<::h3::ext::Protocol>()
-            .map(|p| *p == ::h3::ext::Protocol::CONNECT_UDP)
-            .unwrap_or(false);
-        let kind = if is_connect_udp {
-            H3ConnectKind::ConnectUdp
-        } else {
-            H3ConnectKind::Connect
+        let kind = match req_head.extensions().get::<::h3::ext::Protocol>().copied() {
+            Some(::h3::ext::Protocol::CONNECT_UDP) => H3ConnectKind::ConnectUdp,
+            Some(other) => {
+                warn!(protocol = ?other, "unsupported HTTP/3 extended CONNECT protocol");
+                let _ = send_h3_static_response(
+                    &mut req_stream,
+                    http1::StatusCode::NOT_IMPLEMENTED,
+                    b"unsupported extended CONNECT protocol",
+                    &request_method,
+                    limits.proxy_name.as_ref(),
+                    limits.max_response_body_bytes,
+                )
+                .await;
+                return;
+            }
+            None => H3ConnectKind::Connect,
         };
         if let Err(err) = handler
             .handle_connect(req_head, req_stream, conn_info, kind, datagrams)
@@ -186,6 +202,38 @@ async fn handle_stream<H: H3RequestHandler>(
             warn!(error = ?err, "HTTP/3 CONNECT handling failed");
         }
         return;
+    }
+
+    match parse_expect_continue(req_head.headers()) {
+        Ok(true) => {
+            let continue_head = match http1::Response::builder()
+                .status(http1::StatusCode::CONTINUE)
+                .body(())
+            {
+                Ok(head) => head,
+                Err(err) => {
+                    warn!(error = ?err, "failed to build HTTP/3 100-continue response");
+                    return;
+                }
+            };
+            if let Err(err) = req_stream.send_response(continue_head).await {
+                warn!(error = ?err, "failed to send HTTP/3 100-continue response");
+                return;
+            }
+        }
+        Ok(false) => {}
+        Err(_) => {
+            let _ = send_h3_static_response(
+                &mut req_stream,
+                http1::StatusCode::EXPECTATION_FAILED,
+                b"expectation failed",
+                &request_method,
+                limits.proxy_name.as_ref(),
+                limits.max_response_body_bytes,
+            )
+            .await;
+            return;
+        }
     }
 
     let (req_body, req_trailers) = match read_h3_request_body(
@@ -310,4 +358,30 @@ fn parse_content_length(headers: &http::HeaderMap) -> Option<u64> {
         }
     }
     parsed
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InvalidExpectHeader;
+
+fn parse_expect_continue(
+    headers: &http1::HeaderMap,
+) -> std::result::Result<bool, InvalidExpectHeader> {
+    let mut saw_expect = false;
+    for value in headers.get_all(http1::header::EXPECT).iter() {
+        let raw = value.to_str().map_err(|_| InvalidExpectHeader)?;
+        for token in raw.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            saw_expect = true;
+            if !token.eq_ignore_ascii_case("100-continue") {
+                return Err(InvalidExpectHeader);
+            }
+        }
+    }
+    if headers.contains_key(http1::header::EXPECT) && !saw_expect {
+        return Err(InvalidExpectHeader);
+    }
+    Ok(saw_expect)
 }

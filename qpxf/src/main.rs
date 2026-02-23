@@ -39,6 +39,9 @@ async fn main() -> Result<()> {
 
     let listen = cfg.listen.clone();
     let workers = cfg.workers;
+    let max_requests_per_connection = cfg.max_requests_per_connection;
+    let max_params_bytes = cfg.max_params_bytes;
+    let max_stdin_bytes = cfg.max_stdin_bytes;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -50,12 +53,6 @@ async fn main() -> Result<()> {
     let router = Arc::new(qpxf::router::Router::new(&cfg)?);
     let semaphore = Arc::new(Semaphore::new(workers));
     let conn_semaphore = Arc::new(Semaphore::new(cfg.max_connections));
-    let limits = Arc::new(qpxf::fastcgi::RequestLimits {
-        max_params_bytes: cfg.max_params_bytes,
-        max_stdin_bytes: cfg.max_stdin_bytes,
-    });
-    let max_conns = cfg.max_connections;
-    let max_reqs_per_conn = cfg.max_requests_per_connection;
     let input_idle = Duration::from_millis(cfg.input_idle_timeout_ms);
     let conn_idle = Duration::from_millis(cfg.conn_idle_timeout_ms);
 
@@ -76,6 +73,9 @@ async fn main() -> Result<()> {
                 }
             }
             let listener = tokio::net::UnixListener::bind(path)?;
+            // Avoid umask-dependent exposure: this IPC surface must be local-user only by default.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
             info!(listen = %listen, workers = workers, "qpxf listening (Unix socket)");
             loop {
                 let (stream, _) = listener.accept().await?;
@@ -88,18 +88,17 @@ async fn main() -> Result<()> {
                 };
                 let router = Arc::clone(&router);
                 let sem = Arc::clone(&semaphore);
-                let lim = Arc::clone(&limits);
                 tokio::spawn(async move {
                     let _permit = permit;
                     if let Err(e) = qpxf::server::handle_connection(
                         stream,
                         router,
                         sem,
-                        lim,
                         input_idle,
                         conn_idle,
-                        max_conns,
-                        max_reqs_per_conn,
+                        max_requests_per_connection,
+                        max_params_bytes,
+                        max_stdin_bytes,
                     )
                     .await
                     {
@@ -128,18 +127,17 @@ async fn main() -> Result<()> {
             };
             let router = Arc::clone(&router);
             let sem = Arc::clone(&semaphore);
-            let lim = Arc::clone(&limits);
             tokio::spawn(async move {
                 let _permit = permit;
                 if let Err(e) = qpxf::server::handle_connection(
                     stream,
                     router,
                     sem,
-                    lim,
                     input_idle,
                     conn_idle,
-                    max_conns,
-                    max_reqs_per_conn,
+                    max_requests_per_connection,
+                    max_params_bytes,
+                    max_stdin_bytes,
                 )
                 .await
                 {

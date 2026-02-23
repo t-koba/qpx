@@ -1,915 +1,860 @@
 use anyhow::{anyhow, Result};
 use bytes::{Bytes, BytesMut};
+use http::Uri;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
-use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
-use tokio::time::{Duration, Instant};
-use tracing::error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::oneshot;
+use tokio::sync::Semaphore;
+use tokio::time::{timeout, Duration};
+use tracing::warn;
 
-use crate::executor::{CgiRequest, CgiResponse, Execution, Executor};
-use crate::fastcgi::{
-    decode_name_values, encode_name_value, read_record, write_end_request, write_record,
-    RequestLimits, FCGI_ABORT_REQUEST, FCGI_BEGIN_REQUEST, FCGI_GET_VALUES, FCGI_GET_VALUES_RESULT,
-    FCGI_OVERLOADED, FCGI_PARAMS, FCGI_REQUEST_COMPLETE, FCGI_RESPONDER, FCGI_STDERR, FCGI_STDIN,
-    FCGI_STDOUT, FCGI_UNKNOWN_ROLE, FCGI_UNKNOWN_TYPE,
-};
+use crate::executor::{CgiRequest, CgiResponse, Execution};
 use crate::router::Router;
 
-const FCGI_KEEP_CONN: u8 = 1;
+use qpx_core::ipc::meta::{IpcRequestMeta, IpcResponseMeta};
+use qpx_core::ipc::protocol::{read_frame, write_frame};
+use qpx_core::shm_ring::ShmRingBuffer;
 
-#[derive(Debug)]
-enum WriterMsg {
-    Record {
-        record_type: u8,
-        request_id: u16,
-        content: Bytes,
-    },
-    EndRequest {
-        request_id: u16,
-        app_status: u32,
-        protocol_status: u8,
-    },
-}
-
-struct ReqState {
-    last_activity: Instant,
-    params_buf: BytesMut,
-    params_done: bool,
-    stdin_bytes: usize,
-    stdin_tx: Option<mpsc::Sender<Bytes>>,
-    stdin_rx: Option<mpsc::Receiver<Bytes>>,
-    abort_notify: Option<oneshot::Sender<()>>,
-    exec_task: Option<tokio::task::JoinHandle<()>>,
-}
-
-struct ConnState {
-    close_when_idle: bool,
-    states: HashMap<u16, ReqState>,
-}
+const MAX_IPC_SHM_RING_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_connection<S>(
-    stream: S,
+    mut stream: S,
     router: Arc<Router>,
     semaphore: Arc<Semaphore>,
-    limits: Arc<RequestLimits>,
     input_idle: Duration,
     conn_idle: Duration,
-    max_conns: usize,
-    max_reqs_per_conn: usize,
+    max_requests_per_connection: usize,
+    max_params_bytes: usize,
+    max_stdin_bytes: usize,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (reader, writer) = tokio::io::split(stream);
-    // Larger buffer reduces syscalls for high record rates.
-    let mut reader = BufReader::with_capacity(64 * 1024, reader);
-
-    let (writer_tx, mut writer_rx) = mpsc::channel::<WriterMsg>(1024);
-    // Buffer small writes (record headers, small chunks) to reduce syscalls.
-    let mut writer = BufWriter::with_capacity(64 * 1024, writer);
-    let writer_task = tokio::spawn(async move {
-        while let Some(msg) = writer_rx.recv().await {
-            match msg {
-                WriterMsg::Record {
-                    record_type,
-                    request_id,
-                    content,
-                } => {
-                    write_record(&mut writer, record_type, request_id, &content).await?;
-                }
-                WriterMsg::EndRequest {
-                    request_id,
-                    app_status,
-                    protocol_status,
-                } => {
-                    write_end_request(&mut writer, request_id, app_status, protocol_status).await?;
-                    writer.flush().await?;
-                }
-            }
-        }
-        Ok::<(), anyhow::Error>(())
-    });
-
-    let (complete_tx, mut complete_rx) = mpsc::channel::<u16>(128);
-    let mut conn = ConnState {
-        close_when_idle: false,
-        states: HashMap::new(),
-    };
-    let mut last_any_activity = Instant::now();
-
+    let mut handled_requests: usize = 0;
     loop {
-        let next_deadline =
-            compute_next_deadline(&conn.states, last_any_activity, input_idle, conn_idle);
-
-        tokio::select! {
-            rec = read_record(&mut reader) => {
-                let rec = match rec {
-                    Ok(r) => r,
-                    Err(e) => {
-                        if is_eof_error(&e) {
-                            break;
-                        }
-                        return Err(e);
-                    }
-                };
-                last_any_activity = Instant::now();
-                if rec.header.request_id == 0 {
-                    handle_management_record(&writer_tx, &rec, max_conns, max_reqs_per_conn).await?;
-                    continue;
+        // 1) Read the metadata frame from qpxd.
+        let meta: IpcRequestMeta = match timeout(conn_idle, read_frame(&mut stream)).await {
+            Ok(Ok(meta)) => meta,
+            Ok(Err(err)) => {
+                if is_unexpected_eof(&err) {
+                    return Ok(());
                 }
-                handle_request_record(
-                    &router,
-                    &semaphore,
-                    limits.as_ref(),
-                    &writer_tx,
-                    &complete_tx,
-                    max_reqs_per_conn,
-                    &mut conn,
-                    rec,
-                ).await?;
-                if conn.close_when_idle && conn.states.is_empty() {
-                    break;
-                }
+                return Err(err);
             }
-            Some(done_id) = complete_rx.recv() => {
-                let _ = conn.states.remove(&done_id);
-                if conn.close_when_idle && conn.states.is_empty() {
-                    break;
-                }
-            }
-            _ = tokio::time::sleep_until(next_deadline) => {
-                if conn.close_when_idle && conn.states.is_empty() {
-                    break;
-                }
-                // Idle connection timeout (no in-flight requests).
-                if conn.states.is_empty() && Instant::now().duration_since(last_any_activity) >= conn_idle {
-                    break;
-                }
-                // Per-request input idle timeouts.
-                let timed_out: Vec<u16> = conn.states.iter()
-                    .filter_map(|(id, st)| {
-                        let expecting_input = !st.params_done || st.stdin_tx.is_some();
-                        if expecting_input && Instant::now().duration_since(st.last_activity) >= input_idle {
-                            Some(*id)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                for id in timed_out {
-                    if let Some(mut st) = conn.states.remove(&id) {
-                        if let Some(abort) = st.abort_notify.take() {
-                            let _ = abort.send(());
-                        }
-                        if let Some(mut task) = st.exec_task.take() {
-                            // Give the execution a brief window to observe abort and shut down cleanly.
-                            let _ = tokio::time::timeout(Duration::from_millis(200), &mut task).await;
-                            if !task.is_finished() {
-                                task.abort();
-                            }
-                            let _ = task.await;
-                        }
-                        // Best-effort timeout response.
-                        let _ = send_cgi_output(&writer_tx, id, CgiResponse {
-                            status: 408,
-                            headers: vec![("Content-Type".into(), "text/plain".into())],
-                            body: Bytes::from_static(b"request timeout"),
-                        }.to_cgi_output()).await;
-                        let _ = writer_tx.send(WriterMsg::Record{ record_type: FCGI_STDOUT, request_id: id, content: Bytes::new()}).await;
-                        let _ = writer_tx.send(WriterMsg::EndRequest{ request_id: id, app_status: 0, protocol_status: FCGI_REQUEST_COMPLETE}).await;
-                    }
-                }
-            }
-        }
-    }
+            Err(_) => return Ok(()), // idle
+        };
 
-    // Connection is closing: abort any in-flight executions to avoid orphaned work.
-    let mut exec_tasks = Vec::new();
-    for (_, mut st) in conn.states.drain() {
-        if let Some(abort) = st.abort_notify.take() {
-            let _ = abort.send(());
+        let uses_shm = meta_uses_shm(&meta);
+        if uses_shm {
+            handle_one_request_shm(
+                &mut stream,
+                meta,
+                &router,
+                &semaphore,
+                input_idle,
+                max_params_bytes,
+                max_stdin_bytes,
+            )
+            .await?;
+            handled_requests = handled_requests.saturating_add(1);
+            if handled_requests >= max_requests_per_connection {
+                return Ok(());
+            }
+            continue;
         }
-        // Close stdin so executors can observe EOF quickly.
-        st.stdin_tx.take();
-        if let Some(task) = st.exec_task.take() {
-            exec_tasks.push(task);
-        }
+        // TCP-streaming mode uses connection-close (EOF) semantics, so keep-alive isn't possible.
+        return handle_one_request_tcp(
+            stream,
+            meta,
+            router,
+            semaphore,
+            input_idle,
+            max_params_bytes,
+            max_stdin_bytes,
+        )
+        .await;
     }
-    // Allow tasks a brief window to propagate abort into the executor, then hard-abort any stragglers.
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    for task in &exec_tasks {
-        if !task.is_finished() {
-            task.abort();
-        }
-    }
-    for task in exec_tasks {
-        let _ = task.await;
-    }
-
-    drop(writer_tx);
-    let _ = writer_task.await;
-    Ok(())
 }
 
-fn is_eof_error(e: &anyhow::Error) -> bool {
-    if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-        return io_err.kind() == std::io::ErrorKind::UnexpectedEof;
-    }
-    let msg = e.to_string();
-    msg.contains("unexpected eof") || msg.contains("early eof")
+fn meta_uses_shm(meta: &IpcRequestMeta) -> bool {
+    meta.req_body_shm_path.is_some()
+        || meta.req_body_shm_size_bytes.is_some()
+        || meta.res_body_shm_path.is_some()
+        || meta.res_body_shm_size_bytes.is_some()
 }
 
-fn compute_next_deadline(
-    states: &HashMap<u16, ReqState>,
-    last_any_activity: Instant,
-    input_idle: Duration,
-    conn_idle: Duration,
-) -> Instant {
-    if states.is_empty() {
-        return last_any_activity + conn_idle;
-    }
-    let mut next = Instant::now() + Duration::from_secs(3600);
-    for st in states.values() {
-        let expecting_input = !st.params_done || st.stdin_tx.is_some();
-        if expecting_input {
-            let d = st.last_activity + input_idle;
-            if d < next {
-                next = d;
-            }
-        }
-    }
-    next
+fn meta_params_bytes(meta: &IpcRequestMeta) -> usize {
+    meta.params
+        .iter()
+        .map(|(k, v)| k.len().saturating_add(v.len()))
+        .sum()
 }
 
-async fn handle_management_record(
-    writer_tx: &mpsc::Sender<WriterMsg>,
-    rec: &crate::fastcgi::Record,
-    max_conns: usize,
-    max_reqs_per_conn: usize,
-) -> Result<()> {
-    match rec.header.record_type {
-        FCGI_GET_VALUES => {
-            let req = decode_name_values(&rec.content)?;
-            let mut out = BytesMut::new();
-            for k in req.keys() {
-                match k.as_str() {
-                    "FCGI_MAX_CONNS" => {
-                        encode_name_value(&mut out, k.as_bytes(), max_conns.to_string().as_bytes());
-                    }
-                    "FCGI_MAX_REQS" => {
-                        encode_name_value(
-                            &mut out,
-                            k.as_bytes(),
-                            max_reqs_per_conn.to_string().as_bytes(),
-                        );
-                    }
-                    "FCGI_MPXS_CONNS" => {
-                        let value = if max_reqs_per_conn > 1 { b"1" } else { b"0" };
-                        encode_name_value(&mut out, k.as_bytes(), value);
-                    }
-                    _ => {}
-                }
-            }
-            writer_tx
-                .send(WriterMsg::Record {
-                    record_type: FCGI_GET_VALUES_RESULT,
-                    request_id: 0,
-                    content: out.freeze(),
-                })
-                .await
-                .map_err(|_| anyhow!("writer closed"))?;
+fn is_unexpected_eof(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::UnexpectedEof)
+}
+
+fn ensure_secure_dir(dir: &Path) -> Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(dir) {
+        if meta.file_type().is_symlink() {
+            return Err(anyhow!("refusing symlink directory: {}", dir.display()));
         }
-        other => {
-            let mut body = [0u8; 8];
-            body[0] = other;
-            writer_tx
-                .send(WriterMsg::Record {
-                    record_type: FCGI_UNKNOWN_TYPE,
-                    request_id: 0,
-                    content: Bytes::copy_from_slice(&body),
-                })
-                .await
-                .map_err(|_| anyhow!("writer closed"))?;
+        if !meta.is_dir() {
+            return Err(anyhow!("path is not a directory: {}", dir.display()));
         }
+    }
+    std::fs::create_dir_all(dir)
+        .map_err(|e| anyhow!("failed to create directory {}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+            anyhow!(
+                "failed to set permissions on directory {}: {e}",
+                dir.display()
+            )
+        })?;
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_request_record(
-    router: &Router,
-    semaphore: &Arc<Semaphore>,
-    limits: &RequestLimits,
-    writer_tx: &mpsc::Sender<WriterMsg>,
-    complete_tx: &mpsc::Sender<u16>,
-    max_reqs_per_conn: usize,
-    conn: &mut ConnState,
-    rec: crate::fastcgi::Record,
-) -> Result<()> {
-    let request_id = rec.header.request_id;
-    let now = Instant::now();
+fn ipc_shm_dir() -> Result<PathBuf> {
+    let base = ShmRingBuffer::default_shm_dir();
+    ensure_secure_dir(&base)?;
+    let ipc = base.join("ipc");
+    ensure_secure_dir(&ipc)?;
+    Ok(ipc)
+}
 
-    match rec.header.record_type {
-        FCGI_BEGIN_REQUEST => {
-            if conn.states.contains_key(&request_id) {
-                return Err(anyhow!(
-                    "duplicate BEGIN_REQUEST for request_id {}",
-                    request_id
-                ));
-            }
-            if conn.states.len() >= max_reqs_per_conn {
-                // Too many in-flight request IDs on this connection: fail-fast (no unbounded state).
-                let _ = send_cgi_output(
-                    writer_tx,
-                    request_id,
-                    CgiResponse {
-                        status: 503,
-                        headers: vec![("Content-Type".into(), "text/plain".into())],
-                        body: Bytes::from_static(b"overloaded"),
-                    }
-                    .to_cgi_output(),
-                )
-                .await;
-                let _ = writer_tx
-                    .send(WriterMsg::Record {
-                        record_type: FCGI_STDOUT,
-                        request_id,
-                        content: Bytes::new(),
-                    })
-                    .await;
-                let _ = writer_tx
-                    .send(WriterMsg::Record {
-                        record_type: FCGI_STDERR,
-                        request_id,
-                        content: Bytes::new(),
-                    })
-                    .await;
-                let _ = writer_tx
-                    .send(WriterMsg::EndRequest {
-                        request_id,
-                        app_status: 0,
-                        protocol_status: FCGI_OVERLOADED,
-                    })
-                    .await;
-                return Ok(());
-            }
-            if rec.content.len() < 3 {
-                return Err(anyhow!("BEGIN_REQUEST body too short"));
-            }
-            let role = u16::from_be_bytes([rec.content[0], rec.content[1]]);
-            let flags = rec.content[2];
-            if role != FCGI_RESPONDER {
-                writer_tx
-                    .send(WriterMsg::EndRequest {
-                        request_id,
-                        app_status: 0,
-                        protocol_status: FCGI_UNKNOWN_ROLE,
-                    })
-                    .await
-                    .map_err(|_| anyhow!("writer closed"))?;
-                return Ok(());
-            }
-
-            let (stdin_tx, stdin_rx) = mpsc::channel::<Bytes>(16);
-            if (flags & FCGI_KEEP_CONN) == 0 {
-                conn.close_when_idle = true;
-            }
-            conn.states.insert(
-                request_id,
-                ReqState {
-                    last_activity: now,
-                    params_buf: BytesMut::new(),
-                    params_done: false,
-                    stdin_bytes: 0,
-                    stdin_tx: Some(stdin_tx),
-                    stdin_rx: Some(stdin_rx),
-                    abort_notify: None,
-                    exec_task: None,
-                },
-            );
-        }
-        FCGI_PARAMS => {
-            if !rec.content.is_empty() {
-                let Some(st) = conn.states.get_mut(&request_id) else {
-                    return Ok(());
-                };
-                st.last_activity = now;
-                if st.params_done {
-                    return Err(anyhow!("unexpected PARAMS after terminator"));
-                }
-                if st.params_buf.len() + rec.content.len() > limits.max_params_bytes {
-                    return Err(anyhow!("PARAMS exceeds size limit"));
-                }
-                st.params_buf.extend_from_slice(&rec.content);
-                return Ok(());
-            }
-
-            let parsed = {
-                let Some(st) = conn.states.get_mut(&request_id) else {
-                    return Ok(());
-                };
-                st.last_activity = now;
-                if st.params_done {
-                    return Err(anyhow!("unexpected PARAMS after terminator"));
-                }
-                st.params_done = true;
-                parse_cgi_params(st.params_buf.as_ref())?
-            };
-
-            let (executor, matched_prefix) =
-                match router.route(&parsed.script_name, parsed.server_name.as_deref()) {
-                    Some(v) => v,
-                    None => {
-                        send_cgi_output(
-                            writer_tx,
-                            request_id,
-                            CgiResponse {
-                                status: 404,
-                                headers: vec![("Content-Type".into(), "text/plain".into())],
-                                body: Bytes::from_static(b"no handler matched"),
-                            }
-                            .to_cgi_output(),
-                        )
-                        .await?;
-                        writer_tx
-                            .send(WriterMsg::Record {
-                                record_type: FCGI_STDOUT,
-                                request_id,
-                                content: Bytes::new(),
-                            })
-                            .await
-                            .map_err(|_| anyhow!("writer closed"))?;
-                        writer_tx
-                            .send(WriterMsg::EndRequest {
-                                request_id,
-                                app_status: 0,
-                                protocol_status: FCGI_REQUEST_COMPLETE,
-                            })
-                            .await
-                            .map_err(|_| anyhow!("writer closed"))?;
-                        conn.states.remove(&request_id);
-                        return Ok(());
-                    }
-                };
-
-            let mut cgi_req = parsed.into_cgi_request();
-            if let Some(prefix) = matched_prefix {
-                cgi_req.matched_prefix = Some(prefix);
-            }
-
-            // Fail-fast if no worker slot is available (avoid unbounded queues).
-            let permit = match Arc::clone(semaphore).try_acquire_owned() {
-                Ok(p) => p,
-                Err(_) => {
-                    send_cgi_output(
-                        writer_tx,
-                        request_id,
-                        CgiResponse {
-                            status: 503,
-                            headers: vec![("Content-Type".into(), "text/plain".into())],
-                            body: Bytes::from_static(b"overloaded"),
-                        }
-                        .to_cgi_output(),
-                    )
-                    .await
-                    .ok();
-                    writer_tx
-                        .send(WriterMsg::Record {
-                            record_type: FCGI_STDOUT,
-                            request_id,
-                            content: Bytes::new(),
-                        })
-                        .await
-                        .ok();
-                    writer_tx
-                        .send(WriterMsg::Record {
-                            record_type: FCGI_STDERR,
-                            request_id,
-                            content: Bytes::new(),
-                        })
-                        .await
-                        .ok();
-                    writer_tx
-                        .send(WriterMsg::EndRequest {
-                            request_id,
-                            app_status: 0,
-                            protocol_status: FCGI_OVERLOADED,
-                        })
-                        .await
-                        .ok();
-                    conn.states.remove(&request_id);
-                    return Ok(());
-                }
-            };
-
-            let (stdin_rx, abort_rx) = {
-                let Some(st) = conn.states.get_mut(&request_id) else {
-                    return Ok(());
-                };
-                let stdin_rx = st
-                    .stdin_rx
-                    .take()
-                    .ok_or_else(|| anyhow!("stdin receiver missing"))?;
-                let (abort_tx, abort_rx) = oneshot::channel::<()>();
-                st.abort_notify = Some(abort_tx);
-                (stdin_rx, abort_rx)
-            };
-
-            let writer_tx2 = writer_tx.clone();
-            let complete_tx2 = complete_tx.clone();
-            let task = tokio::spawn(async move {
-                if let Err(e) = run_execution(
-                    request_id, executor, cgi_req, stdin_rx, abort_rx, permit, writer_tx2,
-                )
-                .await
-                {
-                    error!(request_id = request_id, error = %e, "execution failed");
-                }
-                let _ = complete_tx2.send(request_id).await;
-            });
-            if let Some(st) = conn.states.get_mut(&request_id) {
-                st.exec_task = Some(task);
-            }
-        }
-        FCGI_STDIN => {
-            let Some(st) = conn.states.get_mut(&request_id) else {
-                return Ok(());
-            };
-            st.last_activity = now;
-            if !st.params_done {
-                return Err(anyhow!("STDIN before PARAMS terminator"));
-            }
-            if rec.content.is_empty() {
-                st.stdin_tx = None; // close stdin channel
-            } else {
-                st.stdin_bytes = st.stdin_bytes.saturating_add(rec.content.len());
-                if st.stdin_bytes > limits.max_stdin_bytes {
-                    return Err(anyhow!("STDIN exceeds size limit"));
-                }
-                if let Some(tx) = st.stdin_tx.as_ref() {
-                    let _ = tx.send(rec.content.clone()).await;
-                }
-            }
-        }
-        FCGI_ABORT_REQUEST => {
-            if let Some(mut st) = conn.states.remove(&request_id) {
-                if let Some(abort) = st.abort_notify.take() {
-                    let _ = abort.send(());
-                }
-                if let Some(mut task) = st.exec_task.take() {
-                    let _ = tokio::time::timeout(Duration::from_millis(200), &mut task).await;
-                    if !task.is_finished() {
-                        task.abort();
-                    }
-                    let _ = task.await;
-                }
-                writer_tx
-                    .send(WriterMsg::EndRequest {
-                        request_id,
-                        app_status: 0,
-                        protocol_status: FCGI_REQUEST_COMPLETE,
-                    })
-                    .await
-                    .ok();
-            }
-        }
-        _ => {}
+fn validate_ipc_shm_token(token: &str, expected_prefix: &str) -> Result<()> {
+    if token.len() > 255 {
+        return Err(anyhow!("IPC SHM token is too long"));
+    }
+    if !token.is_ascii() {
+        return Err(anyhow!("IPC SHM token must be ASCII"));
+    }
+    if token.contains('/') || token.contains('\\') || token.contains("..") {
+        return Err(anyhow!("IPC SHM token contains forbidden path characters"));
+    }
+    if !token.starts_with(expected_prefix) || !token.ends_with(".shm") {
+        return Err(anyhow!("IPC SHM token has unexpected format"));
+    }
+    if !token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(anyhow!("IPC SHM token contains invalid characters"));
     }
     Ok(())
 }
 
-struct ParsedCgiParams {
-    script_name: String,
-    path_info: String,
-    query_string: String,
-    request_method: String,
-    content_type: String,
-    content_length: usize,
-    server_protocol: Option<String>,
-    server_name: Option<String>,
-    server_port: u16,
-    remote_addr: Option<String>,
-    remote_port: Option<u16>,
-    http_headers: HashMap<String, String>,
-}
-
-impl ParsedCgiParams {
-    fn into_cgi_request(self) -> CgiRequest {
-        CgiRequest {
-            matched_prefix: None,
-            script_name: self.script_name,
-            path_info: self.path_info,
-            query_string: self.query_string,
-            request_method: self.request_method,
-            content_type: self.content_type,
-            content_length: self.content_length,
-            server_protocol: self
-                .server_protocol
-                .unwrap_or_else(|| "HTTP/1.1".to_string()),
-            server_name: self.server_name.unwrap_or_else(|| "localhost".to_string()),
-            server_port: self.server_port,
-            remote_addr: self.remote_addr,
-            remote_port: self.remote_port,
-            http_headers: self.http_headers,
-        }
+fn host_only(authority: &str) -> Option<String> {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return None;
     }
+    if let Some(v6) = authority.strip_prefix('[') {
+        let end = v6.find(']')?;
+        return Some(v6[..end].to_string());
+    }
+    Some(
+        authority
+            .split_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(authority)
+            .to_string(),
+    )
 }
 
-fn parse_cgi_params(data: &[u8]) -> Result<ParsedCgiParams> {
-    fn read_nv_len(data: &mut &[u8]) -> Result<usize> {
-        if data.is_empty() {
-            return Err(anyhow!("unexpected end of name-value data"));
-        }
-        let first = data[0];
-        if first < 128 {
-            *data = &data[1..];
-            Ok(first as usize)
+fn host_port(authority: &str) -> (Option<String>, Option<u16>) {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return (None, None);
+    }
+    if let Some(v6) = authority.strip_prefix('[') {
+        let end = match v6.find(']') {
+            Some(v) => v,
+            None => return (None, None),
+        };
+        let host = v6[..end].to_string();
+        let rest = &v6[end + 1..];
+        let port = rest.strip_prefix(':').and_then(|p| p.parse::<u16>().ok());
+        return (Some(host), port);
+    }
+    let (host, port) = authority
+        .split_once(':')
+        .map(|(h, p)| (h.to_string(), p.parse::<u16>().ok()))
+        .unwrap_or((authority.to_string(), None));
+    (Some(host), port)
+}
+
+fn cgi_header_map(headers: Vec<(String, String)>) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (k, v) in headers {
+        let key = k.to_ascii_lowercase();
+        if let Some(existing) = out.get_mut(&key) {
+            let sep = if key == "cookie" { "; " } else { ", " };
+            existing.push_str(sep);
+            existing.push_str(&v);
         } else {
-            if data.len() < 4 {
-                return Err(anyhow!("truncated 4-byte name-value length"));
-            }
-            let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff;
-            *data = &data[4..];
-            Ok(len as usize)
+            out.insert(key, v);
         }
     }
-
-    fn parse_usize_ascii(data: &[u8]) -> Option<usize> {
-        if data.is_empty() {
-            return None;
-        }
-        let mut v: usize = 0;
-        for &b in data {
-            if !b.is_ascii_digit() {
-                return None;
-            }
-            v = v.checked_mul(10)?.checked_add((b - b'0') as usize)?;
-        }
-        Some(v)
-    }
-
-    fn parse_u16_ascii(data: &[u8]) -> Option<u16> {
-        parse_usize_ascii(data).and_then(|v| u16::try_from(v).ok())
-    }
-
-    fn http_suffix_to_header_name(suffix: &[u8]) -> String {
-        let mut out = String::with_capacity(suffix.len());
-        for &b in suffix {
-            let b = match b {
-                b'_' => b'-',
-                b'A'..=b'Z' => b + 32,
-                _ => b,
-            };
-            out.push(b as char);
-        }
-        out
-    }
-
-    let mut rest = data;
-    let mut out = ParsedCgiParams {
-        script_name: String::new(),
-        path_info: String::new(),
-        query_string: String::new(),
-        request_method: "GET".to_string(),
-        content_type: String::new(),
-        content_length: 0,
-        server_protocol: None,
-        server_name: None,
-        server_port: 80,
-        remote_addr: None,
-        remote_port: None,
-        http_headers: HashMap::new(),
-    };
-
-    while !rest.is_empty() {
-        let name_len = read_nv_len(&mut rest)?;
-        let value_len = read_nv_len(&mut rest)?;
-        if rest.len() < name_len + value_len {
-            return Err(anyhow!("truncated name-value pair"));
-        }
-        let (name, rest2) = rest.split_at(name_len);
-        let (value, rest3) = rest2.split_at(value_len);
-        rest = rest3;
-
-        if name == b"SCRIPT_NAME" {
-            out.script_name = std::str::from_utf8(value)?.to_string();
-        } else if name == b"PATH_INFO" {
-            out.path_info = std::str::from_utf8(value)?.to_string();
-        } else if name == b"QUERY_STRING" {
-            out.query_string = std::str::from_utf8(value)?.to_string();
-        } else if name == b"REQUEST_METHOD" {
-            out.request_method = std::str::from_utf8(value)?.to_string();
-        } else if name == b"CONTENT_TYPE" {
-            out.content_type = std::str::from_utf8(value)?.to_string();
-        } else if name == b"CONTENT_LENGTH" {
-            out.content_length = parse_usize_ascii(value).unwrap_or(0);
-        } else if name == b"SERVER_NAME" {
-            out.server_name = Some(std::str::from_utf8(value)?.to_string());
-        } else if name == b"SERVER_PROTOCOL" {
-            out.server_protocol = Some(std::str::from_utf8(value)?.to_string());
-        } else if name == b"SERVER_PORT" {
-            out.server_port = parse_u16_ascii(value).unwrap_or(80);
-        } else if name == b"REMOTE_ADDR" {
-            out.remote_addr = Some(std::str::from_utf8(value)?.to_string());
-        } else if name == b"REMOTE_PORT" {
-            out.remote_port = parse_u16_ascii(value);
-        } else if let Some(suffix) = name.strip_prefix(b"HTTP_") {
-            let key = http_suffix_to_header_name(suffix);
-            let val = std::str::from_utf8(value)?.to_string();
-            if let Some(existing) = out.http_headers.get_mut(&key) {
-                if !existing.is_empty() {
-                    existing.push_str(", ");
-                }
-                existing.push_str(val.as_str());
-            } else {
-                out.http_headers.insert(key, val);
-            }
-        }
-    }
-    Ok(out)
+    out
 }
 
-async fn run_execution(
-    request_id: u16,
-    executor: Arc<dyn Executor>,
-    req: CgiRequest,
-    mut stdin_rx: mpsc::Receiver<Bytes>,
-    mut abort_rx: oneshot::Receiver<()>,
-    _permit: OwnedSemaphorePermit,
-    writer_tx: mpsc::Sender<WriterMsg>,
-) -> Result<()> {
-    let exec = match executor.start(req).await {
-        Ok(exec) => exec,
-        Err(e) => {
-            // If the executor fails to start, return a well-formed CGI error response
-            // so the client doesn't hang waiting for headers.
-            let out = CgiResponse {
-                status: 502,
-                headers: vec![("Content-Type".into(), "text/plain".into())],
-                body: Bytes::from(format!("executor start error: {}", e)),
+async fn drain_req_ring(req_path: &Path, ring: &mut ShmRingBuffer, input_idle: Duration) {
+    loop {
+        match ring.try_pop() {
+            Ok(Some(data)) => {
+                if data.is_empty() {
+                    break;
+                }
             }
-            .to_cgi_output();
-            send_cgi_output(&writer_tx, request_id, out).await.ok();
-            writer_tx
-                .send(WriterMsg::Record {
-                    record_type: FCGI_STDOUT,
-                    request_id,
-                    content: Bytes::new(),
-                })
-                .await
-                .ok();
-            writer_tx
-                .send(WriterMsg::Record {
-                    record_type: FCGI_STDERR,
-                    request_id,
-                    content: Bytes::new(),
-                })
-                .await
-                .ok();
-            writer_tx
-                .send(WriterMsg::EndRequest {
-                    request_id,
-                    app_status: 1,
-                    protocol_status: FCGI_REQUEST_COMPLETE,
-                })
-                .await
-                .ok();
+            Ok(None) => {
+                let waited = timeout(input_idle, ring.wait_for_data()).await;
+                if waited.is_err() || waited.is_ok_and(|r| r.is_err()) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = std::fs::remove_file(req_path);
+}
+
+async fn push_ring_bytes(ring: &mut ShmRingBuffer, bytes: &[u8]) -> Result<()> {
+    loop {
+        match ring.try_push(bytes) {
+            Ok(true) => return Ok(()),
+            Ok(false) => ring.wait_for_space(bytes.len()).await?,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+async fn push_ring_eof(ring: &mut ShmRingBuffer) -> Result<()> {
+    push_ring_bytes(ring, &[]).await
+}
+
+async fn handle_one_request_shm<S>(
+    stream: &mut S,
+    mut meta: IpcRequestMeta,
+    router: &Arc<Router>,
+    semaphore: &Arc<Semaphore>,
+    input_idle: Duration,
+    max_params_bytes: usize,
+    max_stdin_bytes: usize,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let req_token = meta.req_body_shm_path.take().ok_or_else(|| {
+        anyhow!("req_body_shm_path is required when shared memory IPC is enabled")
+    })?;
+    let req_size = meta.req_body_shm_size_bytes.take().ok_or_else(|| {
+        anyhow!("req_body_shm_size_bytes is required when shared memory IPC is enabled")
+    })?;
+    let res_token = meta.res_body_shm_path.take().ok_or_else(|| {
+        anyhow!("res_body_shm_path is required when shared memory IPC is enabled")
+    })?;
+    let res_size = meta.res_body_shm_size_bytes.take().ok_or_else(|| {
+        anyhow!("res_body_shm_size_bytes is required when shared memory IPC is enabled")
+    })?;
+
+    if req_size == 0
+        || res_size == 0
+        || req_size > MAX_IPC_SHM_RING_BYTES
+        || res_size > MAX_IPC_SHM_RING_BYTES
+    {
+        return Err(anyhow!(
+            "IPC shared memory ring size is out of allowed range"
+        ));
+    }
+
+    validate_ipc_shm_token(req_token.as_str(), "ipc_req_")?;
+    validate_ipc_shm_token(res_token.as_str(), "ipc_res_")?;
+    let shm_dir = ipc_shm_dir()?;
+    let req_path = shm_dir.join(req_token);
+    let res_path = shm_dir.join(res_token);
+
+    let mut req_ring = ShmRingBuffer::create_or_open(&req_path, req_size)?;
+    let mut res_ring = ShmRingBuffer::create_or_open(&res_path, res_size)?;
+
+    // Per-request SHM doorbells should not leak named kernel objects (notably on macOS).
+    if let Err(e) = req_ring.unlink_doorbells() {
+        warn!(error = ?e, "failed to unlink IPC request SHM doorbells");
+    }
+    if let Err(e) = res_ring.unlink_doorbells() {
+        warn!(error = ?e, "failed to unlink IPC response SHM doorbells");
+    }
+
+    if meta_params_bytes(&meta) > max_params_bytes {
+        let res_meta = IpcResponseMeta {
+            status: 413,
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+        };
+        write_frame(stream, &res_meta).await?;
+        let _ = push_ring_bytes(&mut res_ring, b"params too large").await;
+        let _ = push_ring_eof(&mut res_ring).await;
+        drain_req_ring(&req_path, &mut req_ring, input_idle).await;
+        let _ = std::fs::remove_file(&res_path);
+        return Ok(());
+    }
+
+    let uri: Uri = meta
+        .uri
+        .parse()
+        .map_err(|e| anyhow!("invalid IPC request URI '{}': {e}", meta.uri))?;
+    let script_name = uri.path().to_string();
+    let query_string = uri.query().unwrap_or("").to_string();
+    let header_host = meta
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.as_str());
+    let route_host = header_host
+        .and_then(host_only)
+        .or_else(|| uri.authority().and_then(|a| host_only(a.as_str())));
+
+    let (executor, matched_prefix) = match router.route(script_name.as_str(), route_host.as_deref())
+    {
+        Some(v) => v,
+        None => {
+            let res_meta = IpcResponseMeta {
+                status: 404,
+                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            };
+            write_frame(stream, &res_meta).await?;
+            let _ = push_ring_bytes(&mut res_ring, b"no handler matched").await;
+            let _ = push_ring_eof(&mut res_ring).await;
+            drain_req_ring(&req_path, &mut req_ring, input_idle).await;
+            let _ = std::fs::remove_file(&res_path);
             return Ok(());
         }
     };
+
+    let _permit = match Arc::clone(semaphore).try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            let res_meta = IpcResponseMeta {
+                status: 503,
+                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            };
+            write_frame(stream, &res_meta).await?;
+            let _ = push_ring_bytes(&mut res_ring, b"overloaded").await;
+            let _ = push_ring_eof(&mut res_ring).await;
+            drain_req_ring(&req_path, &mut req_ring, input_idle).await;
+            let _ = std::fs::remove_file(&res_path);
+            return Ok(());
+        }
+    };
+
+    let header_host = header_host.or_else(|| uri.authority().map(|a| a.as_str()));
+    let (server_name, server_port) = header_host
+        .map(host_port)
+        .unwrap_or((Some("localhost".to_string()), Some(80)));
+
+    let cgi_req = CgiRequest {
+        script_name: script_name.clone(),
+        path_info: String::new(),
+        query_string: query_string.clone(),
+        request_method: meta.method.clone(),
+        content_type: meta
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default(),
+        content_length: meta
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(0),
+        server_protocol: "HTTP/1.1".to_string(),
+        server_name: server_name.unwrap_or_else(|| "localhost".to_string()),
+        server_port: server_port.unwrap_or(80),
+        remote_addr: meta.params.get("REMOTE_ADDR").cloned(),
+        remote_port: meta.params.get("REMOTE_PORT").and_then(|p| p.parse().ok()),
+        http_headers: cgi_header_map(meta.headers),
+        matched_prefix: matched_prefix.clone(),
+    };
+
+    if cgi_req.content_length > max_stdin_bytes {
+        let res_meta = IpcResponseMeta {
+            status: 413,
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+        };
+        write_frame(stream, &res_meta).await?;
+        let _ = push_ring_bytes(&mut res_ring, b"request body too large").await;
+        let _ = push_ring_eof(&mut res_ring).await;
+        drain_req_ring(&req_path, &mut req_ring, input_idle).await;
+        let _ = std::fs::remove_file(&res_path);
+        return Ok(());
+    }
+
+    let exec = match executor.start(cgi_req).await {
+        Ok(exec) => exec,
+        Err(e) => {
+            let res_meta = IpcResponseMeta {
+                status: 502,
+                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            };
+            write_frame(stream, &res_meta).await?;
+            let msg = format!("executor start error: {}", e);
+            let _ = push_ring_bytes(&mut res_ring, msg.as_bytes()).await;
+            let _ = push_ring_eof(&mut res_ring).await;
+            drain_req_ring(&req_path, &mut req_ring, input_idle).await;
+            let _ = std::fs::remove_file(&res_path);
+            return Ok(());
+        }
+    };
+
     let Execution {
         stdin: exec_stdin,
-        stdout: exec_stdout,
-        stderr: exec_stderr,
+        stdout: mut exec_stdout,
+        stderr: mut exec_stderr,
         abort: exec_abort,
         done: exec_done,
     } = exec;
 
-    // Forward inbound STDIN to executor stdin.
-    let exec_stdin = exec_stdin;
+    // Drain request body into executor stdin concurrently with header parsing.
+    let req_path_task = req_path.clone();
+    let input_idle_for_task = input_idle;
+    let max_stdin_bytes_for_task = max_stdin_bytes;
+    let (too_large_tx, too_large_rx) = oneshot::channel::<()>();
     let stdin_task = tokio::spawn(async move {
-        while let Some(chunk) = stdin_rx.recv().await {
-            if exec_stdin.send(chunk).await.is_err() {
+        let mut stdin_open = true;
+        let mut stdin_bytes: usize = 0;
+        let mut too_large_tx = Some(too_large_tx);
+        let mut ring = req_ring;
+        loop {
+            match ring.try_pop() {
+                Ok(Some(data)) => {
+                    if data.is_empty() {
+                        break; // EOF
+                    }
+                    stdin_bytes = stdin_bytes.saturating_add(data.len());
+                    if stdin_bytes > max_stdin_bytes_for_task {
+                        if let Some(tx) = too_large_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        stdin_open = false;
+                        continue; // drain to EOF
+                    }
+                    if stdin_open && exec_stdin.send(Bytes::from(data)).await.is_err() {
+                        stdin_open = false;
+                    }
+                }
+                Ok(None) => {
+                    let waited = timeout(input_idle_for_task, ring.wait_for_data()).await;
+                    if waited.is_err() || waited.is_ok_and(|r| r.is_err()) {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        drop(ring);
+        let _ = std::fs::remove_file(req_path_task);
+    });
+
+    // Read until headers are fully accumulated
+    let mut header_buf = BytesMut::new();
+    let too_large_rx = too_large_rx;
+    tokio::pin!(too_large_rx);
+    let mut too_large_rx_active = true;
+    let parsed_res = loop {
+        tokio::select! {
+            res = &mut too_large_rx, if too_large_rx_active => {
+                match res {
+                    Ok(()) => {
+                        let res_meta = IpcResponseMeta {
+                            status: 413,
+                            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+                        };
+                        write_frame(stream, &res_meta).await?;
+                        let _ = push_ring_bytes(&mut res_ring, b"request body too large").await;
+                        let _ = push_ring_eof(&mut res_ring).await;
+                        let _ = exec_abort.send(());
+                        let _ = stdin_task.await;
+                        let _ = exec_done.await;
+                        let _ = std::fs::remove_file(&res_path);
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        too_large_rx_active = false;
+                    }
+                }
+            }
+            chunk = exec_stdout.recv() => {
+                let Some(chunk) = chunk else {
+                    break None;
+                };
+                header_buf.extend_from_slice(&chunk);
+
+                let eof_idx = header_buf
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .or_else(|| header_buf.windows(2).position(|window| window == b"\n\n"));
+
+                if eof_idx.is_some() || header_buf.len() > 65536 {
+                    match CgiResponse::parse_cgi_output(&header_buf) {
+                        Ok(resp) => break Some(resp),
+                        Err(_) => break None,
+                    }
+                }
+            }
+        }
+    };
+
+    let (res_meta, body_leftover) = if let Some(parsed) = parsed_res {
+        (
+            IpcResponseMeta {
+                status: parsed.status,
+                headers: parsed.headers,
+            },
+            parsed.body,
+        )
+    } else {
+        let meta = IpcResponseMeta {
+            status: 502,
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+        };
+        write_frame(stream, &meta).await?;
+        let _ = push_ring_bytes(&mut res_ring, b"bad gateway (invalid CGI headers)").await;
+        let _ = push_ring_eof(&mut res_ring).await;
+        let _ = exec_abort.send(());
+        let _ = stdin_task.await;
+        let _ = exec_done.await;
+        let _ = std::fs::remove_file(&res_path);
+        return Ok(());
+    };
+
+    // Write IpcResponseMeta
+    write_frame(stream, &res_meta).await?;
+
+    // Handle initial leftover stdout body bytes
+    if !body_leftover.is_empty() {
+        let _ = push_ring_bytes(&mut res_ring, body_leftover.as_ref()).await;
+    }
+
+    // Task to forward executor STDOUT to response ring
+    let res_path_task = res_path.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut ring = res_ring;
+        while let Some(chunk) = exec_stdout.recv().await {
+            if push_ring_bytes(&mut ring, &chunk).await.is_err() {
+                break;
+            }
+        }
+        let _ = push_ring_eof(&mut ring).await;
+        drop(ring);
+        let _ = std::fs::remove_file(res_path_task);
+    });
+
+    let stderr_task = tokio::spawn(async move {
+        while let Some(chunk) = exec_stderr.recv().await {
+            if !chunk.is_empty() {
+                if let Ok(msg) = std::str::from_utf8(&chunk) {
+                    warn!("CGI STDERR: {}", msg.trim_end());
+                } else {
+                    warn!("CGI STDERR (binary): {} bytes", chunk.len());
+                }
+            }
+        }
+    });
+
+    let _ = exec_done.await;
+    let _ = stdin_task.await;
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+
+    Ok(())
+}
+
+async fn handle_one_request_tcp<S>(
+    mut stream: S,
+    meta: IpcRequestMeta,
+    router: Arc<Router>,
+    semaphore: Arc<Semaphore>,
+    input_idle: Duration,
+    max_params_bytes: usize,
+    max_stdin_bytes: usize,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    if meta_params_bytes(&meta) > max_params_bytes {
+        let res_meta = IpcResponseMeta {
+            status: 413,
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+        };
+        write_frame(&mut stream, &res_meta).await?;
+        stream.write_all(b"params too large").await?;
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = match timeout(input_idle, stream.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => n,
+                _ => break,
+            };
+            let _ = n; // discard
+        }
+        return Ok(());
+    }
+
+    let uri: Uri = meta
+        .uri
+        .parse()
+        .map_err(|e| anyhow!("invalid IPC request URI '{}': {e}", meta.uri))?;
+    let script_name = uri.path().to_string();
+    let query_string = uri.query().unwrap_or("").to_string();
+    let header_host = meta
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.as_str());
+    let route_host = header_host
+        .and_then(host_only)
+        .or_else(|| uri.authority().and_then(|a| host_only(a.as_str())));
+
+    let (executor, matched_prefix) = match router.route(script_name.as_str(), route_host.as_deref())
+    {
+        Some(v) => v,
+        None => {
+            let res_meta = IpcResponseMeta {
+                status: 404,
+                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            };
+            write_frame(&mut stream, &res_meta).await?;
+            stream.write_all(b"no handler matched").await?;
+            return Ok(());
+        }
+    };
+
+    let header_host = header_host.or_else(|| uri.authority().map(|a| a.as_str()));
+    let (server_name, server_port) = header_host
+        .map(host_port)
+        .unwrap_or((Some("localhost".to_string()), Some(80)));
+
+    let cgi_req = CgiRequest {
+        script_name: script_name.clone(),
+        path_info: String::new(),
+        query_string: query_string.clone(),
+        request_method: meta.method.clone(),
+        content_type: meta
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default(),
+        content_length: meta
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(0),
+        server_protocol: "HTTP/1.1".to_string(),
+        server_name: server_name.unwrap_or_else(|| "localhost".to_string()),
+        server_port: server_port.unwrap_or(80),
+        remote_addr: meta.params.get("REMOTE_ADDR").cloned(),
+        remote_port: meta.params.get("REMOTE_PORT").and_then(|p| p.parse().ok()),
+        http_headers: cgi_header_map(meta.headers),
+        matched_prefix: matched_prefix.clone(),
+    };
+
+    let _permit = match Arc::clone(&semaphore).try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            let res_meta = IpcResponseMeta {
+                status: 503,
+                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            };
+            write_frame(&mut stream, &res_meta).await?;
+            stream.write_all(b"overloaded").await?;
+            return Ok(());
+        }
+    };
+
+    if cgi_req.content_length > max_stdin_bytes {
+        let res_meta = IpcResponseMeta {
+            status: 413,
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+        };
+        write_frame(&mut stream, &res_meta).await?;
+        stream.write_all(b"request body too large").await?;
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = match timeout(input_idle, stream.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => n,
+                _ => break,
+            };
+            let _ = n; // discard
+        }
+        return Ok(());
+    }
+
+    let exec = match executor.start(cgi_req).await {
+        Ok(exec) => exec,
+        Err(e) => {
+            let res_meta = IpcResponseMeta {
+                status: 502,
+                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            };
+            write_frame(&mut stream, &res_meta).await?;
+            let msg = format!("executor start error: {}", e);
+            stream.write_all(msg.as_bytes()).await?;
+            return Ok(());
+        }
+    };
+
+    let Execution {
+        stdin: exec_stdin,
+        stdout: mut exec_stdout,
+        stderr: mut exec_stderr,
+        abort: exec_abort,
+        done: exec_done,
+    } = exec;
+
+    let (mut rx, mut tx) = tokio::io::split(stream);
+
+    // Drain request body into executor stdin concurrently with header parsing.
+    let (too_large_tx, too_large_rx) = oneshot::channel::<()>();
+    let stdin_task = tokio::spawn(async move {
+        let mut buf = [0u8; 65536];
+        let mut stdin_open = true;
+        let mut stdin_bytes: usize = 0;
+        let mut too_large_tx = Some(too_large_tx);
+        loop {
+            let n = match timeout(input_idle, rx.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => n,
+                _ => break,
+            };
+            stdin_bytes = stdin_bytes.saturating_add(n);
+            if stdin_bytes > max_stdin_bytes {
+                if let Some(tx) = too_large_tx.take() {
+                    let _ = tx.send(());
+                }
+                stdin_open = false;
+                continue; // drain to EOF
+            }
+            if stdin_open
+                && exec_stdin
+                    .send(Bytes::copy_from_slice(&buf[..n]))
+                    .await
+                    .is_err()
+            {
+                stdin_open = false;
+            }
+        }
+    });
+
+    let mut header_buf = BytesMut::new();
+    let too_large_rx = too_large_rx;
+    tokio::pin!(too_large_rx);
+    let mut too_large_rx_active = true;
+    let parsed_res = loop {
+        tokio::select! {
+            res = &mut too_large_rx, if too_large_rx_active => {
+                match res {
+                    Ok(()) => {
+                        let res_meta = IpcResponseMeta {
+                            status: 413,
+                            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+                        };
+                        write_frame(&mut tx, &res_meta).await?;
+                        let _ = tx.write_all(b"request body too large").await;
+                        let _ = exec_abort.send(());
+                        let _ = stdin_task.await;
+                        let _ = exec_done.await;
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        too_large_rx_active = false;
+                    }
+                }
+            }
+            chunk = exec_stdout.recv() => {
+                let Some(chunk) = chunk else {
+                    break None;
+                };
+                header_buf.extend_from_slice(&chunk);
+
+                let eof_idx = header_buf
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .or_else(|| header_buf.windows(2).position(|window| window == b"\n\n"));
+
+                if eof_idx.is_some() || header_buf.len() > 65536 {
+                    match CgiResponse::parse_cgi_output(&header_buf) {
+                        Ok(resp) => break Some(resp),
+                        Err(_) => break None,
+                    }
+                }
+            }
+        }
+    };
+
+    let (res_meta, body_leftover) = if let Some(parsed) = parsed_res {
+        (
+            IpcResponseMeta {
+                status: parsed.status,
+                headers: parsed.headers,
+            },
+            parsed.body,
+        )
+    } else {
+        // Executor ended before headers were completed.
+        let meta = IpcResponseMeta {
+            status: 502,
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+        };
+        write_frame(&mut tx, &meta).await?;
+        tx.write_all(b"bad gateway (no output)").await?;
+        return Ok(());
+    };
+
+    // Write IpcResponseMeta
+    write_frame(&mut tx, &res_meta).await?;
+
+    // Handle initial leftover stdout body bytes
+    if !body_leftover.is_empty() {
+        tx.write_all(&body_leftover).await?;
+    }
+
+    // Task to forward executor STDOUT to stream
+    let stdout_task = tokio::spawn(async move {
+        while let Some(chunk) = exec_stdout.recv().await {
+            if tx.write_all(&chunk).await.is_err() {
                 break;
             }
         }
     });
 
-    // Forward executor stdout/stderr to FastCGI.
-    let stdout_sent = Arc::new(AtomicBool::new(false));
-    let writer_tx_stdout = writer_tx.clone();
-    let mut stdout_rx = exec_stdout;
-    let stdout_sent_flag = Arc::clone(&stdout_sent);
-    let stdout_task = tokio::spawn(async move {
-        while let Some(chunk) = stdout_rx.recv().await {
-            if !chunk.is_empty() {
-                stdout_sent_flag.store(true, Ordering::Relaxed);
-            }
-            send_record_chunks(&writer_tx_stdout, FCGI_STDOUT, request_id, chunk)
-                .await
-                .ok();
-        }
-    });
-
-    let writer_tx_stderr = writer_tx.clone();
-    let mut stderr_rx = exec_stderr;
     let stderr_task = tokio::spawn(async move {
-        while let Some(chunk) = stderr_rx.recv().await {
-            send_record_chunks(&writer_tx_stderr, FCGI_STDERR, request_id, chunk)
-                .await
-                .ok();
+        while let Some(chunk) = exec_stderr.recv().await {
+            if !chunk.is_empty() {
+                if let Ok(msg) = std::str::from_utf8(&chunk) {
+                    warn!("CGI STDERR: {}", msg.trim_end());
+                } else {
+                    warn!("CGI STDERR (binary): {} bytes", chunk.len());
+                }
+            }
         }
     });
 
-    // Wait for completion or abort.
-    let mut exec_abort = Some(exec_abort);
-    let mut exec_done = exec_done;
-    let done = tokio::select! {
-        _ = &mut abort_rx => {
-            if let Some(abort) = exec_abort.take() {
-                let _ = abort.send(());
-            }
-            Err(anyhow!("request aborted"))
-        }
-        res = &mut exec_done => match res {
-            Ok(r) => r,
-            Err(e) => Err(anyhow!("executor task join failed: {}", e)),
-        }
-    };
-
-    stdin_task.abort();
+    let _ = exec_done.await;
     let _ = stdin_task.await;
     let _ = stdout_task.await;
     let _ = stderr_task.await;
 
-    // If execution failed before producing any stdout, return a minimal CGI error response.
-    if done.is_err() && !stdout_sent.load(Ordering::Relaxed) {
-        let out = CgiResponse {
-            status: 502,
-            headers: vec![("Content-Type".into(), "text/plain".into())],
-            body: Bytes::from_static(b"executor error"),
-        }
-        .to_cgi_output();
-        send_cgi_output(&writer_tx, request_id, out).await.ok();
-    }
-    // Terminate streams and end the request (always).
-    writer_tx
-        .send(WriterMsg::Record {
-            record_type: FCGI_STDOUT,
-            request_id,
-            content: Bytes::new(),
-        })
-        .await
-        .map_err(|_| anyhow!("writer closed"))?;
-    writer_tx
-        .send(WriterMsg::Record {
-            record_type: FCGI_STDERR,
-            request_id,
-            content: Bytes::new(),
-        })
-        .await
-        .map_err(|_| anyhow!("writer closed"))?;
-    writer_tx
-        .send(WriterMsg::EndRequest {
-            request_id,
-            app_status: if done.is_ok() { 0 } else { 1 },
-            protocol_status: FCGI_REQUEST_COMPLETE,
-        })
-        .await
-        .map_err(|_| anyhow!("writer closed"))?;
-    Ok(())
-}
-
-async fn send_cgi_output(
-    writer_tx: &mpsc::Sender<WriterMsg>,
-    request_id: u16,
-    out: Bytes,
-) -> Result<()> {
-    send_record_chunks(writer_tx, FCGI_STDOUT, request_id, out).await
-}
-
-async fn send_record_chunks(
-    writer_tx: &mpsc::Sender<WriterMsg>,
-    record_type: u8,
-    request_id: u16,
-    data: Bytes,
-) -> Result<()> {
-    let mut off = 0usize;
-    while off < data.len() {
-        let end = std::cmp::min(off + 65535, data.len());
-        let chunk = data.slice(off..end);
-        writer_tx
-            .send(WriterMsg::Record {
-                record_type,
-                request_id,
-                content: chunk,
-            })
-            .await
-            .map_err(|_| anyhow!("writer closed"))?;
-        off = end;
-    }
     Ok(())
 }

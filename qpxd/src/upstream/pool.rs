@@ -6,13 +6,32 @@ use anyhow::{anyhow, Result};
 use http::header::PROXY_AUTHORIZATION;
 use hyper::{Body, Request, Response};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
 
 type UpstreamProxySender = hyper::client::conn::SendRequest<Body>;
-type UpstreamProxySlot = Arc<Mutex<Option<UpstreamProxySender>>>;
-type UpstreamProxyMap = HashMap<String, UpstreamProxySlot>;
+
+static UPSTREAM_PROXY_MAX_CONCURRENT_PER_ENDPOINT: AtomicUsize = AtomicUsize::new(8);
+
+pub(crate) fn set_upstream_proxy_max_concurrent_per_endpoint(value: usize) {
+    UPSTREAM_PROXY_MAX_CONCURRENT_PER_ENDPOINT.store(value.max(1), Ordering::Relaxed);
+}
+
+fn upstream_proxy_max_concurrent_per_endpoint() -> usize {
+    UPSTREAM_PROXY_MAX_CONCURRENT_PER_ENDPOINT
+        .load(Ordering::Relaxed)
+        .max(1)
+}
+
+struct UpstreamProxySlot {
+    senders: Mutex<Vec<UpstreamProxySender>>,
+    semaphore: Arc<Semaphore>,
+}
+
+type UpstreamProxySlotHandle = Arc<UpstreamProxySlot>;
+type UpstreamProxyMap = HashMap<String, UpstreamProxySlotHandle>;
 type UpstreamProxyPool = Arc<Mutex<UpstreamProxyMap>>;
 
 fn upstream_proxy_pool() -> &'static UpstreamProxyPool {
@@ -37,28 +56,37 @@ pub async fn send_via_upstream_proxy(
         let mut guard = pool.lock().await;
         guard
             .entry(pool_key.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .or_insert_with(|| {
+                Arc::new(UpstreamProxySlot {
+                    senders: Mutex::new(Vec::new()),
+                    semaphore: Arc::new(Semaphore::new(
+                        upstream_proxy_max_concurrent_per_endpoint(),
+                    )),
+                })
+            })
             .clone()
     };
 
-    let mut sender_guard = slot.lock().await;
-    if sender_guard.is_none() {
-        *sender_guard = Some(open_upstream_proxy_sender(&endpoint, timeout_dur).await?);
-    }
+    let _permit = slot
+        .semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| anyhow!("upstream proxy concurrency limiter closed"))?;
 
-    let sender = sender_guard
-        .as_mut()
-        .ok_or_else(|| anyhow!("upstream proxy sender unavailable"))?;
+    let sender = { slot.senders.lock().await.pop() };
+    let mut sender = match sender {
+        Some(sender) => sender,
+        None => open_upstream_proxy_sender(&endpoint, timeout_dur).await?,
+    };
+
     match timeout(timeout_dur, sender.send_request(req)).await {
-        Ok(Ok(response)) => Ok(response),
-        Ok(Err(err)) => {
-            *sender_guard = None;
-            Err(err.into())
+        Ok(Ok(response)) => {
+            slot.senders.lock().await.push(sender);
+            Ok(response)
         }
-        Err(_) => {
-            *sender_guard = None;
-            Err(anyhow!("upstream proxy request timed out"))
-        }
+        Ok(Err(err)) => Err(err.into()),
+        Err(_) => Err(anyhow!("upstream proxy request timed out")),
     }
 }
 

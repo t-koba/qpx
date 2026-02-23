@@ -65,11 +65,13 @@ otel:
   level: "info"
   sample_percent: 100
   # headers:
-  #   Authorization: "Bearer ${OTEL_TOKEN}"
+  #   Authorization: "Bearer ${OTEL_TOKEN:-}"
 
 exporter:
   enabled: true
-  endpoint: "127.0.0.1:19100"
+  shm_path: ""
+  shm_size_mb: 16
+  lossy: false
   max_queue_events: 4096
   capture:
     plaintext: true
@@ -79,17 +81,17 @@ exporter:
 auth:
   users:
     - username: localuser
-      password: localpass
-  ldap:
-    url: ldaps://ad.example.com:636
-    bind_dn: cn=proxy,ou=svc,dc=example,dc=com
-    bind_password_env: LDAP_BIND_PASSWORD
-    user_base_dn: ou=users,dc=example,dc=com
-    group_base_dn: ou=groups,dc=example,dc=com
-    require_starttls: true
-    user_filter: "(|(uid={username})(sAMAccountName={username})(userPrincipalName={username}))"
-    group_filter: "(|(member={user_dn})(memberUid={username}))"
-    group_attr: cn
+      password: change-me
+  # ldap:
+  #   url: ldaps://ad.example.com:636
+  #   bind_dn: cn=proxy,ou=svc,dc=example,dc=com
+  #   bind_password_env: LDAP_BIND_PASSWORD
+  #   user_base_dn: ou=users,dc=example,dc=com
+  #   group_base_dn: ou=groups,dc=example,dc=com
+  #   require_starttls: true
+  #   user_filter: "(|(uid={username})(sAMAccountName={username})(userPrincipalName={username}))"
+  #   group_filter: "(|(member={user_dn})(memberUid={username}))"
+  #   group_attr: cn
 
 upstreams:
   - name: corp-proxy

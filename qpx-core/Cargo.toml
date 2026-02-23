@@ -12,7 +12,6 @@ tls-rustls = [
   "dep:rustls",
   "dep:webpki-roots",
   "dep:rcgen",
-  "dep:rustls-pemfile",
   "dep:lru",
   "ldap3/tls-rustls-ring",
 ]
@@ -45,7 +44,6 @@ tower-service.workspace = true
 rustls = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }
 lru = { workspace = true, optional = true }
 
 # Auth
@@ -65,3 +63,12 @@ tracing-opentelemetry.workspace = true
 
 # Async runtime
 tokio.workspace = true
+memmap2 = "0.9.10"
+bytes.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3.25.0"

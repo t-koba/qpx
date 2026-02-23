@@ -2,8 +2,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use hyper::{Body, Response};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub(super) const CACHE_HEADER: &str = "x-qpx-cache";
 pub(super) const CACHE_WARNING_STALE: &str = "110 - \"Response is stale\"";
@@ -11,7 +13,50 @@ pub(super) const CACHE_WARNING_REVALIDATION_FAILED: &str = "111 - \"Revalidation
 pub(super) const INDEX_TTL_SECS: u64 = 24 * 60 * 60;
 pub(super) const MAX_CACHE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_VARIANTS_PER_PRIMARY: usize = 256;
-static BACKGROUND_REVALIDATIONS_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+const BACKGROUND_REVALIDATIONS_SHARDS: usize = 64;
+
+struct InFlightRevalidations {
+    shards: Vec<Mutex<HashSet<Arc<str>>>>,
+    mask: usize,
+}
+
+impl InFlightRevalidations {
+    fn new(shards: usize) -> Self {
+        let shards = shards.max(1);
+        debug_assert!(shards.is_power_of_two());
+        let mut out = Vec::with_capacity(shards);
+        for _ in 0..shards {
+            out.push(Mutex::new(HashSet::new()));
+        }
+        Self {
+            shards: out,
+            mask: shards.saturating_sub(1),
+        }
+    }
+
+    fn shard_for(&self, key: &str) -> usize {
+        if self.mask == 0 {
+            return 0;
+        }
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) & self.mask
+    }
+
+    fn try_insert(&self, key: Arc<str>) -> bool {
+        let shard = self.shard_for(key.as_ref());
+        let mut set = self.shards[shard].lock().unwrap_or_else(|p| p.into_inner());
+        set.insert(key)
+    }
+
+    fn remove(&self, key: &str) {
+        let shard = self.shard_for(key);
+        let mut set = self.shards[shard].lock().unwrap_or_else(|p| p.into_inner());
+        let _ = set.remove(key);
+    }
+}
+
+static BACKGROUND_REVALIDATIONS_IN_FLIGHT: OnceLock<InFlightRevalidations> = OnceLock::new();
 
 #[async_trait]
 pub trait CacheBackend: Send + Sync {
@@ -102,38 +147,27 @@ pub(super) enum CacheEntryDisposition {
 }
 
 pub(crate) struct BackgroundRevalidationGuard {
-    key: String,
+    key: Arc<str>,
 }
 
 pub(crate) fn try_begin_background_revalidation(
     state: &RevalidationState,
 ) -> Option<BackgroundRevalidationGuard> {
-    let in_flight = BACKGROUND_REVALIDATIONS_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
+    let in_flight = BACKGROUND_REVALIDATIONS_IN_FLIGHT
+        .get_or_init(|| InFlightRevalidations::new(BACKGROUND_REVALIDATIONS_SHARDS));
 
-    let key = format!("{}::{}", state.namespace, state.variant_key);
-    match in_flight.lock() {
-        Ok(mut set) => {
-            if !set.insert(key.clone()) {
-                return None;
-            }
-        }
-        Err(poisoned) => {
-            let mut set = poisoned.into_inner();
-            if !set.insert(key.clone()) {
-                return None;
-            }
-        }
+    let key: Arc<str> = format!("{}::{}", state.namespace, state.variant_key).into();
+    if !in_flight.try_insert(key.clone()) {
+        return None;
     }
     Some(BackgroundRevalidationGuard { key })
 }
 
 impl Drop for BackgroundRevalidationGuard {
     fn drop(&mut self) {
-        let in_flight =
-            BACKGROUND_REVALIDATIONS_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
-        if let Ok(mut set) = in_flight.lock() {
-            let _ = set.remove(self.key.as_str());
-        }
+        let in_flight = BACKGROUND_REVALIDATIONS_IN_FLIGHT
+            .get_or_init(|| InFlightRevalidations::new(BACKGROUND_REVALIDATIONS_SHARDS));
+        in_flight.remove(self.key.as_ref());
     }
 }
 

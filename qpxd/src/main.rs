@@ -18,9 +18,10 @@ compile_error!("qpxd: feature mitm requires tls-rustls");
 #[cfg(feature = "tls-rustls")]
 use qpx_core::tls::write_ca_files;
 
+#[cfg(feature = "tls-rustls")]
+mod acme;
 mod cache;
 mod exporter;
-mod fastcgi_client;
 mod forward;
 mod ftp;
 mod http;
@@ -28,6 +29,7 @@ mod http;
 mod http3;
 mod io_copy;
 mod io_prefix;
+mod ipc_client;
 mod net;
 mod rate_limit;
 mod reverse;
@@ -121,12 +123,17 @@ async fn run(config_paths: Vec<PathBuf>, config: Config) -> Result<()> {
         &config.audit_log,
         config.otel.as_ref(),
     )?;
+    crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
+        config.runtime.upstream_proxy_max_concurrent_per_endpoint,
+    );
     info!(
         worker_threads = net::worker_threads(&config.runtime),
         max_blocking_threads = net::max_blocking_threads(&config.runtime),
         acceptor_tasks_per_listener = net::acceptor_tasks_per_listener(&config.runtime),
         reuse_port = config.runtime.reuse_port,
         tcp_backlog = config.runtime.tcp_backlog,
+        upstream_proxy_max_concurrent_per_endpoint =
+            config.runtime.upstream_proxy_max_concurrent_per_endpoint,
         "runtime tuning"
     );
     if let Some(metrics) = &config.metrics {
@@ -141,6 +148,24 @@ async fn run(config_paths: Vec<PathBuf>, config: Config) -> Result<()> {
         }
     }
     let mut tasks: JoinSet<(String, Result<()>)> = JoinSet::new();
+
+    #[cfg(feature = "tls-rustls")]
+    if let Some(acme_state) = acme::init(&config, runtime.clone())? {
+        let http_state = acme_state.clone();
+        tasks.spawn(async move {
+            (
+                "acme http-01".to_string(),
+                acme::run_http01_server(http_state).await,
+            )
+        });
+        let mgr_state = acme_state.clone();
+        tasks.spawn(async move {
+            (
+                "acme manager".to_string(),
+                acme::run_manager(mgr_state).await,
+            )
+        });
+    }
 
     for listener in config.listeners.clone() {
         let rt = runtime.clone();
@@ -218,82 +243,87 @@ async fn watch_config(
     let mut current = current;
     while let Some(event) = rx.recv().await {
         match event {
-            Ok(_) => match load_configs_with_sources(&paths) {
-                Ok((new_config, sources)) => {
-                    if runtime::ensure_hot_reload_compatible(&current, &new_config).is_err() {
-                        warn!("listener/reverse topology changed; reload ignored");
-                        if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                            tracing::warn!(
-                                target: "audit_log",
-                                event = "config_reload",
-                                outcome = "ignored",
-                                reason = "hot_reload_incompatible",
-                                configs = %configs,
-                            );
-                        }
-                        continue;
-                    }
-                    if let Err(err) = new_config
-                        .reverse
-                        .iter()
-                        .try_for_each(reverse::check_reverse_runtime)
-                    {
-                        warn!(error = ?err, "config reload reverse compile failed");
-                        if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                            tracing::warn!(
-                                target: "audit_log",
-                                event = "config_reload",
-                                outcome = "failed",
-                                reason = "reverse_compile_error",
-                                configs = %configs,
-                                error = ?err,
-                            );
-                        }
-                        continue;
-                    }
-                    match runtime::RuntimeState::build(new_config.clone()) {
-                        Ok(state) => {
-                            runtime.swap(state);
-                            let _ = refresh_watches(&mut watcher, &mut watched, sources);
-                            info!("config reloaded");
-                            if tracing::enabled!(target: "audit_log", tracing::Level::INFO) {
-                                tracing::info!(
+            Ok(_) => {
+                match load_configs_with_sources(&paths) {
+                    Ok((new_config, sources)) => {
+                        if runtime::ensure_hot_reload_compatible(&current, &new_config).is_err() {
+                            warn!("listener/reverse topology changed; reload ignored");
+                            if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
+                                tracing::warn!(
                                     target: "audit_log",
                                     event = "config_reload",
-                                    outcome = "applied",
+                                    outcome = "ignored",
+                                    reason = "hot_reload_incompatible",
                                     configs = %configs,
                                 );
                             }
-                            current = new_config;
+                            continue;
                         }
-                        Err(err) => {
-                            warn!(error = ?err, "config reload failed");
+                        if let Err(err) = new_config
+                            .reverse
+                            .iter()
+                            .try_for_each(reverse::check_reverse_runtime)
+                        {
+                            warn!(error = ?err, "config reload reverse compile failed");
                             if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
                                 tracing::warn!(
                                     target: "audit_log",
                                     event = "config_reload",
                                     outcome = "failed",
+                                    reason = "reverse_compile_error",
                                     configs = %configs,
                                     error = ?err,
                                 );
                             }
+                            continue;
+                        }
+                        match runtime::RuntimeState::build(new_config.clone()) {
+                            Ok(state) => {
+                                runtime.swap(state);
+                                crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
+                                new_config.runtime.upstream_proxy_max_concurrent_per_endpoint,
+                            );
+                                let _ = refresh_watches(&mut watcher, &mut watched, sources);
+                                info!("config reloaded");
+                                if tracing::enabled!(target: "audit_log", tracing::Level::INFO) {
+                                    tracing::info!(
+                                        target: "audit_log",
+                                        event = "config_reload",
+                                        outcome = "applied",
+                                        configs = %configs,
+                                    );
+                                }
+                                current = new_config;
+                            }
+                            Err(err) => {
+                                warn!(error = ?err, "config reload failed");
+                                if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
+                                    tracing::warn!(
+                                        target: "audit_log",
+                                        event = "config_reload",
+                                        outcome = "failed",
+                                        configs = %configs,
+                                        error = ?err,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        warn!(error = ?err, "config reload parse failed");
+                        if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
+                            tracing::warn!(
+                                target: "audit_log",
+                                event = "config_reload",
+                                outcome = "failed",
+                                reason = "parse_error",
+                                configs = %configs,
+                                error = ?err,
+                            );
                         }
                     }
                 }
-                Err(err) => {
-                    warn!(error = ?err, "config reload parse failed");
-                    if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                        tracing::warn!(
-                            target: "audit_log",
-                            event = "config_reload",
-                            outcome = "failed",
-                            reason = "parse_error",
-                            configs = %configs,
-                            error = ?err,
-                        );
-                    }
-                }
-            },
+            }
             Err(err) => warn!(error = ?err, "watch error"),
         }
     }

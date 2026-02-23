@@ -15,7 +15,6 @@ Most samples assume the default `qpxd` build (`tls-rustls`).
 
 - HTTP/3 (`http3:` sections) and TLS inspection (`tls_inspection:` sections) require a `tls-rustls` build.
 - For `tls-native` builds, reverse TLS termination uses PKCS#12 (`reverse[].tls.certificates[].pkcs12`) instead of PEM `cert`/`key`.
-- If you enable exporter TLS client authentication, `exporter.tls.client_cert/client_key` is rustls-only; `exporter.tls.client_pkcs12` is native-tls-only.
 
 ## Security defaults (important)
 
@@ -36,7 +35,7 @@ Most samples assume the default `qpxd` build (`tls-rustls`).
 
 ### 02-secure-egress (`config/usecases/02-secure-egress`)
 - `forward-upstream-chain.yaml`: forward proxy chained to upstream proxy.
-- `forward-local-auth-basic-digest.yaml`: multi-user local auth (Basic/Digest) baseline using `.example.invalid` sample usernames and `1234567890` sample passwords.
+- `forward-local-auth-basic-digest.yaml`: multi-user local auth (Basic/Digest) baseline using `.example.invalid` sample usernames and placeholder `change-me` passwords.
 - `forward-ldap-group-policy.yaml`: LDAP auth with group-based policy.
 - `forward-tls-inspection-selective.yaml`: selective TLS inspection/tunnel/block.
 - `forward-adblock-privacy.yaml`: ad/tracker blocking profile.
@@ -48,6 +47,7 @@ Most samples assume the default `qpxd` build (`tls-rustls`).
 - `reverse-path-rewrite.yaml`: reverse route path rewrite (strip/add prefix).
 - `reverse-advanced-routing.yaml`: reverse route header rewrite + canary + mirroring + regex rewrite.
 - `reverse-tls-termination.yaml`: HTTPS terminate and route to HTTP upstreams.
+- `reverse-tls-acme-letsencrypt.yaml`: reverse TLS termination with ACME / Let's Encrypt (HTTP-01).
 - `reverse-tls-passthrough-sni.yaml`: SNI-based TLS passthrough split.
 - `reverse-http2-tls.yaml`: reverse TLS with HTTP/2 downstream.
 - `reverse-http3-terminate.yaml`: reverse HTTP/3 terminate mode.
@@ -70,7 +70,7 @@ Most samples assume the default `qpxd` build (`tls-rustls`).
 - `transparent-captive-portal.yaml`: captive-portal style transparent responses.
 
 ### 07-observability-debug (`config/usecases/07-observability-debug`)
-- `observability-high-detail.yaml`: detailed logging + metrics + exporter feed (for `qpxr` integration).
+- `observability-high-detail.yaml`: detailed logging + metrics + capture exporter (writes to shared-memory ring for `qpxr`).
 - `forward-header-rewrite.yaml`: request/response header rewrite testing.
 - `forward-websocket-debug.yaml`: WebSocket-oriented routing/debug profile.
 - `forward-ftp-over-http.yaml`: FTP-over-HTTP debug profile.
@@ -91,8 +91,8 @@ Most samples assume the default `qpxd` build (`tls-rustls`).
 - `transparent-macos-windows-fallback.yaml`: transparent mode fallback path for non-Linux hosts.
 - `transparent-mitm-selective.yaml`: transparent mode with selective TLS MITM.
 
-### 12-fastcgi-gateway (`config/usecases/12-fastcgi-gateway`)
-- `qpx.yaml`: `qpxd` reverse proxy sample routing to a FastCGI backend.
+### 12-ipc-gateway (`config/usecases/12-ipc-gateway`)
+- `qpx.yaml`: `qpxd` reverse proxy sample routing to a `qpxf` function executor via QPX-IPC (`ipc:` route).
 - `qpxf.yaml`: `qpxf` executor sample (CGI/WASM handlers).
 
 ### 99-test-fixtures (`config/usecases/99-test-fixtures`)
@@ -120,7 +120,7 @@ find config/usecases -name '*.yaml' ! -name 'qpxf.yaml' -print | sort | while re
 done
 ```
 
-`qpxf` has no `check` subcommand. Validate `config/usecases/12-fastcgi-gateway/qpxf.yaml` by starting `qpxf` with real handler paths (`backend.root`, `backend.module`) on your host.
+`qpxf` has no `check` subcommand. Validate `config/usecases/12-ipc-gateway/qpxf.yaml` by starting `qpxf` with real handler paths (`backend.root` for CGI, `backend.module` for WASM) on your host.
 
 ## End-to-end checks
 
@@ -135,4 +135,5 @@ cargo build -p qpxd
 
 - `listeners.rules[].action.type: respond` requires `action.local_response`.
 - Reverse route local response uses route-level `local_response` (omit `upstreams` / `backends`).
-- `reverse.routes[]` must set exactly one of `upstreams`, `backends`, or `local_response`.
+- `reverse.routes[]` must set exactly one of `upstreams`, `backends`, `local_response`, or `ipc`.
+- `ipc.mode: shm` (default) uses a shared-memory ring for body transfer and requires `qpxd` and `qpxf` on the same host. Use `ipc.mode: tcp` for cross-host deployments.

@@ -1,12 +1,13 @@
 # qpx
 
-Async HTTP proxy server in Rust. Supports forward, reverse, and transparent proxy modes with HTTP/1.1, HTTP/2, HTTP/3, TLS inspection (MITM), and a FastCGI function executor.
+Async HTTP proxy server in Rust. Supports forward, reverse, and transparent proxy modes with HTTP/1.1, HTTP/2, HTTP/3, TLS inspection (MITM), and a function executor (`qpxf`) for CGI scripts and WASM modules over QPX-IPC.
 
 ## Features
 
 - **Forward proxy** — HTTP/HTTPS with rules, auth (Basic/Digest/LDAP), upstream chaining, FTP-over-HTTP gateway, WebSocket upgrade.
-- **Reverse proxy** — route by Host/SNI/path/src_ip, TLS termination, TLS passthrough by SNI, retry, health checks, header rewrite, path rewrite (strip/add/regex), canary traffic splitting, request mirroring, HTTP/3 termination, FastCGI upstream forwarding.
-- **FastCGI gateway** — `qpxf` function executor: hardened FastCGI server with CGI script execution (path containment, concurrent I/O, size limits) and WASM module execution (via `wasmtime` with memory limits, epoch-based timeout). `qpxd` acts as FastCGI client via reverse route `fastcgi:` config (recommended) or `fastcgi://` upstream URLs (TCP/Unix).
+- **Reverse proxy** — route by Host/SNI/path/src_ip, TLS termination, TLS passthrough by SNI, retry, health checks, header rewrite, path rewrite (strip/add/regex), canary traffic splitting, request mirroring, HTTP/3 termination, function executor forwarding (`ipc:` routes).
+- **ACME / Let's Encrypt** — automatic certificate issuance/renewal (HTTP-01) for reverse TLS termination (requires `tls-rustls` build).
+- **Function executor** — `qpxf` is a hardened executor for CGI scripts (path containment, concurrent I/O, size limits) and WASM modules (via `wasmtime` with memory limits, epoch-based timeout). `qpxd` communicates with `qpxf` over the QPX-IPC protocol via `ipc:` reverse route config (recommended) or `ipc://` upstream URLs (TCP/Unix).
 - **Transparent proxy** — Linux `SO_ORIGINAL_DST` or protocol metadata routing (SNI, Host), with optional TLS MITM inspection.
 - **TLS inspection (MITM)** — dynamic per-connection certificate impersonation via built-in CA (requires `tls-rustls` build).
 - **HTTP/3 (QUIC)** — forward and reverse listeners. CONNECT-UDP / MASQUE support (requires `tls-rustls` build).
@@ -81,21 +82,22 @@ The capture pipeline consists of three components:
 
 | Binary | Role |
 |--------|------|
-| `qpxd` (daemon) | Traffic processing and TLS termination/decryption only (does not generate PCAP) |
-| `qpxr` (reader) | Receives events from `qpxd`, generates PCAPNG files, and serves live/history streams |
+| `qpxd` (daemon) | Traffic processing and TLS termination/decryption; writes capture events to a shared-memory ring (does not generate PCAP) |
+| `qpxr` (reader) | Reads the shared-memory ring written by `qpxd`, generates PCAPNG files, and serves live/history streams |
 | `qpxc` (client) | Connects to `qpxr` and relays PCAPNG to Wireshark (extcap) or a simple packet viewer |
 
 **Recommended topology:** `qpxd` and `qpxr` run on the same host; remote analysis machines connect via `qpxc` only.
 
 ```bash
-# 1) Start the reader
+# 1) Start the reader (reads the shared-memory capture ring, serves PCAPNG streams)
+#    --shm-path and --shm-size-mb must match exporter.shm_path / exporter.shm_size_mb in qpxd config.
+#    When omitted, both sides use the same platform default path (temp_dir/qpx/capture.shm).
 cargo run -p qpxr -- \
-  --event-listen 127.0.0.1:19100 \
   --stream-listen 127.0.0.1:19101 \
   --save-dir /tmp/qpx-pcapng
 
-# 2) Start the daemon (ensure exporter.endpoint in config matches qpxr)
-cargo run -p qpxd -- run --config config/qpx.example.yaml
+# 2) Start the daemon (writes capture events to the SHM ring)
+cargo run -p qpxd -- run --config config/usecases/07-observability-debug/observability-high-detail.yaml
 
 # 3) Stream via client (also usable as a Wireshark extcap FIFO)
 cargo run -p qpxc -- \
@@ -105,7 +107,7 @@ cargo run -p qpxc -- \
 ### Capture security profiles
 
 - **Local debug (low security):** Loopback bind, no TLS, no token (as shown above).
-- **Production (recommended):** Start `qpxr` with TLS + token (optionally mTLS + allowlist); connect `qpxd` and `qpxc` with the same credentials.
+- **Production (recommended):** Start `qpxr` with TLS + token (optionally mTLS + allowlist); connect `qpxc` with the same credentials.
   - `qpxr` **refuses** non-loopback listeners without TLS unless `--unsafe-allow-insecure` is explicitly passed.
 
 **Example (TLS + token + allowlist):**
@@ -115,7 +117,6 @@ export QPX_EXPORTER_TOKEN='...'
 
 # Reader (server)
 cargo run -p qpxr -- \
-  --event-listen 127.0.0.1:19100 \
   --stream-listen 0.0.0.0:19101 \
   --tls-cert /etc/qpxr/tls/server.crt --tls-key /etc/qpxr/tls/server.key \
   --token-env QPX_EXPORTER_TOKEN \
@@ -136,39 +137,55 @@ For `tls-native` builds, use `qpxr --tls-pkcs12` and `qpxc --tls-client-pkcs12` 
 ```yaml
 exporter:
   enabled: true
-  endpoint: "127.0.0.1:19100"
-  auth:
-    token_env: "QPX_EXPORTER_TOKEN"
-  tls:
-    enabled: true
-    ca_cert: "/etc/qpxr/tls/ca.crt"
-    server_name: "qpxr.example.internal"  # must match qpxr certificate SAN
+  shm_path: ""        # SHM file path. Empty = platform default (temp_dir/qpx/capture.shm).
+  shm_size_mb: 16     # Must match qpxr --shm-size-mb (default: 16).
+  lossy: false        # true = drop events when ring is full; false = block with backpressure.
+  max_queue_events: 4096
   capture:
     plaintext: true
     encrypted: true
     max_chunk_bytes: 16384
 ```
 
-## FastCGI gateway
+`qpxr` reads the same ring using `--shm-path` / `--shm-size-mb` (both default to the same values). When running `qpxd` and `qpxr` on the same host with default paths, no explicit path configuration is needed.
 
-`qpxf` is a hardened FastCGI executor that runs alongside `qpxd`. `qpxd` routes requests to `qpxf` over the FastCGI protocol using a `fastcgi:` reverse route (recommended) or a `fastcgi://` upstream URL.
+## Function executor (`qpxf`)
+
+`qpxf` is a hardened function executor that runs alongside `qpxd`. `qpxd` routes requests to `qpxf` over the QPX-IPC protocol — a lightweight JSON-framed protocol. Route to `qpxf` using an `ipc:` reverse route config (recommended) or an `ipc://` upstream URL.
 
 `qpxf` supports two execution backends:
 
 | Backend | Description |
 |---------|-------------|
-| CGI scripts | Spawns external processes (RFC 3875). Path containment, size limits, concurrent I/O with deadlock prevention. |
-| WASM modules | Executes WASI-compatible modules via `wasmtime`. Memory limits via `ResourceLimiter`, epoch-based timeout. |
+| CGI scripts | Spawns external processes (RFC 3875). Path containment, symlink-escape prevention, concurrent I/O with deadlock prevention, configurable size limits. |
+| WASM modules | Executes WASI-compatible modules via `wasmtime`. Memory limits via `ResourceLimiter`, epoch-based timeout, stderr captured and logged. |
 
-```bash
-# Start the executor (listen on a Unix socket)
-cargo run -p qpxf -- --listen /run/qpxf/qpxf.sock --config config/usecases/12-fastcgi-gateway/qpxf.yaml
+The `ipc.mode` field controls how request/response bodies are transferred:
 
-# Start qpxd routed to it
-cargo run -p qpxd -- run --config config/usecases/12-fastcgi-gateway/qpx.yaml
+| `ipc.mode` | Body transfer | When to use |
+|------------|--------------|-------------|
+| `shm` (default) | shared-memory ring buffer | `qpxd` and `qpxf` on the same host |
+| `tcp` | streamed over the connection | cross-host or non-Unix deployments |
+
+```yaml
+# reverse route config in qpxd
+routes:
+  - match: { path: ["/cgi-bin/*"] }
+    ipc:
+      mode: shm          # "shm" (default) or "tcp"
+      address: "127.0.0.1:9000"
+      timeout_ms: 30000
 ```
 
-See `config/usecases/12-fastcgi-gateway/` for sample configs.
+```bash
+# Start the executor (Unix socket, or a plain TCP address like "127.0.0.1:9000")
+cargo run -p qpxf -- --listen unix:///run/qpxf/qpxf.sock --config config/usecases/12-ipc-gateway/qpxf.yaml
+
+# Start qpxd routed to it
+cargo run -p qpxd -- run --config config/usecases/12-ipc-gateway/qpx.yaml
+```
+
+See `config/usecases/12-ipc-gateway/` for sample configs.
 
 ## Configuration
 

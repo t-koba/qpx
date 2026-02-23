@@ -116,7 +116,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - `qpxd/src/reverse/transport.rs`
      - `qpxd/src/transparent/http_path.rs`
 
-11. RFC 9111 (HTTP caching) baseline behavior
+11. RFC 9111 (HTTP caching) baseline behavior + RFC 5861 extensions
    - Cache lookup/store pipeline is implemented for:
      - forward listeners (`listeners[].cache`)
      - reverse routes (`reverse[].routes[].cache`)
@@ -125,6 +125,9 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - response directives: `no-store`, `private`, `public`, `no-cache`, `must-revalidate`, `proxy-revalidate`, `s-maxage`, `max-age`
      - freshness lifetime from `s-maxage` / `max-age` / `Expires` / policy default
      - `Age` synthesis on cache hits and stale-warning (`Warning: 110`) when served via `max-stale`
+   - RFC 5861 extensions (`stale-while-revalidate`, `stale-if-error`):
+     - `stale-while-revalidate`: serve stale entry immediately, revalidate in background (`StaleWhileRevalidate` lookup outcome).
+     - `stale-if-error`: serve stale entry when upstream returns a 5xx or is unreachable, within the stated error window (`maybe_build_stale_if_error_response()`).
    - Conditional revalidation:
      - stale or `no-cache` entries revalidate via `If-None-Match` / `If-Modified-Since`
      - `304 Not Modified` merges metadata and serves refreshed cached entity
@@ -138,7 +141,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - Redis (`redis://`, `rediss://`, `redis+unix://`)
      - HTTP object gateway (`http://`, `https://`)
    - Code:
-     - `qpxd/src/cache/mod.rs`
+     - `qpxd/src/cache/mod.rs`, `qpxd/src/cache/lookup_ops.rs`, `qpxd/src/cache/directives.rs`
      - `qpxd/src/cache/backend_redis.rs`
      - `qpxd/src/cache/backend_http.rs`
      - call sites in `qpxd/src/forward/request.rs` and `qpxd/src/reverse/transport.rs`
@@ -254,3 +257,14 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
 3. TRACE is implemented with a security-first local response shape rather than full request loop-back.
     - Default `TRACE` reflection is **headers-only** and uses an allowlist to reduce secret header leakage risk.
     - `runtime.trace_reflect_all_headers: true` can enable full header reflection (DANGEROUS).
+
+4. Interim informational (`1xx`) response forwarding is not implemented (e.g. `103 Early Hints`).
+    - The current proxy data paths are built on `hyper`/`h2`/`h3` APIs that surface a single final response per request.
+    - `qpxd` does generate a local `100 Continue` where required, and it normalizes any standalone `1xx` responses correctly, but it does not stream multiple response heads from upstream to downstream.
+
+5. RFC 9298 / RFC 6570 URI Template support for CONNECT-UDP is intentionally partial.
+    - Listener-side target extraction supports the RFC 9298 default template and a restricted URI Template subset (simple string expansion and basic query operators).
+    - When `listeners[].http3.connect_udp.uri_template` is set, it is treated as **strict**: only that template is accepted (no fallback to default/query forms).
+
+6. Non-CONNECT-UDP HTTP/3 extended CONNECT is not implemented.
+    - For related RFCs that use extended CONNECT semantics over HTTP/3 (e.g. WebSocket over HTTP/3), `qpxd` responds with `501 Not Implemented`.

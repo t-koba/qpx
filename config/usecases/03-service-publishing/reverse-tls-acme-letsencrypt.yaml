@@ -1,0 +1,46 @@
+version: 1
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+
+# WARNING: This is a sample config. Do not expose it to untrusted networks as-is.
+# - HTTP-01 requires the public hostname to reach acme.http01_listen (typically TCP/80).
+# - Replace the example hostnames and upstreams before use.
+acme:
+  enabled: true
+  # Set to true only after agreeing to the ACME CA Terms of Service (Let's Encrypt).
+  terms_of_service_agreed: true
+  email: "${QPX_ACME_EMAIL:-ops@example.invalid}"
+  # Use staging while testing to avoid rate limits. Set to false for production certificates.
+  staging: true
+  http01_listen: "0.0.0.0:80"
+  renew_before_days: 30
+
+reverse:
+  - name: reverse-tls-acme
+    # For real deployments, use 443. This sample uses a high port to avoid requiring root.
+    listen: "0.0.0.0:19443"
+    tls:
+      # Leave cert/key empty to let qpxd manage the certificate via ACME (HTTP-01).
+      certificates:
+        - sni: "shop.example.com"
+        - sni: "cdn.example.com"
+    routes:
+      - match:
+          host: ["shop.example.com"]
+        upstreams:
+          - "http://10.30.0.21:8080"
+          - "http://10.30.0.22:8080"
+        lb: round_robin
+        retry:
+          attempts: 2
+          backoff_ms: 100
+        timeout_ms: 20000
+      - match:
+          host: ["cdn.example.com"]
+        upstreams:
+          - "http://10.30.0.31:8080"
+        lb: round_robin
+        retry:
+          attempts: 1
+          backoff_ms: 50
+        timeout_ms: 10000
+

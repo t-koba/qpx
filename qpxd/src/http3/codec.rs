@@ -4,6 +4,7 @@ use http1::{Request as Http1Request, Response as Http1Response};
 use hyper::body::HttpBody as _;
 use hyper::{Body, Request, Response, Uri};
 use tokio::spawn;
+use tracing::warn;
 
 pub fn h1_headers_to_http(src: &http1::HeaderMap) -> Result<http::HeaderMap> {
     let mut headers = http::HeaderMap::new();
@@ -55,6 +56,10 @@ pub fn h3_request_to_hyper(
         .map_err(|e| anyhow!("invalid HTTP/3 URI: {e}"))?;
 
     let trailers = trailers.as_ref().map(h1_headers_to_http).transpose()?;
+    if let Some(ref t) = trailers {
+        crate::http::semantics::validate_request_trailers(t)
+            .map_err(|e| anyhow!("invalid HTTP/3 request trailers: {e}"))?;
+    }
     let mut out = Request::builder()
         .method(method)
         .uri(uri)
@@ -72,7 +77,13 @@ pub async fn hyper_response_to_h3(
     let (parts, body) = response.into_parts();
     let status = http1::StatusCode::from_u16(parts.status.as_u16())
         .map_err(|e| anyhow!("invalid response status for HTTP/3: {e}"))?;
-    let (bytes, trailers) = collect_body_limited(body, max_body_bytes).await?;
+    let (bytes, mut trailers) = collect_body_limited(body, max_body_bytes).await?;
+    if let Some(ref mut trailers) = trailers {
+        let removed = crate::http::semantics::sanitize_response_trailers(trailers);
+        if removed > 0 {
+            warn!(removed, "dropping forbidden response trailers");
+        }
+    }
     let mut headers = parts.headers;
     if parts.status.is_informational()
         || parts.status == http::StatusCode::NO_CONTENT

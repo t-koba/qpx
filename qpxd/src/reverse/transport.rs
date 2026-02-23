@@ -1,9 +1,6 @@
 use super::request_template::{request_is_retryable, ReverseRequestTemplate};
 use super::router::{normalize_host_for_match, CompiledPathRewrite, ReverseRouter};
 use crate::cache::CacheRequestKey;
-use crate::fastcgi_client::{
-    proxy_fastcgi_upstream, proxy_fastcgi_url_with_timeout, ClientConnInfo,
-};
 use crate::http::cache_flow::{
     clone_request_head_for_revalidation, lookup_with_revalidation,
     process_upstream_response_for_cache, CacheLookupDecision, CacheWritebackContext,
@@ -17,6 +14,7 @@ use crate::http::l7::{
 use crate::http::local_response::build_local_response;
 use crate::http::semantics::validate_incoming_request;
 use crate::http::websocket::is_websocket_upgrade;
+use crate::ipc_client::{proxy_ipc, proxy_ipc_upstream, ClientConnInfo};
 use crate::runtime::Runtime;
 use crate::upstream::origin::{proxy_http, proxy_websocket};
 use anyhow::{anyhow, Result};
@@ -310,7 +308,7 @@ pub(crate) async fn handle_request_inner(
                 return Ok(hit);
             }
             CacheLookupDecision::StaleWhileRevalidate(mut hit, state) => {
-                if request_method == Method::GET && route.fastcgi.is_none() {
+                if request_method == Method::GET && route.ipc.is_none() {
                     if let (Some(policy), Some(snapshot), Some(lookup_key), Some(target_key)) = (
                         cache_policy,
                         request_headers_snapshot.as_ref(),
@@ -319,9 +317,7 @@ pub(crate) async fn handle_request_inner(
                     ) {
                         if let Some(upstream) = route.select_upstream(seed, sticky_seed) {
                             let target = upstream.target.clone();
-                            if !target.starts_with("fastcgi://")
-                                && !target.starts_with("fastcgi+unix://")
-                            {
+                            if !target.starts_with("ipc://") && !target.starts_with("ipc+unix://") {
                                 if let Some(guard) =
                                     crate::cache::try_begin_background_revalidation(&state)
                                 {
@@ -432,15 +428,14 @@ pub(crate) async fn handle_request_inner(
         );
     }
 
-    let fastcgi_conn = ClientConnInfo {
+    let ipc_conn = ClientConnInfo {
         remote_addr: Some(conn.remote_addr),
-        dst_port: Some(conn.dst_port),
     };
 
     let mut last_err = None;
 
-    if let Some(fcgi) = route.fastcgi.as_ref() {
-        let timeout_dur = std::cmp::min(route.policy.timeout, fcgi.timeout());
+    if let Some(ipc) = route.ipc.as_ref() {
+        let timeout_dur = std::cmp::min(route.policy.timeout, ipc.timeout());
         for attempt_idx in 0..attempts {
             let started = Instant::now();
             let req_for_upstream = if attempt_idx == 0 {
@@ -460,11 +455,11 @@ pub(crate) async fn handle_request_inner(
 
             let response = timeout(
                 timeout_dur,
-                proxy_fastcgi_upstream(
+                proxy_ipc_upstream(
                     req_for_upstream,
-                    fcgi,
+                    ipc,
                     proxy_name.as_str(),
-                    fastcgi_conn,
+                    ipc_conn,
                     route.policy.timeout,
                 ),
             )
@@ -599,24 +594,18 @@ pub(crate) async fn handle_request_inner(
                 .ok_or_else(|| anyhow!("reverse retry template missing"))?
                 .build()?
         };
-        let response = if upstream.target.starts_with("fastcgi://")
-            || upstream.target.starts_with("fastcgi+unix://")
+        let response = if upstream.target.starts_with("ipc://")
+            || upstream.target.starts_with("ipc+unix://")
         {
             match Url::parse(&upstream.target) {
                 Ok(url) => {
                     timeout(
                         route.policy.timeout,
-                        proxy_fastcgi_url_with_timeout(
-                            req_for_upstream,
-                            &url,
-                            proxy_name.as_str(),
-                            fastcgi_conn,
-                            route.policy.timeout,
-                        ),
+                        proxy_ipc(req_for_upstream, &url, proxy_name.as_str()),
                     )
                     .await
                 }
-                Err(err) => Ok(Err(anyhow!("invalid fastcgi upstream url: {}", err))),
+                Err(err) => Ok(Err(anyhow!("invalid ipc upstream url: {}", err))),
             }
         } else {
             timeout(
@@ -1086,6 +1075,7 @@ pub(super) fn build_tls_acceptor(reverse: &ReverseConfig) -> Result<ReverseTlsAc
 #[derive(Debug)]
 struct SniResolver {
     certs: std::collections::HashMap<String, Arc<rustls::sign::CertifiedKey>>,
+    acme_snis: std::collections::HashSet<String>,
 }
 
 #[cfg(feature = "tls-rustls")]
@@ -1094,26 +1084,32 @@ impl SniResolver {
         use qpx_core::tls::{load_cert_chain, load_private_key};
         use rustls::crypto::ring::sign::any_supported_type;
         use rustls::sign::CertifiedKey;
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         use std::path::Path;
 
         let mut certs = HashMap::new();
+        let mut acme_snis = HashSet::new();
         for cert in &tls.certificates {
             let cert_path = cert.cert.as_deref().unwrap_or("").trim();
-            if cert_path.is_empty() {
-                return Err(anyhow!("reverse.tls.certificates[].cert must not be empty"));
-            }
             let key_path = cert.key.as_deref().unwrap_or("").trim();
-            if key_path.is_empty() {
-                return Err(anyhow!("reverse.tls.certificates[].key must not be empty"));
+            if cert_path.is_empty() && key_path.is_empty() {
+                acme_snis.insert(cert.sni.to_ascii_lowercase());
+            } else {
+                if cert_path.is_empty() {
+                    return Err(anyhow!("reverse.tls.certificates[].cert must not be empty"));
+                }
+                if key_path.is_empty() {
+                    return Err(anyhow!("reverse.tls.certificates[].key must not be empty"));
+                }
+                let chain = load_cert_chain(Path::new(cert_path))?;
+                let key = load_private_key(Path::new(key_path))?;
+                let signing_key =
+                    any_supported_type(&key).map_err(|_| anyhow!("unsupported key"))?;
+                let certified = Arc::new(CertifiedKey::new(chain, signing_key));
+                certs.insert(cert.sni.to_ascii_lowercase(), certified);
             }
-            let chain = load_cert_chain(Path::new(cert_path))?;
-            let key = load_private_key(Path::new(key_path))?;
-            let signing_key = any_supported_type(&key).map_err(|_| anyhow!("unsupported key"))?;
-            let certified = Arc::new(CertifiedKey::new(chain, signing_key));
-            certs.insert(cert.sni.to_ascii_lowercase(), certified);
         }
-        Ok(Self { certs })
+        Ok(Self { certs, acme_snis })
     }
 }
 
@@ -1124,7 +1120,13 @@ impl rustls::server::ResolvesServerCert for SniResolver {
         client_hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
         let name = client_hello.server_name()?.to_ascii_lowercase();
-        self.certs.get(&name).cloned()
+        if let Some(key) = self.certs.get(&name) {
+            return Some(key.clone());
+        }
+        if self.acme_snis.contains(&name) {
+            return crate::acme::cert_store().and_then(|store| store.get(&name));
+        }
+        None
     }
 }
 

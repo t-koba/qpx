@@ -32,13 +32,16 @@ mod e2e {
     fn write_qpxd_config(path: &std::path::Path, qpxd_listen: &str, qpxf_addr: &str) {
         let config = format!(
             r#"version: 1
+system_log:
+  level: trace
 reverse:
   - name: "e2e"
     listen: "{qpxd_listen}"
     routes:
       - match:
           path: ["/*"]
-        fastcgi:
+        ipc:
+          mode: tcp
           address: "{qpxf_addr}"
           timeout_ms: 5000
 "#,
@@ -64,6 +67,9 @@ handlers:
 
     #[tokio::test]
     async fn test_qpxd_to_qpxf_e2e_cgi() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("trace")
+            .try_init();
         let tmp = tempdir("qpxd-qpxf-e2e");
         let _script = create_cgi_script(&tmp);
 
@@ -76,31 +82,29 @@ handlers:
             serde_yaml::from_str(qpxf_config_yaml(&tmp).as_str()).unwrap();
         let router = std::sync::Arc::new(qpxf::router::Router::new(&qpxf_cfg).unwrap());
         let semaphore = std::sync::Arc::new(Semaphore::new(qpxf_cfg.workers));
-        let limits = std::sync::Arc::new(qpxf::fastcgi::RequestLimits {
-            max_params_bytes: qpxf_cfg.max_params_bytes,
-            max_stdin_bytes: qpxf_cfg.max_stdin_bytes,
-        });
+
         let input_idle = Duration::from_millis(qpxf_cfg.input_idle_timeout_ms);
         let conn_idle = Duration::from_millis(qpxf_cfg.conn_idle_timeout_ms);
-        let max_conns = qpxf_cfg.max_connections;
-        let max_reqs_per_conn = qpxf_cfg.max_requests_per_connection;
+        let max_requests_per_connection = qpxf_cfg.max_requests_per_connection;
+        let max_params_bytes = qpxf_cfg.max_params_bytes;
+        let max_stdin_bytes = qpxf_cfg.max_stdin_bytes;
+        let _max_conns = qpxf_cfg.max_connections;
 
         let qpxf_task = tokio::spawn(async move {
             loop {
                 let (stream, _) = qpxf_listener.accept().await.unwrap();
                 let router = router.clone();
                 let sem = semaphore.clone();
-                let lim = limits.clone();
                 tokio::spawn(async move {
                     if let Err(err) = qpxf::server::handle_connection(
                         stream,
                         router,
                         sem,
-                        lim,
                         input_idle,
                         conn_idle,
-                        max_conns,
-                        max_reqs_per_conn,
+                        max_requests_per_connection,
+                        max_params_bytes,
+                        max_stdin_bytes,
                     )
                     .await
                     {
@@ -158,18 +162,30 @@ handlers:
             .await
             .expect("http timeout")
             .expect("http request failed");
-        assert_eq!(resp.status(), hyper::StatusCode::OK);
+        let status = resp.status();
         let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
         let body_str = String::from_utf8_lossy(&body);
+
+        // Cleanup.
+        qpxd_child.kill().await.ok();
+        qpxf_task.abort();
+        let output = qpxd_child.wait_with_output().await.unwrap();
+        println!("QPXD STDOUT:\n{}", String::from_utf8_lossy(&output.stdout));
+        println!("QPXD STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+
+        assert_eq!(
+            status,
+            hyper::StatusCode::OK,
+            "Status was: {}, body: {}",
+            status,
+            body_str
+        );
+
         assert!(
             body_str.contains("Hello from CGI!"),
             "body was: {}",
             body_str
         );
         assert!(body_str.contains("METHOD=GET"), "body was: {}", body_str);
-
-        // Cleanup.
-        qpxd_child.kill().await.ok();
-        qpxf_task.abort();
     }
 }

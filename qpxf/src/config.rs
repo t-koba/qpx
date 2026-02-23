@@ -20,7 +20,7 @@ pub struct QpxfConfig {
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 
-    /// Maximum number of active request IDs per connection (FastCGI multiplexing cap).
+    /// Maximum number of requests per connection (keep-alive cap).
     #[serde(default = "default_max_requests_per_connection")]
     pub max_requests_per_connection: usize,
 

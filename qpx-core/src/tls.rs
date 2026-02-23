@@ -9,14 +9,13 @@ mod imp {
     };
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::crypto::ring::sign::any_supported_type;
+    use rustls::pki_types::pem::PemObject as _;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::pki_types::{ServerName, UnixTime};
     use rustls::server::{ClientHello, ResolvesServerCert};
     use rustls::sign::CertifiedKey;
     use rustls::{ClientConfig, RootCertStore, ServerConfig};
-    use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
     use std::fs;
-    use std::io::BufReader;
     use std::num::NonZeroUsize;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -53,10 +52,9 @@ mod imp {
             let key_pair = KeyPair::from_pem(&ca_key_pem)?;
             let issuer = Issuer::from_ca_cert_pem(&ca_pem, key_pair)?;
             let ca_der = {
-                let mut reader = BufReader::new(ca_pem.as_bytes());
-                let mut certs = certs(&mut reader)
+                let mut certs = CertificateDer::pem_slice_iter(ca_pem.as_bytes())
                     .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|_| anyhow!("invalid CA pem"))?;
+                    .map_err(|e| anyhow!("invalid CA pem: {e}"))?;
                 certs.pop().ok_or_else(|| anyhow!("no CA cert found"))?
             };
             return Ok(CaStore {
@@ -378,33 +376,23 @@ mod imp {
     pub fn load_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
         let data =
             fs::read(path).with_context(|| format!("failed to read cert {}", path.display()))?;
-        let mut reader = BufReader::new(&data[..]);
-        let certs = certs(&mut reader)
+        let certs = CertificateDer::pem_slice_iter(&data)
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|_| anyhow!("invalid cert {}", path.display()))?;
+            .map_err(|e| anyhow!("invalid cert {}: {e}", path.display()))?;
+        if certs.is_empty() {
+            return Err(anyhow!("no certificate found in {}", path.display()));
+        }
         Ok(certs)
     }
 
     pub fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
         let data =
             fs::read(path).with_context(|| format!("failed to read key {}", path.display()))?;
-        let mut reader = BufReader::new(&data[..]);
-        if let Ok(mut keys) =
-            pkcs8_private_keys(&mut reader).collect::<std::result::Result<Vec<_>, _>>()
-        {
-            if let Some(key) = keys.pop() {
-                return Ok(PrivateKeyDer::Pkcs8(key));
-            }
-        }
-        let mut reader = BufReader::new(&data[..]);
-        if let Ok(mut keys) =
-            rsa_private_keys(&mut reader).collect::<std::result::Result<Vec<_>, _>>()
-        {
-            if let Some(key) = keys.pop() {
-                return Ok(PrivateKeyDer::Pkcs1(key));
-            }
-        }
-        Err(anyhow!("no private key found in {}", path.display()))
+        let mut keys = PrivateKeyDer::pem_slice_iter(&data)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| anyhow!("invalid key {}: {e}", path.display()))?;
+        keys.pop()
+            .ok_or_else(|| anyhow!("no private key found in {}", path.display()))
     }
 
     pub fn build_server_config(

@@ -122,6 +122,7 @@ mod tests {
             audit_log: AuditLogConfig::default(),
             metrics: None,
             otel: None,
+            acme: None,
             exporter: None,
             auth: AuthConfig::default(),
             listeners: vec![ListenerConfig {

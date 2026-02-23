@@ -25,9 +25,11 @@ mod h3_connect_udp;
 mod policy;
 mod request;
 
-#[cfg(feature = "http3")]
+#[cfg(any(feature = "http3", feature = "mitm"))]
 pub(crate) use policy::{evaluate_forward_policy, ForwardPolicyDecision};
 pub(crate) use request::handle_request_inner;
+#[cfg(feature = "mitm")]
+pub(crate) use request::proxy_auth_required;
 
 pub async fn run(listener: ListenerConfig, runtime: Runtime) -> Result<()> {
     let addr: SocketAddr = listener.listen.parse()?;
