@@ -50,7 +50,7 @@ where
             let request_method = req.method().clone();
             let request_version = req.version();
 
-            let result: Result<hyper::Response<Body>> = (|| async move {
+            let result: Result<hyper::Response<Body>> = async move {
                 let state = runtime.state();
                 let proxy_name = state.config.identity.proxy_name.as_str();
                 if let Err(err) = validate_incoming_request(&req) {
@@ -242,7 +242,7 @@ where
                     false,
                 );
                 Ok::<_, anyhow::Error>(response)
-            })()
+            }
             .await;
 
             match result {
