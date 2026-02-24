@@ -65,8 +65,8 @@ jobs:
           RELEASE_NAME="qpx-${{ matrix.target }}"
           mkdir -p "$RELEASE_NAME"
           
-          # Generate license
-          cargo about generate licenses/about.hbs > THIRDPARTY.md
+          # Generate licenses for the full workspace using our pinned config/lockfile.
+          cargo about generate --config about.toml --workspace --locked licenses/about.hbs > THIRDPARTY.md
 
           # Copy binaries
           cp "target/${{ matrix.target }}/release/${BINARY_NAME}${EXT}" "$RELEASE_NAME/"

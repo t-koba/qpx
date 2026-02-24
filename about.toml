@@ -10,9 +10,36 @@ accepted = [
     "CDLA-Permissive-2.0",
     "Zlib",
     "MPL-2.0",
-    "MPL-2.0+",
 ]
+
+no-clearly-defined = true
+filter-noassertion = true
 
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
 
+[ittapi.clarify]
+license = "GPL-2.0-only OR BSD-3-Clause"
+
+[[ittapi.clarify.git]]
+path = "LICENSES/BSD-3-Clause.txt"
+license = "BSD-3-Clause"
+checksum = "cf48cdd9ed87c2031b68fb1b9f4cfb55d00dcf815b21a30bf8304aa1e5e6f76a"
+
+[ittapi-sys.clarify]
+license = "GPL-2.0-only OR BSD-3-Clause"
+
+[[ittapi-sys.clarify.files]]
+path = "LICENSES/BSD-3-Clause.txt"
+license = "BSD-3-Clause"
+checksum = "cf48cdd9ed87c2031b68fb1b9f4cfb55d00dcf815b21a30bf8304aa1e5e6f76a"
+
+[[ittapi.clarify.git]]
+path = "LICENSES/GPL-2.0-only.txt"
+license = "GPL-2.0-only"
+checksum = "cbe0f9505c5ca02ee34bfca453df31a98e31e6d56afcdf8ab0f87f4c94f1181b"
+
+[[ittapi-sys.clarify.files]]
+path = "LICENSES/GPL-2.0-only.txt"
+license = "GPL-2.0-only"
+checksum = "cbe0f9505c5ca02ee34bfca453df31a98e31e6d56afcdf8ab0f87f4c94f1181b"
