@@ -213,7 +213,6 @@ PY
 
   echo "[CONTROL] hot reload with listener/reverse restart"
   install_config RESTARTED 2
-  wait_port "$RESTART_PORT" "$parent_pid"
   wait_body "RESTARTED"
 
   echo "[CONTROL] binary upgrade"

@@ -42,7 +42,7 @@ pub(crate) fn install_upgrade_trigger() -> Result<Option<UpgradeTrigger>> {
     #[cfg(windows)]
     {
         let event = crate::windows_handoff::create_upgrade_event(std::process::id())?;
-        return Ok(Some(UpgradeTrigger::Event(event)));
+        Ok(Some(UpgradeTrigger::Event(event)))
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -97,7 +97,7 @@ pub(crate) fn request_upgrade(pid: u32) -> Result<()> {
     #[cfg(windows)]
     {
         let event = crate::windows_handoff::open_upgrade_event(pid)?;
-        return crate::windows_handoff::signal_event(&event);
+        crate::windows_handoff::signal_event(&event)
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -373,10 +373,10 @@ pub(crate) fn take_ready_notifier_from_env() -> Result<Option<ReadyNotifier>> {
             .to_string_lossy()
             .parse()
             .context("invalid upgrade ready address")?;
-        return Ok(Some(ReadyNotifier {
+        Ok(Some(ReadyNotifier {
             addr,
             token: token_raw.to_string_lossy().into_owned(),
-        }));
+        }))
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -413,7 +413,7 @@ impl ReadyNotifier {
                 .write_all(token)
                 .context("failed to write readiness token")?;
             stream.flush().ok();
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(any(unix, windows)))]

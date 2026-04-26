@@ -1567,9 +1567,9 @@ fn tokio_broker_stream_from_std(stream: QuinnBrokerStream) -> Result<TokioQuinnB
 
     #[cfg(windows)]
     {
-        return Ok(TokioQuinnBrokerStream::Tcp(TokioTcpStream::from_std(
+        Ok(TokioQuinnBrokerStream::Tcp(TokioTcpStream::from_std(
             stream,
-        )?));
+        )?))
     }
 
     #[cfg(not(any(unix, windows)))]

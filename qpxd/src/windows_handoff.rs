@@ -260,13 +260,13 @@ pub(crate) fn duplicate_socket_for_child<T: AsRawSocket>(
 #[cfg(windows)]
 fn recreate_socket(bytes: &[u8]) -> Result<RawSocket> {
     ensure_winsock_started()?;
-    let mut info = protocol_info_from_bytes(bytes)?;
+    let info = protocol_info_from_bytes(bytes)?;
     let socket = unsafe {
         WSASocketW(
             FROM_PROTOCOL_INFO,
             FROM_PROTOCOL_INFO,
             FROM_PROTOCOL_INFO,
-            &mut info,
+            &info,
             0,
             WSA_FLAG_OVERLAPPED,
         )

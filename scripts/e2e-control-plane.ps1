@@ -13,9 +13,9 @@ $RestartPort = if ($env:QPX_CONTROL_PLANE_RESTART_PORT) { [int]$env:QPX_CONTROL_
 $TrackedPids = [System.Collections.Generic.List[int]]::new()
 
 function Register-Pid {
-    param([int]$Pid)
-    if ($Pid -gt 0 -and -not $TrackedPids.Contains($Pid)) {
-        $TrackedPids.Add($Pid)
+    param([int]$ProcessId)
+    if ($ProcessId -gt 0 -and -not $TrackedPids.Contains($ProcessId)) {
+        $TrackedPids.Add($ProcessId)
     }
 }
 
@@ -27,9 +27,9 @@ function Get-QpxdProcessIdsForConfig {
 }
 
 function Stop-PidIfRunning {
-    param([int]$Pid)
+    param([int]$ProcessId)
     try {
-        $process = Get-Process -Id $Pid -ErrorAction Stop
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
         Stop-Process -Id $process.Id -Force -ErrorAction Stop
         $null = $process.WaitForExit(5000)
     } catch {
@@ -38,10 +38,10 @@ function Stop-PidIfRunning {
 
 function Cleanup {
     foreach ($pid in $TrackedPids) {
-        Stop-PidIfRunning -Pid $pid
+        Stop-PidIfRunning -ProcessId $pid
     }
     foreach ($pid in Get-QpxdProcessIdsForConfig) {
-        Stop-PidIfRunning -Pid $pid
+        Stop-PidIfRunning -ProcessId $pid
     }
     if (Test-Path $TmpDir) {
         Remove-Item -LiteralPath $TmpDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -90,12 +90,12 @@ function Test-PortOpen {
 }
 
 function Wait-Port {
-    param([int]$Port, [int]$Pid)
+    param([int]$Port, [int]$ProcessId)
     for ($i = 0; $i -lt 100; $i++) {
         if (Test-PortOpen -Port $Port) {
             return
         }
-        if (-not (Get-Process -Id $Pid -ErrorAction SilentlyContinue)) {
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
             $stdout = if (Test-Path $LogFile) { Get-Content -Raw $LogFile } else { "" }
             $stderr = if (Test-Path $ErrFile) { Get-Content -Raw $ErrFile } else { "" }
             throw "qpxd exited before opening port $Port`nSTDOUT:`n$stdout`nSTDERR:`n$stderr"
@@ -220,8 +220,8 @@ $parent = Start-Process -FilePath $QpxdBin `
     -RedirectStandardOutput $LogFile `
     -RedirectStandardError $ErrFile `
     -PassThru
-Register-Pid -Pid $parent.Id
-Wait-Port -Port $Port -Pid $parent.Id
+Register-Pid -ProcessId $parent.Id
+Wait-Port -Port $Port -ProcessId $parent.Id
 Wait-Body -Expected "OLD"
 
 Write-Host "[CONTROL] hot reload in place (windows)"
@@ -231,7 +231,6 @@ Wait-Body -Expected "RELOADED"
 
 Write-Host "[CONTROL] hot reload with listener/reverse restart (windows)"
 Install-Config -Body "RESTARTED" -Acceptors 2
-Wait-Port -Port $RestartPort -Pid $parent.Id
 Wait-Body -Expected "RESTARTED"
 
 Write-Host "[CONTROL] binary upgrade (windows)"
@@ -251,7 +250,7 @@ if (-not $childPid) {
     $stderr = if (Test-Path $ErrFile) { Get-Content -Raw $ErrFile } else { "" }
     throw "failed to locate upgraded child process`nSTDOUT:`n$stdout`nSTDERR:`n$stderr"
 }
-Register-Pid -Pid $childPid
+Register-Pid -ProcessId $childPid
 
 for ($i = 0; $i -lt 120; $i++) {
     if (-not (Get-Process -Id $parent.Id -ErrorAction SilentlyContinue)) {

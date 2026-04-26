@@ -152,9 +152,9 @@ async fn run_server(args: RunArgs) -> Result<()> {
         }
         #[cfg(not(unix))]
         {
-            return Err(anyhow::anyhow!(
+            Err(anyhow::anyhow!(
                 "Unix sockets are not supported on this platform"
-            ));
+            ))
         }
     } else {
         let listener = TcpListener::bind(&listen).await?;

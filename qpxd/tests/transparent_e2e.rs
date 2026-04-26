@@ -87,9 +87,9 @@ runtime:
     let mut stream = timeout(Duration::from_secs(3), TcpStream::connect(proxy_addr)).await??;
     let metadata = build_proxy_v2_header("192.0.2.10:41000".parse()?, backend_addr)?;
     stream.write_all(&metadata).await?;
-    stream
-        .write_all(b"GET /proxyv2 HTTP/1.0\r\nConnection: close\r\n\r\n")
-        .await?;
+    let request =
+        format!("GET /proxyv2 HTTP/1.1\r\nHost: {backend_addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
     let mut raw = Vec::new();
     timeout(Duration::from_secs(3), stream.read_to_end(&mut raw)).await??;
