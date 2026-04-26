@@ -20,9 +20,26 @@ function Register-Pid {
 }
 
 function Get-QpxdProcessIdsForConfig {
-    $needle = $ConfigFile.Replace('\', '\\')
+    $fullPath = [System.IO.Path]::GetFullPath($ConfigFile)
+    $needles = @($ConfigFile, $fullPath, "\\?\$fullPath") |
+        Where-Object { $_ } |
+        Select-Object -Unique
     $processes = Get-CimInstance Win32_Process -Filter "Name = 'qpxd.exe'" |
-        Where-Object { $_.CommandLine -and $_.CommandLine -like "*$needle*" }
+        Where-Object {
+            $commandLine = [string]$_.CommandLine
+            if ([string]::IsNullOrEmpty($commandLine)) {
+                $false
+            } else {
+                $matched = $false
+                foreach ($needle in $needles) {
+                    if ($commandLine.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        $matched = $true
+                        break
+                    }
+                }
+                $matched
+            }
+        }
     @($processes | ForEach-Object { [int]$_.ProcessId })
 }
 
@@ -209,8 +226,9 @@ $parent = Start-Process -FilePath $QpxdBin `
     -RedirectStandardOutput $LogFile `
     -RedirectStandardError $ErrFile `
     -PassThru
-Register-Pid -ProcessId $parent.Id
-Wait-Port -Port $Port -ProcessId $parent.Id
+$parentProcessId = [int]$parent.Id
+Register-Pid -ProcessId $parentProcessId
+Wait-Port -Port $Port -ProcessId $parentProcessId
 Wait-Body -Expected "OLD"
 
 Write-Host "[CONTROL] hot reload in place (windows)"
@@ -219,15 +237,20 @@ Wait-Body -Expected "RELOADED"
 
 Write-Host "[CONTROL] hot reload with listener/reverse restart (windows)"
 Install-Config -Body "RESTARTED" -Acceptors 2
-Wait-Port -Port $RestartPort -ProcessId $parent.Id
+Wait-Port -Port $RestartPort -ProcessId $parentProcessId
 Wait-Body -Expected "RESTARTED"
 
 Write-Host "[CONTROL] binary upgrade (windows)"
-& $QpxdBin upgrade --pid $parent.Id
+& $QpxdBin upgrade --pid $parentProcessId
+if ($LASTEXITCODE -ne 0) {
+    $stdout = if (Test-Path $LogFile) { Get-Content -Raw $LogFile } else { "" }
+    $stderr = if (Test-Path $ErrFile) { Get-Content -Raw $ErrFile } else { "" }
+    throw "qpxd upgrade command failed with exit code $LASTEXITCODE`nSTDOUT:`n$stdout`nSTDERR:`n$stderr"
+}
 
 $childPid = $null
 for ($i = 0; $i -lt 120; $i++) {
-    $candidate = Get-QpxdProcessIdsForConfig | Where-Object { $_ -ne $parent.Id } | Select-Object -First 1
+    $candidate = Get-QpxdProcessIdsForConfig | Where-Object { $_ -ne $parentProcessId } | Select-Object -First 1
     if ($candidate) {
         $childPid = [int]$candidate
         break
@@ -242,12 +265,12 @@ if (-not $childPid) {
 Register-Pid -ProcessId $childPid
 
 for ($i = 0; $i -lt 120; $i++) {
-    if (-not (Get-Process -Id $parent.Id -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Process -Id $parentProcessId -ErrorAction SilentlyContinue)) {
         break
     }
     Start-Sleep -Milliseconds 100
 }
-if (Get-Process -Id $parent.Id -ErrorAction SilentlyContinue) {
+if (Get-Process -Id $parentProcessId -ErrorAction SilentlyContinue) {
     $stdout = if (Test-Path $LogFile) { Get-Content -Raw $LogFile } else { "" }
     $stderr = if (Test-Path $ErrFile) { Get-Content -Raw $ErrFile } else { "" }
     throw "parent did not exit after binary upgrade`nSTDOUT:`n$stdout`nSTDERR:`n$stderr"
