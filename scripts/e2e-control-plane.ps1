@@ -179,8 +179,12 @@ reverse:
 "@
     }
     [System.IO.File]::WriteAllText($tmpConfig, $content, [System.Text.UTF8Encoding]::new($false))
-    if (Test-Path $ConfigFile) {
-        [System.IO.File]::Replace($tmpConfig, $ConfigFile, $null)
+    if (Test-Path -LiteralPath $ConfigFile) {
+        $backupConfig = Join-Path $TmpDir ("control-plane.backup." + [System.Guid]::NewGuid().ToString("N") + ".yaml")
+        [System.IO.File]::Replace($tmpConfig, $ConfigFile, $backupConfig)
+        if (Test-Path -LiteralPath $backupConfig) {
+            Remove-Item -LiteralPath $backupConfig -Force -ErrorAction SilentlyContinue
+        }
     } else {
         [System.IO.File]::Move($tmpConfig, $ConfigFile)
     }
