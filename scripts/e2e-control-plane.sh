@@ -115,13 +115,19 @@ wait_body() {
 install_config() {
   local body="$1"
   local acceptors="$2"
+  local tcp_backlog=4096
   local tmp_cfg="$TMP_DIR/control-plane.next.yaml"
+
+  if [ "$acceptors" -gt 1 ]; then
+    tcp_backlog=4097
+  fi
 
   cat >"$tmp_cfg" <<EOF
 state_dir: '$STATE_DIR'
 runtime:
   acceptor_tasks_per_listener: $acceptors
   reuse_port: false
+  tcp_backlog: $tcp_backlog
 reverse:
 - name: control
   listen: 127.0.0.1:$PORT

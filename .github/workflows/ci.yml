@@ -184,6 +184,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-preflight-${{ matrix.target }}
       - name: Install cross
         if: ${{ matrix.use_cross }}
         uses: taiki-e/install-action@v2
@@ -192,6 +194,7 @@ jobs:
       - name: build release targets (no warnings)
         env:
           RUSTFLAGS: "-D warnings"
+          CARGO_TARGET_DIR: target/${{ matrix.target }}
         shell: bash
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then

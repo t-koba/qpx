@@ -119,11 +119,3 @@ pub(crate) fn duplicate_std_udp_socket_for_child(
 ) -> Result<Vec<u8>> {
     crate::windows_handoff::duplicate_socket_for_child(socket, child_pid)
 }
-
-#[cfg(windows)]
-pub(crate) fn duplicate_tokio_udp_socket_for_child(
-    socket: &tokio::net::UdpSocket,
-    child_pid: u32,
-) -> Result<Vec<u8>> {
-    crate::windows_handoff::duplicate_socket_for_child(socket, child_pid)
-}
