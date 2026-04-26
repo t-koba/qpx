@@ -34,7 +34,7 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+    CreateEventW, OpenEventW, ResetEvent, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
 };
 
 #[cfg(windows)]
@@ -330,7 +330,7 @@ impl Drop for EventHandle {
 #[cfg(windows)]
 pub(crate) fn create_upgrade_event(pid: u32) -> Result<EventHandle> {
     let name = upgrade_event_name(pid);
-    let handle = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
+    let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
     if handle.is_null() {
         return Err(anyhow!(
             "CreateEventW failed: {}",
@@ -358,6 +358,17 @@ pub(crate) fn signal_event(event: &EventHandle) -> Result<()> {
     if unsafe { SetEvent(event.raw()) } == 0 {
         return Err(anyhow!(
             "SetEvent failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn reset_event(event: &EventHandle) -> Result<()> {
+    if unsafe { ResetEvent(event.raw()) } == 0 {
+        return Err(anyhow!(
+            "ResetEvent failed: {}",
             std::io::Error::last_os_error()
         ));
     }

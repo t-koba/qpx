@@ -1624,7 +1624,6 @@ fn remaining_handoff_wait(deadline: std::time::Instant) -> Result<std::time::Dur
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
 
     fn long_packet(dcid: &[u8], scid: &[u8]) -> Vec<u8> {
         let mut packet = vec![0xc0, 0, 0, 0, 1, dcid.len() as u8];
@@ -1660,12 +1659,6 @@ mod tests {
             state.matches_cid(&long_packet(&server_cid, &client_cid)),
             "long header should match observed client/server CIDs"
         );
-    }
-
-    #[cfg(any(unix, windows))]
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn test_config() -> qpx_core::config::Config {
@@ -1722,7 +1715,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn quic_broker_handoff_round_trip_restores_roles() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = crate::test_env_lock().lock().expect("env lock");
 
         let forward_socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("forward bind");
         let reverse_socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("reverse bind");

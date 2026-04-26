@@ -846,13 +846,6 @@ mod tests {
         AccessLogConfig, AuditLogConfig, AuthConfig, CacheConfig, Config, IdentityConfig,
         MessagesConfig, RuntimeConfig, SystemLogConfig,
     };
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     fn test_config() -> Config {
         Config {
             state_dir: None,
@@ -883,7 +876,7 @@ mod tests {
 
     #[test]
     fn udp_session_handoff_round_trip_restores_connected_sockets() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = crate::test_env_lock().lock().expect("env lock");
 
         let upstream = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind upstream");
         let transparent_socket =

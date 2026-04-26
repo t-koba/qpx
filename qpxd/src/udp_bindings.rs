@@ -641,13 +641,6 @@ mod tests {
         Http3ListenerConfig, IdentityConfig, ListenerConfig, ListenerMode, MessagesConfig,
         RuntimeConfig, SystemLogConfig,
     };
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     fn test_config() -> Config {
         Config {
             state_dir: None,
@@ -709,7 +702,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn inherited_udp_bindings_round_trip() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = crate::test_env_lock().lock().expect("env lock");
         let config = test_config();
         let bindings = UdpBindings::bind(&config).expect("bind");
         let handoff = bindings.prepare_handoff(&config).expect("handoff");

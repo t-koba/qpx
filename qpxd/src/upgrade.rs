@@ -78,6 +78,15 @@ impl UpgradeTrigger {
             },
         }
     }
+
+    pub(crate) fn acknowledge(&self) -> Result<()> {
+        match self {
+            #[cfg(unix)]
+            Self::Signal(_) => Ok(()),
+            #[cfg(windows)]
+            Self::Event(event) => crate::windows_handoff::reset_event(event),
+        }
+    }
 }
 
 pub(crate) fn request_upgrade(pid: u32) -> Result<()> {
@@ -523,13 +532,6 @@ fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    #[cfg(unix)]
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -538,7 +540,7 @@ mod tests {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 
         let (notifier, read_fd) = {
-            let _guard = env_lock().lock().expect("env lock");
+            let _guard = crate::test_env_lock().lock().expect("env lock");
 
             let mut pipe_fds = [0; 2];
             assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);

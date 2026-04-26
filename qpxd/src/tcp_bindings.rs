@@ -843,13 +843,6 @@ mod tests {
         IdentityConfig, ListenerConfig, ListenerMode, MessagesConfig, RuntimeConfig,
         SystemLogConfig,
     };
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     fn test_config() -> Config {
         let runtime = RuntimeConfig {
             acceptor_tasks_per_listener: Some(1),
@@ -909,7 +902,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn inherited_bindings_round_trip() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = crate::test_env_lock().lock().expect("env lock");
         let config = test_config();
         let bindings = TcpBindings::bind(&config).expect("bind");
         let handoff = bindings.prepare_handoff(&config).expect("handoff");

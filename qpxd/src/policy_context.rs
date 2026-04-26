@@ -1782,6 +1782,7 @@ mod tests {
 
     #[test]
     fn signed_assertion_accepts_es256_public_key_tokens() {
+        let _guard = crate::test_env_lock().lock().expect("env lock");
         let key_pair =
             rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
         let private_key_der = key_pair.serialize_der();
@@ -1831,6 +1832,7 @@ mod tests {
 
     #[test]
     fn signed_assertion_defaults_to_public_key_algorithms() {
+        let _guard = crate::test_env_lock().lock().expect("env lock");
         let key_pair =
             rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
         let private_key_der = key_pair.serialize_der();
