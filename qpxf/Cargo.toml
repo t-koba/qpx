@@ -24,4 +24,4 @@ dirs-next.workspace = true
 libc.workspace = true
 
 qpx-wasm = { path = "../qpx-wasm", optional = true }
-qpx-core = { version = "0.1.0", path = "../qpx-core", default-features = false, features = ["ipc-support"] }
+qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }

@@ -624,7 +624,7 @@ cargo build -p qpxd
 <summary>Metrics, identity, and messages</summary>
 
 - **Metrics:** `metrics.listen` and `metrics.path` configure the Prometheus scrape endpoint. Non-loopback binding requires explicit `metrics.allow` CIDR allowlist.
-- **Identity:** `identity.proxy_name` (Via hop entries), `identity.auth_realm` (auth challenges), `identity.metrics_prefix` (metric name prefix), `identity.generated_user_agent` (User-Agent for proxy-originated requests).
+- **Identity:** `identity.proxy_name` (Via hop entries), `identity.auth_realm` (auth challenges), `identity.metrics_prefix` (metric name prefix), `identity.generated_user_agent` (optional User-Agent for proxy-originated requests; keep it low-information, e.g. product name only).
 - **Messages:** `messages.*` controls fixed response bodies for policy/error paths (e.g., `blocked`, `forbidden`, proxy errors, cache miss, FTP method errors).
 
 </details>

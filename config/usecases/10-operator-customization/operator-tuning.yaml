@@ -37,7 +37,8 @@ identity:
   proxy_name: corp-edge-proxy
   auth_realm: corp-proxy-auth
   metrics_prefix: corp_proxy
-  generated_user_agent: CorpProxy/2026.02
+  # Proxy-originated requests should not disclose version, host, or deployment details.
+  generated_user_agent: CorpProxy
 messages:
   blocked: blocked by corp policy
   forbidden: access denied by corp policy

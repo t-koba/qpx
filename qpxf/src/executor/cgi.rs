@@ -49,7 +49,10 @@ impl CgiExecutor {
         let mut env = HashMap::new();
         env.insert("GATEWAY_INTERFACE".into(), "CGI/1.1".into());
         env.insert("SERVER_PROTOCOL".into(), req.server_protocol.clone());
-        env.insert("SERVER_SOFTWARE".into(), "qpxf/0.1".into());
+        env.insert(
+            "SERVER_SOFTWARE".into(),
+            concat!("qpxf/", env!("CARGO_PKG_VERSION")).into(),
+        );
         env.insert("REQUEST_METHOD".into(), req.request_method.clone());
         env.insert("QUERY_STRING".into(), req.query_string.clone());
         env.insert("SCRIPT_NAME".into(), req.script_name.clone());

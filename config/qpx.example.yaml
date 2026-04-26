@@ -13,7 +13,8 @@ identity:
   proxy_name: qpx
   auth_realm: qpx
   metrics_prefix: qpx
-  generated_user_agent: qpxd/0.1 (+https://example.com/qpx)
+  # Keep proxy-originated User-Agent low-information; omit version, host, URLs, and comments.
+  generated_user_agent: qpx
 messages:
   blocked: blocked
   forbidden: forbidden

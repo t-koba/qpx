@@ -138,7 +138,7 @@ HTTP/3 backend selection is a build-time `qpxd` feature choice. YAML does not se
 - `include-transparent-reverse.yaml`: include-composed transparent + reverse profile.
 
 ### 10-operator-customization (`config/usecases/10-operator-customization`)
-- `operator-tuning.yaml`: identity/messages customization and generated `User-Agent` tuning.
+- `operator-tuning.yaml`: identity/messages customization and low-information generated `User-Agent` tuning.
 
 ### 11-transparent-intercept (`config/usecases/11-transparent-intercept`)
 - `transparent-macos-windows-fallback.yaml`: transparent mode fallback path for non-Linux hosts.

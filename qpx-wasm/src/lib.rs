@@ -370,7 +370,10 @@ fn build_wasi_ctx(req: &WasmRequest, extra_env: &HashMap<String, String>) -> Was
     let mut builder = WasiCtxBuilder::new();
     builder.env("GATEWAY_INTERFACE", "CGI/1.1");
     builder.env("SERVER_PROTOCOL", &req.server_protocol);
-    builder.env("SERVER_SOFTWARE", "qpxf/0.1");
+    builder.env(
+        "SERVER_SOFTWARE",
+        concat!("qpxf/", env!("CARGO_PKG_VERSION")),
+    );
     builder.env("REQUEST_METHOD", &req.request_method);
     builder.env("QUERY_STRING", &req.query_string);
     builder.env("SCRIPT_NAME", &req.script_name);
