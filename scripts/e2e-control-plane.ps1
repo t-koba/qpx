@@ -163,6 +163,7 @@ reverse:
       body: $Body
 "@
     if ($Acceptors -gt 1) {
+        $content += "`n"
         $content += @"
 - name: control-extra
   listen: 127.0.0.1:$RestartPort
