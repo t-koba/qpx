@@ -150,7 +150,7 @@ pub(super) async fn refresh_dynamic_upstreams(
             Some(current) => current.min(delay),
             None => delay,
         });
-        endpoints.extend(resolved.into_iter());
+        endpoints.extend(resolved);
     }
     Ok((
         endpoints,

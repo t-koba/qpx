@@ -109,7 +109,7 @@ pub(super) fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDi
             } else if directive == "no-cache" {
                 if let Some(value) = value.as_deref() {
                     out.no_cache_fields
-                        .extend(parse_cache_field_name_list(value).into_iter());
+                        .extend(parse_cache_field_name_list(value));
                 } else {
                     out.no_cache = true;
                 }
@@ -118,7 +118,7 @@ pub(super) fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDi
             } else if directive == "private" {
                 if let Some(value) = value.as_deref() {
                     out.private_fields
-                        .extend(parse_cache_field_name_list(value).into_iter());
+                        .extend(parse_cache_field_name_list(value));
                 } else {
                     out.private = true;
                 }

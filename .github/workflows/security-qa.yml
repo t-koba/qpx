@@ -1,0 +1,60 @@
+name: security-qa
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  address_sanitizer:
+    name: address sanitizer
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+      RUSTFLAGS: -Zsanitizer=address
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: install sanitizer toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+      - uses: Swatinem/rust-cache@v2
+      - name: run shm ring tests under asan
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu -p qpx-core --lib shm_ring --no-default-features --features ipc-support -- --nocapture
+      - name: run upgrade tests under asan
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu -p qpxd ready_notifier_from_env_writes_readiness_byte -- --nocapture
+
+  fuzz_smoke:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: install fuzzing toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: fuzz parser and ring targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in \
+            shm_ring_ops \
+            proxy_v2_parser \
+            http1_request_head \
+            qpack_decoder \
+            client_hello_sniff; do
+            echo "::group::cargo fuzz run ${target}"
+            cargo fuzz run --manifest-path fuzz/Cargo.toml "${target}" -- -max_total_time=15
+            echo "::endgroup::"
+          done

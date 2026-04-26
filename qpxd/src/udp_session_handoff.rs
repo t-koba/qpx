@@ -487,7 +487,7 @@ impl UdpSessionRestoreState {
             let path = PathBuf::from(raw);
             let result = crate::windows_handoff::read_json_wait(path.as_path())
                 .and_then(Self::from_persisted_handoff);
-            let _ = fs::remove_file(&path);
+            let _ = std::fs::remove_file(&path);
             result.map(Some)
         }
     }

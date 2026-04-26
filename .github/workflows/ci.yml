@@ -26,13 +26,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: crate-ci/typos@v1.43.5
 
+  sensitive_artifacts:
+    name: sensitive artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: reject local paths, secrets, and runtime artifacts
+        run: bash ./scripts/check-sensitive-artifacts.sh
+
   doc:
     name: doc
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo doc --workspace --no-deps --document-private-items
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --locked --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -54,23 +63,80 @@ jobs:
       - name: install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y netcat-openbsd lsof curl
+          sudo apt-get install -y netcat-openbsd lsof curl openssl procps
       - name: build qpxd (no warnings)
         env:
           RUSTFLAGS: "-D warnings"
         run: cargo build -p qpxd --locked
-      - name: run e2e script
-        run: ./scripts/e2e-config-samples.sh
+      - name: run control-plane e2e
+        run: bash ./scripts/e2e-control-plane.sh
+      - name: run control-plane soak e2e
+        run: bash ./scripts/e2e-control-plane-soak.sh
+      - name: run sample-config e2e
+        run: bash ./scripts/e2e-config-samples.sh
+      - name: run local-response e2e
+        run: bash ./scripts/e2e-local-response.sh
+      - name: run http2 e2e
+        run: bash ./scripts/e2e-http2.sh
 
+  e2e_control_plane_windows:
+    name: control-plane e2e (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build qpxd (no warnings)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo build -p qpxd --locked
+      - name: run control-plane e2e (windows)
+        shell: pwsh
+        run: ./scripts/e2e-control-plane.ps1
 
+  perf_smoke:
+    name: perf smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: perf smoke (release)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
+
+  config_samples:
+    name: config samples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssl
+      - name: validate qpxd sample configs
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: bash ./scripts/check-config-samples.sh
 
   build_test:
-    name: build/test (${{ matrix.os }})
+    name: build/test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: windows-x86_64
+            os: windows-latest
+          - name: macos-x86_64
+            os: macos-13
+          - name: macos-aarch64
+            os: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -94,6 +160,50 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  release_target_preflight:
+    name: release preflight (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            use_cross: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            use_cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross
+        if: ${{ matrix.use_cross }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: build release targets (no warnings)
+        env:
+          RUSTFLAGS: "-D warnings"
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --workspace --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --workspace --release --locked --target ${{ matrix.target }}
+          fi
 
   clippy_feature_matrix:
     name: clippy (feature matrix, ubuntu)
@@ -129,29 +239,61 @@ jobs:
             echo "::endgroup::"
           }
 
-          # qpx-core: tls backend (none|tls-rustls|tls-native) x digest-auth (on|off)
-          for tls in "" "tls-rustls" "tls-native"; do
-            for digest in "" "digest-auth"; do
-              feats=""
-              if [[ -n "${tls}" ]]; then feats="${tls}"; fi
-              if [[ -n "${digest}" ]]; then
-                if [[ -n "${feats}" ]]; then feats="${feats},${digest}"; else feats="${digest}"; fi
-              fi
-              run_clippy qpx-core "${feats}"
-            done
+          run_plain() {
+            local pkg="$1"
+            echo "::group::cargo clippy -p ${pkg}"
+            cargo clippy -p "${pkg}" --locked --all-targets -- -D warnings
+            echo "::endgroup::"
+          }
+
+          # qpx-core: tls backend (none|tls-rustls|tls-native) x ipc-support (on|off)
+          for feats in \
+            "" \
+            "ipc-support" \
+            "tls-rustls" \
+            "tls-rustls,ipc-support" \
+            "tls-native" \
+            "tls-native,ipc-support"; do
+            run_clippy qpx-core "${feats}"
+          done
+
+          # qpx-auth: valid auth-proxy / LDAP / digest combinations
+          for feats in \
+            "" \
+            "auth-proxy" \
+            "digest-auth" \
+            "ldap-auth-rustls" \
+            "ldap-auth-native" \
+            "ldap-auth-rustls,digest-auth" \
+            "ldap-auth-native,digest-auth"; do
+            run_clippy qpx-auth "${feats}"
+          done
+
+          # qpx-acme: base or HTTP/3-enabled
+          for feats in "" "http3"; do
+            run_clippy qpx-acme "${feats}"
           done
 
           # qpxd:
           # - tls backend: none | tls-native | tls-rustls
-          # - http3/mitm only valid with tls-rustls
-          # - digest-auth / sha2-hash independent
-          qpxd_tls_sets=(
+          # - HTTP/3 is selected by exactly one backend feature
+          # - mitm/acme require tls-rustls
+          # - digest-auth / sha2-hash are independent toggles
+          qpxd_base_sets=(
             ""
             "tls-native"
             "tls-rustls"
-            "tls-rustls,http3"
             "tls-rustls,mitm"
-            "tls-rustls,http3,mitm"
+            "tls-rustls,acme"
+            "tls-rustls,mitm,acme"
+            "http3-backend-h3"
+            "http3-backend-h3,mitm"
+            "http3-backend-h3,acme"
+            "http3-backend-h3,mitm,acme"
+            "http3-backend-qpx"
+            "http3-backend-qpx,mitm"
+            "http3-backend-qpx,acme"
+            "http3-backend-qpx,mitm,acme"
           )
           qpxd_opt_sets=(
             ""
@@ -159,9 +301,9 @@ jobs:
             "sha2-hash"
             "digest-auth,sha2-hash"
           )
-          for tls in "${qpxd_tls_sets[@]}"; do
+          for base in "${qpxd_base_sets[@]}"; do
             for opt in "${qpxd_opt_sets[@]}"; do
-              feats="${tls}"
+              feats="${base}"
               if [[ -n "${opt}" ]]; then
                 if [[ -n "${feats}" ]]; then feats="${feats},${opt}"; else feats="${opt}"; fi
               fi
@@ -179,6 +321,11 @@ jobs:
           # qpxf: wasm (on|off)
           run_clippy qpxf ""
           run_clippy qpxf "wasm"
+
+          # featureless crates
+          for pkg in qpx-wasm qpx-h3 qpx-observability xtask; do
+            run_plain "${pkg}"
+          done
 
   audit:
     name: audit

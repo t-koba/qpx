@@ -8,7 +8,36 @@ on:
       - "v*"
 
 jobs:
+  benchmark_gate:
+    name: release benchmark gate
+    runs-on:
+      - self-hosted
+      - qpx-reference-host
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: release benchmark gate
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
+
+      - name: release advanced transport benchmark
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo test -p qpxd --release --no-default-features --features tls-rustls,http3-backend-qpx,mitm --test advanced_transport_perf --locked -- --nocapture
+
+      - name: release RPC smoke
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo test -p qpxd --release --locked --lib -- --nocapture grpc_local_response_emits_trailers grpc_web_local_response_emits_trailer_frame grpc_status_rule_matches_trailers
+
   build:
+    needs: benchmark_gate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -16,19 +45,19 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            use-cross: true
+            use_cross: true
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            use-cross: true
+            use_cross: true
           - target: x86_64-apple-darwin
-            os: macos-latest
-            use-cross: false
+            os: macos-13
+            use_cross: false
           - target: aarch64-apple-darwin
-            os: macos-latest
-            use-cross: false
+            os: macos-14
+            use_cross: false
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            use-cross: false
+            use_cross: false
 
     steps:
       - uses: actions/checkout@v4
@@ -43,13 +72,18 @@ jobs:
         with:
           tool: cargo-about
 
+      - name: Install cross
+        if: ${{ matrix.use_cross }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
       - name: Build
         run: |
-          if [ "${{ matrix.use-cross }}" = "true" ]; then
-            cargo install cross --git https://github.com/cross-rs/cross
-            cross build --release --locked --target ${{ matrix.target }}
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --workspace --release --locked --target ${{ matrix.target }}
           else
-            cargo build --release --locked --target ${{ matrix.target }}
+            cargo build --workspace --release --locked --target ${{ matrix.target }}
           fi
         shell: bash
 
