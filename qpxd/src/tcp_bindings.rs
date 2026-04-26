@@ -835,7 +835,7 @@ fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use qpx_core::config::{

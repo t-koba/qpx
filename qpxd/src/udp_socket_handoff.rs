@@ -59,25 +59,16 @@ pub(crate) fn adopt_inherited_udp_socket_windows(socket: &[u8]) -> Result<std::n
     crate::windows_handoff::adopt_udp_socket(socket)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn duplicate_std_udp_socket(
     socket: &std::net::UdpSocket,
 ) -> Result<std::net::UdpSocket> {
-    #[cfg(unix)]
-    {
-        let duplicated = duplicate_raw_fd(socket.as_raw_fd(), true)?;
-        let socket = unsafe { std::net::UdpSocket::from_raw_fd(duplicated.into_raw_fd()) };
-        socket
-            .set_nonblocking(true)
-            .context("failed to set duplicated udp socket nonblocking")?;
-        Ok(socket)
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = socket;
-        Err(anyhow!("udp socket duplication is only supported on unix"))
-    }
+    let duplicated = duplicate_raw_fd(socket.as_raw_fd(), true)?;
+    let socket = unsafe { std::net::UdpSocket::from_raw_fd(duplicated.into_raw_fd()) };
+    socket
+        .set_nonblocking(true)
+        .context("failed to set duplicated udp socket nonblocking")?;
+    Ok(socket)
 }
 
 #[cfg(feature = "http3")]

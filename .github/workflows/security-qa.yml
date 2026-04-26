@@ -55,6 +55,6 @@ jobs:
             qpack_decoder \
             client_hello_sniff; do
             echo "::group::cargo fuzz run ${target}"
-            cargo fuzz run --manifest-path fuzz/Cargo.toml "${target}" -- -max_total_time=15
+            (cd fuzz && cargo fuzz run "${target}" -- -max_total_time=15)
             echo "::endgroup::"
           done

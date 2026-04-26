@@ -245,7 +245,9 @@ pub fn load_config(path: &Path) -> anyhow::Result<QpxfConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[cfg(unix)]

@@ -9,6 +9,7 @@ $LogFile = Join-Path $TmpDir "qpxd.stdout.log"
 $ErrFile = Join-Path $TmpDir "qpxd.stderr.log"
 $StateDir = Join-Path $TmpDir "state"
 $Port = if ($env:QPX_CONTROL_PLANE_PORT) { [int]$env:QPX_CONTROL_PLANE_PORT } else { 0 }
+$RestartPort = if ($env:QPX_CONTROL_PLANE_RESTART_PORT) { [int]$env:QPX_CONTROL_PLANE_RESTART_PORT } else { 0 }
 $TrackedPids = [System.Collections.Generic.List[int]]::new()
 
 function Register-Pid {
@@ -160,11 +161,13 @@ function Install-Config {
         [string]$Body,
         [int]$Acceptors
     )
+    $tcpBacklog = if ($Acceptors -gt 1) { 4097 } else { 4096 }
     $content = @"
 state_dir: $(Quote-YamlPath $StateDir)
 runtime:
   acceptor_tasks_per_listener: $Acceptors
   reuse_port: false
+  tcp_backlog: $tcpBacklog
 reverse:
 - name: control
   listen: 127.0.0.1:$Port
@@ -179,6 +182,22 @@ reverse:
       status: 200
       body: $Body
 "@
+    if ($Acceptors -gt 1) {
+        $content += @"
+- name: control-extra
+  listen: 127.0.0.1:$RestartPort
+  routes:
+  - name: health
+    match:
+      host:
+      - control.local
+      path:
+      - /health
+    local_response:
+      status: 200
+      body: $Body
+"@
+    }
     Set-Content -LiteralPath $ConfigFile -Value $content -NoNewline
 }
 
@@ -187,6 +206,9 @@ Require-Path -Path $QpxdBin
 
 if ($Port -eq 0) {
     $Port = Get-FreeTcpPort
+}
+if ($RestartPort -eq 0) {
+    $RestartPort = Get-FreeTcpPort
 }
 
 Install-Config -Body "OLD" -Acceptors 1

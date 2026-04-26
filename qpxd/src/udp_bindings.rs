@@ -633,7 +633,7 @@ fn bind_udp_for_reverse(
     crate::net::bind_udp_std_socket(addr, &config.runtime)
 }
 
-#[cfg(all(test, feature = "http3"))]
+#[cfg(all(test, feature = "http3", unix))]
 mod tests {
     use super::*;
     use qpx_core::config::{
