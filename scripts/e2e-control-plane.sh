@@ -170,6 +170,11 @@ main() {
   require_cmd pgrep
   require_cmd python3
 
+  if [ ! -x "$QPXD_BIN" ]; then
+    echo "[CONTROL] build qpxd"
+    cargo build -q -p qpxd --locked
+  fi
+
   if [ -z "$PORT" ]; then
     PORT="$(python3 - <<'PY'
 import socket
@@ -208,7 +213,7 @@ PY
 
   echo "[CONTROL] hot reload with listener/reverse restart"
   install_config RESTARTED 2
-  wait_log_contains "config reloaded; listener/reverse server set restarted"
+  wait_port "$RESTART_PORT" "$parent_pid"
   wait_body "RESTARTED"
 
   echo "[CONTROL] binary upgrade"

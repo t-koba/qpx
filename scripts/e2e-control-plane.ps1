@@ -50,6 +50,7 @@ function Cleanup {
 
 trap {
     Cleanup
+    Write-Error $_
     throw
 }
 
@@ -230,7 +231,7 @@ Wait-Body -Expected "RELOADED"
 
 Write-Host "[CONTROL] hot reload with listener/reverse restart (windows)"
 Install-Config -Body "RESTARTED" -Acceptors 2
-Wait-LogContains -Needle "config reloaded; listener/reverse server set restarted"
+Wait-Port -Port $RestartPort -Pid $parent.Id
 Wait-Body -Expected "RESTARTED"
 
 Write-Host "[CONTROL] binary upgrade (windows)"

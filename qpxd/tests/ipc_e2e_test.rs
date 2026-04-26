@@ -1,7 +1,10 @@
+#[cfg(unix)]
 #[path = "support/collect_body.rs"]
 mod collect_body_support;
+#[cfg(unix)]
 #[path = "support/empty_body.rs"]
 mod empty_body_support;
+#[cfg(unix)]
 #[path = "support/test_client.rs"]
 mod test_client_support;
 
