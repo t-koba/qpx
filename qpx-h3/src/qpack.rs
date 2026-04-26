@@ -940,14 +940,30 @@ fn decode_required_insert_count(
             "QPACK encoded insert count exceeds full range",
         ));
     }
-    let mut required = encoded_insert_count - 1;
+    let mut required = encoded_insert_count
+        .checked_sub(1)
+        .ok_or_else(|| FieldDecodeError::decompression_failed("invalid QPACK insert count"))?;
     let mut wrapped = total_inserted % full_range;
-    if wrapped >= required + max_entries {
-        required += full_range;
-    } else if wrapped + max_entries < required {
-        wrapped += full_range;
+    let required_window = required
+        .checked_add(max_entries)
+        .ok_or_else(|| FieldDecodeError::decompression_failed("QPACK insert count overflow"))?;
+    if wrapped >= required_window {
+        required = required
+            .checked_add(full_range)
+            .ok_or_else(|| FieldDecodeError::decompression_failed("QPACK insert count overflow"))?;
+    } else if wrapped
+        .checked_add(max_entries)
+        .ok_or_else(|| FieldDecodeError::decompression_failed("QPACK insert count overflow"))?
+        < required
+    {
+        wrapped = wrapped
+            .checked_add(full_range)
+            .ok_or_else(|| FieldDecodeError::decompression_failed("QPACK insert count overflow"))?;
     }
-    let decoded = required + total_inserted - wrapped;
+    let decoded = required
+        .checked_add(total_inserted)
+        .and_then(|value| value.checked_sub(wrapped))
+        .ok_or_else(|| FieldDecodeError::decompression_failed("invalid QPACK insert count"))?;
     if decoded == 0 {
         return Err(FieldDecodeError::decompression_failed(
             "non-zero QPACK encoded insert count decoded to zero",
@@ -1378,9 +1394,9 @@ mod tests {
     use super::{
         append_header, decode_field_section_prefix, decode_request_head_from_fields,
         decode_required_insert_count, encode_header_prefix, encode_prefixed_int,
-        encode_request_head, encode_response_head, encode_string, encode_trailers, static_field,
-        validate_h3_regular_field, validate_h3_response_field, validate_h3_trailer_field,
-        DecoderState, FieldDecodeError, DEFAULT_DYNAMIC_TABLE_CAPACITY,
+        encode_request_head, encode_response_head, encode_string, encode_trailers,
+        fuzz_qpack_decoder, static_field, validate_h3_regular_field, validate_h3_response_field,
+        validate_h3_trailer_field, DecoderState, FieldDecodeError, DEFAULT_DYNAMIC_TABLE_CAPACITY,
         DEFAULT_MAX_BLOCKED_STREAMS, STATIC_TABLE,
     };
     use http::HeaderValue;
@@ -1556,6 +1572,14 @@ mod tests {
             decode_required_insert_count(2 * max_entries + 1, 128, DEFAULT_DYNAMIC_TABLE_CAPACITY)
                 .expect_err("encoded insert count beyond full range must fail");
         assert!(matches!(err, FieldDecodeError::DecompressionFailed(_)));
+    }
+
+    #[test]
+    fn encoded_insert_count_underflow_is_malformed() {
+        let err = decode_required_insert_count(132, 0, DEFAULT_DYNAMIC_TABLE_CAPACITY)
+            .expect_err("wrapped required insert count before zero must fail");
+        assert!(matches!(err, FieldDecodeError::DecompressionFailed(_)));
+        fuzz_qpack_decoder(&[132, 10]);
     }
 
     #[test]
