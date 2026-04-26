@@ -51,10 +51,11 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - `qpxd/src/http/semantics.rs`
      - integrated in `qpxd/src/forward/request.rs`, `qpxd/src/reverse/transport.rs`, `qpxd/src/transparent/http_path.rs`
    - Operational handling:
-     - `Max-Forwards` is decremented for `TRACE`/`OPTIONS` forwarding.
-     - `Max-Forwards: 0` is handled locally (no forwarding).
-     - `TRACE` is disabled by default to avoid request-header reflection footguns. Set `runtime.trace_enabled: true` to enable it.
-     - Code: `qpxd/src/http/l7.rs`
+   - `Max-Forwards` is decremented for `TRACE`/`OPTIONS` forwarding.
+   - `Max-Forwards: 0` is handled locally (no forwarding).
+   - `TRACE` is disabled by default to avoid request-header reflection footguns. Set `runtime.trace_enabled: true` to enable it.
+   - When `TRACE` is enabled, `runtime.trace_reflect_all_headers: false` keeps the local loop-back body on the safer side by stripping hop-by-hop, auth, forwarding, and tracing headers. Set `runtime.trace_reflect_all_headers: true` only when you explicitly need all request headers echoed back.
+   - Code: `qpxd/src/http/l7.rs`
 
 6. RFC 6455 section 4 (WebSocket Upgrade over HTTP/1.1)
    - WebSocket upgrade headers are preserved and upgraded streams are bridged bidirectionally.
@@ -80,12 +81,15 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - UDP passthrough mode supports configurable upstream sets with round-robin forwarding for `UDP/443` workloads.
    - Forward proxy:
      - HTTP/3 listener supports standard request forwarding and CONNECT tunnel proxying.
-     - CONNECT-UDP is handled with MASQUE capsule flow (`Capsule-Protocol: ?1`, DATAGRAM capsule type, context id `0`) for both direct targets and chained upstream HTTP/3 proxies.
+     - On the default `http3-backend-h3` build, CONNECT-UDP is handled with MASQUE capsule flow (`Capsule-Protocol: ?1`, DATAGRAM capsule type, context id `0`) for both direct targets and chained upstream HTTP/3 proxies.
+     - On the clean-room `http3-backend-qpx` build, the HTTP/3 server path covers buffered request/response handling, reverse terminate, CONNECT-UDP MASQUE capsule/datagram relay (direct and chained), generic extended CONNECT with per-stream datagrams, and WebTransport relay.
    - Code:
-     - `qpxd/src/reverse/h3.rs`
+     - `qpxd/src/reverse/mod.rs`
      - `qpxd/src/reverse/h3_terminate.rs`
+     - `qpxd/src/reverse/h3_terminate_qpx.rs`
      - `qpxd/src/reverse/h3_passthrough.rs`
      - `qpxd/src/forward/h3.rs`
+     - `qpxd/src/forward/h3_qpx.rs`
      - `qpxd/src/forward/h3_connect.rs`
      - `qpxd/src/forward/h3_connect_udp.rs`
      - `qpxd/src/http3/listener.rs`
@@ -93,6 +97,9 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - `qpxd/src/http3/codec.rs`
      - `qpxd/src/http3/capsule.rs`
      - `qpxd/src/http3/quic.rs`
+     - `qpx-h3/src/server.rs`
+     - `qpx-h3/src/transport.rs`
+     - `qpx-h3/src/client.rs`
      - `qpx-core/src/tls.rs`
      - `qpxd/src/runtime.rs`
 
@@ -122,9 +129,10 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - reverse routes (`reverse[].routes[].cache`)
    - Cache-control handling includes:
      - request directives: `no-store`, `no-cache`, `max-age`, `max-stale`, `min-fresh`, `only-if-cached`
-     - response directives: `no-store`, `private`, `public`, `no-cache`, `must-revalidate`, `proxy-revalidate`, `s-maxage`, `max-age`
+     - response directives: `no-store`, `private`, `public`, `no-cache`, `must-understand`, `must-revalidate`, `proxy-revalidate`, `s-maxage`, `max-age`
      - freshness lifetime from `s-maxage` / `max-age` / `Expires` / policy default
-     - `Age` synthesis on cache hits and stale-warning (`Warning: 110`) when served via `max-stale`
+     - `Age` synthesis on cache hits
+     - `must-understand` support is status-aware: qpxd ignores `no-store` only when it implements that status code's storage requirements; unsupported status-specific cases remain non-storable
    - RFC 5861 extensions (`stale-while-revalidate`, `stale-if-error`):
      - `stale-while-revalidate`: serve stale entry immediately, revalidate in background (`StaleWhileRevalidate` lookup outcome).
      - `stale-if-error`: serve stale entry when upstream returns a 5xx or is unreachable, within the stated error window (`maybe_build_stale_if_error_response()`).
@@ -173,7 +181,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - `Vary: Cookie`
    - Code:
      - `qpxd/src/cache/mod.rs`
-     - `qpx-core/src/config/types.rs`
+     - `qpx-core/src/config/types/cache.rs`
 
 15. QUIC replay safety defaults for HTTP/3 (RFC 9001 context)
    - HTTP/3 server-side QUIC config disables 0-RTT by default (`max_early_data_size = 0`) for both forward and reverse listeners.
@@ -188,7 +196,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - PROXY metadata is accepted only from trusted peer CIDRs.
      - Default for `xdp.require_metadata` is safe-side (`true`).
    - Code:
-     - `qpx-core/src/config/types.rs`
+     - `qpx-core/src/config/types/listener.rs`
      - `qpx-core/src/config/validate.rs`
      - `qpxd/src/xdp/mod.rs`
      - `qpxd/src/xdp/remote.rs`
@@ -244,27 +252,38 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
      - plain HTTP reverse path bypass behavior
      - exception-glob override behavior
 
-## Scope limits
+## Coverage notes
 
 1. RFC 5861 extensions are implemented.
     - Supported: `stale-while-revalidate`, `stale-if-error` (best-effort background revalidation).
 
-2. RFC 9111 cache behavior is intentionally a safe subset (not a full-featured shared-cache).
-    - Storage is limited to `GET` responses (no `POST`/`PUT`/etc storage).
-    - Storable status codes are an explicit allowlist (see `qpxd/src/cache/store.rs`).
-    - Requests with unsupported conditionals (`Range`, `If-Range`, `If-Match`, `If-Unmodified-Since`) bypass cache lookup/store.
+2. RFC 9111 cache behavior is implemented across the shared-cache paths used by `qpxd`.
+    - Cache keys distinguish method semantics; `HEAD` entries are isolated from `GET`, while a stored `GET` representation can satisfy a later `HEAD` without a body.
+    - Cache lookup and revalidation honor `Range`, `If-Range`, `If-Match`, and `If-Unmodified-Since`.
+    - Cache storage and invalidation cover cacheable `GET`/`HEAD`, unsafe-method write-through invalidation, and explicit-freshness `POST`/`PATCH` representations only when `Content-Location` identifies the same target for later `GET`/`HEAD` reuse.
 
-3. TRACE is implemented with a security-first local response shape rather than full request loop-back.
-    - Default `TRACE` reflection is **headers-only** and uses an allowlist to reduce secret header leakage risk.
-    - `runtime.trace_reflect_all_headers: true` can enable full header reflection (DANGEROUS).
+3. `TRACE` uses strict request loop-back semantics when `runtime.trace_enabled: true`.
+    - The reflected message includes the request line, headers, and body as a `message/http` payload.
+    - `Max-Forwards: 0` is handled locally for both `TRACE` and `OPTIONS`.
 
-4. Interim informational (`1xx`) response forwarding is not implemented (e.g. `103 Early Hints`).
-    - The current proxy data paths are built on `hyper`/`h2`/`h3` APIs that surface a single final response per request.
-    - `qpxd` does generate a local `100 Continue` where required, and it normalizes any standalone `1xx` responses correctly, but it does not stream multiple response heads from upstream to downstream.
+4. Interim informational (`1xx`) response forwarding is implemented on the HTTP proxy paths.
+    - Reverse proxy downstream paths forward upstream interim responses, including `103 Early Hints`, on HTTP/1.1, HTTP/2, and HTTP/3.
+    - Forward proxy HTTP downstream paths forward upstream interim responses end-to-end on HTTP/1.1, HTTP/2 prior-knowledge, and HTTP/3.
+    - Transparent cleartext HTTP downstream paths forward upstream interim responses end-to-end on HTTP/1.1 and HTTP/2 prior-knowledge.
+    - `qpxd` also generates a local `100 Continue` where required, and it normalizes standalone `1xx` responses correctly.
 
-5. RFC 9298 / RFC 6570 URI Template support for CONNECT-UDP is intentionally partial.
-    - Listener-side target extraction supports the RFC 9298 default template and a restricted URI Template subset (simple string expansion and basic query operators).
-    - When `listeners[].http3.connect_udp.uri_template` is set, it is treated as **strict**: only that template is accepted (no fallback to default/query forms).
+5. RFC 9298 / RFC 6570 URI Template handling is implemented for CONNECT-UDP request matching and upstream expansion.
+    - Listener-side `listeners[].http3.connect_udp.uri_template` is strict: the request target must match the configured template exactly, including absolute-template `scheme`/`authority`, path structure, query structure, and the RFC 6570 operators/modifiers accepted by the configured variables.
+    - The shared URI template engine supports scalar, list, and associative (map) composite expansion semantics, including explode and named query/path-parameter forms.
+    - CONNECT-UDP uses that engine for upstream expansion; the current built-in CONNECT-UDP variables remain `target_host` and `target_port`, so list/map semantics are available through the template engine even though the built-in listener variables are scalar.
+    - Full CONNECT-UDP relay, including HTTP/3 datagrams and chained upstream HTTP/3 proxying, is implemented on both HTTP/3 backends. `http3-backend-qpx` is the clean-room path; `http3-backend-h3` remains the upstream-`h3` path.
 
-6. Non-CONNECT-UDP HTTP/3 extended CONNECT is not implemented.
-    - For related RFCs that use extended CONNECT semantics over HTTP/3 (e.g. WebSocket over HTTP/3), `qpxd` responds with `501 Not Implemented`.
+6. Non-CONNECT-UDP HTTP/3 extended CONNECT is supported end-to-end over HTTP/3.
+    - On the default `http3-backend-h3` build, `qpxd` preserves the downstream `:protocol` value, opens an upstream extended CONNECT request, forwards interim `1xx`, and relays the bidirectional request stream plus per-stream HTTP datagrams for non-WebTransport extended CONNECT.
+    - On the clean-room `http3-backend-qpx` build, generic non-CONNECT-UDP extended CONNECT is proxied end-to-end with bidirectional request stream relay, interim `1xx`, and per-stream HTTP datagrams.
+    - `webtransport` is also proxied end-to-end on the clean-room `http3-backend-qpx` build: the CONNECT request stream, associated bidirectional streams, associated unidirectional streams, and per-session HTTP datagrams are all forwarded between downstream and upstream HTTP/3 peers.
+
+7. RFC 8441 / HTTP/2 extended CONNECT is implemented only on the forward proxy path that terminates downstream HTTP/2.
+    - Forward listeners advertise `SETTINGS_ENABLE_CONNECT_PROTOCOL`, accept `:protocol`-based downstream extended CONNECT requests, and forward them upstream over HTTP/2 extended CONNECT.
+    - Reverse and transparent HTTP/2 listeners do not advertise `SETTINGS_ENABLE_CONNECT_PROTOCOL`; reverse listeners reject `CONNECT`, and transparent listeners reject `CONNECT` rather than attempting generic HTTP forwarding.
+    - Successful forward-path extended CONNECT responses keep the tunnel body semantics intact instead of collapsing to legacy `CONNECT` no-body handling.

@@ -9,6 +9,9 @@
 .vscode/
 
 # Local runtime artifacts
+.qpx/
+**/.qpx/
+.claude/
 *.pid
 *.log
 *.pcapng

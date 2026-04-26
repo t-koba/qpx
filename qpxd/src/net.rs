@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use qpx_core::config::RuntimeConfig;
 use socket2::{Domain, Protocol, Socket, Type};
+#[cfg(feature = "http3")]
+use std::net::UdpSocket as StdUdpSocket;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use tokio::net::TcpListener;
 use tracing::warn;
@@ -20,7 +22,10 @@ pub fn acceptor_tasks_per_listener(cfg: &RuntimeConfig) -> usize {
         .max(1)
 }
 
-pub fn bind_tcp_listeners(addr: SocketAddr, runtime: &RuntimeConfig) -> Result<Vec<TcpListener>> {
+pub fn bind_tcp_std_listeners(
+    addr: SocketAddr,
+    runtime: &RuntimeConfig,
+) -> Result<Vec<StdTcpListener>> {
     let requested = acceptor_tasks_per_listener(runtime);
     let allow_reuse_port = runtime.reuse_port;
 
@@ -42,16 +47,45 @@ pub fn bind_tcp_listeners(addr: SocketAddr, runtime: &RuntimeConfig) -> Result<V
 
     let mut listeners = Vec::with_capacity(effective);
     for _ in 0..effective {
-        listeners.push(bind_single(addr, runtime, effective > 1)?);
+        listeners.push(bind_single_std(addr, runtime, effective > 1)?);
     }
     Ok(listeners)
 }
 
-fn bind_single(
+pub fn tokio_listener_from_std(listener: StdTcpListener) -> Result<TcpListener> {
+    TcpListener::from_std(listener).context("tokio listener conversion failed")
+}
+
+#[cfg(feature = "http3")]
+pub fn bind_udp_std_socket(addr: SocketAddr, runtime: &RuntimeConfig) -> Result<StdUdpSocket> {
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
+        .with_context(|| format!("failed to create UDP socket for {addr}"))?;
+    socket
+        .set_reuse_address(true)
+        .context("failed to set UDP SO_REUSEADDR")?;
+    #[cfg(unix)]
+    if runtime.reuse_port {
+        let _ = socket.set_reuse_port(true);
+    }
+    socket
+        .set_nonblocking(true)
+        .context("failed to set UDP nonblocking mode")?;
+    socket
+        .bind(&addr.into())
+        .with_context(|| format!("udp bind failed on {addr}"))?;
+    Ok(socket.into())
+}
+
+fn bind_single_std(
     addr: SocketAddr,
     runtime: &RuntimeConfig,
     use_reuse_port: bool,
-) -> Result<TcpListener> {
+) -> Result<StdTcpListener> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {
@@ -98,8 +132,7 @@ fn bind_single(
         .with_context(|| format!("listen failed on {}", addr))?;
 
     let std_listener: StdTcpListener = socket.into();
-    TcpListener::from_std(std_listener)
-        .with_context(|| format!("tokio listener conversion failed for {}", addr))
+    Ok(std_listener)
 }
 
 #[cfg(unix)]

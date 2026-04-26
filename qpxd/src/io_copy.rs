@@ -1,34 +1,47 @@
 use crate::exporter::ExportSession;
-use crate::rate_limit::RateLimiter;
+use crate::rate_limit::{QuotaLimiter, RateLimitContext, RateLimiter};
 use anyhow::Result;
-use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{sleep, timeout, Duration};
 
 #[derive(Clone)]
 pub struct BandwidthThrottle {
-    src_ip: IpAddr,
+    context: RateLimitContext,
     limiters: Arc<Vec<Arc<RateLimiter>>>,
+    quotas: Arc<Vec<Arc<QuotaLimiter>>>,
 }
 
 impl BandwidthThrottle {
-    pub fn new(src_ip: IpAddr, limiters: Vec<Arc<RateLimiter>>) -> Option<Self> {
-        if limiters.is_empty() {
+    pub fn with_context(
+        context: RateLimitContext,
+        limiters: Vec<Arc<RateLimiter>>,
+        quotas: Vec<Arc<QuotaLimiter>>,
+    ) -> Option<Self> {
+        if limiters.is_empty() && quotas.is_empty() {
             return None;
         }
         Some(Self {
-            src_ip,
+            context,
             limiters: Arc::new(limiters),
+            quotas: Arc::new(quotas),
         })
     }
 
-    fn reserve_delay(&self, bytes: usize) -> Duration {
+    fn reserve_delay(&self, bytes: usize) -> std::io::Result<Duration> {
+        for quota in self.quotas.iter() {
+            if !quota.try_take_bytes_with_context(&self.context, bytes as u64) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "bandwidth quota exceeded",
+                ));
+            }
+        }
         let mut delay = Duration::ZERO;
         for limiter in self.limiters.iter() {
-            delay = delay.max(limiter.reserve_delay(self.src_ip, bytes as u64));
+            delay = delay.max(limiter.reserve_delay_with_context(&self.context, bytes as u64));
         }
-        delay
+        Ok(delay)
     }
 }
 
@@ -63,7 +76,7 @@ where
             return Ok(total);
         }
         if let Some(throttle) = throttle.as_ref() {
-            let delay = throttle.reserve_delay(n);
+            let delay = throttle.reserve_delay(n)?;
             if !delay.is_zero() {
                 sleep(delay).await;
             }

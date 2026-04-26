@@ -1,33 +1,56 @@
-version: 1
-state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+listeners:
+- name: obs-forward
+  listen: 127.0.0.1:18089
+  default_action:
+    type: block
+  rules:
+  - name: allow-loopback
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      host:
+      - '*'
+    action:
+      type: direct
+  mode: forward
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
 system_log:
   level: debug
   format: json
-
-# High-frequency access log (non-blocking). Prefer a file path in production.
 access_log:
   enabled: true
-  path: "${QPX_STATE_DIR:-~/.local/share/qpx}/access.log"
+  path: ${QPX_STATE_DIR:-~/.local/share/qpx}/access.log
   format: combined
   rotation: daily
   rotation_count: 7
   exclude:
-    - /health
-    - /metrics
-
-# Low-frequency security/audit log (non-blocking, reliability-focused).
+  - /health
+  - /metrics
 audit_log:
   enabled: true
-  path: "${QPX_STATE_DIR:-~/.local/share/qpx}/audit.log"
+  path: ${QPX_STATE_DIR:-~/.local/share/qpx}/audit.log
   format: json
   rotation: daily
   rotation_count: 30
+  include:
+  - subject
+  - groups
+  - device_id
+  - posture
+  - auth_strength
+  - idp
+  - identity_source
+  - policy_tags
+  - ext_authz_policy_id
+  - matched_rule
+  - matched_route
 metrics:
-  listen: "127.0.0.1:19901"
-  path: "/metrics"
+  listen: 127.0.0.1:19901
+  path: /metrics
 exporter:
   enabled: true
-  shm_path: ""
+  shm_path: ''
   shm_size_mb: 16
   lossy: false
   max_queue_events: 4096
@@ -35,14 +58,3 @@ exporter:
     plaintext: true
     encrypted: true
     max_chunk_bytes: 16384
-listeners:
-  - name: obs-forward
-    mode: forward
-    listen: "127.0.0.1:18089"
-    default_action: { type: block }
-    rules:
-      - name: allow-loopback
-        match:
-          src_ip: ["127.0.0.1/32", "::1/128"]
-          host: ["*"]
-        action: { type: direct }

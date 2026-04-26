@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use qpx_core::envsubst::expand_env;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -8,7 +9,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QpxfConfig {
-    /// Listen address — TCP ("127.0.0.1:9000") or Unix socket ("unix:///var/run/qpxf.sock").
+    /// Listen address — prefer Unix sockets ("unix:///var/run/qpxf.sock").
+    /// TCP listeners are opt-in with `allow_insecure_tcp=true`.
     #[serde(default = "default_listen")]
     pub listen: String,
 
@@ -100,12 +102,18 @@ pub struct WasmBackendConfig {
     pub module: PathBuf,
     #[serde(default)]
     pub precompile: bool,
+    /// Maximum WASM module file size accepted by the executor (bytes).
+    #[serde(default = "default_wasm_max_module_bytes")]
+    pub max_module_bytes: u64,
     #[serde(default = "default_wasm_max_memory_mb")]
     pub max_memory_mb: u64,
     #[serde(default = "default_wasm_timeout_ms")]
     pub timeout_ms: u64,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Maximum WASM stdin size accepted by the executor (bytes).
+    #[serde(default = "default_max_stdin_bytes")]
+    pub max_stdin_bytes: usize,
     /// Maximum WASM stdout capture size (bytes).
     #[serde(default = "default_max_stdout_bytes")]
     pub max_stdout_bytes: usize,
@@ -115,7 +123,22 @@ pub struct WasmBackendConfig {
 }
 
 fn default_listen() -> String {
-    "127.0.0.1:9000".to_string()
+    #[cfg(unix)]
+    {
+        let path = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .or_else(|| dirs_next::home_dir().map(|home| home.join(".qpxf").join("run")))
+            .unwrap_or_else(|| {
+                let user = std::env::var("USER").unwrap_or_else(|_| "local-user".to_string());
+                std::env::temp_dir().join(format!("qpxf-{user}"))
+            })
+            .join("qpxf.sock");
+        format!("unix://{}", path.display())
+    }
+    #[cfg(not(unix))]
+    {
+        "127.0.0.1:9000".to_string()
+    }
 }
 
 fn default_workers() -> usize {
@@ -136,6 +159,10 @@ fn default_cgi_timeout_ms() -> u64 {
 
 fn default_wasm_max_memory_mb() -> u64 {
     128
+}
+
+fn default_wasm_max_module_bytes() -> u64 {
+    134_217_728 // 128 MiB
 }
 
 fn default_wasm_timeout_ms() -> u64 {
@@ -194,13 +221,13 @@ impl QpxfConfig {
             return Ok(());
         }
 
-        let addr: SocketAddr = self
+        let _addr: SocketAddr = self
             .listen
             .parse()
             .map_err(|e| anyhow!("invalid listen address '{}': {}", self.listen, e))?;
-        if !addr.ip().is_loopback() && !self.allow_insecure_tcp {
+        if !self.allow_insecure_tcp {
             return Err(anyhow!(
-                "refusing to bind qpxf to non-loopback address '{}' without allow_insecure_tcp=true",
+                "refusing to bind qpxf to TCP address '{}' without allow_insecure_tcp=true; use a unix:// socket instead",
                 self.listen
             ));
         }
@@ -210,6 +237,73 @@ impl QpxfConfig {
 
 pub fn load_config(path: &Path) -> anyhow::Result<QpxfConfig> {
     let content = std::fs::read_to_string(path)?;
-    let config: QpxfConfig = serde_yaml::from_str(&content)?;
+    let expanded = expand_env(&content)?;
+    let config: QpxfConfig = serde_yaml::from_str(&expanded)?;
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    #[test]
+    fn default_listen_uses_private_user_scoped_socket_path() {
+        let listen = default_listen();
+        assert!(listen.starts_with("unix://"));
+        assert!(listen.ends_with("/qpxf.sock"));
+        assert!(!listen.contains("unix:///tmp/qpxf.sock"));
+    }
+
+    fn minimal_config(listen: String) -> QpxfConfig {
+        QpxfConfig {
+            listen,
+            workers: 1,
+            max_connections: 1,
+            max_requests_per_connection: 1,
+            allow_insecure_tcp: false,
+            max_params_bytes: 1024,
+            max_stdin_bytes: 1024,
+            input_idle_timeout_ms: 1000,
+            conn_idle_timeout_ms: 1000,
+            handlers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_tcp_without_explicit_opt_in() {
+        let err = minimal_config("127.0.0.1:9000".to_string())
+            .validate()
+            .expect_err("tcp should require explicit opt-in");
+        assert!(err.to_string().contains("allow_insecure_tcp=true"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_accepts_unix_socket_default() {
+        let cfg = minimal_config(default_listen());
+        cfg.validate().expect("unix socket should be accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_config_expands_env_variables() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("qpxf-config-{unique}.yaml"));
+        fs::write(
+            &path,
+            "listen: \"unix://${QPXF_TEST_RUNTIME_DIR}/qpxf.sock\"\nhandlers: []\n",
+        )
+        .expect("write config");
+        std::env::set_var("QPXF_TEST_RUNTIME_DIR", "/tmp/qpxf-runtime");
+        let cfg = load_config(&path).expect("config");
+        std::env::remove_var("QPXF_TEST_RUNTIME_DIR");
+        let _ = fs::remove_file(&path);
+        assert_eq!(cfg.listen, "unix:///tmp/qpxf-runtime/qpxf.sock");
+    }
 }

@@ -1,19 +1,44 @@
-use crate::http3::listener::{H3ConnInfo, H3ConnectKind, H3Limits, H3RequestHandler};
+use crate::http::body::Body;
+use crate::http3::listener::{
+    H3ConnInfo, H3ConnectKind, H3HttpResponse, H3Limits, H3RequestHandler,
+};
 use crate::http3::quic::build_h3_server_config_from_tls;
+use crate::http3::quinn_socket::{
+    build_server_endpoint, prepare_server_endpoint_socket, NoopQuinnUdpIngressFilter,
+    PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket,
+};
 use crate::runtime::Runtime;
+use crate::sidecar_control::SidecarControl;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use hyper::{Body, Request, Response, StatusCode};
+use hyper::{Request, Response, StatusCode};
 use qpx_core::config::{ConnectUdpConfig, Http3ListenerConfig, ListenerConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio::time::Duration;
 use tracing::info;
+
+pub(crate) fn prepare_http3_listener_socket(
+    listener_name: &str,
+    udp_socket: std::net::UdpSocket,
+    inherited_broker: Option<QuinnBrokerStream>,
+) -> Result<PreparedServerEndpointSocket> {
+    prepare_server_endpoint_socket(
+        listener_name,
+        QuinnBrokerKind::Forward,
+        udp_socket,
+        inherited_broker,
+        Arc::new(NoopQuinnUdpIngressFilter),
+    )
+}
 
 pub(crate) async fn run_http3_listener(
     listener: ListenerConfig,
     runtime: Runtime,
     http3_cfg: Http3ListenerConfig,
+    shutdown: watch::Receiver<SidecarControl>,
+    endpoint_socket: QuinnEndpointSocket,
 ) -> Result<()> {
     let listen_addr: SocketAddr = http3_cfg
         .listen
@@ -33,7 +58,7 @@ pub(crate) async fn run_http3_listener(
         .max_h3_streams_per_connection
         .min(u32::MAX as usize) as u32;
     let quic_config = build_h3_server_config_from_tls(tls_config, max_bidi.max(1), 256)?;
-    let endpoint = quinn::Endpoint::server(quic_config, listen_addr)?;
+    let endpoint = build_server_endpoint(endpoint_socket, quic_config)?;
 
     let semaphore = runtime.state().connection_semaphore.clone();
     let handler = ForwardH3Handler {
@@ -53,6 +78,7 @@ pub(crate) async fn run_http3_listener(
         handler,
         "forward",
         semaphore,
+        shutdown,
     )
     .await
 }
@@ -64,6 +90,7 @@ fn build_forward_tls_config(
 ) -> Result<quinn::rustls::ServerConfig> {
     let state = runtime.state();
     let ca = state
+        .security
         .ca
         .as_ref()
         .ok_or_else(|| anyhow!("forward HTTP/3 requires CA state"))?;
@@ -115,7 +142,7 @@ impl H3RequestHandler for ForwardH3Handler {
     }
 
     fn enable_datagram(&self) -> bool {
-        self.connect_udp.enabled
+        true
     }
 
     async fn handle_http(&self, req: Request<Body>, conn: H3ConnInfo) -> Response<Body> {
@@ -147,9 +174,55 @@ impl H3RequestHandler for ForwardH3Handler {
         }
     }
 
+    async fn handle_http_with_interim(
+        &self,
+        req: Request<Body>,
+        conn: H3ConnInfo,
+    ) -> H3HttpResponse {
+        let state = self.runtime.state();
+        let request_method = req.method().clone();
+        let request_version = req.version();
+        match crate::forward::request::handle_request_inner(
+            req,
+            self.runtime.clone(),
+            self.listener_name.as_ref(),
+            conn.remote_addr,
+        )
+        .await
+        {
+            Ok(mut response) => {
+                let interim = crate::http::interim::take_interim_response_heads(&mut response)
+                    .into_iter()
+                    .filter_map(|head| {
+                        let status = ::http::StatusCode::from_u16(head.status.as_u16()).ok()?;
+                        let mut response =
+                            ::http::Response::builder().status(status).body(()).ok()?;
+                        *response.headers_mut() =
+                            crate::http3::codec::http_headers_to_h1(&head.headers).ok()?;
+                        Some(response)
+                    })
+                    .collect();
+                H3HttpResponse { interim, response }
+            }
+            Err(err) => {
+                tracing::warn!(error = ?err, "forward HTTP/3 request handling failed");
+                H3HttpResponse::final_only(crate::http::l7::finalize_response_for_request(
+                    &request_method,
+                    request_version,
+                    state.config.identity.proxy_name.as_str(),
+                    Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(Body::from(state.messages.proxy_error.clone()))
+                        .unwrap(),
+                    false,
+                ))
+            }
+        }
+    }
+
     async fn handle_connect(
         &self,
-        req_head: http1::Request<()>,
+        req_head: ::http::Request<()>,
         req_stream: crate::http3::server::H3ServerRequestStream,
         conn: H3ConnInfo,
         kind: H3ConnectKind,
@@ -170,6 +243,25 @@ impl H3RequestHandler for ForwardH3Handler {
                 )
                 .await
             }
+            H3ConnectKind::Extended(protocol) => {
+                super::h3_connect::handle_h3_extended_connect(
+                    req_head,
+                    req_stream,
+                    self.clone(),
+                    conn,
+                    protocol,
+                    datagrams,
+                )
+                .await
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn webtransport_is_standard_extended_connect_protocol() {
+        assert_eq!(::h3::ext::Protocol::WEB_TRANSPORT.as_str(), "webtransport");
     }
 }

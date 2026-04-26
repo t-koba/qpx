@@ -48,7 +48,20 @@ impl Drop for ShmRingBuffer {
 
 impl ShmRingBuffer {
     pub fn default_shm_dir() -> PathBuf {
-        std::env::temp_dir().join("qpx")
+        #[cfg(unix)]
+        {
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .or_else(|| dirs_next::home_dir().map(|home| home.join(".qpx").join("run")))
+                .unwrap_or_else(|| {
+                    let user = std::env::var("USER").unwrap_or_else(|_| "local-user".to_string());
+                    std::env::temp_dir().join(format!("qpx-{user}"))
+                })
+        }
+        #[cfg(not(unix))]
+        {
+            std::env::temp_dir().join("qpx")
+        }
     }
 
     pub fn default_capture_shm_path() -> PathBuf {
@@ -543,38 +556,30 @@ impl Drop for ShmDoorbell {
 fn open_shm_file(path: &Path) -> Result<File> {
     if let Some(parent) = path.parent() {
         #[cfg(unix)]
-        let existed = parent.exists();
-        ensure_not_symlink_under_default_dir(parent, "shared memory directory")?;
-        ensure_not_symlink(parent, "shared memory directory")?;
-        fs::create_dir_all(parent).map_err(|e| {
-            anyhow!(
-                "failed to create shared memory directory {}: {e}",
-                parent.display()
-            )
-        })?;
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let existed = parent.exists();
+            ensure_secure_shm_dir_components(parent)?;
             let enforce = parent.starts_with(ShmRingBuffer::default_shm_dir());
-            if !existed {
+            if !existed || enforce {
                 fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|e| {
                     anyhow!(
-                        "failed to set permissions on shared memory directory {}: {e}",
+                        "failed to set private permissions on shared memory directory {}: {e}",
                         parent.display()
                     )
                 })?;
-            } else if enforce {
-                let mode = fs::metadata(parent)?.permissions().mode() & 0o777;
-                if (mode & 0o077) != 0 {
-                    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|e| {
-                        anyhow!(
-                            "shared memory directory permissions are too open (mode={:o}) for {}; failed to set to 0700: {e}",
-                            mode,
-                            parent.display()
-                        )
-                    })?;
-                }
             }
+        }
+        #[cfg(not(unix))]
+        {
+            ensure_not_symlink_under_default_dir(parent, "shared memory directory")?;
+            ensure_not_symlink(parent, "shared memory directory")?;
+            fs::create_dir_all(parent).map_err(|e| {
+                anyhow!(
+                    "failed to create shared memory directory {}: {e}",
+                    parent.display()
+                )
+            })?;
         }
     }
 
@@ -747,6 +752,113 @@ fn validate_header(mmap: &MmapMut, expected_capacity: usize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn ensure_secure_shm_dir_components(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    current = resolve_trusted_shm_symlink(&current, &meta)?;
+                    continue;
+                }
+                if !meta.is_dir() {
+                    return Err(anyhow!(
+                        "shared memory path component is not a directory: {}",
+                        current.display()
+                    ));
+                }
+                reject_untrusted_shm_ancestor(&current, &meta)?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(|e| {
+                    anyhow!(
+                        "failed to create shared memory directory component {}: {e}",
+                        current.display()
+                    )
+                })?;
+                set_private_shm_dir_permissions(&current)?;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_shm_dir_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|e| {
+        anyhow!(
+            "failed to set private permissions on shared memory directory {}: {e}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn resolve_trusted_shm_symlink(path: &Path, meta: &fs::Metadata) -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != 0 && meta.uid() != euid {
+        return Err(anyhow!(
+            "shared memory path must not contain untrusted symlink component: {}",
+            path.display()
+        ));
+    }
+    let resolved = fs::canonicalize(path).map_err(|e| {
+        anyhow!(
+            "failed to resolve trusted shared memory symlink {}: {e}",
+            path.display()
+        )
+    })?;
+    let resolved_meta = fs::metadata(&resolved)?;
+    if !resolved_meta.is_dir() {
+        return Err(anyhow!(
+            "shared memory symlink target is not a directory: {}",
+            resolved.display()
+        ));
+    }
+    reject_untrusted_shm_ancestor(&resolved, &resolved_meta)?;
+    Ok(resolved)
+}
+
+#[cfg(unix)]
+fn reject_untrusted_shm_ancestor(path: &Path, meta: &fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mode = meta.mode();
+    let sticky = mode & libc::S_ISVTX as u32 != 0;
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != 0 && meta.uid() != euid {
+        return Err(anyhow!(
+            "refusing shared memory ancestor directory not owned by root or current user: {}",
+            path.display()
+        ));
+    }
+    if sticky && mode & 0o022 != 0 && meta.uid() != 0 && meta.uid() != euid {
+        return Err(anyhow!(
+            "refusing sticky writable shared memory ancestor directory not owned by root or current user: {}",
+            path.display()
+        ));
+    }
+    if mode & 0o002 != 0 && !sticky {
+        return Err(anyhow!(
+            "refusing attacker-writable shared memory ancestor directory {}",
+            path.display()
+        ));
+    }
+    if !sticky && mode & 0o020 != 0 && meta.uid() != euid {
+        return Err(anyhow!(
+            "refusing group-writable shared memory ancestor directory not owned by current user: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_not_symlink(path: &Path, label: &str) -> Result<()> {
     if let Ok(meta) = fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
@@ -776,6 +888,15 @@ fn ensure_not_symlink_under_default_dir(path: &Path, label: &str) -> Result<()> 
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+
+    #[cfg(unix)]
+    #[test]
+    fn default_shm_dir_uses_private_user_scoped_path() {
+        let dir = ShmRingBuffer::default_shm_dir();
+        assert!(!dir.starts_with(std::env::temp_dir().join("qpx")));
+        let dir_text = dir.to_string_lossy();
+        assert!(dir_text.contains("/.qpx/run") || dir_text.contains("/qpx-"));
+    }
 
     #[test]
     fn test_shm_ring_buffer() -> Result<()> {

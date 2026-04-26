@@ -6,20 +6,30 @@ Use this for block pages, maintenance notices, health endpoints, and captive-por
 ## 1. Where it works
 
 - Forward proxy:
+  - `listeners[].default_action.type: respond`
   - `listeners[].rules[].action.type: respond`
 - Transparent proxy:
+  - `listeners[].default_action.type: respond`
   - `listeners[].rules[].action.type: respond`
 - Reverse proxy:
   - `reverse[].routes[].local_response`
+  - `reverse[].routes[].http.response_rules[].action.local_response`
 
 ## 2. Configuration rules
 
 - `respond` requires `local_response`:
   - `listeners[].default_action`
   - `listeners[].rules[].action`
-- For reverse routes, set exactly one:
+- For reverse routes, use exactly one route target surface:
   - `upstreams`
-  - `local_response`
+  - `backends`
+  - `ipc`
+  - route-level `local_response`
+- `upstreams` / `backends[].upstreams` use either literal `http://` / `https://` / `ws://` / `wss://` URLs or names declared in top-level `upstreams`.
+- `ipc` uses QPX-IPC fields `mode`, `address`, and `timeout_ms`.
+- Reverse routes with `local_response` cannot also configure:
+  - `mirrors`
+  - `cache`
 - TLS passthrough is configured separately:
   - `reverse[].tls_passthrough_routes[]`
   - TLS passthrough routes do not support `local_response`.
@@ -39,8 +49,10 @@ If `content_type` is omitted and `body` is non-empty, `qpxd` sets:
 
 - Forward/transparent mode:
   - `headers.response_*` controls are applied to local responses too.
+  - `listeners[].http.response_rules` can synthesize local responses after an upstream response is observed.
 - Reverse mode:
-  - Local responses are defined directly in the matched route.
+  - Local responses are defined directly in the matched route, and route-level `headers.response_*` controls are still applied.
+  - `reverse[].routes[].http.response_rules` can also synthesize local responses from upstream response metadata.
 
 ## 5. HTTP semantics applied
 

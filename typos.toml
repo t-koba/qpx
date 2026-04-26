@@ -1,0 +1,7 @@
+[default.extend-words]
+# QUIC packet number abbreviation.
+pn = "pn"
+# libc msghdr field name.
+controllen = "controllen"
+# Common HTTP benchmark tool.
+wrk = "wrk"

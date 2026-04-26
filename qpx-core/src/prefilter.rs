@@ -1,6 +1,7 @@
 use anyhow::Result;
 use cidr::IpCidr;
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use regex::Regex;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -64,6 +65,7 @@ pub struct TextPatternMatcher {
     exact: HashSet<Arc<str>>,
     suffix: Vec<Arc<str>>,
     glob: Option<GlobSet>,
+    regex: Vec<Regex>,
     lowercase_input: bool,
 }
 
@@ -216,7 +218,13 @@ impl TextPatternMatcher {
         }
 
         if let Some(glob) = &self.glob {
-            return glob.is_match(normalized);
+            if glob.is_match(normalized) {
+                return true;
+            }
+        }
+
+        if !self.regex.is_empty() {
+            return self.regex.iter().any(|regex| regex.is_match(normalized));
         }
         false
     }
@@ -391,7 +399,7 @@ impl MatchPrefilterIndex {
         found
     }
 
-    pub(crate) fn for_each_candidate(
+    pub fn for_each_candidate(
         &self,
         ctx: &MatchPrefilterContext<'_>,
         mut visitor: impl FnMut(usize) -> bool,
@@ -674,6 +682,13 @@ fn build_globset(items: &[String]) -> Result<Option<GlobSet>> {
     Ok(Some(builder.build()?))
 }
 
+fn extract_regex_pattern(item: &str) -> Option<&str> {
+    item.strip_prefix("re:")
+        .or_else(|| item.strip_prefix("regex:"))
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+}
+
 pub(crate) fn compile_text_patterns(
     items: &[String],
     lowercase: bool,
@@ -694,6 +709,7 @@ pub(crate) fn compile_text_patterns(
     let mut suffix = Vec::new();
     let mut suffix_seen = HashSet::new();
     let mut complex = Vec::new();
+    let mut regex = Vec::new();
     let mut hint = TextPrefilterHint {
         any: false,
         ..Default::default()
@@ -705,6 +721,12 @@ pub(crate) fn compile_text_patterns(
         } else {
             item.clone()
         };
+
+        if let Some(pattern) = extract_regex_pattern(&normalized) {
+            hint.complex = true;
+            regex.push(Regex::new(pattern)?);
+            continue;
+        }
 
         if is_exact_pattern(&normalized) {
             let value = interner.intern(normalized.as_str());
@@ -734,6 +756,7 @@ pub(crate) fn compile_text_patterns(
             exact,
             suffix,
             glob: build_globset(&complex)?,
+            regex,
             lowercase_input: lowercase,
         }),
         hint,

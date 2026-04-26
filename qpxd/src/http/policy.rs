@@ -1,7 +1,8 @@
+use crate::http::body::Body;
 use crate::http::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::http::local_response::build_local_response;
 use anyhow::{anyhow, Result};
-use hyper::{Body, Method, Response, Version};
+use hyper::{Method, Response, Version};
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::{CompiledHeaderControl, RuleEngine, RuleMatchContext};
 use std::sync::Arc;
@@ -15,7 +16,7 @@ pub struct EvaluatedAction {
 
 pub enum ListenerPolicyDecision {
     Proceed(Box<EvaluatedAction>),
-    Early(Response<Body>, Option<String>),
+    Early(Box<Response<Body>>, Option<String>),
 }
 
 pub fn evaluate_listener_policy(
@@ -33,13 +34,13 @@ pub fn evaluate_listener_policy(
 
     if auth_required || matches!(outcome.action.kind, ActionKind::Block) {
         return Ok(ListenerPolicyDecision::Early(
-            finalize_response_for_request(
+            Box::new(finalize_response_for_request(
                 method,
                 version,
                 proxy_name,
                 deny_builder(deny_message),
                 false,
-            ),
+            )),
             matched_rule,
         ));
     }
@@ -51,14 +52,14 @@ pub fn evaluate_listener_policy(
             .as_ref()
             .ok_or_else(|| anyhow!("respond action requires local_response"))?;
         return Ok(ListenerPolicyDecision::Early(
-            finalize_response_with_headers(
+            Box::new(finalize_response_with_headers(
                 method,
                 version,
                 proxy_name,
                 build_local_response(local)?,
                 outcome.headers.map(|h| h.as_ref()),
                 false,
-            ),
+            )),
             matched_rule,
         ));
     }

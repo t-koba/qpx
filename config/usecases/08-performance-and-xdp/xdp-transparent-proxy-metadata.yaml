@@ -1,0 +1,57 @@
+listeners:
+- name: transparent-xdp
+  listen: 0.0.0.0:15150
+  default_action:
+    type: block
+  tls_inspection:
+    enabled: true
+    verify_upstream: true
+  rules:
+  - name: inspect-corp-https
+    match:
+      src_ip:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      dst_port:
+      - 443
+      sni:
+      - '*.corp.example.com'
+      - api.partner.example.com
+    action:
+      type: inspect
+  - name: allow-private-http
+    match:
+      src_ip:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      dst_port:
+      - 80
+      host:
+      - '*.corp.example.com'
+      - intranet.example.com
+    action:
+      type: direct
+  - name: allow-fallback
+    match:
+      src_ip:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      dst_port:
+      - 80
+      - 443
+      host:
+      - '*'
+    action:
+      type: direct
+  xdp:
+    enabled: true
+    metadata_mode: proxy-v2
+    require_metadata: true
+    trusted_peers:
+    - 127.0.0.1/32
+    - ::1/128
+  mode: transparent
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

@@ -1,321 +1,202 @@
-use super::http1::{
-    ensure_origin_form_uri, proxy_websocket_http1, set_absolute_uri, set_host_header,
-    WebsocketProxyConfig,
-};
-use crate::http::address::{format_authority_host_port, parse_authority_host_port};
-use crate::http::l7::prepare_request_with_headers_in_place;
-use crate::http::websocket::spawn_upgrade_tunnel;
-use crate::tls::client::{connect_tls_h2_h1, connect_tls_http1, BoxTlsStream};
 use anyhow::{anyhow, Result};
-use hyper::client::connect::{Connected, Connection};
-use hyper::client::HttpConnector;
-use hyper::service::Service;
-use hyper::Uri;
-use hyper::{Body, Request, Response};
-#[cfg(feature = "http3")]
-use std::net::SocketAddr;
-use std::sync::OnceLock;
-use std::{future::Future, pin::Pin, task::Context, task::Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-#[cfg(feature = "http3")]
-use tokio::net::lookup_host;
-use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
-use tracing::warn;
-use url::Url;
 
-pub(crate) async fn proxy_http(
-    req: Request<Body>,
-    upstream: &str,
-    proxy_name: &str,
-) -> Result<Response<Body>> {
-    let url = Url::parse(upstream)?;
-    match url.scheme() {
-        "http" => proxy_http_plain(req, &url, proxy_name).await,
-        "https" => proxy_http_tls(req, &url, proxy_name).await,
-        "ipc" | "ipc+unix" => crate::ipc_client::proxy_ipc(req, &url, proxy_name).await,
-        _ => Err(anyhow!(
-            "reverse currently supports only http/https/ipc upstream for HTTP requests"
-        )),
-    }
+#[path = "origin/dispatch.rs"]
+mod dispatch;
+#[path = "origin/dns.rs"]
+mod dns;
+#[path = "origin/http_backend.rs"]
+mod http_backend;
+#[path = "origin/ipc_backend.rs"]
+mod ipc_backend;
+#[path = "origin/ws_backend.rs"]
+mod ws_backend;
+
+pub(crate) use dns::discover_origin_endpoints;
+#[cfg(all(
+    feature = "http3",
+    any(
+        all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")),
+        all(feature = "http3-backend-qpx", not(feature = "http3-backend-h3"))
+    )
+))]
+pub(crate) use dns::resolve_upstream_socket_addr;
+pub(crate) use http_backend::{
+    clear_direct_origin_connection_pools, proxy_http, proxy_http_with_interim,
+    shared_reverse_http_client, shared_reverse_https_client,
+};
+pub(crate) use ws_backend::proxy_websocket;
+
+#[cfg(test)]
+use dns::{
+    discover_origin_endpoints_with_nameservers, encode_dns_name, parse_dns_name, DNS_TYPE_A,
+    DNS_TYPE_AAAA, DNS_TYPE_SRV,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OriginEndpoint {
+    pub(crate) upstream: String,
+    connect_host: Option<String>,
+    connect_port: Option<u16>,
+    logical_host: Option<String>,
+    logical_port: Option<u16>,
+    tls_name: Option<String>,
 }
 
-pub(crate) async fn proxy_websocket(
-    req: Request<Body>,
-    upstream: &str,
-    proxy_name: &str,
-    timeout_dur: Duration,
-    upgrade_wait_timeout: Duration,
-    tunnel_idle_timeout: Duration,
-) -> Result<Response<Body>> {
-    let upstream_url = Url::parse(upstream)?;
-    let scheme = upstream_url.scheme();
-    if scheme != "http" && scheme != "https" && scheme != "ws" && scheme != "wss" {
-        return Err(anyhow!(
-            "reverse websocket supports only http/https/ws/wss upstream"
-        ));
-    }
-    let mut req = req;
-    rewrite_direct_upstream_request(
-        &mut req,
-        &upstream_url,
-        if scheme == "https" || scheme == "wss" {
-            443
-        } else {
-            80
-        },
-    )?;
-    prepare_request_with_headers_in_place(&mut req, proxy_name, None, true);
+#[derive(Debug, Clone)]
+pub(super) struct ParsedOriginTarget {
+    pub(super) scheme: Option<String>,
+    pub(super) host: String,
+    pub(super) port: Option<u16>,
+}
 
-    match scheme {
-        "http" | "ws" => {
-            let addr = parse_upstream_addr(upstream, 80)?;
-            proxy_websocket_http1(
-                req,
-                WebsocketProxyConfig {
-                    upstream_proxy: None,
-                    direct_connect_authority: &addr,
-                    direct_host_header: &addr,
-                    timeout_dur,
-                    upgrade_wait_timeout,
-                    tunnel_idle_timeout,
-                    tunnel_label: "reverse",
-                    upstream_context: "reverse websocket upstream proxy",
-                    direct_context: "reverse websocket upstream conn",
-                },
-            )
-            .await
+impl OriginEndpoint {
+    pub(crate) fn direct(upstream: impl Into<String>) -> Self {
+        Self {
+            upstream: upstream.into(),
+            connect_host: None,
+            connect_port: None,
+            logical_host: None,
+            logical_port: None,
+            tls_name: None,
         }
-        "https" | "wss" => {
-            let mut req_tls = req;
-            let client_upgrade = hyper::upgrade::on(&mut req_tls);
-            let mut sender = open_tls_http1_sender(
-                &upstream_url,
-                443,
-                "reverse websocket upstream TLS conn",
-                timeout_dur,
-            )
-            .await?;
-            let mut response = timeout(timeout_dur, sender.send_request(req_tls)).await??;
-            spawn_upgrade_tunnel(
-                &mut response,
-                client_upgrade,
-                "reverse",
-                upgrade_wait_timeout,
-                tunnel_idle_timeout,
-            );
-            Ok(response)
+    }
+
+    pub(super) fn discovered(
+        base_upstream: &str,
+        connect_host: String,
+        connect_port: u16,
+        logical_host: String,
+        logical_port: u16,
+        tls_name: String,
+    ) -> Self {
+        Self {
+            upstream: base_upstream.to_string(),
+            connect_host: Some(connect_host),
+            connect_port: Some(connect_port),
+            logical_host: Some(logical_host),
+            logical_port: Some(logical_port),
+            tls_name: Some(tls_name),
         }
-        _ => Err(anyhow!("unsupported websocket upstream scheme")),
+    }
+
+    pub(crate) fn label(&self) -> String {
+        if !self.uses_connect_override() {
+            return self.upstream.clone();
+        }
+
+        let default_port = self.default_port_hint();
+        let connect = self
+            .connect_authority(default_port)
+            .unwrap_or_else(|_| self.upstream.clone());
+        let logical = self
+            .host_header_authority(default_port)
+            .unwrap_or_else(|_| connect.clone());
+        let mut label = format!("{} via {}", self.upstream, connect);
+        if logical != connect {
+            label.push_str(" host=");
+            label.push_str(logical.as_str());
+        }
+        if let Ok(server_name) = self.tls_server_name() {
+            if server_name != logical && server_name != connect {
+                label.push_str(" sni=");
+                label.push_str(server_name.as_str());
+            }
+        }
+        label
+    }
+
+    pub(crate) fn uses_connect_override(&self) -> bool {
+        self.connect_host.is_some()
+            || self.connect_port.is_some()
+            || self.logical_host.is_some()
+            || self.logical_port.is_some()
+            || self.tls_name.is_some()
+    }
+
+    pub(crate) fn connect_authority(&self, default_port: u16) -> Result<String> {
+        let (host, port) = self.connect_parts(default_port)?;
+        Ok(crate::http::address::format_authority_host_port(
+            host.as_str(),
+            port,
+        ))
+    }
+
+    pub(crate) fn host_header_authority(&self, default_port: u16) -> Result<String> {
+        let (host, port) = self.logical_parts(default_port)?;
+        Ok(crate::http::address::format_authority_host_port(
+            host.as_str(),
+            port,
+        ))
+    }
+
+    pub(crate) fn tls_server_name(&self) -> Result<String> {
+        if let Some(name) = self.tls_name.as_ref() {
+            return Ok(name.clone());
+        }
+        if let Some(host) = self.logical_host.as_ref() {
+            return Ok(host.clone());
+        }
+        Ok(parse_origin_target(self.upstream.as_str())?.host)
+    }
+
+    pub(super) fn connect_parts(&self, default_port: u16) -> Result<(String, u16)> {
+        let parsed = parse_origin_target(self.upstream.as_str())?;
+        Ok((
+            self.connect_host.clone().unwrap_or(parsed.host),
+            self.connect_port.or(parsed.port).unwrap_or(default_port),
+        ))
+    }
+
+    pub(super) fn logical_parts(&self, default_port: u16) -> Result<(String, u16)> {
+        let parsed = parse_origin_target(self.upstream.as_str())?;
+        Ok((
+            self.logical_host.clone().unwrap_or(parsed.host),
+            self.logical_port.or(parsed.port).unwrap_or(default_port),
+        ))
+    }
+
+    pub(super) fn default_port_hint(&self) -> u16 {
+        self.connect_port
+            .or(self.logical_port)
+            .or_else(|| {
+                parse_origin_target(self.upstream.as_str())
+                    .ok()
+                    .and_then(|parsed| {
+                        parsed.port.or_else(|| {
+                            parsed
+                                .scheme
+                                .as_deref()
+                                .map(dispatch::default_port_for_scheme)
+                        })
+                    })
+            })
+            .unwrap_or(443)
     }
 }
 
-#[cfg(feature = "http3")]
-pub(crate) async fn resolve_upstream_socket_addr(
-    raw: &str,
-    default_port: u16,
-    timeout_dur: Duration,
-) -> Result<SocketAddr> {
-    let host_port = parse_upstream_addr(raw, default_port)?;
-    timeout(timeout_dur, lookup_host(host_port))
-        .await??
-        .next()
-        .ok_or_else(|| anyhow!("failed to resolve upstream address"))
-}
-
-pub(crate) fn parse_upstream_addr(raw: &str, default_port: u16) -> Result<String> {
-    if raw.contains("://") {
-        let url = Url::parse(raw)?;
+pub(super) fn parse_origin_target(upstream: &str) -> Result<ParsedOriginTarget> {
+    if upstream.contains("://") {
+        let url = url::Url::parse(upstream)?;
         let host = url
             .host_str()
-            .ok_or_else(|| anyhow!("missing upstream host"))?;
-        let port = url.port().unwrap_or(default_port);
-        return Ok(format_authority_host_port(host, port));
+            .ok_or_else(|| anyhow!("origin missing host: {}", upstream))?
+            .to_string();
+        return Ok(ParsedOriginTarget {
+            scheme: Some(url.scheme().to_string()),
+            host,
+            port: url.port(),
+        });
     }
 
-    if raw.contains(':') {
-        if let Some((host, port)) = parse_authority_host_port(raw, default_port) {
-            return Ok(format_authority_host_port(host.as_str(), port));
-        }
-    }
-
-    Ok(format_authority_host_port(raw, default_port))
-}
-
-async fn proxy_http_plain(
-    req: Request<Body>,
-    upstream_url: &Url,
-    proxy_name: &str,
-) -> Result<Response<Body>> {
-    let mut new_req = req;
-    rewrite_client_upstream_request(&mut new_req, upstream_url, 80)?;
-    prepare_request_with_headers_in_place(&mut new_req, proxy_name, None, false);
-    *new_req.version_mut() = http::Version::HTTP_11;
-    *new_req.extensions_mut() = http::Extensions::new();
-    Ok(shared_reverse_http_client().request(new_req).await?)
-}
-
-async fn proxy_http_tls(
-    req: Request<Body>,
-    upstream_url: &Url,
-    proxy_name: &str,
-) -> Result<Response<Body>> {
-    let mut new_req = req;
-    rewrite_client_upstream_request(&mut new_req, upstream_url, 443)?;
-    prepare_request_with_headers_in_place(&mut new_req, proxy_name, None, false);
-    *new_req.extensions_mut() = http::Extensions::new();
-    *new_req.version_mut() = http::Version::HTTP_11;
-    Ok(shared_reverse_https_client().request(new_req).await?)
-}
-
-#[derive(Clone)]
-struct ReverseTlsConnector {
-    timeout_dur: Duration,
-}
-
-impl Default for ReverseTlsConnector {
-    fn default() -> Self {
-        Self {
-            timeout_dur: Duration::from_secs(30),
-        }
-    }
-}
-
-struct ReverseTlsStream {
-    io: BoxTlsStream,
-    negotiated_h2: bool,
-}
-
-impl AsyncRead for ReverseTlsStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.io).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for ReverseTlsStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.io).poll_write(cx, buf)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.io).poll_flush(cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.io).poll_shutdown(cx)
-    }
-}
-
-impl Connection for ReverseTlsStream {
-    fn connected(&self) -> Connected {
-        let mut connected = Connected::new();
-        if self.negotiated_h2 {
-            connected = connected.negotiated_h2();
-        }
-        connected
-    }
-}
-
-impl Service<Uri> for ReverseTlsConnector {
-    type Response = ReverseTlsStream;
-    type Error = anyhow::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, uri: Uri) -> Self::Future {
-        let timeout_dur = self.timeout_dur;
-        Box::pin(async move {
-            let host = uri
-                .host()
-                .ok_or_else(|| anyhow!("reverse https upstream missing host"))?;
-            let port = uri.port_u16().unwrap_or(443);
-            let addr = format_authority_host_port(host, port);
-            let tcp = timeout(timeout_dur, TcpStream::connect(addr)).await??;
-            let (tls_stream, negotiated_h2) =
-                timeout(timeout_dur, connect_tls_h2_h1(host, tcp)).await??;
-            Ok(ReverseTlsStream {
-                io: tls_stream,
-                negotiated_h2,
-            })
-        })
-    }
-}
-
-fn shared_reverse_http_client() -> &'static hyper::Client<HttpConnector, Body> {
-    static CLIENT: OnceLock<hyper::Client<HttpConnector, Body>> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        let mut connector = HttpConnector::new();
-        connector.enforce_http(false);
-        hyper::Client::builder()
-            .pool_max_idle_per_host(256)
-            .build(connector)
+    let (host, port) = crate::http::address::parse_authority_host_port(upstream, 443)
+        .ok_or_else(|| anyhow!("invalid upstream authority: {}", upstream))?;
+    Ok(ParsedOriginTarget {
+        scheme: None,
+        host,
+        port: Some(port),
     })
 }
 
-fn shared_reverse_https_client() -> &'static hyper::Client<ReverseTlsConnector, Body> {
-    static CLIENT: OnceLock<hyper::Client<ReverseTlsConnector, Body>> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        hyper::Client::builder()
-            .pool_max_idle_per_host(256)
-            .build(ReverseTlsConnector::default())
-    })
-}
-
-fn rewrite_client_upstream_request(
-    req: &mut Request<Body>,
-    upstream_url: &Url,
-    default_port: u16,
-) -> Result<()> {
-    let authority = parse_upstream_addr(upstream_url.as_str(), default_port)?;
-    set_host_header(req, &authority)?;
-    set_absolute_uri(req, upstream_url.scheme(), authority.as_str())?;
-    Ok(())
-}
-
-fn rewrite_direct_upstream_request(
-    req: &mut Request<Body>,
-    upstream_url: &Url,
-    default_port: u16,
-) -> Result<()> {
-    let authority = parse_upstream_addr(upstream_url.as_str(), default_port)?;
-    set_host_header(req, &authority)?;
-    ensure_origin_form_uri(req)?;
-    Ok(())
-}
-
-async fn open_tls_http1_sender(
-    upstream_url: &Url,
-    default_port: u16,
-    context: &str,
-    timeout_dur: Duration,
-) -> Result<hyper::client::conn::SendRequest<Body>> {
-    let host = upstream_url
-        .host_str()
-        .ok_or_else(|| anyhow!("missing upstream host"))?;
-    let addr = parse_upstream_addr(upstream_url.as_str(), default_port)?;
-    let tcp = timeout(timeout_dur, TcpStream::connect(addr)).await??;
-    let tls_stream = timeout(timeout_dur, connect_tls_http1(host, tcp)).await??;
-    let (sender, conn) = timeout(
-        timeout_dur,
-        hyper::client::conn::Builder::new().handshake(tls_stream),
-    )
-    .await??;
-    let context = context.to_string();
-    tokio::spawn(async move {
-        if let Err(err) = conn.await {
-            warn!(error = ?err, context = %context, "reverse upstream TLS conn closed");
-        }
-    });
-    Ok(sender)
-}
+#[cfg(test)]
+#[path = "origin_tests.rs"]
+mod tests;

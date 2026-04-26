@@ -1,24 +1,29 @@
-version: 1
-state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
-
+# Build-time note:
+# - Works with either HTTP/3 backend.
+# - `http3-backend-h3` is the baseline upstream-`h3` backend.
+# - `http3-backend-qpx` is the clean-room backend and also works here.
 reverse:
-  - name: reverse-h3-terminate
-    # TCP side serves HTTP/1.1 and HTTP/2 (ALPN); UDP side serves HTTP/3.
-    listen: "0.0.0.0:443"
-    tls:
-      certificates:
-        - sni: example.com
-          cert: /etc/qpx/certs/example.com.crt
-          key: /etc/qpx/certs/example.com.key
-    http3:
-      enabled: true
-      listen: "0.0.0.0:443"
-    routes:
-      - match:
-          host: [example.com]
-        upstreams: ["http://10.0.0.10:8080", "http://10.0.0.11:8080"]
-        lb: round_robin
-        retry:
-          attempts: 2
-          backoff_ms: 100
-        timeout_ms: 30000
+- name: reverse-h3-terminate
+  listen: 0.0.0.0:443
+  tls:
+    certificates:
+    - sni: example.com
+      cert: ${QPX_TLS_CERT:-/etc/qpx/certs/example.com.crt}
+      key: ${QPX_TLS_KEY:-/etc/qpx/certs/example.com.key}
+  http3:
+    enabled: true
+    listen: 0.0.0.0:443
+  routes:
+  - match:
+      host:
+      - example.com
+    timeout_ms: 30000
+    lb: round_robin
+    resilience:
+      retry:
+        attempts: 2
+        backoff_ms: 100
+    upstreams:
+    - http://10.0.0.10:8080
+    - http://10.0.0.11:8080
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

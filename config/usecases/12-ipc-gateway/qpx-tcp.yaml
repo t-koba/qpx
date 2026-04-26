@@ -1,0 +1,23 @@
+reverse:
+- name: ipc-gateway-tcp
+  listen: ${QPX_IPC_GATEWAY_TCP_LISTEN:-127.0.0.1:18099}
+  routes:
+  - name: function-executor
+    match:
+      path:
+      - /cgi-bin/*
+      - /wasm/*
+    ipc:
+      # Paired with qpxf-tcp.yaml. The executor sample intentionally accepts
+      # loopback smoke tests without requiring a custom Host header.
+      mode: tcp
+      address: ${QPXF_TCP_LISTEN:-127.0.0.1:19090}
+      timeout_ms: 30000
+  - name: not-found
+    match:
+      path:
+      - /*
+    local_response:
+      status: 404
+      content_type: text/plain
+      body: not found

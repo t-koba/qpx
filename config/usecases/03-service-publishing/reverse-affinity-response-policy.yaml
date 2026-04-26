@@ -1,0 +1,81 @@
+reverse:
+- name: reverse-affinity-policy
+  listen: 0.0.0.0:19084
+  routes:
+  - name: store-api
+    match:
+      host:
+      - store.example.com
+      path:
+      - /api/*
+      - /cart/*
+    http:
+      response_rules:
+      - name: maintenance-fallback
+        match:
+          response_status:
+          - '503'
+        effects:
+          local_response:
+            status: 200
+            content_type: application/json
+            body: '{"status":"degraded","source":"qpx-local"}'
+          headers:
+            response_set:
+              Cache-Control: no-store
+              X-Qpx-Policy: maintenance-fallback
+          cache:
+            bypass: true
+          mirror:
+            enabled: false
+          tags:
+          - maintenance
+      - name: bypass-cache-on-session-cookie
+        match:
+          response_status:
+          - 200-299
+          headers:
+          - name: set-cookie
+            regex: .+
+        effects:
+          cache:
+            bypass: true
+          tags:
+          - session-cookie
+    mirrors:
+    - name: audit
+      percent: 10
+      upstreams:
+      - http://10.70.0.50:8080
+    affinity:
+      key: query
+      query: session
+    cache:
+      enabled: true
+      backend: reverse-redis
+      namespace: store-api
+      default_ttl_secs: 30
+      max_object_bytes: 2097152
+    resilience:
+      retry:
+        attempts: 2
+        backoff_ms: 100
+    timeout_ms: 10000
+    backends:
+    - name: stable
+      weight: 95
+      upstreams:
+      - http://10.70.0.11:8080
+      - http://10.70.0.12:8080
+    - name: canary
+      weight: 5
+      upstreams:
+      - http://10.70.0.99:8080
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+cache:
+  backends:
+  - name: reverse-redis
+    kind: redis
+    endpoint: redis://127.0.0.1:6379/4
+    timeout_ms: 1500
+    max_object_bytes: 2097152

@@ -1,0 +1,52 @@
+reverse:
+- name: inventory-edge
+  listen: 0.0.0.0:19085
+  routes:
+  - name: inventory
+    match:
+      host:
+      - inventory.example.com
+    lifecycle:
+      warmup_ms: 5000
+      slow_start_ms: 15000
+      drain_timeout_ms: 10000
+    timeout_ms: 12000
+    health_check:
+      interval_ms: 5000
+      timeout_ms: 1000
+      fail_threshold: 2
+      cooldown_ms: 10000
+      http:
+        path: /healthz
+        method: GET
+        expected_status:
+        - 200
+        - 204
+    upstreams:
+    - inventory-srv
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+upstreams:
+- name: inventory-srv
+  url: https://inventory.service.example:8443
+  tls_trust_profile: mesh-issued
+  discovery:
+    kind: srv
+    name: _https._tcp.inventory.service.example
+    interval_ms: 5000
+    min_ttl_ms: 1000
+    max_ttl_ms: 30000
+  resilience:
+    outlier_detection:
+      consecutive_failures:
+        http_5xx: 2
+        timeouts: 2
+        connect_errors: 2
+    ejection:
+      max_ms: 30000
+    max_upstream_concurrency: 128
+upstream_trust_profiles:
+- name: mesh-issued
+  issuer:
+  - Cluster Mesh CA
+  san_dns:
+  - '*.svc.cluster.local'

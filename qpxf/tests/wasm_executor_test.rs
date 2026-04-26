@@ -47,6 +47,7 @@ mod wasm_tests {
         let wasm_path_yaml = yaml_single_quote(wasm_path.to_string_lossy().as_ref());
         let config = format!(
             r#"listen: "{listen_addr}"
+allow_insecure_tcp: true
 workers: 1
 handlers:
   - match:

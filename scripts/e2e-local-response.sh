@@ -230,8 +230,14 @@ main() {
   require_cmd curl
   require_cmd lsof
 
-  echo "[LOCAL-E2E] building qpxd"
-  cargo build -q -p qpxd
+  if [ ! -x "$QPXD_BIN" ]; then
+    echo "[LOCAL-E2E] building qpxd"
+    cargo build -q -p qpxd --locked
+  fi
+  if [ ! -x "$QPXD_BIN" ]; then
+    echo "missing built qpxd binary: $QPXD_BIN" >&2
+    exit 1
+  fi
 
   run_forward_suite
   run_reverse_suite

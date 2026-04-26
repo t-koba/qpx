@@ -1,10 +1,11 @@
 use crate::http::address::parse_authority_host_port;
+use crate::http::body::Body;
 use crate::http::common::resolve_named_upstream;
 use crate::upstream::connect::{connect_tunnel_target, ConnectedTunnel};
 use crate::xdp;
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use hyper::{Body, Request};
+use hyper::Request;
 use qpx_core::config::{ActionConfig, ListenerConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -135,7 +136,7 @@ pub(super) fn resolve_upstream(
     action: &ActionConfig,
     state: &Arc<crate::runtime::RuntimeState>,
     listener: &ListenerConfig,
-) -> Result<Option<String>> {
+) -> Result<Option<crate::upstream::pool::ResolvedUpstreamProxy>> {
     resolve_named_upstream(action, state, listener.upstream_proxy.as_deref())
 }
 
@@ -172,11 +173,19 @@ pub(super) fn resolve_http_target(
 
 pub(super) async fn connect_target_stream(
     target: &ConnectTarget,
-    upstream_proxy: Option<&str>,
+    upstream_proxy: Option<&crate::upstream::pool::ResolvedUpstreamProxy>,
+    proxy_name: &str,
     timeout_dur: Duration,
 ) -> Result<ConnectedTunnel> {
     let host = target.host_for_connect();
-    connect_tunnel_target(host.as_str(), target.port(), upstream_proxy, timeout_dur).await
+    connect_tunnel_target(
+        host.as_str(),
+        target.port(),
+        upstream_proxy,
+        proxy_name,
+        timeout_dur,
+    )
+    .await
 }
 
 pub(super) fn destination_resolver_for_listener(
@@ -264,4 +273,97 @@ fn original_dst_socket(_stream: &tokio::net::TcpStream) -> Result<SocketAddr> {
     Err(anyhow!(
         "original destination lookup unavailable on this OS"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cidr::IpCidr;
+    use hyper::Request;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn resolve_http_target_prefers_original_target_over_host_fallback() {
+        let request = Request::builder()
+            .uri("/resource")
+            .header(http::header::HOST, "ignored.example:8080")
+            .body(Body::empty())
+            .expect("request");
+        let fallback = ConnectTarget::Socket("127.0.0.1:18080".parse().expect("socket"));
+
+        let (target, host_for_match) =
+            resolve_http_target(&request, Some(&fallback)).expect("target");
+        assert!(matches!(target, ConnectTarget::Socket(addr) if addr.port() == 18080));
+        assert_eq!(host_for_match.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn resolve_http_target_uses_host_header_when_original_target_is_unavailable() {
+        let request = Request::builder()
+            .uri("/resource")
+            .header(http::header::HOST, "example.com:8443")
+            .body(Body::empty())
+            .expect("request");
+
+        let (target, host_for_match) = resolve_http_target(&request, None).expect("target");
+        assert!(matches!(target, ConnectTarget::HostPort(ref host, 8443) if host == "example.com"));
+        assert_eq!(host_for_match.as_deref(), Some("example.com"));
+    }
+
+    fn proxy_v2_header(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
+        let (SocketAddr::V4(src), SocketAddr::V4(dst)) = (src, dst) else {
+            panic!("test helper only supports ipv4");
+        };
+        let mut bytes = vec![
+            0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a, 0x21, 0x11,
+            0x00, 0x0c,
+        ];
+        bytes.extend_from_slice(&src.ip().octets());
+        bytes.extend_from_slice(&dst.ip().octets());
+        bytes.extend_from_slice(&src.port().to_be_bytes());
+        bytes.extend_from_slice(&dst.port().to_be_bytes());
+        bytes
+    }
+
+    #[tokio::test]
+    async fn xdp_proxy_v2_destination_resolver_uses_proxy_metadata_for_target() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listen_addr = listener.local_addr().expect("listen addr");
+        let payload = b"CONNECT example.com:443 HTTP/1.1\r\n\r\n".to_vec();
+        let client_payload = payload.clone();
+        let proxy = proxy_v2_header(
+            "10.2.3.4:41234".parse().expect("src"),
+            "203.0.113.8:8443".parse().expect("dst"),
+        );
+
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(listen_addr).await.expect("connect");
+            stream.write_all(&proxy).await.expect("write proxy");
+            stream
+                .write_all(&client_payload)
+                .await
+                .expect("write payload");
+        });
+
+        let (stream, remote_addr) = listener.accept().await.expect("accept");
+        let resolver = DestinationResolver::XdpProxyV2 {
+            require_metadata: true,
+            trusted_peers: vec!["127.0.0.0/8".parse::<IpCidr>().expect("cidr")],
+        };
+        let (mut prefixed, effective_remote, target) = resolver
+            .resolve_original_target(stream, remote_addr, Duration::from_secs(1))
+            .await
+            .expect("resolve");
+
+        assert_eq!(effective_remote, "10.2.3.4:41234".parse().unwrap());
+        assert!(matches!(
+            target,
+            Some(ConnectTarget::Socket(addr)) if addr == "203.0.113.8:8443".parse().unwrap()
+        ));
+        let mut buf = vec![0u8; payload.len()];
+        prefixed.read_exact(&mut buf).await.expect("read prefixed");
+        assert_eq!(buf, payload);
+        client.await.expect("client");
+    }
 }

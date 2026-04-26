@@ -1,0 +1,54 @@
+listeners:
+- name: forward-cookie-cache
+  listen: 127.0.0.1:18056
+  default_action:
+    type: block
+  rules:
+  - name: cache-public-shell
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      host:
+      - app.example.com
+      path:
+      - /assets/*
+      - /session-shell/*
+      method:
+      - GET
+      - HEAD
+    action:
+      type: direct
+  http:
+    response_rules:
+    - name: bypass-auth-errors
+      match:
+        src_ip:
+        - 127.0.0.1/32
+        - ::1/128
+        host:
+        - app.example.com
+        response_status:
+        - '401'
+        - '403'
+      effects:
+        cache:
+          bypass: true
+        tags:
+        - auth-error
+  cache:
+    enabled: true
+    backend: redis-cookie-public
+    namespace: forward-cookie-public
+    default_ttl_secs: 120
+    max_object_bytes: 2097152
+    allow_set_cookie_store: true
+  mode: forward
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+cache:
+  backends:
+  - name: redis-cookie-public
+    kind: redis
+    endpoint: redis://127.0.0.1:6379/5
+    timeout_ms: 1200
+    max_object_bytes: 2097152

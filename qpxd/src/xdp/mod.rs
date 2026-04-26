@@ -264,6 +264,15 @@ fn parse_proxy_v2_payload(fam_proto: u8, payload: &[u8]) -> Result<ProxyMeta> {
     }
 }
 
+pub(crate) fn fuzz_parse_proxy_v2_frame(frame: &[u8]) {
+    if frame.len() < 16 {
+        return;
+    }
+    let mut hdr = [0u8; 16];
+    hdr.copy_from_slice(&frame[..16]);
+    let _ = parse_proxy_v2_header_and_payload(hdr, &frame[16..], false);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,29 +5,39 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["tls-rustls", "http3", "mitm", "digest-auth", "sha2-hash"]
+default = ["tls-rustls", "http3-backend-h3", "mitm", "acme", "digest-auth", "sha2-hash"]
 
 tls-rustls = [
   "dep:rustls",
   "dep:tokio-rustls",
-  "dep:webpki-roots",
-  "dep:instant-acme",
-  "dep:x509-parser",
   "qpx-core/tls-rustls",
+  "qpx-auth/ldap-auth-rustls",
 ]
-tls-native = ["dep:native-tls", "dep:tokio-native-tls", "qpx-core/tls-native"]
+tls-native = [
+  "dep:native-tls",
+  "dep:tokio-native-tls",
+  "qpx-core/tls-native",
+  "qpx-auth/ldap-auth-native",
+]
 
 # QUIC/HTTP/3 requires rustls (via quinn).
-http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:h3-datagram", "tls-rustls"]
+http3 = ["dep:quinn"]
+http3-backend-h3 = ["http3", "tls-rustls", "dep:quinn", "dep:h3", "dep:h3-quinn", "dep:h3-datagram"]
+http3-backend-qpx = ["http3", "tls-rustls", "dep:quinn", "dep:qpx-h3"]
 
 # TLS MITM inspection requires rustls.
 mitm = ["tls-rustls"]
+acme = ["dep:qpx-acme", "tls-rustls", "qpx-acme/http3"]
 
-digest-auth = ["qpx-core/digest-auth"]
-sha2-hash = ["dep:sha2"]
+digest-auth = ["qpx-auth/digest-auth"]
+sha2-hash = []
 
 [dependencies]
-qpx-core = { path = "../qpx-core", default-features = false }
+qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
+qpx-auth = { path = "../qpx-auth", default-features = false, features = ["auth-proxy"] }
+qpx-acme = { path = "../qpx-acme", optional = true }
+qpx-observability = { path = "../qpx-observability" }
+qpx-h3 = { path = "../qpx-h3", optional = true }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -40,6 +50,9 @@ url.workspace = true
 percent-encoding.workspace = true
 httpdate.workspace = true
 bytes.workspace = true
+brotli.workspace = true
+flate2.workspace = true
+zstd.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 arc-swap.workspace = true
@@ -50,16 +63,17 @@ dirs-next.workspace = true
 # TLS
 rustls = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
-webpki-roots = { workspace = true, optional = true }
 native-tls = { workspace = true, optional = true }
 tokio-native-tls = { workspace = true, optional = true }
-instant-acme = { workspace = true, optional = true, features = ["hyper-rustls", "ring", "rcgen"] }
-x509-parser = { workspace = true, optional = true }
+x509-parser.workspace = true
 
 # HTTP
 hyper.workspace = true
+hyper-util.workspace = true
 http.workspace = true
-http1.workspace = true
+h2.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
 httparse.workspace = true
 libc.workspace = true
 quinn = { workspace = true, optional = true }
@@ -73,17 +87,24 @@ socket2.workspace = true
 
 # Auth
 base64.workspace = true
-rand.workspace = true
-sha2 = { workspace = true, optional = true }
-
-# FTP
-suppaftp.workspace = true
+pem.workspace = true
+ring.workspace = true
+sha2.workspace = true
 
 # CLI
 clap.workspace = true
 uuid = { version = "1.21.0", features = ["v4"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinSock",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 rcgen.workspace = true
 qpxf = { path = "../qpxf", default-features = false }
 tracing-subscriber.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true

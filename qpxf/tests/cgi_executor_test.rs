@@ -26,6 +26,7 @@ mod cgi_tests {
         let config_path = dir.join("qpxf.yaml");
         let config = format!(
             r#"listen: "{listen}"
+allow_insecure_tcp: true
 workers: 1
 handlers:
   - match:

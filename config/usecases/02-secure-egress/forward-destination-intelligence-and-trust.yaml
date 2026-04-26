@@ -1,0 +1,126 @@
+destination_resolution:
+  defaults:
+    precedence:
+      - cert
+      - sni
+      - host
+      - ip
+      - tls_fingerprint
+      - heuristic
+    conflict_mode: prefer_precedence
+    merge_mode: strongest_per_dimension
+    min_confidence:
+      category: 80
+      reputation: 80
+      application: 40
+
+listeners:
+- name: destination-aware-forward
+  listen: 127.0.0.1:18097
+  default_action:
+    type: block
+  destination_resolution:
+    precedence:
+      - sni
+      - host
+      - cert
+      - ip
+      - tls_fingerprint
+      - heuristic
+  tls_inspection:
+    enabled: true
+    verify_upstream: true
+    upstream_trust_profile: corp-issued
+  rules:
+  - name: inspect-corp-saas
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      destination:
+        category:
+          value:
+          - corp
+          source:
+          - host
+          confidence:
+          - '>=80'
+        application:
+          value:
+          - chrome
+          source:
+          - heuristic
+          confidence:
+          - '40'
+      scheme:
+      - https
+      tls_version:
+      - tls1.3
+      tls_fingerprint:
+        ja4:
+        - t13dh2_03_05_02
+    action:
+      type: inspect
+  - name: block-watchlist
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      destination:
+        reputation:
+          value:
+          - watch
+    action:
+      type: block
+  - name: allow-via-discovered-egress
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      host:
+      - '*'
+    action:
+      type: proxy
+  upstream_proxy: corp-egress-discovery
+  mode: forward
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+upstreams:
+- name: corp-egress-discovery
+  url: https://egress.corp.example.com:8443
+  tls_trust_profile: corp-issued
+  discovery:
+    kind: srv
+    name: _https._tcp.egress.corp.example.com
+    interval_ms: 5000
+    min_ttl_ms: 1000
+    max_ttl_ms: 30000
+  resilience:
+    outlier_detection:
+      consecutive_failures:
+        connect_errors: 2
+        timeouts: 2
+    ejection:
+      max_ms: 30000
+    max_upstream_concurrency: 128
+named_sets:
+- name: category:corp
+  type: domain
+  file: config/usecases/02-secure-egress/data/category-corp-domains.txt
+- name: reputation:watch
+  type: cidr
+  file: config/usecases/02-secure-egress/data/reputation-watchlist.cidr
+- name: application:chrome
+  type: string
+  values:
+  - chrome
+  - ja4-chrome
+  - h2
+upstream_trust_profiles:
+- name: corp-issued
+  issuer:
+  - Corp Issuer
+  san_dns:
+  - '*.corp.example.com'
+  - egress.corp.example.com
+  client_cert: ${QPX_UPSTREAM_CLIENT_CERT:-/etc/qpx/upstream/client.crt}
+  client_key: ${QPX_UPSTREAM_CLIENT_KEY:-/etc/qpx/upstream/client.key}

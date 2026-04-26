@@ -127,6 +127,9 @@ pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), Reques
     validate_request_body_length_headers(req.headers())?;
     validate_expect_header(req.headers())?;
     validate_h2_h3_request_headers(req.version(), req.headers())?;
+    let is_h2_extended_connect = req.version() == Version::HTTP_2
+        && req.method() == Method::CONNECT
+        && req.extensions().get::<h2::ext::Protocol>().is_some();
 
     let host_values: Vec<_> = req.headers().get_all(HOST).iter().collect();
     if host_values.len() > 1 {
@@ -151,13 +154,14 @@ pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), Reques
         let Some(authority) = uri_authority else {
             return Err(RequestValidationError::MissingConnectAuthority);
         };
-        // RFC 9110: CONNECT target is authority-form ("host:port"), not absolute or origin-form.
-        if req.uri().scheme().is_some() || req.uri().path_and_query().is_some() {
-            return Err(RequestValidationError::InvalidConnectTarget);
-        }
         let connect_authority =
             parse_authority_parts(authority).ok_or(RequestValidationError::InvalidConnectTarget)?;
-        if connect_authority.port.is_none() {
+        if connect_authority.port.is_none()
+            || (!is_h2_extended_connect
+                && (req.uri().scheme().is_some() || req.uri().path_and_query().is_some()))
+            || (is_h2_extended_connect
+                && (req.uri().scheme().is_none() || req.uri().path_and_query().is_none()))
+        {
             return Err(RequestValidationError::InvalidConnectTarget);
         }
     } else {
@@ -265,6 +269,7 @@ fn is_prohibited_trailer_field(name: &str) -> bool {
 }
 
 #[cfg(feature = "http3")]
+#[cfg(all(feature = "http3", feature = "http3-backend-h3"))]
 pub fn validate_h2_h3_connect_headers(headers: &HeaderMap) -> Result<(), RequestValidationError> {
     validate_request_body_length_headers(headers)?;
     validate_h2_h3_request_headers(Version::HTTP_3, headers)
@@ -317,9 +322,27 @@ pub fn normalize_response_for_request<B>(
 where
     B: Default,
 {
+    normalize_response_for_request_with_options(request_method, response, false)
+}
+
+pub fn normalize_response_for_request_with_options<B>(
+    request_method: &Method,
+    response: &mut http::Response<B>,
+    allow_switching_protocols: bool,
+) -> bool
+where
+    B: Default,
+{
     let status = response.status();
+    if status.is_informational()
+        && !(allow_switching_protocols && status == StatusCode::SWITCHING_PROTOCOLS)
+    {
+        *response.status_mut() = StatusCode::BAD_GATEWAY;
+        *response.body_mut() = B::default();
+        strip_message_body_headers(response.headers_mut());
+        return true;
+    }
     let no_body = request_method == Method::HEAD
-        || status.is_informational()
         || status == StatusCode::NO_CONTENT
         || status == StatusCode::RESET_CONTENT
         || status == StatusCode::NOT_MODIFIED
@@ -344,6 +367,11 @@ pub fn strip_message_body_headers(headers: &mut HeaderMap) {
 pub fn strip_message_body_framing_headers(headers: &mut HeaderMap) {
     headers.remove(TRANSFER_ENCODING);
     headers.remove(TRAILER);
+}
+
+pub fn sanitize_interim_response_headers(headers: &mut HeaderMap) {
+    sanitize_hop_by_hop_headers(headers, false);
+    strip_message_body_headers(headers);
 }
 
 pub fn is_hop_by_hop_header_name(name: &str) -> bool {
@@ -669,6 +697,31 @@ mod tests {
     }
 
     #[test]
+    fn normalize_response_rejects_final_informational_status() {
+        let mut resp = http::Response::builder()
+            .status(StatusCode::EARLY_HINTS)
+            .header(CONTENT_LENGTH, "10")
+            .body("payload".to_string())
+            .expect("response");
+        let changed = normalize_response_for_request(&Method::GET, &mut resp);
+        assert!(changed);
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.body(), "");
+        assert!(resp.headers().get(CONTENT_LENGTH).is_none());
+    }
+
+    #[test]
+    fn normalize_response_can_preserve_switching_protocols_for_upgrade_paths() {
+        let mut resp = http::Response::builder()
+            .status(StatusCode::SWITCHING_PROTOCOLS)
+            .body("".to_string())
+            .expect("response");
+        let changed = normalize_response_for_request_with_options(&Method::GET, &mut resp, true);
+        assert!(!changed);
+        assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
+    }
+
+    #[test]
     fn validate_rejects_mismatched_content_length_values() {
         let mut req = http::Request::builder()
             .version(Version::HTTP_11)
@@ -719,6 +772,19 @@ mod tests {
             .insert(HOST, HeaderValue::from_static("example.com"));
         let err = validate_incoming_request(&req).expect_err("must fail");
         assert_eq!(err, RequestValidationError::InvalidConnectTarget);
+    }
+
+    #[test]
+    fn validate_accepts_h2_extended_connect_request() {
+        let mut req = http::Request::builder()
+            .version(Version::HTTP_2)
+            .method(Method::CONNECT)
+            .uri("https://example.com:443/chat")
+            .body(())
+            .expect("request");
+        req.extensions_mut()
+            .insert(h2::ext::Protocol::from("websocket"));
+        validate_incoming_request(&req).expect("must pass");
     }
 
     #[test]

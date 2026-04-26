@@ -1,25 +1,18 @@
-state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
 system_log:
-  level: "${QPX_LOG_LEVEL:-info}"
-  format: "${QPX_LOG_FORMAT:-json}"
+  level: ${QPX_LOG_LEVEL:-info}
+  format: ${QPX_LOG_FORMAT:-json}
 metrics:
-  listen: "${QPX_METRICS_LISTEN:-127.0.0.1:19902}"
-  path: "${QPX_METRICS_PATH:-/metrics}"
-  # By default metrics.listen must be loopback. To expose metrics on non-loopback addresses,
-  # configure an explicit CIDR allowlist:
-  # allow:
-  #   - "10.0.0.0/8"
+  listen: ${QPX_METRICS_LISTEN:-127.0.0.1:19902}
+  path: ${QPX_METRICS_PATH:-/metrics}
 otel:
   enabled: false
-  endpoint: "http://127.0.0.1:4317"
-  level: "info"
+  endpoint: http://127.0.0.1:4317
+  level: info
   sample_percent: 100
-  # headers:
-  #   Authorization: "Bearer ${OTEL_TOKEN:-}"
 exporter:
   enabled: false
-  # When empty, qpxd/qpxr use a platform temp default (see README).
-  shm_path: ""
+  shm_path: ''
   shm_size_mb: 16
   lossy: false
   max_queue_events: 4096

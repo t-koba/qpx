@@ -1,0 +1,114 @@
+listeners:
+- name: forward-rate-limit
+  listen: 127.0.0.1:18091
+  default_action:
+    type: block
+  rules:
+  - name: docs-and-api
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      host:
+      - docs.example.com
+      - api.example.com
+      method:
+      - GET
+      - HEAD
+    action:
+      type: direct
+    rate_limit:
+      enabled: true
+      key: src_ip
+      requests:
+        rps: 60
+        burst: 120
+        quota:
+          interval_secs: 3600
+          amount: 20000
+  - name: shape-large-downloads
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      host:
+      - downloads.example.com
+      path:
+      - /packages/*
+      - /artifacts/*
+      method:
+      - GET
+    action:
+      type: direct
+    rate_limit:
+      enabled: true
+      key: src_ip
+      traffic:
+        bytes_per_sec: 2097152
+        burst_bytes: 4194304
+  http:
+    response_rules:
+    - name: annotate-retryable-failures
+      match:
+        src_ip:
+        - 127.0.0.1/32
+        - ::1/128
+        host:
+        - '*'
+        response_status:
+        - '429'
+        - 500-599
+      effects:
+        headers:
+          response_set:
+            X-Qpx-Policy: retry-limited
+        retry:
+          suppress: true
+        mirror:
+          enabled: false
+        tags:
+        - throttled-response
+  rate_limit:
+    enabled: true
+    key: src_ip
+    requests:
+      rps: 200
+      burst: 400
+    sessions:
+      max_concurrency: 100
+  policy_context:
+    ext_authz: rate-aware-policy
+  mode: forward
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+ext_authz:
+- name: rate-aware-policy
+  endpoint: http://127.0.0.1:19091/check
+  timeout_ms: 300
+  send:
+    request: true
+    identity: true
+    selected_headers:
+    - user-agent
+    - content-type
+  on_error: deny
+rate_limit_profiles:
+- name: subject-burst
+  enabled: true
+  key: user
+  requests:
+    rps: 40
+    burst: 80
+  sessions:
+    max_concurrency: 20
+- name: tenant-daily
+  enabled: true
+  key: tenant
+  requests:
+    quota:
+      interval_secs: 86400
+      amount: 250000
+- name: upstream-concurrency
+  enabled: true
+  key: upstream
+  sessions:
+    max_concurrency: 64

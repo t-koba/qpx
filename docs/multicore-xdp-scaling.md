@@ -84,3 +84,20 @@ runtime:
 ```
 
 Use `config/usecases/08-performance-and-xdp/runtime-multicore-scaling.yaml` as a starting point.
+
+## Automated perf smoke
+
+CI also keeps a lightweight release-mode throughput / p95 latency smoke gate through:
+
+```bash
+cargo test -p qpxd --release --test perf_smoke -- --nocapture
+```
+
+- Scope:
+  - reverse `local_response`
+  - reverse upstream HTTP/1
+  - forward CONNECT tunnel
+  - reverse HTTP/3 terminate
+  - reverse HTTP/3 passthrough
+- Goal: catch gross regressions in baseline throughput or tail latency before they land.
+- This is a smoke floor, not a substitute for full production benchmarking with realistic traffic mixes.

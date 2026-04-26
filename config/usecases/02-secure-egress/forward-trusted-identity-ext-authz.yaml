@@ -1,0 +1,101 @@
+listeners:
+- name: enterprise-egress
+  listen: 127.0.0.1:18088
+  default_action:
+    type: block
+  tls_inspection:
+    enabled: true
+    verify_upstream: true
+  rules:
+  - name: inspect-finance-managed
+    match:
+      host:
+      - '*.finance.example.com'
+      identity:
+        groups:
+        - finance
+        - security
+        posture:
+        - managed
+        - compliant
+    action:
+      type: inspect
+  - name: allow-corp-apps
+    match:
+      host:
+      - '*.corp.example.com'
+      identity:
+        user:
+        - '*'
+    action:
+      type: direct
+  - name: allow-authenticated-egress
+    match:
+      src_ip:
+      - 10.0.0.0/8
+    action:
+      type: proxy
+      upstream: corp-proxy
+  policy_context:
+    identity_sources:
+    - corp-access-proxy
+    ext_authz: central-policy
+  mode: forward
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+identity:
+  proxy_name: qpx
+audit_log:
+  enabled: true
+  path: ${QPX_STATE_DIR:-~/.local/share/qpx}/audit-enterprise.log
+  format: json
+  rotation: daily
+  rotation_count: 30
+  include:
+  - subject
+  - groups
+  - device_id
+  - posture
+  - auth_strength
+  - idp
+  - identity_source
+  - ext_authz_policy_id
+  - matched_rule
+  - matched_route
+upstreams:
+- name: corp-proxy
+  url: http://proxy.example.com:3128
+identity_sources:
+- name: corp-access-proxy
+  type: trusted_headers
+  from:
+    trusted_peers:
+    - 10.0.0.0/8
+    - 192.0.2.0/24
+  headers:
+    user: x-authenticated-user
+    groups: x-authenticated-groups
+    device_id: x-device-id
+    posture: x-device-posture
+    auth_strength: x-auth-strength
+    idp: x-idp
+  strip_from_untrusted: true
+ext_authz:
+- name: central-policy
+  endpoint: http://127.0.0.1:18080/check
+  timeout_ms: 300
+  send:
+    request: true
+    identity: true
+    selected_headers:
+    - user-agent
+    - content-type
+  on_error: deny
+rate_limit_profiles:
+- name: subject-egress
+  enabled: true
+  key: user
+  requests:
+    rps: 30
+    burst: 60
+  sessions:
+    max_concurrency: 16

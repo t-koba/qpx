@@ -1,7 +1,8 @@
 use super::router::normalize_host_for_match;
+use crate::http::body::Body;
 use anyhow::{anyhow, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use hyper::{Body, Request};
+use hyper::Request;
 use qpx_core::config::ReverseConfig;
 
 #[derive(Clone)]

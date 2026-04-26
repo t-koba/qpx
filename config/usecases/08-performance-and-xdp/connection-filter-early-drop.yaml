@@ -1,0 +1,66 @@
+# connection_filter is a separate early-drop DSL.
+# It runs before full HTTP parsing and only supports action.type=block plus
+# transport/TLS metadata matchers such as src_ip, dst_port, SNI, ALPN, TLS
+# version, and JA3/JA4 fingerprints.
+listeners:
+- name: forward-filtered
+  listen: 0.0.0.0:18088
+  default_action:
+    type: block
+  connection_filter:
+  - name: drop-known-scanner-net
+    match:
+      src_ip:
+      - 198.51.100.0/24
+      dst_port:
+      - 18088
+    action:
+      type: block
+  rules:
+  - name: allow-corp-and-loopback
+    match:
+      src_ip:
+      - 10.0.0.0/8
+      - 127.0.0.1/32
+      - ::1/128
+      host:
+      - '*'
+    action:
+      type: direct
+  mode: forward
+
+reverse:
+- name: reverse-filtered
+  listen: 0.0.0.0:19488
+  tls:
+    certificates:
+    - sni: app.example.com
+      cert: ${QPX_TLS_CERT:-/etc/qpx/certs/app.example.com.crt}
+      key: ${QPX_TLS_KEY:-/etc/qpx/certs/app.example.com.key}
+  connection_filter:
+  - name: drop-legacy-tls-clients
+    match:
+      sni:
+      - app.example.com
+      tls_version:
+      - tls1.0
+      - tls1.1
+    action:
+      type: block
+  - name: drop-known-ja4-scanner
+    match:
+      sni:
+      - app.example.com
+      tls_fingerprint:
+        ja4:
+        - t13dh2_03_05_02
+    action:
+      type: block
+  routes:
+  - match:
+      host:
+      - app.example.com
+    upstreams:
+    - http://127.0.0.1:19088
+
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

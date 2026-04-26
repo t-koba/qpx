@@ -1,12 +1,11 @@
+use crate::tls::cert_info::UpstreamCertificateInfo;
+use crate::tls::trust::CompiledUpstreamTlsTrust;
 use crate::upstream::connect::TunnelIo;
-use anyhow::{anyhow, Result};
-use hyper::client::conn::Builder as ClientConnBuilder;
-use hyper::Body;
+use anyhow::Result;
 use qpx_core::tls::MitmConfig;
-use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::TlsAcceptor;
 use tracing::warn;
 
 pub(crate) async fn accept_mitm_client<C>(
@@ -24,22 +23,24 @@ where
 pub(crate) async fn connect_mitm_upstream(
     upstream_io: TunnelIo,
     host: &str,
-    mitm: &MitmConfig,
     verify_upstream: bool,
+    trust: Option<&CompiledUpstreamTlsTrust>,
     timeout_dur: Duration,
     log_context: &'static str,
-) -> Result<Arc<tokio::sync::Mutex<hyper::client::conn::SendRequest<Body>>>> {
+) -> Result<(
+    Arc<tokio::sync::Mutex<crate::http::common::Http1SendRequest>>,
+    UpstreamCertificateInfo,
+)> {
     // For MITM traffic we force HTTP/1.1 upstream to keep Upgrade/WebSocket semantics working
     // and to avoid relying on HTTP/2 pseudo-header inference.
-    let base = mitm.ca.client_config(verify_upstream)?;
-    let mut client_config = (*base).clone();
-    client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    let connector = TlsConnector::from(Arc::new(client_config));
-    let server_name = server_name_for_host(host)?;
-    let server_tls = timeout(timeout_dur, connector.connect(server_name, upstream_io)).await??;
-    let (sender, conn): (hyper::client::conn::SendRequest<Body>, _) = timeout(
+    let (server_tls, cert_info) = timeout(
         timeout_dur,
-        ClientConnBuilder::new().handshake::<_, Body>(server_tls),
+        crate::tls::builder::connect_client_http1(host, upstream_io, verify_upstream, trust),
+    )
+    .await??;
+    let (sender, conn) = timeout(
+        timeout_dur,
+        crate::http::common::handshake_http1(server_tls),
     )
     .await??;
     tokio::spawn(async move {
@@ -48,13 +49,5 @@ pub(crate) async fn connect_mitm_upstream(
         }
     });
 
-    Ok(Arc::new(tokio::sync::Mutex::new(sender)))
-}
-
-fn server_name_for_host(host: &str) -> Result<rustls::pki_types::ServerName<'static>> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(rustls::pki_types::ServerName::IpAddress(ip.into()));
-    }
-    rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|_| anyhow!("invalid server name for TLS: {}", host))
+    Ok((Arc::new(tokio::sync::Mutex::new(sender)), cert_info))
 }

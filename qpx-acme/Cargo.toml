@@ -1,0 +1,27 @@
+[package]
+name = "qpx-acme"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+http3 = ["dep:quinn"]
+
+[dependencies]
+qpx-core = { path = "../qpx-core", default-features = false, features = ["tls-rustls"] }
+anyhow.workspace = true
+arc-swap.workspace = true
+bytes.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+instant-acme = { workspace = true, features = ["hyper-rustls", "ring", "rcgen"] }
+rustls.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+x509-parser.workspace = true
+libc.workspace = true
+quinn = { workspace = true, optional = true }

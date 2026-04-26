@@ -1,7 +1,7 @@
 use crate::runtime::Runtime;
 use anyhow::{anyhow, Result};
 use hyper::HeaderMap;
-use qpx_core::auth::{AuthChallenge, AuthOutcome};
+use qpx_auth::{AuthChallenge, AuthOutcome, AuthenticatedUser};
 use qpx_core::config::ActionConfig;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_core::rules::RuleMatchContext;
@@ -12,6 +12,7 @@ pub(crate) struct AllowedPolicy {
     pub(crate) action: ActionConfig,
     pub(crate) headers: Option<Arc<CompiledHeaderControl>>,
     pub(crate) matched_rule: Option<Arc<str>>,
+    pub(crate) authenticated_user: Option<AuthenticatedUser>,
 }
 
 pub(crate) enum ForwardPolicyDecision {
@@ -30,6 +31,7 @@ pub(crate) async fn evaluate_forward_policy(
 ) -> Result<ForwardPolicyDecision> {
     let state = runtime.state();
     let engine = state
+        .policy
         .rules_by_listener
         .get(listener_name)
         .ok_or_else(|| anyhow!("rule engine not found"))?;
@@ -40,6 +42,7 @@ pub(crate) async fn evaluate_forward_policy(
             action: engine.default_action().clone(),
             headers: None,
             matched_rule: None,
+            authenticated_user: None,
         })));
     }
 
@@ -50,6 +53,7 @@ pub(crate) async fn evaluate_forward_policy(
             continue;
         };
 
+        let mut authenticated_user = None;
         if let Some(auth_cfg) = rule.auth() {
             if !auth_cfg.require.is_empty() {
                 let key = normalized_require_key(&auth_cfg.require);
@@ -57,6 +61,7 @@ pub(crate) async fn evaluate_forward_policy(
                     Some(outcome) => outcome.clone(),
                     None => {
                         let outcome = state
+                            .security
                             .auth
                             .authenticate_proxy(
                                 ctx.src_ip,
@@ -78,6 +83,7 @@ pub(crate) async fn evaluate_forward_policy(
                         {
                             continue;
                         }
+                        authenticated_user = Some(user);
                     }
                     AuthOutcome::Challenge(challenge) => {
                         return Ok(ForwardPolicyDecision::Challenge(challenge))
@@ -96,6 +102,7 @@ pub(crate) async fn evaluate_forward_policy(
                 .unwrap_or_else(|| engine.default_action().clone()),
             headers: rule.headers().cloned(),
             matched_rule: Some(rule.name_arc()),
+            authenticated_user,
         })));
     }
 
@@ -103,6 +110,7 @@ pub(crate) async fn evaluate_forward_policy(
         action: engine.default_action().clone(),
         headers: None,
         matched_rule: None,
+        authenticated_user: None,
     })))
 }
 
@@ -130,7 +138,6 @@ mod tests {
     #[tokio::test]
     async fn groups_mismatch_continues_to_next_rule() {
         let config = Config {
-            version: 1,
             state_dir: None,
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
@@ -150,6 +157,9 @@ mod tests {
                 }],
                 ldap: None,
             },
+            identity_sources: Vec::new(),
+            ext_authz: Vec::new(),
+            destination_resolution: Default::default(),
             listeners: vec![ListenerConfig {
                 name: "forward".to_string(),
                 mode: ListenerMode::Forward,
@@ -189,13 +199,23 @@ mod tests {
                         rate_limit: None,
                     },
                 ],
+                connection_filter: Vec::new(),
                 upstream_proxy: None,
                 http3: None,
                 ftp: Default::default(),
                 xdp: None,
                 cache: None,
                 rate_limit: None,
+                policy_context: None,
+                http: None,
+                http_guard_profile: None,
+                destination_resolution: None,
+                http_modules: Vec::new(),
             }],
+            named_sets: Vec::new(),
+            http_guard_profiles: Vec::new(),
+            rate_limit_profiles: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
             reverse: Vec::new(),
             upstreams: Vec::new(),
             cache: CacheConfig::default(),
@@ -218,7 +238,14 @@ mod tests {
             method: Some("GET"),
             path: Some("/"),
             headers: None,
+            user: None,
             user_groups: &[],
+            device_id: None,
+            posture: &[],
+            tenant: None,
+            auth_strength: None,
+            idp: None,
+            ..Default::default()
         };
 
         let decision = evaluate_forward_policy(

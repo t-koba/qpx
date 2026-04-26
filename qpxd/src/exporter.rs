@@ -1,5 +1,7 @@
+use crate::http::body::Body;
+use crate::http::common::http_version_label;
 use anyhow::Result;
-use hyper::{Body, Request, Response};
+use hyper::{Request, Response};
 use metrics::counter;
 use qpx_core::config::ExporterConfig;
 use qpx_core::exporter::{unix_timestamp_nanos, CaptureDirection, CaptureEvent, CapturePlane};
@@ -252,16 +254,5 @@ fn bool_to_direction(client_to_server: bool) -> CaptureDirection {
         CaptureDirection::ClientToServer
     } else {
         CaptureDirection::ServerToClient
-    }
-}
-
-fn http_version_label(version: http::Version) -> &'static str {
-    match version {
-        http::Version::HTTP_09 => "HTTP/0.9",
-        http::Version::HTTP_10 => "HTTP/1.0",
-        http::Version::HTTP_11 => "HTTP/1.1",
-        http::Version::HTTP_2 => "HTTP/2",
-        http::Version::HTTP_3 => "HTTP/3",
-        _ => "HTTP/1.1",
     }
 }

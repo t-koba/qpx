@@ -38,9 +38,7 @@ mod imp {
     }
 
     pub fn load_or_generate_ca(state_dir: &Path) -> Result<CaStore> {
-        ensure_path_not_symlink(state_dir, "state dir")?;
-        fs::create_dir_all(state_dir)
-            .with_context(|| format!("failed to create state dir {}", state_dir.display()))?;
+        ensure_private_state_dir(state_dir)?;
         let cert_path = state_dir.join("ca.crt");
         let key_path = state_dir.join("ca.key");
         if cert_path.exists() && key_path.exists() {
@@ -191,6 +189,130 @@ mod imp {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn ensure_private_state_dir(path: &Path) -> Result<()> {
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            current.push(component.as_os_str());
+            match fs::symlink_metadata(&current) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        current = resolve_trusted_state_symlink(&current, &meta)?;
+                        continue;
+                    }
+                    if !meta.is_dir() {
+                        return Err(anyhow!(
+                            "state dir component is not a directory: {}",
+                            current.display()
+                        ));
+                    }
+                    reject_untrusted_state_ancestor(&current, &meta)?;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir(&current).with_context(|| {
+                        format!("failed to create state dir component {}", current.display())
+                    })?;
+                    set_private_directory_permissions(&current)?;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+
+    fn set_private_directory_permissions(path: &Path) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn reject_untrusted_state_ancestor(path: &Path, meta: &fs::Metadata) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let mode = meta.mode();
+        let sticky = mode & libc::S_ISVTX as u32 != 0;
+        let euid = unsafe { libc::geteuid() };
+
+        if meta.uid() != 0 && meta.uid() != euid {
+            return Err(anyhow!(
+                "refusing state dir ancestor not owned by root or current user: {}",
+                path.display()
+            ));
+        }
+        if sticky && mode & 0o022 != 0 && meta.uid() != 0 && meta.uid() != euid {
+            return Err(anyhow!(
+                "refusing sticky writable state dir ancestor not owned by root or current user: {}",
+                path.display()
+            ));
+        }
+        if mode & 0o002 != 0 && !sticky {
+            return Err(anyhow!(
+                "refusing attacker-writable state dir ancestor {}",
+                path.display()
+            ));
+        }
+        if !sticky && mode & 0o020 != 0 && meta.uid() != euid {
+            return Err(anyhow!(
+                "refusing group-writable state dir ancestor not owned by current user: {}",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn resolve_trusted_state_symlink(path: &Path, meta: &fs::Metadata) -> Result<PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != 0 && meta.uid() != euid {
+            return Err(anyhow!(
+                "state dir path must not contain untrusted symlink component: {}",
+                path.display()
+            ));
+        }
+        let resolved = fs::canonicalize(path).with_context(|| {
+            format!(
+                "failed to resolve trusted state dir symlink {}",
+                path.display()
+            )
+        })?;
+        let resolved_meta = fs::metadata(&resolved)?;
+        if !resolved_meta.is_dir() {
+            return Err(anyhow!(
+                "state dir symlink target is not a directory: {}",
+                resolved.display()
+            ));
+        }
+        reject_untrusted_state_ancestor(&resolved, &resolved_meta)?;
+        Ok(resolved)
+    }
+
+    #[cfg(not(unix))]
+    fn resolve_trusted_state_symlink(path: &Path, _meta: &fs::Metadata) -> Result<PathBuf> {
+        Err(anyhow!(
+            "state dir path must not contain symlinks: {}",
+            path.display()
+        ))
+    }
+
+    #[cfg(not(unix))]
+    fn reject_untrusted_state_ancestor(_path: &Path, _meta: &fs::Metadata) -> Result<()> {
         Ok(())
     }
 
@@ -447,6 +569,13 @@ mod imp {
 #[cfg(feature = "tls-rustls")]
 pub use imp::*;
 
+#[cfg(feature = "tls-rustls")]
+pub fn init_rustls_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
 // --- Stub implementation when tls-rustls is not enabled ---
 
 #[cfg(not(feature = "tls-rustls"))]
@@ -479,6 +608,9 @@ pub fn write_ca_files(state_dir: &Path) -> Result<(PathBuf, PathBuf)> {
         state_dir.display()
     ))
 }
+
+#[cfg(not(feature = "tls-rustls"))]
+pub fn init_rustls_crypto_provider() {}
 
 #[cfg(not(feature = "tls-rustls"))]
 impl CaStore {

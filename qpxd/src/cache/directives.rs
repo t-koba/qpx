@@ -1,23 +1,31 @@
 use super::freshness::{parse_http_date_secs, parse_if_none_match};
-use super::types::{RequestDirectives, ResponseDirectives};
+use super::types::{ByteRangeSpec, IfRangeCondition, RequestDirectives, ResponseDirectives};
 use http::header::{
     CACHE_CONTROL, IF_MATCH, IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, IF_UNMODIFIED_SINCE,
     PRAGMA, RANGE,
 };
 
 pub(super) fn parse_request_directives(headers: &http::HeaderMap) -> RequestDirectives {
+    let range = parse_single_range_header(headers);
+    let if_range = parse_if_range_header(headers);
     let mut directives = RequestDirectives {
         has_conditional: headers.contains_key(IF_NONE_MATCH)
             || headers.contains_key(IF_MODIFIED_SINCE),
+        if_match: parse_if_match(headers),
         if_none_match: parse_if_none_match(headers),
         if_modified_since: headers
             .get(IF_MODIFIED_SINCE)
             .and_then(|v| v.to_str().ok())
             .and_then(parse_http_date_secs),
+        if_unmodified_since: headers
+            .get(IF_UNMODIFIED_SINCE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_http_date_secs),
+        if_range,
+        range,
         has_unsupported_conditionals: headers.contains_key(RANGE)
-            || headers.contains_key(IF_RANGE)
-            || headers.contains_key(IF_MATCH)
-            || headers.contains_key(IF_UNMODIFIED_SINCE),
+            && directives_range_invalid(headers)
+            || headers.contains_key(IF_RANGE) && directives_if_range_invalid(headers),
         ..RequestDirectives::default()
     };
 
@@ -70,6 +78,22 @@ pub(super) fn parse_request_directives(headers: &http::HeaderMap) -> RequestDire
     directives
 }
 
+pub(super) fn parse_if_match(headers: &http::HeaderMap) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in headers.get_all(IF_MATCH).iter() {
+        let Ok(raw) = value.to_str() else {
+            continue;
+        };
+        for token in raw.split(',') {
+            let trimmed = token.trim();
+            if !trimmed.is_empty() {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    out
+}
+
 pub(super) fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDirectives {
     let mut out = ResponseDirectives::default();
     for value in headers.get_all(CACHE_CONTROL) {
@@ -89,6 +113,8 @@ pub(super) fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDi
                 } else {
                     out.no_cache = true;
                 }
+            } else if directive == "must-understand" {
+                out.must_understand = true;
             } else if directive == "private" {
                 if let Some(value) = value.as_deref() {
                     out.private_fields
@@ -204,4 +230,52 @@ fn parse_cache_field_name_list(value: &str) -> Vec<String> {
         .map(|token| token.trim().trim_matches('"').to_ascii_lowercase())
         .filter(|token| !token.is_empty())
         .collect()
+}
+
+fn parse_single_range_header(headers: &http::HeaderMap) -> Option<ByteRangeSpec> {
+    let raw = headers.get(RANGE)?.to_str().ok()?;
+    parse_range_header(raw)
+}
+
+fn parse_range_header(raw: &str) -> Option<ByteRangeSpec> {
+    let value = raw.trim();
+    let ranges = value.strip_prefix("bytes=")?;
+    if ranges.contains(',') {
+        return None;
+    }
+    let (start, end) = ranges.split_once('-')?;
+    let start = start.trim();
+    let end = end.trim();
+    if start.is_empty() {
+        let len = end.parse::<u64>().ok()?;
+        return (len > 0).then_some(ByteRangeSpec::Suffix { len });
+    }
+    let start = start.parse::<u64>().ok()?;
+    if end.is_empty() {
+        return Some(ByteRangeSpec::From { start, end: None });
+    }
+    let end = end.parse::<u64>().ok()?;
+    (end >= start).then_some(ByteRangeSpec::From {
+        start,
+        end: Some(end),
+    })
+}
+
+fn parse_if_range_header(headers: &http::HeaderMap) -> Option<IfRangeCondition> {
+    let raw = headers.get(IF_RANGE)?.to_str().ok()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.starts_with('"') || raw.starts_with("W/") {
+        return Some(IfRangeCondition::Etag(raw.to_string()));
+    }
+    parse_http_date_secs(raw).map(IfRangeCondition::Date)
+}
+
+fn directives_range_invalid(headers: &http::HeaderMap) -> bool {
+    headers.contains_key(RANGE) && parse_single_range_header(headers).is_none()
+}
+
+fn directives_if_range_invalid(headers: &http::HeaderMap) -> bool {
+    headers.contains_key(IF_RANGE) && parse_if_range_header(headers).is_none()
 }

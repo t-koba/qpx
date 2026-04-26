@@ -1,0 +1,5 @@
+#!/bin/sh
+printf 'Status: 200 OK\r\n'
+printf 'Content-Type: text/plain\r\n'
+printf '\r\n'
+printf 'ok from qpxf cgi\n'

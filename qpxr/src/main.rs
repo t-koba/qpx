@@ -34,6 +34,8 @@ use tokio::task::spawn_blocking;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
+const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[cfg(all(feature = "tls-rustls", feature = "tls-native"))]
 compile_error!("qpxr: features tls-rustls and tls-native are mutually exclusive");
 
@@ -194,6 +196,7 @@ struct Endpoint {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    qpx_core::tls::init_rustls_crypto_provider();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -257,14 +260,16 @@ async fn main() -> Result<()> {
     let event_task = tokio::spawn(run_event_ingest_loop(ring, hub.clone()));
     let stream_task = tokio::spawn(run_stream_accept_loop(
         stream_listener,
-        hub,
-        stream_allow,
-        token,
-        tls,
-        tls_accept_timeout,
-        max_control,
-        handshake_timeout,
-        connections,
+        StreamAcceptContext {
+            hub,
+            allow: stream_allow,
+            token,
+            tls,
+            tls_accept_timeout,
+            max_control_line_bytes: max_control,
+            handshake_timeout,
+            connections,
+        },
     ));
     let _ = tokio::try_join!(event_task, stream_task)?;
     Ok(())
@@ -305,6 +310,36 @@ struct SecurityPosture {
 fn validate_security_posture(sp: &SecurityPosture) -> Result<()> {
     for (label, addr, allow) in [("stream", sp.stream_listen, sp.stream_allow_configured)] {
         if addr.ip().is_loopback() {
+            if sp.unsafe_allow_insecure {
+                continue;
+            }
+            #[cfg(feature = "tls-rustls")]
+            let has_local_access_control = sp.token_enabled || sp.mtls_enabled;
+            #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
+            let has_local_access_control = sp.token_enabled;
+            #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+            let has_local_access_control = sp.token_enabled;
+
+            if !has_local_access_control {
+                #[cfg(feature = "tls-rustls")]
+                {
+                    return Err(anyhow!(
+                        "{label}.listen is loopback ({addr}) but local users are not authenticated; set --token-env and/or --tls-client-ca (or --unsafe-allow-insecure)"
+                    ));
+                }
+                #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
+                {
+                    return Err(anyhow!(
+                        "{label}.listen is loopback ({addr}) but local users are not authenticated; set --token-env (or --unsafe-allow-insecure)"
+                    ));
+                }
+                #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+                {
+                    return Err(anyhow!(
+                        "{label}.listen is loopback ({addr}) but local users are not authenticated; set --token-env (or --unsafe-allow-insecure)"
+                    ));
+                }
+            }
             continue;
         }
         if sp.unsafe_allow_insecure {
@@ -607,13 +642,112 @@ impl RotatingFileSink {
 }
 
 fn ensure_dir_secure(dir: &Path) -> Result<()> {
-    ensure_not_symlink(dir, "save dir")?;
-    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        ensure_secure_dir_components(dir, "save dir")?;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
             .with_context(|| format!("failed to chmod {}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        ensure_not_symlink(dir, "save dir")?;
+        fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_secure_dir_components(dir: &Path, label: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut current = PathBuf::new();
+    for component in dir.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    current = resolve_trusted_symlink_component(&current, &meta, label)?;
+                    continue;
+                }
+                if !meta.is_dir() {
+                    return Err(anyhow!(
+                        "{label} component is not a directory: {}",
+                        current.display()
+                    ));
+                }
+                reject_untrusted_dir_component(&current, &meta, label)?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current)
+                    .with_context(|| format!("failed to create {}", current.display()))?;
+                fs::set_permissions(&current, fs::Permissions::from_mode(0o700))
+                    .with_context(|| format!("failed to chmod {}", current.display()))?;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn resolve_trusted_symlink_component(
+    path: &Path,
+    meta: &fs::Metadata,
+    label: &str,
+) -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != 0 && meta.uid() != euid {
+        return Err(anyhow!(
+            "{label} path must not contain untrusted symlink component: {}",
+            path.display()
+        ));
+    }
+    let resolved =
+        fs::canonicalize(path).with_context(|| format!("failed to resolve {}", path.display()))?;
+    let resolved_meta = fs::metadata(&resolved)?;
+    if !resolved_meta.is_dir() {
+        return Err(anyhow!(
+            "{label} symlink target is not a directory: {}",
+            resolved.display()
+        ));
+    }
+    reject_untrusted_dir_component(&resolved, &resolved_meta, label)?;
+    Ok(resolved)
+}
+
+#[cfg(unix)]
+fn reject_untrusted_dir_component(path: &Path, meta: &fs::Metadata, label: &str) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mode = meta.mode();
+    let sticky = mode & libc::S_ISVTX as u32 != 0;
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != 0 && meta.uid() != euid {
+        return Err(anyhow!(
+            "refusing {label} ancestor directory not owned by root or current user: {}",
+            path.display()
+        ));
+    }
+    if sticky && mode & 0o022 != 0 && meta.uid() != 0 && meta.uid() != euid {
+        return Err(anyhow!(
+            "refusing sticky writable {label} ancestor directory not owned by root or current user: {}",
+            path.display()
+        ));
+    }
+    if mode & 0o002 != 0 && !sticky {
+        return Err(anyhow!(
+            "refusing attacker-writable {label} ancestor directory {}",
+            path.display()
+        ));
+    }
+    if !sticky && mode & 0o020 != 0 && meta.uid() != euid {
+        return Err(anyhow!(
+            "refusing group-writable {label} ancestor directory not owned by current user: {}",
+            path.display()
+        ));
     }
     Ok(())
 }
@@ -812,9 +946,7 @@ async fn run_event_ingest_loop(mut ring: ShmRingBuffer, hub: ExporterHub) -> Res
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_stream_accept_loop(
-    listener: TcpListener,
+struct StreamAcceptContext {
     hub: ExporterHub,
     allow: Vec<IpCidr>,
     token: Option<String>,
@@ -823,7 +955,19 @@ async fn run_stream_accept_loop(
     max_control_line_bytes: usize,
     handshake_timeout: Duration,
     connections: Arc<Semaphore>,
-) -> Result<()> {
+}
+
+async fn run_stream_accept_loop(listener: TcpListener, ctx: StreamAcceptContext) -> Result<()> {
+    let StreamAcceptContext {
+        hub,
+        allow,
+        token,
+        tls,
+        tls_accept_timeout,
+        max_control_line_bytes,
+        handshake_timeout,
+        connections,
+    } = ctx;
     #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
     let _ = tls_accept_timeout;
     loop {
@@ -925,23 +1069,33 @@ where
     let mode = parse_mode(next.ok_or_else(|| anyhow!("missing MODE line"))?.as_slice())?;
 
     // Always start the stream with a valid section header + interfaces.
-    writer.write_all(&hub.pcap_preface).await?;
+    write_stream_block(&mut writer, &hub.pcap_preface).await?;
 
     if matches!(mode, StreamMode::History | StreamMode::Follow) {
         for block in hub.history_snapshot().await {
-            writer.write_all(&block).await?;
+            write_stream_block(&mut writer, &block).await?;
         }
     }
     if matches!(mode, StreamMode::Live | StreamMode::Follow) {
         let mut rx = hub.live_tx.subscribe();
         loop {
             match rx.recv().await {
-                Ok(block) => writer.write_all(&block).await?,
+                Ok(block) => write_stream_block(&mut writer, &block).await?,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     }
+    Ok(())
+}
+
+async fn write_stream_block<W>(writer: &mut W, block: &[u8]) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    timeout(STREAM_WRITE_TIMEOUT, writer.write_all(block))
+        .await
+        .map_err(|_| anyhow!("qpxr stream client write timed out"))??;
     Ok(())
 }
 
@@ -1234,5 +1388,36 @@ mod tests {
         let endpoint = parse_endpoint("127.0.0.1:8443", 80, "server");
         assert_eq!(endpoint.ip, Ipv4Addr::new(127, 0, 0, 1));
         assert_eq!(endpoint.port, 8443);
+    }
+
+    #[test]
+    fn validate_security_posture_rejects_unauthenticated_loopback_stream() {
+        let err = validate_security_posture(&SecurityPosture {
+            stream_listen: "127.0.0.1:19101".parse().unwrap(),
+            tls_enabled: false,
+            stream_allow_configured: false,
+            token_enabled: false,
+            #[cfg(feature = "tls-rustls")]
+            mtls_enabled: false,
+            unsafe_allow_insecure: false,
+        })
+        .expect_err("loopback stream should require auth");
+        assert!(err
+            .to_string()
+            .contains("local users are not authenticated"));
+    }
+
+    #[test]
+    fn validate_security_posture_accepts_loopback_stream_with_token() {
+        validate_security_posture(&SecurityPosture {
+            stream_listen: "127.0.0.1:19101".parse().unwrap(),
+            tls_enabled: false,
+            stream_allow_configured: false,
+            token_enabled: true,
+            #[cfg(feature = "tls-rustls")]
+            mtls_enabled: false,
+            unsafe_allow_insecure: false,
+        })
+        .expect("loopback token auth should be accepted");
     }
 }

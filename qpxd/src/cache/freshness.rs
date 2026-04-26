@@ -1,4 +1,6 @@
-use super::types::{CachedResponseEnvelope, RequestDirectives, ResponseDirectives};
+use super::types::{
+    ByteRangeSpec, CachedResponseEnvelope, IfRangeCondition, RequestDirectives, ResponseDirectives,
+};
 use super::util::header_value;
 use http::header::{AGE, DATE, ETAG, EXPIRES, IF_NONE_MATCH, LAST_MODIFIED};
 use qpx_core::config::CachePolicyConfig;
@@ -113,6 +115,40 @@ pub(super) fn conditional_not_modified(
     false
 }
 
+pub(super) fn precondition_failed(
+    req: &RequestDirectives,
+    envelope: &CachedResponseEnvelope,
+) -> bool {
+    if !req.if_match.is_empty() && !if_match_succeeds(req, envelope) {
+        return true;
+    }
+
+    if let (Some(if_unmodified_since), Some(last_modified)) = (
+        req.if_unmodified_since,
+        header_value(&envelope.headers, LAST_MODIFIED.as_str())
+            .and_then(|v| parse_http_date_secs(&v)),
+    ) {
+        if last_modified > if_unmodified_since {
+            return true;
+        }
+    }
+
+    false
+}
+
+pub(super) fn active_range<'a>(
+    req: &'a RequestDirectives,
+    envelope: &CachedResponseEnvelope,
+) -> Option<&'a ByteRangeSpec> {
+    let range = req.range.as_ref()?;
+    if let Some(if_range) = req.if_range.as_ref() {
+        if !if_range_matches(if_range, envelope) {
+            return None;
+        }
+    }
+    Some(range)
+}
+
 pub(super) fn parse_if_none_match(headers: &http::HeaderMap) -> Vec<String> {
     let mut out = Vec::new();
     for value in headers.get_all(IF_NONE_MATCH).iter() {
@@ -127,6 +163,18 @@ pub(super) fn parse_if_none_match(headers: &http::HeaderMap) -> Vec<String> {
         }
     }
     out
+}
+
+fn if_match_succeeds(req: &RequestDirectives, envelope: &CachedResponseEnvelope) -> bool {
+    if req.if_match.iter().any(|tag| tag == "*") {
+        return true;
+    }
+    let Some(etag) = header_value(&envelope.headers, ETAG.as_str()) else {
+        return false;
+    };
+    req.if_match
+        .iter()
+        .any(|candidate| strong_etag_eq(candidate, etag.as_str()))
 }
 
 pub(super) fn freshness_lifetime_secs_from_vec(
@@ -152,6 +200,22 @@ fn weak_etag_eq(lhs: &str, rhs: &str) -> bool {
         tag.strip_prefix("W/").unwrap_or(tag)
     }
     normalize(lhs) == normalize(rhs)
+}
+
+fn strong_etag_eq(lhs: &str, rhs: &str) -> bool {
+    let lhs = lhs.trim();
+    let rhs = rhs.trim();
+    !lhs.starts_with("W/") && !rhs.starts_with("W/") && lhs == rhs
+}
+
+fn if_range_matches(condition: &IfRangeCondition, envelope: &CachedResponseEnvelope) -> bool {
+    match condition {
+        IfRangeCondition::Etag(expected) => header_value(&envelope.headers, ETAG.as_str())
+            .is_some_and(|etag| strong_etag_eq(expected, etag.as_str())),
+        IfRangeCondition::Date(expected) => header_value(&envelope.headers, LAST_MODIFIED.as_str())
+            .and_then(|value| parse_http_date_secs(&value))
+            .is_some_and(|last_modified| last_modified <= *expected),
+    }
 }
 
 pub(super) fn parse_http_date_secs(value: &str) -> Option<u64> {

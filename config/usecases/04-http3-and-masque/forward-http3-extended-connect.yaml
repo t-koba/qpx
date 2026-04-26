@@ -1,0 +1,61 @@
+# Build-time note:
+# - Works with either HTTP/3 backend.
+# - Choose `http3-backend-qpx` if the same build also needs WebTransport
+#   relay on the clean-room backend.
+#
+# Client note:
+# - This sample is for generic non-WebTransport HTTP/3 extended CONNECT.
+# - The downstream client supplies `:protocol`, `:scheme`, and `:path`.
+# - Send `Capsule-Protocol: ?1` only for protocols that use per-stream HTTP
+#   datagrams/capsules in addition to the CONNECT request stream itself.
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+listeners:
+- name: forward-http3-extended-connect
+  listen: 127.0.0.1:18121
+  default_action:
+    type: block
+  rules:
+  - name: chain-capsule-protocols
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      method:
+      - CONNECT
+      host:
+      - '*.capsule.corp.example'
+      headers:
+      - name: capsule-protocol
+        value: '?1'
+    auth:
+      require:
+      - local
+    action:
+      type: proxy
+      upstream: https://extended-connect-gateway.example.com:443
+  - name: allow-direct-stream-protocols
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      method:
+      - CONNECT
+      host:
+      - '*.stream.lab.example'
+    action:
+      type: direct
+  - name: block-advertising
+    match:
+      host:
+      - '*.doubleclick.net'
+      - '*.googlesyndication.com'
+    action:
+      type: block
+  http3:
+    enabled: true
+    listen: 127.0.0.1:18447
+  mode: forward
+auth:
+  users:
+  - username: tester
+    password: change-me

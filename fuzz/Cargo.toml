@@ -1,0 +1,51 @@
+[package]
+name = "qpx-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
+qpx-h3 = { path = "../qpx-h3" }
+qpxd = { path = "../qpxd" }
+tempfile = "3"
+
+[[bin]]
+name = "shm_ring_ops"
+path = "fuzz_targets/shm_ring_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proxy_v2_parser"
+path = "fuzz_targets/proxy_v2_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http1_request_head"
+path = "fuzz_targets/http1_request_head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qpack_decoder"
+path = "fuzz_targets/qpack_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_hello_sniff"
+path = "fuzz_targets/client_hello_sniff.rs"
+test = false
+doc = false
+bench = false

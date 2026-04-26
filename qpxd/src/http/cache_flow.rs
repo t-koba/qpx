@@ -1,9 +1,11 @@
 use crate::cache::{self, CacheBackend, CacheRequestKey, LookupOutcome, RevalidationState};
+use crate::http::body::Body;
 use anyhow::Result;
-use hyper::{Body, Method, Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub fn clone_request_head_for_revalidation(req: &Request<Body>) -> Request<Body> {
     let mut out = Request::new(Body::empty());
@@ -29,6 +31,7 @@ pub struct CacheWritebackContext<'a> {
     pub cache_policy: Option<&'a CachePolicyConfig>,
     pub request_headers_snapshot: &'a http::HeaderMap,
     pub revalidation_state: Option<RevalidationState>,
+    pub body_read_timeout: Duration,
     pub backends: &'a HashMap<String, Arc<dyn CacheBackend>>,
 }
 
@@ -47,7 +50,15 @@ pub async fn lookup_with_revalidation(
         return Ok((CacheLookupDecision::Miss, None));
     };
 
-    match cache::lookup(request_headers_snapshot, key, policy, backends).await? {
+    match cache::lookup(
+        req.method(),
+        request_headers_snapshot,
+        key,
+        policy,
+        backends,
+    )
+    .await?
+    {
         LookupOutcome::Hit(hit) => Ok((CacheLookupDecision::Hit(hit), None)),
         LookupOutcome::StaleWhileRevalidate(hit, state) => {
             cache::attach_revalidation_headers(req.headers_mut(), &state);
@@ -79,6 +90,7 @@ pub async fn process_upstream_response_for_cache(
         cache_policy,
         request_headers_snapshot,
         revalidation_state,
+        body_read_timeout,
         backends,
     } = ctx;
     if let Some(policy) = cache_policy {
@@ -98,6 +110,7 @@ pub async fn process_upstream_response_for_cache(
     {
         if response.status() == StatusCode::NOT_MODIFIED {
             response = cache::revalidate_not_modified(
+                request_method,
                 request_headers_snapshot,
                 policy,
                 response,
@@ -117,7 +130,10 @@ pub async fn process_upstream_response_for_cache(
                 key,
                 policy,
                 response,
-                response_delay_secs,
+                cache::CacheStoreTiming {
+                    response_delay_secs,
+                    body_read_timeout,
+                },
                 backends,
             )
             .await?;

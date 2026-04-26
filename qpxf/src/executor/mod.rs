@@ -29,8 +29,8 @@ pub struct CgiRequest {
     pub matched_prefix: Option<String>,
 }
 
-/// A running execution instance: stdin is fed by the FastCGI server, stdout/stderr
-/// are streamed back to the FastCGI client.
+/// A running execution instance: stdin is fed by the IPC server, stdout/stderr
+/// are streamed back to the IPC client.
 pub struct Execution {
     pub stdin: mpsc::Sender<Bytes>,
     pub stdout: mpsc::Receiver<Bytes>,

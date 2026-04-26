@@ -1,11 +1,11 @@
 use super::CacheBackend;
+use crate::http::body::Body;
 use crate::tls::client::connect_tls_http1;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::BytesMut;
-use hyper::body::HttpBody as _;
 use hyper::header::HOST;
-use hyper::{Body, Method, Request, StatusCode, Uri};
+use hyper::{Method, Request, StatusCode, Uri};
 use qpx_core::config::CacheBackendConfig;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -87,27 +87,25 @@ impl HttpCacheBackend {
         let tcp = timeout(self.timeout, tokio::net::TcpStream::connect((host, port))).await??;
         match scheme {
             "http" => {
-                let (mut sender, conn) = timeout(
-                    self.timeout,
-                    hyper::client::conn::Builder::new().handshake(tcp),
-                )
-                .await??;
+                let (mut sender, conn) =
+                    timeout(self.timeout, crate::http::common::handshake_http1(tcp)).await??;
                 tokio::spawn(async move {
                     let _ = conn.await;
                 });
-                Ok(timeout(self.timeout, sender.send_request(req)).await??)
+                Ok(timeout(self.timeout, sender.send_request(req))
+                    .await??
+                    .map(Body::from))
             }
             "https" => {
                 let tls = timeout(self.timeout, connect_tls_http1(host, tcp)).await??;
-                let (mut sender, conn) = timeout(
-                    self.timeout,
-                    hyper::client::conn::Builder::new().handshake(tls),
-                )
-                .await??;
+                let (mut sender, conn) =
+                    timeout(self.timeout, crate::http::common::handshake_http1(tls)).await??;
                 tokio::spawn(async move {
                     let _ = conn.await;
                 });
-                Ok(timeout(self.timeout, sender.send_request(req)).await??)
+                Ok(timeout(self.timeout, sender.send_request(req))
+                    .await??
+                    .map(Body::from))
             }
             _ => Err(anyhow!("unsupported cache backend scheme: {}", scheme)),
         }

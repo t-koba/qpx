@@ -1,8 +1,10 @@
+use crate::http::body::Body;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
-use hyper::body::HttpBody as _;
-use hyper::{Body, Request, Uri};
+use hyper::{Request, Uri};
+use std::time::Duration;
+use tokio::time::timeout;
 
 #[derive(Clone)]
 pub(super) struct ReverseRequestTemplate {
@@ -14,9 +16,13 @@ pub(super) struct ReverseRequestTemplate {
 }
 
 impl ReverseRequestTemplate {
-    pub(super) async fn from_request(req: Request<Body>, max_body_bytes: usize) -> Result<Self> {
+    pub(super) async fn from_request(
+        req: Request<Body>,
+        max_body_bytes: usize,
+        body_read_timeout: Duration,
+    ) -> Result<Self> {
         let (parts, body) = req.into_parts();
-        let body = collect_body_limited(body, max_body_bytes).await?;
+        let body = collect_body_limited(body, max_body_bytes, body_read_timeout).await?;
         Ok(Self {
             method: parts.method,
             uri: parts.uri,
@@ -73,9 +79,16 @@ fn request_may_have_body(req: &Request<Body>) -> bool {
     false
 }
 
-async fn collect_body_limited(mut body: Body, max_body_bytes: usize) -> Result<bytes::Bytes> {
+async fn collect_body_limited(
+    mut body: Body,
+    max_body_bytes: usize,
+    body_read_timeout: Duration,
+) -> Result<bytes::Bytes> {
     let mut out = BytesMut::new();
-    while let Some(frame) = body.data().await {
+    while let Some(frame) = timeout(body_read_timeout, body.data())
+        .await
+        .map_err(|_| anyhow!("reverse request body read timed out"))?
+    {
         let chunk = frame?;
         let next = out
             .len()
@@ -90,4 +103,29 @@ async fn collect_body_limited(mut body: Body, max_body_bytes: usize) -> Result<b
         out.extend_from_slice(&chunk);
     }
     Ok(out.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::Duration;
+
+    #[tokio::test]
+    async fn reverse_request_template_times_out_idle_body() {
+        let (_sender, body) = Body::channel();
+        let req = Request::builder()
+            .method(http::Method::POST)
+            .uri("http://example.test/upload")
+            .body(body)
+            .expect("request");
+
+        let err = match ReverseRequestTemplate::from_request(req, 1024, Duration::from_millis(10))
+            .await
+        {
+            Ok(_) => panic!("idle body must time out"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("timed out"));
+    }
 }

@@ -1,6 +1,16 @@
+#[path = "support/collect_body.rs"]
+mod collect_body_support;
+#[path = "support/empty_body.rs"]
+mod empty_body_support;
+#[path = "support/test_client.rs"]
+mod test_client_support;
+
 #[cfg(unix)]
 mod e2e {
-    use hyper::{Body, Client, Request};
+    use super::collect_body_support::collect_body;
+    use super::empty_body_support::empty_body;
+    use super::test_client_support::test_client;
+    use hyper::Request;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
@@ -31,20 +41,19 @@ mod e2e {
 
     fn write_qpxd_config(path: &std::path::Path, qpxd_listen: &str, qpxf_addr: &str) {
         let config = format!(
-            r#"version: 1
+            r#"reverse:
+- name: e2e
+  listen: '{qpxd_listen}'
+  routes:
+  - match:
+      path:
+      - /*
+    ipc:
+      mode: tcp
+      address: '{qpxf_addr}'
+      timeout_ms: 5000
 system_log:
-  level: trace
-reverse:
-  - name: "e2e"
-    listen: "{qpxd_listen}"
-    routes:
-      - match:
-          path: ["/*"]
-        ipc:
-          mode: tcp
-          address: "{qpxf_addr}"
-          timeout_ms: 5000
-"#,
+  level: trace"#,
         );
         std::fs::write(path, config).unwrap();
     }
@@ -98,13 +107,15 @@ handlers:
                 tokio::spawn(async move {
                     if let Err(err) = qpxf::server::handle_connection(
                         stream,
-                        router,
-                        sem,
-                        input_idle,
-                        conn_idle,
-                        max_requests_per_connection,
-                        max_params_bytes,
-                        max_stdin_bytes,
+                        qpxf::server::ConnectionContext {
+                            router,
+                            semaphore: sem,
+                            input_idle,
+                            conn_idle,
+                            max_requests_per_connection,
+                            max_params_bytes,
+                            max_stdin_bytes,
+                        },
                     )
                     .await
                     {
@@ -114,7 +125,7 @@ handlers:
             }
         });
 
-        // Start qpxd binary with a reverse config that targets qpxf via typed fastcgi config.
+        // Start qpxd with a reverse config that targets qpxf via routes[].ipc.
         let qpxd_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let qpxd_port = qpxd_listener.local_addr().unwrap().port();
         drop(qpxd_listener);
@@ -150,20 +161,20 @@ handlers:
             );
         }
 
-        // Send HTTP request to qpxd; it should proxy to qpxf via FastCGI.
-        let client = Client::new();
+        // Send HTTP request to qpxd; it should proxy to qpxf over QPX-IPC.
+        let client = test_client();
         let uri: hyper::Uri = format!("http://{qpxd_listen}/hello.sh").parse().unwrap();
         let req = Request::builder()
             .method("GET")
             .uri(uri)
-            .body(Body::empty())
+            .body(empty_body())
             .unwrap();
         let resp = timeout(Duration::from_secs(10), client.request(req))
             .await
             .expect("http timeout")
             .expect("http request failed");
         let status = resp.status();
-        let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let body = collect_body(resp.into_body()).await.unwrap();
         let body_str = String::from_utf8_lossy(&body);
 
         // Cleanup.

@@ -1,66 +1,85 @@
+use crate::http::body::Body;
+use crate::http::http1_codec::serve_http1_with_interim;
+use crate::http::interim::{serve_h2_with_interim, sniff_h2_preface, H2_PREFACE};
 use crate::http::l7::finalize_response_for_request;
-use crate::http::server::serve_http1_with_upgrades;
 use crate::runtime::Runtime;
+#[cfg(feature = "http3")]
+use crate::sidecar_control::SidecarControl;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
+use crate::{
+    connection_filter::{
+        emit_connection_filter_audit, evaluate_connection_filter, ConnectionFilterStage,
+    },
+    runtime::metric_names,
+};
 use anyhow::{anyhow, Result};
-use hyper::service::service_fn;
-use hyper::{Body, Request, Response, StatusCode};
+use hyper::{Request, Response, StatusCode};
 use metrics::{counter, histogram};
 use qpx_core::config::ListenerConfig;
-use qpx_core::middleware::access_log::{AccessLogContext, AccessLogService};
+use qpx_core::rules::RuleMatchContext;
+use qpx_observability::access_log::{AccessLogContext, AccessLogService};
+use qpx_observability::handler_fn;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 mod connect;
 #[cfg(feature = "http3")]
-mod h3;
-#[cfg(feature = "http3")]
+mod connect_udp_upstream;
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
+pub(crate) mod h3;
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-qpx",
+    not(feature = "http3-backend-h3")
+))]
+#[path = "h3_qpx.rs"]
+pub(crate) mod h3;
+#[cfg(all(
+    feature = "http3",
+    not(any(
+        all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")),
+        all(feature = "http3-backend-qpx", not(feature = "http3-backend-h3"))
+    ))
+))]
+#[path = "h3_invalid.rs"]
+pub(crate) mod h3;
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
 mod h3_connect;
-#[cfg(feature = "http3")]
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
 mod h3_connect_udp;
 mod policy;
 mod request;
 
-#[cfg(any(feature = "http3", feature = "mitm"))]
+#[cfg(any(feature = "mitm", all(feature = "http3", feature = "http3-backend-h3")))]
 pub(crate) use policy::{evaluate_forward_policy, ForwardPolicyDecision};
 pub(crate) use request::handle_request_inner;
 #[cfg(feature = "mitm")]
 pub(crate) use request::proxy_auth_required;
 
-pub async fn run(listener: ListenerConfig, runtime: Runtime) -> Result<()> {
+pub async fn run_tcp(
+    listener: ListenerConfig,
+    runtime: Runtime,
+    shutdown: watch::Receiver<bool>,
+    tcp_listeners: Vec<TcpListener>,
+) -> Result<()> {
     let addr: SocketAddr = listener.listen.parse()?;
-    let h3_task: Option<tokio::task::JoinHandle<Result<()>>> = if listener
-        .http3
-        .as_ref()
-        .map(|cfg| cfg.enabled)
-        .unwrap_or(false)
-    {
-        #[cfg(feature = "http3")]
-        {
-            let http3 = listener.http3.clone().expect("enabled config");
-            let listener_h3 = listener.clone();
-            let runtime_h3 = runtime.clone();
-            Some(tokio::spawn(async move {
-                crate::forward::h3::run_http3_listener(listener_h3, runtime_h3, http3).await
-            }))
-        }
-        #[cfg(not(feature = "http3"))]
-        {
-            return Err(anyhow!(
-                "listener {} enables http3, but this build was compiled without feature http3",
-                listener.name
-            ));
-        }
-    } else {
-        None
-    };
-
-    let runtime_cfg = runtime.state().config.runtime.clone();
-    let tcp_listeners = crate::net::bind_tcp_listeners(addr, &runtime_cfg)?;
     info!(
         listener = %listener.name,
         addr = %addr,
@@ -75,33 +94,43 @@ pub async fn run(listener: ListenerConfig, runtime: Runtime) -> Result<()> {
         let runtime = runtime.clone();
         let listener_name = listener_name.clone();
         let xdp_cfg = xdp_cfg.clone();
+        let acceptor_shutdown = shutdown.clone();
         accept_tasks.push(tokio::spawn(async move {
-            run_forward_acceptor(tcp_listener, runtime, listener_name, xdp_cfg).await
+            run_forward_acceptor(
+                tcp_listener,
+                runtime,
+                listener_name,
+                xdp_cfg,
+                acceptor_shutdown,
+            )
+            .await
         }));
     }
-    let http_server = async move {
-        for task in accept_tasks {
-            match task.await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => return Err(err),
-                Err(err) => return Err(anyhow!("forward acceptor task failed: {}", err)),
-            }
+    for task in accept_tasks {
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err),
+            Err(err) => return Err(anyhow!("forward acceptor task failed: {}", err)),
         }
-        Ok::<(), anyhow::Error>(())
-    };
-    if let Some(task) = h3_task {
-        tokio::select! {
-            res = http_server => {
-                res?;
-            }
-            res = task => {
-                res??;
-            }
-        }
-    } else {
-        http_server.await?;
     }
     Ok(())
+}
+
+#[cfg(feature = "http3")]
+pub async fn run_h3(
+    listener: ListenerConfig,
+    runtime: Runtime,
+    shutdown: watch::Receiver<SidecarControl>,
+    endpoint_socket: crate::http3::quinn_socket::QuinnEndpointSocket,
+) -> Result<()> {
+    let http3 = listener.http3.clone().ok_or_else(|| {
+        anyhow!(
+            "listener {} enables http3 sidecar without http3 config",
+            listener.name
+        )
+    })?;
+    crate::forward::h3::run_http3_listener(listener, runtime, http3, shutdown, endpoint_socket)
+        .await
 }
 
 async fn run_forward_acceptor(
@@ -109,18 +138,52 @@ async fn run_forward_acceptor(
     runtime: Runtime,
     listener_name: String,
     xdp_cfg: Option<crate::xdp::CompiledXdpConfig>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let semaphore = runtime.state().connection_semaphore.clone();
     loop {
-        let permit = semaphore.clone().acquire_owned().await?;
-        let (stream, remote_addr) = match tcp_listener.accept().await {
-            Ok(accepted) => accepted,
+        let permit = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    None
+                } else {
+                    continue;
+                }
+            }
+            permit = semaphore.clone().acquire_owned() => Some(permit?),
+        };
+        if permit.is_none() {
+            break;
+        }
+        let permit = permit.expect("checked permit");
+        let accepted = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    None
+                } else {
+                    continue;
+                }
+            }
+            accepted = tcp_listener.accept() => match accepted {
+                Ok(accepted) => Some(accepted),
+                Err(err) => {
+                    warn!(error = ?err, "forward accept failed");
+                    continue;
+                }
+            }
+        };
+        if accepted.is_none() {
+            break;
+        }
+        let (stream, remote_addr) = accepted.expect("checked accept");
+        let _ = stream.set_nodelay(true);
+        let local_port = match stream.local_addr() {
+            Ok(addr) => addr.port(),
             Err(err) => {
-                warn!(error = ?err, "forward accept failed");
+                warn!(error = ?err, "failed to resolve forward local addr");
                 continue;
             }
         };
-        let _ = stream.set_nodelay(true);
         let runtime = runtime.clone();
         let listener_name = listener_name.clone();
         let xdp_cfg = xdp_cfg.clone();
@@ -143,9 +206,47 @@ async fn run_forward_acceptor(
                     return;
                 }
             };
+            let block_rule = {
+                let state = runtime.state();
+                evaluate_connection_filter(
+                    state
+                        .policy
+                        .connection_filters_by_listener
+                        .get(listener_name.as_str()),
+                    &RuleMatchContext {
+                        src_ip: Some(effective_remote_addr.ip()),
+                        dst_port: Some(local_port),
+                        ..Default::default()
+                    },
+                )
+                .map(str::to_string)
+            };
+            if let Some(matched_rule) = block_rule {
+                counter!(metric_names().forward_requests_total.clone(), "result" => "blocked")
+                    .increment(1);
+                emit_connection_filter_audit(
+                    "listener",
+                    listener_name.as_str(),
+                    effective_remote_addr,
+                    local_port,
+                    ConnectionFilterStage::Accept,
+                    matched_rule.as_str(),
+                    None,
+                );
+                return;
+            }
+            let mut stream = stream;
+            let preface = match sniff_h2_preface(&mut stream, header_read_timeout).await {
+                Ok(preface) => preface,
+                Err(err) => {
+                    warn!(error = ?err, "forward protocol sniff failed");
+                    return;
+                }
+            };
+            let stream = crate::io_prefix::PrefixedIo::new(stream, preface.clone());
             let access_cfg = runtime.state().config.access_log.clone();
             let access_name = Arc::<str>::from(listener_name.as_str());
-            let service = service_fn(move |req| {
+            let service = handler_fn(move |req| {
                 handle_request(
                     req,
                     runtime.clone(),
@@ -162,13 +263,17 @@ async fn run_forward_acceptor(
                 },
                 &access_cfg,
             );
-            if let Err(err) =
-                serve_http1_with_upgrades(stream, service, header_read_timeout, true).await
-            {
+            let result = if preface.as_ref() == H2_PREFACE {
+                serve_h2_with_interim(stream, service, true, header_read_timeout).await
+            } else {
+                serve_http1_with_interim(stream, service, header_read_timeout).await
+            };
+            if let Err(err) = result {
                 warn!(error = ?err, "forward connection failed");
             }
         });
     }
+    Ok(())
 }
 
 async fn handle_request(
@@ -184,14 +289,14 @@ async fn handle_request(
     let result = handle_request_inner(req, runtime, &listener_name, remote_addr).await;
     match result {
         Ok(response) => {
-            counter!(state.metric_names.forward_requests_total.clone(), "result" => "ok")
+            counter!(state.observability.metric_names.forward_requests_total.clone(), "result" => "ok")
                 .increment(1);
-            histogram!(state.metric_names.forward_latency_ms.clone())
+            histogram!(state.observability.metric_names.forward_latency_ms.clone())
                 .record(started.elapsed().as_secs_f64() * 1000.0);
             Ok(response)
         }
         Err(err) => {
-            counter!(state.metric_names.forward_requests_total.clone(), "result" => "error")
+            counter!(state.observability.metric_names.forward_requests_total.clone(), "result" => "error")
                 .increment(1);
             error!(error = ?err, "request handling failed");
             Ok(finalize_response_for_request(

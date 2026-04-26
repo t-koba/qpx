@@ -1,0 +1,25 @@
+# tls-native-only sample.
+# Validate or run this with:
+#   cargo run -p qpxd --no-default-features --features tls-native -- check --config <this-file>
+reverse:
+- name: reverse-tls-native-pkcs12
+  listen: 0.0.0.0:19450
+  tls:
+    certificates:
+    - sni: shop.example.com
+      pkcs12: ${QPX_TLS_PKCS12:-/etc/qpx/tls/shop.example.com.p12}
+      pkcs12_password_env: QPX_TLS_PKCS12_PASSWORD
+  routes:
+  - match:
+      host:
+      - shop.example.com
+    timeout_ms: 20000
+    lb: round_robin
+    resilience:
+      retry:
+        attempts: 2
+        backoff_ms: 100
+    upstreams:
+    - http://10.30.0.21:8080
+    - http://10.30.0.22:8080
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

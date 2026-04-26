@@ -106,55 +106,54 @@ write_reverse_backend_config() {
   local listen_port="$2"
   local ok_body="$3"
   local ok_path="$4"
-  cat >"$cfg" <<YAML
-version: 1
-state_dir: "${STATE_DIR}"
+cat >"$cfg" <<YAML
 reverse:
-  - name: h2-backend
-    listen: "127.0.0.1:${listen_port}"
-    routes:
-      - match:
-          path: ["${ok_path}"]
-        upstreams: []
-        local_response:
-          status: 200
-          body: "${ok_body}"
-      - match: {}
-        upstreams: []
-        local_response:
-          status: 418
-          body: "ROUTE_MISS"
+- name: h2-backend
+  listen: 127.0.0.1:${listen_port}
+  routes:
+  - match:
+      path:
+      - ${ok_path}
+    local_response:
+      status: 200
+      body: ${ok_body}
+  - match: {}
+    local_response:
+      status: 418
+      body: ROUTE_MISS
+state_dir: ${STATE_DIR}
 YAML
 }
 
 write_transparent_backend_config() {
   local cfg="$1"
   local listen_port="$2"
-  cat >"$cfg" <<YAML
-version: 1
-state_dir: "${STATE_DIR}"
+cat >"$cfg" <<YAML
 listeners:
-  - name: transparent-http2-backend
-    mode: forward
-    listen: "127.0.0.1:${listen_port}"
-    default_action:
+- name: transparent-http2-backend
+  listen: 127.0.0.1:${listen_port}
+  default_action:
+    type: respond
+    local_response:
+      status: 428
+      body: HEADER_MISSING
+  rules:
+  - name: trace-with-header
+    match:
+      host:
+      - 127.0.0.1
+      path:
+      - /trace
+      headers:
+      - name: x-transparent-test
+        value: enabled
+    action:
       type: respond
       local_response:
-        status: 428
-        body: "HEADER_MISSING"
-    rules:
-      - name: trace-with-header
-        match:
-          host: ["127.0.0.1"]
-          path: ["/trace"]
-          headers:
-            - name: "x-transparent-test"
-              value: "enabled"
-        action:
-          type: respond
-          local_response:
-            status: 200
-            body: "H2TRACE!"
+        status: 200
+        body: H2TRACE!
+  mode: forward
+state_dir: ${STATE_DIR}
 YAML
 }
 
@@ -166,20 +165,22 @@ run_reverse_h2c_suite() {
   write_reverse_backend_config "$backend_cfg" "$REV_H2C_BACKEND_PORT" "H2REV!!" "/h2"
 
   cat >"$proxy_cfg" <<YAML
-version: 1
-state_dir: "${STATE_DIR}"
 reverse:
-  - name: e2e-reverse-h2c
-    listen: "127.0.0.1:${REV_H2C_PROXY_PORT}"
-    routes:
-      - match:
-          host: ["reverse.local"]
-        upstreams: ["http://127.0.0.1:${REV_H2C_BACKEND_PORT}"]
-        lb: round_robin
-        retry:
-          attempts: 1
-          backoff_ms: 20
-        timeout_ms: 5000
+- name: e2e-reverse-h2c
+  listen: 127.0.0.1:${REV_H2C_PROXY_PORT}
+  routes:
+  - match:
+      host:
+      - reverse.local
+    timeout_ms: 5000
+    lb: round_robin
+    resilience:
+      retry:
+        attempts: 1
+        backoff_ms: 20
+    upstreams:
+    - http://127.0.0.1:${REV_H2C_BACKEND_PORT}
+state_dir: ${STATE_DIR}
 YAML
 
   local backend_log="$LOG_DIR/reverse-h2c-backend.log"
@@ -213,26 +214,31 @@ run_transparent_h2c_suite() {
   write_transparent_backend_config "$backend_cfg" "$TRANS_BACKEND_PORT"
 
   cat >"$proxy_cfg" <<YAML
-version: 1
-state_dir: "${STATE_DIR}"
 listeners:
-  - name: e2e-transparent
-    mode: transparent
-    listen: "127.0.0.1:${TRANS_PROXY_PORT}"
-    default_action: { type: direct }
-    rules:
-      - name: block-transparent-host
-        match:
-          host: ["blocked.invalid"]
-        action: { type: block }
-      - name: trace-transparent-header
-        match:
-          host: ["127.0.0.1"]
-          path: ["/trace"]
-        action: { type: direct }
-        headers:
-          request_set:
-            X-Transparent-Test: enabled
+- name: e2e-transparent
+  listen: 127.0.0.1:${TRANS_PROXY_PORT}
+  default_action:
+    type: direct
+  rules:
+  - name: block-transparent-host
+    match:
+      host:
+      - blocked.invalid
+    action:
+      type: block
+  - name: trace-transparent-header
+    match:
+      host:
+      - 127.0.0.1
+      path:
+      - /trace
+    action:
+      type: direct
+    headers:
+      request_set:
+        X-Transparent-Test: enabled
+  mode: transparent
+state_dir: ${STATE_DIR}
 YAML
 
   local backend_log="$LOG_DIR/transparent-h2c-backend.log"
@@ -274,20 +280,21 @@ run_reverse_tls_h2_suite() {
   write_reverse_backend_config "$backend_cfg" "$REV_TLS_BACKEND_PORT" "H2TLS!" "/h2"
 
   cat >"$proxy_cfg" <<YAML
-version: 1
-state_dir: "${STATE_DIR}"
 reverse:
-  - name: rev-h2
-    listen: "127.0.0.1:${REV_TLS_PROXY_PORT}"
-    tls:
-      certificates:
-        - sni: "reverse.local"
-          cert: "${cert}"
-          key: "${key}"
-    routes:
-      - match:
-          host: ["reverse.local"]
-        upstreams: ["http://127.0.0.1:${REV_TLS_BACKEND_PORT}"]
+- name: rev-h2
+  listen: 127.0.0.1:${REV_TLS_PROXY_PORT}
+  tls:
+    certificates:
+    - sni: reverse.local
+      cert: ${cert}
+      key: ${key}
+  routes:
+  - match:
+      host:
+      - reverse.local
+    upstreams:
+    - http://127.0.0.1:${REV_TLS_BACKEND_PORT}
+state_dir: ${STATE_DIR}
 YAML
 
   local backend_log="$LOG_DIR/reverse-tls-h2-backend.log"
@@ -319,8 +326,10 @@ main() {
   require_cmd nc
   require_cmd openssl
 
-  echo "[H2-E2E] building qpxd"
-  cargo build -q -p qpxd
+  if [ ! -x "$QPXD_BIN" ]; then
+    echo "[H2-E2E] building qpxd"
+    cargo build -q -p qpxd --locked
+  fi
   if [ ! -x "$QPXD_BIN" ]; then
     echo "missing built qpxd binary: $QPXD_BIN" >&2
     exit 1

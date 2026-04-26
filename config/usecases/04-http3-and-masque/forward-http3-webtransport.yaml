@@ -1,0 +1,49 @@
+# Build-time note:
+# - Use `http3-backend-qpx` for this sample.
+# - WebTransport relay over HTTP/3 extended CONNECT is implemented only on the
+#   clean-room `qpx-h3` backend today.
+# - See `forward-http3-extended-connect.yaml` for generic non-WebTransport
+#   extended CONNECT over HTTP/3.
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+listeners:
+- name: forward-http3-webtransport
+  listen: 127.0.0.1:18120
+  default_action:
+    type: block
+  rules:
+  - name: allow-loopback-connect
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      method:
+      - CONNECT
+    action:
+      type: direct
+  - name: block-advertising
+    match:
+      host:
+      - '*.doubleclick.net'
+      - '*.googlesyndication.com'
+    action:
+      type: block
+  http3:
+    enabled: true
+    listen: 127.0.0.1:18446
+  rate_limit:
+    enabled: true
+    apply_to:
+    - webtransport
+    - webtransport_bidi_downstream
+    - webtransport_bidi_upstream
+    - webtransport_uni_downstream
+    - webtransport_uni_upstream
+    - webtransport_datagram_downstream
+    - webtransport_datagram_upstream
+    key: src_ip
+    traffic:
+      bytes_per_sec: 10485760
+      burst_bytes: 10485760
+    sessions:
+      max_concurrency: 128
+  mode: forward

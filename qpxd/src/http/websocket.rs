@@ -1,3 +1,6 @@
+use crate::http::body::Body;
+use hyper_util::rt::TokioIo;
+use std::future::Future;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -21,13 +24,17 @@ pub fn is_websocket_upgrade(headers: &http::HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-pub fn spawn_upgrade_tunnel(
-    response: &mut hyper::Response<hyper::Body>,
-    client_upgrade: hyper::upgrade::OnUpgrade,
+pub fn spawn_upgrade_tunnel<F, I, E>(
+    response: &mut hyper::Response<Body>,
+    client_upgrade: F,
     context: &'static str,
     upgrade_wait_timeout: Duration,
     idle_timeout: Duration,
-) {
+) where
+    F: Future<Output = Result<I, E>> + Send + 'static,
+    E: Into<anyhow::Error> + Send + 'static,
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     if response.status() != hyper::StatusCode::SWITCHING_PROTOCOLS {
         return;
     }
@@ -36,7 +43,9 @@ pub fn spawn_upgrade_tunnel(
         let client = timeout(upgrade_wait_timeout, client_upgrade).await;
         let server = timeout(upgrade_wait_timeout, server_upgrade).await;
         match (client, server) {
-            (Ok(Ok(mut client)), Ok(Ok(mut server))) => {
+            (Ok(Ok(client)), Ok(Ok(server))) => {
+                let mut client = client;
+                let mut server = TokioIo::new(server);
                 if let Err(err) = crate::io_copy::copy_bidirectional_with_export_and_idle(
                     &mut client,
                     &mut server,
@@ -49,7 +58,11 @@ pub fn spawn_upgrade_tunnel(
                     tracing::warn!(error = ?err, %context, "websocket tunnel timed out");
                 }
             }
-            (Ok(Err(err)), _) | (_, Ok(Err(err))) => {
+            (Ok(Err(err)), _) => {
+                let err: anyhow::Error = err.into();
+                tracing::warn!(error = ?err, %context, "websocket upgrade failed");
+            }
+            (_, Ok(Err(err))) => {
                 tracing::warn!(error = ?err, %context, "websocket upgrade failed");
             }
             (Err(_), _) | (_, Err(_)) => {

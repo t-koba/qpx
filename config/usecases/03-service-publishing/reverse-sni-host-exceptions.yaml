@@ -1,0 +1,27 @@
+# Shared-edge publish profile where Host and SNI intentionally differ within
+# the same wildcard fleet. Both values must match the same exception glob.
+reverse:
+- name: reverse-sni-host-exceptions
+  listen: 0.0.0.0:19449
+  tls:
+    certificates:
+    - sni: edge.shared.example.com
+      cert: ${QPX_TLS_CERT:-/etc/qpx/certs/edge.shared.example.com.crt}
+      key: ${QPX_TLS_KEY:-/etc/qpx/certs/edge.shared.example.com.key}
+  enforce_sni_host_match: true
+  sni_host_exceptions:
+  - '*.shared.example.com'
+  routes:
+  - name: tenant-a
+    match:
+      host:
+      - tenant-a.shared.example.com
+    upstreams:
+    - http://10.70.0.21:8080
+  - name: tenant-b
+    match:
+      host:
+      - tenant-b.shared.example.com
+    upstreams:
+    - http://10.70.0.22:8080
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

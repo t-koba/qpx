@@ -1,21 +1,24 @@
-use crate::http::common::shared_http_client;
+use crate::http::body::Body;
+use crate::http::common::request_with_shared_client;
 use crate::http::websocket::spawn_upgrade_tunnel;
-use crate::tls::client::connect_tls_http1;
+use crate::tls::client::connect_tls_http1_with_options;
+use crate::tls::CompiledUpstreamTlsTrust;
+use crate::upstream::origin::OriginEndpoint;
 use crate::upstream::pool::send_via_upstream_proxy;
+use crate::upstream::raw_http1::{send_http1_request_with_interim, Http1ResponseWithInterim};
 use anyhow::{anyhow, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use hyper::client::conn::Builder as ClientConnBuilder;
-use hyper::header::{HeaderValue, HOST, PROXY_AUTHORIZATION};
-use hyper::{Body, Request, Response, Uri};
+use hyper::header::{HeaderValue, CONNECTION, HOST, PROXY_AUTHORIZATION, UPGRADE};
+use hyper::{Request, Response, Uri};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 use tracing::warn;
 use url::Url;
 
 pub struct WebsocketProxyConfig<'a> {
-    pub upstream_proxy: Option<&'a str>,
+    pub upstream_proxy: Option<&'a crate::upstream::pool::ResolvedUpstreamProxy>,
     pub direct_connect_authority: &'a str,
     pub direct_host_header: &'a str,
     pub timeout_dur: Duration,
@@ -38,11 +41,35 @@ pub struct UpstreamProxyEndpoint {
     pub authority: String,
     pub host: String,
     pub proxy_authorization: Option<HeaderValue>,
+    pub logical_authority: Option<String>,
 }
 
 impl UpstreamProxyEndpoint {
     pub fn cache_key(&self) -> String {
         format!("{}://{}", self.scheme.as_str(), self.authority)
+    }
+
+    pub fn from_origin(origin: &OriginEndpoint) -> Result<Self> {
+        let parsed = parse_upstream_proxy_endpoint(origin.upstream.as_str())?;
+        let default_port = match parsed.scheme {
+            UpstreamProxyScheme::Http => 80,
+            UpstreamProxyScheme::Https => 443,
+        };
+        let authority = origin.connect_authority(default_port)?;
+        let logical_authority = origin
+            .host_header_authority(default_port)
+            .ok()
+            .filter(|logical| logical != &authority);
+        let host = origin
+            .tls_server_name()
+            .unwrap_or_else(|_| parsed.host.clone());
+        Ok(Self {
+            scheme: parsed.scheme,
+            authority,
+            host,
+            proxy_authorization: parsed.proxy_authorization,
+            logical_authority,
+        })
     }
 }
 
@@ -147,6 +174,7 @@ pub fn parse_upstream_proxy_endpoint(upstream: &str) -> Result<UpstreamProxyEndp
         authority,
         host,
         proxy_authorization,
+        logical_authority: None,
     })
 }
 
@@ -154,7 +182,8 @@ pub async fn open_upstream_proxy_sender(
     endpoint: &UpstreamProxyEndpoint,
     timeout_dur: Option<Duration>,
     context: &str,
-) -> Result<hyper::client::conn::SendRequest<Body>> {
+    trust: Option<&CompiledUpstreamTlsTrust>,
+) -> Result<crate::http::common::Http1SendRequest> {
     let tcp = match timeout_dur {
         Some(dur) => timeout(dur, TcpStream::connect(endpoint.authority.as_str())).await??,
         None => TcpStream::connect(endpoint.authority.as_str()).await?,
@@ -162,13 +191,13 @@ pub async fn open_upstream_proxy_sender(
     match endpoint.scheme {
         UpstreamProxyScheme::Http => {
             let (sender, conn) = match timeout_dur {
-                Some(dur) => timeout(dur, ClientConnBuilder::new().handshake(tcp)).await??,
-                None => ClientConnBuilder::new().handshake(tcp).await?,
+                Some(dur) => timeout(dur, crate::http::common::handshake_http1(tcp)).await??,
+                None => crate::http::common::handshake_http1(tcp).await?,
             };
             let authority = endpoint.authority.clone();
             let context = context.to_string();
             tokio::spawn(async move {
-                if let Err(err) = conn.await {
+                if let Err(err) = conn.with_upgrades().await {
                     warn!(
                         error = ?err,
                         upstream = %authority,
@@ -181,17 +210,25 @@ pub async fn open_upstream_proxy_sender(
         }
         UpstreamProxyScheme::Https => {
             let tls = match timeout_dur {
-                Some(dur) => timeout(dur, connect_tls_http1(endpoint.host.as_str(), tcp)).await??,
-                None => connect_tls_http1(endpoint.host.as_str(), tcp).await?,
+                Some(dur) => {
+                    timeout(
+                        dur,
+                        connect_tls_http1_with_options(endpoint.host.as_str(), tcp, true, trust),
+                    )
+                    .await??
+                }
+                None => {
+                    connect_tls_http1_with_options(endpoint.host.as_str(), tcp, true, trust).await?
+                }
             };
             let (sender, conn) = match timeout_dur {
-                Some(dur) => timeout(dur, ClientConnBuilder::new().handshake(tls)).await??,
-                None => ClientConnBuilder::new().handshake(tls).await?,
+                Some(dur) => timeout(dur, crate::http::common::handshake_http1(tls)).await??,
+                None => crate::http::common::handshake_http1(tls).await?,
             };
             let authority = endpoint.authority.clone();
             let context = context.to_string();
             tokio::spawn(async move {
-                if let Err(err) = conn.await {
+                if let Err(err) = conn.with_upgrades().await {
                     warn!(
                         error = ?err,
                         upstream = %authority,
@@ -209,19 +246,19 @@ pub async fn open_http1_sender(
     authority: &str,
     timeout_dur: Option<Duration>,
     context: &str,
-) -> Result<hyper::client::conn::SendRequest<Body>> {
+) -> Result<crate::http::common::Http1SendRequest> {
     let stream = match timeout_dur {
         Some(dur) => timeout(dur, TcpStream::connect(authority)).await??,
         None => TcpStream::connect(authority).await?,
     };
     let (sender, conn) = match timeout_dur {
-        Some(dur) => timeout(dur, ClientConnBuilder::new().handshake(stream)).await??,
-        None => ClientConnBuilder::new().handshake(stream).await?,
+        Some(dur) => timeout(dur, crate::http::common::handshake_http1(stream)).await??,
+        None => crate::http::common::handshake_http1(stream).await?,
     };
     let authority = authority.to_string();
     let context = context.to_string();
     tokio::spawn(async move {
-        if let Err(err) = conn.await {
+        if let Err(err) = conn.with_upgrades().await {
             warn!(
                 error = ?err,
                 upstream = %authority,
@@ -248,16 +285,21 @@ pub async fn proxy_websocket_http1(
         upstream_context,
         direct_context,
     } = cfg;
-    let client_upgrade = hyper::upgrade::on(&mut req);
+    let client_upgrade = crate::http::upgrade::on(&mut req);
 
     let mut sender = if let Some(upstream_proxy) = upstream_proxy {
-        let endpoint = parse_upstream_proxy_endpoint(upstream_proxy)?;
+        let endpoint = upstream_proxy.endpoint();
         req.headers_mut().remove(PROXY_AUTHORIZATION);
         if let Some(value) = endpoint.proxy_authorization.as_ref() {
             req.headers_mut().insert(PROXY_AUTHORIZATION, value.clone());
         }
-        let sender =
-            open_upstream_proxy_sender(&endpoint, Some(timeout_dur), upstream_context).await?;
+        let sender = open_upstream_proxy_sender(
+            endpoint,
+            Some(timeout_dur),
+            upstream_context,
+            upstream_proxy.trust(),
+        )
+        .await?;
         if req.uri().scheme().is_none() || req.uri().authority().is_none() {
             set_absolute_uri(&mut req, "http", direct_connect_authority)?;
         }
@@ -270,7 +312,10 @@ pub async fn proxy_websocket_http1(
         sender
     };
 
-    let mut response = timeout(timeout_dur, sender.send_request(req)).await??;
+    let mut response = timeout(timeout_dur, sender.send_request(req))
+        .await??
+        .map(Body::from);
+    normalize_websocket_switching_protocols_response(&mut response);
     spawn_upgrade_tunnel(
         &mut response,
         client_upgrade,
@@ -281,9 +326,22 @@ pub async fn proxy_websocket_http1(
     Ok(response)
 }
 
+pub(crate) fn normalize_websocket_switching_protocols_response(response: &mut Response<Body>) {
+    if response.status() != hyper::StatusCode::SWITCHING_PROTOCOLS {
+        return;
+    }
+    response
+        .headers_mut()
+        .insert(CONNECTION, HeaderValue::from_static("upgrade"));
+    response
+        .headers_mut()
+        .entry(UPGRADE)
+        .or_insert(HeaderValue::from_static("websocket"));
+}
+
 pub async fn proxy_http1_request(
     mut req: Request<Body>,
-    upstream_proxy: Option<&str>,
+    upstream_proxy: Option<&crate::upstream::pool::ResolvedUpstreamProxy>,
     direct_authority: &str,
     timeout_dur: Duration,
 ) -> Result<Response<Body>> {
@@ -292,5 +350,75 @@ pub async fn proxy_http1_request(
     if let Some(upstream) = upstream_proxy {
         return send_via_upstream_proxy(req, upstream, timeout_dur).await;
     }
-    Ok(timeout(timeout_dur, shared_http_client().request(req)).await??)
+    Ok(timeout(timeout_dur, request_with_shared_client(req)).await??)
+}
+
+pub async fn proxy_http1_request_with_interim(
+    mut req: Request<Body>,
+    upstream_proxy: Option<&crate::upstream::pool::ResolvedUpstreamProxy>,
+    direct_authority: &str,
+    timeout_dur: Duration,
+) -> Result<Http1ResponseWithInterim> {
+    ensure_absolute_uri(&mut req, "http", direct_authority)?;
+    *req.version_mut() = http::Version::HTTP_11;
+    if let Some(upstream) = upstream_proxy {
+        return crate::upstream::pool::send_via_upstream_proxy_with_interim(
+            req,
+            upstream,
+            timeout_dur,
+        )
+        .await;
+    }
+
+    let deadline = Instant::now() + timeout_dur;
+    let stream = timeout(timeout_dur, TcpStream::connect(direct_authority)).await??;
+    let _ = stream.set_nodelay(true);
+    timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        send_http1_request_with_interim(stream, req),
+    )
+    .await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn direct_interim_exchange_times_out_after_connect() {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("bind: {err}"),
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 256];
+            let _ = stream.read(&mut buf).await;
+            std::future::pending::<()>().await;
+        });
+
+        let req = Request::builder()
+            .method(http::Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .expect("request");
+        let authority = addr.to_string();
+        let result = proxy_http1_request_with_interim(
+            req,
+            None,
+            authority.as_str(),
+            Duration::from_millis(20),
+        )
+        .await;
+        let Err(err) = result else {
+            panic!("stalled upstream response head must time out");
+        };
+        assert!(err.to_string().contains("deadline has elapsed"), "{err}");
+        server.abort();
+        let _ = server.await;
+    }
 }

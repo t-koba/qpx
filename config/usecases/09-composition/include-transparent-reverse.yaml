@@ -1,4 +1,3 @@
-version: 1
 include:
-  - ../../fragments/base-observability.yaml
-  - ../../fragments/transparent-reverse.yaml
+- ../../fragments/base-observability.yaml
+- ../../fragments/transparent-reverse.yaml

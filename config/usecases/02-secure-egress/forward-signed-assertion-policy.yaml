@@ -1,0 +1,108 @@
+listeners:
+- name: signed-identity-egress
+  listen: 127.0.0.1:18096
+  default_action:
+    type: block
+  tls_inspection:
+    enabled: true
+    verify_upstream: true
+  rules:
+  - name: inspect-finance-tenant
+    match:
+      host:
+      - '*.finance.example.com'
+      identity:
+        tenant:
+        - finance
+        groups:
+        - trade
+        - security
+        auth_strength:
+        - mfa
+        - hwk
+    action:
+      type: inspect
+  - name: allow-managed-saas
+    match:
+      destination:
+        category:
+          value:
+          - saas
+      identity:
+        user:
+        - '*'
+        device_id:
+        - managed-*
+    action:
+      type: direct
+    headers:
+      request_set:
+        X-Identity-Source: signed-assertion
+  - name: allow-loopback-web
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      host:
+      - '*'
+    action:
+      type: direct
+  policy_context:
+    identity_sources:
+    - edge-jwt
+    ext_authz: jwt-policy
+  mode: forward
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+audit_log:
+  enabled: true
+  path: ${QPX_STATE_DIR:-~/.local/share/qpx}/audit-signed-assertion.log
+  format: json
+  rotation: daily
+  rotation_count: 30
+  include:
+  - subject
+  - groups
+  - device_id
+  - tenant
+  - auth_strength
+  - idp
+  - identity_source
+  - ext_authz_policy_id
+  - matched_rule
+identity_sources:
+- name: edge-jwt
+  type: signed_assertion
+  strip_from_untrusted: true
+  assertion:
+    header: x-verified-jwt
+    prefix: 'Bearer '
+    algorithms:
+    - HS256
+    issuer: https://idp.example.com
+    audience: qpx
+    secret_env: EDGE_JWT_HMAC_SECRET
+    claims:
+      user_from_sub: true
+      groups: groups
+      device_id: device_id
+      tenant: tenant
+      auth_strength: acr
+      idp: iss
+      groups_separator: ','
+ext_authz:
+- name: jwt-policy
+  endpoint: http://127.0.0.1:19096/check
+  timeout_ms: 300
+  send:
+    request: true
+    identity: true
+    selected_headers:
+    - user-agent
+  on_error: deny
+named_sets:
+- name: category:saas
+  type: domain
+  values:
+  - '*.finance.example.com'
+  - '*.docs.example.com'
+  - '*.storage.example.com'

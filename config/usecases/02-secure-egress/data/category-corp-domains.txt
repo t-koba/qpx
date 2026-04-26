@@ -1,0 +1,4 @@
+# File-backed destination category set.
+*.corp.example.com
+*.internal.example.com
+build-cache.example.net

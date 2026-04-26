@@ -1,0 +1,54 @@
+reverse:
+- name: partner-api
+  listen: 0.0.0.0:19445
+  tls:
+    client_ca: ${QPX_TLS_CLIENT_CA:-/etc/qpx/client-ca.pem}
+    certificates:
+    - sni: partner-api.example.com
+      cert: ${QPX_TLS_CERT:-/etc/qpx/certs/partner-api.example.com.crt}
+      key: ${QPX_TLS_KEY:-/etc/qpx/certs/partner-api.example.com.key}
+  policy_context:
+    identity_sources:
+    - partner-mtls
+  routes:
+  - name: partner-ingress
+    match:
+      host:
+      - partner-api.example.com
+      identity:
+        auth_strength:
+        - mTLS
+    policy_context:
+      ext_authz: partner-policy
+    headers:
+      request_set:
+        X-Client-Auth: mtls
+      response_set:
+        X-Identity-Source: partner-mtls
+    affinity:
+      key: user
+    timeout_ms: 15000
+    upstreams:
+    - http://10.60.0.10:8080
+    - http://10.60.0.11:8080
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+identity_sources:
+- name: partner-mtls
+  type: mtls_subject
+  from:
+    client_ca: ${QPX_TLS_CLIENT_CA:-/etc/qpx/client-ca.pem}
+  map:
+    user_from_san_uri_prefix: spiffe://partners.example/workload/
+    user_from_subject_cn: true
+    auth_strength: mTLS
+    idp: partner-ca
+ext_authz:
+- name: partner-policy
+  endpoint: http://127.0.0.1:19445/check
+  timeout_ms: 300
+  send:
+    request: true
+    identity: true
+    selected_headers:
+    - user-agent
+  on_error: deny

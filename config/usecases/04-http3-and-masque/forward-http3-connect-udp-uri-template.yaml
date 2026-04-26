@@ -1,0 +1,36 @@
+# Build-time note:
+# - Works with either HTTP/3 backend.
+# - Choose `http3-backend-qpx` if the same build also needs WebTransport
+#   relay on the clean-room backend.
+listeners:
+- name: forward-http3-template
+  listen: 127.0.0.1:18104
+  default_action:
+    type: block
+  rules:
+  - name: allow-loopback-connect-and-connect-udp
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      method:
+      - CONNECT
+    action:
+      type: direct
+  - name: block-advertising
+    match:
+      host:
+      - '*.doubleclick.net'
+      - '*.googlesyndication.com'
+    action:
+      type: block
+  http3:
+    enabled: true
+    listen: 127.0.0.1:18445
+    connect_udp:
+      enabled: true
+      idle_timeout_secs: 20
+      max_capsule_buffer_bytes: 262144
+      uri_template: /masque/udp/{target_host}/{target_port}
+  mode: forward
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

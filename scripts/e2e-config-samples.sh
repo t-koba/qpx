@@ -4,10 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_DIR="$ROOT_DIR/config/usecases/99-test-fixtures"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/debug/qpxd}"
+QPXF_BIN="${QPXF_BIN:-$ROOT_DIR/target/debug/qpxf}"
+IPC_CONFIG_DIR="$ROOT_DIR/config/usecases/12-ipc-gateway"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-e2e.XXXXXX")"
 STATE_DIR="$TMP_DIR/state"
 LOG_DIR="$TMP_DIR/logs"
-mkdir -p "$STATE_DIR" "$LOG_DIR"
+IPC_RUNTIME_DIR="$TMP_DIR/runtime"
+IPC_CGI_ROOT="$ROOT_DIR/config/usecases/12-ipc-gateway/assets/cgi"
+IPC_WASM_MODULE="$ROOT_DIR/config/usecases/12-ipc-gateway/assets/wasm/echo.wat"
+mkdir -p "$STATE_DIR" "$LOG_DIR" "$IPC_RUNTIME_DIR"
 CURL_MAX_TIME_SEC="${CURL_MAX_TIME_SEC:-8}"
 CURL_RETRY_COUNT="${CURL_RETRY_COUNT:-12}"
 CURL_RETRY_DELAY_SEC="${CURL_RETRY_DELAY_SEC:-0}"
@@ -32,6 +37,18 @@ register_pid() {
 }
 
 cleanup() {
+  local status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "[E2E] failed; dumping logs from $LOG_DIR" >&2
+    if [ -d "$LOG_DIR" ]; then
+      local log_file
+      for log_file in "$LOG_DIR"/*.log; do
+        [ -e "$log_file" ] || continue
+        echo "--- $log_file ---" >&2
+        sed -n '1,240p' "$log_file" >&2 || true
+      done
+    fi
+  fi
   local pid
   for pid in "${PIDS[@]:-}"; do
     if kill -0 "$pid" >/dev/null 2>&1; then
@@ -39,7 +56,12 @@ cleanup() {
       wait "$pid" >/dev/null 2>&1 || true
     fi
   done
-  rm -rf "$TMP_DIR"
+  if [ "${KEEP_E2E_TMP:-0}" = "1" ]; then
+    echo "[E2E] keeping temporary directory: $TMP_DIR" >&2
+  else
+    rm -rf "$TMP_DIR"
+  fi
+  return "$status"
 }
 trap cleanup EXIT
 
@@ -108,6 +130,30 @@ wait_port() {
   exit 1
 }
 
+wait_socket() {
+  local socket_path="$1"
+  local pid="$2"
+  local log_file="$3"
+  local tries=0
+
+  while [ "$tries" -lt 100 ]; do
+    if [ -S "$socket_path" ]; then
+      return 0
+    fi
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      echo "qpxf exited before creating socket $socket_path" >&2
+      cat "$log_file" >&2 || true
+      exit 1
+    fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+
+  echo "timeout waiting for socket $socket_path" >&2
+  cat "$log_file" >&2 || true
+  exit 1
+}
+
 start_qpxd() {
   local config_file="$1"
   local port="$2"
@@ -116,6 +162,37 @@ start_qpxd() {
   local pid=$!
   register_pid "$pid"
   wait_port "$port" "$pid" "$log_file"
+  LAST_PID="$pid"
+}
+
+start_qpxf_tcp() {
+  local config_file="$1"
+  local listen_addr="$2"
+  local log_file="$3"
+  XDG_RUNTIME_DIR="$IPC_RUNTIME_DIR" \
+  QPXF_SAMPLE_CGI_ROOT="$IPC_CGI_ROOT" \
+  QPXF_SAMPLE_WASM_MODULE="$IPC_WASM_MODULE" \
+  QPXF_TCP_LISTEN="$listen_addr" \
+    "$QPXF_BIN" --config "$config_file" >"$log_file" 2>&1 &
+  local pid=$!
+  register_pid "$pid"
+  wait_port "${listen_addr##*:}" "$pid" "$log_file"
+  LAST_PID="$pid"
+}
+
+start_qpxf_unix() {
+  local config_file="$1"
+  local listen_uri="$2"
+  local log_file="$3"
+  local socket_path="${listen_uri#unix://}"
+  XDG_RUNTIME_DIR="$IPC_RUNTIME_DIR" \
+  QPXF_UNIX_LISTEN="$listen_uri" \
+  QPXF_SAMPLE_CGI_ROOT="$IPC_CGI_ROOT" \
+  QPXF_SAMPLE_WASM_MODULE="$IPC_WASM_MODULE" \
+    "$QPXF_BIN" --config "$config_file" >"$log_file" 2>&1 &
+  local pid=$!
+  register_pid "$pid"
+  wait_socket "$socket_path" "$pid" "$log_file"
   LAST_PID="$pid"
 }
 
@@ -357,6 +434,75 @@ run_transparent_suite() {
   stop_pid "$qpx_pid"
 }
 
+run_ipc_gateway_suite() {
+  echo "[E2E] ipc gateway suite"
+
+  local qpxf_log="$LOG_DIR/qpxf-unix.log"
+  local qpxd_log="$LOG_DIR/ipc-unix.log"
+  local qpxf_pid
+  local qpxd_pid
+  local status
+  local qpxf_listen="unix://$IPC_RUNTIME_DIR/qpxf.sock"
+
+  start_qpxf_unix "$IPC_CONFIG_DIR/qpxf.yaml" "$qpxf_listen" "$qpxf_log"
+  qpxf_pid="$LAST_PID"
+
+  QPXF_UNIX_LISTEN="$qpxf_listen" \
+  QPX_IPC_GATEWAY_LISTEN="127.0.0.1:18098" \
+  XDG_RUNTIME_DIR="$IPC_RUNTIME_DIR" \
+    start_qpxd "$IPC_CONFIG_DIR/qpx.yaml" 18098 "$qpxd_log"
+  qpxd_pid="$LAST_PID"
+
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" \
+    -o "$TMP_DIR/ipc_unix_cgi.body" \
+    -D "$TMP_DIR/ipc_unix_cgi.headers" \
+    -w '%{http_code}' \
+    http://127.0.0.1:18098/cgi-bin/health)
+  assert_eq "200" "$status" "ipc unix cgi status"
+  assert_eq "ok from qpxf cgi" "$(tr -d '\r' <"$TMP_DIR/ipc_unix_cgi.body")" "ipc unix cgi body"
+
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" \
+    -o "$TMP_DIR/ipc_unix_wasm.body" \
+    -D "$TMP_DIR/ipc_unix_wasm.headers" \
+    -w '%{http_code}' \
+    http://127.0.0.1:18098/wasm/echo)
+  assert_eq "200" "$status" "ipc unix wasm status"
+  assert_eq "ok from qpxf wasm" "$(tr -d '\r' <"$TMP_DIR/ipc_unix_wasm.body")" "ipc unix wasm body"
+
+  stop_pid "$qpxd_pid"
+  stop_pid "$qpxf_pid"
+
+  qpxf_log="$LOG_DIR/qpxf-tcp.log"
+  qpxd_log="$LOG_DIR/ipc-tcp.log"
+  start_qpxf_tcp "$IPC_CONFIG_DIR/qpxf-tcp.yaml" "127.0.0.1:19098" "$qpxf_log"
+  qpxf_pid="$LAST_PID"
+
+  QPXF_TCP_LISTEN="127.0.0.1:19098" \
+  QPX_IPC_GATEWAY_TCP_LISTEN="127.0.0.1:18099" \
+  XDG_RUNTIME_DIR="$IPC_RUNTIME_DIR" \
+    start_qpxd "$IPC_CONFIG_DIR/qpx-tcp.yaml" 18099 "$qpxd_log"
+  qpxd_pid="$LAST_PID"
+
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" \
+    -o "$TMP_DIR/ipc_tcp_cgi.body" \
+    -D "$TMP_DIR/ipc_tcp_cgi.headers" \
+    -w '%{http_code}' \
+    http://127.0.0.1:18099/cgi-bin/health)
+  assert_eq "200" "$status" "ipc tcp cgi status"
+  assert_eq "ok from qpxf cgi" "$(tr -d '\r' <"$TMP_DIR/ipc_tcp_cgi.body")" "ipc tcp cgi body"
+
+  status=$(curl -sS --max-time "$CURL_MAX_TIME_SEC" --connect-timeout 2 "${CURL_RETRY_ARGS[@]}" \
+    -o "$TMP_DIR/ipc_tcp_wasm.body" \
+    -D "$TMP_DIR/ipc_tcp_wasm.headers" \
+    -w '%{http_code}' \
+    http://127.0.0.1:18099/wasm/echo)
+  assert_eq "200" "$status" "ipc tcp wasm status"
+  assert_eq "ok from qpxf wasm" "$(tr -d '\r' <"$TMP_DIR/ipc_tcp_wasm.body")" "ipc tcp wasm body"
+
+  stop_pid "$qpxd_pid"
+  stop_pid "$qpxf_pid"
+}
+
 main() {
   require_cmd cargo
   require_cmd curl
@@ -364,12 +510,27 @@ main() {
   require_cmd timeout
   require_cmd lsof
 
-  echo "[E2E] building qpxd"
-  cargo build -q -p qpxd
+  if [ ! -x "$QPXD_BIN" ]; then
+    echo "[E2E] building qpxd"
+    cargo build -q -p qpxd --locked
+  fi
+  if [ ! -x "$QPXF_BIN" ]; then
+    echo "[E2E] building qpxf"
+    cargo build -q -p qpxf --locked
+  fi
+  if [ ! -x "$QPXD_BIN" ]; then
+    echo "missing built qpxd binary: $QPXD_BIN" >&2
+    exit 1
+  fi
+  if [ ! -x "$QPXF_BIN" ]; then
+    echo "missing built qpxf binary: $QPXF_BIN" >&2
+    exit 1
+  fi
 
   run_forward_suite
   run_reverse_suite
   run_transparent_suite
+  run_ipc_gateway_suite
   echo "[E2E] all sample-config checks passed"
 }
 

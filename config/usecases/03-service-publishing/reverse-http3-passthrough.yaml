@@ -1,15 +1,23 @@
-version: 1
-state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
-
+# Build-time note:
+# - Backend-neutral sample.
+# - Reverse HTTP/3 passthrough works with either `http3-backend-h3` or
+#   `http3-backend-qpx` because it routes raw UDP/QUIC sessions.
+# - For HTTP/3 framing features, choose `http3-backend-qpx` when you want the
+#   clean-room backend to carry CONNECT-UDP / MASQUE, generic extended
+#   CONNECT, and WebTransport relay.
 reverse:
-  - name: reverse-h3-passthrough
-    # tcp listen is kept for schema consistency; passthrough-only mode runs UDP/QUIC path.
-    listen: "0.0.0.0:443"
-    http3:
-      enabled: true
-      listen: "0.0.0.0:443"
-      # Round-robin UDP/443 passthrough upstreams.
-      passthrough_upstreams:
-        - 203.0.113.10:443
-        - 203.0.113.11:443
-    routes: []
+- name: reverse-h3-passthrough
+  listen: 0.0.0.0:443
+  http3:
+    enabled: true
+    listen: 0.0.0.0:443
+    passthrough_upstreams:
+    - 203.0.113.10:443
+    - 203.0.113.11:443
+    passthrough_max_sessions: 16384
+    passthrough_idle_timeout_secs: 30
+    passthrough_max_new_sessions_per_sec: 5000
+    passthrough_min_client_bytes: 1200
+    passthrough_max_amplification: 3
+  routes: []
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

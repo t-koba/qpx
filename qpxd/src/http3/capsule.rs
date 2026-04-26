@@ -1,6 +1,9 @@
+#[cfg(any(test, feature = "http3"))]
 use anyhow::{anyhow, Result};
+#[cfg(any(test, feature = "http3"))]
 use bytes::{Buf, Bytes, BytesMut};
 
+#[cfg(any(test, feature = "http3"))]
 pub(crate) fn append_capsule_chunk(
     buf: &mut BytesMut,
     bytes: &[u8],
@@ -20,6 +23,7 @@ pub(crate) fn append_capsule_chunk(
     Ok(())
 }
 
+#[cfg(any(test, feature = "http3"))]
 pub(crate) fn take_next_capsule(buf: &mut BytesMut) -> Result<Option<(u64, Bytes)>> {
     let (capsule_type, type_len) = match decode_quic_varint(buf.as_ref()) {
         Some(v) => v,
@@ -43,6 +47,7 @@ pub(crate) fn take_next_capsule(buf: &mut BytesMut) -> Result<Option<(u64, Bytes
     Ok(Some((capsule_type, payload)))
 }
 
+#[cfg(any(test, feature = "http3"))]
 pub(crate) fn encode_datagram_capsule(payload: &[u8]) -> Result<Bytes> {
     let mut value = Vec::with_capacity(1 + payload.len());
     encode_quic_varint(0, &mut value)?; // context id
@@ -51,6 +56,7 @@ pub(crate) fn encode_datagram_capsule(payload: &[u8]) -> Result<Bytes> {
     encode_datagram_capsule_value(&value)
 }
 
+#[cfg(any(test, feature = "http3"))]
 pub(crate) fn encode_datagram_capsule_value(value: &[u8]) -> Result<Bytes> {
     let mut capsule = Vec::with_capacity(2 + value.len());
     encode_quic_varint(0, &mut capsule)?; // DATAGRAM capsule type
@@ -78,6 +84,7 @@ pub(crate) fn decode_quic_varint(buf: &[u8]) -> Option<(u64, usize)> {
     Some((value, len))
 }
 
+#[cfg(any(test, feature = "http3"))]
 pub(crate) fn encode_quic_varint(value: u64, out: &mut Vec<u8>) -> Result<()> {
     if value <= 63 {
         out.push(value as u8);

@@ -1,0 +1,74 @@
+# RPC-aware reverse policy for gRPC, Connect, and gRPC-Web.
+# `match.rpc.*` works on the shared HTTP response-rule surface and can
+# translate upstream RPC failures into protocol-correct local responses.
+reverse:
+- name: reverse-rpc-aware-policy
+  listen: 0.0.0.0:19452
+  routes:
+  - name: rpc-edge
+    match:
+      host:
+      - api.example.com
+      path:
+      - /demo.Echo/*
+    timeout_ms: 30000
+    http:
+      response_rules:
+      - name: grpc-maintenance
+        match:
+          rpc:
+            protocol:
+            - grpc
+            service:
+            - demo.Echo
+            method:
+            - Say
+            status:
+            - '14'
+        effects:
+          local_response:
+            rpc:
+              protocol: grpc
+              status: '14'
+              message: maintenance
+            headers:
+              X-QPX-RPC-Policy: grpc-maintenance
+          retry:
+            suppress: true
+          tags:
+          - rpc
+          - grpc-unavailable
+      - name: connect-overload
+        match:
+          rpc:
+            protocol:
+            - connect
+            service:
+            - demo.Echo
+            method:
+            - Say
+            status:
+            - resource_exhausted
+            - unavailable
+        effects:
+          headers:
+            response_add:
+              X-RPC-Policy: connect-overload
+      - name: grpc-web-errors
+        match:
+          rpc:
+            protocol:
+            - grpc_web
+            status:
+            - '7'
+            - '14'
+            trailers:
+            - name: grpc-message
+              regex: .+
+        effects:
+          headers:
+            response_add:
+              X-RPC-Policy: grpc-web-error
+    upstreams:
+    - https://rpc-backend.internal.example.com:9443
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

@@ -1,15 +1,13 @@
 use super::types::CacheRequestKey;
 use crate::http::address::format_authority_host_port;
+use crate::http::body::Body;
 use anyhow::Result;
 use http::header::HOST;
-use hyper::{Body, Method, Request};
+use hyper::{Method, Request};
 use url::Url;
 
 impl CacheRequestKey {
     pub fn for_lookup(req: &Request<Body>, default_scheme: &str) -> Result<Option<Self>> {
-        if req.method() != Method::GET && req.method() != Method::HEAD {
-            return Ok(None);
-        }
         Self::for_target(req, default_scheme)
     }
 
@@ -41,6 +39,7 @@ impl CacheRequestKey {
             .unwrap_or_else(|| "/".to_string());
 
         Ok(Some(Self {
+            method: cache_method_group(req.method()),
             scheme,
             authority,
             path_and_query,
@@ -48,7 +47,10 @@ impl CacheRequestKey {
     }
 
     pub(super) fn primary_hash(&self) -> String {
-        let raw = format!("{}|{}|{}", self.scheme, self.authority, self.path_and_query);
+        let raw = format!(
+            "{}|{}|{}|{}",
+            self.method, self.scheme, self.authority, self.path_and_query
+        );
         super::hash::sha256_hex(raw.as_bytes())
     }
 
@@ -61,6 +63,25 @@ impl CacheRequestKey {
             .as_str(),
         )
         .ok()
+    }
+
+    pub(super) fn with_method_group(&self, method: impl Into<String>) -> Self {
+        Self {
+            method: method.into(),
+            scheme: self.scheme.clone(),
+            authority: self.authority.clone(),
+            path_and_query: self.path_and_query.clone(),
+        }
+    }
+}
+
+pub(super) fn cache_method_group(method: &Method) -> String {
+    if *method == Method::GET {
+        "GET".to_string()
+    } else if *method == Method::HEAD {
+        "HEAD".to_string()
+    } else {
+        method.as_str().to_ascii_uppercase()
     }
 }
 

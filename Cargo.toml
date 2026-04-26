@@ -2,16 +2,23 @@
 resolver = "2"
 members = [
   "qpx-core",
+  "qpx-auth",
+  "qpx-h3",
+  "qpx-wasm",
+  "qpx-acme",
+  "qpx-observability",
   "qpxd",
   "qpxr",
   "qpxc",
-  "qpxf"
+  "qpxf",
+  "xtask"
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.1.0"
+version = "0.2.0"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -27,15 +34,18 @@ url = "2"
 percent-encoding = "2"
 httpdate = "1"
 bytes = "1"
+brotli = "8"
+flate2 = "1"
+zstd = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
 metrics = "0.22"
 metrics-exporter-prometheus = { version = "0.13", default-features = false }
-opentelemetry = { version = "0.31", features = ["trace"] }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic"] }
-tracing-opentelemetry = "0.32"
+tracing-opentelemetry = { version = "0.32", default-features = false }
 arc-swap = "1"
 notify = "6"
 async-trait = "0.1"
@@ -43,8 +53,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs-next = "2"
 
 # TLS
-rustls = "0.22"
-tokio-rustls = "0.25"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26"
 webpki-roots = "0.26"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 lru = "0.16.3"
@@ -54,15 +64,17 @@ x509-parser = { version = "0.18", default-features = false }
 instant-acme = { version = "0.8.4", default-features = false }
 
 # HTTP
-hyper = { version = "0.14", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
 tower-service = "0.3"
-http = "0.2"
-http1 = { package = "http", version = "1" }
-http-body = "0.4"
+http = "1"
+http-body = "1"
+http-body-util = { version = "0.1", features = ["channel"] }
+h2 = "0.4"
 httparse = "1"
 libc = "0.2"
 quinn = "0.11"
-h3 = "0.0.8"
+h3 = { version = "0.0.8", features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes"] }
 h3-quinn = { version = "0.0.10", features = ["datagram"] }
 h3-datagram = "0.0.2"
 
@@ -73,24 +85,24 @@ socket2 = { version = "0.5", features = ["all"] }
 # Auth/LDAP
 ldap3 = { version = "0.12", default-features = false }
 base64 = "0.22"
-rand = "0.8"
+pem = "3.0.6"
+ring = "0.17.14"
 
 # Hashing
 sha2 = "0.10"
-
-# FTP
-suppaftp = "5"
 
 # PCAP
 pcap-file = "2"
 etherparse = "0.13"
 
 # WASM
-wasmtime = "41"
-wasmtime-wasi = "41"
+wasmtime = { version = "42", default-features = false, features = ["async", "cache", "cranelift", "parallel-compilation", "runtime", "std", "wat"] }
+wasmtime-wasi = { version = "42", default-features = false, features = ["p1"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+syn = { version = "2", features = ["full", "visit"] }
+toml = "0.8"
 
 [profile.release]
 # Release defaults are already optimized; these settings mainly reduce size while keeping perf.

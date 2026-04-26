@@ -1,0 +1,94 @@
+reverse:
+- name: observed-reverse
+  listen: 127.0.0.1:19448
+  routes:
+  - name: status
+    match:
+      host:
+      - status.example.com
+      path:
+      - /status
+    local_response:
+      status: 200
+      content_type: application/json
+      body: '{"status":"ok","source":"qpx"}'
+  - name: app
+    match:
+      host:
+      - status.example.com
+    upstreams:
+    - http://127.0.0.1:18080
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+listeners:
+- name: observed-forward
+  listen: 127.0.0.1:18098
+  default_action:
+    type: block
+  rules:
+  - name: allow-loopback
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - ::1/128
+      host:
+      - '*'
+    action:
+      type: direct
+  mode: forward
+system_log:
+  level: info
+  format: json
+access_log:
+  enabled: true
+  path: ${QPX_STATE_DIR:-~/.local/share/qpx}/access-observed.log
+  format: json
+  rotation: hourly
+  rotation_count: 48
+  exclude:
+  - /healthz
+  - /metrics
+audit_log:
+  enabled: true
+  path: ${QPX_STATE_DIR:-~/.local/share/qpx}/audit-observed.log
+  format: json
+  rotation: daily
+  rotation_count: 90
+  include:
+  - subject
+  - groups
+  - device_id
+  - posture
+  - tenant
+  - auth_strength
+  - idp
+  - identity_source
+  - policy_tags
+  - ext_authz_policy_id
+  - matched_rule
+  - matched_route
+metrics:
+  listen: 0.0.0.0:19902
+  path: /metrics
+  allow:
+  - 10.0.0.0/8
+  - 192.168.0.0/16
+  max_concurrent_connections: 64
+otel:
+  enabled: true
+  endpoint: ${OTEL_ENDPOINT:-http://127.0.0.1:4317}
+  protocol: grpc
+  level: info
+  sample_percent: 25
+  service_name: qpx-observed-edge
+  headers:
+    Authorization: Bearer ${OTEL_TOKEN:-sample-token}
+exporter:
+  enabled: true
+  shm_path: ''
+  shm_size_mb: 16
+  lossy: false
+  max_queue_events: 4096
+  capture:
+    plaintext: true
+    encrypted: true
+    max_chunk_bytes: 16384

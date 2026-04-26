@@ -122,6 +122,14 @@ pub(super) fn default_local_response_status() -> u16 {
     200
 }
 
+pub(super) fn default_ext_authz_timeout_ms() -> u64 {
+    300
+}
+
+pub(super) fn default_ext_authz_max_response_bytes() -> usize {
+    1024 * 1024
+}
+
 pub(super) fn default_reverse_enforce_sni_host_match() -> bool {
     true
 }
@@ -152,6 +160,75 @@ pub(super) fn default_reverse_h3_passthrough_min_client_bytes() -> usize {
 
 pub(super) fn default_reverse_h3_passthrough_max_amplification() -> u32 {
     3
+}
+
+pub(super) fn default_destination_resolution_precedence(
+) -> Vec<crate::config::DestinationEvidenceSourceKind> {
+    vec![
+        crate::config::DestinationEvidenceSourceKind::PolicyContext,
+        crate::config::DestinationEvidenceSourceKind::Cert,
+        crate::config::DestinationEvidenceSourceKind::Sni,
+        crate::config::DestinationEvidenceSourceKind::Host,
+        crate::config::DestinationEvidenceSourceKind::Ip,
+        crate::config::DestinationEvidenceSourceKind::TlsFingerprint,
+        crate::config::DestinationEvidenceSourceKind::Heuristic,
+    ]
+}
+
+pub(super) fn default_destination_conflict_mode() -> crate::config::DestinationConflictMode {
+    crate::config::DestinationConflictMode::PreferHighestConfidence
+}
+
+pub(super) fn default_destination_merge_mode() -> crate::config::DestinationMergeMode {
+    crate::config::DestinationMergeMode::StrongestPerDimension
+}
+
+pub(super) fn default_http_guard_enable_smuggling_checks() -> bool {
+    true
+}
+
+pub(super) fn default_http_guard_enable_invalid_framing_checks() -> bool {
+    true
+}
+
+pub(super) fn default_http_compression_min_body_bytes() -> usize {
+    512
+}
+
+pub(super) fn default_http_compression_max_body_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
+pub(super) fn default_http_compression_enable_gzip() -> bool {
+    true
+}
+
+pub(super) fn default_http_compression_enable_brotli() -> bool {
+    true
+}
+
+pub(super) fn default_http_compression_enable_zstd() -> bool {
+    true
+}
+
+pub(super) fn default_http_compression_gzip_level() -> u32 {
+    6
+}
+
+pub(super) fn default_http_compression_brotli_level() -> u32 {
+    5
+}
+
+pub(super) fn default_http_compression_zstd_level() -> i32 {
+    3
+}
+
+pub(super) fn default_http_cache_purge_methods() -> Vec<String> {
+    vec!["PURGE".to_string()]
+}
+
+pub(super) fn default_http_cache_purge_response_status() -> u16 {
+    204
 }
 
 pub(super) fn default_runtime_reuse_port() -> bool {
@@ -188,6 +265,14 @@ pub(super) fn default_runtime_max_h3_response_body_bytes() -> usize {
 
 pub(super) fn default_runtime_max_reverse_retry_template_body_bytes() -> usize {
     8 * 1024 * 1024
+}
+
+pub(super) fn default_runtime_max_observed_request_body_bytes() -> usize {
+    64 * 1024 * 1024
+}
+
+pub(super) fn default_runtime_max_observed_response_body_bytes() -> usize {
+    64 * 1024 * 1024
 }
 
 pub(super) fn default_runtime_upstream_http_timeout_ms() -> u64 {
@@ -306,7 +391,31 @@ pub(super) fn default_cache_max_object_bytes() -> usize {
     1024 * 1024
 }
 
+pub(super) fn default_upstream_discovery_interval_ms() -> u64 {
+    30_000
+}
+
+pub(super) fn default_upstream_discovery_min_ttl_ms() -> u64 {
+    1_000
+}
+
+pub(super) fn default_upstream_discovery_max_ttl_ms() -> u64 {
+    300_000
+}
+
 pub(super) fn default_rate_limit_key() -> String {
+    "src_ip".to_string()
+}
+
+pub(super) fn default_rate_limit_apply_to() -> Vec<super::types::RateLimitApplyTo> {
+    vec![super::types::RateLimitApplyTo::Request]
+}
+
+pub(super) fn default_rate_limit_quota_interval_secs() -> u64 {
+    60
+}
+
+pub(super) fn default_reverse_affinity_key() -> String {
     "src_ip".to_string()
 }
 

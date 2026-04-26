@@ -1,6 +1,7 @@
 use super::types::{CacheBackend, ResponseDirectives, VariantIndex, MAX_VARIANTS_PER_PRIMARY};
 use super::vary::index_storage_key;
 use anyhow::Result;
+#[cfg(test)]
 use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use qpx_core::config::CachePolicyConfig;
 use std::collections::HashSet;
@@ -37,6 +38,7 @@ pub(super) fn sanitize_cached_headers_for_storage(
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn cacheable_content_length(headers: &http::HeaderMap) -> Option<u64> {
     if headers.contains_key(TRANSFER_ENCODING) {
         return None;
@@ -91,12 +93,9 @@ pub(super) async fn load_variant_index(
                 error = ?err,
                 namespace = %namespace,
                 primary = %primary,
-                "cache variant index parse failed; treating as empty"
+                "cache variant index parse failed"
             );
-            let _ = backend
-                .delete(namespace, index_storage_key(primary).as_str())
-                .await;
-            VariantIndex::default()
+            return Err(err.into());
         }
     };
     Ok(parsed)

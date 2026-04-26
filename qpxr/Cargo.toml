@@ -11,7 +11,7 @@ tls-rustls = ["dep:rustls", "dep:tokio-rustls", "qpx-core/tls-rustls"]
 tls-native = ["dep:native-tls", "dep:tokio-native-tls", "qpx-core/tls-native"]
 
 [dependencies]
-qpx-core = { path = "../qpx-core", default-features = false }
+qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
 anyhow.workspace = true
 bytes.workspace = true
 tokio.workspace = true

@@ -1,97 +1,53 @@
+use crate::http::body::Body;
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use hyper::body::HttpBody as _;
-use hyper::{Body, Request, Response};
+use hyper::{Request, Response};
 use qpx_core::config::{IpcMode, IpcUpstreamConfig};
 use qpx_core::ipc::meta::{IpcRequestMeta, IpcResponseMeta};
 use qpx_core::ipc::protocol::{read_frame, write_frame};
 use qpx_core::shm_ring::ShmRingBuffer;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
+use tracing::warn;
 
 use url::Url;
 
 const MAX_IDLE_CONNS_PER_BACKEND: usize = 8;
 const SHM_RING_SIZE: usize = 16 * 1024 * 1024; // 16MB
+const IPC_DOWNSTREAM_ABORT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 static IPC_SHM_LAST_CLEANUP_UNIX_SECS: AtomicU64 = AtomicU64::new(0);
 
-fn maybe_cleanup_ipc_shm_dir(dir: &PathBuf) {
-    // Best-effort GC for crash/abort cases (especially important on Windows where unlink-on-open
-    // semantics don't exist). This is intentionally coarse to keep per-request overhead tiny.
-    const CLEANUP_INTERVAL_SECS: u64 = 60;
-    const STALE_AFTER_SECS: u64 = 3600;
-
-    let now = SystemTime::now();
-    let now_secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-
-    let last = IPC_SHM_LAST_CLEANUP_UNIX_SECS.load(Ordering::Relaxed);
-    if now_secs.saturating_sub(last) < CLEANUP_INTERVAL_SECS {
-        return;
-    }
-    if IPC_SHM_LAST_CLEANUP_UNIX_SECS
-        .compare_exchange(last, now_secs, Ordering::Relaxed, Ordering::Relaxed)
-        .is_err()
-    {
-        return;
-    }
-
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.starts_with("ipc_req_") && !name.starts_with("ipc_res_") {
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("shm") {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        let Ok(modified) = meta.modified() else {
-            continue;
-        };
-        let Ok(age) = now.duration_since(modified) else {
-            continue;
-        };
-        if age.as_secs() < STALE_AFTER_SECS {
-            continue;
-        }
-        let _ = std::fs::remove_file(path);
-    }
+fn maybe_cleanup_ipc_shm_dir(dir: &Path) {
+    qpx_core::ipc::shm::maybe_cleanup_stale_ipc_shm_files(
+        dir,
+        &IPC_SHM_LAST_CLEANUP_UNIX_SECS,
+        60,
+        3600,
+    );
 }
 
-struct AbortOnDrop {
-    handle: Option<tokio::task::JoinHandle<()>>,
+struct AbortOnDrop<T> {
+    handle: Option<tokio::task::JoinHandle<T>>,
 }
 
-impl AbortOnDrop {
-    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+impl<T> AbortOnDrop<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
         Self {
             handle: Some(handle),
         }
     }
-
-    fn disarm(&mut self) {
-        // Dropping JoinHandle detaches the task; we only want to abort on cancellation/error paths.
-        let _ = self.handle.take();
-    }
 }
 
-impl Drop for AbortOnDrop {
+impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();
@@ -127,6 +83,79 @@ impl Drop for IpcShmCleanup {
         let _ = std::fs::remove_file(&self.req_path);
         let _ = std::fs::remove_file(&self.res_path);
     }
+}
+
+const SHM_PUSH_CHUNK_BYTES: usize = 64 * 1024;
+
+async fn push_request_ring_bytes(
+    ring: &mut ShmRingBuffer,
+    bytes: &[u8],
+    timeout_dur: Duration,
+) -> Result<()> {
+    loop {
+        match ring.try_push(bytes) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                timeout(timeout_dur, ring.wait_for_space(bytes.len()))
+                    .await
+                    .map_err(|_| anyhow!("IPC SHM request body writer timed out"))??;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+async fn write_request_body_to_shm(
+    body: &mut Body,
+    mut req_ring: ShmRingBuffer,
+    timeout_dur: Duration,
+) -> Result<()> {
+    while let Some(chunk) = timeout(timeout_dur, body.data())
+        .await
+        .map_err(|_| anyhow!("IPC request body read timed out"))?
+    {
+        let data = chunk.map_err(|err| anyhow!("IPC request body read failed: {}", err))?;
+        for part in data.chunks(SHM_PUSH_CHUNK_BYTES) {
+            push_request_ring_bytes(&mut req_ring, part, timeout_dur).await?;
+        }
+    }
+    push_request_ring_bytes(&mut req_ring, &[], timeout_dur).await
+}
+
+fn finish_shm_body_writer_result(
+    body_result: std::result::Result<Result<()>, tokio::sync::oneshot::error::RecvError>,
+) -> Result<()> {
+    match body_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Err(anyhow!("IPC SHM request body writer ended unexpectedly")),
+    }
+}
+
+async fn read_shm_response_meta_after_body_writer<S>(
+    stream: &mut S,
+    mut result_rx: tokio::sync::oneshot::Receiver<Result<()>>,
+) -> Result<IpcResponseMeta>
+where
+    S: AsyncRead + Unpin,
+{
+    let pending_meta = tokio::select! {
+        res = read_frame(stream) => Some(res?),
+        body_result = &mut result_rx => {
+            finish_shm_body_writer_result(body_result)?;
+            None
+        }
+    };
+
+    if let Some(meta) = pending_meta {
+        Ok(meta)
+    } else {
+        read_frame(stream).await
+    }
+}
+
+async fn downstream_body_closed(sender: &mut crate::http::body::Sender) -> bool {
+    sender.is_closed()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -483,17 +512,20 @@ async fn proxy_ipc_backend(
     let mut req_ring = None;
     let mut res_ring = None;
     let mut res_path_fs: Option<PathBuf> = None;
-    let mut body_writer_abort: Option<AbortOnDrop> = None;
+    let mut body_writer_abort: Option<AbortOnDrop<()>> = None;
+    let mut body_writer_result_rx = None;
 
     if mode == IpcMode::Shm {
-        let shm_dir = ShmRingBuffer::default_shm_dir().join("ipc");
+        let shm_dir = qpx_core::ipc::shm::ipc_shm_dir()?;
 
         let req_token = format!("ipc_req_{uuid}.shm");
         let res_token = format!("ipc_res_{uuid}.shm");
-        let req_path = shm_dir.join(&req_token);
-        let res_path = shm_dir.join(&res_token);
-        req_ring = Some(ShmRingBuffer::create_or_open(&req_path, SHM_RING_SIZE)?);
-        res_ring = Some(ShmRingBuffer::create_or_open(&res_path, SHM_RING_SIZE)?);
+        let (req_path, created_req_ring) =
+            qpx_core::ipc::shm::create_or_open_ipc_ring(&req_token, "ipc_req_", SHM_RING_SIZE)?;
+        let (res_path, created_res_ring) =
+            qpx_core::ipc::shm::create_or_open_ipc_ring(&res_token, "ipc_res_", SHM_RING_SIZE)?;
+        req_ring = Some(created_req_ring);
+        res_ring = Some(created_res_ring);
         maybe_cleanup_ipc_shm_dir(&shm_dir);
         shm_cleanup = Some(IpcShmCleanup::new(req_path, res_path.clone()));
         meta.req_body_shm_path = Some(req_token);
@@ -509,50 +541,37 @@ async fn proxy_ipc_backend(
 
     if mode == IpcMode::Shm {
         // Stream req body to shm ring
-        let mut req_ring = req_ring.unwrap();
-        const SHM_PUSH_CHUNK_BYTES: usize = 64 * 1024;
+        let req_ring = req_ring.unwrap();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<()>>();
         let handle = tokio::spawn(async move {
-            while let Some(chunk) = req.body_mut().data().await {
-                if let Ok(data) = chunk {
-                    for part in data.chunks(SHM_PUSH_CHUNK_BYTES) {
-                        loop {
-                            match req_ring.try_push(part) {
-                                Ok(true) => break,
-                                Ok(false) => {
-                                    if req_ring.wait_for_space(part.len()).await.is_err() {
-                                        return;
-                                    }
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                }
-            }
-            // push EOF
-            loop {
-                match req_ring.try_push(&[]) {
-                    Ok(true) => break,
-                    Ok(false) => {
-                        if req_ring.wait_for_space(0).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
+            let result = write_request_body_to_shm(req.body_mut(), req_ring, timeout_dur).await;
+            if let Err(Err(err)) = result_tx.send(result) {
+                warn!(error = ?err, "IPC SHM request body writer failed after response started");
             }
         });
         body_writer_abort = Some(AbortOnDrop::new(handle));
+        body_writer_result_rx = Some(result_rx);
     } else {
         // Stream req body over tcp
-        while let Some(chunk) = req.body_mut().data().await {
+        while let Some(chunk) = timeout(timeout_dur, req.body_mut().data())
+            .await
+            .map_err(|_| anyhow!("IPC TCP request body read timed out"))?
+        {
             let data = chunk?;
-            stream.write_all(&data).await?;
+            timeout(timeout_dur, stream.write_all(&data))
+                .await
+                .map_err(|_| anyhow!("IPC TCP request body write timed out"))??;
         }
-        stream.shutdown().await?;
+        timeout(timeout_dur, stream.shutdown())
+            .await
+            .map_err(|_| anyhow!("IPC TCP request body shutdown timed out"))??;
     }
 
-    let res_meta: IpcResponseMeta = read_frame(&mut stream).await?;
+    let res_meta: IpcResponseMeta = if let Some(result_rx) = body_writer_result_rx.take() {
+        read_shm_response_meta_after_body_writer(&mut stream, result_rx).await?
+    } else {
+        read_frame(&mut stream).await?
+    };
 
     let mut builder = Response::builder().status(res_meta.status);
     for (k, v) in res_meta.headers {
@@ -564,7 +583,9 @@ async fn proxy_ipc_backend(
     if mode == IpcMode::Shm {
         let mut res_ring = res_ring.unwrap();
         let res_path = res_path_fs.unwrap();
+        let body_writer_abort = body_writer_abort;
         tokio::spawn(async move {
+            let mut reusable = true;
             loop {
                 match res_ring.try_pop() {
                     Ok(Some(data)) => {
@@ -572,28 +593,57 @@ async fn proxy_ipc_backend(
                             break; // EOF
                         }
                         if sender.send_data(Bytes::from(data)).await.is_err() {
+                            reusable = false;
                             break;
                         }
                     }
                     Ok(None) => {
-                        if res_ring.wait_for_data().await.is_err() {
-                            break;
+                        tokio::select! {
+                            wait = res_ring.wait_for_data() => {
+                                if wait.is_err() {
+                                    reusable = false;
+                                    break;
+                                }
+                            }
+                            _ = tokio::time::sleep(IPC_DOWNSTREAM_ABORT_POLL_INTERVAL) => {
+                                if downstream_body_closed(&mut sender).await {
+                                    reusable = false;
+                                    break;
+                                }
+                            }
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        reusable = false;
+                        break;
+                    }
                 }
             }
+            drop(body_writer_abort);
             drop(res_ring);
             let _ = std::fs::remove_file(res_path);
-            checkin_stream(pool_key, stream).await; // We checkin ONLY AFTER EOF or Drop in SHM
+            if reusable {
+                checkin_stream(pool_key, stream).await;
+            }
         });
     } else {
         tokio::spawn(async move {
             let mut buf = [0u8; 65536];
             loop {
-                match stream.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
+                let read = tokio::select! {
+                    read = stream.read(&mut buf) => Some(read),
+                    _ = tokio::time::sleep(IPC_DOWNSTREAM_ABORT_POLL_INTERVAL) => {
+                        if downstream_body_closed(&mut sender).await {
+                            None
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+                match read {
+                    None => break,
+                    Some(Ok(0)) => break,
+                    Some(Ok(n)) => {
                         if sender
                             .send_data(Bytes::copy_from_slice(&buf[..n]))
                             .await
@@ -602,20 +652,97 @@ async fn proxy_ipc_backend(
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Some(Err(_)) => break,
                 }
             }
             // Cannot checkin Tcp stream if it reached EOF on response. It must be dropped.
             // Unless qpxf somehow signals EOF without closing? TCP raw stream just closes the socket.
-            // FastCGI supported multiplexing but IPC raw stream does not. So we drop it.
+            // This transport is one-request-per-connection, so EOF means the socket is no longer reusable.
         });
     }
 
-    if let Some(abort) = body_writer_abort.as_mut() {
-        abort.disarm();
-    }
     if let Some(cleanup) = shm_cleanup.as_mut() {
         cleanup.disarm();
     }
     Ok(builder.body(body)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::time::Duration;
+
+    fn temp_shm_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        ShmRingBuffer::default_shm_dir().join(format!("{name}-{}-{nonce}.shm", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn shm_body_writer_does_not_push_eof_after_body_error() {
+        let req_path = temp_shm_path("ipc-body-writer");
+        let mut reader = ShmRingBuffer::create_or_open(&req_path, 64 * 1024).unwrap();
+        let writer = ShmRingBuffer::create_or_open(&req_path, 64 * 1024).unwrap();
+
+        let (mut sender, mut body) = Body::channel();
+        sender.send_data(Bytes::from_static(b"abc")).await.unwrap();
+        sender.abort();
+
+        let err = write_request_body_to_shm(&mut body, writer, Duration::from_secs(1))
+            .await
+            .expect_err("body error should propagate");
+        assert!(err.to_string().contains("request body read failed"));
+
+        let first = reader.try_pop().unwrap().expect("payload");
+        assert_eq!(first, b"abc");
+        let waited = timeout(Duration::from_millis(100), reader.wait_for_data()).await;
+        assert!(waited.is_err(), "unexpected clean EOF in request ring");
+
+        let _ = std::fs::remove_file(req_path);
+    }
+
+    #[tokio::test]
+    async fn shm_response_meta_returns_before_body_writer_after_fast_response() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let response_meta = IpcResponseMeta {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        };
+        let writer = tokio::spawn(async move {
+            write_frame(&mut server, &response_meta)
+                .await
+                .expect("write response meta");
+        });
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<()>>();
+        let read_task = tokio::spawn(async move {
+            read_shm_response_meta_after_body_writer(&mut client, result_rx).await
+        });
+
+        tokio::task::yield_now().await;
+        let meta = read_task
+            .await
+            .expect("join read task")
+            .expect("read response meta");
+        assert_eq!(meta.status, 200);
+        assert!(
+            result_tx
+                .send(Err(anyhow!("body writer failed late")))
+                .is_err(),
+            "response metadata reader should not keep waiting on the body writer"
+        );
+        writer.await.expect("join writer");
+    }
+
+    #[tokio::test]
+    async fn downstream_body_closed_reports_dropped_receiver() {
+        let (sender, body) = Body::channel();
+        drop(body);
+
+        let mut sender = sender;
+        assert!(downstream_body_closed(&mut sender).await);
+        assert!(sender.is_closed());
+    }
 }

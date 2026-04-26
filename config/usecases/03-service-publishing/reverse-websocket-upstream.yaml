@@ -1,0 +1,58 @@
+# Reverse publish to WebSocket backends over both ws:// and wss://.
+# Health checks stay HTTP-shaped: qpx normalizes ws:// -> http:// and
+# wss:// -> https:// for route health probes.
+reverse:
+- name: reverse-websocket-upstream
+  listen: 0.0.0.0:19446
+  routes:
+  - name: chat-ws
+    match:
+      host:
+      - chat.example.com
+    timeout_ms: 60000
+    lb: round_robin
+    resilience:
+      retry:
+        attempts: 1
+        backoff_ms: 50
+    health_check:
+      interval_ms: 5000
+      timeout_ms: 1000
+      fail_threshold: 3
+      cooldown_ms: 30000
+      http:
+        path: /healthz
+        method: GET
+        expected_status:
+        - 200
+        - 204
+    upstreams:
+    - ws://10.50.0.10:8080
+    - ws://10.50.0.11:8080
+  - name: events-wss
+    match:
+      host:
+      - events.example.com
+    timeout_ms: 60000
+    lb: round_robin
+    resilience:
+      retry:
+        attempts: 1
+        backoff_ms: 50
+    upstream_trust:
+      san_dns:
+      - events-backend.internal.example.com
+    health_check:
+      interval_ms: 5000
+      timeout_ms: 1000
+      fail_threshold: 3
+      cooldown_ms: 30000
+      http:
+        path: /healthz
+        method: GET
+        expected_status:
+        - 200
+        - 204
+    upstreams:
+    - wss://events-backend.internal.example.com:8443
+state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

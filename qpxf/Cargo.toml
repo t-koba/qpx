@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = ["wasm"]
-wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
+wasm = ["dep:qpx-wasm"]
 
 [dependencies]
 anyhow.workspace = true
@@ -20,7 +20,8 @@ bytes.workspace = true
 tokio.workspace = true
 clap.workspace = true
 http.workspace = true
+dirs-next.workspace = true
+libc.workspace = true
 
-wasmtime = { workspace = true, optional = true }
-wasmtime-wasi = { workspace = true, optional = true }
-qpx-core = { version = "0.1.0", path = "../qpx-core", default-features = false }
+qpx-wasm = { path = "../qpx-wasm", optional = true }
+qpx-core = { version = "0.1.0", path = "../qpx-core", default-features = false, features = ["ipc-support"] }

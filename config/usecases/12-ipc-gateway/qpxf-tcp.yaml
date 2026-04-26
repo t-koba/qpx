@@ -1,0 +1,38 @@
+listen: ${QPXF_TCP_LISTEN:-127.0.0.1:19090}
+allow_insecure_tcp: true
+workers: 8
+max_connections: 128
+max_requests_per_connection: 32
+max_params_bytes: 1048576
+max_stdin_bytes: 33554432
+input_idle_timeout_ms: 30000
+conn_idle_timeout_ms: 60000
+# Paired with qpx-tcp.yaml. Match the same /cgi-bin/* and /wasm/* paths so a
+# plain loopback request like `curl http://127.0.0.1:18099/cgi-bin/health`
+# reaches an executor without requiring `Host: app.local`.
+# If you need stricter virtual-host routing, add `host:` and narrower
+# `path_regex:` predicates after the initial smoke test.
+handlers:
+- match:
+    path_prefix: /cgi-bin/
+  backend:
+    type: cgi
+    root: ${QPXF_SAMPLE_CGI_ROOT:-config/usecases/12-ipc-gateway/assets/cgi}
+    timeout_ms: 30000
+    env_passthrough:
+    - PATH
+    - HOME
+    max_stdout_bytes: 33554432
+    max_stderr_bytes: 1048576
+- match:
+    path_prefix: /wasm/
+  backend:
+    type: wasm
+    module: ${QPXF_SAMPLE_WASM_MODULE:-config/usecases/12-ipc-gateway/assets/wasm/echo.wat}
+    precompile: true
+    max_module_bytes: 134217728
+    max_stdin_bytes: 33554432
+    max_memory_mb: 128
+    timeout_ms: 10000
+    max_stdout_bytes: 33554432
+    max_stderr_bytes: 1048576

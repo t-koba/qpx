@@ -32,7 +32,7 @@ pub async fn maybe_invalidate(
     };
 
     let namespace = cache_namespace(policy, "default");
-    let mut keys = vec![key.clone()];
+    let mut keys = invalidation_keys_for_target(key);
     keys.extend(collect_invalidation_targets(key, response_headers));
     let mut seen = HashSet::new();
     for k in keys {
@@ -43,6 +43,27 @@ pub async fn maybe_invalidate(
         invalidate_primary(backend.as_ref(), namespace.as_str(), primary.as_str()).await?;
     }
     Ok(())
+}
+
+pub async fn purge_cache_key(
+    key: &CacheRequestKey,
+    policy: &CachePolicyConfig,
+    backends: &HashMap<String, Arc<dyn CacheBackend>>,
+) -> Result<bool> {
+    if !policy.enabled {
+        return Ok(false);
+    }
+    let Some(backend) = backends.get(policy.backend.as_str()) else {
+        return Ok(false);
+    };
+    let namespace = cache_namespace(policy, "default");
+    invalidate_primary(
+        backend.as_ref(),
+        namespace.as_str(),
+        key.primary_hash().as_str(),
+    )
+    .await?;
+    Ok(true)
 }
 
 pub(super) async fn invalidate_primary(
@@ -90,20 +111,48 @@ fn collect_invalidation_targets(
             if !same_authority(&request_url, &url) {
                 continue;
             }
-            let key = CacheRequestKey {
-                scheme: url.scheme().to_ascii_lowercase(),
-                authority: normalize_url_authority(&url).unwrap_or_default(),
-                path_and_query: match url.query() {
-                    Some(query) => format!("{}?{}", url.path(), query),
-                    None => url.path().to_string(),
-                },
+            let authority = normalize_url_authority(&url).unwrap_or_default();
+            if authority.is_empty() {
+                continue;
+            }
+            let path_and_query = match url.query() {
+                Some(query) => format!("{}?{}", url.path(), query),
+                None => url.path().to_string(),
             };
-            if !key.authority.is_empty() {
-                out.push(key);
+            for method in invalidated_method_groups(request_target.method.as_str()) {
+                out.push(CacheRequestKey {
+                    method: method.to_string(),
+                    scheme: url.scheme().to_ascii_lowercase(),
+                    authority: authority.clone(),
+                    path_and_query: path_and_query.clone(),
+                });
             }
         }
     }
     out
+}
+
+fn invalidation_keys_for_target(target: &CacheRequestKey) -> Vec<CacheRequestKey> {
+    invalidated_method_groups(target.method.as_str())
+        .iter()
+        .map(|method| CacheRequestKey {
+            method: (*method).to_string(),
+            scheme: target.scheme.clone(),
+            authority: target.authority.clone(),
+            path_and_query: target.path_and_query.clone(),
+        })
+        .collect()
+}
+
+fn invalidated_method_groups(request_method: &str) -> &'static [&'static str] {
+    match request_method {
+        "GET" | "HEAD" => &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+        "POST" => &["GET", "HEAD", "POST"],
+        "PUT" => &["GET", "HEAD", "PUT"],
+        "PATCH" => &["GET", "HEAD", "PATCH"],
+        "DELETE" => &["GET", "HEAD", "DELETE"],
+        _ => &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+    }
 }
 
 fn same_authority(a: &Url, b: &Url) -> bool {

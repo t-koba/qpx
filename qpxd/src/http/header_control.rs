@@ -61,7 +61,10 @@ fn apply_header_mutations(
         if let Ok(new_value) = http::HeaderValue::from_str(replaced.as_ref()) {
             headers.insert(replace.header().clone(), new_value);
         } else {
-            counter!("qpx_header_regex_replace_invalid_total").increment(1);
+            counter!(crate::runtime::metric_names()
+                .header_regex_replace_invalid_total
+                .clone())
+            .increment(1);
             warn!(
                 header = %replace.header(),
                 "header regex_replace produced invalid HeaderValue; mutation skipped"

@@ -1,8 +1,9 @@
+use crate::http::body::Body;
 use crate::http::l7::finalize_response_for_request;
 use crate::http3::codec::hyper_response_to_h3;
 use anyhow::{anyhow, Result};
 use bytes::{Buf, Bytes, BytesMut};
-use hyper::{Body, Response, StatusCode};
+use hyper::{Response, StatusCode};
 use tokio::time::{timeout, Duration};
 
 pub type H3ServerRequestStream = ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
@@ -18,7 +19,7 @@ pub async fn read_h3_request_body(
     req_stream: &mut H3ServerRequestStream,
     read_timeout: Duration,
     max_body_bytes: usize,
-) -> std::result::Result<(Bytes, Option<http1::HeaderMap>), H3ReadBodyError> {
+) -> std::result::Result<(Bytes, Option<::http::HeaderMap>), H3ReadBodyError> {
     let mut req_body = BytesMut::new();
     loop {
         let recv = match timeout(read_timeout, req_stream.recv_data()).await {
@@ -65,23 +66,37 @@ pub async fn send_h3_response(
     request_method: &http::Method,
     req_stream: &mut H3ServerRequestStream,
     max_h3_response_body_bytes: usize,
+    body_read_timeout: Duration,
 ) -> Result<()> {
-    let (head, body, trailers) =
-        hyper_response_to_h3(response, request_method, max_h3_response_body_bytes).await?;
-    req_stream.send_response(head).await?;
+    let (head, body, trailers) = hyper_response_to_h3(
+        response,
+        request_method,
+        max_h3_response_body_bytes,
+        body_read_timeout,
+    )
+    .await?;
+    timeout(body_read_timeout, req_stream.send_response(head))
+        .await
+        .map_err(|_| anyhow!("HTTP/3 response HEADERS send timed out"))??;
     if !body.is_empty() {
-        req_stream.send_data(body).await?;
+        timeout(body_read_timeout, req_stream.send_data(body))
+            .await
+            .map_err(|_| anyhow!("HTTP/3 response DATA send timed out"))??;
     }
     if let Some(trailers) = trailers {
-        req_stream.send_trailers(trailers).await?;
+        timeout(body_read_timeout, req_stream.send_trailers(trailers))
+            .await
+            .map_err(|_| anyhow!("HTTP/3 response trailers send timed out"))??;
     }
-    req_stream.finish().await?;
+    timeout(body_read_timeout, req_stream.finish())
+        .await
+        .map_err(|_| anyhow!("HTTP/3 response finish timed out"))??;
     Ok(())
 }
 
 pub async fn send_h3_static_response(
     req_stream: &mut H3ServerRequestStream,
-    status: http1::StatusCode,
+    status: ::http::StatusCode,
     body: &[u8],
     request_method: &http::Method,
     proxy_name: &str,
@@ -101,6 +116,7 @@ pub async fn send_h3_static_response(
         request_method,
         req_stream,
         max_h3_response_body_bytes,
+        Duration::from_secs(1),
     )
     .await
 }

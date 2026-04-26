@@ -1,9 +1,12 @@
+use crate::http::body::Body;
 use anyhow::{anyhow, Result};
-use hyper::client::HttpConnector;
-use hyper::{Body, Response, StatusCode};
+use hyper::{Response, StatusCode};
+use hyper_util::client::legacy::{connect::HttpConnector, Client};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use qpx_core::config::ActionConfig;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 pub fn blocked_response(message: &str) -> Response<Body> {
     Response::builder()
@@ -48,38 +51,78 @@ pub fn too_many_requests_response(retry_after: Option<Duration>) -> Response<Bod
         .expect("static response")
 }
 
-pub fn shared_http_client() -> &'static hyper::Client<HttpConnector, Body> {
-    static CLIENT: OnceLock<hyper::Client<HttpConnector, Body>> = OnceLock::new();
-    CLIENT.get_or_init(hyper::Client::new)
+pub fn http_version_label(version: http::Version) -> &'static str {
+    match version {
+        http::Version::HTTP_09 => "HTTP/0.9",
+        http::Version::HTTP_10 => "HTTP/1.0",
+        http::Version::HTTP_11 => "HTTP/1.1",
+        http::Version::HTTP_2 => "HTTP/2",
+        http::Version::HTTP_3 => "HTTP/3",
+        _ => "HTTP/1.1",
+    }
+}
+
+pub type Http1SendRequest = hyper::client::conn::http1::SendRequest<Body>;
+
+pub fn shared_http_client() -> &'static Client<HttpConnector, Body> {
+    static CLIENT: OnceLock<Client<HttpConnector, Body>> = OnceLock::new();
+    CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build(HttpConnector::new()))
+}
+
+pub async fn request_with_shared_client(
+    req: http::Request<Body>,
+) -> Result<Response<Body>, hyper_util::client::legacy::Error> {
+    Ok(shared_http_client().request(req).await?.map(Body::from))
+}
+
+pub async fn handshake_http1<T>(
+    io: T,
+) -> Result<
+    (
+        Http1SendRequest,
+        hyper::client::conn::http1::Connection<TokioIo<T>, Body>,
+    ),
+    hyper::Error,
+>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    hyper::client::conn::http1::Builder::new()
+        .handshake(TokioIo::new(io))
+        .await
 }
 
 pub fn resolve_named_upstream(
     action: &ActionConfig,
     state: &Arc<crate::runtime::RuntimeState>,
     listener_upstream_proxy: Option<&str>,
-) -> Result<Option<String>> {
+) -> Result<Option<crate::upstream::pool::ResolvedUpstreamProxy>> {
     if matches!(action.kind, qpx_core::config::ActionKind::Direct) {
         return Ok(None);
     }
 
     if let Some(upstream_name) = action.upstream.as_deref().or(listener_upstream_proxy) {
         if upstream_name.contains("://") {
-            return Ok(Some(upstream_name.to_string()));
+            return Ok(Some(crate::upstream::pool::ResolvedUpstreamProxy::direct(
+                upstream_name,
+            )?));
         }
         // Keep validation and runtime behavior aligned: bare "host:port" (and "[::1]:port")
         // is treated as a direct upstream proxy endpoint.
         if (upstream_name.contains(':') || upstream_name.starts_with('['))
             && upstream_name.parse::<http::uri::Authority>().is_ok()
         {
-            // Preserve userinfo semantics by converting to a URL form, so downstream parsing can
-            // produce Proxy-Authorization (parse_upstream_proxy_endpoint).
-            if upstream_name.contains('@') {
-                return Ok(Some(format!("http://{}", upstream_name)));
-            }
-            return Ok(Some(upstream_name.to_string()));
+            let direct = if upstream_name.contains('@') {
+                format!("http://{}", upstream_name)
+            } else {
+                upstream_name.to_string()
+            };
+            return Ok(Some(crate::upstream::pool::ResolvedUpstreamProxy::direct(
+                direct.as_str(),
+            )?));
         }
-        if let Some(url) = state.upstreams.get(upstream_name) {
-            return Ok(Some(url.clone()));
+        if let Some(cluster) = state.upstream_proxies.get(upstream_name) {
+            return Ok(Some(cluster.select()?));
         }
         return Err(anyhow!(
             "unknown upstream reference: {} (define it in top-level upstreams[])",
@@ -112,7 +155,6 @@ mod tests {
 
     fn base_runtime() -> Runtime {
         let config = Config {
-            version: 1,
             state_dir: None,
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
@@ -125,6 +167,9 @@ mod tests {
             acme: None,
             exporter: None,
             auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            ext_authz: Vec::new(),
+            destination_resolution: Default::default(),
             listeners: vec![ListenerConfig {
                 name: "forward".to_string(),
                 mode: ListenerMode::Forward,
@@ -136,13 +181,23 @@ mod tests {
                 },
                 tls_inspection: None,
                 rules: Vec::new(),
+                connection_filter: Vec::new(),
                 upstream_proxy: None,
                 http3: None,
                 ftp: Default::default(),
                 xdp: None,
                 cache: None,
                 rate_limit: None,
+                policy_context: None,
+                http: None,
+                http_guard_profile: None,
+                destination_resolution: None,
+                http_modules: Vec::new(),
             }],
+            named_sets: Vec::new(),
+            http_guard_profiles: Vec::new(),
+            rate_limit_profiles: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
             reverse: Vec::new(),
             upstreams: Vec::new(),
             cache: CacheConfig::default(),
@@ -160,7 +215,10 @@ mod tests {
             local_response: None,
         };
         let resolved = resolve_named_upstream(&action, &state, None).expect("resolve");
-        assert_eq!(resolved.as_deref(), Some("127.0.0.1:3128"));
+        assert_eq!(
+            resolved.as_ref().map(|upstream| upstream.label()),
+            Some("127.0.0.1:3128")
+        );
     }
 
     #[test]
@@ -174,6 +232,9 @@ mod tests {
         };
         let resolved =
             resolve_named_upstream(&action, &state, Some("127.0.0.1:3128")).expect("resolve");
-        assert_eq!(resolved.as_deref(), Some("127.0.0.1:3128"));
+        assert_eq!(
+            resolved.as_ref().map(|upstream| upstream.label()),
+            Some("127.0.0.1:3128")
+        );
     }
 }

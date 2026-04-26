@@ -48,7 +48,7 @@ pub struct Rule {
     headers: Option<Arc<CompiledHeaderControl>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RuleMatchContext<'a> {
     pub src_ip: Option<IpAddr>,
     pub dst_port: Option<u16>,
@@ -56,8 +56,54 @@ pub struct RuleMatchContext<'a> {
     pub sni: Option<&'a str>,
     pub method: Option<&'a str>,
     pub path: Option<&'a str>,
+    pub query: Option<&'a str>,
+    pub authority: Option<&'a str>,
+    pub scheme: Option<&'a str>,
+    pub http_version: Option<&'a str>,
+    pub alpn: Option<&'a str>,
+    pub tls_version: Option<&'a str>,
+    pub destination_category: Option<&'a str>,
+    pub destination_category_source: Option<&'a str>,
+    pub destination_category_confidence: Option<u64>,
+    pub destination_reputation: Option<&'a str>,
+    pub destination_reputation_source: Option<&'a str>,
+    pub destination_reputation_confidence: Option<u64>,
+    pub destination_application: Option<&'a str>,
+    pub destination_application_source: Option<&'a str>,
+    pub destination_application_confidence: Option<u64>,
+    pub ja3: Option<&'a str>,
+    pub ja4: Option<&'a str>,
+    pub request_size: Option<u64>,
+    pub response_status: Option<u16>,
+    pub response_size: Option<u64>,
+    pub client_cert_present: Option<bool>,
+    pub client_cert_subject: Option<&'a str>,
+    pub client_cert_issuer: Option<&'a str>,
+    pub client_cert_san_dns: &'a [String],
+    pub client_cert_san_uri: &'a [String],
+    pub client_cert_fingerprint_sha256: Option<&'a str>,
+    pub upstream_cert_present: Option<bool>,
+    pub upstream_cert_subject: Option<&'a str>,
+    pub upstream_cert_issuer: Option<&'a str>,
+    pub upstream_cert_san_dns: &'a [String],
+    pub upstream_cert_san_uri: &'a [String],
+    pub upstream_cert_fingerprint_sha256: Option<&'a str>,
+    pub rpc_protocol: Option<&'a str>,
+    pub rpc_service: Option<&'a str>,
+    pub rpc_method: Option<&'a str>,
+    pub rpc_streaming: Option<&'a str>,
+    pub rpc_status: Option<&'a str>,
+    pub rpc_message_size: Option<u64>,
+    pub rpc_message: Option<&'a str>,
+    pub rpc_trailers: Option<&'a http::HeaderMap>,
     pub headers: Option<&'a http::HeaderMap>,
+    pub user: Option<&'a str>,
     pub user_groups: &'a [String],
+    pub device_id: Option<&'a str>,
+    pub posture: &'a [String],
+    pub tenant: Option<&'a str>,
+    pub auth_strength: Option<&'a str>,
+    pub idp: Option<&'a str>,
 }
 
 impl RuleEngine {
@@ -171,6 +217,54 @@ impl RuleEngine {
         out
     }
 
+    pub fn candidate_rule_indices(&self, ctx: MatchPrefilterContext<'_>) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.prefilter.for_each_candidate(&ctx, |idx| {
+            out.push(idx);
+            false
+        });
+        out
+    }
+
+    pub fn candidate_requires_request_size(&self, ctx: MatchPrefilterContext<'_>) -> bool {
+        self.candidate_rule_indices(ctx).into_iter().any(|idx| {
+            self.rules
+                .get(idx)
+                .map(Rule::requires_request_size)
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn candidate_requires_request_body_observation(
+        &self,
+        ctx: MatchPrefilterContext<'_>,
+    ) -> bool {
+        self.candidate_rule_indices(ctx).into_iter().any(|idx| {
+            self.rules
+                .get(idx)
+                .map(Rule::requires_request_body_observation)
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn candidate_requires_request_rpc_context(&self, ctx: MatchPrefilterContext<'_>) -> bool {
+        self.candidate_rule_indices(ctx).into_iter().any(|idx| {
+            self.rules
+                .get(idx)
+                .map(Rule::requires_request_rpc_context)
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn candidate_requires_response_size(&self, ctx: MatchPrefilterContext<'_>) -> bool {
+        self.candidate_rule_indices(ctx).into_iter().any(|idx| {
+            self.rules
+                .get(idx)
+                .map(Rule::requires_response_size)
+                .unwrap_or(false)
+        })
+    }
+
     pub fn rule_at(&self, idx: usize) -> Option<&Rule> {
         self.rules.get(idx)
     }
@@ -213,6 +307,26 @@ impl Rule {
     pub fn headers(&self) -> Option<&Arc<CompiledHeaderControl>> {
         self.headers.as_ref()
     }
+
+    pub fn requires_request_size(&self) -> bool {
+        self.matcher.requires_request_size()
+    }
+
+    pub fn requires_request_body_observation(&self) -> bool {
+        self.matcher.requires_request_body_observation()
+    }
+
+    pub fn requires_request_rpc_context(&self) -> bool {
+        self.matcher.requires_request_rpc_context()
+    }
+
+    pub fn requires_response_size(&self) -> bool {
+        self.matcher.requires_response_size()
+    }
+
+    pub fn requires_response_context(&self) -> bool {
+        self.matcher.requires_response_context()
+    }
 }
 
 impl CompiledHeaderControl {
@@ -237,6 +351,31 @@ impl CompiledHeaderControl {
 
     pub fn request_set(&self) -> &[(http::header::HeaderName, http::HeaderValue)] {
         &self.request_set
+    }
+
+    pub fn merged(&self, other: &CompiledHeaderControl) -> Self {
+        let mut merged = self.clone();
+        merged.request_set.extend(other.request_set.iter().cloned());
+        merged.request_add.extend(other.request_add.iter().cloned());
+        merged
+            .request_remove
+            .extend(other.request_remove.iter().cloned());
+        merged
+            .request_regex_replace
+            .extend(other.request_regex_replace.iter().cloned());
+        merged
+            .response_set
+            .extend(other.response_set.iter().cloned());
+        merged
+            .response_add
+            .extend(other.response_add.iter().cloned());
+        merged
+            .response_remove
+            .extend(other.response_remove.iter().cloned());
+        merged
+            .response_regex_replace
+            .extend(other.response_regex_replace.iter().cloned());
+        merged
     }
 
     pub fn request_add(&self) -> &[(http::header::HeaderName, http::HeaderValue)] {
@@ -265,6 +404,13 @@ impl CompiledHeaderControl {
 
     pub fn response_regex_replace(&self) -> &[CompiledRegexReplace] {
         &self.response_regex_replace
+    }
+
+    pub fn has_response_mutations(&self) -> bool {
+        !self.response_set.is_empty()
+            || !self.response_add.is_empty()
+            || !self.response_remove.is_empty()
+            || !self.response_regex_replace.is_empty()
     }
 }
 
@@ -375,7 +521,14 @@ mod tests {
             method: None,
             path: None,
             headers: None,
+            user: None,
             user_groups: &[],
+            device_id: None,
+            posture: &[],
+            tenant: None,
+            auth_strength: None,
+            idp: None,
+            ..Default::default()
         };
 
         let out = engine.evaluate_ref(&ctx);
@@ -406,7 +559,14 @@ mod tests {
             method: None,
             path: None,
             headers: None,
+            user: None,
             user_groups: &[],
+            device_id: None,
+            posture: &[],
+            tenant: None,
+            auth_strength: None,
+            idp: None,
+            ..Default::default()
         };
         let allow_ctx = RuleMatchContext {
             user_groups: &["dev".to_string()],
@@ -458,7 +618,14 @@ mod tests {
             method: Some("GET"),
             path: Some("/"),
             headers: None,
+            user: None,
             user_groups: &[],
+            device_id: None,
+            posture: &[],
+            tenant: None,
+            auth_strength: None,
+            idp: None,
+            ..Default::default()
         };
         let exact = engine.evaluate_ref(&exact_ctx);
         assert!(matches!(exact.action.kind, ActionKind::Block));
@@ -509,7 +676,14 @@ mod tests {
             method: None,
             path: None,
             headers: None,
+            user: None,
             user_groups: &[],
+            device_id: None,
+            posture: &[],
+            tenant: None,
+            auth_strength: None,
+            idp: None,
+            ..Default::default()
         };
         let out = engine.evaluate_ref(&v4_ctx);
         assert!(matches!(out.action.kind, ActionKind::Block));
@@ -554,7 +728,14 @@ mod tests {
             method: Some("GET"),
             path: Some("/"),
             headers: Some(&headers),
+            user: None,
             user_groups: &[],
+            device_id: None,
+            posture: &[],
+            tenant: None,
+            auth_strength: None,
+            idp: None,
+            ..Default::default()
         };
 
         let out = engine.evaluate_ref(&ctx);

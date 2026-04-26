@@ -1,0 +1,17 @@
+[package]
+name = "qpx-h3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+http.workspace = true
+quinn.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
