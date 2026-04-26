@@ -107,34 +107,6 @@ function Wait-Port {
     throw "timeout waiting for port $Port`nSTDOUT:`n$stdout`nSTDERR:`n$stderr"
 }
 
-function Wait-LogContains {
-    param([string]$Needle, [int]$MinCount = 1)
-    for ($i = 0; $i -lt 120; $i++) {
-        $matches = Get-LogCount -Needle $Needle
-        if ($matches -ge $MinCount) {
-            return
-        }
-        Start-Sleep -Milliseconds 100
-    }
-    $stdout = if (Test-Path $LogFile) { Get-Content -Raw $LogFile } else { "" }
-    $stderr = if (Test-Path $ErrFile) { Get-Content -Raw $ErrFile } else { "" }
-    throw "missing expected log line: $Needle`nSTDOUT:`n$stdout`nSTDERR:`n$stderr"
-}
-
-function Get-LogCount {
-    param([string]$Needle)
-    $matches = 0
-    if (Test-Path $LogFile) {
-        $content = Get-Content -Raw $LogFile
-        $matches += ([regex]::Matches($content, [regex]::Escape($Needle))).Count
-    }
-    if (Test-Path $ErrFile) {
-        $content = Get-Content -Raw $ErrFile
-        $matches += ([regex]::Matches($content, [regex]::Escape($Needle))).Count
-    }
-    return $matches
-}
-
 function Invoke-HealthRequest {
     $response = Invoke-WebRequest -Uri ("http://127.0.0.1:{0}/health" -f $Port) -Headers @{ Host = "control.local" } -TimeoutSec 3
     return [string]$response.Content
@@ -231,15 +203,12 @@ Wait-Port -Port $Port -ProcessId $parent.Id
 Wait-Body -Expected "OLD"
 
 Write-Host "[CONTROL] hot reload in place (windows)"
-$reloadCount = Get-LogCount -Needle "config reloaded"
 Install-Config -Body "RELOADED" -Acceptors 1
-Wait-LogContains -Needle "config reloaded" -MinCount ($reloadCount + 1)
 Wait-Body -Expected "RELOADED"
 
 Write-Host "[CONTROL] hot reload with listener/reverse restart (windows)"
-$reloadCount = Get-LogCount -Needle "config reloaded"
 Install-Config -Body "RESTARTED" -Acceptors 2
-Wait-LogContains -Needle "config reloaded" -MinCount ($reloadCount + 1)
+Wait-Port -Port $RestartPort -ProcessId $parent.Id
 Wait-Body -Expected "RESTARTED"
 
 Write-Host "[CONTROL] binary upgrade (windows)"

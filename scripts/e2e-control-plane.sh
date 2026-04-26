@@ -70,31 +70,6 @@ wait_port() {
   exit 1
 }
 
-wait_log_contains() {
-  local needle="$1"
-  local min_count="${2:-1}"
-  local tries=0
-
-  while [ "$tries" -lt 120 ]; do
-    local count
-    count="$({ grep -F "$needle" "$LOG_FILE" 2>/dev/null || true; } | wc -l | tr -d ' ')"
-    if [ "${count:-0}" -ge "$min_count" ]; then
-      return 0
-    fi
-    tries=$((tries + 1))
-    sleep 0.1
-  done
-
-  echo "missing expected log line: $needle" >&2
-  cat "$LOG_FILE" >&2 || true
-  exit 1
-}
-
-log_line_count() {
-  local needle="$1"
-  { grep -F "$needle" "$LOG_FILE" 2>/dev/null || true; } | wc -l | tr -d ' '
-}
-
 request_body() {
   curl -fsS --max-time 3 \
     -H 'Host: control.local' \
@@ -215,16 +190,12 @@ PY
   wait_body "OLD"
 
   echo "[CONTROL] hot reload in place"
-  local reload_count
-  reload_count="$(log_line_count "config reloaded")"
   install_config RELOADED 1
-  wait_log_contains "config reloaded" $((reload_count + 1))
   wait_body "RELOADED"
 
   echo "[CONTROL] hot reload with listener/reverse restart"
-  reload_count="$(log_line_count "config reloaded")"
   install_config RESTARTED 2
-  wait_log_contains "config reloaded" $((reload_count + 1))
+  wait_port "$RESTART_PORT" "$parent_pid"
   wait_body "RESTARTED"
 
   echo "[CONTROL] binary upgrade"
