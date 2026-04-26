@@ -12,7 +12,7 @@ use std::net::{SocketAddr, UdpSocket};
 #[cfg(windows)]
 use std::path::PathBuf;
 
-#[cfg(feature = "http3")]
+#[cfg(all(feature = "http3", unix))]
 use crate::udp_socket_handoff::{adopt_inherited_udp_socket, duplicate_std_udp_socket_for_handoff};
 #[cfg(windows)]
 use crate::udp_socket_handoff::{

@@ -1,12 +1,12 @@
-use anyhow::{anyhow, Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 
 #[cfg(any(feature = "http3", test))]
 #[cfg(unix)]
 use std::os::fd::IntoRawFd;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-#[cfg(windows)]
-use std::os::windows::io::AsRawSocket;
 
 #[cfg(unix)]
 fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {

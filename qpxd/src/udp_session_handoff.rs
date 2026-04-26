@@ -1,4 +1,5 @@
 use crate::rate_limit::RateLimitContext;
+#[cfg(unix)]
 use crate::udp_socket_handoff::{adopt_inherited_udp_socket, duplicate_std_udp_socket_for_handoff};
 #[cfg(windows)]
 use crate::udp_socket_handoff::{
@@ -8,10 +9,15 @@ use anyhow::{anyhow, Context, Result};
 use qpx_core::config::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::fs::{self, OpenOptions};
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(unix)]
 use uuid::Uuid;
 
 #[cfg(unix)]

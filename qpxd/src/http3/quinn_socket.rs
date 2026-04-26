@@ -1531,8 +1531,6 @@ fn adopt_unix_stream(fd: i32) -> Result<QuinnBrokerStream> {
 
 #[cfg(windows)]
 fn connect_windows_broker(addr: &str, token: &str) -> Result<QuinnBrokerStream> {
-    use std::io::Write;
-
     let addr: SocketAddr = addr
         .parse()
         .with_context(|| format!("invalid QUIC broker rendezvous addr {addr}"))?;
@@ -1586,13 +1584,10 @@ fn tokio_broker_stream_from_std(stream: QuinnBrokerStream) -> Result<TokioQuinnB
 fn write_broker_token(stream: &mut StdTcpStream, token: &str) -> Result<()> {
     let bytes = token.as_bytes();
     let len = u16::try_from(bytes.len()).context("broker token too long")?;
-    stream
-        .write_all(&len.to_be_bytes())
+    std::io::Write::write_all(stream, &len.to_be_bytes())
         .context("failed to write broker token length")?;
-    stream
-        .write_all(bytes)
-        .context("failed to write broker token")?;
-    stream.flush().ok();
+    std::io::Write::write_all(stream, bytes).context("failed to write broker token")?;
+    std::io::Write::flush(stream).ok();
     Ok(())
 }
 

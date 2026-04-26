@@ -894,8 +894,12 @@ mod tests {
     fn default_shm_dir_uses_private_user_scoped_path() {
         let dir = ShmRingBuffer::default_shm_dir();
         assert!(!dir.starts_with(std::env::temp_dir().join("qpx")));
-        let dir_text = dir.to_string_lossy();
-        assert!(dir_text.contains("/.qpx/run") || dir_text.contains("/qpx-"));
+        if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+            assert_eq!(dir, PathBuf::from(runtime_dir));
+        } else {
+            let dir_text = dir.to_string_lossy();
+            assert!(dir_text.contains("/.qpx/run") || dir_text.contains("/qpx-"));
+        }
     }
 
     #[test]

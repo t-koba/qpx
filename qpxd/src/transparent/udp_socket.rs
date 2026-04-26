@@ -15,7 +15,7 @@ pub(super) fn bind_udp_listener(
 
 pub(crate) fn bind_udp_std_listener(
     addr: SocketAddr,
-    runtime: &qpx_core::config::RuntimeConfig,
+    _runtime: &qpx_core::config::RuntimeConfig,
 ) -> Result<std::net::UdpSocket> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
@@ -28,7 +28,7 @@ pub(crate) fn bind_udp_std_listener(
         .set_reuse_address(true)
         .context("failed to set transparent UDP SO_REUSEADDR")?;
     #[cfg(unix)]
-    if runtime.reuse_port {
+    if _runtime.reuse_port {
         let _ = socket.set_reuse_port(true);
     }
     socket

@@ -26,16 +26,17 @@ use std::os::windows::io::{AsRawSocket, FromRawSocket, RawSocket};
 #[cfg(windows)]
 use std::sync::OnceLock;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, SYNCHRONIZE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{
-    WSADuplicateSocketW, WSASocketW, WSAStartup, FROM_PROTOCOL_INFO, INVALID_SOCKET, MAKEWORD,
-    SOCKET_ERROR, WSADATA, WSAPROTOCOL_INFOW, WSA_FLAG_OVERLAPPED,
+    WSADuplicateSocketW, WSASocketW, WSAStartup, FROM_PROTOCOL_INFO, INVALID_SOCKET, SOCKET_ERROR,
+    WSADATA, WSAPROTOCOL_INFOW, WSA_FLAG_OVERLAPPED,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE, SYNCHRONIZE,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CreateEventW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
 };
 
 #[cfg(windows)]
@@ -185,18 +186,24 @@ fn reject_reparse_point(path: &Path, meta: &std::fs::Metadata) -> Result<()> {
 
 #[cfg(windows)]
 fn ensure_winsock_started() -> Result<()> {
-    static START: OnceLock<Result<()>> = OnceLock::new();
-    START
-        .get_or_init(|| {
-            let mut data = MaybeUninit::<WSADATA>::uninit();
-            let rc = unsafe { WSAStartup(MAKEWORD(2, 2), data.as_mut_ptr()) };
-            if rc == 0 {
-                Ok(())
-            } else {
-                Err(anyhow!("WSAStartup failed with {}", rc))
-            }
-        })
-        .clone()
+    static START: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+    match START.get_or_init(|| {
+        let mut data = MaybeUninit::<WSADATA>::uninit();
+        let rc = unsafe { WSAStartup(makeword(2, 2), data.as_mut_ptr()) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(format!("WSAStartup failed with {rc}"))
+        }
+    }) {
+        Ok(()) => Ok(()),
+        Err(message) => Err(anyhow!(message.clone())),
+    }
+}
+
+#[cfg(windows)]
+fn makeword(low: u8, high: u8) -> u16 {
+    u16::from(low) | (u16::from(high) << 8)
 }
 
 #[cfg(windows)]
@@ -312,7 +319,7 @@ impl EventHandle {
 #[cfg(windows)]
 impl Drop for EventHandle {
     fn drop(&mut self) {
-        if self.0 != 0 {
+        if !self.0.is_null() {
             unsafe {
                 let _ = CloseHandle(self.0);
             }
@@ -324,7 +331,7 @@ impl Drop for EventHandle {
 pub(crate) fn create_upgrade_event(pid: u32) -> Result<EventHandle> {
     let name = upgrade_event_name(pid);
     let handle = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
-    if handle == 0 {
+    if handle.is_null() {
         return Err(anyhow!(
             "CreateEventW failed: {}",
             std::io::Error::last_os_error()
@@ -337,7 +344,7 @@ pub(crate) fn create_upgrade_event(pid: u32) -> Result<EventHandle> {
 pub(crate) fn open_upgrade_event(pid: u32) -> Result<EventHandle> {
     let name = upgrade_event_name(pid);
     let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, 0, name.as_ptr()) };
-    if handle == 0 {
+    if handle.is_null() {
         return Err(anyhow!(
             "OpenEventW failed: {}",
             std::io::Error::last_os_error()

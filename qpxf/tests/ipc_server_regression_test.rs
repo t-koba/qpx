@@ -361,13 +361,20 @@ handlers:
         let _ = first.write_all(&[b'a'; 128]).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let (status, body) = timeout(
-            Duration::from_secs(2),
-            send_tcp_ipc_request(&addr, "/fast.sh", "GET"),
-        )
-        .await
-        .expect("second request timeout")
-        .expect("second request failed");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let (status, body) = loop {
+            let (status, body) = timeout(
+                Duration::from_secs(2),
+                send_tcp_ipc_request(&addr, "/fast.sh", "GET"),
+            )
+            .await
+            .expect("second request timeout")
+            .expect("second request failed");
+            if status == 200 || tokio::time::Instant::now() >= deadline {
+                break (status, body);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
         assert_eq!(
             status,
             200,

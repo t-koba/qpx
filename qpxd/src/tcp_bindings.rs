@@ -671,7 +671,7 @@ impl TcpBindings {
                 .metrics
                 .as_ref()
                 .map(|single| {
-                    Ok(InheritedSingleTcp {
+                    Ok::<InheritedSingleTcp, anyhow::Error>(InheritedSingleTcp {
                         listen: single.listen.clone(),
                         socket: crate::windows_handoff::duplicate_socket_for_child(
                             &single.listener,
@@ -686,7 +686,7 @@ impl TcpBindings {
                 .acme_http01
                 .as_ref()
                 .map(|single| {
-                    Ok(InheritedSingleTcp {
+                    Ok::<InheritedSingleTcp, anyhow::Error>(InheritedSingleTcp {
                         listen: single.listen.clone(),
                         socket: crate::windows_handoff::duplicate_socket_for_child(
                             &single.listener,

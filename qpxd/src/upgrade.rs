@@ -61,8 +61,13 @@ impl UpgradeTrigger {
             #[cfg(windows)]
             Self::Event(event) => loop {
                 let fired = tokio::task::spawn_blocking({
-                    let raw = event.raw();
-                    move || crate::windows_handoff::wait_for_event_raw(raw, READY_TIMEOUT)
+                    let raw = event.raw() as usize;
+                    move || {
+                        crate::windows_handoff::wait_for_event_raw(
+                            raw as windows_sys::Win32::Foundation::HANDLE,
+                            READY_TIMEOUT,
+                        )
+                    }
                 })
                 .await
                 .context("upgrade event wait join failed")??;

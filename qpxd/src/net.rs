@@ -57,7 +57,7 @@ pub fn tokio_listener_from_std(listener: StdTcpListener) -> Result<TcpListener> 
 }
 
 #[cfg(feature = "http3")]
-pub fn bind_udp_std_socket(addr: SocketAddr, runtime: &RuntimeConfig) -> Result<StdUdpSocket> {
+pub fn bind_udp_std_socket(addr: SocketAddr, _runtime: &RuntimeConfig) -> Result<StdUdpSocket> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {
@@ -69,7 +69,7 @@ pub fn bind_udp_std_socket(addr: SocketAddr, runtime: &RuntimeConfig) -> Result<
         .set_reuse_address(true)
         .context("failed to set UDP SO_REUSEADDR")?;
     #[cfg(unix)]
-    if runtime.reuse_port {
+    if _runtime.reuse_port {
         let _ = socket.set_reuse_port(true);
     }
     socket
