@@ -502,6 +502,10 @@ mod tests {
             .await
             .expect("join lazy invalid wasm")
             .expect_err("lazy compile fails on request");
-        assert!(err.to_string().contains("WASM compile failed"));
+        assert!(
+            err.chain()
+                .any(|cause| cause.to_string().contains("WASM compile failed")),
+            "unexpected error chain: {err:?}"
+        );
     }
 }

@@ -141,6 +141,7 @@ function Install-Config {
         [int]$Acceptors
     )
     $tcpBacklog = if ($Acceptors -gt 1) { 4097 } else { 4096 }
+    $tmpConfig = Join-Path $TmpDir ("control-plane.next." + [System.Guid]::NewGuid().ToString("N") + ".yaml")
     $content = @"
 state_dir: $(Quote-YamlPath $StateDir)
 runtime:
@@ -177,7 +178,12 @@ reverse:
       body: $Body
 "@
     }
-    Set-Content -LiteralPath $ConfigFile -Value $content -NoNewline
+    [System.IO.File]::WriteAllText($tmpConfig, $content, [System.Text.UTF8Encoding]::new($false))
+    if (Test-Path $ConfigFile) {
+        [System.IO.File]::Replace($tmpConfig, $ConfigFile, $null)
+    } else {
+        [System.IO.File]::Move($tmpConfig, $ConfigFile)
+    }
 }
 
 New-Item -ItemType Directory -Path $TmpDir, $StateDir | Out-Null

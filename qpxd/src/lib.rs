@@ -771,11 +771,14 @@ fn refresh_watches(
 ) -> Result<()> {
     let next: std::collections::HashSet<PathBuf> = sources.into_iter().collect();
 
-    for stale in watched.difference(&next) {
+    // Config files are commonly updated via atomic replace. Some notify backends
+    // bind file watches to the old inode/handle, so refresh every retained path
+    // after a successful reload instead of only adding/removing set differences.
+    for stale in watched.iter() {
         let _ = watcher.unwatch(stale);
     }
-    for added in next.difference(watched) {
-        watcher.watch(added, notify::RecursiveMode::NonRecursive)?;
+    for source in &next {
+        watcher.watch(source, notify::RecursiveMode::NonRecursive)?;
     }
 
     *watched = next;
