@@ -633,7 +633,11 @@ fn reject_untrusted_ancestor(path: &Path, meta: &fs::Metadata) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
     let mode = meta.mode();
-    let sticky = mode & libc::S_ISVTX as u32 != 0;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let sticky_bit = u32::from(libc::S_ISVTX);
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let sticky_bit = libc::S_ISVTX;
+    let sticky = mode & sticky_bit != 0;
     let euid = unsafe { libc::geteuid() };
 
     if meta.uid() != 0 && meta.uid() != euid {
