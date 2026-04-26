@@ -15,6 +15,7 @@ use qpx_core::config::{
     ReverseConfig, ReverseRouteConfig, RpcMatchConfig, RuntimeConfig, SystemLogConfig,
     UpstreamConfig,
 };
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use rcgen::generate_simple_self_signed;
 use regex::Regex;
 use std::collections::HashMap;
@@ -830,6 +831,7 @@ async fn response_rule_matches_destination_and_upstream_cert_context() {
 }
 
 #[tokio::test]
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 async fn response_rule_matches_client_cert_context() {
     let router = build_router(vec![HttpResponseRuleConfig {
         name: "resp-client-cert".to_string(),

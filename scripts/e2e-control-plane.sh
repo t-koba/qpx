@@ -8,6 +8,7 @@ CONFIG_FILE="$TMP_DIR/control-plane.yaml"
 LOG_FILE="$TMP_DIR/qpxd.log"
 STATE_DIR="$TMP_DIR/state"
 PORT="${QPX_CONTROL_PLANE_PORT:-}"
+RESTART_PORT="${QPX_CONTROL_PLANE_RESTART_PORT:-}"
 PIDS=()
 
 register_pid() {
@@ -136,6 +137,23 @@ reverse:
       body: $body
 EOF
 
+  if [ "$acceptors" -gt 1 ]; then
+    cat >>"$tmp_cfg" <<EOF
+- name: control-extra
+  listen: 127.0.0.1:$RESTART_PORT
+  routes:
+  - name: health
+    match:
+      host:
+      - control.local
+      path:
+      - /health
+    local_response:
+      status: 200
+      body: $body
+EOF
+  fi
+
   mv "$tmp_cfg" "$CONFIG_FILE"
 }
 
@@ -148,6 +166,16 @@ main() {
 
   if [ -z "$PORT" ]; then
     PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+  fi
+  if [ -z "$RESTART_PORT" ]; then
+    RESTART_PORT="$(python3 - <<'PY'
 import socket
 s = socket.socket()
 s.bind(("127.0.0.1", 0))

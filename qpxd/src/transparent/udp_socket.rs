@@ -117,7 +117,10 @@ fn recvmsg_with_original_dst(
     msg.msg_iov = (&mut iov as *mut libc::iovec).cast();
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = control.len();
+    msg.msg_controllen = control
+        .len()
+        .try_into()
+        .map_err(|_| std::io::Error::other("control buffer length exceeds msg_controllen"))?;
 
     let n = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut msg, 0) };
     if n < 0 {

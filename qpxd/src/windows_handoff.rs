@@ -26,9 +26,7 @@ use std::os::windows::io::{AsRawSocket, FromRawSocket, RawSocket};
 #[cfg(windows)]
 use std::sync::OnceLock;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{
-    CloseHandle, HANDLE, SYNCHRONIZE, WAIT_OBJECT_0, WAIT_TIMEOUT,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{
     WSADuplicateSocketW, WSASocketW, WSAStartup, FROM_PROTOCOL_INFO, INVALID_SOCKET, SOCKET_ERROR,
@@ -41,6 +39,8 @@ use windows_sys::Win32::System::Threading::{
 
 #[cfg(windows)]
 pub(crate) const HANDOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(windows)]
+const SYNCHRONIZE: u32 = 0x0010_0000;
 
 pub(crate) fn handoff_dir(config: &Config) -> PathBuf {
     config

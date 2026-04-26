@@ -1,5 +1,8 @@
+#[cfg(any(feature = "tls-rustls", feature = "tls-native", test))]
 use crate::tls::cert_info::UpstreamCertificateInfo;
-use anyhow::{anyhow, Result};
+#[cfg(any(feature = "tls-rustls", feature = "tls-native", test))]
+use anyhow::anyhow;
+use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use qpx_core::config::UpstreamTlsTrustConfig;
 use regex::Regex;
@@ -61,10 +64,12 @@ impl CompiledUpstreamTlsTrust {
         Ok(Some(Arc::new(compiled)))
     }
 
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub(crate) fn client_auth(&self) -> Option<&UpstreamTlsClientAuth> {
         self.client_auth.as_ref()
     }
 
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native", test))]
     pub(crate) fn validate_certificate(
         &self,
         peer_name: &str,
@@ -131,6 +136,7 @@ impl CompiledUpstreamTlsTrust {
         Ok(())
     }
 
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native", test))]
     fn requires_certificate_validation(&self) -> bool {
         !self.pin_sha256.is_empty()
             || !self.issuer.is_empty()
@@ -143,11 +149,19 @@ impl CompiledUpstreamTlsTrust {
             && self.issuer.is_empty()
             && self.san_dns.is_empty()
             && self.san_uri.is_empty()
-            && self.client_auth.is_none()
+            && self
+                .client_auth
+                .as_ref()
+                .map(UpstreamTlsClientAuth::has_empty_paths)
+                .unwrap_or(true)
     }
 }
 
 impl UpstreamTlsClientAuth {
+    fn has_empty_paths(&self) -> bool {
+        self.cert.as_os_str().is_empty() && self.key.as_os_str().is_empty()
+    }
+
     #[cfg(feature = "tls-native")]
     pub(crate) fn is_configured(&self) -> bool {
         !self.cert.as_os_str().is_empty() && !self.key.as_os_str().is_empty()
@@ -220,6 +234,7 @@ impl PatternSet {
         })
     }
 
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native", test))]
     fn matches_text(&self, value: &str) -> bool {
         let Some(normalized) = normalize_text(value) else {
             return false;
@@ -240,6 +255,7 @@ impl PatternSet {
             .any(|pattern| pattern.is_match(normalized.as_str()))
     }
 
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native", test))]
     fn matches_domain(&self, value: &str) -> bool {
         let Some(normalized) = normalize_domain(value) else {
             return false;
@@ -301,6 +317,7 @@ fn is_exact_pattern(item: &str) -> bool {
         && !item.contains('}')
 }
 
+#[cfg(any(feature = "tls-rustls", feature = "tls-native", test))]
 fn host_matches_suffix(host: &str, suffix: &str) -> bool {
     if host.len() <= suffix.len() || !host.ends_with(suffix) {
         return false;

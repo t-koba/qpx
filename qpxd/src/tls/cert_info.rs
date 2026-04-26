@@ -1,6 +1,30 @@
+#[cfg(any(
+    feature = "tls-rustls",
+    feature = "tls-native",
+    feature = "http3",
+    test
+))]
 use sha2::{Digest, Sha256};
+#[cfg(any(
+    feature = "tls-rustls",
+    feature = "tls-native",
+    feature = "http3",
+    test
+))]
 use x509_parser::certificate::X509Certificate;
+#[cfg(any(
+    feature = "tls-rustls",
+    feature = "tls-native",
+    feature = "http3",
+    test
+))]
 use x509_parser::extensions::GeneralName;
+#[cfg(any(
+    feature = "tls-rustls",
+    feature = "tls-native",
+    feature = "http3",
+    test
+))]
 use x509_parser::prelude::FromDer;
 
 #[derive(Debug, Clone, Default)]
@@ -13,6 +37,12 @@ pub(crate) struct UpstreamCertificateInfo {
     pub(crate) fingerprint_sha256: Option<String>,
 }
 
+#[cfg(any(
+    feature = "tls-rustls",
+    feature = "tls-native",
+    feature = "http3",
+    test
+))]
 pub(crate) fn extract_upstream_certificate_info(raw_der: Option<&[u8]>) -> UpstreamCertificateInfo {
     let Some(raw_der) = raw_der else {
         return UpstreamCertificateInfo::default();

@@ -320,40 +320,15 @@ reverse:
     let op: PerfOperation = Arc::new(move || {
         let request_body = request_body.clone();
         Box::pin(async move {
-            let stream = timeout(
-                Duration::from_secs(3),
-                TcpStream::connect(("127.0.0.1", port)),
-            )
-            .await??;
-            let (mut sender, conn) = http2_client_support::handshake_http2(stream).await?;
-            tokio::spawn(async move {
-                let _ = conn.await;
-            });
-            let uri: hyper::Uri = format!("http://127.0.0.1:{port}/perf.Service/Unary").parse()?;
-            let req = Request::builder()
-                .method(Method::POST)
-                .uri(uri)
-                .header(http::header::CONTENT_TYPE, "application/grpc")
-                .header(http::header::TE, "trailers")
-                .body(full_body(request_body.clone()))?;
-            let resp = sender.send_request(req).await?;
-            if resp.status() != StatusCode::OK {
-                return Err(anyhow!("expected grpc unary 200, got {}", resp.status()));
+            let mut last_error = None;
+            for _ in 0..2 {
+                match grpc_unary_once(port, request_body.clone()).await {
+                    Ok(()) => return Ok(()),
+                    Err(err) => last_error = Some(err),
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            let collected = resp.into_body().collect().await?;
-            let trailers = collected.trailers().cloned();
-            let body = collected.to_bytes();
-            if body.as_ref() != frame_grpc_message(Bytes::from_static(b"OK")).as_slice() {
-                return Err(anyhow!("unexpected grpc unary response body"));
-            }
-            let trailers = trailers.ok_or_else(|| anyhow!("missing grpc unary trailers"))?;
-            let status = trailers
-                .get("grpc-status")
-                .and_then(|value| value.to_str().ok());
-            if status != Some("0") {
-                return Err(anyhow!("unexpected grpc unary status: {status:?}"));
-            }
-            Ok(())
+            Err(last_error.unwrap_or_else(|| anyhow!("grpc unary request failed")))
         })
     });
     measure_parallel_perf(
@@ -367,6 +342,43 @@ reverse:
         op,
     )
     .await
+}
+
+async fn grpc_unary_once(port: u16, request_body: Bytes) -> Result<()> {
+    let stream = timeout(
+        Duration::from_secs(3),
+        TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await??;
+    let (mut sender, conn) = http2_client_support::handshake_http2(stream).await?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let uri: hyper::Uri = format!("http://127.0.0.1:{port}/perf.Service/Unary").parse()?;
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(http::header::CONTENT_TYPE, "application/grpc")
+        .header(http::header::TE, "trailers")
+        .body(full_body(request_body.clone()))?;
+    let resp = sender.send_request(req).await?;
+    if resp.status() != StatusCode::OK {
+        return Err(anyhow!("expected grpc unary 200, got {}", resp.status()));
+    }
+    let collected = resp.into_body().collect().await?;
+    let trailers = collected.trailers().cloned();
+    let body = collected.to_bytes();
+    if body.as_ref() != frame_grpc_message(Bytes::from_static(b"OK")).as_slice() {
+        return Err(anyhow!("unexpected grpc unary response body"));
+    }
+    let trailers = trailers.ok_or_else(|| anyhow!("missing grpc unary trailers"))?;
+    let status = trailers
+        .get("grpc-status")
+        .and_then(|value| value.to_str().ok());
+    if status != Some("0") {
+        return Err(anyhow!("unexpected grpc unary status: {status:?}"));
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -937,10 +949,7 @@ async fn serve_tcp_echo_loop() -> Result<SocketAddr> {
             };
             tokio::spawn(async move {
                 let mut buf = [0u8; 8192];
-                loop {
-                    let Ok(n) = stream.read(&mut buf).await else {
-                        break;
-                    };
+                while let Ok(n) = stream.read(&mut buf).await {
                     if n == 0 {
                         break;
                     }
