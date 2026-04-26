@@ -365,11 +365,6 @@ pub(crate) fn signal_event(event: &EventHandle) -> Result<()> {
 }
 
 #[cfg(windows)]
-pub(crate) fn wait_for_event(event: &EventHandle, timeout: Duration) -> Result<bool> {
-    wait_for_event_raw(event.raw(), timeout)
-}
-
-#[cfg(windows)]
 pub(crate) fn wait_for_event_raw(handle: HANDLE, timeout: Duration) -> Result<bool> {
     let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
     match unsafe { WaitForSingleObject(handle, timeout_ms) } {

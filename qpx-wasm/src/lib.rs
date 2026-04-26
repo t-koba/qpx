@@ -467,7 +467,11 @@ mod tests {
             Ok(_) => panic!("invalid wasm unexpectedly loaded"),
             Err(err) => err,
         };
-        assert!(err.to_string().contains("WASM precompile failed"));
+        assert!(
+            err.chain()
+                .any(|cause| cause.to_string().contains("WASM precompile failed")),
+            "unexpected error chain: {err:?}"
+        );
     }
 
     #[tokio::test]

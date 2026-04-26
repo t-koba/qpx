@@ -886,6 +886,7 @@ impl LocalBrokerSocket {
         RouteDecision::Drop
     }
 
+    #[cfg(unix)]
     fn attach_remote(&self, stream: QuinnBrokerStream) -> Result<()> {
         let tokio_stream = tokio_broker_stream_from_std(stream)?;
         self.attach_remote_tokio(tokio_stream)

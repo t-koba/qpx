@@ -1,6 +1,8 @@
 use super::super::connect::ConnectPolicyInput;
 use super::h3_connect_extended::OpenUpstreamExtendedConnectInput;
-use super::h3_connect_tunnel::{H3ConnectPolicyContext, MitmH3ConnectInput};
+use super::h3_connect_tunnel::H3ConnectPolicyContext;
+#[cfg(feature = "mitm")]
+use super::h3_connect_tunnel::MitmH3ConnectInput;
 use super::*;
 
 pub(crate) async fn handle_h3_connect(

@@ -764,23 +764,16 @@ fn adopt_tcp_group(group: &InheritedTcpGroup) -> Result<Vec<TcpListener>> {
     }
 }
 
+#[cfg(unix)]
 fn adopt_tcp_listener(fd: i32) -> Result<TcpListener> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::{AsRawFd, FromRawFd};
 
-        let listener = unsafe { TcpListener::from_raw_fd(fd) };
-        listener
-            .set_nonblocking(true)
-            .context("failed to set inherited listener nonblocking")?;
-        set_cloexec(listener.as_raw_fd(), true)?;
-        Ok(listener)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = fd;
-        Err(anyhow!("inherited tcp bindings are only supported on unix"))
-    }
+    let listener = unsafe { TcpListener::from_raw_fd(fd) };
+    listener
+        .set_nonblocking(true)
+        .context("failed to set inherited listener nonblocking")?;
+    set_cloexec(listener.as_raw_fd(), true)?;
+    Ok(listener)
 }
 
 #[cfg(windows)]

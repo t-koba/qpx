@@ -44,30 +44,14 @@ fn duplicate_raw_fd(fd: i32, cloexec: bool) -> Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
 }
 
+#[cfg(unix)]
 pub(crate) fn adopt_inherited_udp_socket(fd: i32) -> Result<std::net::UdpSocket> {
-    #[cfg(unix)]
-    {
-        let socket = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
-        socket
-            .set_nonblocking(true)
-            .context("failed to set inherited udp socket nonblocking")?;
-        set_cloexec(socket.as_raw_fd(), true)?;
-        Ok(socket)
-    }
-
-    #[cfg(windows)]
-    {
-        let _ = fd;
-        Err(anyhow!(
-            "windows udp handoff requires WSAPROTOCOL_INFO payload, not raw fd"
-        ))
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = fd;
-        Err(anyhow!("inherited udp bindings are only supported on unix"))
-    }
+    let socket = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
+    socket
+        .set_nonblocking(true)
+        .context("failed to set inherited udp socket nonblocking")?;
+    set_cloexec(socket.as_raw_fd(), true)?;
+    Ok(socket)
 }
 
 #[cfg(windows)]
@@ -117,31 +101,15 @@ pub(crate) fn duplicate_tokio_udp_socket(
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn duplicate_std_udp_socket_for_handoff(
     socket: &std::net::UdpSocket,
-    #[cfg(unix)] kept_fds: &mut Vec<OwnedFd>,
+    kept_fds: &mut Vec<OwnedFd>,
 ) -> Result<i32> {
-    #[cfg(unix)]
-    {
-        let duplicated = duplicate_raw_fd(socket.as_raw_fd(), false)?;
-        let raw = duplicated.as_raw_fd();
-        kept_fds.push(duplicated);
-        Ok(raw)
-    }
-
-    #[cfg(windows)]
-    {
-        let _ = socket;
-        Err(anyhow!(
-            "windows udp handoff requires child-specific WSAPROTOCOL_INFO"
-        ))
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = socket;
-        Err(anyhow!("udp socket handoff is only supported on unix"))
-    }
+    let duplicated = duplicate_raw_fd(socket.as_raw_fd(), false)?;
+    let raw = duplicated.as_raw_fd();
+    kept_fds.push(duplicated);
+    Ok(raw)
 }
 
 #[cfg(windows)]

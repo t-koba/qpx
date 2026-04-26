@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 #[cfg(windows)]
 use std::net::SocketAddr;
 
+#[cfg(unix)]
 const ENV_READY_FD: &str = "QPX_UPGRADE_READY_FD";
 #[cfg(windows)]
 const ENV_READY_ADDR: &str = "QPX_UPGRADE_READY_ADDR";
