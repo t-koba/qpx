@@ -436,10 +436,12 @@ fn build_error_output(err: wasmtime::Error, stdout_data: Vec<u8>) -> Result<Byte
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("qpx-wasm-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qpx-wasm-test-{}-{id}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let path = dir.join(name);
         std::fs::write(&path, bytes).expect("write temp wasm");
