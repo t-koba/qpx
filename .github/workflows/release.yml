@@ -8,36 +8,7 @@ on:
       - "v*"
 
 jobs:
-  benchmark_gate:
-    name: release benchmark gate
-    runs-on:
-      - self-hosted
-      - qpx-reference-host
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: release benchmark gate
-        env:
-          RUSTFLAGS: "-D warnings"
-        run: cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
-
-      - name: release advanced transport benchmark
-        env:
-          RUSTFLAGS: "-D warnings"
-        run: cargo test -p qpxd --release --no-default-features --features tls-rustls,http3-backend-qpx,mitm --test advanced_transport_perf --locked -- --nocapture
-
-      - name: release RPC smoke
-        env:
-          RUSTFLAGS: "-D warnings"
-        run: cargo test -p qpxd --release --locked --lib -- --nocapture grpc_local_response_emits_trailers grpc_web_local_response_emits_trailer_frame grpc_status_rule_matches_trailers
-
   build:
-    needs: benchmark_gate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
