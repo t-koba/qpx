@@ -429,12 +429,7 @@ pub(super) async fn dispatch_reverse_request(
     }
 
     apply_request_headers(req.headers_mut(), route_headers.as_deref());
-    let request_cache_policy = route
-        .plan
-        .cache
-        .as_ref()
-        .filter(|_| !cache_bypass)
-        .cloned();
+    let request_cache_policy = route.plan.cache.as_ref().filter(|_| !cache_bypass).cloned();
     let mut http_modules = route.plan.modules.start(
         state.clone(),
         crate::http::modules::HttpModuleSessionInit {
@@ -960,11 +955,9 @@ pub(super) async fn dispatch_reverse_request(
                             request_rpc: request_rpc.as_ref(),
                             route_headers: route_headers.clone(),
                             response: resp,
-                            max_observed_response_body_bytes: route
-                                .plan
-                                .body_observation_limit(
-                                    state.plan.limits.max_observed_response_body_bytes,
-                                ),
+                            max_observed_response_body_bytes: route.plan.body_observation_limit(
+                                state.plan.limits.max_observed_response_body_bytes,
+                            ),
                             response_body_read_timeout: std::time::Duration::from_millis(
                                 state.plan.limits.upstream_http_timeout_ms.max(1),
                             ),

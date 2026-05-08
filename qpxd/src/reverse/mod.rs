@@ -141,9 +141,10 @@ impl ReloadableReverse {
             &reverse,
             current_operational.upstreams.as_slice(),
             state.http_module_registry().as_ref(),
-            state.plan.reverse_edge(reverse.name.as_str()).ok_or_else(|| {
-                anyhow!("compiled reverse edge missing for {}", reverse.name)
-            })?,
+            state
+                .plan
+                .reverse_edge(reverse.name.as_str())
+                .ok_or_else(|| anyhow!("compiled reverse edge missing for {}", reverse.name))?,
         )?;
         compiled
             .router

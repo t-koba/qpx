@@ -336,9 +336,12 @@ fn check_with_runtime(
                 reverse,
                 state.resources.operational.upstreams.as_slice(),
                 state.http_module_registry().as_ref(),
-                state.plan.reverse_edge(reverse.name.as_str()).ok_or_else(|| {
-                    anyhow::anyhow!("compiled reverse edge missing for {}", reverse.name)
-                })?,
+                state
+                    .plan
+                    .reverse_edge(reverse.name.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("compiled reverse edge missing for {}", reverse.name)
+                    })?,
             )?;
         }
         Ok::<(), anyhow::Error>(())
@@ -1311,9 +1314,12 @@ fn validate_runtime_state(state: &runtime::RuntimeState) -> Result<()> {
             reverse,
             state.resources.operational.upstreams.as_slice(),
             state.http_module_registry().as_ref(),
-            state.plan.reverse_edge(reverse.name.as_str()).ok_or_else(|| {
-                anyhow::anyhow!("compiled reverse edge missing for {}", reverse.name)
-            })?,
+            state
+                .plan
+                .reverse_edge(reverse.name.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("compiled reverse edge missing for {}", reverse.name)
+                })?,
         )?;
     }
     Ok(())

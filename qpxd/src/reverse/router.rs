@@ -5,9 +5,7 @@ use super::health::{
 use crate::http::body::Body;
 use crate::http::modules::HttpModuleRegistry;
 use crate::http::response_policy::HttpResponseRuleEngine;
-use crate::runtime::{
-    CompiledReverseEdge, CompiledReverseRouteTarget, ExecutionPlan,
-};
+use crate::runtime::{CompiledReverseEdge, CompiledReverseRouteTarget, ExecutionPlan};
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use hyper::Request;
@@ -203,7 +201,12 @@ impl ReverseRouter {
             .plan
             .reverse_edge(config.name.as_str())
             .ok_or_else(|| anyhow::anyhow!("compiled reverse edge missing for {}", config.name))?;
-        Self::new_with_plan(config, upstream_configs, http_module_registry, compiled_edge)
+        Self::new_with_plan(
+            config,
+            upstream_configs,
+            http_module_registry,
+            compiled_edge,
+        )
     }
 
     pub(super) fn new_with_plan(

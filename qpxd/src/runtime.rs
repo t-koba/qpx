@@ -30,8 +30,8 @@ use obs_rt::ObsRuntime;
 pub(crate) use plan::CompiledPlaintextCapturePlan;
 pub(crate) use plan::{
     CompiledCapturePlan, CompiledEdge, CompiledListenerSettings, CompiledReverseEdge,
-    CompiledReverseRoute, CompiledReverseRouteTarget, CompiledTlsPassthroughRoute,
-    ExecutionPlan, PlanFlags,
+    CompiledReverseRoute, CompiledReverseRouteTarget, CompiledTlsPassthroughRoute, ExecutionPlan,
+    PlanFlags,
 };
 pub use plan::{PlanCompiler, RuntimePlan};
 use policy_rt::PolicyRuntime;
