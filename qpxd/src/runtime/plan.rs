@@ -8,10 +8,10 @@ use crate::tls::trust::CompiledUpstreamTlsTrust;
 use anyhow::{anyhow, Result};
 use qpx_core::config::{
     ActionKind, CaptureRedactionConfig, DestinationResolutionOverrideConfig, FtpConfig,
-    IngressEdgeConfig, IngressEdgeMode, ReverseRouteConfig, SubrequestPhase,
+    IngressEdgeConfig, IngressEdgeMode, ReverseRouteConfig, ReverseRouteTargetConfig,
 };
 use qpx_core::matchers::CompiledMatch;
-use qpx_core::prefilter::StringInterner;
+use qpx_core::prefilter::{MatchPrefilterHint, StringInterner};
 use qpx_core::rules::RuleMatchContext;
 use std::sync::Arc;
 
@@ -142,6 +142,7 @@ pub struct CompiledReverseEdge {
     pub name: Arc<str>,
     pub flags: PlanFlags,
     pub routes: Arc<[CompiledReverseRoute]>,
+    pub tls_passthrough_routes: Arc<[CompiledTlsPassthroughRoute]>,
 }
 
 #[derive(Clone)]
@@ -162,7 +163,53 @@ pub struct CompiledTransparentRule {
 pub struct CompiledReverseRoute {
     pub name: Arc<str>,
     pub matcher: CompiledMatch,
+    pub(crate) hint: MatchPrefilterHint,
+    pub target: CompiledReverseRouteTarget,
     pub plan: ExecutionPlan,
+}
+
+#[derive(Clone)]
+pub enum CompiledReverseRouteTarget {
+    Upstream {
+        upstreams: Arc<[Arc<str>]>,
+        lb: Arc<str>,
+    },
+    Weighted {
+        backends: Arc<[CompiledRouteBackend]>,
+        lb: Arc<str>,
+    },
+    Ipc {
+        mode: Arc<str>,
+        address: Arc<str>,
+    },
+    LocalResponse {
+        status: u16,
+    },
+    TlsPassthrough {
+        upstreams: Arc<[Arc<str>]>,
+        lb: Arc<str>,
+    },
+}
+
+#[derive(Clone)]
+pub struct CompiledRouteBackend {
+    pub name: Option<Arc<str>>,
+    pub weight: u32,
+    pub upstreams: Arc<[Arc<str>]>,
+}
+
+#[derive(Clone)]
+pub struct CompiledTlsPassthroughRoute {
+    pub name: Arc<str>,
+    pub matcher: CompiledMatch,
+    pub(crate) hint: MatchPrefilterHint,
+    pub target: CompiledReverseRouteTarget,
+}
+
+impl CompiledTlsPassthroughRoute {
+    pub fn matches(&self, ctx: &RuleMatchContext<'_>) -> bool {
+        self.matcher.matches(ctx)
+    }
 }
 
 impl CompiledForwardRule {
@@ -215,6 +262,52 @@ impl CompiledReverseRoute {
     }
 }
 
+fn compile_reverse_route_target(target: &ReverseRouteTargetConfig) -> CompiledReverseRouteTarget {
+    match target {
+        ReverseRouteTargetConfig::Upstream { upstreams, lb } => {
+            CompiledReverseRouteTarget::Upstream {
+                upstreams: upstreams
+                    .iter()
+                    .map(|upstream| Arc::<str>::from(upstream.as_str()))
+                    .collect::<Vec<_>>()
+                    .into(),
+                lb: Arc::from(lb.as_str()),
+            }
+        }
+        ReverseRouteTargetConfig::Weighted { backends, lb } => {
+            CompiledReverseRouteTarget::Weighted {
+                backends: backends
+                    .iter()
+                    .map(|backend| CompiledRouteBackend {
+                        name: backend.name.as_deref().map(Arc::<str>::from),
+                        weight: backend.weight,
+                        upstreams: backend
+                            .upstreams
+                            .iter()
+                            .map(|upstream| Arc::<str>::from(upstream.as_str()))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+                lb: Arc::from(lb.as_str()),
+            }
+        }
+        ReverseRouteTargetConfig::Ipc { config } => CompiledReverseRouteTarget::Ipc {
+            mode: Arc::from(match config.mode {
+                qpx_core::config::IpcMode::Shm => "shm",
+                qpx_core::config::IpcMode::Tcp => "tcp",
+            }),
+            address: Arc::from(config.address.as_str()),
+        },
+        ReverseRouteTargetConfig::LocalResponse { response } => {
+            CompiledReverseRouteTarget::LocalResponse {
+                status: response.status,
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PlanFlags(u64);
 
@@ -238,6 +331,7 @@ impl PlanFlags {
     pub const WEBSOCKET: Self = Self(1 << 16);
     pub const IPC: Self = Self(1 << 17);
     pub const CAPTURE_BODY: Self = Self(1 << 18);
+    pub const FROZEN_REQUEST: Self = Self(1 << 19);
 
     pub fn empty() -> Self {
         Self(0)
@@ -422,14 +516,39 @@ impl<'a> PlanCompiler<'a> {
                 .routes
                 .iter()
                 .map(|route| {
-                    let (matcher, _) = CompiledMatch::compile(&route.r#match, &mut interner)?;
+                    let (matcher, hint) = CompiledMatch::compile(&route.r#match, &mut interner)?;
                     let mut plan =
                         execution_plan_for_reverse_route(self.config, reverse_edges, route)?;
                     apply_matcher_flags(&matcher, &mut plan);
                     Ok(CompiledReverseRoute {
                         name: Arc::from(route.name.as_deref().unwrap_or("<unnamed>")),
                         matcher,
+                        hint,
+                        target: compile_reverse_route_target(&route.target),
                         plan,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let tls_passthrough_routes = reverse_edges
+                .tls_passthrough_routes
+                .iter()
+                .enumerate()
+                .map(|(idx, route)| {
+                    let (matcher, hint) =
+                        CompiledMatch::compile_tls_passthrough(&route.r#match, &mut interner)?;
+                    Ok(CompiledTlsPassthroughRoute {
+                        name: Arc::from(format!("tls_passthrough[{idx}]")),
+                        matcher,
+                        hint,
+                        target: CompiledReverseRouteTarget::TlsPassthrough {
+                            upstreams: route
+                                .upstreams
+                                .iter()
+                                .map(|upstream| Arc::from(upstream.as_str()))
+                                .collect::<Vec<_>>()
+                                .into(),
+                            lb: Arc::from(route.lb.as_str()),
+                        },
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -440,6 +559,7 @@ impl<'a> PlanCompiler<'a> {
                 name: Arc::from(reverse_edges.name.as_str()),
                 flags,
                 routes: routes.into(),
+                tls_passthrough_routes: tls_passthrough_routes.into(),
             }));
         }
 
@@ -547,7 +667,7 @@ fn execution_plan_for_reverse_route(
         RateLimitSet::default(),
         RateLimitSet::from_config(route.rate_limit.as_ref()),
     );
-    if route.ipc.is_some() {
+    if route.target.is_ipc() {
         plan.flags.insert(PlanFlags::IPC);
     }
     if !route.mirrors.is_empty() {
@@ -564,6 +684,7 @@ fn execution_plan_for_reverse_route(
     Ok(plan)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execution_plan_for_forward_action(
     config: &RuntimeResources,
     policy_context: EffectivePolicyContext,
@@ -621,6 +742,7 @@ fn compile_ingress_edge_settings(listener: &IngressEdgeConfig) -> Result<Compile
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execution_plan_for_common(
     config: &RuntimeResources,
     policy_context: EffectivePolicyContext,
@@ -647,19 +769,6 @@ fn execution_plan_for_common(
         if exporter.capture.encrypted {
             plan.flags.insert(PlanFlags::CAPTURE_ENCRYPTED);
             plan.capture.encrypted = true;
-        }
-        if exporter.capture.plaintext {
-            plan.flags.insert(PlanFlags::CAPTURE_PLAINTEXT);
-            plan.flags.insert(PlanFlags::CAPTURE_BODY);
-            plan.flags.insert(PlanFlags::REQUEST_BODY_OBSERVE);
-            plan.flags.insert(PlanFlags::RESPONSE_BODY_OBSERVE);
-            plan.capture.plaintext = Some(CompiledPlaintextCapturePlan {
-                headers: true,
-                body: true,
-                sample_percent: None,
-                max_body_bytes: None,
-                redact: exporter.capture.redact.clone(),
-            });
         }
     }
     if !plan.policy_context.identity_sources.is_empty() {
@@ -705,6 +814,17 @@ fn execution_plan_for_common(
                 redact: capture.plaintext.redact.clone(),
             });
             if capture.plaintext.body {
+                if plan
+                    .capture
+                    .plaintext
+                    .as_ref()
+                    .and_then(|plaintext| plaintext.max_body_bytes)
+                    .is_none()
+                {
+                    return Err(anyhow!(
+                        "plaintext body capture requires plaintext.max_body_bytes"
+                    ));
+                }
                 plan.flags.insert(PlanFlags::CAPTURE_BODY);
                 plan.flags.insert(PlanFlags::REQUEST_BODY_OBSERVE);
                 plan.flags.insert(PlanFlags::RESPONSE_BODY_OBSERVE);
@@ -721,9 +841,20 @@ fn execution_plan_for_common(
         .map(Arc::new);
     if plan.response_rules.is_some() {
         plan.flags.insert(PlanFlags::RESPONSE_RULES);
-        plan.flags.insert(PlanFlags::RESPONSE_BODY_OBSERVE);
+        if plan
+            .response_rules
+            .as_ref()
+            .map(|rules| {
+                rules.any_rule_requires_response_body_observation()
+                    || rules.any_rule_requires_response_size()
+                    || rules.any_rule_requires_response_rpc_observation()
+            })
+            .unwrap_or(false)
+        {
+            plan.flags.insert(PlanFlags::RESPONSE_BODY_OBSERVE);
+        }
     }
-    compile_module_flags(config, http_modules, &mut plan)?;
+    apply_module_flags(plan.modules.as_ref(), &mut plan.flags);
     Ok(plan)
 }
 
@@ -755,42 +886,32 @@ fn merge_destination_resolution_override(
     }
 }
 
-fn compile_module_flags(
-    config: &RuntimeResources,
-    modules: &[qpx_core::config::HttpModuleConfig],
-    plan: &mut ExecutionPlan,
-) -> Result<()> {
-    for module in modules {
-        if config
-            .http_module_registry()
-            .get(module.r#type.as_str())
-            .is_none()
-        {
-            return Err(anyhow!("unknown http module type: {}", module.r#type));
+fn apply_module_flags(
+    chain: &crate::http::modules::CompiledHttpModuleChain,
+    flags: &mut PlanFlags,
+) {
+    let aggregate = chain.aggregate();
+    if chain.has_request_side_modules() {
+        flags.insert(PlanFlags::REQUEST_MODULES);
+    }
+    if chain.has_response_side_modules() {
+        flags.insert(PlanFlags::RESPONSE_MODULES);
+    }
+    match aggregate.body_access {
+        crate::http::modules::BodyAccess::HeadersOnly => {}
+        crate::http::modules::BodyAccess::RequestBodyBuffered { .. } => {
+            flags.insert(PlanFlags::REQUEST_BODY_OBSERVE);
         }
-        match module.r#type.as_str() {
-            "response_compression" => {
-                plan.flags.insert(PlanFlags::RESPONSE_MODULES);
-                plan.flags.insert(PlanFlags::RESPONSE_BODY_OBSERVE);
-            }
-            "subrequest" => {
-                let settings: qpx_core::config::SubrequestModuleConfig = module.parse_settings()?;
-                match settings.phase {
-                    SubrequestPhase::RequestHeaders => {
-                        plan.flags.insert(PlanFlags::REQUEST_MODULES);
-                    }
-                    SubrequestPhase::ResponseHeaders => {
-                        plan.flags.insert(PlanFlags::RESPONSE_MODULES);
-                        plan.flags.insert(PlanFlags::RESPONSE_BODY_OBSERVE);
-                    }
-                }
-            }
-            "cache_purge" => plan.flags.insert(PlanFlags::REQUEST_MODULES),
-            _ => {
-                plan.flags.insert(PlanFlags::REQUEST_MODULES);
-                plan.flags.insert(PlanFlags::RESPONSE_MODULES);
-            }
+        crate::http::modules::BodyAccess::ResponseBodyBuffered { .. } => {
+            flags.insert(PlanFlags::RESPONSE_BODY_OBSERVE);
+        }
+        crate::http::modules::BodyAccess::RequestAndResponseBodyBuffered { .. }
+        | crate::http::modules::BodyAccess::Streaming => {
+            flags.insert(PlanFlags::REQUEST_BODY_OBSERVE);
+            flags.insert(PlanFlags::RESPONSE_BODY_OBSERVE);
         }
     }
-    Ok(())
+    if chain.needs_frozen_request() {
+        flags.insert(PlanFlags::FROZEN_REQUEST);
+    }
 }

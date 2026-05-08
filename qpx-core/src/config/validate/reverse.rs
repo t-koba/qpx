@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 
-use super::super::types::Config;
+use super::super::types::{Config, ReverseRouteTargetConfig};
 use super::observability::validate_capture_policy;
 use super::rules::{
     has_cache_purge_module, validate_affinity_config, validate_cache_policy,
@@ -344,19 +344,8 @@ pub(super) fn validate_reverse_edge_configs(
                 &format!("reverse_edge {} route", reverse_edge.name),
                 reverse_has_mtls_identity,
             )?;
-            let has_upstream = !route.upstreams.is_empty();
-            let has_backends = !route.backends.is_empty();
-            let has_local = route.local_response.is_some();
-            let has_ipc = route.ipc.is_some();
-            let configured_kinds =
-                (has_upstream as u8) + (has_backends as u8) + (has_local as u8) + (has_ipc as u8);
-            if configured_kinds != 1 {
-                return Err(anyhow!(
-                    "reverse_edge {} route must set exactly one of upstreams, backends, ipc, or local_response",
-                    reverse_edge.name
-                ));
-            }
-            if let Some(ipc) = route.ipc.as_ref() {
+            let has_local = route.target.is_local_response();
+            if let ReverseRouteTargetConfig::Ipc { config: ipc } = &route.target {
                 if ipc.address.trim().is_empty() {
                     return Err(anyhow!(
                         "reverse_edge {} route ipc.address must not be empty",
@@ -382,10 +371,9 @@ pub(super) fn validate_reverse_edge_configs(
                     ));
                 }
             }
-            validate_lb_config(
-                route.lb.as_str(),
-                &format!("reverse_edge {} route", reverse_edge.name),
-            )?;
+            if let Some(lb) = route.target.lb() {
+                validate_lb_config(lb, &format!("reverse_edge {} route", reverse_edge.name))?;
+            }
             validate_resilience_config(
                 route.resilience.as_ref(),
                 &format!("reverse_edge {} route", reverse_edge.name),
@@ -447,49 +435,69 @@ pub(super) fn validate_reverse_edge_configs(
                     )?;
                 }
             }
-            for upstream_ref in &route.upstreams {
-                validate_named_upstream_ref(
-                    upstream_ref,
-                    upstreams,
-                    &format!("reverse_edge {} route upstreams", reverse_edge.name),
-                    REVERSE_UPSTREAM_URL_SCHEMES,
-                    false,
-                    false,
-                )?;
-            }
-            if has_backends {
-                for backend in &route.backends {
-                    if backend.weight == 0 {
+            match &route.target {
+                ReverseRouteTargetConfig::Upstream {
+                    upstreams: refs, ..
+                } => {
+                    if refs.is_empty() {
                         return Err(anyhow!(
-                            "reverse_edge {} route backend weight must be >= 1",
+                            "reverse_edge {} route upstream target must set upstreams",
                             reverse_edge.name
                         ));
                     }
-                    if backend.upstreams.is_empty() {
-                        return Err(anyhow!(
-                            "reverse_edge {} route backend must set upstreams",
-                            reverse_edge.name
-                        ));
-                    }
-                    for upstream_ref in &backend.upstreams {
+                    for upstream_ref in refs {
                         validate_named_upstream_ref(
                             upstream_ref,
                             upstreams,
-                            &format!("reverse_edge {} route backends", reverse_edge.name),
+                            &format!("reverse_edge {} route target.upstreams", reverse_edge.name),
                             REVERSE_UPSTREAM_URL_SCHEMES,
                             false,
                             false,
                         )?;
                     }
-                    if let Some(name) = backend.name.as_deref() {
-                        if name.trim().is_empty() {
+                }
+                ReverseRouteTargetConfig::Weighted { backends, .. } => {
+                    if backends.is_empty() {
+                        return Err(anyhow!(
+                            "reverse_edge {} route weighted target must set backends",
+                            reverse_edge.name
+                        ));
+                    }
+                    for backend in backends {
+                        if backend.weight == 0 {
                             return Err(anyhow!(
-                                "reverse_edge {} route backend name must not be empty when set",
+                                "reverse_edge {} route backend weight must be >= 1",
                                 reverse_edge.name
                             ));
                         }
+                        if backend.upstreams.is_empty() {
+                            return Err(anyhow!(
+                                "reverse_edge {} route backend must set upstreams",
+                                reverse_edge.name
+                            ));
+                        }
+                        for upstream_ref in &backend.upstreams {
+                            validate_named_upstream_ref(
+                                upstream_ref,
+                                upstreams,
+                                &format!("reverse_edge {} route backends", reverse_edge.name),
+                                REVERSE_UPSTREAM_URL_SCHEMES,
+                                false,
+                                false,
+                            )?;
+                        }
+                        if let Some(name) = backend.name.as_deref() {
+                            if name.trim().is_empty() {
+                                return Err(anyhow!(
+                                    "reverse_edge {} route backend name must not be empty when set",
+                                    reverse_edge.name
+                                ));
+                            }
+                        }
                     }
                 }
+                ReverseRouteTargetConfig::Ipc { .. }
+                | ReverseRouteTargetConfig::LocalResponse { .. } => {}
             }
             for mirror in &route.mirrors {
                 if mirror.percent == 0 || mirror.percent > 100 {

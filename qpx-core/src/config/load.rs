@@ -132,15 +132,23 @@ fn load_value(path: &Path, stack: &mut Vec<PathBuf>, sources: &mut Vec<PathBuf>)
 }
 
 fn merge_values(base: Value, overlay: Value) -> Value {
+    merge_values_at(&[], base, overlay)
+}
+
+fn merge_values_at(path: &[String], base: Value, overlay: Value) -> Value {
     match (base, overlay) {
         (Value::Mapping(mut a), Value::Mapping(b)) => {
             for (k, v) in b {
+                let mut next_path = path.to_vec();
+                if let Value::String(key) = &k {
+                    next_path.push(key.clone());
+                }
                 let entry = a.remove(&k);
                 let merged = match entry {
-                    Some(existing) if k == Value::String("edges".to_string()) => {
+                    Some(existing) if should_append_sequence(next_path.as_slice()) => {
                         merge_sequence_values(existing, v)
                     }
-                    Some(existing) => merge_values(existing, v),
+                    Some(existing) => merge_values_at(next_path.as_slice(), existing, v),
                     None => v,
                 };
                 a.insert(k, merged);
@@ -149,6 +157,33 @@ fn merge_values(base: Value, overlay: Value) -> Value {
         }
         (_, v) => v,
     }
+}
+
+fn should_append_sequence(path: &[String]) -> bool {
+    matches!(
+        path,
+        [key] if matches!(key.as_str(), "edges" | "upstreams" | "caches")
+    ) || matches!(
+        path,
+        [section, key]
+            if matches!(
+                (section.as_str(), key.as_str()),
+                ("http", "guard_profiles")
+                    | ("http", "module_chains")
+                    | ("traffic", "rate_limit_profiles")
+                    | ("security", "identity_sources")
+                    | ("security", "named_sets")
+                    | ("security", "upstream_trust_profiles")
+            )
+    ) || matches!(
+        path,
+        [section, subsection, key]
+            if matches!(
+                (section.as_str(), subsection.as_str(), key.as_str()),
+                ("security", "decisions", "ext_authz")
+                    | ("security", "auth", "users")
+            )
+    )
 }
 
 fn merge_sequence_values(base: Value, overlay: Value) -> Value {

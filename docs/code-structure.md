@@ -83,7 +83,7 @@ Shared building blocks that `qpxd`, `qpxr`, and `qpxc` all depend on. This crate
 - `lib.rs`: crate root, public module re-exports.
 - `config.rs`: re-export module root.
 - `config/types/`: YAML configuration schema (serde structs for all sections).
-- `config/types/http.rs`: open HTTP module schema — shared `type` / `id` / `order` envelope plus raw module settings. Built-ins such as `response_compression`, `subrequest`, and `cache_purge` are parsed by the runtime registry, but third-party module types also load here unchanged.
+- `config/types/http.rs`: fixed HTTP module schema — shared `type` / `id` / `order` envelope plus module-specific `settings`. Built-ins such as `response_compression`, `subrequest`, and `cache_purge` parse their settings through the runtime registry, and third-party module settings live under the same `settings` field.
 - `config/load.rs`: config loading, `include` file composition, and environment variable expansion.
 - `config/validate.rs`: post-load validation and constraint checking.
 - `config/defaults.rs`: default values for optional config fields.
@@ -354,16 +354,16 @@ Reusable WASI executor used by `qpxf` when built with feature `wasm`. This crate
 
 ## Function executor (`qpxf`)
 
-QPX-IPC server that executes CGI scripts, dispatches optional WASM execution through `qpx-wasm`, and proxies CGI-shaped requests to persistent FastCGI/SCGI responders on behalf of `qpxd`. `qpxd` normally connects to `qpxf` using reverse-route `ipc:` config. The protocol sends a JSON metadata frame first, then streams request/response bodies either over the same connection or via shared-memory ring buffers when both processes are on the same host.
+QPX-IPC server that executes CGI scripts, dispatches optional WASM execution through `qpx-wasm`, and proxies CGI-shaped requests to FastCGI/SCGI responders on behalf of `qpxd`. FastCGI uses pooled persistent connections; SCGI uses per-request connections behind a concurrency limiter. `qpxd` normally connects to `qpxf` using reverse-route `ipc:` config. The protocol sends a JSON metadata frame first, then streams request/response bodies either over the same connection or via shared-memory ring buffers when both processes are on the same host.
 
 - `main.rs`: CLI (`--listen`, `--config`, `--workers`) plus `check --config` for config/backend validation, QPX-IPC connection accept loop, concurrency-limited request dispatch via `tokio::sync::Semaphore`. Listen address accepts TCP (`host:port`) or Unix socket (`unix:///path`). TCP listeners require `allow_insecure_tcp=true`. Safe Unix socket binding verifies an existing path is a socket before unlinking.
-- `config.rs`: YAML configuration schema with `deny_unknown_fields` — listen address, workers (concurrency limit), `allow_insecure_tcp`, connection caps (`max_connections`, `max_requests_per_connection`), request and connection idle timeouts, size limits (`max_params_bytes`, `max_stdin_bytes`), handler routing rules, CGI/WASM/FastCGI/SCGI backend settings including per-backend concurrency and stdout/stderr size limits.
+- `config.rs`: YAML configuration schema with `deny_unknown_fields` — listen address, workers (concurrency limit), `allow_insecure_tcp`, connection caps (`max_connections`, `max_requests_per_connection`), request and connection idle timeouts, size limits (`max_params_bytes`, `max_stdin_bytes`), handler routing rules, CGI/WASM/FastCGI/SCGI backend settings including FastCGI pool limits, SCGI per-request concurrency, and stdout/stderr size limits.
 - `server.rs`: QPX-IPC connection handler — reads `IpcRequestMeta` frame, routes to executor, streams body, writes `IpcResponseMeta` response frame, handles keep-alive, input idle timeout, and connection idle timeout.
 - `router.rs`: path-based request routing — matches incoming requests by `path_prefix`, `path_regex`, and `host` to the appropriate executor. Returns matched prefix for prefix-stripping in executors.
 - `executor/mod.rs`: `Executor` trait definition and shared request/response types (`CgiRequest`, `CgiResponse`). `matched_prefix` field enables correct script path resolution.
 - `executor/cgi.rs`: RFC 3875 CGI script executor — spawns external processes via `tokio::process::Command`, sets CGI environment variables (including `SERVER_SOFTWARE`), pipes stdin/stdout/stderr. Security: canonicalizes CGI root on startup, rejects `..` paths and symlink escapes, enforces configurable stdout/stderr size limits, reads stdout/stderr concurrently (prevents deadlock), post-timeout `wait()` ensures zombie process cleanup. Hop-by-hop headers are excluded from HTTP_* env.
 - `executor/wasm.rs`: adapter for feature `wasm` — translates `qpxf`'s `CgiRequest` into `qpx_wasm::WasmRequest`, builds an optional pool of precompiled executors, applies per-handler concurrency limits, and maps the returned execution handles back into the generic `Execution` shape used by the IPC server.
-- `executor/persistent.rs`: persistent FastCGI/SCGI adapter — collects the request body within configured limits, builds CGI environment metadata, sends one request to a TCP or `unix://` backend, and returns raw CGI-compatible stdout/stderr to the IPC server.
+- `executor/persistent.rs`: FastCGI/SCGI adapter — FastCGI reuses TCP or `unix://` connections through a bounded idle pool; SCGI intentionally keeps per-request connections and only shares the concurrency limiter. Both paths collect the request body within configured limits, build CGI environment metadata, and return raw CGI-compatible stdout/stderr to the IPC server.
 
 ---
 

@@ -7,7 +7,7 @@ use crate::runtime::RuntimeState;
 use crate::upstream::origin::{proxy_http, OriginEndpoint};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use http::header::{CONTENT_LENGTH, HOST};
+use http::header::{CONTENT_LENGTH, HOST, LOCATION};
 use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
 use hyper::{Request, Response};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
@@ -101,6 +101,7 @@ impl HttpModuleRegistryBuilder {
     }
 }
 
+#[derive(Clone)]
 pub struct HttpModuleRegistry {
     factories: HashMap<Arc<str>, Arc<dyn HttpModuleFactory>>,
 }
@@ -198,18 +199,6 @@ pub struct HttpModuleCapabilities {
 }
 
 impl HttpModuleCapabilities {
-    pub fn conservative() -> Self {
-        Self {
-            stages: ModuleStages::all(),
-            body_access: BodyAccess::Streaming,
-            mutates_request_headers: true,
-            mutates_response_headers: true,
-            may_short_circuit: true,
-            needs_frozen_request: true,
-            safe_on_retry: false,
-        }
-    }
-
     pub fn headers_only(stages: ModuleStages) -> Self {
         Self {
             stages,
@@ -390,9 +379,7 @@ pub trait HttpModule: Send + Sync {
         0
     }
 
-    fn capabilities(&self) -> HttpModuleCapabilities {
-        HttpModuleCapabilities::conservative()
-    }
+    fn capabilities(&self) -> HttpModuleCapabilities;
 
     async fn call<'a>(
         &self,
@@ -449,6 +436,44 @@ impl Default for CompiledHttpModuleChain {
 }
 
 impl CompiledHttpModuleChain {
+    pub(crate) fn aggregate(&self) -> HttpModuleCapabilities {
+        self.aggregate
+    }
+
+    pub(crate) fn has_request_side_modules(&self) -> bool {
+        !self.request_headers.is_empty()
+            || !self.cache_lookup.is_empty()
+            || !self.upstream_request.is_empty()
+    }
+
+    pub(crate) fn has_response_side_modules(&self) -> bool {
+        !self.upstream_response.is_empty()
+            || !self.downstream_response.is_empty()
+            || !self.retry.is_empty()
+            || !self.error.is_empty()
+            || !self.log.is_empty()
+    }
+
+    pub(crate) fn needs_frozen_request(&self) -> bool {
+        self.aggregate.needs_frozen_request
+    }
+
+    pub(crate) fn stage_labels(&self) -> Vec<(&'static str, Vec<String>)> {
+        vec![
+            ("request_headers", module_labels(&self.request_headers)),
+            ("cache_lookup", module_labels(&self.cache_lookup)),
+            ("upstream_request", module_labels(&self.upstream_request)),
+            ("upstream_response", module_labels(&self.upstream_response)),
+            (
+                "downstream_response",
+                module_labels(&self.downstream_response),
+            ),
+            ("retry", module_labels(&self.retry)),
+            ("error", module_labels(&self.error)),
+            ("log", module_labels(&self.log)),
+        ]
+    }
+
     pub(crate) fn start(
         &self,
         runtime: Arc<RuntimeState>,
@@ -459,6 +484,10 @@ impl CompiledHttpModuleChain {
             context: HttpModuleContext::new(runtime, init),
         }
     }
+}
+
+fn module_labels(modules: &[CompiledHttpModule]) -> Vec<String> {
+    modules.iter().map(CompiledHttpModule::label).collect()
 }
 
 pub(crate) fn compile_http_modules(
@@ -1356,6 +1385,9 @@ impl SubrequestModule {
         if self.deny_redirects && response.status().is_redirection() {
             return Err(anyhow!("subrequest {} received a redirect", self.name));
         }
+        if self.deny_private_ip_redirects && response.status().is_redirection() {
+            self.validate_redirect_location(response.headers().get(LOCATION))?;
+        }
         if let Some(content_length) = response
             .headers()
             .get(CONTENT_LENGTH)
@@ -1369,12 +1401,38 @@ impl SubrequestModule {
                 ));
             }
         }
-        let _ = self.deny_private_ip_redirects;
         let max_response_bytes = self.max_response_bytes;
         let name = self.name.clone();
         Ok(response.map(move |body| {
             limit_subrequest_response_body(body, max_response_bytes, timeout_dur, name)
         }))
+    }
+
+    fn validate_redirect_location(&self, location: Option<&HeaderValue>) -> Result<()> {
+        let Some(location) = location else {
+            return Ok(());
+        };
+        let location = location
+            .to_str()
+            .with_context(|| format!("subrequest {} redirect Location is invalid", self.name))?;
+        let Ok(uri) = location.parse::<http::Uri>() else {
+            return Ok(());
+        };
+        if uri.scheme().is_none() && uri.host().is_none() {
+            return Ok(());
+        }
+        self.validate_url(location)?;
+        let Some(host) = uri.host() else {
+            return Ok(());
+        };
+        if redirect_host_is_private_ip(host) {
+            return Err(anyhow!(
+                "subrequest {} redirect Location points to a private IP: {}",
+                self.name,
+                host
+            ));
+        }
+        Ok(())
     }
 
     fn should_return_response(&self, response: &Response<Body>) -> bool {
@@ -1576,6 +1634,26 @@ fn allowed_host_matches(pattern: &str, host: &str) -> bool {
             .strip_prefix("*.")
             .map(|suffix| host.ends_with(suffix))
             .unwrap_or(false)
+}
+
+fn redirect_host_is_private_ip(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']);
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.octets()[0] == 0
+        }
+        Ok(IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_unspecified()
+        }
+        Err(_) => false,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1859,6 +1937,74 @@ mod tests {
             rendered,
             "http://127.0.0.1/check?path=%2Fa%2Fb&q=x%3D1%26y%3Dtwo"
         );
+    }
+
+    fn subrequest_config(url: &str) -> SubrequestModuleConfig {
+        SubrequestModuleConfig {
+            name: "authz".to_string(),
+            phase: SubrequestPhase::RequestHeaders,
+            url: url.to_string(),
+            method: None,
+            timeout_ms: None,
+            max_response_bytes: Some(1024),
+            allowed_schemes: vec!["http".to_string(), "https".to_string()],
+            allowed_hosts: vec![
+                "auth.example.com".to_string(),
+                "203.0.113.10".to_string(),
+                "127.0.0.1".to_string(),
+            ],
+            deny_redirects: false,
+            deny_private_ip_redirects: true,
+            pass_headers: Vec::new(),
+            request_headers: HashMap::new(),
+            copy_response_headers_to_request: Vec::new(),
+            copy_response_headers_to_response: Vec::new(),
+            response_mode: None,
+        }
+    }
+
+    #[test]
+    fn subrequest_config_rejects_missing_allowlists() {
+        let mut cfg = subrequest_config("http://auth.example.com/check");
+        cfg.allowed_hosts.clear();
+
+        let err = match SubrequestModule::new(cfg) {
+            Ok(_) => panic!("allowlist should be required"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("allowed_hosts must not be empty"));
+    }
+
+    #[test]
+    fn subrequest_rejects_disallowed_target_host() {
+        let module = SubrequestModule::new(subrequest_config("http://evil.example.com/check"))
+            .expect("module");
+
+        let err = match module.validate_url("http://evil.example.com/check") {
+            Ok(_) => panic!("host should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("URL host is not allowed"));
+    }
+
+    #[test]
+    fn subrequest_rejects_private_ip_redirect_location() {
+        let module = SubrequestModule::new(subrequest_config("http://auth.example.com/check"))
+            .expect("module");
+        let response = Response::builder()
+            .status(StatusCode::FOUND)
+            .header(LOCATION, "http://127.0.0.1/admin")
+            .body(Body::empty())
+            .expect("response");
+
+        let err = match module.validate_redirect_location(response.headers().get(LOCATION)) {
+            Ok(_) => panic!("private redirect should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("private IP"));
     }
 
     #[test]

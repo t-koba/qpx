@@ -2,10 +2,11 @@ use super::super::defaults::*;
 use super::{HeaderControl, LocalResponseConfig, MatchConfig};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use serde_yaml::{Mapping, Value};
-use std::collections::{BTreeMap, HashMap};
+use serde_yaml::Value;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct HttpModuleConfig {
     #[serde(rename = "type")]
     pub r#type: String,
@@ -13,8 +14,8 @@ pub struct HttpModuleConfig {
     pub id: Option<String>,
     #[serde(default)]
     pub order: Option<i16>,
-    #[serde(flatten)]
-    pub settings: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub settings: Value,
 }
 
 impl HttpModuleConfig {
@@ -22,11 +23,10 @@ impl HttpModuleConfig {
     where
         T: DeserializeOwned,
     {
-        let mut mapping = Mapping::new();
-        for (key, value) in &self.settings {
-            mapping.insert(Value::String(key.clone()), value.clone());
+        if self.settings.is_null() {
+            return serde_yaml::from_value(Value::Mapping(Default::default()));
         }
-        serde_yaml::from_value(Value::Mapping(mapping))
+        serde_yaml::from_value(self.settings.clone())
     }
 }
 

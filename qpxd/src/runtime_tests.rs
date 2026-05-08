@@ -6,8 +6,8 @@ use qpx_core::config::{
     HttpModuleConfig, HttpPolicyConfig, IngressEdgeConfig, IngressEdgeMode, IpcMode,
     IpcUpstreamConfig, MatchConfig, NamedSetConfig, NamedSetKind, PolicyContextConfig,
     RateLimitApplyTo, RateLimitConfig, RateLimitRequestsConfig, ReverseEdgeConfig,
-    ReverseRouteConfig, ReverseTlsPassthroughRouteConfig, RuleConfig, SystemLogConfig,
-    TlsInspectionConfig, TlsPassthroughMatchConfig, UpstreamTlsTrustConfig,
+    ReverseRouteConfig, ReverseRouteTargetConfig, ReverseTlsPassthroughRouteConfig, RuleConfig,
+    SystemLogConfig, TlsInspectionConfig, TlsPassthroughMatchConfig, UpstreamTlsTrustConfig,
     UpstreamTlsTrustProfileConfig, XdpConfig,
 };
 use std::fs;
@@ -85,12 +85,12 @@ fn reverse_route(name: &str) -> ReverseRouteConfig {
     ReverseRouteConfig {
         name: Some(name.to_string()),
         r#match: MatchConfig::default(),
-        upstreams: vec!["http://127.0.0.1:8080".to_string()],
-        backends: Vec::new(),
+        target: ReverseRouteTargetConfig::Upstream {
+            upstreams: vec!["http://127.0.0.1:8080".to_string()],
+            lb: "round_robin".to_string(),
+        },
         mirrors: Vec::new(),
-        local_response: None,
         headers: None,
-        lb: "round_robin".to_string(),
         timeout_ms: None,
         health_check: None,
         cache: None,
@@ -100,7 +100,6 @@ fn reverse_route(name: &str) -> ReverseRouteConfig {
         upstream_trust_profile: None,
         upstream_trust: None,
         lifecycle: None,
-        ipc: None,
         affinity: None,
         policy_context: None,
         http: Some(HttpPolicyConfig {
@@ -284,12 +283,13 @@ fn runtime_plan_classifies_http_modules_by_phase() {
         (
             serde_yaml::from_str::<HttpModuleConfig>(
                 r#"type: subrequest
-name: enrich
-phase: request_headers
-url: http://127.0.0.1:18081/enrich
-max_response_bytes: 65536
-allowed_schemes: [http]
-allowed_hosts: [127.0.0.1]"#,
+settings:
+  name: enrich
+  phase: request_headers
+  url: http://127.0.0.1:18081/enrich
+  max_response_bytes: 65536
+  allowed_schemes: [http]
+  allowed_hosts: [127.0.0.1]"#,
             )
             .expect("request subrequest module"),
             PlanFlags::REQUEST_MODULES,
@@ -298,12 +298,13 @@ allowed_hosts: [127.0.0.1]"#,
         (
             serde_yaml::from_str::<HttpModuleConfig>(
                 r#"type: subrequest
-name: observe
-phase: response_headers
-url: http://127.0.0.1:18081/observe
-max_response_bytes: 65536
-allowed_schemes: [http]
-allowed_hosts: [127.0.0.1]"#,
+settings:
+  name: observe
+  phase: response_headers
+  url: http://127.0.0.1:18081/observe
+  max_response_bytes: 65536
+  allowed_schemes: [http]
+  allowed_hosts: [127.0.0.1]"#,
             )
             .expect("response subrequest module"),
             PlanFlags::RESPONSE_MODULES,
@@ -327,12 +328,14 @@ allowed_hosts: [127.0.0.1]"#,
 #[test]
 fn runtime_plan_marks_ipc_reverse_routes() {
     let mut route = reverse_route("ipc");
-    route.ipc = Some(IpcUpstreamConfig {
-        mode: IpcMode::Shm,
-        address: "qpx-ipc.sock".to_string(),
-        timeout_ms: 500,
-        body: Default::default(),
-    });
+    route.target = ReverseRouteTargetConfig::Ipc {
+        config: IpcUpstreamConfig {
+            mode: IpcMode::Shm,
+            address: "qpx-ipc.sock".to_string(),
+            timeout_ms: 500,
+            body: Default::default(),
+        },
+    };
     let mut config = base_config();
     push_reverse(&mut config, reverse_edge(route));
 
@@ -342,7 +345,7 @@ fn runtime_plan_marks_ipc_reverse_routes() {
 }
 
 #[tokio::test]
-async fn runtime_plan_marks_capture_flags_from_exporter() {
+async fn runtime_plan_exporter_only_does_not_enable_plaintext_body_capture() {
     let mut config = base_config();
     config.telemetry.exporter = Some(ExporterConfig {
         enabled: true,
@@ -361,10 +364,11 @@ async fn runtime_plan_marks_capture_flags_from_exporter() {
 
     let flags = single_reverse_route_flags(config);
 
-    assert!(flags.contains(PlanFlags::CAPTURE_PLAINTEXT));
     assert!(flags.contains(PlanFlags::CAPTURE_ENCRYPTED));
-    assert!(flags.contains(PlanFlags::REQUEST_BODY_OBSERVE));
-    assert!(flags.contains(PlanFlags::RESPONSE_BODY_OBSERVE));
+    assert!(!flags.contains(PlanFlags::CAPTURE_PLAINTEXT));
+    assert!(!flags.contains(PlanFlags::CAPTURE_BODY));
+    assert!(!flags.contains(PlanFlags::REQUEST_BODY_OBSERVE));
+    assert!(!flags.contains(PlanFlags::RESPONSE_BODY_OBSERVE));
 }
 
 #[test]
@@ -417,6 +421,31 @@ fn runtime_plan_marks_route_level_plaintext_body_capture() {
     assert!(capture.body);
     assert_eq!(capture.sample_percent, Some(10));
     assert_eq!(capture.max_body_bytes, Some(16_384));
+}
+
+#[test]
+fn runtime_plan_plaintext_headers_only_does_not_observe_body() {
+    let mut route = reverse_route("capture-headers");
+    route.capture = Some(CapturePolicyConfig {
+        encrypted: false,
+        plaintext: CapturePlaintextPolicyConfig {
+            enabled: true,
+            headers: true,
+            body: false,
+            sample_percent: None,
+            max_body_bytes: None,
+            redact: Default::default(),
+        },
+    });
+    let mut config = base_config();
+    push_reverse(&mut config, reverse_edge(route));
+
+    let flags = single_reverse_route_flags(config);
+
+    assert!(flags.contains(PlanFlags::CAPTURE_PLAINTEXT));
+    assert!(!flags.contains(PlanFlags::CAPTURE_BODY));
+    assert!(!flags.contains(PlanFlags::REQUEST_BODY_OBSERVE));
+    assert!(!flags.contains(PlanFlags::RESPONSE_BODY_OBSERVE));
 }
 
 #[test]
@@ -524,12 +553,12 @@ fn expand_named_sets_from_external_feed_files() {
                     src_ip: vec!["@office_cidrs".to_string()],
                     ..Default::default()
                 },
-                upstreams: vec!["http://127.0.0.1:8080".to_string()],
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                    upstreams: vec!["http://127.0.0.1:8080".to_string()],
+                    lb: "round_robin".to_string(),
+                },
                 mirrors: Vec::new(),
-                local_response: None,
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
@@ -539,7 +568,6 @@ fn expand_named_sets_from_external_feed_files() {
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: Some(HttpPolicyConfig {
@@ -754,12 +782,12 @@ fn hot_reload_requires_server_restart_for_reverse_http3_startup_change() {
             routes: vec![ReverseRouteConfig {
                 name: Some("default".to_string()),
                 r#match: MatchConfig::default(),
-                upstreams: vec!["http://127.0.0.1:8080".to_string()],
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                    upstreams: vec!["http://127.0.0.1:8080".to_string()],
+                    lb: "round_robin".to_string(),
+                },
                 mirrors: Vec::new(),
-                local_response: None,
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
@@ -769,7 +797,6 @@ fn hot_reload_requires_server_restart_for_reverse_http3_startup_change() {
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: Some(HttpPolicyConfig {

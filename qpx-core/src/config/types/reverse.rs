@@ -80,18 +80,11 @@ pub struct ReverseRouteConfig {
     #[serde(default)]
     pub name: Option<String>,
     pub r#match: MatchConfig,
-    #[serde(default)]
-    pub upstreams: Vec<String>,
-    #[serde(default)]
-    pub backends: Vec<ReverseRouteBackendConfig>,
+    pub target: ReverseRouteTargetConfig,
     #[serde(default)]
     pub mirrors: Vec<ReverseRouteMirrorConfig>,
     #[serde(default)]
-    pub local_response: Option<LocalResponseConfig>,
-    #[serde(default)]
     pub headers: Option<HeaderControl>,
-    #[serde(default = "default_lb")]
-    pub lb: String,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
@@ -113,8 +106,6 @@ pub struct ReverseRouteConfig {
     #[serde(default)]
     pub lifecycle: Option<EndpointLifecycleConfig>,
     #[serde(default)]
-    pub ipc: Option<IpcUpstreamConfig>,
-    #[serde(default)]
     pub affinity: Option<ReverseAffinityConfig>,
     #[serde(default)]
     pub policy_context: Option<PolicyContextConfig>,
@@ -126,6 +117,45 @@ pub struct ReverseRouteConfig {
     pub http_guard_profile: Option<String>,
     #[serde(default)]
     pub http_modules: Vec<HttpModuleConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReverseRouteTargetConfig {
+    Upstream {
+        upstreams: Vec<String>,
+        #[serde(default = "default_lb")]
+        lb: String,
+    },
+    Weighted {
+        backends: Vec<ReverseRouteBackendConfig>,
+        #[serde(default = "default_lb")]
+        lb: String,
+    },
+    Ipc {
+        #[serde(flatten)]
+        config: IpcUpstreamConfig,
+    },
+    LocalResponse {
+        response: Box<LocalResponseConfig>,
+    },
+}
+
+impl ReverseRouteTargetConfig {
+    pub fn lb(&self) -> Option<&str> {
+        match self {
+            Self::Upstream { lb, .. } | Self::Weighted { lb, .. } => Some(lb.as_str()),
+            Self::Ipc { .. } | Self::LocalResponse { .. } => None,
+        }
+    }
+
+    pub fn is_ipc(&self) -> bool {
+        matches!(self, Self::Ipc { .. })
+    }
+
+    pub fn is_local_response(&self) -> bool {
+        matches!(self, Self::LocalResponse { .. })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]

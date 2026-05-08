@@ -508,50 +508,53 @@ edges:
   - type: cache_purge
     id: forward-cache-purge
     order: -100
-    methods:
-    - PURGE
-    response_status: 202
-    response_body: purge scheduled
-    response_headers:
-      X-Cache-Purge: queued
+    settings:
+      methods:
+      - PURGE
+      response_status: 202
+      response_body: purge scheduled
+      response_headers:
+        X-Cache-Purge: queued
   - type: subrequest
     id: preflight-authz
     order: -20
-    name: preflight-authz
-    phase: request_headers
-    url: http://127.0.0.1:19091/check?path={request.path:urlquery}
-    method: POST
-    timeout_ms: 250
-    max_response_bytes: 65536
-    allowed_schemes:
-    - http
-    allowed_hosts:
-    - 127.0.0.1
-    pass_headers:
-    - authorization
-    - x-request-id
-    request_headers:
-      X-Module: authz
-    copy_response_headers_to_request:
-    - from: x-authz-user
-      to: x-authenticated-user
-    copy_response_headers_to_response:
-    - from: x-authz-policy
-      to: x-policy
-    response_mode: return_on_error
+    settings:
+      name: preflight-authz
+      phase: request_headers
+      url: http://127.0.0.1:19091/check?path={request.path:urlquery}
+      method: POST
+      timeout_ms: 250
+      max_response_bytes: 65536
+      allowed_schemes:
+      - http
+      allowed_hosts:
+      - 127.0.0.1
+      pass_headers:
+      - authorization
+      - x-request-id
+      request_headers:
+        X-Module: authz
+      copy_response_headers_to_request:
+      - from: x-authz-user
+        to: x-authenticated-user
+      copy_response_headers_to_response:
+      - from: x-authz-policy
+        to: x-policy
+      response_mode: return_on_error
   - type: response_compression
     id: forward-compress
     order: 50
-    min_body_bytes: 1024
-    max_body_bytes: 1048576
-    content_types:
-    - application/json
-    - text/plain
-    gzip: true
-    brotli: true
-    zstd: false
-    gzip_level: 6
-    brotli_level: 5
+    settings:
+      min_body_bytes: 1024
+      max_body_bytes: 1048576
+      content_types:
+      - application/json
+      - text/plain
+      gzip: true
+      brotli: true
+      zstd: false
+      gzip_level: 6
+      brotli_level: 5
 - kind: transparent
   name: transparent
   listen: 127.0.0.1:15001
@@ -713,16 +716,17 @@ edges:
     - type: response_compression
       id: reverse-compress
       order: 50
-      min_body_bytes: 1024
-      max_body_bytes: 1048576
-      content_types:
-      - application/json
-      - text/plain
-      gzip: true
-      brotli: true
-      zstd: false
-      gzip_level: 6
-      brotli_level: 5
+      settings:
+        min_body_bytes: 1024
+        max_body_bytes: 1048576
+        content_types:
+        - application/json
+        - text/plain
+        gzip: true
+        brotli: true
+        zstd: false
+        gzip_level: 6
+        brotli_level: 5
     target:
       type: upstream
       upstreams:

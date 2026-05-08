@@ -57,6 +57,11 @@ impl WasmExecutor {
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.instances.len();
         self.instances[idx].clone()
     }
+
+    #[cfg(test)]
+    fn prewarmed_instances(&self) -> usize {
+        self.instances.len()
+    }
 }
 
 #[async_trait]
@@ -92,5 +97,39 @@ impl Executor for WasmExecutor {
             abort: exec.abort,
             done,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WasmPoolConfig;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn wasm_pool_prewarms_min_idle_instances() {
+        let module = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("config/usecases/12-ipc-gateway/assets/wasm/echo.wat");
+        let executor = WasmExecutor::new(&WasmBackendConfig {
+            module,
+            precompile: false,
+            pool: Some(WasmPoolConfig {
+                min_idle: 2,
+                max_instances: 3,
+                prewarm: true,
+            }),
+            max_module_bytes: 1024 * 1024,
+            max_memory_mb: 16,
+            timeout_ms: 1000,
+            env: HashMap::new(),
+            max_stdin_bytes: 1024,
+            max_stdout_bytes: 1024,
+            max_stderr_bytes: 1024,
+        })
+        .expect("wasm executor");
+
+        assert_eq!(executor.prewarmed_instances(), 2);
     }
 }

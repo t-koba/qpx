@@ -172,12 +172,12 @@ fn build_router(response_rules: Vec<HttpResponseRuleConfig>) -> ReverseRouter {
             routes: vec![ReverseRouteConfig {
                 name: Some("test".to_string()),
                 r#match: MatchConfig::default(),
-                upstreams: vec!["upstream".to_string()],
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                    upstreams: vec!["upstream".to_string()],
+                    lb: "round_robin".to_string(),
+                },
                 mirrors: Vec::new(),
-                local_response: None,
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
@@ -187,7 +187,6 @@ fn build_router(response_rules: Vec<HttpResponseRuleConfig>) -> ReverseRouter {
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: Some(HttpPolicyConfig { response_rules }),
@@ -519,12 +518,12 @@ async fn assert_reverse_response_rule_matches_streaming(
         routes: vec![ReverseRouteConfig {
             name: Some("grpc".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
@@ -534,7 +533,6 @@ async fn assert_reverse_response_rule_matches_streaming(
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: Some(HttpPolicyConfig {
@@ -929,18 +927,17 @@ async fn route_match_uses_actual_chunked_request_size() {
                     request_size: vec!["4".to_string()],
                     ..Default::default()
                 },
-                upstreams: vec!["upstream".to_string()],
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                    response: Box::new(LocalResponseConfig {
+                        status: 204,
+                        body: String::new(),
+                        content_type: None,
+                        headers: HashMap::new(),
+                        rpc: None,
+                    }),
+                },
                 mirrors: Vec::new(),
-                local_response: Some(LocalResponseConfig {
-                    status: 204,
-                    body: String::new(),
-                    content_type: None,
-                    headers: HashMap::new(),
-                    rpc: None,
-                }),
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
@@ -950,7 +947,6 @@ async fn route_match_uses_actual_chunked_request_size() {
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: None,
@@ -962,18 +958,17 @@ async fn route_match_uses_actual_chunked_request_size() {
             ReverseRouteConfig {
                 name: Some("fallback".to_string()),
                 r#match: MatchConfig::default(),
-                upstreams: vec!["upstream".to_string()],
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                    response: Box::new(LocalResponseConfig {
+                        status: 409,
+                        body: "fallback".to_string(),
+                        content_type: Some("text/plain".to_string()),
+                        headers: HashMap::new(),
+                        rpc: None,
+                    }),
+                },
                 mirrors: Vec::new(),
-                local_response: Some(LocalResponseConfig {
-                    status: 409,
-                    body: "fallback".to_string(),
-                    content_type: Some("text/plain".to_string()),
-                    headers: HashMap::new(),
-                    rpc: None,
-                }),
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
@@ -983,7 +978,6 @@ async fn route_match_uses_actual_chunked_request_size() {
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: None,
@@ -1097,18 +1091,17 @@ async fn route_match_uses_destination_category() {
                     }),
                     ..Default::default()
                 },
-                upstreams: Vec::new(),
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                    response: Box::new(LocalResponseConfig {
+                        status: 204,
+                        body: String::new(),
+                        content_type: None,
+                        headers: HashMap::new(),
+                        rpc: None,
+                    }),
+                },
                 mirrors: Vec::new(),
-                local_response: Some(LocalResponseConfig {
-                    status: 204,
-                    body: String::new(),
-                    content_type: None,
-                    headers: HashMap::new(),
-                    rpc: None,
-                }),
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
@@ -1118,7 +1111,6 @@ async fn route_match_uses_destination_category() {
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: None,
@@ -1130,18 +1122,17 @@ async fn route_match_uses_destination_category() {
             ReverseRouteConfig {
                 name: Some("fallback".to_string()),
                 r#match: MatchConfig::default(),
-                upstreams: Vec::new(),
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                    response: Box::new(LocalResponseConfig {
+                        status: 409,
+                        body: "fallback".to_string(),
+                        content_type: Some("text/plain".to_string()),
+                        headers: HashMap::new(),
+                        rpc: None,
+                    }),
+                },
                 mirrors: Vec::new(),
-                local_response: Some(LocalResponseConfig {
-                    status: 409,
-                    body: "fallback".to_string(),
-                    content_type: Some("text/plain".to_string()),
-                    headers: HashMap::new(),
-                    rpc: None,
-                }),
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 rate_limit: None,
@@ -1151,7 +1142,6 @@ async fn route_match_uses_destination_category() {
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: None,
@@ -1245,18 +1235,17 @@ async fn reverse_ext_authz_rate_limit_profile_is_enforced() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: Vec::new(),
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                response: Box::new(LocalResponseConfig {
+                    status: 204,
+                    body: String::new(),
+                    content_type: None,
+                    headers: HashMap::new(),
+                    rpc: None,
+                }),
+            },
             mirrors: Vec::new(),
-            local_response: Some(LocalResponseConfig {
-                status: 204,
-                body: String::new(),
-                content_type: None,
-                headers: HashMap::new(),
-                rpc: None,
-            }),
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
@@ -1266,7 +1255,6 @@ async fn reverse_ext_authz_rate_limit_profile_is_enforced() {
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: Some(PolicyContextConfig {
                 identity_sources: Vec::new(),
@@ -1404,12 +1392,12 @@ async fn handle_request_with_interim_returns_early_hints_for_h3_downstream() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
@@ -1419,7 +1407,6 @@ async fn handle_request_with_interim_returns_early_hints_for_h3_downstream() {
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: None,
@@ -1530,12 +1517,12 @@ async fn reverse_route_http_module_compresses_responses() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
@@ -1545,7 +1532,6 @@ async fn reverse_route_http_module_compresses_responses() {
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: None,
@@ -1554,16 +1540,17 @@ async fn reverse_route_http_module_compresses_responses() {
             resilience: None,
             http_modules: vec![serde_yaml::from_str(
                 r#"type: response_compression
-min_body_bytes: 1
-max_body_bytes: 65536
-content_types:
-  - text/plain
-gzip: true
-brotli: false
-zstd: false
-gzip_level: 6
-brotli_level: 5
-zstd_level: 3"#,
+settings:
+  min_body_bytes: 1
+  max_body_bytes: 65536
+  content_types:
+    - text/plain
+  gzip: true
+  brotli: false
+  zstd: false
+  gzip_level: 6
+  brotli_level: 5
+  zstd_level: 3"#,
             )
             .expect("http module config")],
         }],
@@ -1671,12 +1658,12 @@ async fn reverse_route_http_module_can_inject_subrequest_headers() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
@@ -1686,7 +1673,6 @@ async fn reverse_route_http_module_can_inject_subrequest_headers() {
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: None,
@@ -1695,16 +1681,17 @@ async fn reverse_route_http_module_can_inject_subrequest_headers() {
             resilience: None,
             http_modules: vec![serde_yaml::from_str(&format!(
                 r#"type: subrequest
-name: header-inject
-phase: response_headers
-url: http://{subrequest_addr}/headers
-timeout_ms: 1000
-max_response_bytes: 65536
-allowed_schemes: [http]
-allowed_hosts: [127.0.0.1]
-copy_response_headers_to_response:
-  - from: x-decision
-    to: x-module-decision"#
+settings:
+  name: header-inject
+  phase: response_headers
+  url: http://{subrequest_addr}/headers
+  timeout_ms: 1000
+  max_response_bytes: 65536
+  allowed_schemes: [http]
+  allowed_hosts: [127.0.0.1]
+  copy_response_headers_to_response:
+    - from: x-decision
+      to: x-module-decision"#
             ))
             .expect("http module config")],
         }],
@@ -1824,12 +1811,12 @@ async fn handle_request_with_interim_returns_early_hints_for_h2_downstream() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
@@ -1839,7 +1826,6 @@ async fn handle_request_with_interim_returns_early_hints_for_h2_downstream() {
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: None,
@@ -1967,12 +1953,12 @@ async fn handle_request_with_interim_returns_early_hints_for_h1_downstream() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
@@ -1982,7 +1968,6 @@ async fn handle_request_with_interim_returns_early_hints_for_h1_downstream() {
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: None,

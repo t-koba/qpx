@@ -330,7 +330,7 @@ impl ExportSession {
             Some(max) => &payload[..payload.len().min(max)],
             None => payload.as_slice(),
         };
-        self.emit(CapturePlane::ClientServerPlaintext, direction, &payload);
+        self.emit(CapturePlane::ClientServerPlaintext, direction, payload);
     }
 
     fn emit(&self, plane: CapturePlane, direction: CaptureDirection, payload: &[u8]) {

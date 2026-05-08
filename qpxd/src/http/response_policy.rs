@@ -64,6 +64,10 @@ pub(crate) struct ResponseRuleCandidates {
 }
 
 impl HttpResponseRuleEngine {
+    pub(crate) fn len(&self) -> usize {
+        self.rules.len()
+    }
+
     pub(crate) fn new(rules: &[HttpResponseRuleConfig]) -> Result<Option<Self>> {
         if rules.is_empty() {
             return Ok(None);
@@ -158,6 +162,24 @@ impl HttpResponseRuleEngine {
         self.rules
             .iter()
             .any(|rule| rule.matcher.requires_response_request_body_observation())
+    }
+
+    pub(crate) fn any_rule_requires_response_body_observation(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| rule.matcher.requires_response_body_observation())
+    }
+
+    pub(crate) fn any_rule_requires_response_size(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| rule.matcher.requires_response_size())
+    }
+
+    pub(crate) fn any_rule_requires_response_rpc_observation(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| rule.matcher.requires_response_rpc_observation())
     }
 }
 

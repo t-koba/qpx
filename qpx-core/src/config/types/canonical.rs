@@ -7,7 +7,7 @@ use super::{
     IpcMode, IpcUpstreamConfig, LocalResponseConfig, MatchConfig, MessagesConfig, NamedSetConfig,
     OriginalDstConfig, RateLimitConfig, RateLimitProfileConfig, ResilienceConfig,
     ReverseAffinityConfig, ReverseEdgeConfig, ReverseHttp3Config, ReverseRouteBackendConfig,
-    ReverseRouteConfig, ReverseRouteMirrorConfig, ReverseTlsConfig,
+    ReverseRouteConfig, ReverseRouteMirrorConfig, ReverseRouteTargetConfig, ReverseTlsConfig,
     ReverseTlsPassthroughRouteConfig, RuleConfig, TlsInspectionConfig, TlsPassthroughMatchConfig,
     UpstreamConfig, UpstreamTlsTrustConfig, UpstreamTlsTrustProfileConfig, XdpConfig,
 };
@@ -507,8 +507,8 @@ impl ReverseEdgeInputConfig {
         let mut tls_passthrough_routes = self.tls_passthrough_routes;
         for route in self.routes {
             match route.into_route_or_passthrough(chains, self.name.as_str())? {
-                LoadedReverseRoute::Http(route) => routes.push(route),
-                LoadedReverseRoute::TlsPassthrough(route) => tls_passthrough_routes.push(route),
+                LoadedReverseRoute::Http(route) => routes.push(*route),
+                LoadedReverseRoute::TlsPassthrough(route) => tls_passthrough_routes.push(*route),
             }
         }
         Ok(ReverseEdgeConfig {
@@ -588,7 +588,7 @@ impl ReverseRouteInputConfig {
             .unwrap_or_else(|| format!("edge {edge_name} route <unnamed>"));
         match self.target {
             RouteTargetConfig::TlsPassthrough { upstreams, lb } => Ok(
-                LoadedReverseRoute::TlsPassthrough(ReverseTlsPassthroughRouteConfig {
+                LoadedReverseRoute::TlsPassthrough(Box::new(ReverseTlsPassthroughRouteConfig {
                     r#match: TlsPassthroughMatchConfig {
                         src_ip: self.r#match.src_ip,
                         dst_port: self.r#match.dst_port,
@@ -601,7 +601,7 @@ impl ReverseRouteInputConfig {
                     resilience: self.resilience,
                     lifecycle: self.lifecycle,
                     affinity: self.affinity,
-                }),
+                })),
             ),
             target => {
                 let http_modules = expand_module_refs(
@@ -613,12 +613,17 @@ impl ReverseRouteInputConfig {
                 let mut route = ReverseRouteConfig {
                     name: self.name,
                     r#match: self.r#match,
-                    upstreams: Vec::new(),
-                    backends: Vec::new(),
+                    target: ReverseRouteTargetConfig::LocalResponse {
+                        response: Box::new(LocalResponseConfig {
+                            status: 500,
+                            body: String::new(),
+                            content_type: None,
+                            headers: Default::default(),
+                            rpc: None,
+                        }),
+                    },
                     mirrors: self.mirrors,
-                    local_response: None,
                     headers: self.headers,
-                    lb: super::super::defaults::default_lb(),
                     timeout_ms: self.timeout_ms,
                     health_check: self.health_check,
                     resilience: self.resilience,
@@ -629,7 +634,6 @@ impl ReverseRouteInputConfig {
                     upstream_trust_profile: self.upstream_trust_profile,
                     upstream_trust: self.upstream_trust,
                     lifecycle: self.lifecycle,
-                    ipc: None,
                     affinity: self.affinity,
                     policy_context: self.policy_context,
                     destination_resolution: self.destination_resolution,
@@ -639,11 +643,13 @@ impl ReverseRouteInputConfig {
                 };
                 match target {
                     RouteTargetConfig::Upstream { upstreams, lb } => {
-                        route.upstreams = upstreams;
-                        route.lb = lb;
+                        route.target = ReverseRouteTargetConfig::Upstream { upstreams, lb };
                     }
                     RouteTargetConfig::Weighted { backends } => {
-                        route.backends = backends;
+                        route.target = ReverseRouteTargetConfig::Weighted {
+                            backends,
+                            lb: super::super::defaults::default_lb(),
+                        };
                     }
                     RouteTargetConfig::Ipc {
                         endpoint,
@@ -651,27 +657,29 @@ impl ReverseRouteInputConfig {
                         timeout_ms,
                         body,
                     } => {
-                        route.ipc = Some(IpcUpstreamConfig {
-                            mode,
-                            address: endpoint,
-                            timeout_ms,
-                            body,
-                        });
+                        route.target = ReverseRouteTargetConfig::Ipc {
+                            config: IpcUpstreamConfig {
+                                mode,
+                                address: endpoint,
+                                timeout_ms,
+                                body,
+                            },
+                        };
                     }
                     RouteTargetConfig::LocalResponse { response } => {
-                        route.local_response = Some(response);
+                        route.target = ReverseRouteTargetConfig::LocalResponse { response };
                     }
                     RouteTargetConfig::TlsPassthrough { .. } => unreachable!(),
                 }
-                Ok(LoadedReverseRoute::Http(route))
+                Ok(LoadedReverseRoute::Http(Box::new(route)))
             }
         }
     }
 }
 
 enum LoadedReverseRoute {
-    Http(ReverseRouteConfig),
-    TlsPassthrough(ReverseTlsPassthroughRouteConfig),
+    Http(Box<ReverseRouteConfig>),
+    TlsPassthrough(Box<ReverseTlsPassthroughRouteConfig>),
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -695,7 +703,7 @@ enum RouteTargetConfig {
         body: IpcBodyLimitConfig,
     },
     LocalResponse {
-        response: LocalResponseConfig,
+        response: Box<LocalResponseConfig>,
     },
     TlsPassthrough {
         upstreams: Vec<String>,

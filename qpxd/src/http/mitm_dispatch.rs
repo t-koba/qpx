@@ -731,16 +731,17 @@ mod tests {
                 destination_resolution: None,
                 http_modules: vec![serde_yaml::from_str(
                     r#"type: response_compression
-min_body_bytes: 1
-max_body_bytes: 65536
-content_types:
-  - text/plain
-gzip: true
-brotli: false
-zstd: false
-gzip_level: 6
-brotli_level: 5
-zstd_level: 3"#,
+settings:
+  min_body_bytes: 1
+  max_body_bytes: 65536
+  content_types:
+    - text/plain
+  gzip: true
+  brotli: false
+  zstd: false
+  gzip_level: 6
+  brotli_level: 5
+  zstd_level: 3"#,
                 )
                 .expect("http module config")],
             })],

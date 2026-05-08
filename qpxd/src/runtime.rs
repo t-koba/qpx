@@ -29,7 +29,9 @@ use obs_rt::ObsRuntime;
 #[cfg(test)]
 pub(crate) use plan::CompiledPlaintextCapturePlan;
 pub(crate) use plan::{
-    CompiledCapturePlan, CompiledEdge, CompiledListenerSettings, ExecutionPlan, PlanFlags,
+    CompiledCapturePlan, CompiledEdge, CompiledListenerSettings, CompiledReverseEdge,
+    CompiledReverseRoute, CompiledReverseRouteTarget, CompiledTlsPassthroughRoute,
+    ExecutionPlan, PlanFlags,
 };
 pub use plan::{PlanCompiler, RuntimePlan};
 use policy_rt::PolicyRuntime;

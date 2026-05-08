@@ -51,8 +51,8 @@ mod transport;
 use crate::connection_filter::{
     emit_connection_filter_audit, evaluate_connection_filter, ConnectionFilterStage,
 };
-use crate::runtime::metric_names;
 use crate::runtime::Runtime;
+use crate::runtime::{metric_names, CompiledReverseEdge};
 use crate::tls::TlsClientHelloInfo;
 #[cfg(feature = "http3")]
 use crate::transparent::quic::{extract_quic_client_hello_info, looks_like_quic_initial};
@@ -79,11 +79,13 @@ pub(crate) fn compile_reverse(
     reverse: &ReverseEdgeConfig,
     upstreams: &[UpstreamConfig],
     http_module_registry: &crate::http::modules::HttpModuleRegistry,
+    compiled_edge: &CompiledReverseEdge,
 ) -> Result<CompiledReverse> {
-    let router = Arc::new(router::ReverseRouter::new(
+    let router = Arc::new(router::ReverseRouter::new_with_plan(
         reverse.clone(),
         upstreams,
         http_module_registry,
+        compiled_edge,
     )?);
     let security_policy = Arc::new(security::ReverseTlsHostPolicy::from_config(reverse)?);
 
@@ -139,6 +141,9 @@ impl ReloadableReverse {
             &reverse,
             current_operational.upstreams.as_slice(),
             state.http_module_registry().as_ref(),
+            state.plan.reverse_edge(reverse.name.as_str()).ok_or_else(|| {
+                anyhow!("compiled reverse edge missing for {}", reverse.name)
+            })?,
         )?;
         compiled
             .router
@@ -173,11 +178,21 @@ impl ReloadableReverse {
         match next_reverse {
             Some(reverse_cfg) => {
                 let state = self.runtime.state();
-                match compile_reverse(
-                    &reverse_cfg,
-                    current_operational.upstreams.as_slice(),
-                    state.http_module_registry().as_ref(),
-                ) {
+                let next = state
+                    .plan
+                    .reverse_edge(reverse_cfg.name.as_str())
+                    .ok_or_else(|| {
+                        anyhow!("compiled reverse edge missing for {}", reverse_cfg.name)
+                    })
+                    .and_then(|compiled_edge| {
+                        compile_reverse(
+                            reverse_cfg,
+                            current_operational.upstreams.as_slice(),
+                            state.http_module_registry().as_ref(),
+                            compiled_edge,
+                        )
+                    });
+                match next {
                     Ok(next) => {
                         next.router
                             .spawn_health_tasks(self.name.clone(), self.unhealthy_metric.clone());
@@ -273,13 +288,14 @@ pub(super) fn reverse_quic_connection_filter_match(
 pub(crate) fn check_reverse_runtime(
     reverse: &ReverseEdgeConfig,
     upstreams: &[UpstreamConfig],
+    http_module_registry: &crate::http::modules::HttpModuleRegistry,
+    compiled_edge: &CompiledReverseEdge,
 ) -> Result<()> {
     let _: SocketAddr = reverse
         .listen
         .parse()
         .map_err(|e| anyhow!("reverse {} listen is invalid: {}", reverse.name, e))?;
-    let registry = crate::http::modules::default_http_module_registry();
-    let _ = compile_reverse(reverse, upstreams, registry.as_ref())?;
+    let _ = compile_reverse(reverse, upstreams, http_module_registry, compiled_edge)?;
 
     if reverse.http3.as_ref().map(|h| h.enabled).unwrap_or(false) {
         #[cfg(feature = "http3")]

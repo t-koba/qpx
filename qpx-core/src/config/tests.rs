@@ -79,6 +79,110 @@ telemetry:
 }
 
 #[test]
+fn load_config_appends_named_collections_and_rejects_duplicates() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+
+    let base = dir.join("base.yaml");
+    let overlay = dir.join("overlay.yaml");
+    write_config(
+        &base,
+        r#"edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action:
+    type: direct
+upstreams:
+- name: egress-a
+  url: http://proxy-a.local:3128
+caches:
+- name: cache-a
+  kind: redis
+  endpoint: redis://127.0.0.1:6379/11
+http:
+  module_chains:
+  - name: base-chain
+    modules:
+    - type: response_compression
+security:
+  identity_sources:
+  - name: headers-a
+    type: trusted_headers
+    from:
+      trusted_peers: [127.0.0.1/32]
+    headers:
+      user: x-user
+  decisions:
+    ext_authz:
+    - name: authz-a
+      endpoint: http://127.0.0.1:19091/check
+traffic:
+  rate_limit_profiles:
+  - name: burst-a
+    requests:
+      rps: 10"#,
+    )
+    .expect("write base");
+    write_config(
+        &overlay,
+        r#"upstreams:
+- name: egress-b
+  url: http://proxy-b.local:3128
+caches:
+- name: cache-b
+  kind: redis
+  endpoint: redis://127.0.0.1:6379/12
+http:
+  module_chains:
+  - name: overlay-chain
+    modules:
+    - type: response_compression
+security:
+  identity_sources:
+  - name: headers-b
+    type: trusted_headers
+    from:
+      trusted_peers: [127.0.0.1/32]
+    headers:
+      user: x-user
+  decisions:
+    ext_authz:
+    - name: authz-b
+      endpoint: http://127.0.0.1:19092/check
+traffic:
+  rate_limit_profiles:
+  - name: burst-b
+    requests:
+      rps: 20"#,
+    )
+    .expect("write overlay");
+
+    let loaded = load_configs(&[base.clone(), overlay.clone()]).expect("load config");
+    assert_eq!(loaded.upstreams.len(), 2);
+    assert_eq!(loaded.caches.len(), 2);
+    assert_eq!(loaded.http.module_chains.len(), 2);
+    assert_eq!(loaded.security.identity_sources.len(), 2);
+    assert_eq!(loaded.security.decisions.ext_authz.len(), 2);
+    assert_eq!(loaded.traffic.rate_limit_profiles.len(), 2);
+
+    write_config(
+        &overlay,
+        r#"upstreams:
+- name: egress-a
+  url: http://proxy-b.local:3128"#,
+    )
+    .expect("write duplicate overlay");
+    let err = load_configs(&[base.clone(), overlay.clone()]).expect_err("duplicate must fail");
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        err.to_string()
+            .contains("duplicate upstream name: egress-a"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn load_config_supports_include_and_env() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");
@@ -580,7 +684,10 @@ fn load_config_allows_reverse_backends_mirrors_headers_and_regex_rewrite() {
     fs::remove_dir_all(&dir).ok();
 
     let route = &loaded.reverse_edge_configs()[0].routes[0];
-    assert_eq!(route.backends.len(), 2);
+    let ReverseRouteTargetConfig::Weighted { backends, .. } = &route.target else {
+        panic!("expected weighted target");
+    };
+    assert_eq!(backends.len(), 2);
     assert_eq!(route.mirrors.len(), 1);
     assert!(route.headers.is_some());
     assert!(route
@@ -650,11 +757,12 @@ fn load_config_supports_http_modules() {
     type: direct
   http_modules:
   - type: response_compression
-    min_body_bytes: 1
-    max_body_bytes: 4096
-    gzip: true
-    brotli: false
-    zstd: false
+    settings:
+      min_body_bytes: 1
+      max_body_bytes: 4096
+      gzip: true
+      brotli: false
+      zstd: false
 - kind: reverse
   name: api
   listen: 127.0.0.1:19080
@@ -668,17 +776,18 @@ fn load_config_supports_http_modules() {
       - http://127.0.0.1:8080
     http_modules:
     - type: subrequest
-      name: authz
-      phase: response_headers
-      url: http://127.0.0.1:19091/check
-      max_response_bytes: 65536
-      allowed_schemes:
-      - http
-      allowed_hosts:
-      - 127.0.0.1
-      copy_response_headers_to_response:
-      - from: x-decision
-        to: x-module-decision"#,
+      settings:
+        name: authz
+        phase: response_headers
+        url: http://127.0.0.1:19091/check
+        max_response_bytes: 65536
+        allowed_schemes:
+        - http
+        allowed_hosts:
+        - 127.0.0.1
+        copy_response_headers_to_response:
+        - from: x-decision
+          to: x-module-decision"#,
     )
     .expect("write");
 
@@ -706,11 +815,12 @@ fn load_config_expands_http_module_chains() {
   - name: compress
     modules:
     - type: response_compression
-      min_body_bytes: 1
-      max_body_bytes: 4096
-      gzip: true
-      brotli: false
-      zstd: false
+      settings:
+        min_body_bytes: 1
+        max_body_bytes: 4096
+        gzip: true
+        brotli: false
+        zstd: false
 edges:
 - kind: reverse
   name: api
@@ -847,8 +957,9 @@ fn load_config_allows_custom_http_modules_for_runtime_registry_resolution() {
   http_modules:
   - type: custom_filter
     id: inject
-    header_name: x-custom
-    header_value: yes"#,
+    settings:
+      header_name: x-custom
+      header_value: yes"#,
     )
     .expect("write");
 
@@ -926,10 +1037,11 @@ fn load_config_preserves_ipc_body_limits() {
     let loaded = load_config(&cfg).expect("load config");
     fs::remove_dir_all(&dir).ok();
 
-    let ipc = loaded.reverse_edge_configs()[0].routes[0]
-        .ipc
-        .as_ref()
-        .expect("ipc config");
+    let ReverseRouteTargetConfig::Ipc { config: ipc } =
+        &loaded.reverse_edge_configs()[0].routes[0].target
+    else {
+        panic!("expected ipc target");
+    };
     assert_eq!(ipc.body.max_request_bytes, Some(1024));
     assert_eq!(ipc.body.max_response_bytes, Some(2048));
 }

@@ -35,51 +35,54 @@ edges:
   - type: cache_purge
     id: forward-cache-purge
     order: -100
-    methods:
-    - PURGE
-    - DELETE
-    response_status: 202
-    response_body: cache purge queued
-    response_headers:
-      X-Cache-Purge: modules-forward
+    settings:
+      methods:
+      - PURGE
+      - DELETE
+      response_status: 202
+      response_body: cache purge queued
+      response_headers:
+        X-Cache-Purge: modules-forward
   - type: subrequest
     id: request-authz
     order: -20
-    name: request-authz
-    phase: request_headers
-    url: http://127.0.0.1:19091/check
-    method: POST
-    timeout_ms: 250
-    max_response_bytes: 65536
-    allowed_schemes:
-    - http
-    allowed_hosts:
-    - 127.0.0.1
-    pass_headers:
-    - authorization
-    - x-request-id
-    request_headers:
-      X-Module: request-authz
-    copy_response_headers_to_request:
-    - from: x-authz-user
-      to: x-authenticated-user
-    copy_response_headers_to_response:
-    - from: x-authz-policy
-      to: x-policy
-    response_mode: return_on_error
+    settings:
+      name: request-authz
+      phase: request_headers
+      url: http://127.0.0.1:19091/check
+      method: POST
+      timeout_ms: 250
+      max_response_bytes: 65536
+      allowed_schemes:
+      - http
+      allowed_hosts:
+      - 127.0.0.1
+      pass_headers:
+      - authorization
+      - x-request-id
+      request_headers:
+        X-Module: request-authz
+      copy_response_headers_to_request:
+      - from: x-authz-user
+        to: x-authenticated-user
+      copy_response_headers_to_response:
+      - from: x-authz-policy
+        to: x-policy
+      response_mode: return_on_error
   - type: response_compression
     id: forward-compress
     order: 50
-    min_body_bytes: 1024
-    max_body_bytes: 1048576
-    content_types:
-    - application/json
-    - text/plain
-    gzip: true
-    brotli: true
-    zstd: false
-    gzip_level: 6
-    brotli_level: 5
+    settings:
+      min_body_bytes: 1024
+      max_body_bytes: 1048576
+      content_types:
+      - application/json
+      - text/plain
+      gzip: true
+      brotli: true
+      zstd: false
+      gzip_level: 6
+      brotli_level: 5
 - kind: reverse
   name: modules-reverse
   listen: 127.0.0.1:19497
@@ -92,32 +95,34 @@ edges:
     - type: subrequest
       id: response-metadata
       order: -10
-      name: response-metadata
-      phase: response_headers
-      url: http://127.0.0.1:19092/metadata
-      timeout_ms: 200
-      max_response_bytes: 65536
-      allowed_schemes:
-      - http
-      allowed_hosts:
-      - 127.0.0.1
-      request_headers:
-        X-Module: response-metadata
-      copy_response_headers_to_response:
-      - from: x-route-tag
-        to: x-upstream-tag
-      response_mode: ignore
+      settings:
+        name: response-metadata
+        phase: response_headers
+        url: http://127.0.0.1:19092/metadata
+        timeout_ms: 200
+        max_response_bytes: 65536
+        allowed_schemes:
+        - http
+        allowed_hosts:
+        - 127.0.0.1
+        request_headers:
+          X-Module: response-metadata
+        copy_response_headers_to_response:
+        - from: x-route-tag
+          to: x-upstream-tag
+        response_mode: ignore
     - type: response_compression
       id: reverse-compress
       order: 40
-      min_body_bytes: 2048
-      max_body_bytes: 2097152
-      content_types:
-      - application/json
-      gzip: true
-      brotli: false
-      zstd: true
-      zstd_level: 9
+      settings:
+        min_body_bytes: 2048
+        max_body_bytes: 2097152
+        content_types:
+        - application/json
+        gzip: true
+        brotli: false
+        zstd: true
+        zstd_level: 9
     target:
       type: upstream
       upstreams:

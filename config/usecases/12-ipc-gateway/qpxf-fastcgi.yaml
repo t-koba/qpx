@@ -13,7 +13,9 @@ handlers:
     type: fastcgi
     address: ${QPXF_FASTCGI_ADDRESS:-127.0.0.1:9000}
     timeout_ms: 3000
-    max_concurrency: 128
+    pool:
+      max_concurrency: 128
+      max_idle: 16
     max_stdin_bytes: 33554432
     max_stdout_bytes: 33554432
     max_stderr_bytes: 1048576

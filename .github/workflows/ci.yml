@@ -255,10 +255,10 @@ jobs:
             run_clippy qpx-core "${feats}"
           done
 
-          # qpx-auth: valid auth-proxy / LDAP / digest combinations
+          # qpx-auth: explicit Basic / Digest / LDAP feature combinations
           for feats in \
             "" \
-            "auth-proxy" \
+            "basic-auth" \
             "digest-auth" \
             "ldap-auth-rustls" \
             "ldap-auth-native" \
@@ -276,11 +276,15 @@ jobs:
           # - tls backend: none | tls-native | tls-rustls
           # - HTTP/3 is selected by exactly one backend feature
           # - mitm/acme require tls-rustls
-          # - digest-auth / sha2-hash are independent toggles
-          qpxd_base_sets=(
+          # - auth features are named auth-basic/auth-digest/auth-ldap-rustls/auth-ldap-native
+          for feats in \
             ""
             "tls-native"
             "tls-rustls"
+            "tls-rustls,auth-basic"
+            "tls-rustls,auth-digest"
+            "tls-rustls,auth-ldap-rustls"
+            "tls-native,auth-ldap-native"
             "tls-rustls,mitm"
             "tls-rustls,acme"
             "tls-rustls,mitm,acme"
@@ -291,22 +295,8 @@ jobs:
             "http3-backend-qpx"
             "http3-backend-qpx,mitm"
             "http3-backend-qpx,acme"
-            "http3-backend-qpx,mitm,acme"
-          )
-          qpxd_opt_sets=(
-            ""
-            "digest-auth"
-            "sha2-hash"
-            "digest-auth,sha2-hash"
-          )
-          for base in "${qpxd_base_sets[@]}"; do
-            for opt in "${qpxd_opt_sets[@]}"; do
-              feats="${base}"
-              if [[ -n "${opt}" ]]; then
-                if [[ -n "${feats}" ]]; then feats="${feats},${opt}"; else feats="${opt}"; fi
-              fi
-              run_clippy qpxd "${feats}"
-            done
+            "http3-backend-qpx,mitm,acme"; do
+            run_clippy qpxd "${feats}"
           done
 
           # qpxr / qpxc: tls backend (none|tls-rustls|tls-native)

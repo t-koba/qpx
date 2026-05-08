@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
 
 const FCGI_BEGIN_REQUEST: u8 = 1;
@@ -24,28 +24,26 @@ trait AsyncIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AsyncIo for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 type BoxedIo = Pin<Box<dyn AsyncIo>>;
 
-#[derive(Clone, Copy)]
-enum PersistentProtocol {
-    FastCgi,
-    Scgi,
-}
-
 pub struct FastCgiExecutor {
-    inner: PersistentExecutor,
+    timeout: Duration,
+    pool: Arc<FastCgiConnectionPool>,
+    max_stdin_bytes: usize,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
 }
 
 impl FastCgiExecutor {
     pub fn new(config: &FastCgiBackendConfig) -> Result<Self> {
         Ok(Self {
-            inner: PersistentExecutor::new(
-                PersistentProtocol::FastCgi,
+            timeout: Duration::from_millis(config.timeout_ms),
+            pool: Arc::new(FastCgiConnectionPool::new(
                 config.address.clone(),
-                config.timeout_ms,
-                config.max_concurrency,
-                config.max_stdin_bytes,
-                config.max_stdout_bytes,
-                config.max_stderr_bytes,
-            )?,
+                config.pool.max_concurrency,
+                config.pool.max_idle,
+            )?),
+            max_stdin_bytes: config.max_stdin_bytes,
+            max_stdout_bytes: config.max_stdout_bytes,
+            max_stderr_bytes: config.max_stderr_bytes,
         })
     }
 }
@@ -53,7 +51,99 @@ impl FastCgiExecutor {
 #[async_trait]
 impl Executor for FastCgiExecutor {
     async fn start(&self, req: CgiRequest) -> Result<Execution> {
-        self.inner.start(req).await
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Bytes>(16);
+        let (stdout_tx, stdout_rx) = mpsc::channel::<Bytes>(16);
+        let (stderr_tx, stderr_rx) = mpsc::channel::<Bytes>(16);
+        let (abort_tx, mut abort_rx) = oneshot::channel::<()>();
+
+        let timeout_dur = self.timeout;
+        let pool = self.pool.clone();
+        let max_stdin = self.max_stdin_bytes;
+        let max_stdout = self.max_stdout_bytes;
+        let max_stderr = self.max_stderr_bytes;
+
+        let done = tokio::spawn(async move {
+            let body = tokio::select! {
+                body = collect_stdin(&mut stdin_rx, max_stdin) => body?,
+                _ = &mut abort_rx => return Ok(()),
+            };
+            let env = build_gateway_env(&req, body.len());
+            let future = pool.execute(env, body, max_stdout, max_stderr);
+            let (stdout, stderr) = timeout(timeout_dur, future)
+                .await
+                .context("fastcgi backend request timed out")??;
+            if !stderr.is_empty() {
+                let _ = stderr_tx.send(stderr).await;
+            }
+            if !stdout.is_empty() {
+                let _ = stdout_tx.send(stdout).await;
+            }
+            Ok(())
+        });
+
+        Ok(Execution {
+            stdin: stdin_tx,
+            stdout: stdout_rx,
+            stderr: stderr_rx,
+            abort: abort_tx,
+            done,
+        })
+    }
+}
+
+struct FastCgiConnectionPool {
+    address: String,
+    idle: Mutex<Vec<BoxedIo>>,
+    semaphore: Arc<Semaphore>,
+    max_idle: usize,
+}
+
+impl FastCgiConnectionPool {
+    fn new(address: String, max_concurrency: usize, max_idle: usize) -> Result<Self> {
+        if address.trim().is_empty() {
+            return Err(anyhow!("fastcgi backend address must not be empty"));
+        }
+        Ok(Self {
+            address,
+            idle: Mutex::new(Vec::new()),
+            semaphore: Arc::new(Semaphore::new(max_concurrency)),
+            max_idle,
+        })
+    }
+
+    async fn execute(
+        &self,
+        env: Vec<(String, String)>,
+        body: Bytes,
+        max_stdout_bytes: usize,
+        max_stderr_bytes: usize,
+    ) -> Result<(Bytes, Bytes)> {
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| anyhow!("fastcgi backend semaphore closed"))?;
+        let mut stream = self.take().await?;
+        let result =
+            run_fastcgi_on_stream(&mut stream, env, body, max_stdout_bytes, max_stderr_bytes).await;
+        if result.is_ok() {
+            self.put(stream).await;
+        }
+        result
+    }
+
+    async fn take(&self) -> Result<BoxedIo> {
+        if let Some(stream) = self.idle.lock().await.pop() {
+            return Ok(stream);
+        }
+        connect_backend(self.address.as_str()).await
+    }
+
+    async fn put(&self, stream: BoxedIo) {
+        let mut idle = self.idle.lock().await;
+        if idle.len() < self.max_idle {
+            idle.push(stream);
+        }
     }
 }
 
@@ -65,7 +155,6 @@ impl ScgiExecutor {
     pub fn new(config: &ScgiBackendConfig) -> Result<Self> {
         Ok(Self {
             inner: PersistentExecutor::new(
-                PersistentProtocol::Scgi,
                 config.address.clone(),
                 config.timeout_ms,
                 config.max_concurrency,
@@ -85,36 +174,31 @@ impl Executor for ScgiExecutor {
 }
 
 struct PersistentExecutor {
-    protocol: PersistentProtocol,
     address: String,
     timeout: Duration,
     semaphore: Arc<Semaphore>,
     max_stdin_bytes: usize,
     max_stdout_bytes: usize,
-    max_stderr_bytes: usize,
 }
 
 impl PersistentExecutor {
     fn new(
-        protocol: PersistentProtocol,
         address: String,
         timeout_ms: u64,
         max_concurrency: usize,
         max_stdin_bytes: usize,
         max_stdout_bytes: usize,
-        max_stderr_bytes: usize,
+        _max_stderr_bytes: usize,
     ) -> Result<Self> {
         if address.trim().is_empty() {
             return Err(anyhow!("persistent backend address must not be empty"));
         }
         Ok(Self {
-            protocol,
             address,
             timeout: Duration::from_millis(timeout_ms),
             semaphore: Arc::new(Semaphore::new(max_concurrency)),
             max_stdin_bytes,
             max_stdout_bytes,
-            max_stderr_bytes,
         })
     }
 
@@ -124,14 +208,11 @@ impl PersistentExecutor {
         let (stderr_tx, stderr_rx) = mpsc::channel::<Bytes>(16);
         let (abort_tx, mut abort_rx) = oneshot::channel::<()>();
 
-        let protocol = self.protocol;
         let address = self.address.clone();
         let timeout_dur = self.timeout;
         let semaphore = self.semaphore.clone();
         let max_stdin = self.max_stdin_bytes;
         let max_stdout = self.max_stdout_bytes;
-        let max_stderr = self.max_stderr_bytes;
-
         let done = tokio::spawn(async move {
             let permit = semaphore
                 .acquire_owned()
@@ -143,16 +224,7 @@ impl PersistentExecutor {
                 _ = &mut abort_rx => return Ok(()),
             };
             let env = build_gateway_env(&req, body.len());
-            let future = async {
-                match protocol {
-                    PersistentProtocol::FastCgi => {
-                        run_fastcgi(address.as_str(), env, body, max_stdout, max_stderr).await
-                    }
-                    PersistentProtocol::Scgi => {
-                        run_scgi(address.as_str(), env, body, max_stdout).await
-                    }
-                }
-            };
+            let future = run_scgi(address.as_str(), env, body, max_stdout);
             let (stdout, stderr) = timeout(timeout_dur, future)
                 .await
                 .context("persistent backend request timed out")??;
@@ -224,29 +296,28 @@ async fn run_scgi(
     Ok((stdout, Bytes::new()))
 }
 
-async fn run_fastcgi(
-    address: &str,
+async fn run_fastcgi_on_stream(
+    stream: &mut BoxedIo,
     env: Vec<(String, String)>,
     body: Bytes,
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
 ) -> Result<(Bytes, Bytes)> {
-    let mut stream = connect_backend(address).await?;
-    write_fastcgi_begin(&mut stream).await?;
+    write_fastcgi_begin(stream).await?;
     let params = encode_fastcgi_params(env)?;
     for chunk in params.chunks(u16::MAX as usize) {
-        write_fastcgi_record(&mut stream, FCGI_PARAMS, chunk).await?;
+        write_fastcgi_record(stream, FCGI_PARAMS, chunk).await?;
     }
-    write_fastcgi_record(&mut stream, FCGI_PARAMS, &[]).await?;
+    write_fastcgi_record(stream, FCGI_PARAMS, &[]).await?;
     for chunk in body.chunks(u16::MAX as usize) {
-        write_fastcgi_record(&mut stream, FCGI_STDIN, chunk).await?;
+        write_fastcgi_record(stream, FCGI_STDIN, chunk).await?;
     }
-    write_fastcgi_record(&mut stream, FCGI_STDIN, &[]).await?;
+    write_fastcgi_record(stream, FCGI_STDIN, &[]).await?;
 
     let mut stdout = BytesMut::new();
     let mut stderr = BytesMut::new();
     loop {
-        let Some((record_type, content)) = read_fastcgi_record(&mut stream).await? else {
+        let Some((record_type, content)) = read_fastcgi_record(stream).await? else {
             break;
         };
         match record_type {
@@ -263,6 +334,7 @@ async fn run_fastcgi(
 async fn write_fastcgi_begin(stream: &mut BoxedIo) -> Result<()> {
     let mut content = [0u8; 8];
     content[0..2].copy_from_slice(&FCGI_RESPONDER.to_be_bytes());
+    content[2] = 1;
     write_fastcgi_record(stream, FCGI_BEGIN_REQUEST, &content).await
 }
 
@@ -431,6 +503,8 @@ fn is_hop_by_hop_header(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::{Cursor, Read};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
 
     #[test]
     fn fastcgi_param_lengths_roundtrip_short_and_long() {
@@ -461,6 +535,87 @@ mod tests {
             let mut rest = [0u8; 3];
             Read::read_exact(cursor, &mut rest).expect("rest");
             u32::from_be_bytes([first[0] & 0x7f, rest[0], rest[1], rest[2]]) as usize
+        }
+    }
+
+    #[tokio::test]
+    async fn fastcgi_pool_reuses_idle_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("addr").to_string();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_task = accepted.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            accepted_task.fetch_add(1, Ordering::SeqCst);
+            for _ in 0..2 {
+                read_fastcgi_request_from_tcp(&mut stream).await;
+                write_fastcgi_record_to_tcp(&mut stream, FCGI_STDOUT, b"Status: 200 OK\r\n\r\nok")
+                    .await;
+                write_fastcgi_record_to_tcp(&mut stream, FCGI_END_REQUEST, &[0; 8]).await;
+            }
+        });
+
+        let pool = FastCgiConnectionPool::new(address, 1, 1).expect("pool");
+        for _ in 0..2 {
+            let (stdout, stderr) = pool
+                .execute(Vec::new(), Bytes::new(), 1024, 1024)
+                .await
+                .expect("execute");
+            assert!(stderr.is_empty());
+            assert_eq!(stdout, Bytes::from_static(b"Status: 200 OK\r\n\r\nok"));
+        }
+        server.await.expect("server");
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    async fn read_fastcgi_request_from_tcp(stream: &mut TcpStream) {
+        loop {
+            let Some((record_type, content)) = read_fastcgi_record_from_tcp(stream).await else {
+                panic!("unexpected eof");
+            };
+            if record_type == FCGI_STDIN && content.is_empty() {
+                break;
+            }
+        }
+    }
+
+    async fn read_fastcgi_record_from_tcp(stream: &mut TcpStream) -> Option<(u8, Bytes)> {
+        let mut header = [0u8; 8];
+        if stream.read_exact(&mut header).await.is_err() {
+            return None;
+        }
+        let record_type = header[1];
+        let content_len = u16::from_be_bytes([header[4], header[5]]) as usize;
+        let padding_len = header[6] as usize;
+        let mut content = vec![0u8; content_len];
+        stream.read_exact(&mut content).await.expect("content");
+        if padding_len > 0 {
+            let mut padding = vec![0u8; padding_len];
+            stream.read_exact(&mut padding).await.expect("padding");
+        }
+        Some((record_type, Bytes::from(content)))
+    }
+
+    async fn write_fastcgi_record_to_tcp(stream: &mut TcpStream, record_type: u8, content: &[u8]) {
+        let content_len = content.len() as u16;
+        let padding_len = (8 - (content.len() % 8)) % 8;
+        let header = [
+            1,
+            record_type,
+            0,
+            1,
+            (content_len >> 8) as u8,
+            content_len as u8,
+            padding_len as u8,
+            0,
+        ];
+        stream.write_all(&header).await.expect("header");
+        stream.write_all(content).await.expect("content");
+        if padding_len > 0 {
+            stream
+                .write_all(&[0u8; 8][..padding_len])
+                .await
+                .expect("padding");
         }
     }
 }

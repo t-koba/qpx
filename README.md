@@ -208,8 +208,8 @@ For local deployments, `qpxf` defaults to a user-scoped `unix://` socket. Any TC
 |---------|-------------|
 | CGI scripts | Spawns external processes (RFC 3875). Path containment, symlink-escape prevention, concurrent I/O with deadlock prevention, configurable size limits. |
 | WASM modules | Executes WASI-compatible modules via `qpx-wasm` (`wasmtime` + `wasmtime-wasi`). Module/stdin/stdout/stderr size caps, memory limits via `ResourceLimiter`, request wall-clock timeout, stderr capture, and optional executor pool/prewarm settings. |
-| FastCGI | Sends CGI-shaped requests to a persistent FastCGI responder over TCP or `unix://`, with per-backend concurrency, timeout, stdin/stdout/stderr limits. |
-| SCGI | Sends CGI-shaped requests to a persistent SCGI responder over TCP or `unix://`, with per-backend concurrency, timeout, stdin/stdout/stderr limits. |
+| FastCGI | Sends CGI-shaped requests to a persistent FastCGI responder over TCP or `unix://`, with a per-backend connection pool (`pool.max_concurrency`, `pool.max_idle`), timeout, stdin/stdout/stderr limits. |
+| SCGI | Sends CGI-shaped requests to an SCGI responder over TCP or `unix://` using per-request connections, with per-backend concurrency, timeout, stdin/stdout/stderr limits. |
 
 The default `qpxf` build enables the `wasm` feature, which pulls in `qpx-wasm`. Use `cargo build -p qpxf --no-default-features` for a CGI-only build.
 
@@ -439,10 +439,11 @@ edges:
     http_modules:
       - type: cache_purge
       - type: response_compression
-        min_body_bytes: 512
-        gzip: true
-        brotli: true
-        zstd: true
+        settings:
+          min_body_bytes: 512
+          gzip: true
+          brotli: true
+          zstd: true
 
   - kind: reverse
     name: api
@@ -456,13 +457,14 @@ edges:
             - https://127.0.0.1:9443
         http_modules:
           - type: subrequest
-            name: authz
-            phase: request_headers
-            url: http://127.0.0.1:19091/check?path={request.path:urlquery}
-            max_response_bytes: 65536
-            allowed_schemes: [http]
-            allowed_hosts: [127.0.0.1]
-            response_mode: return_on_error
+            settings:
+              name: authz
+              phase: request_headers
+              url: http://127.0.0.1:19091/check?path={request.path:urlquery}
+              max_response_bytes: 65536
+              allowed_schemes: [http]
+              allowed_hosts: [127.0.0.1]
+              response_mode: return_on_error
 ```
 
 See [`config/usecases/07-observability-debug/http-modules-advanced.yaml`](config/usecases/07-observability-debug/http-modules-advanced.yaml) and [`config/qpx.example.yaml`](config/qpx.example.yaml) for a fuller built-in-module sample with `id`, `order`, compression tuning, subrequest header capture, and cache purge response customization.

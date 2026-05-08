@@ -522,6 +522,7 @@ pub(crate) async fn proxy_ipc_upstream(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn proxy_ipc_backend(
     mut req: Request<Body>,
     backend: &IpcBackend,

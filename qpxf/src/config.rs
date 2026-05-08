@@ -145,14 +145,32 @@ pub struct FastCgiBackendConfig {
     pub address: String,
     #[serde(default = "default_persistent_backend_timeout_ms")]
     pub timeout_ms: u64,
-    #[serde(default = "default_persistent_backend_max_concurrency")]
-    pub max_concurrency: usize,
+    #[serde(default)]
+    pub pool: FastCgiPoolConfig,
     #[serde(default = "default_max_stdin_bytes")]
     pub max_stdin_bytes: usize,
     #[serde(default = "default_max_stdout_bytes")]
     pub max_stdout_bytes: usize,
     #[serde(default = "default_max_stderr_bytes")]
     pub max_stderr_bytes: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FastCgiPoolConfig {
+    #[serde(default = "default_persistent_backend_max_concurrency")]
+    pub max_concurrency: usize,
+    #[serde(default = "default_fastcgi_pool_max_idle")]
+    pub max_idle: usize,
+}
+
+impl Default for FastCgiPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrency: default_persistent_backend_max_concurrency(),
+            max_idle: default_fastcgi_pool_max_idle(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -230,6 +248,10 @@ fn default_persistent_backend_max_concurrency() -> usize {
     128
 }
 
+fn default_fastcgi_pool_max_idle() -> usize {
+    16
+}
+
 fn default_max_params_bytes() -> usize {
     1_048_576 // 1 MiB
 }
@@ -285,11 +307,16 @@ impl QpxfConfig {
                         idx,
                         config.address.as_str(),
                         config.timeout_ms,
-                        config.max_concurrency,
+                        config.pool.max_concurrency,
                         config.max_stdin_bytes,
                         config.max_stdout_bytes,
                         config.max_stderr_bytes,
                     )?;
+                    if config.pool.max_idle == 0 {
+                        return Err(anyhow!(
+                            "handlers[{idx}] fastcgi pool.max_idle must be >= 1"
+                        ));
+                    }
                 }
                 BackendConfig::Scgi(config) => {
                     validate_persistent_backend(
@@ -345,6 +372,7 @@ impl QpxfConfig {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_persistent_backend(
     kind: &str,
     handler_idx: usize,

@@ -761,16 +761,17 @@ async fn forward_http_module_compresses_responses() {
             destination_resolution: None,
             http_modules: vec![serde_yaml::from_str(
                 r#"type: response_compression
-min_body_bytes: 1
-max_body_bytes: 65536
-content_types:
-  - text/plain
-gzip: true
-brotli: false
-zstd: false
-gzip_level: 6
-brotli_level: 5
-zstd_level: 3"#,
+settings:
+  min_body_bytes: 1
+  max_body_bytes: 65536
+  content_types:
+    - text/plain
+  gzip: true
+  brotli: false
+  zstd: false
+  gzip_level: 6
+  brotli_level: 5
+  zstd_level: 3"#,
             )
             .expect("http module config")],
         })],
@@ -868,16 +869,17 @@ async fn forward_http_module_subrequest_can_short_circuit() {
             destination_resolution: None,
             http_modules: vec![serde_yaml::from_str(&format!(
                 r#"type: subrequest
-name: authz
-phase: request_headers
-url: http://{subrequest_addr}/check?path={{request.path:urlquery}}
-timeout_ms: 1000
-max_response_bytes: 65536
-allowed_schemes: [http]
-allowed_hosts: [127.0.0.1]
-pass_headers:
-  - x-test
-response_mode: return_on_error"#
+settings:
+  name: authz
+  phase: request_headers
+  url: http://{subrequest_addr}/check?path={{request.path:urlquery}}
+  timeout_ms: 1000
+  max_response_bytes: 65536
+  allowed_schemes: [http]
+  allowed_hosts: [127.0.0.1]
+  pass_headers:
+    - x-test
+  response_mode: return_on_error"#
             ))
             .expect("http module config")],
         })],

@@ -36,10 +36,6 @@ pub(super) async fn dispatch_reverse_request(
     let method = request_method.as_str();
     let path_owned = base.path.clone();
     let request_uri = base.request_uri.clone();
-    let compiled_edge = state
-        .plan
-        .reverse_edge(reverse.name.as_ref())
-        .ok_or_else(|| anyhow!("compiled reverse edge missing"))?;
     let prefilter_ctx = MatchPrefilterContext {
         method: Some(method),
         dst_port: Some(conn.dst_port),
@@ -50,18 +46,14 @@ pub(super) async fn dispatch_reverse_request(
     };
     let mut observation_plan = RequestObservationPlan::default();
     let mut max_observed_request_body_bytes = state.plan.limits.max_observed_request_body_bytes;
-    router.try_for_each_candidate_route(prefilter_ctx.clone(), |idx, route| {
-        let route_plan = compiled_edge
-            .routes
-            .get(idx)
-            .ok_or_else(|| anyhow!("compiled reverse route missing"))?;
-        let route_http_guard = route_plan.plan.guard.as_deref();
+    router.try_for_each_candidate_route(prefilter_ctx.clone(), |_idx, route| {
+        let route_http_guard = route.plan.guard.as_deref();
         if let Some(cap) =
             route_http_guard.and_then(|profile| profile.request_body_observation_cap())
         {
             max_observed_request_body_bytes = max_observed_request_body_bytes.min(cap);
         }
-        max_observed_request_body_bytes = route_plan
+        max_observed_request_body_bytes = route
             .plan
             .body_observation_limit(max_observed_request_body_bytes);
         let guard_requires_buffering =
@@ -71,7 +63,7 @@ pub(super) async fn dispatch_reverse_request(
                 route.requires_request_size(),
                 route.requires_request_body_observation()
                     || route.response_rules_require_request_body_observation()
-                    || route_plan
+                    || route
                         .plan
                         .flags
                         .contains(crate::runtime::PlanFlags::CAPTURE_BODY)
@@ -113,12 +105,8 @@ pub(super) async fn dispatch_reverse_request(
     let mut request_destination_cache =
         std::collections::HashMap::<String, crate::destination::DestinationMetadata>::new();
     router.try_for_each_candidate_route(prefilter_ctx, |idx, candidate| {
-        let route_plan = compiled_edge
-            .routes
-            .get(idx)
-            .ok_or_else(|| anyhow!("compiled reverse route missing"))?;
-        let resolution_override = route_plan.plan.destination_resolution.as_ref();
-        let effective_policy = route_plan.plan.policy_context.clone();
+        let resolution_override = candidate.plan.destination_resolution.as_ref();
+        let effective_policy = candidate.plan.policy_context.clone();
         let sanitized_headers = sanitize_headers_for_policy(
             &state,
             &effective_policy,
@@ -172,12 +160,18 @@ pub(super) async fn dispatch_reverse_request(
     let route = selected_route_idx
         .and_then(|idx| router.route_at(idx))
         .ok_or_else(|| anyhow!("no route matched"))?;
-    let selected_route_plan = compiled_edge
-        .routes
-        .get(selected_route_idx.expect("selected route index"))
-        .ok_or_else(|| anyhow!("compiled selected reverse route missing"))?;
-    let resolution_override = selected_route_plan.plan.destination_resolution.as_ref();
-    let route_http_guard = selected_route_plan.plan.guard.as_deref();
+    debug_assert!(match &route.target {
+        crate::runtime::CompiledReverseRouteTarget::Upstream { .. }
+        | crate::runtime::CompiledReverseRouteTarget::Weighted { .. } =>
+            route.local_response.is_none() && route.ipc.is_none(),
+        crate::runtime::CompiledReverseRouteTarget::Ipc { .. } =>
+            route.local_response.is_none() && route.ipc.is_some(),
+        crate::runtime::CompiledReverseRouteTarget::LocalResponse { .. } =>
+            route.local_response.is_some() && route.ipc.is_none(),
+        crate::runtime::CompiledReverseRouteTarget::TlsPassthrough { .. } => false,
+    });
+    let resolution_override = route.plan.destination_resolution.as_ref();
+    let route_http_guard = route.plan.guard.as_deref();
     let route_max_observed_request_body_bytes = route_http_guard
         .and_then(|profile| profile.request_body_observation_cap())
         .map(|cap| cap.min(max_observed_request_body_bytes))
@@ -357,7 +351,7 @@ pub(super) async fn dispatch_reverse_request(
         limits: mut request_limits,
         retry_after,
     } = state.policy.rate_limiters.collect_checked_plan_request(
-        &selected_route_plan.plan.rate_limits,
+        &route.plan.rate_limits,
         None,
         crate::rate_limit::TransportScope::Request,
         &request_limit_ctx,
@@ -435,13 +429,13 @@ pub(super) async fn dispatch_reverse_request(
     }
 
     apply_request_headers(req.headers_mut(), route_headers.as_deref());
-    let request_cache_policy = selected_route_plan
+    let request_cache_policy = route
         .plan
         .cache
         .as_ref()
         .filter(|_| !cache_bypass)
         .cloned();
-    let mut http_modules = selected_route_plan.plan.modules.start(
+    let mut http_modules = route.plan.modules.start(
         state.clone(),
         crate::http::modules::HttpModuleSessionInit {
             proxy_kind: "reverse",
@@ -492,7 +486,7 @@ pub(super) async fn dispatch_reverse_request(
             .or_else(|| selected_upstream.as_ref().map(|upstream| &upstream.origin))
             .ok_or_else(|| anyhow!("no healthy upstream"))?;
         let export_session = state.export_session_for_plan(
-            &selected_route_plan.plan,
+            &route.plan,
             conn.remote_addr,
             upstream_origin.upstream.as_str(),
         );
@@ -932,7 +926,7 @@ pub(super) async fn dispatch_reverse_request(
                     .on_upstream_request(&mut req_for_upstream)
                     .await?;
                 let export_session = state.export_session_for_plan(
-                    &selected_route_plan.plan,
+                    &route.plan,
                     conn.remote_addr,
                     ipc.endpoint_label(),
                 );
@@ -966,7 +960,7 @@ pub(super) async fn dispatch_reverse_request(
                             request_rpc: request_rpc.as_ref(),
                             route_headers: route_headers.clone(),
                             response: resp,
-                            max_observed_response_body_bytes: selected_route_plan
+                            max_observed_response_body_bytes: route
                                 .plan
                                 .body_observation_limit(
                                     state.plan.limits.max_observed_response_body_bytes,
@@ -974,7 +968,7 @@ pub(super) async fn dispatch_reverse_request(
                             response_body_read_timeout: std::time::Duration::from_millis(
                                 state.plan.limits.upstream_http_timeout_ms.max(1),
                             ),
-                            force_response_body_observation: selected_route_plan
+                            force_response_body_observation: route
                                 .plan
                                 .flags
                                 .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
@@ -1230,7 +1224,7 @@ pub(super) async fn dispatch_reverse_request(
             .or_else(|| selected_upstream.as_ref().map(|upstream| &upstream.origin))
             .ok_or_else(|| anyhow!("no upstream"))?;
         let export_session = state.export_session_for_plan(
-            &selected_route_plan.plan,
+            &route.plan,
             conn.remote_addr,
             upstream_origin.upstream.as_str(),
         );
@@ -1342,13 +1336,13 @@ pub(super) async fn dispatch_reverse_request(
                     request_rpc: request_rpc.as_ref(),
                     route_headers: route_headers.clone(),
                     response: resp,
-                    max_observed_response_body_bytes: selected_route_plan
+                    max_observed_response_body_bytes: route
                         .plan
                         .body_observation_limit(state.plan.limits.max_observed_response_body_bytes),
                     response_body_read_timeout: std::time::Duration::from_millis(
                         state.plan.limits.upstream_http_timeout_ms.max(1),
                     ),
-                    force_response_body_observation: selected_route_plan
+                    force_response_body_observation: route
                         .plan
                         .flags
                         .contains(crate::runtime::PlanFlags::CAPTURE_BODY),

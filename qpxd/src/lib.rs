@@ -138,7 +138,16 @@ impl Daemon {
                 host,
                 method,
                 path,
-            } => match_config(config, edge, src_ip, sni, host, method, path),
+            } => match_config(
+                config,
+                edge,
+                src_ip,
+                sni,
+                host,
+                method,
+                path,
+                self.http_module_registry.clone(),
+            ),
             #[cfg(feature = "tls-rustls")]
             Command::GenCa { state_dir } => {
                 let (cert, key) = write_ca_files(&state_dir)?;
@@ -326,6 +335,10 @@ fn check_with_runtime(
             reverse::check_reverse_runtime(
                 reverse,
                 state.resources.operational.upstreams.as_slice(),
+                state.http_module_registry().as_ref(),
+                state.plan.reverse_edge(reverse.name.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("compiled reverse edge missing for {}", reverse.name)
+                })?,
             )?;
         }
         Ok::<(), anyhow::Error>(())
@@ -435,10 +448,32 @@ fn render_explain_plan(
                 append_plan_flags(&mut output, "  aggregate_execution_plan", edge.flags);
                 for route in edge.routes.iter() {
                     if route_filter_matches(route_filter, &route.name) {
+                        output.push_str(&format!(
+                            "  route {} matched_by: configured_match\n",
+                            route.name
+                        ));
+                        append_reverse_target(
+                            &mut output,
+                            &format!("  route {} target", route.name),
+                            &route.target,
+                        );
                         append_execution_plan(
                             &mut output,
                             &format!("  route {}", route.name),
                             &route.plan,
+                        );
+                    }
+                }
+                for route in edge.tls_passthrough_routes.iter() {
+                    if route_filter_matches(route_filter, &route.name) {
+                        output.push_str(&format!(
+                            "  route {} matched_by: configured_match\n",
+                            route.name
+                        ));
+                        append_reverse_target(
+                            &mut output,
+                            &format!("  route {} target", route.name),
+                            &route.target,
                         );
                     }
                 }
@@ -458,6 +493,132 @@ fn route_filter_matches(filter: Option<&str>, name: &str) -> bool {
 
 fn append_execution_plan(output: &mut String, label: &str, plan: &runtime::ExecutionPlan) {
     append_plan_flags(output, label, plan.flags);
+    append_execution_details(output, plan);
+}
+
+fn append_execution_details(output: &mut String, plan: &runtime::ExecutionPlan) {
+    if let Some(cache) = plan.cache.as_ref() {
+        output.push_str("    cache\n");
+        output.push_str(&format!("      backend: {}\n", cache.backend));
+        if let Some(namespace) = cache.namespace.as_ref() {
+            output.push_str(&format!("      namespace: {namespace}\n"));
+        }
+        output.push_str(&format!(
+            "      max_object_bytes: {}\n",
+            cache.max_object_bytes
+        ));
+    }
+    if plan.capture.encrypted || plan.capture.plaintext.is_some() {
+        output.push_str("    capture\n");
+        output.push_str(&format!(
+            "      encrypted: {}\n",
+            on_off(plan.capture.encrypted)
+        ));
+        if let Some(plaintext) = plan.capture.plaintext.as_ref() {
+            output.push_str(&format!(
+                "      plaintext_headers: {}\n",
+                on_off(plaintext.headers)
+            ));
+            output.push_str(&format!(
+                "      plaintext_body: {}\n",
+                on_off(plaintext.body)
+            ));
+            if let Some(limit) = plaintext.max_body_bytes {
+                output.push_str(&format!("      max_body_bytes: {limit}\n"));
+            }
+        }
+    }
+    let module_stages = plan.modules.stage_labels();
+    if module_stages.iter().any(|(_, modules)| !modules.is_empty()) {
+        output.push_str("    modules\n");
+        for (stage, modules) in module_stages {
+            if modules.is_empty() {
+                continue;
+            }
+            output.push_str(&format!("      {stage}\n"));
+            for module in modules {
+                output.push_str(&format!("        - {module}\n"));
+            }
+        }
+    }
+    if let Some(response_rules) = plan.response_rules.as_ref() {
+        output.push_str("    response_rules_detail\n");
+        output.push_str(&format!("      count: {}\n", response_rules.len()));
+        output.push_str(&format!(
+            "      needs_body: {}\n",
+            on_off(response_rules.any_rule_requires_response_body_observation())
+        ));
+        output.push_str(&format!(
+            "      needs_size: {}\n",
+            on_off(response_rules.any_rule_requires_response_size())
+        ));
+        output.push_str(&format!(
+            "      needs_rpc: {}\n",
+            on_off(response_rules.any_rule_requires_response_rpc_observation())
+        ));
+    }
+}
+
+fn append_reverse_target(
+    output: &mut String,
+    label: &str,
+    target: &runtime::CompiledReverseRouteTarget,
+) {
+    output.push_str(label);
+    output.push('\n');
+    match target {
+        runtime::CompiledReverseRouteTarget::Upstream { upstreams, lb } => {
+            output.push_str("    type: upstream\n");
+            output.push_str(&format!("    lb: {lb}\n"));
+            append_list(
+                output,
+                "    upstreams",
+                upstreams.iter().map(|value| value.as_ref() as &str),
+            );
+        }
+        runtime::CompiledReverseRouteTarget::Weighted { backends, lb } => {
+            output.push_str("    type: weighted\n");
+            output.push_str(&format!("    lb: {lb}\n"));
+            for backend in backends.iter() {
+                output.push_str("    backend\n");
+                if let Some(name) = backend.name.as_ref() {
+                    output.push_str(&format!("      name: {name}\n"));
+                }
+                output.push_str(&format!("      weight: {}\n", backend.weight));
+                append_list(
+                    output,
+                    "      upstreams",
+                    backend.upstreams.iter().map(|value| value.as_ref() as &str),
+                );
+            }
+        }
+        runtime::CompiledReverseRouteTarget::Ipc { mode, address } => {
+            output.push_str("    type: ipc\n");
+            output.push_str(&format!("    mode: {mode}\n"));
+            output.push_str(&format!("    address: {address}\n"));
+        }
+        runtime::CompiledReverseRouteTarget::LocalResponse { status } => {
+            output.push_str("    type: local_response\n");
+            output.push_str(&format!("    status: {status}\n"));
+        }
+        runtime::CompiledReverseRouteTarget::TlsPassthrough { upstreams, lb } => {
+            output.push_str("    type: tls_passthrough\n");
+            output.push_str(&format!("    lb: {lb}\n"));
+            append_list(
+                output,
+                "    upstreams",
+                upstreams.iter().map(|value| value.as_ref() as &str),
+            );
+        }
+    }
+}
+
+fn append_list<'a>(output: &mut String, label: &str, values: impl Iterator<Item = &'a str>) {
+    output.push_str(label);
+    output.push('\n');
+    for value in values {
+        output.push_str(&format!("      - {value}\n"));
+    }
 }
 
 fn append_plan_flags(output: &mut String, label: &str, flags: runtime::PlanFlags) {
@@ -543,6 +704,7 @@ fn on_off(value: bool) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn match_config(
     config_paths: Vec<PathBuf>,
     edge: String,
@@ -551,9 +713,11 @@ fn match_config(
     host: Option<String>,
     method: Option<String>,
     path: Option<String>,
+    http_module_registry: Arc<http::modules::HttpModuleRegistry>,
 ) -> Result<()> {
     let config = load_configs(&config_paths)?;
-    let state = runtime::RuntimeState::build(config)?;
+    let state =
+        runtime::RuntimeState::build_with_http_module_registry(config, http_module_registry)?;
     print!(
         "{}",
         render_match_plan(
@@ -595,7 +759,19 @@ fn render_match_plan(
                         output.push_str(&format!("edge: {}\n", reverse.name));
                         output.push_str("kind: reverse\n");
                         output.push_str(&format!("route: {}\n", route.name));
+                        output.push_str("matched_by: configured_match\n");
+                        append_reverse_target(&mut output, "target", &route.target);
                         append_execution_plan(&mut output, "execution_plan", &route.plan);
+                        return Ok(output);
+                    }
+                }
+                for route in reverse.tls_passthrough_routes.iter() {
+                    if route.matches(&ctx) {
+                        output.push_str(&format!("edge: {}\n", reverse.name));
+                        output.push_str("kind: reverse\n");
+                        output.push_str(&format!("route: {}\n", route.name));
+                        output.push_str("matched_by: configured_match\n");
+                        append_reverse_target(&mut output, "target", &route.target);
                         return Ok(output);
                     }
                 }
@@ -1131,7 +1307,14 @@ fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
 
 fn validate_runtime_state(state: &runtime::RuntimeState) -> Result<()> {
     for reverse in state.resources.operational.reverse_edge_configs().iter() {
-        reverse::check_reverse_runtime(reverse, state.resources.operational.upstreams.as_slice())?;
+        reverse::check_reverse_runtime(
+            reverse,
+            state.resources.operational.upstreams.as_slice(),
+            state.http_module_registry().as_ref(),
+            state.plan.reverse_edge(reverse.name.as_str()).ok_or_else(|| {
+                anyhow::anyhow!("compiled reverse edge missing for {}", reverse.name)
+            })?,
+        )?;
     }
     Ok(())
 }
@@ -2287,6 +2470,9 @@ mod cli_tests {
 
         assert!(output.contains("edge public-http"));
         assert!(output.contains("  kind: reverse"));
+        assert!(output.contains("  route app matched_by: configured_match"));
+        assert!(output.contains("  route app target"));
+        assert!(output.contains("    type: upstream"));
         assert!(output.contains("  route app"));
         assert!(output.contains("    cache_lookup: off"));
         assert!(output.contains("    capture_plaintext: off"));
@@ -2308,6 +2494,9 @@ mod cli_tests {
         assert!(matched.contains("edge: public-http"));
         assert!(matched.contains("kind: reverse"));
         assert!(matched.contains("route: app"));
+        assert!(matched.contains("matched_by: configured_match"));
+        assert!(matched.contains("target"));
+        assert!(matched.contains("type: upstream"));
 
         let missed = render_match_plan(
             state.plan.as_ref(),
