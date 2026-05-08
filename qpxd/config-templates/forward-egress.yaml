@@ -1,0 +1,14 @@
+runtime: {}
+telemetry:
+  system_log:
+    level: info
+security: {}
+http: {}
+traffic: {}
+edges:
+  - kind: forward
+    name: egress
+    listen: 127.0.0.1:18080
+    default_action:
+      type: direct
+    rules: []

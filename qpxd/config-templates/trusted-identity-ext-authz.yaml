@@ -1,0 +1,28 @@
+runtime: {}
+telemetry:
+  system_log:
+    level: info
+security:
+  identity_sources:
+    - name: trusted-headers
+      type: trusted_headers
+      from:
+        trusted_peers: [127.0.0.1/32]
+      headers:
+        user: x-auth-user
+  decisions:
+    ext_authz:
+      - name: edge-authz
+        endpoint: http://127.0.0.1:8181/authorize
+http: {}
+traffic: {}
+edges:
+  - kind: forward
+    name: egress
+    listen: 127.0.0.1:18080
+    policy_context:
+      identity_sources: [trusted-headers]
+      ext_authz: edge-authz
+    default_action:
+      type: direct
+    rules: []
