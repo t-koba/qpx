@@ -54,8 +54,9 @@ async fn reverse_route_retries_and_mirrors() -> Result<()> {
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: reverse
+edges:
+- kind: reverse
+  name: reverse
   listen: 127.0.0.1:{port}
   routes:
   - name: app
@@ -73,9 +74,11 @@ reverse:
     - percent: 100
       upstreams:
       - mirror
-    upstreams:
-    - dead
-    - live"#
+    target:
+      type: upstream
+      upstreams:
+      - dead
+      - live"#
         )
     })?;
 
@@ -130,15 +133,15 @@ state_dir:
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-cache:
-  backends:
-  - name: http-cache
-    kind: http
-    endpoint: http://{cache_addr}
-    timeout_ms: 1000
-    max_object_bytes: 1048576
-reverse:
-- name: reverse
+caches:
+- name: http-cache
+  kind: http
+  endpoint: http://{cache_addr}
+  timeout_ms: 1000
+  max_object_bytes: 1048576
+edges:
+- kind: reverse
+  name: reverse
   listen: 127.0.0.1:{port}
   routes:
   - name: cache
@@ -153,8 +156,10 @@ reverse:
       namespace: reverse-cache
       default_ttl_secs: 60
       max_object_bytes: 1048576
-    upstreams:
-    - origin"#,
+    target:
+      type: upstream
+      upstreams:
+      - origin"#,
             state_dir_yaml = state_dir_yaml
         )
     })?;
@@ -219,8 +224,9 @@ async fn reverse_preserves_http1_early_hints() -> Result<()> {
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: reverse
+edges:
+- kind: reverse
+  name: reverse
   listen: 127.0.0.1:{port}
   routes:
   - name: hints
@@ -229,8 +235,10 @@ reverse:
       - hints.local
       path:
       - /hints
-    upstreams:
-    - hints"#
+    target:
+      type: upstream
+      upstreams:
+      - hints"#
         )
     })?;
 
@@ -272,8 +280,9 @@ async fn reverse_websocket_upstream_tunnels_upgraded_bytes() -> Result<()> {
                 r#"runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: reverse
+edges:
+- kind: reverse
+  name: reverse
   listen: 127.0.0.1:{port}
   routes:
   - name: websocket
@@ -282,8 +291,10 @@ reverse:
       - ws.local
       path:
       - /socket
-    upstreams:
-    - ws://{backend_addr}"#
+    target:
+      type: upstream
+      upstreams:
+      - ws://{backend_addr}"#
             )
         })?;
 

@@ -48,7 +48,7 @@ pub(super) async fn handle_h3_connect_udp(
     };
 
     let state = handler.runtime.state();
-    let proxy_name = state.config.identity.proxy_name.clone();
+    let proxy_name = state.plan.identity.proxy_name.to_string();
     let super::h3_connect::PreparedH3Connect {
         authority: _authority,
         host,
@@ -64,18 +64,17 @@ pub(super) async fn handle_h3_connect_udp(
         mut rate_limit_context,
         ..
     } = prepared;
-    let mut request_limits = state.policy.rate_limiters.collect(
-        handler.listener_name.as_ref(),
-        matched_rule.as_deref(),
-        None,
-        crate::rate_limit::TransportScope::Http3Datagram,
-    );
-    request_limits.extend_from(&state.policy.rate_limiters.collect_profile(
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled HTTP/3 CONNECT-UDP execution plan not found"))?;
+    let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
+        &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
         crate::rate_limit::TransportScope::Http3Datagram,
-    )?);
+    )?;
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
     macro_rules! send_policy {
         ($response:expr, $outcome:expr) => {
             send_h3_policy_response(
@@ -149,7 +148,7 @@ pub(super) async fn handle_h3_connect_udp(
             port,
             proxy_name.as_str(),
             state
-                .listener_config(handler.listener_name.as_ref())
+                .ingress_edge_settings(handler.listener_name.as_ref())
                 .and_then(|listener| listener.tls_inspection.as_ref())
                 .map(|cfg| {
                     cfg.verify_upstream
@@ -195,7 +194,7 @@ pub(super) async fn handle_h3_connect_udp(
         for interim in upstream_chain.interim.drain(..) {
             let interim = crate::http3::codec::sanitize_interim_response_for_h3(interim)?;
             timeout(
-                Duration::from_millis(state.config.runtime.h3_read_timeout_ms.max(1)),
+                Duration::from_millis(state.plan.limits.h3_read_timeout_ms.max(1)),
                 req_stream.send_response(interim),
             )
             .await

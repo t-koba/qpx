@@ -3,8 +3,8 @@ use anyhow::{anyhow, Result};
 use super::super::types::{Config, IdentityConfig, MessagesConfig, RuntimeConfig};
 
 pub(super) fn validate_listener_topology(config: &Config) -> Result<()> {
-    if config.listeners.is_empty() && config.reverse.is_empty() {
-        return Err(anyhow!("no listeners or reverse proxies configured"));
+    if config.edge_count() == 0 {
+        return Err(anyhow!("no edges configured"));
     }
     Ok(())
 }

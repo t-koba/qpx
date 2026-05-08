@@ -19,8 +19,8 @@ use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{send_h3_response, send_h3_static_response, H3ServerRequestStream};
 use crate::policy_context::{
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord, ExtAuthzEnforcement,
+    ExtAuthzInput, ExtAuthzMode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::tls::client::preview_tls_certificate_with_options;
@@ -166,8 +166,8 @@ pub(super) async fn send_h3_policy_response(
         response,
         request_method,
         req_stream,
-        state.config.runtime.max_h3_response_body_bytes,
-        Duration::from_millis(state.config.runtime.h3_read_timeout_ms.max(1)),
+        state.plan.limits.max_h3_response_body_bytes,
+        Duration::from_millis(state.plan.limits.h3_read_timeout_ms.max(1)),
     )
     .await
 }

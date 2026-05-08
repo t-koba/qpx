@@ -3,8 +3,7 @@ use super::quic::{extract_quic_client_hello_info, looks_like_quic_initial};
 use crate::destination::DestinationInputs;
 use crate::policy_context::{
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    validate_ext_authz_allow_mode, AuditRecord, EffectivePolicyContext, ExtAuthzEnforcement,
-    ExtAuthzInput, ExtAuthzMode,
+    validate_ext_authz_allow_mode, AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
 };
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 use crate::runtime::Runtime;
@@ -16,7 +15,7 @@ use crate::udp_session_handoff::{
 use crate::udp_socket_handoff::duplicate_tokio_udp_socket;
 use anyhow::{anyhow, Context, Result};
 use metrics::{counter, histogram};
-use qpx_core::config::{ActionKind, ListenerConfig};
+use qpx_core::config::{ActionKind, IngressEdgeConfig};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
@@ -47,7 +46,7 @@ struct NewUdpSessionContext<'a> {
 }
 
 pub(super) async fn run_transparent_udp_listener(
-    listener: ListenerConfig,
+    listener: IngressEdgeConfig,
     runtime: Runtime,
     mut shutdown: watch::Receiver<SidecarControl>,
     inherited_socket: Option<std::net::UdpSocket>,
@@ -68,11 +67,11 @@ pub(super) async fn run_transparent_udp_listener(
             UdpSocket::from_std(socket)
                 .context("failed to adopt inherited transparent UDP socket")?
         }
-        None => bind_udp_listener(listen_addr, &runtime.state().config.runtime)?,
+        None => bind_udp_listener(listen_addr, runtime.state().plan.limits.reuse_port)?,
     });
     let sessions: Arc<RwLock<SessionIndex>> = Arc::new(RwLock::new(SessionIndex::new()));
     let idle_timeout =
-        Duration::from_millis(runtime.state().config.runtime.tunnel_idle_timeout_ms.max(1));
+        Duration::from_millis(runtime.state().plan.limits.tunnel_idle_timeout_ms.max(1));
     let idle_timeout_ms = idle_timeout.as_millis() as u64;
     let run_started = restore
         .as_ref()
@@ -342,12 +341,16 @@ async fn restore_transparent_udp_sessions(
             UdpSocket::from_std(restored.socket)
                 .context("failed to adopt restored transparent UDP session socket")?,
         );
-        let limits = runtime.state().policy.rate_limiters.collect(
-            listener_name,
-            restored.matched_rule.as_deref(),
+        let state = runtime.state();
+        let selected_plan = state
+            .plan
+            .ingress_edge_execution_plan(listener_name, restored.matched_rule.as_deref())
+            .ok_or_else(|| anyhow!("compiled transparent UDP execution plan not found"))?;
+        let limits = state.policy.rate_limiters.collect_plan_with_profile(
+            &selected_plan.rate_limits,
             restored.rate_limit_profile.as_deref(),
             crate::rate_limit::TransportScope::Udp,
-        );
+        )?;
         let concurrency_permits = limits
             .acquire_concurrency(&restored.rate_limit_ctx)
             .ok_or_else(|| anyhow!("failed to reacquire transparent UDP concurrency permit"))?;
@@ -463,11 +466,11 @@ async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Result<&'stati
         idle_timeout,
     } = ctx;
     let state = runtime.state();
-    let listener_cfg = state
-        .listener_config(listener_name)
-        .ok_or_else(|| anyhow!("listener not found"))?;
-    let effective_policy =
-        EffectivePolicyContext::from_single(listener_cfg.policy_context.as_ref());
+    let base_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, None)
+        .ok_or_else(|| anyhow!("listener plan not found"))?;
+    let effective_policy = base_plan.policy_context.clone();
     let engine = state
         .policy
         .rules_by_listener
@@ -516,7 +519,7 @@ async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Result<&'stati
             ja4: client_hello.as_ref().and_then(|hello| hello.ja4.as_deref()),
             ..Default::default()
         },
-        listener_cfg.destination_resolution.as_ref(),
+        base_plan.destination_resolution.as_ref(),
     );
 
     let ctx = RuleMatchContext {
@@ -565,19 +568,19 @@ async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Result<&'stati
     let outcome = engine.evaluate_ref(&ctx);
     let request_limit_ctx =
         RateLimitContext::from_identity(client_addr.ip(), &identity, outcome.matched_rule, None);
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, outcome.matched_rule)
+        .ok_or_else(|| anyhow!("compiled transparent UDP execution plan not found"))?;
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
-    } = state.policy.rate_limiters.collect_checked_request(
-        crate::rate_limit::RequestLimitCollectInput {
-            listener: Some(listener_name),
-            rule: outcome.matched_rule,
-            profile: None,
-            scope: crate::rate_limit::TransportScope::Udp,
-            extra: None,
-            ctx: &request_limit_ctx,
-            cost: 1,
-        },
+    } = state.policy.rate_limiters.collect_checked_plan_request(
+        &selected_plan.rate_limits,
+        None,
+        crate::rate_limit::TransportScope::Udp,
+        &request_limit_ctx,
+        1,
     )?;
     if retry_after.is_some() {
         return Ok("blocked");
@@ -612,7 +615,7 @@ async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Result<&'stati
         &effective_policy,
         ExtAuthzInput {
             proxy_kind: "transparent",
-            proxy_name: state.config.identity.proxy_name.as_str(),
+            proxy_name: state.plan.identity.proxy_name.as_ref(),
             scope_name: listener_name,
             remote_ip: client_addr.ip(),
             dst_port: Some(connect_target.port()),
@@ -725,7 +728,7 @@ async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Result<&'stati
         connect_udp_target(
             &connect_target,
             timeout_override.unwrap_or_else(|| {
-                Duration::from_millis(state.config.runtime.upstream_http_timeout_ms)
+                Duration::from_millis(state.plan.limits.upstream_http_timeout_ms)
             }),
         )
         .await?,

@@ -1,5 +1,7 @@
-listeners:
-- name: transparent-mitm
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: transparent
+  name: transparent-mitm
   listen: 0.0.0.0:15003
   default_action:
     type: block
@@ -7,18 +9,18 @@ listeners:
     enabled: true
     verify_upstream: true
     verify_exceptions:
-    - '*.internal.example.com'
+    - "*.internal.example.com"
   rules:
   - name: inspect-dev-traffic
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
       sni:
-      - '*.dev.example.com'
+      - "*.dev.example.com"
       - api.stage.example.com
     action:
       type: inspect
@@ -26,33 +28,33 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
       sni:
-      - '*.bank.example'
-      - '*.payments.example'
+      - "*.bank.example"
+      - "*.payments.example"
     action:
       type: direct
   - name: block-bad-dns
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
       host:
-      - '*.malware.test'
-      - '*.botnet.invalid'
+      - "*.malware.test"
+      - "*.botnet.invalid"
     action:
       type: block
   - name: allow-private-web
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
@@ -60,8 +62,6 @@ listeners:
       - 80
       - 443
       host:
-      - '*'
+      - "*"
     action:
       type: direct
-  mode: transparent
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

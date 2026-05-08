@@ -1,7 +1,10 @@
+#![recursion_limit = "256"]
+
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use qpx_core::config::{load_configs, load_configs_with_sources, Config as ProxyConfig};
 use qpx_observability::{init_logging, start_metrics};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -38,6 +41,7 @@ compile_error!("qpxd: feature acme requires tls-rustls");
 #[cfg(feature = "tls-rustls")]
 use qpx_core::tls::write_ca_files;
 
+mod auth_runtime;
 mod cache;
 mod connection_filter;
 mod destination;
@@ -70,9 +74,10 @@ mod xdp;
 pub mod module_api {
     pub use crate::http::body::{to_bytes, Body, BodyError, Sender};
     pub use crate::http::modules::{
-        default_http_module_registry, CacheLookupStatus, HttpModule, HttpModuleContext,
-        HttpModuleFactory, HttpModuleRegistry, HttpModuleRegistryBuilder, HttpModuleRequestView,
-        RequestHeadersOutcome, RetryEvent,
+        default_http_module_registry, BodyAccess, CacheLookupStatus, HttpModule,
+        HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
+        HttpModuleRegistry, HttpModuleRegistryBuilder, HttpModuleRequestView, HttpModuleStage,
+        ModuleStages, RequestHeadersOutcome, RetryEvent,
     };
 }
 
@@ -118,6 +123,22 @@ impl Daemon {
         match cli.command {
             Command::Run { config } => self.run_with_runtime(config),
             Command::Check { config } => self.check_with_runtime(config),
+            Command::Init { template } => init_config_template(template),
+            Command::Schema { format } => print_config_schema(format),
+            Command::Explain {
+                config,
+                edge,
+                route,
+            } => explain_config(config, edge, route, self.http_module_registry.clone()),
+            Command::Match {
+                config,
+                edge,
+                src_ip,
+                sni,
+                host,
+                method,
+                path,
+            } => match_config(config, edge, src_ip, sni, host, method, path),
             #[cfg(feature = "tls-rustls")]
             Command::GenCa { state_dir } => {
                 let (cert, key) = write_ca_files(&state_dir)?;
@@ -203,6 +224,38 @@ enum Command {
         #[arg(short, long, required = true, num_args = 1..)]
         config: Vec<PathBuf>,
     },
+    Init {
+        #[arg(value_enum)]
+        template: InitTemplate,
+    },
+    Schema {
+        #[arg(long, value_enum, default_value_t = SchemaFormat::Json)]
+        format: SchemaFormat,
+    },
+    Explain {
+        #[arg(short, long, required = true, num_args = 1..)]
+        config: Vec<PathBuf>,
+        #[arg(long)]
+        edge: Option<String>,
+        #[arg(long)]
+        route: Option<String>,
+    },
+    Match {
+        #[arg(short, long, required = true, num_args = 1..)]
+        config: Vec<PathBuf>,
+        #[arg(long)]
+        edge: String,
+        #[arg(long)]
+        src_ip: Option<IpAddr>,
+        #[arg(long)]
+        sni: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        method: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+    },
     #[cfg(feature = "tls-rustls")]
     GenCa {
         #[arg(short = 'd', long)]
@@ -212,6 +265,21 @@ enum Command {
         #[arg(long)]
         pid: u32,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum InitTemplate {
+    ReverseBasic,
+    ForwardEgress,
+    TransparentLinux,
+    IpcGateway,
+    TrustedIdentityExtAuthz,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SchemaFormat {
+    Json,
+    Yaml,
 }
 
 pub fn main_entry() -> Result<()> {
@@ -254,13 +322,326 @@ fn check_with_runtime(
     runtime.block_on(async move {
         let state =
             runtime::RuntimeState::build_with_http_module_registry(config, http_module_registry)?;
-        for reverse in state.config.reverse.iter() {
-            reverse::check_reverse_runtime(reverse, state.config.raw.upstreams.as_slice())?;
+        for reverse in state.resources.operational.reverse_edge_configs().iter() {
+            reverse::check_reverse_runtime(
+                reverse,
+                state.resources.operational.upstreams.as_slice(),
+            )?;
         }
         Ok::<(), anyhow::Error>(())
     })?;
     println!("config ok");
     Ok(())
+}
+
+fn init_config_template(template: InitTemplate) -> Result<()> {
+    print!("{}", init_template_yaml(template));
+    Ok(())
+}
+
+fn init_template_yaml(template: InitTemplate) -> &'static str {
+    match template {
+        InitTemplate::ReverseBasic => include_str!("../config-templates/reverse-basic.yaml"),
+        InitTemplate::ForwardEgress => include_str!("../config-templates/forward-egress.yaml"),
+        InitTemplate::TransparentLinux => {
+            include_str!("../config-templates/transparent-linux.yaml")
+        }
+        InitTemplate::IpcGateway => include_str!("../config-templates/ipc-gateway.yaml"),
+        InitTemplate::TrustedIdentityExtAuthz => {
+            include_str!("../config-templates/trusted-identity-ext-authz.yaml")
+        }
+    }
+}
+
+fn print_config_schema(format: SchemaFormat) -> Result<()> {
+    let schema = qpx_core::config::canonical_schema_value();
+    match format {
+        SchemaFormat::Json => println!("{}", serde_json::to_string_pretty(&schema)?),
+        SchemaFormat::Yaml => println!("{}", serde_yaml::to_string(&schema)?),
+    }
+    Ok(())
+}
+
+fn explain_config(
+    config_paths: Vec<PathBuf>,
+    edge_filter: Option<String>,
+    route_filter: Option<String>,
+    http_module_registry: Arc<http::modules::HttpModuleRegistry>,
+) -> Result<()> {
+    let config = load_configs(&config_paths)?;
+    let state =
+        runtime::RuntimeState::build_with_http_module_registry(config, http_module_registry)?;
+    print!(
+        "{}",
+        render_explain_plan(
+            state.plan.as_ref(),
+            edge_filter.as_deref(),
+            route_filter.as_deref()
+        )
+    );
+    Ok(())
+}
+
+fn render_explain_plan(
+    plan: &runtime::RuntimePlan,
+    edge_filter: Option<&str>,
+    route_filter: Option<&str>,
+) -> String {
+    let mut output = String::new();
+    for edge in plan.edges.iter() {
+        match edge {
+            runtime::CompiledEdge::Forward(edge) => {
+                if !edge_filter_matches(edge_filter, &edge.name) {
+                    continue;
+                }
+                output.push_str(&format!("edge {}\n", edge.name));
+                output.push_str("  kind: forward\n");
+                append_plan_flags(&mut output, "  aggregate_execution_plan", edge.flags);
+                append_execution_plan(&mut output, "  default_action", &edge.default_plan);
+                for rule in edge.rules.iter() {
+                    if route_filter_matches(route_filter, &rule.name) {
+                        append_execution_plan(
+                            &mut output,
+                            &format!("  rule {}", rule.name),
+                            &rule.plan,
+                        );
+                    }
+                }
+            }
+            runtime::CompiledEdge::Transparent(edge) => {
+                if !edge_filter_matches(edge_filter, &edge.name) {
+                    continue;
+                }
+                output.push_str(&format!("edge {}\n", edge.name));
+                output.push_str("  kind: transparent\n");
+                append_plan_flags(&mut output, "  aggregate_execution_plan", edge.flags);
+                append_execution_plan(&mut output, "  default_action", &edge.default_plan);
+                for rule in edge.rules.iter() {
+                    if route_filter_matches(route_filter, &rule.name) {
+                        append_execution_plan(
+                            &mut output,
+                            &format!("  rule {}", rule.name),
+                            &rule.plan,
+                        );
+                    }
+                }
+            }
+            runtime::CompiledEdge::Reverse(edge) => {
+                if !edge_filter_matches(edge_filter, &edge.name) {
+                    continue;
+                }
+                output.push_str(&format!("edge {}\n", edge.name));
+                output.push_str("  kind: reverse\n");
+                append_plan_flags(&mut output, "  aggregate_execution_plan", edge.flags);
+                for route in edge.routes.iter() {
+                    if route_filter_matches(route_filter, &route.name) {
+                        append_execution_plan(
+                            &mut output,
+                            &format!("  route {}", route.name),
+                            &route.plan,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    output
+}
+
+fn edge_filter_matches(filter: Option<&str>, name: &str) -> bool {
+    filter.map(|filter| filter == name).unwrap_or(true)
+}
+
+fn route_filter_matches(filter: Option<&str>, name: &str) -> bool {
+    filter.map(|filter| filter == name).unwrap_or(true)
+}
+
+fn append_execution_plan(output: &mut String, label: &str, plan: &runtime::ExecutionPlan) {
+    append_plan_flags(output, label, plan.flags);
+}
+
+fn append_plan_flags(output: &mut String, label: &str, flags: runtime::PlanFlags) {
+    output.push_str(label);
+    output.push('\n');
+    append_flag(output, "auth", flags.contains(runtime::PlanFlags::AUTH));
+    append_flag(
+        output,
+        "identity_sources",
+        flags.contains(runtime::PlanFlags::IDENTITY_SOURCES),
+    );
+    append_flag(
+        output,
+        "ext_authz",
+        flags.contains(runtime::PlanFlags::EXT_AUTHZ),
+    );
+    append_flag(
+        output,
+        "destination_intel",
+        flags.contains(runtime::PlanFlags::DESTINATION_INTEL),
+    );
+    append_flag(
+        output,
+        "http_guard",
+        flags.contains(runtime::PlanFlags::HTTP_GUARD),
+    );
+    append_flag(
+        output,
+        "cache_lookup",
+        flags.contains(runtime::PlanFlags::CACHE_LOOKUP),
+    );
+    append_flag(
+        output,
+        "cache_store",
+        flags.contains(runtime::PlanFlags::CACHE_STORE),
+    );
+    append_flag(
+        output,
+        "request_modules",
+        flags.contains(runtime::PlanFlags::REQUEST_MODULES),
+    );
+    append_flag(
+        output,
+        "response_modules",
+        flags.contains(runtime::PlanFlags::RESPONSE_MODULES),
+    );
+    append_flag(
+        output,
+        "response_rules",
+        flags.contains(runtime::PlanFlags::RESPONSE_RULES),
+    );
+    append_flag(
+        output,
+        "capture_encrypted",
+        flags.contains(runtime::PlanFlags::CAPTURE_ENCRYPTED),
+    );
+    append_flag(
+        output,
+        "capture_plaintext",
+        flags.contains(runtime::PlanFlags::CAPTURE_PLAINTEXT),
+    );
+    append_flag(
+        output,
+        "capture_body",
+        flags.contains(runtime::PlanFlags::CAPTURE_BODY),
+    );
+    append_flag(
+        output,
+        "retry_body_buffer",
+        flags.contains(runtime::PlanFlags::RETRY_BODY_BUFFER),
+    );
+}
+
+fn append_flag(output: &mut String, label: &str, value: bool) {
+    output.push_str(&format!("    {label}: {}\n", on_off(value)));
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn match_config(
+    config_paths: Vec<PathBuf>,
+    edge: String,
+    src_ip: Option<IpAddr>,
+    sni: Option<String>,
+    host: Option<String>,
+    method: Option<String>,
+    path: Option<String>,
+) -> Result<()> {
+    let config = load_configs(&config_paths)?;
+    let state = runtime::RuntimeState::build(config)?;
+    print!(
+        "{}",
+        render_match_plan(
+            state.plan.as_ref(),
+            &edge,
+            src_ip,
+            sni.as_deref(),
+            host.as_deref(),
+            method.as_deref(),
+            path.as_deref(),
+        )?
+    );
+    Ok(())
+}
+
+fn render_match_plan(
+    plan: &runtime::RuntimePlan,
+    edge: &str,
+    src_ip: Option<IpAddr>,
+    sni: Option<&str>,
+    host: Option<&str>,
+    method: Option<&str>,
+    path: Option<&str>,
+) -> Result<String> {
+    let ctx = qpx_core::rules::RuleMatchContext {
+        src_ip,
+        sni,
+        host,
+        method,
+        path,
+        ..Default::default()
+    };
+    let mut output = String::new();
+    for compiled_edge in plan.edges.iter() {
+        match compiled_edge {
+            runtime::CompiledEdge::Reverse(reverse) if reverse.name.as_ref() == edge => {
+                for route in reverse.routes.iter() {
+                    if route.matches(&ctx) {
+                        output.push_str(&format!("edge: {}\n", reverse.name));
+                        output.push_str("kind: reverse\n");
+                        output.push_str(&format!("route: {}\n", route.name));
+                        append_execution_plan(&mut output, "execution_plan", &route.plan);
+                        return Ok(output);
+                    }
+                }
+                output.push_str(&format!("edge: {}\n", reverse.name));
+                output.push_str("kind: reverse\n");
+                output.push_str("route: <no match>\n");
+                return Ok(output);
+            }
+            runtime::CompiledEdge::Forward(forward) if forward.name.as_ref() == edge => {
+                for rule in forward.rules.iter() {
+                    if rule.matches(&ctx) {
+                        output.push_str(&format!("edge: {}\n", forward.name));
+                        output.push_str("kind: forward\n");
+                        output.push_str(&format!("rule: {}\n", rule.name));
+                        append_execution_plan(&mut output, "execution_plan", &rule.plan);
+                        return Ok(output);
+                    }
+                }
+                output.push_str(&format!("edge: {}\n", forward.name));
+                output.push_str("kind: forward\n");
+                output.push_str("rule: <default>\n");
+                append_execution_plan(&mut output, "execution_plan", &forward.default_plan);
+                return Ok(output);
+            }
+            runtime::CompiledEdge::Transparent(transparent)
+                if transparent.name.as_ref() == edge =>
+            {
+                for rule in transparent.rules.iter() {
+                    if rule.matches(&ctx) {
+                        output.push_str(&format!("edge: {}\n", transparent.name));
+                        output.push_str("kind: transparent\n");
+                        output.push_str(&format!("rule: {}\n", rule.name));
+                        append_execution_plan(&mut output, "execution_plan", &rule.plan);
+                        return Ok(output);
+                    }
+                }
+                output.push_str(&format!("edge: {}\n", transparent.name));
+                output.push_str("kind: transparent\n");
+                output.push_str("rule: <default>\n");
+                append_execution_plan(&mut output, "execution_plan", &transparent.default_plan);
+                return Ok(output);
+            }
+            _ => {}
+        }
+    }
+    anyhow::bail!("edge not found: {edge}");
 }
 
 async fn run(
@@ -269,10 +650,10 @@ async fn run(
     http_module_registry: Arc<http::modules::HttpModuleRegistry>,
 ) -> Result<()> {
     let _log_guards = init_logging(
-        &config.system_log,
-        &config.access_log,
-        &config.audit_log,
-        config.otel.as_ref(),
+        &config.telemetry.system_log,
+        &config.telemetry.access_log,
+        &config.telemetry.audit_log,
+        config.telemetry.otel.as_ref(),
     )?;
     crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
         config.runtime.upstream_proxy_max_concurrent_per_endpoint,
@@ -443,9 +824,7 @@ async fn run(
                                             .runtime
                                             .upstream_proxy_max_concurrent_per_endpoint;
                                         crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
-                                            next_state
-                                                .config
-                                                .runtime
+                                            next_state.plan.limits
                                                 .upstream_proxy_max_concurrent_per_endpoint,
                                         );
                                         let new_proxy = match ProxyTasks::start(
@@ -519,9 +898,7 @@ async fn run(
                                             }
                                             continue;
                                         }
-                                        let upstream_proxy_max_concurrent_per_endpoint = state
-                                            .config
-                                            .runtime
+                                        let upstream_proxy_max_concurrent_per_endpoint = state.plan.limits
                                             .upstream_proxy_max_concurrent_per_endpoint;
                                         runtime.swap(state);
                                         crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
@@ -632,7 +1009,7 @@ fn log_runtime_ready(runtime: &runtime::Runtime) {
 
 fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
     let udp_listener_count = config
-        .listeners
+        .ingress_edge_configs()
         .iter()
         .filter(|listener| {
             listener
@@ -643,7 +1020,7 @@ fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
         })
         .count()
         + config
-            .reverse
+            .reverse_edge_configs()
             .iter()
             .filter(|reverse| {
                 reverse
@@ -654,7 +1031,7 @@ fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
             })
             .count();
     let udp_session_handoff_count = config
-        .listeners
+        .ingress_edge_configs()
         .iter()
         .filter(|listener| {
             listener
@@ -662,11 +1039,14 @@ fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
                 .as_ref()
                 .map(|cfg| cfg.enabled)
                 .unwrap_or(false)
-                && matches!(listener.mode, qpx_core::config::ListenerMode::Transparent)
+                && matches!(
+                    listener.mode,
+                    qpx_core::config::IngressEdgeMode::Transparent
+                )
         })
         .count()
         + config
-            .reverse
+            .reverse_edge_configs()
             .iter()
             .filter(|reverse| {
                 reverse
@@ -678,7 +1058,7 @@ fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
             })
             .count();
     let quic_broker_count = config
-        .listeners
+        .ingress_edge_configs()
         .iter()
         .filter(|listener| {
             listener
@@ -686,11 +1066,11 @@ fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
                 .as_ref()
                 .map(|cfg| cfg.enabled)
                 .unwrap_or(false)
-                && matches!(listener.mode, qpx_core::config::ListenerMode::Forward)
+                && matches!(listener.mode, qpx_core::config::IngressEdgeMode::Forward)
         })
         .count()
         + config
-            .reverse
+            .reverse_edge_configs()
             .iter()
             .filter(|reverse| {
                 reverse
@@ -701,14 +1081,14 @@ fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
                     && reverse::requires_tcp_listener(reverse)
             })
             .count();
-    let xdp_enabled = config.listeners.iter().any(|listener| {
+    let xdp_enabled = config.ingress_edges().any(|listener| {
         listener
             .xdp
             .as_ref()
             .map(|cfg| cfg.enabled)
             .unwrap_or(false)
     }) || config
-        .reverse
+        .reverse_edge_configs()
         .iter()
         .any(|reverse| reverse.xdp.as_ref().map(|cfg| cfg.enabled).unwrap_or(false));
 
@@ -739,7 +1119,8 @@ fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
 
     #[cfg(not(any(unix, windows)))]
     {
-        let has_listeners = !config.listeners.is_empty() || !config.reverse.is_empty();
+        let has_listeners =
+            !config.ingress_edge_configs().is_empty() || !config.reverse_edge_configs().is_empty();
         if has_listeners {
             warn!("binary upgrade is unsupported on this platform; use restart instead");
         }
@@ -749,14 +1130,14 @@ fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
 }
 
 fn validate_runtime_state(state: &runtime::RuntimeState) -> Result<()> {
-    for reverse in state.config.reverse.iter() {
-        reverse::check_reverse_runtime(reverse, state.config.raw.upstreams.as_slice())?;
+    for reverse in state.resources.operational.reverse_edge_configs().iter() {
+        reverse::check_reverse_runtime(reverse, state.resources.operational.upstreams.as_slice())?;
     }
     Ok(())
 }
 
 fn watch_sources_for_config(config: &ProxyConfig, mut sources: Vec<PathBuf>) -> Vec<PathBuf> {
-    for set in &config.named_sets {
+    for set in &config.security.named_sets {
         let Some(path) = set.file.as_deref() else {
             continue;
         };
@@ -828,7 +1209,7 @@ impl ProxyTasks {
         >,
     ) -> Result<Self> {
         let reverse_runtimes = config
-            .reverse
+            .reverse_edge_configs()
             .iter()
             .map(|reverse| {
                 reverse::build_reloadable_reverse(reverse, &runtime)
@@ -836,7 +1217,7 @@ impl ProxyTasks {
             })
             .collect::<Result<std::collections::HashMap<_, _>>>()?;
         let listener_bindings = config
-            .listeners
+            .ingress_edge_configs()
             .iter()
             .map(|listener| {
                 tcp_bindings
@@ -845,7 +1226,7 @@ impl ProxyTasks {
             })
             .collect::<Result<std::collections::HashMap<_, _>>>()?;
         let reverse_bindings = config
-            .reverse
+            .reverse_edge_configs()
             .iter()
             .filter(|reverse| reverse::requires_tcp_listener(reverse))
             .map(|reverse| {
@@ -880,15 +1261,15 @@ impl ProxyTasks {
         #[cfg(feature = "http3")]
         quic_broker_restore.ensure_consumed()?;
 
-        let listener_configs = config.listeners.clone();
-        let reverse_configs = config.reverse.clone();
+        let ingress_edge_configs = config.ingress_edges().cloned().collect();
+        let reverse_edge_configs = config.reverse_edges().cloned().collect();
         let (tcp_shutdown_tx, tcp_shutdown_rx) = watch::channel(false);
         let tcp_runtime = runtime.clone();
         let tcp_reverse_runtimes = reverse_runtimes.clone();
         let tcp_task = tokio::spawn(async move {
             run_tcp_server_set(
-                listener_configs,
-                reverse_configs,
+                ingress_edge_configs,
+                reverse_edge_configs,
                 tcp_runtime,
                 listener_bindings,
                 reverse_bindings,
@@ -905,8 +1286,8 @@ impl ProxyTasks {
         ));
         let exportable_sidecar_task = Some(spawn_exportable_sidecar_server_set(
             ExportableSidecarServerSet {
-                listener_configs: config.listeners.clone(),
-                reverse_configs: config.reverse.clone(),
+                ingress_edge_configs: config.ingress_edges().cloned().collect(),
+                reverse_edge_configs: config.reverse_edges().cloned().collect(),
                 runtime: runtime.clone(),
                 reverse_runtimes: reverse_runtimes.clone(),
                 listener_udp_bindings: exportable_listener_udp_bindings,
@@ -921,8 +1302,8 @@ impl ProxyTasks {
             watch::channel(sidecar_control::SidecarControl::Running);
         #[cfg(feature = "http3")]
         let brokered_h3_task = spawn_brokered_h3_server_set(
-            config.listeners.clone(),
-            config.reverse.clone(),
+            config.ingress_edges().cloned().collect(),
+            config.reverse_edges().cloned().collect(),
             runtime,
             reverse_runtimes.clone(),
             brokered_forward_h3_sockets,
@@ -1075,8 +1456,8 @@ impl ProxyTasks {
         ));
         self.exportable_sidecar_task = Some(spawn_exportable_sidecar_server_set(
             ExportableSidecarServerSet {
-                listener_configs: config.listeners.clone(),
-                reverse_configs: config.reverse.clone(),
+                ingress_edge_configs: config.ingress_edges().cloned().collect(),
+                reverse_edge_configs: config.reverse_edges().cloned().collect(),
                 runtime,
                 reverse_runtimes: self.reverse_runtimes.clone(),
                 listener_udp_bindings: exportable_listener_udp_bindings(
@@ -1125,6 +1506,7 @@ impl AdminTasks {
         tcp_bindings: &tcp_bindings::TcpBindings,
     ) -> Result<Self> {
         let metrics_task = config
+            .telemetry
             .metrics
             .as_ref()
             .map(|metrics| start_metrics(metrics, tcp_bindings.clone_metrics()?))
@@ -1181,15 +1563,17 @@ fn exportable_listener_udp_bindings(
     #[cfg(feature = "http3")]
     {
         config
-            .listeners
+            .ingress_edge_configs()
             .iter()
             .filter(|listener| {
-                matches!(listener.mode, qpx_core::config::ListenerMode::Transparent)
-                    && listener
-                        .http3
-                        .as_ref()
-                        .map(|cfg| cfg.enabled)
-                        .unwrap_or(false)
+                matches!(
+                    listener.mode,
+                    qpx_core::config::IngressEdgeMode::Transparent
+                ) && listener
+                    .http3
+                    .as_ref()
+                    .map(|cfg| cfg.enabled)
+                    .unwrap_or(false)
             })
             .map(|listener| {
                 udp_bindings
@@ -1217,7 +1601,7 @@ fn exportable_reverse_udp_bindings(
     #[cfg(feature = "http3")]
     {
         config
-            .reverse
+            .reverse_edge_configs()
             .iter()
             .filter(|reverse| {
                 reverse
@@ -1254,10 +1638,10 @@ fn brokered_forward_h3_sockets(
     quic_broker_handles: &mut Vec<crate::http3::quinn_socket::LocalQuinnBrokerHandle>,
 ) -> Result<std::collections::HashMap<String, crate::http3::quinn_socket::QuinnEndpointSocket>> {
     config
-        .listeners
+        .ingress_edge_configs()
         .iter()
         .filter(|listener| {
-            matches!(listener.mode, qpx_core::config::ListenerMode::Forward)
+            matches!(listener.mode, qpx_core::config::IngressEdgeMode::Forward)
                 && listener
                     .http3
                     .as_ref()
@@ -1292,7 +1676,7 @@ fn brokered_reverse_h3_sockets(
     quic_broker_handles: &mut Vec<crate::http3::quinn_socket::LocalQuinnBrokerHandle>,
 ) -> Result<std::collections::HashMap<String, crate::http3::quinn_socket::QuinnEndpointSocket>> {
     config
-        .reverse
+        .reverse_edge_configs()
         .iter()
         .filter(|reverse| {
             reverse
@@ -1329,8 +1713,8 @@ fn brokered_reverse_h3_sockets(
 }
 
 struct ExportableSidecarServerSet {
-    listener_configs: Vec<qpx_core::config::ListenerConfig>,
-    reverse_configs: Vec<qpx_core::config::ReverseConfig>,
+    ingress_edge_configs: Vec<qpx_core::config::IngressEdgeConfig>,
+    reverse_edge_configs: Vec<qpx_core::config::ReverseEdgeConfig>,
     runtime: runtime::Runtime,
     reverse_runtimes: std::collections::HashMap<String, reverse::ReloadableReverse>,
     listener_udp_bindings: std::collections::HashMap<String, std::net::UdpSocket>,
@@ -1348,8 +1732,8 @@ fn spawn_exportable_sidecar_server_set(
 
 #[cfg(feature = "http3")]
 fn spawn_brokered_h3_server_set(
-    listener_configs: Vec<qpx_core::config::ListenerConfig>,
-    reverse_configs: Vec<qpx_core::config::ReverseConfig>,
+    ingress_edge_configs: Vec<qpx_core::config::IngressEdgeConfig>,
+    reverse_edge_configs: Vec<qpx_core::config::ReverseEdgeConfig>,
     runtime: runtime::Runtime,
     reverse_runtimes: std::collections::HashMap<String, reverse::ReloadableReverse>,
     listener_h3_sockets: std::collections::HashMap<
@@ -1364,8 +1748,8 @@ fn spawn_brokered_h3_server_set(
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
         run_brokered_h3_server_set(
-            listener_configs,
-            reverse_configs,
+            ingress_edge_configs,
+            reverse_edge_configs,
             runtime,
             reverse_runtimes,
             listener_h3_sockets,
@@ -1390,8 +1774,8 @@ fn spawn_empty_sidecar_server_set(
 }
 
 async fn run_tcp_server_set(
-    listener_configs: Vec<qpx_core::config::ListenerConfig>,
-    reverse_configs: Vec<qpx_core::config::ReverseConfig>,
+    ingress_edge_configs: Vec<qpx_core::config::IngressEdgeConfig>,
+    reverse_edge_configs: Vec<qpx_core::config::ReverseEdgeConfig>,
     runtime: runtime::Runtime,
     mut listener_bindings: std::collections::HashMap<String, Vec<tokio::net::TcpListener>>,
     mut reverse_bindings: std::collections::HashMap<String, Vec<tokio::net::TcpListener>>,
@@ -1400,7 +1784,7 @@ async fn run_tcp_server_set(
 ) -> Result<()> {
     let mut tasks: JoinSet<(String, Result<()>)> = JoinSet::new();
 
-    for listener in listener_configs {
+    for listener in ingress_edge_configs {
         let rt = runtime.clone();
         let name = listener.name.clone();
         let tcp_listeners = listener_bindings
@@ -1409,10 +1793,10 @@ async fn run_tcp_server_set(
         let task_shutdown = shutdown.clone();
         tasks.spawn(async move {
             let res = match listener.mode {
-                qpx_core::config::ListenerMode::Forward => {
+                qpx_core::config::IngressEdgeMode::Forward => {
                     forward::run_tcp(listener, rt, task_shutdown, tcp_listeners).await
                 }
-                qpx_core::config::ListenerMode::Transparent => {
+                qpx_core::config::IngressEdgeMode::Transparent => {
                     transparent::run_tcp(listener, rt, task_shutdown, tcp_listeners).await
                 }
             };
@@ -1420,7 +1804,7 @@ async fn run_tcp_server_set(
         });
     }
 
-    for reverse_cfg in reverse_configs {
+    for reverse_cfg in reverse_edge_configs {
         if !reverse::requires_tcp_listener(&reverse_cfg) {
             continue;
         }
@@ -1490,8 +1874,8 @@ async fn run_tcp_server_set(
 
 async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> Result<()> {
     let ExportableSidecarServerSet {
-        listener_configs,
-        reverse_configs,
+        ingress_edge_configs,
+        reverse_edge_configs,
         runtime,
         reverse_runtimes,
         mut listener_udp_bindings,
@@ -1503,13 +1887,15 @@ async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> 
     let mut tasks: JoinSet<(String, Result<()>)> = JoinSet::new();
     let mut restore = sidecar_restore.unwrap_or_default();
 
-    for listener in listener_configs {
-        if !matches!(listener.mode, qpx_core::config::ListenerMode::Transparent)
-            || !listener
-                .http3
-                .as_ref()
-                .map(|cfg| cfg.enabled)
-                .unwrap_or(false)
+    for listener in ingress_edge_configs {
+        if !matches!(
+            listener.mode,
+            qpx_core::config::IngressEdgeMode::Transparent
+        ) || !listener
+            .http3
+            .as_ref()
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(false)
         {
             continue;
         }
@@ -1524,12 +1910,14 @@ async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> 
             .remove(name.as_str())
             .ok_or_else(|| anyhow::anyhow!("udp listener binding missing for {}", name))?;
         let task_control = control.clone();
-        let transparent_restore =
-            if matches!(listener.mode, qpx_core::config::ListenerMode::Transparent) {
-                restore.take_transparent(name.as_str(), listen.as_str())?
-            } else {
-                None
-            };
+        let transparent_restore = if matches!(
+            listener.mode,
+            qpx_core::config::IngressEdgeMode::Transparent
+        ) {
+            restore.take_transparent(name.as_str(), listen.as_str())?
+        } else {
+            None
+        };
         let export_sink = sidecar_export.clone();
         tasks.spawn(async move {
             let res = {
@@ -1562,7 +1950,7 @@ async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> 
         });
     }
 
-    for reverse_cfg in reverse_configs {
+    for reverse_cfg in reverse_edge_configs {
         if !reverse_cfg
             .http3
             .as_ref()
@@ -1591,9 +1979,8 @@ async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> 
             .and_then(|cfg| cfg.listen.clone())
             .unwrap_or_else(|| reverse_cfg.listen.clone());
         let listen_addr: std::net::SocketAddr = listen.parse()?;
-        let resolve_timeout = std::time::Duration::from_millis(
-            runtime.state().config.runtime.upstream_http_timeout_ms,
-        );
+        let resolve_timeout =
+            std::time::Duration::from_millis(runtime.state().plan.limits.upstream_http_timeout_ms);
         let udp_socket = reverse_udp_bindings
             .remove(reverse_cfg.name.as_str())
             .ok_or_else(|| {
@@ -1699,8 +2086,8 @@ async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> 
 
 #[cfg(feature = "http3")]
 async fn run_brokered_h3_server_set(
-    listener_configs: Vec<qpx_core::config::ListenerConfig>,
-    reverse_configs: Vec<qpx_core::config::ReverseConfig>,
+    ingress_edge_configs: Vec<qpx_core::config::IngressEdgeConfig>,
+    reverse_edge_configs: Vec<qpx_core::config::ReverseEdgeConfig>,
     runtime: runtime::Runtime,
     reverse_runtimes: std::collections::HashMap<String, reverse::ReloadableReverse>,
     mut listener_h3_sockets: std::collections::HashMap<
@@ -1715,8 +2102,8 @@ async fn run_brokered_h3_server_set(
 ) -> Result<()> {
     let mut tasks: JoinSet<(String, Result<()>)> = JoinSet::new();
 
-    for listener in listener_configs {
-        if !matches!(listener.mode, qpx_core::config::ListenerMode::Forward)
+    for listener in ingress_edge_configs {
+        if !matches!(listener.mode, qpx_core::config::IngressEdgeMode::Forward)
             || !listener
                 .http3
                 .as_ref()
@@ -1739,7 +2126,7 @@ async fn run_brokered_h3_server_set(
         });
     }
 
-    for reverse_cfg in reverse_configs {
+    for reverse_cfg in reverse_edge_configs {
         if !reverse_cfg
             .http3
             .as_ref()
@@ -1827,9 +2214,133 @@ async fn run_brokered_h3_server_set(
 }
 
 async fn wait_for_connection_drain(runtime: &runtime::Runtime) {
-    let semaphore = runtime.state().config.connection_semaphore.clone();
-    let target = runtime.state().config.runtime.max_concurrent_connections;
+    let semaphore = runtime.state().resources.connection_semaphore.clone();
+    let target = runtime.state().plan.limits.max_concurrent_connections;
     while semaphore.available_permits() < target {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn init_templates_are_valid_canonical_configs() {
+        for template in [
+            InitTemplate::ReverseBasic,
+            InitTemplate::ForwardEgress,
+            InitTemplate::TransparentLinux,
+            InitTemplate::IpcGateway,
+            InitTemplate::TrustedIdentityExtAuthz,
+        ] {
+            let path = temp_config_path(template);
+            fs::write(&path, init_template_yaml(template)).expect("write template config");
+            let loaded = qpx_core::config::load_config(&path)
+                .unwrap_or_else(|err| panic!("{template:?} template failed to load: {err:?}"));
+            let _runtime = RuntimeState::build(loaded).unwrap_or_else(|err| {
+                panic!("{template:?} template failed runtime build: {err:?}")
+            });
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn schema_command_covers_canonical_cli_surface() {
+        let schema = qpx_core::config::canonical_schema_value();
+        assert_eq!(
+            schema
+                .pointer("/$schema")
+                .and_then(serde_json::Value::as_str),
+            Some("https://json-schema.org/draft/2020-12/schema")
+        );
+        assert_eq!(
+            schema
+                .pointer("/required/0")
+                .and_then(serde_json::Value::as_str),
+            Some("edges")
+        );
+        assert!(schema.pointer("/$defs/capturePolicy").is_some());
+        assert!(schema.pointer("/$defs/routeTarget/oneOf").is_some());
+        assert!(schema.pointer("/$defs/ipcBodyLimit").is_some());
+        assert!(schema.pointer("/$defs/originalDst").is_some());
+        assert!(schema.pointer("/properties/edges/items/oneOf").is_some());
+
+        let json = serde_json::to_string_pretty(&schema).expect("json schema render");
+        assert!(json.contains("\"kind\""));
+        assert!(json.contains("\"reverse\""));
+        assert!(json.contains("\"original_dst\""));
+        assert!(json.contains("\"max_request_bytes\""));
+        assert!(json.contains("\"module_chains\""));
+
+        let yaml = serde_yaml::to_string(&schema).expect("yaml schema render");
+        assert!(yaml.contains("capturePolicy"));
+        assert!(yaml.contains("routeTarget"));
+    }
+
+    #[test]
+    fn explain_renderer_uses_compiled_runtime_plan_flags() {
+        let state = runtime_state_from_template(InitTemplate::ReverseBasic);
+        let output = render_explain_plan(state.plan.as_ref(), Some("public-http"), Some("app"));
+
+        assert!(output.contains("edge public-http"));
+        assert!(output.contains("  kind: reverse"));
+        assert!(output.contains("  route app"));
+        assert!(output.contains("    cache_lookup: off"));
+        assert!(output.contains("    capture_plaintext: off"));
+    }
+
+    #[test]
+    fn match_renderer_uses_compiled_matchers() {
+        let state = runtime_state_from_template(InitTemplate::ReverseBasic);
+        let matched = render_match_plan(
+            state.plan.as_ref(),
+            "public-http",
+            None,
+            None,
+            Some("localhost"),
+            Some("GET"),
+            Some("/"),
+        )
+        .expect("match render");
+        assert!(matched.contains("edge: public-http"));
+        assert!(matched.contains("kind: reverse"));
+        assert!(matched.contains("route: app"));
+
+        let missed = render_match_plan(
+            state.plan.as_ref(),
+            "public-http",
+            None,
+            None,
+            Some("example.invalid"),
+            Some("GET"),
+            Some("/"),
+        )
+        .expect("match render");
+        assert!(missed.contains("route: <no match>"));
+    }
+
+    fn runtime_state_from_template(template: InitTemplate) -> RuntimeState {
+        let path = temp_config_path(template);
+        fs::write(&path, init_template_yaml(template)).expect("write template config");
+        let loaded = qpx_core::config::load_config(&path).expect("template config loads");
+        let _ = fs::remove_file(path);
+        RuntimeState::build(loaded).expect("template runtime builds")
+    }
+
+    fn temp_config_path(template: InitTemplate) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        path.push(format!(
+            "qpxd-cli-template-{}-{}-{template:?}.yaml",
+            std::process::id(),
+            now
+        ));
+        path
     }
 }

@@ -59,7 +59,7 @@ use crate::transparent::quic::{extract_quic_client_hello_info, looks_like_quic_i
 use anyhow::{anyhow, Result};
 use arc_swap::ArcSwap;
 use metrics::counter;
-use qpx_core::config::{Config, ReverseConfig, UpstreamConfig};
+use qpx_core::config::{Config, ReverseEdgeConfig, UpstreamConfig};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -76,7 +76,7 @@ pub(crate) struct CompiledReverse {
 }
 
 pub(crate) fn compile_reverse(
-    reverse: &ReverseConfig,
+    reverse: &ReverseEdgeConfig,
     upstreams: &[UpstreamConfig],
     http_module_registry: &crate::http::modules::HttpModuleRegistry,
 ) -> Result<CompiledReverse> {
@@ -122,22 +122,22 @@ pub(crate) struct ReloadableReverse {
     runtime: Runtime,
     unhealthy_metric: Arc<str>,
     compiled: Arc<ArcSwap<CompiledReverse>>,
-    last_config: Arc<ArcSwap<Config>>,
+    last_operational: Arc<ArcSwap<Config>>,
     reload_lock: Arc<Mutex<()>>,
 }
 
 impl ReloadableReverse {
     pub(crate) fn new(
-        reverse: ReverseConfig,
+        reverse: ReverseEdgeConfig,
         runtime: Runtime,
         unhealthy_metric: Arc<str>,
     ) -> Result<Self> {
         let name = Arc::<str>::from(reverse.name.as_str());
         let state = runtime.state();
-        let current_config = state.config.raw.clone();
+        let current_operational = state.resources.operational.clone();
         let compiled = compile_reverse(
             &reverse,
-            current_config.upstreams.as_slice(),
+            current_operational.upstreams.as_slice(),
             state.http_module_registry().as_ref(),
         )?;
         compiled
@@ -148,25 +148,25 @@ impl ReloadableReverse {
             runtime,
             unhealthy_metric,
             compiled: Arc::new(ArcSwap::from_pointee(compiled)),
-            last_config: Arc::new(ArcSwap::from(current_config)),
+            last_operational: Arc::new(ArcSwap::from(current_operational)),
             reload_lock: Arc::new(Mutex::new(())),
         })
     }
 
     pub(crate) async fn compiled(&self) -> Arc<CompiledReverse> {
-        let current_config = self.runtime.state().config.raw.clone();
-        if Arc::ptr_eq(&current_config, &self.last_config.load_full()) {
+        let current_operational = self.runtime.state().resources.operational.clone();
+        if Arc::ptr_eq(&current_operational, &self.last_operational.load_full()) {
             return self.compiled.load_full();
         }
 
         let _guard = self.reload_lock.lock().await;
-        let current_config = self.runtime.state().config.raw.clone();
-        if Arc::ptr_eq(&current_config, &self.last_config.load_full()) {
+        let current_operational = self.runtime.state().resources.operational.clone();
+        if Arc::ptr_eq(&current_operational, &self.last_operational.load_full()) {
             return self.compiled.load_full();
         }
 
-        let next_reverse = current_config
-            .reverse
+        let next_reverse = current_operational
+            .reverse_edge_configs()
             .iter()
             .find(|r| r.name == self.name.as_ref())
             .cloned();
@@ -175,7 +175,7 @@ impl ReloadableReverse {
                 let state = self.runtime.state();
                 match compile_reverse(
                     &reverse_cfg,
-                    current_config.upstreams.as_slice(),
+                    current_operational.upstreams.as_slice(),
                     state.http_module_registry().as_ref(),
                 ) {
                     Ok(next) => {
@@ -193,7 +193,7 @@ impl ReloadableReverse {
             }
         }
         // Even when compilation fails, avoid retrying on every request.
-        self.last_config.store(current_config);
+        self.last_operational.store(current_operational);
 
         self.compiled.load_full()
     }
@@ -271,7 +271,7 @@ pub(super) fn reverse_quic_connection_filter_match(
 }
 
 pub(crate) fn check_reverse_runtime(
-    reverse: &ReverseConfig,
+    reverse: &ReverseEdgeConfig,
     upstreams: &[UpstreamConfig],
 ) -> Result<()> {
     let _: SocketAddr = reverse
@@ -305,7 +305,7 @@ pub(crate) fn check_reverse_runtime(
     Ok(())
 }
 
-fn reverse_passthrough_only(reverse: &ReverseConfig) -> bool {
+fn reverse_passthrough_only(reverse: &ReverseEdgeConfig) -> bool {
     reverse
         .http3
         .as_ref()
@@ -319,10 +319,10 @@ fn reverse_passthrough_only(reverse: &ReverseConfig) -> bool {
 }
 
 pub async fn run_tcp(
-    reverse: ReverseConfig,
+    reverse: ReverseEdgeConfig,
     reverse_rt: ReloadableReverse,
     shutdown: watch::Receiver<bool>,
-    listeners: Vec<tokio::net::TcpListener>,
+    forward_edges: Vec<tokio::net::TcpListener>,
 ) -> Result<()> {
     let addr: SocketAddr = reverse.listen.parse()?;
     if reverse.tls.is_some() {
@@ -332,12 +332,12 @@ pub async fn run_tcp(
             info!(
                 reverse = %reverse.name,
                 addr = %addr,
-                acceptors = listeners.len(),
+                acceptors = forward_edges.len(),
                 "reverse TLS listener starting"
             );
 
-            let mut accept_tasks = Vec::with_capacity(listeners.len());
-            for listener in listeners {
+            let mut accept_tasks = Vec::with_capacity(forward_edges.len());
+            for listener in forward_edges {
                 let xdp_cfg = xdp_cfg.clone();
                 let reverse_rt = reverse_rt.clone();
                 let acceptor_shutdown = shutdown.clone();
@@ -373,11 +373,11 @@ pub async fn run_tcp(
     info!(
         reverse = %reverse.name,
         addr = %addr,
-        acceptors = listeners.len(),
+        acceptors = forward_edges.len(),
         "reverse listener starting"
     );
-    let mut accept_tasks = Vec::with_capacity(listeners.len());
-    for tcp_listener in listeners {
+    let mut accept_tasks = Vec::with_capacity(forward_edges.len());
+    for tcp_listener in forward_edges {
         let xdp_cfg = xdp_cfg.clone();
         let reverse_rt = reverse_rt.clone();
         let acceptor_shutdown = shutdown.clone();
@@ -402,7 +402,7 @@ pub async fn run_tcp(
 }
 
 pub(crate) fn build_reloadable_reverse(
-    reverse: &ReverseConfig,
+    reverse: &ReverseEdgeConfig,
     runtime: &Runtime,
 ) -> Result<ReloadableReverse> {
     let unhealthy_metric = Arc::<str>::from(
@@ -416,6 +416,6 @@ pub(crate) fn build_reloadable_reverse(
     ReloadableReverse::new(reverse.clone(), runtime.clone(), unhealthy_metric)
 }
 
-pub(crate) fn requires_tcp_listener(reverse: &ReverseConfig) -> bool {
+pub(crate) fn requires_tcp_listener(reverse: &ReverseEdgeConfig) -> bool {
     !reverse_passthrough_only(reverse)
 }

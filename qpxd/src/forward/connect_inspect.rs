@@ -27,9 +27,10 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
     input: ConnectPolicyInput<'_>,
 ) -> Result<ActionConfig> {
     let state = input.runtime.state();
-    let resolution_override = state
-        .listener_config(input.listener_name)
-        .and_then(|cfg| cfg.destination_resolution.as_ref());
+    let base_plan = state
+        .plan
+        .ingress_edge_execution_plan(input.listener_name, None)
+        .ok_or_else(|| anyhow!("listener plan not found"))?;
     let destination = state.classify_destination(
         &DestinationInputs {
             host: Some(input.host),
@@ -54,7 +55,7 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
                 .upstream_cert
                 .and_then(|cert| cert.fingerprint_sha256.as_deref()),
         },
-        resolution_override,
+        base_plan.destination_resolution.as_ref(),
     );
     let ctx = RuleMatchContext {
         src_ip: Some(input.remote_addr.ip()),
@@ -129,33 +130,17 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
     }
 }
 
-pub(in crate::forward) fn listener_uses_upstream_cert_match(listener_cfg: &ListenerConfig) -> bool {
-    listener_cfg.rules.iter().any(|rule| {
-        rule.r#match
-            .as_ref()
-            .and_then(|m| m.upstream_cert.as_ref())
-            .is_some()
-    })
-}
-
 pub(in crate::forward) fn listener_upstream_trust(
-    listener_cfg: &ListenerConfig,
+    listener_cfg: &crate::runtime::CompiledListenerSettings,
 ) -> Result<Option<std::sync::Arc<CompiledUpstreamTlsTrust>>> {
-    CompiledUpstreamTlsTrust::from_config(
-        listener_cfg
-            .tls_inspection
-            .as_ref()
-            .and_then(|cfg| cfg.upstream_trust.as_ref()),
-    )
+    Ok(listener_cfg
+        .tls_inspection
+        .as_ref()
+        .and_then(|cfg| cfg.upstream_trust.clone()))
 }
 
 pub(in crate::forward) fn listener_requires_upstream_cert_preview(
-    listener_cfg: &ListenerConfig,
+    listener_cfg: &crate::runtime::CompiledListenerSettings,
 ) -> bool {
-    listener_uses_upstream_cert_match(listener_cfg)
-        || listener_cfg
-            .tls_inspection
-            .as_ref()
-            .and_then(|cfg| cfg.upstream_trust.as_ref())
-            .is_some()
+    listener_cfg.requires_upstream_cert_preview
 }

@@ -45,11 +45,11 @@ pub fn bind_tcp_std_listeners(
         1
     };
 
-    let mut listeners = Vec::with_capacity(effective);
+    let mut forward_edges = Vec::with_capacity(effective);
     for _ in 0..effective {
-        listeners.push(bind_single_std(addr, runtime, effective > 1)?);
+        forward_edges.push(bind_single_std(addr, runtime, effective > 1)?);
     }
-    Ok(listeners)
+    Ok(forward_edges)
 }
 
 pub fn tokio_listener_from_std(listener: StdTcpListener) -> Result<TcpListener> {

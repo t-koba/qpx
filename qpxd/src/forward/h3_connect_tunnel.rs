@@ -147,7 +147,7 @@ pub(super) async fn prepare_h3_connect_stream(
     Option<TlsClientHelloInfo>,
     ActionConfig,
 )> {
-    let peek_timeout = Duration::from_millis(runtime.state().config.runtime.tls_peek_timeout_ms);
+    let peek_timeout = Duration::from_millis(runtime.state().plan.limits.tls_peek_timeout_ms);
     let sniff = sniff_h3_connect_client_hello(&mut req_stream, peek_timeout).await?;
     let client_hello = looks_like_tls_client_hello(&sniff)
         .then(|| extract_client_hello_info(&sniff))
@@ -258,7 +258,7 @@ pub(super) async fn mitm_h3_connect_stream(input: MitmH3ConnectInput) -> Result<
             let connect_host = connect_host.clone();
             let upstream_cert = upstream_cert.clone();
             async move {
-                let proxy_name = runtime.state().config.identity.proxy_name.clone();
+                let proxy_name = runtime.state().plan.identity.proxy_name.to_string();
                 let proxy_error = runtime.state().messages.proxy_error.clone();
                 let request_method = inner_req.method().clone();
                 let request_version = inner_req.version();
@@ -290,7 +290,7 @@ pub(super) async fn mitm_h3_connect_stream(input: MitmH3ConnectInput) -> Result<
                 }
             }
         });
-        let access_cfg = runtime.state().config.access_log.clone();
+        let access_cfg = runtime.state().resources.access_log.clone();
         let service = AccessLogService::new(
             service,
             remote_addr,

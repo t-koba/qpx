@@ -1,4 +1,5 @@
 pub mod cgi;
+pub mod persistent;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 

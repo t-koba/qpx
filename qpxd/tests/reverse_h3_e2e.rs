@@ -35,8 +35,9 @@ async fn reverse_http3_passthrough_smoke() -> Result<()> {
             let cert_yaml = yaml_quote_path(&cert_path);
             let key_yaml = yaml_quote_path(&key_path);
             format!(
-                r#"reverse:
-- name: backend
+                r#"edges:
+- kind: reverse
+  name: backend
   listen: 127.0.0.1:{port}
   tls:
     certificates:
@@ -52,9 +53,11 @@ async fn reverse_http3_passthrough_smoke() -> Result<()> {
       - reverse.local
       path:
       - /h3
-    local_response:
-      status: 200
-      body: H3PASS
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: H3PASS
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,
@@ -71,13 +74,13 @@ runtime:
     fs::write(
         &front_cfg,
         format!(
-            r#"state_dir:
-  {front_state_yaml}
+            r#"state_dir: {front_state_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: passthrough
+edges:
+- kind: reverse
+  name: passthrough
   listen: 127.0.0.1:{front_port}
   http3:
     enabled: true

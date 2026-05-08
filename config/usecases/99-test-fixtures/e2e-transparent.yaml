@@ -1,5 +1,7 @@
-listeners:
-- name: e2e-transparent
+state_dir: "${QPX_STATE_DIR:-/tmp/qpx-e2e-state}"
+edges:
+- kind: transparent
+  name: e2e-transparent
   listen: 127.0.0.1:15150
   default_action:
     type: direct
@@ -15,11 +17,9 @@ listeners:
       host:
       - 127.0.0.1
       path:
-      - /trace
+      - "/trace"
     action:
       type: direct
     headers:
       request_set:
         X-Transparent-Test: enabled
-  mode: transparent
-state_dir: ${QPX_STATE_DIR:-/tmp/qpx-e2e-state}

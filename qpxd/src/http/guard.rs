@@ -3,7 +3,6 @@ use anyhow::Result;
 use bytes::Bytes;
 use hyper::{Request, StatusCode};
 use qpx_core::config::HttpGuardProfileConfig;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -17,20 +16,12 @@ pub(crate) struct HttpGuardReject {
     pub(crate) body: String,
 }
 
-pub(crate) fn compile_http_guard_profiles(
-    profiles: &[HttpGuardProfileConfig],
-) -> HashMap<String, Arc<CompiledHttpGuardProfile>> {
-    profiles
-        .iter()
-        .map(|profile| {
-            (
-                profile.name.clone(),
-                Arc::new(CompiledHttpGuardProfile {
-                    profile: profile.clone(),
-                }),
-            )
-        })
-        .collect()
+pub(crate) fn compile_http_guard_profile(
+    profile: &HttpGuardProfileConfig,
+) -> Arc<CompiledHttpGuardProfile> {
+    Arc::new(CompiledHttpGuardProfile {
+        profile: profile.clone(),
+    })
 }
 
 impl CompiledHttpGuardProfile {

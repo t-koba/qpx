@@ -66,8 +66,9 @@ async fn reverse_local_response_perf_smoke() -> Result<()> {
             r#"runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: perf
+edges:
+- kind: reverse
+  name: perf
   listen: 127.0.0.1:{port}
   routes:
   - name: perf
@@ -76,9 +77,11 @@ reverse:
       - perf.local
       path:
       - /perf
-    local_response:
-      status: 200
-      body: PERF"#
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: PERF"#
         )
     })?;
 
@@ -146,13 +149,13 @@ async fn forward_connect_perf_smoke() -> Result<()> {
     let (port, _qpxd) =
         spawn_qpxd_on_random_port(&cfg, dir.join("forward-connect-perf.log"), |port| {
             format!(
-                r#"listeners:
-- name: forward
+                r#"edges:
+- kind: forward
+  name: forward
   listen: 127.0.0.1:{port}
   default_action:
     type: direct
   rules: []
-  mode: forward
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#
@@ -216,17 +219,20 @@ async fn reverse_upstream_perf_smoke() -> Result<()> {
                 r#"runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: backend
+edges:
+- kind: reverse
+  name: backend
   listen: 127.0.0.1:{port}
   routes:
   - name: perf
     match:
       path:
       - /perf
-    local_response:
-      status: 200
-      body: PERF"#
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: PERF"#
             )
         })?;
 
@@ -236,8 +242,9 @@ reverse:
                 r#"runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: front
+edges:
+- kind: reverse
+  name: front
   listen: 127.0.0.1:{port}
   routes:
   - name: perf
@@ -246,8 +253,10 @@ reverse:
       - perf.local
       path:
       - /perf
-    upstreams:
-    - http://127.0.0.1:{backend_port}"#
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:{backend_port}"#
             )
         })?;
 
@@ -298,21 +307,24 @@ async fn grpc_unary_perf_smoke() -> Result<()> {
             r#"runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: grpc
+edges:
+- kind: reverse
+  name: grpc
   listen: 127.0.0.1:{port}
   routes:
   - name: unary
     match:
       path:
       - /perf.Service/Unary
-    local_response:
-      status: 200
-      body: OK
-      rpc:
-        protocol: grpc
-        status: "0"
-        message: ok"#
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: OK
+        rpc:
+          protocol: grpc
+          status: "0"
+          message: ok"#
         )
     })?;
 
@@ -393,12 +405,12 @@ async fn grpc_streaming_perf_smoke() -> Result<()> {
     let (port, _qpxd) =
         spawn_qpxd_on_random_port(&cfg, dir.join("grpc-streaming-perf.log"), |port| {
             format!(
-                r#"listeners:
-- name: grpc-forward
+                r#"edges:
+- kind: forward
+  name: grpc-forward
   listen: 127.0.0.1:{port}
   default_action:
     type: direct
-  mode: forward
   rules:
   - name: client-streaming
     match:
@@ -503,8 +515,9 @@ async fn reverse_http3_terminate_perf_smoke() -> Result<()> {
                 r#"runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: reverse
+edges:
+- kind: reverse
+  name: reverse
   listen: 127.0.0.1:{port}
   tls:
     certificates:
@@ -520,9 +533,11 @@ reverse:
       - {server_name}
       path:
       - /perf
-    local_response:
-      status: 200
-      body: H3PERF"#,
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: H3PERF"#,
                 server_name = PERF_TLS_SERVER_NAME,
                 cert_yaml = cert_yaml,
                 key_yaml = key_yaml,
@@ -611,8 +626,9 @@ async fn reverse_http3_passthrough_perf_smoke() -> Result<()> {
                 r#"runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: backend
+edges:
+- kind: reverse
+  name: backend
   listen: 127.0.0.1:{port}
   tls:
     certificates:
@@ -628,9 +644,11 @@ reverse:
       - {server_name}
       path:
       - /perf
-    local_response:
-      status: 200
-      body: H3PASS"#,
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: H3PASS"#,
                 server_name = PERF_TLS_SERVER_NAME,
                 cert_yaml = cert_yaml,
                 key_yaml = key_yaml,
@@ -645,13 +663,13 @@ reverse:
     fs::write(
         &front_cfg,
         format!(
-            r#"state_dir:
-  {front_state_yaml}
+            r#"state_dir: {front_state_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-reverse:
-- name: passthrough
+edges:
+- kind: reverse
+  name: passthrough
   listen: 127.0.0.1:{front_port}
   http3:
     enabled: true

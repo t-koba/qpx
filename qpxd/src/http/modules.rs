@@ -7,9 +7,10 @@ use crate::runtime::RuntimeState;
 use crate::upstream::origin::{proxy_http, OriginEndpoint};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use http::header::HOST;
+use http::header::{CONTENT_LENGTH, HOST};
 use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
 use hyper::{Request, Response};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use qpx_core::config::{
     CachePolicyConfig, CachePurgeModuleConfig, HeaderCaptureConfig, HttpModuleConfig,
     SubrequestModuleConfig, SubrequestPhase, SubrequestResponseMode,
@@ -19,6 +20,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
 use tokio::time::{timeout, Duration};
+use tracing::warn;
 
 static DEFAULT_HTTP_MODULE_REGISTRY: OnceLock<Arc<HttpModuleRegistry>> = OnceLock::new();
 
@@ -129,9 +131,257 @@ pub struct RetryEvent<'a> {
     pub reason: &'a str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModuleStages(u32);
+
+impl ModuleStages {
+    pub const REQUEST_HEADERS: Self = Self(1 << 0);
+    pub const CACHE_LOOKUP: Self = Self(1 << 1);
+    pub const UPSTREAM_REQUEST: Self = Self(1 << 2);
+    pub const UPSTREAM_RESPONSE: Self = Self(1 << 3);
+    pub const DOWNSTREAM_RESPONSE: Self = Self(1 << 4);
+    pub const RETRY: Self = Self(1 << 5);
+    pub const ERROR: Self = Self(1 << 6);
+    pub const LOG: Self = Self(1 << 7);
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn all() -> Self {
+        Self(
+            Self::REQUEST_HEADERS.0
+                | Self::CACHE_LOOKUP.0
+                | Self::UPSTREAM_REQUEST.0
+                | Self::UPSTREAM_RESPONSE.0
+                | Self::DOWNSTREAM_RESPONSE.0
+                | Self::RETRY.0
+                | Self::ERROR.0
+                | Self::LOG.0,
+        )
+    }
+
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyAccess {
+    HeadersOnly,
+    RequestBodyBuffered {
+        max_bytes: usize,
+    },
+    ResponseBodyBuffered {
+        max_bytes: usize,
+    },
+    RequestAndResponseBodyBuffered {
+        max_request_bytes: usize,
+        max_response_bytes: usize,
+    },
+    Streaming,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HttpModuleCapabilities {
+    pub stages: ModuleStages,
+    pub body_access: BodyAccess,
+    pub mutates_request_headers: bool,
+    pub mutates_response_headers: bool,
+    pub may_short_circuit: bool,
+    pub needs_frozen_request: bool,
+    pub safe_on_retry: bool,
+}
+
+impl HttpModuleCapabilities {
+    pub fn conservative() -> Self {
+        Self {
+            stages: ModuleStages::all(),
+            body_access: BodyAccess::Streaming,
+            mutates_request_headers: true,
+            mutates_response_headers: true,
+            may_short_circuit: true,
+            needs_frozen_request: true,
+            safe_on_retry: false,
+        }
+    }
+
+    pub fn headers_only(stages: ModuleStages) -> Self {
+        Self {
+            stages,
+            body_access: BodyAccess::HeadersOnly,
+            mutates_request_headers: false,
+            mutates_response_headers: false,
+            may_short_circuit: false,
+            needs_frozen_request: false,
+            safe_on_retry: true,
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.stages.insert(other.stages);
+        self.body_access = merge_body_access(self.body_access, other.body_access);
+        self.mutates_request_headers |= other.mutates_request_headers;
+        self.mutates_response_headers |= other.mutates_response_headers;
+        self.may_short_circuit |= other.may_short_circuit;
+        self.needs_frozen_request |= other.needs_frozen_request;
+        self.safe_on_retry &= other.safe_on_retry;
+    }
+}
+
+impl Default for HttpModuleCapabilities {
+    fn default() -> Self {
+        Self {
+            stages: ModuleStages::empty(),
+            body_access: BodyAccess::HeadersOnly,
+            mutates_request_headers: false,
+            mutates_response_headers: false,
+            may_short_circuit: false,
+            needs_frozen_request: false,
+            safe_on_retry: true,
+        }
+    }
+}
+
+fn merge_body_access(left: BodyAccess, right: BodyAccess) -> BodyAccess {
+    match (left, right) {
+        (BodyAccess::Streaming, _) | (_, BodyAccess::Streaming) => BodyAccess::Streaming,
+        (
+            BodyAccess::RequestAndResponseBodyBuffered {
+                max_request_bytes,
+                max_response_bytes,
+            },
+            other,
+        )
+        | (
+            other,
+            BodyAccess::RequestAndResponseBodyBuffered {
+                max_request_bytes,
+                max_response_bytes,
+            },
+        ) => match other {
+            BodyAccess::RequestBodyBuffered { max_bytes } => {
+                BodyAccess::RequestAndResponseBodyBuffered {
+                    max_request_bytes: max_request_bytes.max(max_bytes),
+                    max_response_bytes,
+                }
+            }
+            BodyAccess::ResponseBodyBuffered { max_bytes } => {
+                BodyAccess::RequestAndResponseBodyBuffered {
+                    max_request_bytes,
+                    max_response_bytes: max_response_bytes.max(max_bytes),
+                }
+            }
+            _ => BodyAccess::RequestAndResponseBodyBuffered {
+                max_request_bytes,
+                max_response_bytes,
+            },
+        },
+        (
+            BodyAccess::RequestBodyBuffered { max_bytes: request },
+            BodyAccess::ResponseBodyBuffered {
+                max_bytes: response,
+            },
+        )
+        | (
+            BodyAccess::ResponseBodyBuffered {
+                max_bytes: response,
+            },
+            BodyAccess::RequestBodyBuffered { max_bytes: request },
+        ) => BodyAccess::RequestAndResponseBodyBuffered {
+            max_request_bytes: request,
+            max_response_bytes: response,
+        },
+        (
+            BodyAccess::RequestBodyBuffered { max_bytes: left },
+            BodyAccess::RequestBodyBuffered { max_bytes: right },
+        ) => BodyAccess::RequestBodyBuffered {
+            max_bytes: left.max(right),
+        },
+        (
+            BodyAccess::ResponseBodyBuffered { max_bytes: left },
+            BodyAccess::ResponseBodyBuffered { max_bytes: right },
+        ) => BodyAccess::ResponseBodyBuffered {
+            max_bytes: left.max(right),
+        },
+        (BodyAccess::HeadersOnly, other) | (other, BodyAccess::HeadersOnly) => other,
+    }
+}
+
 pub enum RequestHeadersOutcome {
     Continue,
     Respond(Box<Response<Body>>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpModuleStage {
+    RequestHeaders,
+    CacheLookup,
+    UpstreamRequest,
+    UpstreamResponse,
+    DownstreamResponse,
+    Retry,
+    Error,
+    Log,
+}
+
+pub enum HttpModuleEvent<'a> {
+    RequestHeaders(&'a mut Request<Body>),
+    RequestHeadersResult(RequestHeadersOutcome),
+    CacheLookup(CacheLookupStatus),
+    UpstreamRequest(&'a mut Request<Body>),
+    UpstreamResponse(Response<Body>),
+    DownstreamResponse(Response<Body>),
+    Retry(RetryEvent<'a>),
+    Error(&'a anyhow::Error),
+    Log {
+        response_status: Option<StatusCode>,
+        err: Option<&'a anyhow::Error>,
+    },
+    Complete,
+}
+
+impl<'a> HttpModuleEvent<'a> {
+    fn request_headers_result(self, module: &str) -> Result<RequestHeadersOutcome> {
+        match self {
+            Self::RequestHeadersResult(outcome) => Ok(outcome),
+            Self::Complete => Ok(RequestHeadersOutcome::Continue),
+            _ => Err(anyhow!(
+                "http module {module} returned invalid request_headers event"
+            )),
+        }
+    }
+
+    fn into_complete(self, module: &str, stage: HttpModuleStage) -> Result<()> {
+        match self {
+            Self::Complete => Ok(()),
+            _ => Err(anyhow!(
+                "http module {module} returned invalid {stage:?} event"
+            )),
+        }
+    }
+
+    fn upstream_response(self, module: &str) -> Result<Response<Body>> {
+        match self {
+            Self::UpstreamResponse(response) => Ok(response),
+            _ => Err(anyhow!(
+                "http module {module} returned invalid upstream_response event"
+            )),
+        }
+    }
+
+    fn downstream_response(self, module: &str) -> Result<Response<Body>> {
+        match self {
+            Self::DownstreamResponse(response) => Ok(response),
+            _ => Err(anyhow!(
+                "http module {module} returned invalid downstream_response event"
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -140,59 +390,16 @@ pub trait HttpModule: Send + Sync {
         0
     }
 
-    async fn on_request_headers(
+    fn capabilities(&self) -> HttpModuleCapabilities {
+        HttpModuleCapabilities::conservative()
+    }
+
+    async fn call<'a>(
         &self,
-        _ctx: &mut HttpModuleContext,
-        _request: &mut Request<Body>,
-    ) -> Result<RequestHeadersOutcome> {
-        Ok(RequestHeadersOutcome::Continue)
-    }
-
-    async fn on_cache_lookup(
-        &self,
-        _ctx: &mut HttpModuleContext,
-        _status: CacheLookupStatus,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn on_upstream_request(
-        &self,
-        _ctx: &mut HttpModuleContext,
-        _request: &mut Request<Body>,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn on_upstream_response(
-        &self,
-        _ctx: &mut HttpModuleContext,
-        response: Response<Body>,
-    ) -> Result<Response<Body>> {
-        Ok(response)
-    }
-
-    async fn on_downstream_response(
-        &self,
-        _ctx: &mut HttpModuleContext,
-        response: Response<Body>,
-    ) -> Result<Response<Body>> {
-        Ok(response)
-    }
-
-    async fn on_retry(&self, _ctx: &mut HttpModuleContext, _event: RetryEvent<'_>) -> Result<()> {
-        Ok(())
-    }
-
-    fn on_error(&self, _ctx: &mut HttpModuleContext, _err: &anyhow::Error) {}
-
-    fn on_log(
-        &self,
-        _ctx: &mut HttpModuleContext,
-        _response: Option<&Response<Body>>,
-        _err: Option<&anyhow::Error>,
-    ) {
-    }
+        stage: HttpModuleStage,
+        ctx: &mut HttpModuleContext,
+        event: HttpModuleEvent<'a>,
+    ) -> Result<HttpModuleEvent<'a>>;
 }
 
 #[derive(Clone)]
@@ -213,13 +420,30 @@ impl CompiledHttpModule {
 
 #[derive(Clone)]
 pub(crate) struct CompiledHttpModuleChain {
-    modules: Arc<[CompiledHttpModule]>,
+    request_headers: Arc<[CompiledHttpModule]>,
+    cache_lookup: Arc<[CompiledHttpModule]>,
+    upstream_request: Arc<[CompiledHttpModule]>,
+    upstream_response: Arc<[CompiledHttpModule]>,
+    downstream_response: Arc<[CompiledHttpModule]>,
+    retry: Arc<[CompiledHttpModule]>,
+    error: Arc<[CompiledHttpModule]>,
+    log: Arc<[CompiledHttpModule]>,
+    aggregate: HttpModuleCapabilities,
 }
 
 impl Default for CompiledHttpModuleChain {
     fn default() -> Self {
+        let empty: Arc<[CompiledHttpModule]> = Vec::<CompiledHttpModule>::new().into();
         Self {
-            modules: Vec::<CompiledHttpModule>::new().into(),
+            request_headers: empty.clone(),
+            cache_lookup: empty.clone(),
+            upstream_request: empty.clone(),
+            upstream_response: empty.clone(),
+            downstream_response: empty.clone(),
+            retry: empty.clone(),
+            error: empty.clone(),
+            log: empty,
+            aggregate: HttpModuleCapabilities::default(),
         }
     }
 }
@@ -269,8 +493,63 @@ pub(crate) fn compile_http_modules(
         ));
     }
     modules.sort_by_key(|(order, idx, _)| (*order, *idx));
+    let modules = modules
+        .into_iter()
+        .map(|(_, _, module)| module)
+        .collect::<Vec<_>>();
+    let mut aggregate = HttpModuleCapabilities::default();
+    let mut request_headers = Vec::new();
+    let mut cache_lookup = Vec::new();
+    let mut upstream_request = Vec::new();
+    let mut upstream_response = Vec::new();
+    let mut downstream_response = Vec::new();
+    let mut retry = Vec::new();
+    let mut error = Vec::new();
+    let mut log = Vec::new();
+    for module in modules {
+        let capabilities = module.module.capabilities();
+        aggregate.merge(capabilities);
+        if capabilities.stages.contains(ModuleStages::REQUEST_HEADERS) {
+            request_headers.push(module.clone());
+        }
+        if capabilities.stages.contains(ModuleStages::CACHE_LOOKUP) {
+            cache_lookup.push(module.clone());
+        }
+        if capabilities.stages.contains(ModuleStages::UPSTREAM_REQUEST) {
+            upstream_request.push(module.clone());
+        }
+        if capabilities
+            .stages
+            .contains(ModuleStages::UPSTREAM_RESPONSE)
+        {
+            upstream_response.push(module.clone());
+        }
+        if capabilities
+            .stages
+            .contains(ModuleStages::DOWNSTREAM_RESPONSE)
+        {
+            downstream_response.push(module.clone());
+        }
+        if capabilities.stages.contains(ModuleStages::RETRY) {
+            retry.push(module.clone());
+        }
+        if capabilities.stages.contains(ModuleStages::ERROR) {
+            error.push(module.clone());
+        }
+        if capabilities.stages.contains(ModuleStages::LOG) {
+            log.push(module);
+        }
+    }
     Ok(Arc::new(CompiledHttpModuleChain {
-        modules: modules.into_iter().map(|(_, _, module)| module).collect(),
+        request_headers: request_headers.into(),
+        cache_lookup: cache_lookup.into(),
+        upstream_request: upstream_request.into(),
+        upstream_response: upstream_response.into(),
+        downstream_response: downstream_response.into(),
+        retry: retry.into(),
+        error: error.into(),
+        log: log.into(),
+        aggregate,
     }))
 }
 
@@ -602,22 +881,31 @@ impl HttpModuleExecution {
         &mut self,
         req: &mut Request<Body>,
     ) -> Result<RequestHeadersOutcome> {
-        for module in self.chain.modules.iter() {
-            match module
+        for module in self.chain.request_headers.iter() {
+            let label = module.label();
+            let outcome = module
                 .module
-                .on_request_headers(&mut self.context, req)
+                .call(
+                    HttpModuleStage::RequestHeaders,
+                    &mut self.context,
+                    HttpModuleEvent::RequestHeaders(req),
+                )
                 .await
-                .with_context(|| {
-                    format!("http module {} on_request_headers failed", module.label())
-                })? {
+                .with_context(|| format!("http module {label} request_headers failed"))?
+                .request_headers_result(label.as_str())?;
+            match outcome {
                 RequestHeadersOutcome::Continue => {}
                 RequestHeadersOutcome::Respond(response) => {
-                    self.context.sync_frozen_request(req);
+                    if self.chain.aggregate.needs_frozen_request {
+                        self.context.sync_frozen_request(req);
+                    }
                     return Ok(RequestHeadersOutcome::Respond(response));
                 }
             }
         }
-        self.context.sync_frozen_request(req);
+        if self.chain.aggregate.needs_frozen_request {
+            self.context.sync_frozen_request(req);
+        }
         Ok(RequestHeadersOutcome::Continue)
     }
 
@@ -627,29 +915,39 @@ impl HttpModuleExecution {
         } else {
             CacheLookupStatus::Miss
         };
-        for module in self.chain.modules.iter() {
+        for module in self.chain.cache_lookup.iter() {
+            let label = module.label();
             module
                 .module
-                .on_cache_lookup(&mut self.context, status)
+                .call(
+                    HttpModuleStage::CacheLookup,
+                    &mut self.context,
+                    HttpModuleEvent::CacheLookup(status),
+                )
                 .await
-                .with_context(|| {
-                    format!("http module {} on_cache_lookup failed", module.label())
-                })?;
+                .with_context(|| format!("http module {label} cache_lookup failed"))?
+                .into_complete(label.as_str(), HttpModuleStage::CacheLookup)?;
         }
         Ok(())
     }
 
     pub(crate) async fn on_upstream_request(&mut self, req: &mut Request<Body>) -> Result<()> {
-        for module in self.chain.modules.iter() {
+        for module in self.chain.upstream_request.iter() {
+            let label = module.label();
             module
                 .module
-                .on_upstream_request(&mut self.context, req)
+                .call(
+                    HttpModuleStage::UpstreamRequest,
+                    &mut self.context,
+                    HttpModuleEvent::UpstreamRequest(req),
+                )
                 .await
-                .with_context(|| {
-                    format!("http module {} on_upstream_request failed", module.label())
-                })?;
+                .with_context(|| format!("http module {label} upstream_request failed"))?
+                .into_complete(label.as_str(), HttpModuleStage::UpstreamRequest)?;
         }
-        self.context.sync_frozen_request(req);
+        if self.chain.aggregate.needs_frozen_request {
+            self.context.sync_frozen_request(req);
+        }
         Ok(())
     }
 
@@ -660,14 +958,18 @@ impl HttpModuleExecution {
         self.context.set_response_status(response.status());
         self.context
             .apply_pending_response_headers(response.headers_mut());
-        for module in self.chain.modules.iter() {
+        for module in self.chain.upstream_response.iter() {
+            let label = module.label();
             response = module
                 .module
-                .on_upstream_response(&mut self.context, response)
+                .call(
+                    HttpModuleStage::UpstreamResponse,
+                    &mut self.context,
+                    HttpModuleEvent::UpstreamResponse(response),
+                )
                 .await
-                .with_context(|| {
-                    format!("http module {} on_upstream_response failed", module.label())
-                })?;
+                .with_context(|| format!("http module {label} upstream_response failed"))?
+                .upstream_response(label.as_str())?;
             self.context.set_response_status(response.status());
             self.context
                 .apply_pending_response_headers(response.headers_mut());
@@ -682,17 +984,18 @@ impl HttpModuleExecution {
         self.context.set_response_status(response.status());
         self.context
             .apply_pending_response_headers(response.headers_mut());
-        for module in self.chain.modules.iter() {
+        for module in self.chain.downstream_response.iter() {
+            let label = module.label();
             response = module
                 .module
-                .on_downstream_response(&mut self.context, response)
+                .call(
+                    HttpModuleStage::DownstreamResponse,
+                    &mut self.context,
+                    HttpModuleEvent::DownstreamResponse(response),
+                )
                 .await
-                .with_context(|| {
-                    format!(
-                        "http module {} on_downstream_response failed",
-                        module.label()
-                    )
-                })?;
+                .with_context(|| format!("http module {label} downstream_response failed"))?
+                .downstream_response(label.as_str())?;
             self.context.set_response_status(response.status());
             self.context
                 .apply_pending_response_headers(response.headers_mut());
@@ -702,32 +1005,65 @@ impl HttpModuleExecution {
 
     pub(crate) async fn on_retry(&mut self, attempt: usize, reason: &str) -> Result<()> {
         let event = RetryEvent { attempt, reason };
-        for module in self.chain.modules.iter() {
+        for module in self.chain.retry.iter() {
+            let label = module.label();
             module
                 .module
-                .on_retry(&mut self.context, event)
+                .call(
+                    HttpModuleStage::Retry,
+                    &mut self.context,
+                    HttpModuleEvent::Retry(event),
+                )
                 .await
-                .with_context(|| format!("http module {} on_retry failed", module.label()))?;
+                .with_context(|| format!("http module {label} retry failed"))?
+                .into_complete(label.as_str(), HttpModuleStage::Retry)?;
         }
         Ok(())
     }
 
-    pub(crate) fn on_error(&mut self, err: &anyhow::Error) {
-        for module in self.chain.modules.iter() {
-            module.module.on_error(&mut self.context, err);
+    pub(crate) async fn on_error(&mut self, err: &anyhow::Error) {
+        for module in self.chain.error.iter() {
+            let label = module.label();
+            if let Err(err) = module
+                .module
+                .call(
+                    HttpModuleStage::Error,
+                    &mut self.context,
+                    HttpModuleEvent::Error(err),
+                )
+                .await
+                .and_then(|event| event.into_complete(label.as_str(), HttpModuleStage::Error))
+            {
+                warn!(error = ?err, module = label.as_str(), "http module error hook failed");
+            }
         }
     }
 
-    pub(crate) fn on_logging(
+    pub(crate) async fn on_logging(
         &mut self,
-        response: Option<&Response<Body>>,
+        response_status: Option<StatusCode>,
         err: Option<&anyhow::Error>,
     ) {
-        if let Some(response) = response {
-            self.context.set_response_status(response.status());
+        if let Some(status) = response_status {
+            self.context.set_response_status(status);
         }
-        for module in self.chain.modules.iter() {
-            module.module.on_log(&mut self.context, response, err);
+        for module in self.chain.log.iter() {
+            let label = module.label();
+            if let Err(err) = module
+                .module
+                .call(
+                    HttpModuleStage::Log,
+                    &mut self.context,
+                    HttpModuleEvent::Log {
+                        response_status,
+                        err,
+                    },
+                )
+                .await
+                .and_then(|event| event.into_complete(label.as_str(), HttpModuleStage::Log))
+            {
+                warn!(error = ?err, module = label.as_str(), "http module log hook failed");
+            }
         }
     }
 }
@@ -791,20 +1127,37 @@ impl HttpModule for CachePurgeModule {
         -100
     }
 
-    async fn on_request_headers(
+    fn capabilities(&self) -> HttpModuleCapabilities {
+        let mut capabilities = HttpModuleCapabilities::headers_only(ModuleStages::REQUEST_HEADERS);
+        capabilities.may_short_circuit = true;
+        capabilities
+    }
+
+    async fn call<'a>(
         &self,
+        stage: HttpModuleStage,
         ctx: &mut HttpModuleContext,
-        request: &mut Request<Body>,
-    ) -> Result<RequestHeadersOutcome> {
+        event: HttpModuleEvent<'a>,
+    ) -> Result<HttpModuleEvent<'a>> {
+        let HttpModuleStage::RequestHeaders = stage else {
+            return Ok(event);
+        };
+        let HttpModuleEvent::RequestHeaders(request) = event else {
+            return Err(anyhow!(
+                "cache_purge received invalid request_headers event"
+            ));
+        };
         if !self.matches(request.method()) {
-            return Ok(RequestHeadersOutcome::Continue);
+            return Ok(HttpModuleEvent::RequestHeadersResult(
+                RequestHeadersOutcome::Continue,
+            ));
         }
         if let Some(key) = ctx.cache_request_key(request)? {
             let _ = ctx.purge_cache_key(&key).await?;
         }
-        Ok(RequestHeadersOutcome::Respond(Box::new(
-            self.build_response(),
-        )))
+        Ok(HttpModuleEvent::RequestHeadersResult(
+            RequestHeadersOutcome::Respond(Box::new(self.build_response())),
+        ))
     }
 }
 
@@ -823,10 +1176,15 @@ struct SubrequestModule {
     name: Arc<str>,
     phase: SubrequestPhase,
     method: Method,
-    url_template: Arc<str>,
+    url_template: CompiledTemplate,
     timeout: Option<Duration>,
+    max_response_bytes: usize,
+    allowed_schemes: Vec<Arc<str>>,
+    allowed_hosts: Vec<Arc<str>>,
+    deny_redirects: bool,
+    deny_private_ip_redirects: bool,
     pass_headers: Vec<HeaderName>,
-    request_headers: Vec<(HeaderName, Arc<str>)>,
+    request_headers: Vec<(HeaderName, CompiledTemplate)>,
     copy_to_request: Vec<(HeaderName, HeaderName)>,
     copy_to_response: Vec<(HeaderName, HeaderName)>,
     response_mode: SubrequestResponseMode,
@@ -834,6 +1192,30 @@ struct SubrequestModule {
 
 impl SubrequestModule {
     fn new(config: SubrequestModuleConfig) -> Result<Self> {
+        if config.allowed_schemes.is_empty() {
+            return Err(anyhow!(
+                "subrequest {} allowed_schemes must not be empty",
+                config.name
+            ));
+        }
+        if config.allowed_hosts.is_empty() {
+            return Err(anyhow!(
+                "subrequest {} allowed_hosts must not be empty",
+                config.name
+            ));
+        }
+        let max_response_bytes = config.max_response_bytes.ok_or_else(|| {
+            anyhow!(
+                "subrequest {} max_response_bytes must be explicitly set",
+                config.name
+            )
+        })?;
+        if max_response_bytes == 0 {
+            return Err(anyhow!(
+                "subrequest {} max_response_bytes must be >= 1",
+                config.name
+            ));
+        }
         let method = config
             .method
             .as_deref()
@@ -851,14 +1233,35 @@ impl SubrequestModule {
         let request_headers = config
             .request_headers
             .into_iter()
-            .map(|(name, value)| Ok((parse_header_name(name)?, Arc::<str>::from(value))))
+            .map(|(name, value)| {
+                let header_name = parse_header_name(name)?;
+                let template = compile_template(value.as_str()).with_context(|| {
+                    format!("invalid subrequest header template for {header_name}")
+                })?;
+                Ok((header_name, template))
+            })
             .collect::<Result<Vec<_>>>()?;
+        let url_template = compile_template(config.url.as_str())
+            .with_context(|| format!("invalid subrequest URL template for {}", config.name))?;
         Ok(Self {
             name: Arc::from(config.name),
             phase: config.phase,
             method,
-            url_template: Arc::from(config.url),
+            url_template,
             timeout: config.timeout_ms.map(Duration::from_millis),
+            max_response_bytes,
+            allowed_schemes: config
+                .allowed_schemes
+                .into_iter()
+                .map(Arc::<str>::from)
+                .collect(),
+            allowed_hosts: config
+                .allowed_hosts
+                .into_iter()
+                .map(Arc::<str>::from)
+                .collect(),
+            deny_redirects: config.deny_redirects,
+            deny_private_ip_redirects: config.deny_private_ip_redirects,
             pass_headers,
             request_headers,
             copy_to_request: compile_header_captures(config.copy_response_headers_to_request)?,
@@ -874,10 +1277,9 @@ impl SubrequestModule {
         ctx: &HttpModuleContext,
         request: &HttpModuleRequestView<'_>,
     ) -> Result<Request<Body>> {
-        let url = render_template(self.url_template.as_ref(), request, ctx);
-        let mut builder = Request::builder()
-            .method(self.method.clone())
-            .uri(url.as_str());
+        let url = render_template(&self.url_template, request, ctx)?;
+        let uri = self.validate_url(url.as_str())?;
+        let mut builder = Request::builder().method(self.method.clone()).uri(uri);
         for header in &self.pass_headers {
             if let Some(value) = request.headers().get(header) {
                 builder = builder.header(header, value);
@@ -885,12 +1287,47 @@ impl SubrequestModule {
         }
         let mut req = builder.body(Body::empty())?;
         for (name, value_template) in &self.request_headers {
-            let value = render_template(value_template.as_ref(), request, ctx);
+            let value = render_template(value_template, request, ctx)?;
             let value = HeaderValue::from_str(value.as_str())
                 .with_context(|| format!("invalid subrequest header value for {name}"))?;
             req.headers_mut().insert(name.clone(), value);
         }
         Ok(req)
+    }
+
+    fn validate_url(&self, url: &str) -> Result<http::Uri> {
+        let uri: http::Uri = url
+            .parse()
+            .with_context(|| format!("invalid subrequest URL for {}", self.name))?;
+        let scheme = uri
+            .scheme_str()
+            .ok_or_else(|| anyhow!("subrequest {} URL must include a scheme", self.name))?;
+        if !self
+            .allowed_schemes
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(scheme))
+        {
+            return Err(anyhow!(
+                "subrequest {} URL scheme is not allowed: {}",
+                self.name,
+                scheme
+            ));
+        }
+        let host = uri
+            .host()
+            .ok_or_else(|| anyhow!("subrequest {} URL must include a host", self.name))?;
+        if !self
+            .allowed_hosts
+            .iter()
+            .any(|allowed| allowed_host_matches(allowed, host))
+        {
+            return Err(anyhow!(
+                "subrequest {} URL host is not allowed: {}",
+                self.name,
+                host
+            ));
+        }
+        Ok(uri)
     }
 
     async fn run_frozen(&self, ctx: &HttpModuleContext) -> Result<Response<Body>> {
@@ -910,12 +1347,34 @@ impl SubrequestModule {
     ) -> Result<Response<Body>> {
         let future = ctx.send_absolute_request(req);
         let timeout_dur = self.timeout.unwrap_or_else(|| {
-            Duration::from_millis(ctx.runtime.config.runtime.upstream_http_timeout_ms)
+            Duration::from_millis(ctx.runtime.plan.limits.upstream_http_timeout_ms)
         });
-        timeout(timeout_dur, future)
+        let response = timeout(timeout_dur, future)
             .await
             .with_context(|| format!("subrequest {} timed out", self.name))?
-            .with_context(|| format!("subrequest {} failed", self.name))
+            .with_context(|| format!("subrequest {} failed", self.name))?;
+        if self.deny_redirects && response.status().is_redirection() {
+            return Err(anyhow!("subrequest {} received a redirect", self.name));
+        }
+        if let Some(content_length) = response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            if content_length > self.max_response_bytes {
+                return Err(anyhow!(
+                    "subrequest {} response exceeds max_response_bytes",
+                    self.name
+                ));
+            }
+        }
+        let _ = self.deny_private_ip_redirects;
+        let max_response_bytes = self.max_response_bytes;
+        let name = self.name.clone();
+        Ok(response.map(move |body| {
+            limit_subrequest_response_body(body, max_response_bytes, timeout_dur, name)
+        }))
     }
 
     fn should_return_response(&self, response: &Response<Body>) -> bool {
@@ -966,41 +1425,140 @@ impl SubrequestModule {
 
 #[async_trait]
 impl HttpModule for SubrequestModule {
-    async fn on_request_headers(
-        &self,
-        ctx: &mut HttpModuleContext,
-        request: &mut Request<Body>,
-    ) -> Result<RequestHeadersOutcome> {
-        if !matches!(self.phase, SubrequestPhase::RequestHeaders) {
-            return Ok(RequestHeadersOutcome::Continue);
+    fn capabilities(&self) -> HttpModuleCapabilities {
+        match self.phase {
+            SubrequestPhase::RequestHeaders => {
+                let mut capabilities =
+                    HttpModuleCapabilities::headers_only(ModuleStages::REQUEST_HEADERS);
+                capabilities.mutates_request_headers = true;
+                capabilities.mutates_response_headers = !self.copy_to_response.is_empty();
+                capabilities.may_short_circuit =
+                    !matches!(self.response_mode, SubrequestResponseMode::Ignore);
+                capabilities
+            }
+            SubrequestPhase::ResponseHeaders => {
+                let mut capabilities =
+                    HttpModuleCapabilities::headers_only(ModuleStages::DOWNSTREAM_RESPONSE);
+                capabilities.mutates_request_headers = !self.copy_to_request.is_empty();
+                capabilities.mutates_response_headers = true;
+                capabilities.may_short_circuit =
+                    !matches!(self.response_mode, SubrequestResponseMode::Ignore);
+                capabilities.needs_frozen_request = true;
+                capabilities
+            }
         }
-        let subrequest = {
-            let request_view = HttpModuleRequestView::from_request(request);
-            self.build_subrequest(ctx, &request_view)?
-        };
-        let subresponse = self.run_built_request(ctx, subrequest).await?;
-        if self.should_return_response(&subresponse) {
-            return Ok(RequestHeadersOutcome::Respond(Box::new(subresponse)));
-        }
-        self.apply_request_response_headers(&subresponse, ctx, request);
-        Ok(RequestHeadersOutcome::Continue)
     }
 
-    async fn on_downstream_response(
+    async fn call<'a>(
         &self,
+        stage: HttpModuleStage,
         ctx: &mut HttpModuleContext,
-        mut response: Response<Body>,
-    ) -> Result<Response<Body>> {
-        if !matches!(self.phase, SubrequestPhase::ResponseHeaders) {
-            return Ok(response);
+        event: HttpModuleEvent<'a>,
+    ) -> Result<HttpModuleEvent<'a>> {
+        match stage {
+            HttpModuleStage::RequestHeaders => {
+                let HttpModuleEvent::RequestHeaders(request) = event else {
+                    return Err(anyhow!("subrequest received invalid request_headers event"));
+                };
+                if !matches!(self.phase, SubrequestPhase::RequestHeaders) {
+                    return Ok(HttpModuleEvent::RequestHeadersResult(
+                        RequestHeadersOutcome::Continue,
+                    ));
+                }
+                let subrequest = {
+                    let request_view = HttpModuleRequestView::from_request(request);
+                    self.build_subrequest(ctx, &request_view)?
+                };
+                let subresponse = self.run_built_request(ctx, subrequest).await?;
+                if self.should_return_response(&subresponse) {
+                    return Ok(HttpModuleEvent::RequestHeadersResult(
+                        RequestHeadersOutcome::Respond(Box::new(subresponse)),
+                    ));
+                }
+                self.apply_request_response_headers(&subresponse, ctx, request);
+                Ok(HttpModuleEvent::RequestHeadersResult(
+                    RequestHeadersOutcome::Continue,
+                ))
+            }
+            HttpModuleStage::DownstreamResponse => {
+                let HttpModuleEvent::DownstreamResponse(mut response) = event else {
+                    return Err(anyhow!(
+                        "subrequest received invalid downstream_response event"
+                    ));
+                };
+                if !matches!(self.phase, SubrequestPhase::ResponseHeaders) {
+                    return Ok(HttpModuleEvent::DownstreamResponse(response));
+                }
+                let subresponse = self.run_frozen(ctx).await?;
+                if self.should_return_response(&subresponse) {
+                    return Ok(HttpModuleEvent::DownstreamResponse(subresponse));
+                }
+                self.apply_response_headers(&subresponse, ctx, &mut response);
+                Ok(HttpModuleEvent::DownstreamResponse(response))
+            }
+            _ => Ok(event),
         }
-        let subresponse = self.run_frozen(ctx).await?;
-        if self.should_return_response(&subresponse) {
-            return Ok(subresponse);
-        }
-        self.apply_response_headers(&subresponse, ctx, &mut response);
-        Ok(response)
     }
+}
+
+fn limit_subrequest_response_body(
+    mut body: Body,
+    max_response_bytes: usize,
+    body_read_timeout: Duration,
+    name: Arc<str>,
+) -> Body {
+    let (mut sender, out) = Body::channel();
+    tokio::spawn(async move {
+        let result: Result<()> = async {
+            let mut seen = 0usize;
+            loop {
+                let chunk = tokio::select! {
+                    _ = sender.closed() => return Ok(()),
+                    chunk = timeout(body_read_timeout, body.data()) => match chunk {
+                        Ok(chunk) => chunk,
+                        Err(_) => return Err(anyhow!("subrequest {name} response body read timed out")),
+                    },
+                };
+                let Some(chunk) = chunk else {
+                    break;
+                };
+                let chunk = chunk?;
+                seen = seen
+                    .checked_add(chunk.len())
+                    .ok_or_else(|| anyhow!("subrequest {name} response body length overflow"))?;
+                if seen > max_response_bytes {
+                    return Err(anyhow!(
+                        "subrequest {name} response exceeds max_response_bytes"
+                    ));
+                }
+                if sender.is_closed() {
+                    return Ok(());
+                }
+                sender.send_data(chunk).await?;
+            }
+            let trailers = tokio::select! {
+                _ = sender.closed() => return Ok(()),
+                trailers = timeout(body_read_timeout, body.trailers()) => match trailers {
+                    Ok(trailers) => trailers?,
+                    Err(_) => return Err(anyhow!("subrequest {name} response trailers read timed out")),
+                },
+            };
+            if let Some(trailers) = trailers {
+                sender.send_trailers(trailers).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(err) = result {
+            warn!(
+                error = ?err,
+                subrequest = name.as_ref(),
+                "subrequest response body limit failed"
+            );
+            sender.abort();
+        }
+    });
+    out
 }
 
 fn parse_module_settings<T>(spec: &HttpModuleConfig) -> Result<T>
@@ -1011,39 +1569,171 @@ where
         .with_context(|| format!("invalid settings for http module {}", spec.r#type))
 }
 
+fn allowed_host_matches(pattern: &str, host: &str) -> bool {
+    pattern.eq_ignore_ascii_case(host)
+        || pattern == "*"
+        || pattern
+            .strip_prefix("*.")
+            .map(|suffix| host.ends_with(suffix))
+            .unwrap_or(false)
+}
+
+#[derive(Debug, Clone)]
+struct CompiledTemplate {
+    parts: Arc<[TemplatePart]>,
+}
+
+#[derive(Debug, Clone)]
+enum TemplatePart {
+    Literal(Arc<str>),
+    Placeholder {
+        variable: TemplateVariable,
+        modifier: TemplateModifier,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TemplateVariable {
+    ProxyKind,
+    ProxyName,
+    ScopeName,
+    RouteName,
+    RequestMethod,
+    RequestUri,
+    RequestScheme,
+    RequestHost,
+    RequestPath,
+    RequestQuery,
+    RequestAuthority,
+    RemoteIp,
+    ResponseStatus,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TemplateModifier {
+    Raw,
+    UrlQuery,
+    PathSegment,
+    Header,
+}
+
+fn compile_template(template: &str) -> Result<CompiledTemplate> {
+    let mut parts = Vec::new();
+    let mut rest = template;
+    loop {
+        let Some(open) = rest.find('{') else {
+            if !rest.is_empty() {
+                parts.push(TemplatePart::Literal(Arc::from(rest)));
+            }
+            break;
+        };
+        if open > 0 {
+            parts.push(TemplatePart::Literal(Arc::from(&rest[..open])));
+        }
+        let after_open = &rest[open + 1..];
+        let close = after_open
+            .find('}')
+            .ok_or_else(|| anyhow!("template placeholder is missing closing '}}'"))?;
+        let placeholder = &after_open[..close];
+        let (variable, modifier) = parse_template_placeholder(placeholder)?;
+        parts.push(TemplatePart::Placeholder { variable, modifier });
+        rest = &after_open[close + 1..];
+    }
+    Ok(CompiledTemplate {
+        parts: parts.into(),
+    })
+}
+
+fn parse_template_placeholder(placeholder: &str) -> Result<(TemplateVariable, TemplateModifier)> {
+    let (variable, modifier) = placeholder.split_once(':').ok_or_else(|| {
+        anyhow!("template placeholder {{{placeholder}}} must include an explicit modifier")
+    })?;
+    let variable = match variable {
+        "proxy.kind" => TemplateVariable::ProxyKind,
+        "proxy.name" => TemplateVariable::ProxyName,
+        "scope.name" => TemplateVariable::ScopeName,
+        "route.name" => TemplateVariable::RouteName,
+        "request.method" => TemplateVariable::RequestMethod,
+        "request.uri" => TemplateVariable::RequestUri,
+        "request.scheme" => TemplateVariable::RequestScheme,
+        "request.host" => TemplateVariable::RequestHost,
+        "request.path" => TemplateVariable::RequestPath,
+        "request.query" => TemplateVariable::RequestQuery,
+        "request.authority" => TemplateVariable::RequestAuthority,
+        "remote.ip" => TemplateVariable::RemoteIp,
+        "response.status" => TemplateVariable::ResponseStatus,
+        _ => return Err(anyhow!("unknown template placeholder variable: {variable}")),
+    };
+    let modifier = match modifier {
+        "raw" => TemplateModifier::Raw,
+        "urlquery" => TemplateModifier::UrlQuery,
+        "pathsegment" => TemplateModifier::PathSegment,
+        "header" => TemplateModifier::Header,
+        _ => return Err(anyhow!("unknown template placeholder modifier: {modifier}")),
+    };
+    Ok((variable, modifier))
+}
+
 fn render_template(
-    template: &str,
+    template: &CompiledTemplate,
     request: &HttpModuleRequestView<'_>,
     ctx: &HttpModuleContext,
-) -> String {
+) -> Result<String> {
     let remote_ip = ctx.remote_ip().to_string();
     let response_status = ctx
         .response_status()
         .map(|status| status.as_str().to_string())
         .unwrap_or_default();
     let request_uri = request.uri_string();
-    let mut out = template.to_string();
-    for (token, value) in [
-        ("{proxy.kind}", ctx.proxy_kind()),
-        ("{proxy.name}", ctx.proxy_name()),
-        ("{scope.name}", ctx.scope_name()),
-        ("{route.name}", ctx.route_name().unwrap_or_default()),
-        ("{request.method}", request.method().as_str()),
-        ("{request.uri}", request_uri.as_ref()),
-        ("{request.scheme}", request.scheme().unwrap_or_default()),
-        ("{request.host}", request.host().unwrap_or_default()),
-        ("{request.path}", request.path()),
-        ("{request.query}", request.query().unwrap_or_default()),
-        (
-            "{request.authority}",
-            request.authority().unwrap_or_default(),
-        ),
-        ("{remote.ip}", remote_ip.as_str()),
-        ("{response.status}", response_status.as_str()),
-    ] {
-        out = out.replace(token, value);
+    let mut out = String::new();
+    for part in template.parts.iter() {
+        match part {
+            TemplatePart::Literal(value) => out.push_str(value),
+            TemplatePart::Placeholder { variable, modifier } => {
+                let value = match variable {
+                    TemplateVariable::ProxyKind => ctx.proxy_kind(),
+                    TemplateVariable::ProxyName => ctx.proxy_name(),
+                    TemplateVariable::ScopeName => ctx.scope_name(),
+                    TemplateVariable::RouteName => ctx.route_name().unwrap_or_default(),
+                    TemplateVariable::RequestMethod => request.method().as_str(),
+                    TemplateVariable::RequestUri => request_uri.as_ref(),
+                    TemplateVariable::RequestScheme => request.scheme().unwrap_or_default(),
+                    TemplateVariable::RequestHost => request.host().unwrap_or_default(),
+                    TemplateVariable::RequestPath => request.path(),
+                    TemplateVariable::RequestQuery => request.query().unwrap_or_default(),
+                    TemplateVariable::RequestAuthority => request.authority().unwrap_or_default(),
+                    TemplateVariable::RemoteIp => remote_ip.as_str(),
+                    TemplateVariable::ResponseStatus => response_status.as_str(),
+                };
+                push_template_value(&mut out, value, *modifier)?;
+            }
+        }
     }
-    out
+    Ok(out)
+}
+
+fn push_template_value(out: &mut String, value: &str, modifier: TemplateModifier) -> Result<()> {
+    match modifier {
+        TemplateModifier::Raw => out.push_str(value),
+        TemplateModifier::UrlQuery | TemplateModifier::PathSegment => {
+            out.push_str(
+                utf8_percent_encode(value, NON_ALPHANUMERIC)
+                    .to_string()
+                    .as_str(),
+            );
+        }
+        TemplateModifier::Header => {
+            if value
+                .as_bytes()
+                .iter()
+                .any(|byte| matches!(byte, b'\r' | b'\n'))
+            {
+                return Err(anyhow!("template header value contains a line break"));
+            }
+            out.push_str(value);
+        }
+    }
+    Ok(())
 }
 
 fn compile_header_captures(
@@ -1085,8 +1775,8 @@ mod tests {
     use super::*;
     use crate::runtime::Runtime;
     use qpx_core::config::{
-        AccessLogConfig, AuditLogConfig, AuthConfig, CacheConfig, Config, IdentityConfig,
-        MessagesConfig, RuntimeConfig, SystemLogConfig,
+        AccessLogConfig, AuditLogConfig, AuthConfig, Config, IdentityConfig, MessagesConfig,
+        RuntimeConfig, SystemLogConfig,
     };
     use std::str::FromStr;
 
@@ -1096,25 +1786,30 @@ mod tests {
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime: RuntimeConfig::default(),
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: AuthConfig::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: AuthConfig::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            listeners: Vec::new(),
-            reverse: Vec::new(),
+            edges: Vec::new(),
             upstreams: Vec::new(),
-            cache: CacheConfig::default(),
+            caches: Vec::new(),
         })
         .expect("runtime")
     }
@@ -1132,6 +1827,38 @@ mod tests {
                 cache_default_scheme: None,
             },
         )
+    }
+
+    #[test]
+    fn subrequest_template_compile_rejects_implicit_raw_placeholder() {
+        let err = compile_template("http://127.0.0.1/check?path={request.path}")
+            .expect_err("implicit raw placeholder should be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("must include an explicit modifier"));
+    }
+
+    #[test]
+    fn subrequest_template_render_applies_urlquery_modifier() {
+        let ctx = module_test_context();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/a/b?x=1&y=two")
+            .body(Body::empty())
+            .expect("request");
+        let request = HttpModuleRequestView::from_request(&req);
+        let template = compile_template(
+            "http://127.0.0.1/check?path={request.path:urlquery}&q={request.query:urlquery}",
+        )
+        .expect("template");
+
+        let rendered = render_template(&template, &request, &ctx).expect("rendered");
+
+        assert_eq!(
+            rendered,
+            "http://127.0.0.1/check?path=%2Fa%2Fb&q=x%3D1%26y%3Dtwo"
+        );
     }
 
     #[test]

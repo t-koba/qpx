@@ -6,8 +6,7 @@ use crate::http::body::Body;
 use crate::http::http1_codec::serve_http1_with_interim;
 use crate::policy_context::{
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    validate_ext_authz_allow_mode, AuditRecord, EffectivePolicyContext, ExtAuthzEnforcement,
-    ExtAuthzInput, ExtAuthzMode,
+    validate_ext_authz_allow_mode, AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
@@ -18,7 +17,7 @@ use anyhow::Context;
 use anyhow::{anyhow, Result};
 #[cfg(feature = "mitm")]
 use hyper::Request;
-use qpx_core::config::{ActionConfig, ActionKind, ListenerConfig};
+use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::RuleMatchContext;
 #[cfg(feature = "mitm")]
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
@@ -118,10 +117,13 @@ where
 
     let state = runtime.state();
     let listener_cfg = state
-        .listener_config(listener_name)
+        .ingress_edge_settings(listener_name)
         .ok_or_else(|| anyhow!("listener not found"))?;
-    let effective_policy =
-        EffectivePolicyContext::from_single(listener_cfg.policy_context.as_ref());
+    let base_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, None)
+        .ok_or_else(|| anyhow!("listener plan not found"))?;
+    let effective_policy = base_plan.policy_context.clone();
     let identity = resolve_identity(&state, &effective_policy, remote_addr.ip(), None, None)?;
     let listener_trust = listener_upstream_trust(listener_cfg)?;
     let mut decision = evaluate_tls_policy_decision(TransparentTlsPolicyInput {
@@ -168,8 +170,8 @@ where
         match connect_target_stream(
             &connect_target,
             preview_upstream.as_ref(),
-            state.config.identity.proxy_name.as_str(),
-            Duration::from_millis(state.config.runtime.upstream_http_timeout_ms),
+            state.plan.identity.proxy_name.as_ref(),
+            Duration::from_millis(state.plan.limits.upstream_http_timeout_ms),
         )
         .await
         {
@@ -214,19 +216,19 @@ where
         decision.matched_rule.as_deref(),
         None,
     );
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, decision.matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled transparent TLS execution plan not found"))?;
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
-    } = state.policy.rate_limiters.collect_checked_request(
-        crate::rate_limit::RequestLimitCollectInput {
-            listener: Some(listener_name),
-            rule: decision.matched_rule.as_deref(),
-            profile: None,
-            scope: crate::rate_limit::TransportScope::Connect,
-            extra: None,
-            ctx: &request_limit_ctx,
-            cost: 1,
-        },
+    } = state.policy.rate_limiters.collect_checked_plan_request(
+        &selected_plan.rate_limits,
+        None,
+        crate::rate_limit::TransportScope::Connect,
+        &request_limit_ctx,
+        1,
     )?;
     if retry_after.is_some() {
         return Ok(TransparentTlsOutcome::Blocked);
@@ -259,7 +261,7 @@ where
         &effective_policy,
         ExtAuthzInput {
             proxy_kind: "transparent",
-            proxy_name: state.config.identity.proxy_name.as_str(),
+            proxy_name: state.plan.identity.proxy_name.as_ref(),
             scope_name: listener_name,
             remote_ip: remote_addr.ip(),
             dst_port: Some(connect_target.port()),
@@ -333,7 +335,7 @@ where
     };
 
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
     let upstream = resolve_upstream(&action, &state, listener_cfg)?;
     let rate_limit_ctx = RateLimitContext::from_identity(
         remote_addr.ip(),
@@ -437,6 +439,8 @@ where
                 .ok_or_else(|| anyhow!("transparent inspect requires SNI; refusing fail-open"))?;
             let mitm = state
                 .security
+                .destination
+                .tls
                 .mitm
                 .clone()
                 .ok_or_else(|| anyhow!("mitm not available for transparent inspect"))?;
@@ -488,14 +492,14 @@ where
     let upstream_connected = connect_target_stream(
         &connect_target,
         upstream.as_ref(),
-        runtime.state().config.identity.proxy_name.as_str(),
+        runtime.state().plan.identity.proxy_name.as_ref(),
         upstream_timeout,
     )
     .await?;
     let export = upstream_connected
         .peer_addr
         .and_then(|server_addr| runtime.state().export_session(remote_addr, server_addr));
-    let idle_timeout = Duration::from_millis(runtime.state().config.runtime.tunnel_idle_timeout_ms);
+    let idle_timeout = Duration::from_millis(runtime.state().plan.limits.tunnel_idle_timeout_ms);
     let throttle = crate::io_copy::BandwidthThrottle::with_context(
         rate_limit_ctx,
         request_limits.byte_limiters.clone(),
@@ -550,6 +554,10 @@ fn evaluate_tls_policy_decision(
         .rules_by_listener
         .get(listener_name)
         .ok_or_else(|| anyhow!("rule engine not found"))?;
+    let base_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, None)
+        .ok_or_else(|| anyhow!("listener plan not found"))?;
     let destination = state.classify_destination(
         &DestinationInputs {
             host: host_for_match,
@@ -571,9 +579,7 @@ fn evaluate_tls_policy_decision(
             cert_fingerprint_sha256: upstream_cert
                 .and_then(|cert| cert.fingerprint_sha256.as_deref()),
         },
-        state
-            .listener_config(listener_name)
-            .and_then(|cfg| cfg.destination_resolution.as_ref()),
+        base_plan.destination_resolution.as_ref(),
     );
     let ctx = RuleMatchContext {
         src_ip: Some(remote_addr.ip()),
@@ -627,33 +633,19 @@ fn evaluate_tls_policy_decision(
     })
 }
 
-fn listener_uses_upstream_cert_match(listener_cfg: &ListenerConfig) -> bool {
-    listener_cfg.rules.iter().any(|rule| {
-        rule.r#match
-            .as_ref()
-            .and_then(|m| m.upstream_cert.as_ref())
-            .is_some()
-    })
-}
-
 fn listener_upstream_trust(
-    listener_cfg: &ListenerConfig,
+    listener_cfg: &crate::runtime::CompiledListenerSettings,
 ) -> Result<Option<Arc<CompiledUpstreamTlsTrust>>> {
-    CompiledUpstreamTlsTrust::from_config(
-        listener_cfg
-            .tls_inspection
-            .as_ref()
-            .and_then(|cfg| cfg.upstream_trust.as_ref()),
-    )
+    Ok(listener_cfg
+        .tls_inspection
+        .as_ref()
+        .and_then(|cfg| cfg.upstream_trust.clone()))
 }
 
-fn listener_requires_upstream_cert_preview(listener_cfg: &ListenerConfig) -> bool {
-    listener_uses_upstream_cert_match(listener_cfg)
-        || listener_cfg
-            .tls_inspection
-            .as_ref()
-            .and_then(|cfg| cfg.upstream_trust.as_ref())
-            .is_some()
+fn listener_requires_upstream_cert_preview(
+    listener_cfg: &crate::runtime::CompiledListenerSettings,
+) -> bool {
+    listener_cfg.requires_upstream_cert_preview
 }
 
 #[cfg(feature = "mitm")]
@@ -686,14 +678,14 @@ where
         trust,
     } = ctx;
     let upstream_timeout =
-        Duration::from_millis(runtime.state().config.runtime.upstream_http_timeout_ms);
+        Duration::from_millis(runtime.state().plan.limits.upstream_http_timeout_ms);
 
     let upstream_connected = timeout(
         upstream_timeout,
         connect_target_stream(
             &connect_target,
             upstream_proxy.as_ref(),
-            runtime.state().config.identity.proxy_name.as_str(),
+            runtime.state().plan.identity.proxy_name.as_ref(),
             upstream_timeout,
         ),
     )
@@ -713,7 +705,7 @@ where
     let listener_for_service = listener_name.clone();
     let sni_for_service = sni.clone();
     let connect_target_for_service = connect_target.clone();
-    let access_cfg = runtime.state().config.access_log.clone();
+    let access_cfg = runtime.state().resources.access_log.clone();
     let access_name = Arc::<str>::from(listener_name.as_str());
 
     let service = handler_fn(move |req: Request<Body>| {
@@ -725,7 +717,7 @@ where
         let upstream_cert = upstream_cert.clone();
 
         async move {
-            let proxy_name = runtime.state().config.identity.proxy_name.clone();
+            let proxy_name = runtime.state().plan.identity.proxy_name.to_string();
             let proxy_error = runtime.state().messages.proxy_error.clone();
             let request_method = req.method().clone();
             let request_version = req.version();
@@ -767,7 +759,7 @@ where
     );
 
     let header_read_timeout =
-        Duration::from_millis(runtime.state().config.runtime.http_header_read_timeout_ms);
+        Duration::from_millis(runtime.state().plan.limits.http_header_read_timeout_ms);
     serve_http1_with_interim(client_tls, service, header_read_timeout)
         .await
         .context("transparent MITM serve_connection failed")?;
@@ -779,41 +771,51 @@ where
 mod tests {
     use super::*;
     use qpx_core::config::{
-        AccessLogConfig, AuditLogConfig, AuthConfig, CacheConfig, CertificateMatchConfig, Config,
-        IdentityConfig, ListenerConfig, ListenerMode, MatchConfig, MessagesConfig, RuleConfig,
-        RuntimeConfig, SystemLogConfig, TlsInspectionConfig,
+        AccessLogConfig, AuditLogConfig, AuthConfig, CertificateMatchConfig, Config,
+        IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MatchConfig, MessagesConfig,
+        RuleConfig, RuntimeConfig, SystemLogConfig, TlsInspectionConfig,
     };
 
     fn tls_runtime(rules: Vec<RuleConfig>) -> Runtime {
+        #[cfg(feature = "tls-rustls")]
+        qpx_core::tls::init_rustls_crypto_provider();
+
         Runtime::new(Config {
             state_dir: None,
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime: RuntimeConfig::default(),
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: AuthConfig::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: AuthConfig::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            listeners: vec![ListenerConfig {
+            edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
                 name: "transparent".to_string(),
-                mode: ListenerMode::Transparent,
+                mode: IngressEdgeMode::Transparent,
                 listen: "127.0.0.1:18443".to_string(),
                 default_action: ActionConfig {
                     kind: ActionKind::Tunnel,
                     upstream: None,
                     local_response: None,
                 },
+                original_dst: None,
                 tls_inspection: Some(TlsInspectionConfig {
                     enabled: true,
                     ca: None,
@@ -829,16 +831,16 @@ mod tests {
                 ftp: qpx_core::config::FtpConfig::default(),
                 xdp: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 policy_context: None,
                 http: None,
                 http_guard_profile: None,
                 destination_resolution: None,
                 http_modules: Vec::new(),
-            }],
-            reverse: Vec::new(),
+            })],
             upstreams: Vec::new(),
-            cache: CacheConfig::default(),
+            caches: Vec::new(),
         })
         .expect("runtime")
     }

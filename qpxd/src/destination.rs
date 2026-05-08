@@ -113,7 +113,7 @@ enum DestinationEvidenceKind {
 impl DestinationClassifier {
     pub(crate) fn from_config(config: &Config) -> Result<Self> {
         let mut classifier = Self::default();
-        for set in &config.named_sets {
+        for set in &config.security.named_sets {
             let Some((kind, label)) = parse_destination_set_name(set.name.as_str()) else {
                 continue;
             };
@@ -875,32 +875,37 @@ mod tests {
             identity: Default::default(),
             messages: Default::default(),
             runtime: Default::default(),
-            system_log: Default::default(),
-            access_log: Default::default(),
-            audit_log: Default::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: Default::default(),
+                access_log: Default::default(),
+                audit_log: Default::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: Default::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: Default::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            listeners: Vec::new(),
-            reverse: Vec::new(),
+            edges: Vec::new(),
             upstreams: Vec::new(),
-            cache: Default::default(),
+            caches: Vec::new(),
         }
     }
 
     #[test]
     fn classifier_uses_prefixed_named_sets_and_application_heuristics() {
         let mut config = base_config();
-        config.named_sets = vec![
+        config.security.named_sets = vec![
             NamedSetConfig {
                 name: "category:ai".to_string(),
                 kind: NamedSetKind::Domain,
@@ -979,7 +984,7 @@ mod tests {
     #[test]
     fn classifier_uses_ip_sni_cert_and_fingerprint_precedence() {
         let mut config = base_config();
-        config.named_sets = vec![
+        config.security.named_sets = vec![
             NamedSetConfig {
                 name: "category:corp".to_string(),
                 kind: NamedSetKind::String,
@@ -1034,7 +1039,7 @@ mod tests {
     #[test]
     fn resolution_override_can_prefer_certificate_evidence() {
         let mut config = base_config();
-        config.named_sets = vec![
+        config.security.named_sets = vec![
             NamedSetConfig {
                 name: "category:host".to_string(),
                 kind: NamedSetKind::Domain,

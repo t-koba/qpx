@@ -26,8 +26,8 @@ pub(crate) async fn handle_h3_connect(
 
     let state = handler.runtime.state();
     let tunnel_idle_timeout =
-        Duration::from_millis(state.config.runtime.tunnel_idle_timeout_ms.max(1));
-    let proxy_name = state.config.identity.proxy_name.clone();
+        Duration::from_millis(state.plan.limits.tunnel_idle_timeout_ms.max(1));
+    let proxy_name = state.plan.identity.proxy_name.to_string();
     let PreparedH3Connect {
         authority,
         host,
@@ -44,18 +44,17 @@ pub(crate) async fn handle_h3_connect(
         sanitized_headers,
         identity,
     } = prepared;
-    let mut request_limits = state.policy.rate_limiters.collect(
-        handler.listener_name.as_ref(),
-        matched_rule.as_deref(),
-        None,
-        crate::rate_limit::TransportScope::Connect,
-    );
-    request_limits.extend_from(&state.policy.rate_limiters.collect_profile(
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled HTTP/3 CONNECT execution plan not found"))?;
+    let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
+        &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
         crate::rate_limit::TransportScope::Connect,
-    )?);
+    )?;
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
     macro_rules! send_policy {
         ($req_stream:expr, $response:expr, $outcome:expr) => {
             send_h3_policy_response(
@@ -109,7 +108,7 @@ pub(crate) async fn handle_h3_connect(
         #[cfg(feature = "mitm")]
         {
             let tls_inspection = state
-                .listener_config(handler.listener_name.as_ref())
+                .ingress_edge_settings(handler.listener_name.as_ref())
                 .and_then(|l| l.tls_inspection.as_ref());
             if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
                 let response = finalize_response_with_headers(
@@ -130,7 +129,7 @@ pub(crate) async fn handle_h3_connect(
                             .tls_verify_exception_matches(handler.listener_name.as_ref(), &host)
                 })
                 .unwrap_or(true);
-            let mitm = match state.security.mitm.clone() {
+            let mitm = match state.security.destination.tls.mitm.clone() {
                 Some(mitm) => mitm,
                 None => {
                     let response = finalize_response_with_headers(
@@ -243,7 +242,7 @@ pub(crate) async fn handle_h3_connect(
                 )
                 .await?;
             let listener_cfg = state
-                .listener_config(handler.listener_name.as_ref())
+                .ingress_edge_settings(handler.listener_name.as_ref())
                 .ok_or_else(|| anyhow!("listener not found"))?;
             let listener_trust = listener_upstream_trust(listener_cfg)?;
             let mut upstream_connected = Some(upstream_connected);
@@ -383,7 +382,7 @@ pub(crate) async fn handle_h3_connect(
                 verify_upstream,
                 trust: listener_trust,
                 header_read_timeout: Duration::from_millis(
-                    state.config.runtime.http_header_read_timeout_ms,
+                    state.plan.limits.http_header_read_timeout_ms,
                 ),
                 upstream_timeout,
                 tunnel_idle_timeout,
@@ -491,7 +490,7 @@ pub(crate) async fn handle_h3_connect(
     )
     .await?;
     let listener_cfg = state
-        .listener_config(handler.listener_name.as_ref())
+        .ingress_edge_settings(handler.listener_name.as_ref())
         .ok_or_else(|| anyhow!("listener not found"))?;
     let listener_trust = listener_upstream_trust(listener_cfg)?;
     let mut server = Some(server);
@@ -605,7 +604,7 @@ pub(crate) async fn handle_h3_connect(
             #[cfg(feature = "mitm")]
             {
                 let tls_inspection = state
-                    .listener_config(handler.listener_name.as_ref())
+                    .ingress_edge_settings(handler.listener_name.as_ref())
                     .and_then(|l| l.tls_inspection.as_ref());
                 if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
                     return Ok(());
@@ -617,7 +616,7 @@ pub(crate) async fn handle_h3_connect(
                                 .tls_verify_exception_matches(handler.listener_name.as_ref(), &host)
                     })
                     .unwrap_or(true);
-                let Some(mitm) = state.security.mitm.clone() else {
+                let Some(mitm) = state.security.destination.tls.mitm.clone() else {
                     return Ok(());
                 };
                 if let Err(err) = mitm_h3_connect_stream(MitmH3ConnectInput {
@@ -633,7 +632,7 @@ pub(crate) async fn handle_h3_connect(
                     verify_upstream,
                     trust: listener_trust,
                     header_read_timeout: Duration::from_millis(
-                        state.config.runtime.http_header_read_timeout_ms,
+                        state.plan.limits.http_header_read_timeout_ms,
                     ),
                     upstream_timeout,
                     tunnel_idle_timeout,
@@ -674,12 +673,12 @@ pub(crate) async fn handle_h3_extended_connect(
             ::http::StatusCode::NOT_IMPLEMENTED,
             b"WEBTRANSPORT relay requires the http3-backend-qpx build",
             &http::Method::CONNECT,
-            handler.runtime.state().config.identity.proxy_name.as_str(),
+            handler.runtime.state().plan.identity.proxy_name.as_ref(),
             handler
                 .runtime
                 .state()
-                .config
-                .runtime
+                .plan
+                .limits
                 .max_h3_response_body_bytes,
         )
         .await?;
@@ -700,8 +699,8 @@ pub(crate) async fn handle_h3_extended_connect(
 
     let state = handler.runtime.state();
     let tunnel_idle_timeout =
-        Duration::from_millis(state.config.runtime.tunnel_idle_timeout_ms.max(1));
-    let proxy_name = state.config.identity.proxy_name.clone();
+        Duration::from_millis(state.plan.limits.tunnel_idle_timeout_ms.max(1));
+    let proxy_name = state.plan.identity.proxy_name.to_string();
     let PreparedH3Connect {
         host,
         port: _,
@@ -717,18 +716,17 @@ pub(crate) async fn handle_h3_extended_connect(
         sanitized_headers,
         ..
     } = prepared;
-    let mut request_limits = state.policy.rate_limiters.collect(
-        handler.listener_name.as_ref(),
-        matched_rule.as_deref(),
-        None,
-        crate::rate_limit::TransportScope::Connect,
-    );
-    request_limits.extend_from(&state.policy.rate_limiters.collect_profile(
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled HTTP/3 CONNECT execution plan not found"))?;
+    let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
+        &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
         crate::rate_limit::TransportScope::Connect,
-    )?);
+    )?;
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
     macro_rules! send_policy {
         ($req_stream:expr, $response:expr, $outcome:expr) => {
             send_h3_policy_response(
@@ -783,7 +781,7 @@ pub(crate) async fn handle_h3_extended_connect(
     };
 
     let verify_upstream = state
-        .listener_config(handler.listener_name.as_ref())
+        .ingress_edge_settings(handler.listener_name.as_ref())
         .and_then(|listener| listener.tls_inspection.as_ref())
         .map(|cfg| {
             cfg.verify_upstream
@@ -844,14 +842,14 @@ pub(crate) async fn handle_h3_extended_connect(
             upstream_stream,
             proxy_name.as_str(),
             response_headers.as_deref(),
-            Duration::from_millis(state.config.runtime.h3_read_timeout_ms.max(1)),
+            Duration::from_millis(state.plan.limits.h3_read_timeout_ms.max(1)),
         )?;
         send_h3_response(
             response,
             &http::Method::CONNECT,
             &mut req_stream,
-            state.config.runtime.max_h3_response_body_bytes,
-            Duration::from_millis(state.config.runtime.h3_read_timeout_ms.max(1)),
+            state.plan.limits.max_h3_response_body_bytes,
+            Duration::from_millis(state.plan.limits.h3_read_timeout_ms.max(1)),
         )
         .await?;
         if let Some(task) = datagram_task {

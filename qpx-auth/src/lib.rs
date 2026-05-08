@@ -1,4 +1,4 @@
-#[cfg(feature = "auth-proxy")]
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use std::collections::HashMap;
 
 #[cfg(all(feature = "ldap-auth-rustls", feature = "ldap-auth-native"))]
@@ -14,10 +14,10 @@ mod digest;
 #[cfg(feature = "ldap-auth")]
 #[path = "auth/ldap.rs"]
 mod ldap;
-#[cfg(feature = "auth-proxy")]
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 #[path = "auth/local.rs"]
 mod local;
-#[cfg(any(feature = "auth-proxy", test))]
+#[cfg(any(feature = "basic-auth", feature = "digest-auth", test))]
 #[path = "auth/util.rs"]
 mod util;
 
@@ -27,7 +27,7 @@ use cache::LdapCache;
 use digest::NonceStore;
 #[cfg(feature = "ldap-auth")]
 pub use ldap::LdapAuthenticator;
-#[cfg(feature = "auth-proxy")]
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use local::LocalUserEntry;
 
 #[cfg(all(test, feature = "ldap-auth"))]
@@ -58,7 +58,7 @@ pub enum AuthOutcome {
 #[derive(Debug, Clone)]
 pub struct Authenticator {
     realm: String,
-    #[cfg(feature = "auth-proxy")]
+    #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
     local: HashMap<String, LocalUserEntry>,
     #[cfg(feature = "ldap-auth")]
     ldap: Option<LdapAuthenticator>,

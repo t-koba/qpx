@@ -13,16 +13,14 @@ pub(super) async fn dispatch_mitm_request(
     route: MitmRouteContext<'_>,
 ) -> Result<Response<Body>> {
     let state = runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
-    let listener_cfg = state
-        .listener_config(route.listener_name)
-        .ok_or_else(|| anyhow!("listener not found"))?;
-    let effective_policy =
-        EffectivePolicyContext::from_single(listener_cfg.policy_context.as_ref());
-    let http_guard = listener_cfg
-        .http_guard_profile
-        .as_deref()
-        .and_then(|name| state.http_guard_profile(name));
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
+    let mitm_plan = state
+        .plan
+        .mitm_plan(route.listener_name, None)
+        .ok_or_else(|| anyhow!("compiled MITM listener execution plan not found"))?;
+    let base_plan = mitm_plan.http;
+    let effective_policy = base_plan.policy_context.clone();
+    let http_guard = base_plan.guard.as_deref();
     let websocket = is_websocket_upgrade(req.headers());
     let client_upgrade = websocket.then(|| crate::http::upgrade::on(&mut req));
     let path_owned = base.path.clone().unwrap_or_else(|| "/".to_string());
@@ -39,11 +37,7 @@ pub(super) async fn dispatch_mitm_request(
         sni: Some(route.sni),
         path: Some(path_owned.as_str()),
     };
-    let response_engine = state
-        .policy
-        .response_rules_by_listener
-        .get(route.listener_name)
-        .map(Arc::as_ref);
+    let response_engine = base_plan.response_rules.as_deref();
     let response_candidates_for_request = response_engine
         .map(|engine| engine.candidate_profile(prefilter_ctx.clone()))
         .unwrap_or_default();
@@ -55,18 +49,23 @@ pub(super) async fn dispatch_mitm_request(
     let guard_requires_buffering =
         http_guard.is_some_and(|profile| profile.requires_request_body_buffering(&req));
     observation_plan.include_body(guard_requires_buffering);
+    observation_plan.include_body(
+        base_plan
+            .flags
+            .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
+    );
     let max_observed_request_body_bytes = http_guard
         .and_then(|profile| profile.request_body_observation_cap())
-        .map(|cap| cap.min(state.config.runtime.max_observed_request_body_bytes))
-        .unwrap_or(state.config.runtime.max_observed_request_body_bytes);
+        .map(|cap| cap.min(state.plan.limits.max_observed_request_body_bytes))
+        .unwrap_or(state.plan.limits.max_observed_request_body_bytes);
+    let max_observed_request_body_bytes =
+        base_plan.body_observation_limit(max_observed_request_body_bytes);
     let request_version_for_observation = req.version();
     req = match observation_plan
         .observe_request(
             req,
             max_observed_request_body_bytes,
-            std::time::Duration::from_millis(
-                state.config.runtime.http_header_read_timeout_ms.max(1),
-            ),
+            std::time::Duration::from_millis(state.plan.limits.http_header_read_timeout_ms.max(1)),
         )
         .await
     {
@@ -121,7 +120,10 @@ pub(super) async fn dispatch_mitm_request(
                 .and_then(|cert| cert.fingerprint_sha256.as_deref()),
             ..Default::default()
         },
-        listener_cfg.destination_resolution.as_ref(),
+        state
+            .plan
+            .ingress_edge_execution_plan(route.listener_name, None)
+            .and_then(|plan| plan.destination_resolution.as_ref()),
     );
     if let Some(profile) = http_guard {
         if let Some(reject) = profile.evaluate_request(&req)? {
@@ -246,6 +248,10 @@ pub(super) async fn dispatch_mitm_request(
             )),
         ),
     };
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(route.listener_name, matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled MITM listener execution plan not found"))?;
     let request_limit_ctx = RateLimitContext::from_identity(
         route.src_addr.ip(),
         &identity,
@@ -255,16 +261,12 @@ pub(super) async fn dispatch_mitm_request(
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
-    } = state.policy.rate_limiters.collect_checked_request(
-        crate::rate_limit::RequestLimitCollectInput {
-            listener: Some(route.listener_name),
-            rule: matched_rule.as_deref(),
-            profile: None,
-            scope: crate::rate_limit::TransportScope::Request,
-            extra: None,
-            ctx: &request_limit_ctx,
-            cost: 1,
-        },
+    } = state.policy.rate_limiters.collect_checked_plan_request(
+        &selected_plan.rate_limits,
+        None,
+        crate::rate_limit::TransportScope::Request,
+        &request_limit_ctx,
+        1,
     )?;
     let ext_authz = if early_response.is_none() {
         Some(
@@ -423,13 +425,14 @@ pub(super) async fn dispatch_mitm_request(
                 return Ok(response);
             }
         };
-    let export_session = state.export_session(route.src_addr, export_server);
+    let export_session =
+        state.export_session_for_plan(selected_plan, route.src_addr, export_server);
     if let Some(response) = handle_max_forwards_in_place(
         &mut req,
         proxy_name,
-        state.config.runtime.trace_reflect_all_headers,
-        state.config.runtime.max_observed_request_body_bytes,
-        std::time::Duration::from_millis(state.config.runtime.http_header_read_timeout_ms.max(1)),
+        state.plan.limits.trace_reflect_all_headers,
+        state.plan.limits.max_observed_request_body_bytes,
+        std::time::Duration::from_millis(state.plan.limits.http_header_read_timeout_ms.max(1)),
     )
     .await
     {
@@ -450,13 +453,7 @@ pub(super) async fn dispatch_mitm_request(
         req.headers_mut()
             .insert(http::header::HOST, http::HeaderValue::from_str(&authority)?);
     }
-    let http_modules_chain = state
-        .listener_http_modules(route.listener_name)
-        .cloned()
-        .unwrap_or_else(|| {
-            std::sync::Arc::new(crate::http::modules::CompiledHttpModuleChain::default())
-        });
-    let mut http_modules = http_modules_chain.start(
+    let mut http_modules = selected_plan.modules.start(
         state.clone(),
         crate::http::modules::HttpModuleSessionInit {
             proxy_kind: "mitm",
@@ -481,13 +478,13 @@ pub(super) async fn dispatch_mitm_request(
                 headers.as_deref(),
                 false,
             );
-            http_modules.on_logging(Some(&response), None);
+            http_modules.on_logging(Some(response.status()), None).await;
             annotate(&mut response, "http_module_local_response");
             return Ok(response);
         }
     }
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
     http_modules.on_upstream_request(&mut req).await?;
     if let Some(session) = export_session.as_ref() {
         let preview = crate::exporter::serialize_request_preview(&req);
@@ -498,12 +495,12 @@ pub(super) async fn dispatch_mitm_request(
         Ok(Ok(response)) => response.map(Body::from),
         Ok(Err(err)) => {
             let err = err.into();
-            http_modules.on_error(&err);
+            http_modules.on_error(&err).await;
             return Err(err);
         }
         Err(err) => {
             let err = err.into();
-            http_modules.on_error(&err);
+            http_modules.on_error(&err).await;
             return Err(err);
         }
     };
@@ -540,10 +537,14 @@ pub(super) async fn dispatch_mitm_request(
         headers.clone(),
         request_rpc.as_ref(),
         ResponseBodyObservationLimits {
-            max_body_bytes: state.config.runtime.max_observed_response_body_bytes,
+            max_body_bytes: selected_plan
+                .body_observation_limit(state.plan.limits.max_observed_response_body_bytes),
             read_timeout: std::time::Duration::from_millis(
-                state.config.runtime.upstream_http_timeout_ms.max(1),
+                state.plan.limits.upstream_http_timeout_ms.max(1),
             ),
+            force_body: selected_plan
+                .flags
+                .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
         },
     )
     .await?
@@ -581,7 +582,7 @@ pub(super) async fn dispatch_mitm_request(
                 updated_headers.as_deref(),
                 false,
             );
-            http_modules.on_logging(Some(&response), None);
+            http_modules.on_logging(Some(response.status()), None).await;
             annotate_with_tags(&mut response, "response_local_response", &policy_tags);
             return Ok(response);
         }
@@ -593,10 +594,8 @@ pub(super) async fn dispatch_mitm_request(
     }
     let keep_upgrade = websocket && response.status() == http::StatusCode::SWITCHING_PROTOCOLS;
     if keep_upgrade {
-        let upgrade_wait_timeout =
-            Duration::from_millis(state.config.runtime.upgrade_wait_timeout_ms);
-        let tunnel_idle_timeout =
-            Duration::from_millis(state.config.runtime.tunnel_idle_timeout_ms);
+        let upgrade_wait_timeout = Duration::from_millis(state.plan.limits.upgrade_wait_timeout_ms);
+        let tunnel_idle_timeout = Duration::from_millis(state.plan.limits.tunnel_idle_timeout_ms);
         if let Some(client_upgrade) = client_upgrade {
             spawn_upgrade_tunnel(
                 &mut response,
@@ -616,7 +615,7 @@ pub(super) async fn dispatch_mitm_request(
         headers.as_deref(),
         keep_upgrade,
     );
-    http_modules.on_logging(Some(&response), None);
+    http_modules.on_logging(Some(response.status()), None).await;
     annotate_with_tags(&mut response, "allow", &response_policy_tags);
     Ok(response)
 }
@@ -627,8 +626,8 @@ mod tests {
     use crate::http::body::to_bytes;
     use crate::http::mitm::proxy_mitm_request;
     use qpx_core::config::{
-        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CacheConfig, Config,
-        IdentityConfig, ListenerConfig, ListenerMode, MessagesConfig, RuntimeConfig,
+        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
+        IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MessagesConfig, RuntimeConfig,
         SystemLogConfig,
     };
     use std::io::Read;
@@ -685,26 +684,37 @@ mod tests {
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime: RuntimeConfig::default(),
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: AuthConfig::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: AuthConfig::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            listeners: vec![ListenerConfig {
+            edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
                 name: "forward".to_string(),
-                mode: ListenerMode::Forward,
+                mode: IngressEdgeMode::Forward,
                 listen: "127.0.0.1:0".to_string(),
                 default_action: ActionConfig {
                     kind: ActionKind::Direct,
                     upstream: None,
                     local_response: None,
                 },
+                original_dst: None,
                 tls_inspection: None,
                 rules: Vec::new(),
                 connection_filter: Vec::new(),
@@ -713,6 +723,7 @@ mod tests {
                 ftp: Default::default(),
                 xdp: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 policy_context: None,
                 http: None,
@@ -732,14 +743,9 @@ brotli_level: 5
 zstd_level: 3"#,
                 )
                 .expect("http module config")],
-            }],
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            reverse: Vec::new(),
+            })],
             upstreams: Vec::new(),
-            cache: CacheConfig::default(),
+            caches: Vec::new(),
         })
         .expect("runtime");
         let sender = spawn_send_request("mitm compression").await;

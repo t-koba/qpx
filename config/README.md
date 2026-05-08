@@ -10,27 +10,29 @@
 - Shared include fragments are in `config/fragments/`.
 - `qpxd run` / `qpxd check` can layer multiple files with repeated `--config`; later files override earlier ones.
 
-The YAML schema is flat and matches the serde structs in `qpx_core::config::types::*`. Write top-level sections such as `system_log`, `metrics`, `auth`, `identity_sources`, and `ext_authz` directly, and express reverse-route targets as `upstreams`, `backends`, `ipc`, or `local_response`.
+The YAML schema is canonical and edge-oriented. Use `telemetry` for logs/metrics/OTel/exporter settings, `security` for built-in auth and policy inputs, `http` for reusable HTTP policy, `traffic` for reusable rate-limit profiles, `caches` for cache backends, and `edges[]` for forward / reverse / transparent entry points.
 
 Reverse route targets are:
 
-- `upstreams` / `backends[].upstreams` with literal `http://` / `https://` / `ws://` / `wss://` upstream URLs.
-- `upstreams` / `backends[].upstreams` with names declared in top-level `upstreams`.
-- `ipc` for QPX-IPC forwarding to `qpxf`.
-- `local_response` for route-local responses without upstream forwarding.
+- `target.type: upstream` with literal `http://` / `https://` / `ws://` / `wss://` upstream URLs or names declared in top-level `upstreams`.
+- `target.type: weighted` with weighted backend sets.
+- `target.type: ipc` for QPX-IPC forwarding to `qpxf`.
+- `target.type: local_response` for route-local responses without upstream forwarding.
+- `target.type: tls_passthrough` for SNI passthrough routing.
 
 ## TLS backend notes
 
 Most samples assume the default `qpxd` build (`tls-rustls`).
 
 - HTTP/3 (`http3:` sections) and TLS inspection (`tls_inspection:` sections) require a `tls-rustls` build.
-- For `tls-native` builds, reverse TLS termination uses PKCS#12 (`reverse[].tls.certificates[].pkcs12`) instead of PEM `cert`/`key`.
+- For `tls-native` builds, reverse TLS termination uses PKCS#12 (`edges[kind=reverse].tls.certificates[].pkcs12`) instead of PEM `cert`/`key`.
 
 Example for `tls-native` reverse termination:
 
 ```yaml
-reverse:
-  - name: edge
+edges:
+  - kind: reverse
+    name: edge
     listen: "0.0.0.0:443"
     tls:
       certificates:
@@ -66,8 +68,8 @@ HTTP/3 backend selection is a build-time `qpxd` feature choice. YAML does not se
 
 ### 02-secure-egress (`config/usecases/02-secure-egress`)
 - `forward-upstream-chain.yaml`: forward proxy chained to upstream proxy.
-- `forward-local-auth-basic-digest.yaml`: built-in multi-user local auth (Basic/Digest) baseline for tests, local development, or small deployments; shows both cleartext `password` and precomputed Digest `ha1`.
-- `forward-ldap-group-policy.yaml`: direct LDAP bind/group policy when `qpx` itself terminates the auth hop; includes `user_filter`, `group_filter`, and `group_attr` overrides for non-default directory schemas.
+- `forward-local-auth-basic-digest.yaml`: optional built-in multi-user local auth (Basic/Digest) baseline for tests, local development, or small deployments; requires `qpxd` `auth-basic` / `auth-digest` features and shows both cleartext `password` and precomputed Digest `ha1`.
+- `forward-ldap-group-policy.yaml`: optional direct LDAP bind/group policy when `qpx` itself terminates the auth hop; requires `auth-ldap-rustls` or `auth-ldap-native` and includes `user_filter`, `group_filter`, and `group_attr` overrides for non-default directory schemas.
 - `forward-trusted-identity-ext-authz.yaml`: trusted identity ingestion + external authz policy callout.
 - `forward-signed-assertion-policy.yaml`: locally verified signed identity assertions (`signed_assertion`) + external authz, including `user_from_sub`.
 - `forward-tls-inspection-selective.yaml`: selective TLS inspection/tunnel/block.
@@ -94,7 +96,7 @@ HTTP/3 backend selection is a build-time `qpxd` feature choice. YAML does not se
 - `reverse-http3-terminate.yaml`: reverse HTTP/3 terminate mode. Works with either backend.
 - `reverse-http3-passthrough.yaml`: reverse HTTP/3 UDP passthrough mode. Backend-neutral.
 - `reverse-websocket-upstream.yaml`: reverse publish profile for `ws://` and `wss://` upstream backends, including health checks.
-- `reverse-http-guard-lite.yaml`: lightweight reverse-edge request hardening via reusable `http_guard_profiles`.
+- `reverse-http-guard-lite.yaml`: lightweight reverse-edge request hardening via reusable `http.guard_profiles`.
 - `reverse-rpc-aware-policy.yaml`: response-stage RPC-aware policy for `gRPC`, `Connect`, and `gRPC-Web`, including protocol-correct local responses.
 
 ### 04-http3-and-masque (`config/usecases/04-http3-and-masque`)
@@ -149,6 +151,7 @@ HTTP/3 backend selection is a build-time `qpxd` feature choice. YAML does not se
 - `qpxf.yaml`: `qpxf` executor sample (CGI/WASM handlers) backed by repo-local fixture handlers so `qpxf check` and sample e2e work out of the box; override `QPXF_SAMPLE_CGI_ROOT` / `QPXF_SAMPLE_WASM_MODULE` for your own handlers.
 - `qpx-tcp.yaml`: `qpxd` reverse proxy sample using `ipc.mode: tcp`. `listen` is overridable with `QPX_IPC_GATEWAY_TCP_LISTEN`.
 - `qpxf-tcp.yaml`: `qpxf` TCP listener sample (`allow_insecure_tcp: true`) aligned with `qpx-tcp.yaml` for loopback smoke tests; tighten `host:` / `path_regex:` after validation if needed.
+- `qpxf-fastcgi.yaml`: `qpxf` persistent backend sample for FastCGI and SCGI responders. `qpxf check` validates routing and backend settings without connecting to the external responder.
 
 ### 99-test-fixtures (`config/usecases/99-test-fixtures`)
 - `e2e-forward.yaml`
@@ -201,27 +204,28 @@ cargo build -p qpxd -p qpxf
 
 ## Notes
 
-- `listeners[].default_action.type: respond` and `listeners[].rules[].action.type: respond` both require `local_response`.
-- Reverse routes use exactly one target surface: `upstreams`, `backends`, `ipc`, or `local_response`.
-- `upstreams` / `backends[].upstreams` accept either literal `http://` / `https://` / `ws://` / `wss://` URLs or names from top-level `upstreams`.
-- `connection_filter` is a separate early-drop DSL on `listeners[]` and `reverse[]`. It requires `match:` plus `action.type: block`, is limited to transport/TLS metadata such as `src_ip`, `dst_port`, `sni`, `alpn`, `tls_version`, and `tls_fingerprint`, and emits `connection_filter_drop` audit entries when it blocks a connection.
-- `destination_resolution.defaults` is the shared destination-intelligence arbitration policy. Override it on `listeners[]`, `reverse[]`, and `reverse[].routes[]` when a scope needs different evidence precedence, conflict handling, or minimum confidence thresholds.
-- `http_guard_profiles` is the reusable lightweight HTTP guard surface. Attach a profile with `listeners[].http_guard_profile` or `reverse[].routes[].http_guard_profile` to enable smuggling/framing checks and bounded path/query/header/body parsing.
+- `edges[kind=forward|transparent].default_action.type: respond` and `edges[].rules[].action.type: respond` both require `local_response`.
+- Reverse routes use exactly one typed `target`: `upstream`, `weighted`, `ipc`, `local_response`, or `tls_passthrough`.
+- `target.type: upstream` and weighted backend `upstreams` accept either literal `http://` / `https://` / `ws://` / `wss://` URLs or names from top-level `upstreams`.
+- `connection_filter` is a separate early-drop DSL on `edges[]`. It requires `match:` plus `action.type: block`, is limited to transport/TLS metadata such as `src_ip`, `dst_port`, `sni`, `alpn`, `tls_version`, and `tls_fingerprint`, and emits `connection_filter_drop` audit entries when it blocks a connection.
+- `security.destination.defaults` is the shared destination-intelligence arbitration policy. Override it on `edges[]` and `edges[kind=reverse].routes[]` when a scope needs different evidence precedence, conflict handling, or minimum confidence thresholds.
+- `http.guard_profiles` is the reusable lightweight HTTP guard surface. Attach a profile with `edges[].http_guard_profile` or `edges[kind=reverse].routes[].http_guard_profile` to enable smuggling/framing checks and bounded path/query/header/body parsing.
 - Runtime knobs worth calling out explicitly: `runtime.max_h3_streams_per_connection`, `runtime.upstream_http_timeout_ms`, `runtime.max_observed_request_body_bytes`, `runtime.max_observed_response_body_bytes`, `runtime.trace_enabled`, and `runtime.trace_reflect_all_headers`. See `runtime-multicore-scaling.yaml` and `config/qpx.example.yaml`.
 - `forward-trace-debug.yaml` is the dedicated loopback-only sample for TRACE diagnostics. Keep `trace_reflect_all_headers: false` unless you explicitly need full header echo for local troubleshooting.
-- Built-in auth supports `auth.users[].ha1` for Digest HA1 preload, and LDAP supports `user_filter`, `group_filter`, and `group_attr`. See `forward-local-auth-basic-digest.yaml` and `forward-ldap-group-policy.yaml`.
+- Optional built-in auth supports `auth.users[].ha1` for Digest HA1 preload, and LDAP supports `user_filter`, `group_filter`, and `group_attr`. These require explicit `qpxd` auth features. See `forward-local-auth-basic-digest.yaml` and `forward-ldap-group-policy.yaml`.
 - Trusted identity mapping supports `map.user_from_subject_cn` for mTLS subjects and `assertion.claims.user_from_sub` / `groups_separator` for signed assertions. See `reverse-mtls-identity-routing.yaml` and `forward-signed-assertion-policy.yaml`.
 - Advanced rule matchers include `http_version`, `tls_version`, `tls_fingerprint`, `request_size`, `response_size`, destination `destination.<dimension>.source` / `destination.<dimension>.confidence`, `upstream_cert`, and reverse-TLS `client_cert`. See `forward-destination-intelligence-and-trust.yaml` and `config/qpx.example.yaml`.
 - `match.rpc.*` is the shared RPC-aware matcher family on HTTP rules and response rules. Use `protocol`, `service`, `method`, `status`, `message_size`, `message`, and `trailers` to write `gRPC` / `Connect` / `gRPC-Web` policy without a separate gateway DSL. See `reverse-rpc-aware-policy.yaml`.
 - `action.local_response.rpc` emits protocol-correct local responses for `grpc`, `connect`, and `grpc_web` on request rules. Response-stage policy uses the same payload shape under `http.response_rules[].effects.local_response.rpc`.
-- HTTP modules are configured with `type`, optional `id`, and optional `order`. Built-ins expose field-level knobs such as compression `max_body_bytes` / `content_types`, subrequest `pass_headers` / header capture, and cache purge `methods` / `response_*`. See `http-modules-advanced.yaml`.
+- HTTP modules are configured with `type`, optional `id`, and optional `order`. Built-ins expose field-level knobs such as compression `max_body_bytes` / `content_types`, subrequest `allowed_schemes` / `allowed_hosts` / `max_response_bytes` / header capture, and cache purge `methods` / `response_*`. See `http-modules-advanced.yaml`.
+- Plaintext capture can be enabled globally in `telemetry.exporter.capture` or targeted on an edge/route with `capture.plaintext`. Plaintext body capture requires `capture.plaintext.max_body_bytes`; redaction supports `headers`, `query_keys`, and simple JSON paths such as `$.password`.
 - On `ipc` routes, `ipc.mode: shm` (default) uses a shared-memory ring for body transfer and requires `qpxd` and `qpxf` on the same host. Use `ipc.mode: tcp` for cross-host deployments.
 - `identity_sources[].type: signed_assertion` locally verifies JWS/JWT assertions. Use `assertion.secret_env` for HS* algorithms or `assertion.public_key_env` for RS*/ES* algorithms, then map claims into subject fields.
 - `named_sets` can be backed by inline `values` or `file`. For destination intelligence, use `type: domain|cidr|string|regex` and prefix the set name with `category:`, `reputation:`, or `application:`. `qpxd` also watches `named_sets[].file` targets during hot reload.
 - `tls_trust` / `upstream_trust` are available on named upstreams, reverse routes, and TLS inspection. They enforce upstream pinning, issuer/SAN constraints, and optional per-upstream mTLS client cert selection via `client_cert` / `client_key`.
-- `reverse[].sni_host_exceptions` is the explicit allowlist for host/SNI mismatch exceptions when `enforce_sni_host_match: true` is enabled.
+- `edges[kind=reverse].sni_host_exceptions` is the explicit allowlist for host/SNI mismatch exceptions when `enforce_sni_host_match: true` is enabled.
 - `resilience.outlier_detection.consecutive_failures.resets` counts transport resets alongside 5xx/timeouts for ejection decisions on named upstreams.
 - `reverse-tls-acme-letsencrypt.yaml` now also shows `acme.directory_url` for staging/private ACME endpoints.
 - Transport-aware shaping uses one canonical surface: `rate_limit` / `rate_limit_profiles` with `apply_to`, `requests`, `traffic`, and `sessions`. WebTransport supports session-wide `webtransport` plus `webtransport_bidi`, `webtransport_uni`, `webtransport_datagram`, and direction-specific `*_downstream` / `*_upstream` scopes.
 - Reverse-route retry/ejection/concurrency policy is expressed with `resilience`; named upstreams use the same `resilience` surface.
-- Response-stage rules live under `listeners[].http.response_rules` and `reverse[].routes[].http.response_rules`, and the same response-aware policy surface is enforced in forward, MITM, transparent HTTP, and reverse HTTP paths.
+- Response-stage rules live under `edges[].http.response_rules` and `edges[kind=reverse].routes[].http.response_rules`, and the same response-aware policy surface is enforced in forward, MITM, transparent HTTP, and reverse HTTP paths.

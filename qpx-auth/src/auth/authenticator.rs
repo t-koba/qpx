@@ -3,17 +3,17 @@ use anyhow::anyhow;
 #[cfg(feature = "ldap-auth")]
 use anyhow::Context;
 use anyhow::Result;
-#[cfg(feature = "auth-proxy")]
+#[cfg(feature = "basic-auth")]
 use base64::engine::general_purpose::STANDARD as BASE64;
-#[cfg(feature = "auth-proxy")]
+#[cfg(feature = "basic-auth")]
 use base64::Engine;
 #[cfg(feature = "ldap-auth")]
 use std::env;
-#[cfg(feature = "auth-proxy")]
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use std::net::IpAddr;
 #[cfg(any(feature = "ldap-auth", feature = "digest-auth"))]
 use std::time::Duration;
-#[cfg(feature = "auth-proxy")]
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use tracing::Level;
 
 use qpx_core::config::AuthConfig;
@@ -24,21 +24,23 @@ use super::cache::LdapCache;
 use super::digest::sha256_hex;
 #[cfg(feature = "digest-auth")]
 use super::digest::{constant_time_eq_hex_lower, parse_digest, DigestAlgorithm, NonceStore};
-#[cfg(feature = "auth-proxy")]
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use super::local::LocalUserEntry;
-#[cfg(feature = "auth-proxy")]
-use super::util::{constant_time_eq_bytes, escape_quoted_header_value};
+#[cfg(feature = "basic-auth")]
+use super::util::constant_time_eq_bytes;
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+use super::util::escape_quoted_header_value;
 use super::Authenticator;
 #[cfg(feature = "ldap-auth")]
 use super::LdapAuthenticator;
-#[cfg(feature = "auth-proxy")]
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use super::{AuthChallenge, AuthOutcome, AuthenticatedUser};
 
 impl Authenticator {
     pub fn new(config: &AuthConfig, realm: &str) -> Result<Self> {
-        #[cfg(feature = "auth-proxy")]
+        #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
         let mut local = std::collections::HashMap::new();
-        #[cfg(feature = "auth-proxy")]
+        #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
         for user in &config.users {
             local.insert(
                 user.username.clone(),
@@ -75,7 +77,7 @@ impl Authenticator {
 
         Ok(Self {
             realm: realm.to_string(),
-            #[cfg(feature = "auth-proxy")]
+            #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
             local,
             #[cfg(feature = "ldap-auth")]
             ldap,
@@ -90,7 +92,7 @@ impl Authenticator {
         &self.realm
     }
 
-    #[cfg(feature = "auth-proxy")]
+    #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
     fn strip_auth_scheme<'a>(header_value: &'a str, scheme: &str) -> Option<&'a str> {
         let value = header_value.trim_start();
         if value.len() <= scheme.len() {
@@ -108,7 +110,7 @@ impl Authenticator {
         Some(rest.trim_start_matches(|c: char| c.is_ascii_whitespace()))
     }
 
-    #[cfg(feature = "auth-proxy")]
+    #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
     pub async fn authenticate_proxy(
         &self,
         src_ip: Option<IpAddr>,
@@ -146,36 +148,39 @@ impl Authenticator {
             return Ok(AuthOutcome::Challenge(self.build_challenge()));
         }
 
-        if let Some(basic) = Self::strip_auth_scheme(header, "Basic") {
-            if let Some(user) = self.verify_basic(basic, required_providers).await? {
+        #[cfg(feature = "basic-auth")]
+        {
+            if let Some(basic) = Self::strip_auth_scheme(header, "Basic") {
+                if let Some(user) = self.verify_basic(basic, required_providers).await? {
+                    if tracing::enabled!(target: "audit_log", Level::INFO) {
+                        tracing::info!(
+                            target: "audit_log",
+                            event = "auth",
+                            outcome = "allowed",
+                            src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                            method = method,
+                            uri = uri,
+                            username = %user.username,
+                            provider = %user.provider,
+                            required_providers = ?required_providers,
+                        );
+                    }
+                    return Ok(AuthOutcome::Allowed(user));
+                }
                 if tracing::enabled!(target: "audit_log", Level::INFO) {
                     tracing::info!(
                         target: "audit_log",
                         event = "auth",
-                        outcome = "allowed",
+                        outcome = "challenge",
+                        reason = "invalid_basic_credentials",
                         src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                         method = method,
                         uri = uri,
-                        username = %user.username,
-                        provider = %user.provider,
                         required_providers = ?required_providers,
                     );
                 }
-                return Ok(AuthOutcome::Allowed(user));
+                return Ok(AuthOutcome::Challenge(self.build_challenge()));
             }
-            if tracing::enabled!(target: "audit_log", Level::INFO) {
-                tracing::info!(
-                    target: "audit_log",
-                    event = "auth",
-                    outcome = "challenge",
-                    reason = "invalid_basic_credentials",
-                    src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
-                    method = method,
-                    uri = uri,
-                    required_providers = ?required_providers,
-                );
-            }
-            return Ok(AuthOutcome::Challenge(self.build_challenge()));
         }
 
         if let Some(digest) = Self::strip_auth_scheme(header, "Digest") {
@@ -232,7 +237,7 @@ impl Authenticator {
         Ok(AuthOutcome::Challenge(self.build_challenge()))
     }
 
-    #[cfg(feature = "auth-proxy")]
+    #[cfg(feature = "basic-auth")]
     async fn verify_basic(
         &self,
         payload: &str,
@@ -372,10 +377,11 @@ impl Authenticator {
         Ok(None)
     }
 
-    #[cfg(feature = "auth-proxy")]
+    #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
     fn build_challenge(&self) -> AuthChallenge {
         let mut headers = Vec::new();
         let escaped_realm = escape_quoted_header_value(self.realm.as_str());
+        #[cfg(feature = "basic-auth")]
         headers.push(format!("Basic realm=\"{}\"", escaped_realm));
         #[cfg(feature = "digest-auth")]
         {

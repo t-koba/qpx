@@ -471,7 +471,7 @@ where
             }
             Ok(None) => {}
             Err(err) => {
-                warn!(error = ?err, "reverse raw http/1 response body relay failed");
+                warn!(error = ?err, "reverse_edges raw http/1 response body relay failed");
                 sender.abort();
             }
         }

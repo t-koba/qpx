@@ -78,6 +78,10 @@ pub enum BackendConfig {
     Cgi(CgiBackendConfig),
     #[serde(rename = "wasm")]
     Wasm(WasmBackendConfig),
+    #[serde(rename = "fastcgi")]
+    FastCgi(FastCgiBackendConfig),
+    #[serde(rename = "scgi")]
+    Scgi(ScgiBackendConfig),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -102,6 +106,8 @@ pub struct WasmBackendConfig {
     pub module: PathBuf,
     #[serde(default)]
     pub precompile: bool,
+    #[serde(default)]
+    pub pool: Option<WasmPoolConfig>,
     /// Maximum WASM module file size accepted by the executor (bytes).
     #[serde(default = "default_wasm_max_module_bytes")]
     pub max_module_bytes: u64,
@@ -118,6 +124,49 @@ pub struct WasmBackendConfig {
     #[serde(default = "default_max_stdout_bytes")]
     pub max_stdout_bytes: usize,
     /// Maximum WASM stderr capture size (bytes).
+    #[serde(default = "default_max_stderr_bytes")]
+    pub max_stderr_bytes: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WasmPoolConfig {
+    #[serde(default)]
+    pub min_idle: usize,
+    #[serde(default = "default_wasm_pool_max_instances")]
+    pub max_instances: usize,
+    #[serde(default)]
+    pub prewarm: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FastCgiBackendConfig {
+    pub address: String,
+    #[serde(default = "default_persistent_backend_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_persistent_backend_max_concurrency")]
+    pub max_concurrency: usize,
+    #[serde(default = "default_max_stdin_bytes")]
+    pub max_stdin_bytes: usize,
+    #[serde(default = "default_max_stdout_bytes")]
+    pub max_stdout_bytes: usize,
+    #[serde(default = "default_max_stderr_bytes")]
+    pub max_stderr_bytes: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScgiBackendConfig {
+    pub address: String,
+    #[serde(default = "default_persistent_backend_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_persistent_backend_max_concurrency")]
+    pub max_concurrency: usize,
+    #[serde(default = "default_max_stdin_bytes")]
+    pub max_stdin_bytes: usize,
+    #[serde(default = "default_max_stdout_bytes")]
+    pub max_stdout_bytes: usize,
     #[serde(default = "default_max_stderr_bytes")]
     pub max_stderr_bytes: usize,
 }
@@ -169,6 +218,18 @@ fn default_wasm_timeout_ms() -> u64 {
     10_000
 }
 
+fn default_wasm_pool_max_instances() -> usize {
+    1
+}
+
+fn default_persistent_backend_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_persistent_backend_max_concurrency() -> usize {
+    128
+}
+
 fn default_max_params_bytes() -> usize {
     1_048_576 // 1 MiB
 }
@@ -216,6 +277,55 @@ impl QpxfConfig {
         if self.conn_idle_timeout_ms == 0 {
             return Err(anyhow!("conn_idle_timeout_ms must be >= 1"));
         }
+        for (idx, handler) in self.handlers.iter().enumerate() {
+            match &handler.backend {
+                BackendConfig::FastCgi(config) => {
+                    validate_persistent_backend(
+                        "fastcgi",
+                        idx,
+                        config.address.as_str(),
+                        config.timeout_ms,
+                        config.max_concurrency,
+                        config.max_stdin_bytes,
+                        config.max_stdout_bytes,
+                        config.max_stderr_bytes,
+                    )?;
+                }
+                BackendConfig::Scgi(config) => {
+                    validate_persistent_backend(
+                        "scgi",
+                        idx,
+                        config.address.as_str(),
+                        config.timeout_ms,
+                        config.max_concurrency,
+                        config.max_stdin_bytes,
+                        config.max_stdout_bytes,
+                        config.max_stderr_bytes,
+                    )?;
+                }
+                BackendConfig::Wasm(config) => {
+                    if let Some(pool) = config.pool.as_ref() {
+                        if pool.max_instances == 0 {
+                            return Err(anyhow!(
+                                "handlers[{idx}] wasm pool.max_instances must be >= 1"
+                            ));
+                        }
+                        if pool.min_idle > pool.max_instances {
+                            return Err(anyhow!(
+                                "handlers[{idx}] wasm pool.min_idle must be <= pool.max_instances"
+                            ));
+                        }
+                    }
+                    if config.max_stdin_bytes == 0
+                        || config.max_stdout_bytes == 0
+                        || config.max_stderr_bytes == 0
+                    {
+                        return Err(anyhow!("handlers[{idx}] wasm byte limits must be >= 1"));
+                    }
+                }
+                BackendConfig::Cgi(_) => {}
+            }
+        }
 
         if self.listen.starts_with("unix://") {
             return Ok(());
@@ -233,6 +343,44 @@ impl QpxfConfig {
         }
         Ok(())
     }
+}
+
+fn validate_persistent_backend(
+    kind: &str,
+    handler_idx: usize,
+    address: &str,
+    timeout_ms: u64,
+    max_concurrency: usize,
+    max_stdin_bytes: usize,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+) -> Result<()> {
+    if address.trim().is_empty() {
+        return Err(anyhow!(
+            "handlers[{handler_idx}] {kind} address must not be empty"
+        ));
+    }
+    if !address.starts_with("unix://") {
+        let _: SocketAddr = address
+            .parse()
+            .map_err(|err| anyhow!("handlers[{handler_idx}] {kind} address is invalid: {err}"))?;
+    }
+    if timeout_ms == 0 {
+        return Err(anyhow!(
+            "handlers[{handler_idx}] {kind} timeout_ms must be >= 1"
+        ));
+    }
+    if max_concurrency == 0 {
+        return Err(anyhow!(
+            "handlers[{handler_idx}] {kind} max_concurrency must be >= 1"
+        ));
+    }
+    if max_stdin_bytes == 0 || max_stdout_bytes == 0 || max_stderr_bytes == 0 {
+        return Err(anyhow!(
+            "handlers[{handler_idx}] {kind} byte limits must be >= 1"
+        ));
+    }
+    Ok(())
 }
 
 pub fn load_config(path: &Path) -> anyhow::Result<QpxfConfig> {

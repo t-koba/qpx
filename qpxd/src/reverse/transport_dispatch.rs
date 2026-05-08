@@ -14,7 +14,7 @@ pub(super) async fn dispatch_reverse_request(
     let router: Arc<ReverseRouter> = compiled.router.clone();
     let security_policy = compiled.security_policy.as_ref();
     let state = runtime.state();
-    let proxy_name = state.config.identity.proxy_name.clone();
+    let proxy_name = state.plan.identity.proxy_name.to_string();
     if let Err(err) =
         security_policy.validate_request(&req, conn.tls_sni.as_deref(), conn.tls_terminated)
     {
@@ -23,7 +23,7 @@ pub(super) async fn dispatch_reverse_request(
         return Ok(empty_interim_response(finalize_response_for_request(
             &request_method,
             req.version(),
-            state.config.identity.proxy_name.as_str(),
+            state.plan.identity.proxy_name.as_ref(),
             Response::builder()
                 .status(StatusCode::MISDIRECTED_REQUEST)
                 .body(Body::from("misdirected request"))?,
@@ -36,9 +36,10 @@ pub(super) async fn dispatch_reverse_request(
     let method = request_method.as_str();
     let path_owned = base.path.clone();
     let request_uri = base.request_uri.clone();
-    let reverse_cfg = state
-        .reverse_config(reverse.name.as_ref())
-        .ok_or_else(|| anyhow!("reverse config missing"))?;
+    let compiled_edge = state
+        .plan
+        .reverse_edge(reverse.name.as_ref())
+        .ok_or_else(|| anyhow!("compiled reverse edge missing"))?;
     let prefilter_ctx = MatchPrefilterContext {
         method: Some(method),
         dst_port: Some(conn.dst_port),
@@ -48,39 +49,43 @@ pub(super) async fn dispatch_reverse_request(
         path: path_owned.as_deref(),
     };
     let mut observation_plan = RequestObservationPlan::default();
-    let mut max_observed_request_body_bytes = state.config.runtime.max_observed_request_body_bytes;
+    let mut max_observed_request_body_bytes = state.plan.limits.max_observed_request_body_bytes;
     router.try_for_each_candidate_route(prefilter_ctx.clone(), |idx, route| {
-        let route_cfg = reverse_cfg
+        let route_plan = compiled_edge
             .routes
             .get(idx)
-            .ok_or_else(|| anyhow!("reverse route config missing"))?;
-        let route_http_guard = route_cfg
-            .http_guard_profile
-            .as_deref()
-            .and_then(|name| state.http_guard_profile(name));
+            .ok_or_else(|| anyhow!("compiled reverse route missing"))?;
+        let route_http_guard = route_plan.plan.guard.as_deref();
         if let Some(cap) =
             route_http_guard.and_then(|profile| profile.request_body_observation_cap())
         {
             max_observed_request_body_bytes = max_observed_request_body_bytes.min(cap);
         }
+        max_observed_request_body_bytes = route_plan
+            .plan
+            .body_observation_limit(max_observed_request_body_bytes);
         let guard_requires_buffering =
             route_http_guard.is_some_and(|profile| profile.requires_request_body_buffering(&req));
-        Ok::<bool, anyhow::Error>(observation_plan.include(
-            route.requires_request_size(),
-            route.requires_request_body_observation()
-                || route.response_rules_require_request_body_observation()
-                || guard_requires_buffering,
-            route.requires_request_rpc_context()
-                || route.response_rules_require_request_rpc_context(),
-        ))
+        Ok::<bool, anyhow::Error>(
+            observation_plan.include(
+                route.requires_request_size(),
+                route.requires_request_body_observation()
+                    || route.response_rules_require_request_body_observation()
+                    || route_plan
+                        .plan
+                        .flags
+                        .contains(crate::runtime::PlanFlags::CAPTURE_BODY)
+                    || guard_requires_buffering,
+                route.requires_request_rpc_context()
+                    || route.response_rules_require_request_rpc_context(),
+            ),
+        )
     })?;
     req = match observation_plan
         .observe_request(
             req,
             max_observed_request_body_bytes,
-            std::time::Duration::from_millis(
-                state.config.runtime.http_header_read_timeout_ms.max(1),
-            ),
+            std::time::Duration::from_millis(state.plan.limits.http_header_read_timeout_ms.max(1)),
         )
         .await
     {
@@ -108,18 +113,12 @@ pub(super) async fn dispatch_reverse_request(
     let mut request_destination_cache =
         std::collections::HashMap::<String, crate::destination::DestinationMetadata>::new();
     router.try_for_each_candidate_route(prefilter_ctx, |idx, candidate| {
-        let route_cfg = reverse_cfg
+        let route_plan = compiled_edge
             .routes
             .get(idx)
-            .ok_or_else(|| anyhow!("reverse route config missing"))?;
-        let resolution_override = merge_destination_resolution_override(
-            reverse_cfg.destination_resolution.as_ref(),
-            route_cfg.destination_resolution.as_ref(),
-        );
-        let effective_policy = EffectivePolicyContext::merged(
-            reverse_cfg.policy_context.as_ref(),
-            candidate.policy_context.as_ref(),
-        );
+            .ok_or_else(|| anyhow!("compiled reverse route missing"))?;
+        let resolution_override = route_plan.plan.destination_resolution.as_ref();
+        let effective_policy = route_plan.plan.policy_context.clone();
         let sanitized_headers = sanitize_headers_for_policy(
             &state,
             &effective_policy,
@@ -144,7 +143,7 @@ pub(super) async fn dispatch_reverse_request(
                     &conn,
                     host.as_str(),
                     None,
-                    resolution_override.as_ref(),
+                    resolution_override,
                 )
             })
             .clone();
@@ -173,18 +172,12 @@ pub(super) async fn dispatch_reverse_request(
     let route = selected_route_idx
         .and_then(|idx| router.route_at(idx))
         .ok_or_else(|| anyhow!("no route matched"))?;
-    let route_cfg = reverse_cfg
+    let selected_route_plan = compiled_edge
         .routes
         .get(selected_route_idx.expect("selected route index"))
-        .ok_or_else(|| anyhow!("reverse route config missing"))?;
-    let resolution_override = merge_destination_resolution_override(
-        reverse_cfg.destination_resolution.as_ref(),
-        route_cfg.destination_resolution.as_ref(),
-    );
-    let route_http_guard = route_cfg
-        .http_guard_profile
-        .as_deref()
-        .and_then(|name| state.http_guard_profile(name));
+        .ok_or_else(|| anyhow!("compiled selected reverse route missing"))?;
+    let resolution_override = selected_route_plan.plan.destination_resolution.as_ref();
+    let route_http_guard = selected_route_plan.plan.guard.as_deref();
     let route_max_observed_request_body_bytes = route_http_guard
         .and_then(|profile| profile.request_body_observation_cap())
         .map(|cap| cap.min(max_observed_request_body_bytes))
@@ -195,13 +188,7 @@ pub(super) async fn dispatch_reverse_request(
         .get(&format!("{:?}", resolution_override))
         .cloned()
         .unwrap_or_else(|| {
-            classify_reverse_destination(
-                &state,
-                &conn,
-                host.as_str(),
-                None,
-                resolution_override.as_ref(),
-            )
+            classify_reverse_destination(&state, &conn, host.as_str(), None, resolution_override)
         });
     if route_http_guard.is_some_and(|profile| profile.requires_request_body_buffering(&req))
         && crate::http::body_size::observed_request_bytes(&req).is_none()
@@ -209,9 +196,7 @@ pub(super) async fn dispatch_reverse_request(
         req = match buffer_request_body(
             req,
             route_max_observed_request_body_bytes,
-            std::time::Duration::from_millis(
-                state.config.runtime.http_header_read_timeout_ms.max(1),
-            ),
+            std::time::Duration::from_millis(state.plan.limits.http_header_read_timeout_ms.max(1)),
         )
         .await
         {
@@ -371,16 +356,12 @@ pub(super) async fn dispatch_reverse_request(
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
-    } = state.policy.rate_limiters.collect_checked_request(
-        crate::rate_limit::RequestLimitCollectInput {
-            listener: None,
-            rule: None,
-            profile: None,
-            scope: crate::rate_limit::TransportScope::Request,
-            extra: Some(&route.rate_limit),
-            ctx: &request_limit_ctx,
-            cost: 1,
-        },
+    } = state.policy.rate_limiters.collect_checked_plan_request(
+        &selected_route_plan.plan.rate_limits,
+        None,
+        crate::rate_limit::TransportScope::Request,
+        &request_limit_ctx,
+        1,
     )?;
     if let Some(retry_after) = retry_after {
         let mut response = finalize_response_for_request(
@@ -432,9 +413,9 @@ pub(super) async fn dispatch_reverse_request(
     if let Some(response) = handle_max_forwards_in_place(
         &mut req,
         proxy_name.as_str(),
-        state.config.runtime.trace_reflect_all_headers,
-        state.config.runtime.max_observed_request_body_bytes,
-        std::time::Duration::from_millis(state.config.runtime.http_header_read_timeout_ms.max(1)),
+        state.plan.limits.trace_reflect_all_headers,
+        state.plan.limits.max_observed_request_body_bytes,
+        std::time::Duration::from_millis(state.plan.limits.http_header_read_timeout_ms.max(1)),
     )
     .await
     {
@@ -454,12 +435,13 @@ pub(super) async fn dispatch_reverse_request(
     }
 
     apply_request_headers(req.headers_mut(), route_headers.as_deref());
-    let request_cache_policy = route
-        .cache_policy
+    let request_cache_policy = selected_route_plan
+        .plan
+        .cache
         .as_ref()
-        .filter(|cache| cache.enabled && !cache_bypass)
+        .filter(|_| !cache_bypass)
         .cloned();
-    let mut http_modules = route.http_modules.start(
+    let mut http_modules = selected_route_plan.plan.modules.start(
         state.clone(),
         crate::http::modules::HttpModuleSessionInit {
             proxy_kind: "reverse",
@@ -486,17 +468,15 @@ pub(super) async fn dispatch_reverse_request(
                 route_headers.as_deref(),
                 false,
             );
-            http_modules.on_logging(Some(&response), None);
+            http_modules.on_logging(Some(response.status()), None).await;
             annotate(&mut response, "http_module_local_response");
             return Ok(empty_interim_response(response));
         }
     }
 
     if is_websocket_upgrade(req.headers()) {
-        let upgrade_wait_timeout =
-            Duration::from_millis(state.config.runtime.upgrade_wait_timeout_ms);
-        let tunnel_idle_timeout =
-            Duration::from_millis(state.config.runtime.tunnel_idle_timeout_ms);
+        let upgrade_wait_timeout = Duration::from_millis(state.plan.limits.upgrade_wait_timeout_ms);
+        let tunnel_idle_timeout = Duration::from_millis(state.plan.limits.tunnel_idle_timeout_ms);
         let selected_upstream = if override_upstream.is_none() {
             Some(
                 route
@@ -511,6 +491,11 @@ pub(super) async fn dispatch_reverse_request(
             .as_ref()
             .or_else(|| selected_upstream.as_ref().map(|upstream| &upstream.origin))
             .ok_or_else(|| anyhow!("no healthy upstream"))?;
+        let export_session = state.export_session_for_plan(
+            &selected_route_plan.plan,
+            conn.remote_addr,
+            upstream_origin.upstream.as_str(),
+        );
         let mut concurrency_ctx = request_limit_ctx.clone();
         if concurrency_ctx.upstream.is_none() {
             concurrency_ctx.upstream = selected_upstream
@@ -535,6 +520,10 @@ pub(super) async fn dispatch_reverse_request(
             upstream.inflight.fetch_add(1, Ordering::Relaxed);
         }
         let started = Instant::now();
+        if let Some(session) = export_session.as_ref() {
+            let preview = crate::exporter::serialize_request_preview(&req);
+            session.emit_plaintext(true, &preview);
+        }
         let response = timeout(
             route_timeout,
             proxy_websocket(
@@ -574,6 +563,10 @@ pub(super) async fn dispatch_reverse_request(
                 .increment(1);
                 resp = http_modules.on_upstream_response(resp).await?;
                 resp = http_modules.prepare_downstream_response(resp).await?;
+                if let Some(session) = export_session.as_ref() {
+                    let preview = crate::exporter::serialize_response_preview(&resp);
+                    session.emit_plaintext(false, &preview);
+                }
                 let keep_upgrade = resp.status() == StatusCode::SWITCHING_PROTOCOLS;
                 let resp_version = resp.version();
                 finalize_response_with_headers_in_place(
@@ -584,12 +577,12 @@ pub(super) async fn dispatch_reverse_request(
                     route_headers.as_deref(),
                     keep_upgrade,
                 );
-                http_modules.on_logging(Some(&resp), None);
+                http_modules.on_logging(Some(resp.status()), None).await;
                 annotate(&mut resp, "allow");
                 return Ok(empty_interim_response(resp));
             }
             Ok(Err(err)) => {
-                http_modules.on_error(&err);
+                http_modules.on_error(&err).await;
                 if let Some(upstream) = selected_upstream.as_ref() {
                     record_reverse_upstream_error(upstream, &route.policy, &err);
                 }
@@ -602,7 +595,7 @@ pub(super) async fn dispatch_reverse_request(
             }
             Err(_) => {
                 let err = anyhow!("upstream timeout");
-                http_modules.on_error(&err);
+                http_modules.on_error(&err).await;
                 if let Some(upstream) = selected_upstream.as_ref() {
                     record_reverse_upstream_timeout(upstream, &route.policy);
                 }
@@ -655,7 +648,7 @@ pub(super) async fn dispatch_reverse_request(
                     route_headers.as_deref(),
                     false,
                 );
-                http_modules.on_logging(Some(&hit), None);
+                http_modules.on_logging(Some(hit.status()), None).await;
                 annotate(&mut hit, "cache_hit");
                 return Ok(empty_interim_response(hit));
             }
@@ -723,8 +716,8 @@ pub(super) async fn dispatch_reverse_request(
                                                 revalidation_state: Some(state),
                                                 body_read_timeout: std::time::Duration::from_millis(
                                                     state_ref
-                                                        .config
-                                                        .runtime
+                                                        .plan
+                                                        .limits
                                                         .upstream_http_timeout_ms
                                                         .max(1),
                                                 ),
@@ -748,7 +741,7 @@ pub(super) async fn dispatch_reverse_request(
                     route_headers.as_deref(),
                     false,
                 );
-                http_modules.on_logging(Some(&hit), None);
+                http_modules.on_logging(Some(hit.status()), None).await;
                 annotate(&mut hit, "cache_stale");
                 return Ok(empty_interim_response(hit));
             }
@@ -762,7 +755,7 @@ pub(super) async fn dispatch_reverse_request(
                     route_headers.as_deref(),
                     false,
                 );
-                http_modules.on_logging(Some(&response), None);
+                http_modules.on_logging(Some(response.status()), None).await;
                 annotate(&mut response, "cache_only_if_cached_miss");
                 return Ok(empty_interim_response(response));
             }
@@ -812,7 +805,7 @@ pub(super) async fn dispatch_reverse_request(
                                     route_headers.as_deref(),
                                     false,
                                 );
-                                http_modules.on_logging(Some(&hit), None);
+                                http_modules.on_logging(Some(hit.status()), None).await;
                                 annotate(&mut hit, "cache_collapsed_hit");
                                 return Ok(empty_interim_response(hit));
                             }
@@ -827,7 +820,7 @@ pub(super) async fn dispatch_reverse_request(
                                     route_headers.as_deref(),
                                     false,
                                 );
-                                http_modules.on_logging(Some(&hit), None);
+                                http_modules.on_logging(Some(hit.status()), None).await;
                                 annotate(&mut hit, "cache_collapsed_stale");
                                 return Ok(empty_interim_response(hit));
                             }
@@ -842,7 +835,7 @@ pub(super) async fn dispatch_reverse_request(
                                     route_headers.as_deref(),
                                     false,
                                 );
-                                http_modules.on_logging(Some(&response), None);
+                                http_modules.on_logging(Some(response.status()), None).await;
                                 annotate(&mut response, "cache_only_if_cached_miss");
                                 return Ok(empty_interim_response(response));
                             }
@@ -862,8 +855,8 @@ pub(super) async fn dispatch_reverse_request(
     };
     let max_template_body_bytes = runtime
         .state()
-        .config
-        .runtime
+        .plan
+        .limits
         .max_reverse_retry_template_body_bytes;
     let mut mirror_upstreams = if request_is_templateable(&req, max_template_body_bytes) {
         route.select_mirror_upstreams(seed, sticky_seed)
@@ -885,7 +878,7 @@ pub(super) async fn dispatch_reverse_request(
                     req,
                     max_template_body_bytes,
                     std::time::Duration::from_millis(
-                        state.config.runtime.http_header_read_timeout_ms.max(1),
+                        state.plan.limits.http_header_read_timeout_ms.max(1),
                     ),
                 )
                 .await?,
@@ -938,6 +931,15 @@ pub(super) async fn dispatch_reverse_request(
                 http_modules
                     .on_upstream_request(&mut req_for_upstream)
                     .await?;
+                let export_session = state.export_session_for_plan(
+                    &selected_route_plan.plan,
+                    conn.remote_addr,
+                    ipc.endpoint_label(),
+                );
+                if let Some(session) = export_session.as_ref() {
+                    let preview = crate::exporter::serialize_request_preview(&req_for_upstream);
+                    session.emit_plaintext(true, &preview);
+                }
 
                 let response = timeout(
                     timeout_dur,
@@ -964,13 +966,18 @@ pub(super) async fn dispatch_reverse_request(
                             request_rpc: request_rpc.as_ref(),
                             route_headers: route_headers.clone(),
                             response: resp,
-                            max_observed_response_body_bytes: state
-                                .config
-                                .runtime
-                                .max_observed_response_body_bytes,
+                            max_observed_response_body_bytes: selected_route_plan
+                                .plan
+                                .body_observation_limit(
+                                    state.plan.limits.max_observed_response_body_bytes,
+                                ),
                             response_body_read_timeout: std::time::Duration::from_millis(
-                                state.config.runtime.upstream_http_timeout_ms.max(1),
+                                state.plan.limits.upstream_http_timeout_ms.max(1),
                             ),
+                            force_response_body_observation: selected_route_plan
+                                .plan
+                                .flags
+                                .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
                         })
                         .await?;
                         let (
@@ -1029,7 +1036,7 @@ pub(super) async fn dispatch_reverse_request(
                                     route_headers.as_deref(),
                                     false,
                                 );
-                                http_modules.on_logging(Some(&response), None);
+                                http_modules.on_logging(Some(response.status()), None).await;
                                 annotate_with_tags(
                                     &mut response,
                                     "response_rule_local_response",
@@ -1038,6 +1045,10 @@ pub(super) async fn dispatch_reverse_request(
                                 return Ok(empty_interim_response(response));
                             }
                         };
+                        if let Some(session) = export_session.as_ref() {
+                            let preview = crate::exporter::serialize_response_preview(&resp);
+                            session.emit_plaintext(false, &preview);
+                        }
                         if resp.status().is_server_error() {
                             if let Some(stale) = revalidation_state
                                 .as_ref()
@@ -1054,7 +1065,7 @@ pub(super) async fn dispatch_reverse_request(
                                     route_headers.as_deref(),
                                     false,
                                 );
-                                http_modules.on_logging(Some(&stale), None);
+                                http_modules.on_logging(Some(stale.status()), None).await;
                                 annotate(&mut stale, "stale_if_error");
                                 return Ok(empty_interim_response(stale));
                             }
@@ -1086,12 +1097,7 @@ pub(super) async fn dispatch_reverse_request(
                                     request_headers_snapshot: snapshot,
                                     revalidation_state: revalidation_state.take(),
                                     body_read_timeout: std::time::Duration::from_millis(
-                                        runtime
-                                            .state()
-                                            .config
-                                            .runtime
-                                            .upstream_http_timeout_ms
-                                            .max(1),
+                                        runtime.state().plan.limits.upstream_http_timeout_ms.max(1),
                                     ),
                                     backends: &runtime.state().cache.backends,
                                 },
@@ -1134,12 +1140,12 @@ pub(super) async fn dispatch_reverse_request(
                                 );
                             }
                         }
-                        http_modules.on_logging(Some(&resp), None);
+                        http_modules.on_logging(Some(resp.status()), None).await;
                         annotate_with_tags(&mut resp, "allow", response_policy_tags.as_ref());
                         return Ok(empty_interim_response(resp));
                     }
                     Ok(Err(err)) => {
-                        http_modules.on_error(&err);
+                        http_modules.on_error(&err).await;
                         counter!(
                             state.observability.metric_names.reverse_requests_total.clone(),
                             "result" => "error"
@@ -1149,7 +1155,7 @@ pub(super) async fn dispatch_reverse_request(
                     }
                     Err(_) => {
                         let err = anyhow!("upstream timeout");
-                        http_modules.on_error(&err);
+                        http_modules.on_error(&err).await;
                         counter!(
                             state.observability.metric_names.reverse_requests_total.clone(),
                             "result" => "timeout"
@@ -1196,13 +1202,13 @@ pub(super) async fn dispatch_reverse_request(
                     route_headers.as_deref(),
                     false,
                 );
-                http_modules.on_logging(Some(&stale), None);
+                http_modules.on_logging(Some(stale.status()), None).await;
                 annotate(&mut stale, "stale_if_error");
                 return Ok(empty_interim_response(stale));
             }
 
             if let Some(err) = last_err.as_ref() {
-                http_modules.on_error(err);
+                http_modules.on_error(err).await;
             }
             return Err(last_err.unwrap_or_else(|| anyhow!("upstream request failed")));
         }
@@ -1223,6 +1229,11 @@ pub(super) async fn dispatch_reverse_request(
             .as_ref()
             .or_else(|| selected_upstream.as_ref().map(|upstream| &upstream.origin))
             .ok_or_else(|| anyhow!("no upstream"))?;
+        let export_session = state.export_session_for_plan(
+            &selected_route_plan.plan,
+            conn.remote_addr,
+            upstream_origin.upstream.as_str(),
+        );
         let mut concurrency_ctx = request_limit_ctx.clone();
         if concurrency_ctx.upstream.is_none() {
             concurrency_ctx.upstream = selected_upstream
@@ -1262,6 +1273,10 @@ pub(super) async fn dispatch_reverse_request(
         http_modules
             .on_upstream_request(&mut req_for_upstream)
             .await?;
+        if let Some(session) = export_session.as_ref() {
+            let preview = crate::exporter::serialize_request_preview(&req_for_upstream);
+            session.emit_plaintext(true, &preview);
+        }
         let response = timeout(route_timeout, async {
             if upstream_origin.upstream.starts_with("ipc://")
                 || upstream_origin.upstream.starts_with("ipc+unix://")
@@ -1315,7 +1330,7 @@ pub(super) async fn dispatch_reverse_request(
                     &conn,
                     host.as_str(),
                     upstream_cert.as_ref(),
-                    resolution_override.as_ref(),
+                    resolution_override,
                 );
                 let response_rule = apply_response_rules(ResponseRuleInput {
                     route,
@@ -1327,13 +1342,16 @@ pub(super) async fn dispatch_reverse_request(
                     request_rpc: request_rpc.as_ref(),
                     route_headers: route_headers.clone(),
                     response: resp,
-                    max_observed_response_body_bytes: state
-                        .config
-                        .runtime
-                        .max_observed_response_body_bytes,
+                    max_observed_response_body_bytes: selected_route_plan
+                        .plan
+                        .body_observation_limit(state.plan.limits.max_observed_response_body_bytes),
                     response_body_read_timeout: std::time::Duration::from_millis(
-                        state.config.runtime.upstream_http_timeout_ms.max(1),
+                        state.plan.limits.upstream_http_timeout_ms.max(1),
                     ),
+                    force_response_body_observation: selected_route_plan
+                        .plan
+                        .flags
+                        .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
                 })
                 .await?;
                 let (
@@ -1398,7 +1416,7 @@ pub(super) async fn dispatch_reverse_request(
                             route_headers.as_deref(),
                             false,
                         );
-                        http_modules.on_logging(Some(&response), None);
+                        http_modules.on_logging(Some(response.status()), None).await;
                         annotate_with_tags(
                             &mut response,
                             "response_rule_local_response",
@@ -1407,6 +1425,10 @@ pub(super) async fn dispatch_reverse_request(
                         return Ok(empty_interim_response(response));
                     }
                 };
+                if let Some(session) = export_session.as_ref() {
+                    let preview = crate::exporter::serialize_response_preview(&resp);
+                    session.emit_plaintext(false, &preview);
+                }
                 if resp.status().is_server_error() {
                     if let Some(stale) = revalidation_state
                         .as_ref()
@@ -1431,7 +1453,7 @@ pub(super) async fn dispatch_reverse_request(
                             route_headers.as_deref(),
                             false,
                         );
-                        http_modules.on_logging(Some(&stale), None);
+                        http_modules.on_logging(Some(stale.status()), None).await;
                         annotate(&mut stale, "stale_if_error");
                         return Ok(empty_interim_response(stale));
                     }
@@ -1471,12 +1493,7 @@ pub(super) async fn dispatch_reverse_request(
                             request_headers_snapshot: snapshot,
                             revalidation_state: revalidation_state.take(),
                             body_read_timeout: std::time::Duration::from_millis(
-                                runtime
-                                    .state()
-                                    .config
-                                    .runtime
-                                    .upstream_http_timeout_ms
-                                    .max(1),
+                                runtime.state().plan.limits.upstream_http_timeout_ms.max(1),
                             ),
                             backends: &runtime.state().cache.backends,
                         },
@@ -1518,12 +1535,12 @@ pub(super) async fn dispatch_reverse_request(
                         );
                     }
                 }
-                http_modules.on_logging(Some(&resp), None);
+                http_modules.on_logging(Some(resp.status()), None).await;
                 annotate_with_tags(&mut resp, "allow", response_policy_tags.as_ref());
                 return Ok((interim, resp));
             }
             Ok(Err(err)) => {
-                http_modules.on_error(&err);
+                http_modules.on_error(&err).await;
                 if let Some(upstream) = selected_upstream.as_ref() {
                     record_reverse_upstream_error(upstream, &route.policy, &err);
                 }
@@ -1536,7 +1553,7 @@ pub(super) async fn dispatch_reverse_request(
             }
             Err(_) => {
                 let err = anyhow!("upstream timeout");
-                http_modules.on_error(&err);
+                http_modules.on_error(&err).await;
                 if let Some(upstream) = selected_upstream.as_ref() {
                     record_reverse_upstream_timeout(upstream, &route.policy);
                 }
@@ -1586,13 +1603,13 @@ pub(super) async fn dispatch_reverse_request(
             route_headers.as_deref(),
             false,
         );
-        http_modules.on_logging(Some(&stale), None);
+        http_modules.on_logging(Some(stale.status()), None).await;
         annotate(&mut stale, "stale_if_error");
         return Ok(empty_interim_response(stale));
     }
 
     if let Some(err) = last_err.as_ref() {
-        http_modules.on_error(err);
+        http_modules.on_error(err).await;
     }
     Err(last_err.unwrap_or_else(|| anyhow!("upstream request failed")))
 }

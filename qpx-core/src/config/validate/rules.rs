@@ -419,6 +419,31 @@ fn validate_subrequest_module(config: &SubrequestModuleConfig, context: &str) ->
             return Err(anyhow!("{module_context} timeout_ms must be >= 1"));
         }
     }
+    match config.max_response_bytes {
+        Some(max_response_bytes) if max_response_bytes > 0 => {}
+        _ => {
+            return Err(anyhow!(
+                "{module_context} max_response_bytes must be explicitly set and >= 1"
+            ));
+        }
+    }
+    if config.allowed_schemes.is_empty() {
+        return Err(anyhow!(
+            "{module_context} allowed_schemes must not be empty"
+        ));
+    }
+    for scheme in &config.allowed_schemes {
+        validate_non_empty_ascii(
+            scheme,
+            format!("{module_context} allowed_schemes[]").as_str(),
+        )?;
+    }
+    if config.allowed_hosts.is_empty() {
+        return Err(anyhow!("{module_context} allowed_hosts must not be empty"));
+    }
+    for host in &config.allowed_hosts {
+        validate_non_empty_ascii(host, format!("{module_context} allowed_hosts[]").as_str())?;
+    }
     for header in &config.pass_headers {
         validate_header_name(header, format!("{module_context} pass_headers[]").as_str())?;
     }
@@ -1133,7 +1158,7 @@ pub(super) fn validate_proxy_tunnel_upstream_requirement(
         && listener_upstream_proxy.is_none()
     {
         return Err(anyhow!(
-            "{context}: action type {:?} requires action.upstream or listeners[].upstream_proxy",
+            "{context}: action type {:?} requires action.upstream or edges[].upstream_proxy",
             action.kind
         ));
     }

@@ -1194,7 +1194,9 @@ mod tests {
 
         let mut stream = TcpStream::connect(addr).await.expect("connect");
         stream
-            .write_all(b"GET /asset HTTP/1.1\r\nHost: reverse.test\r\nConnection: close\r\n\r\n")
+            .write_all(
+                b"GET /asset HTTP/1.1\r\nHost: reverse_edges.test\r\nConnection: close\r\n\r\n",
+            )
             .await
             .expect("write request");
         let mut raw = Vec::new();

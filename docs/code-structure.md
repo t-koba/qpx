@@ -8,7 +8,7 @@ qpx is a Rust workspace with ten product/runtime crates plus one developer utili
 
 ```
 qpx-core   shared library: config loading, rule engine, TLS, exporter schema, IPC/SHM types
-qpx-auth   runtime library: proxy auth providers, Basic/Digest auth, LDAP auth, auth cache
+qpx-auth   optional runtime library: built-in proxy auth providers, Basic/Digest auth, LDAP auth, auth cache
 qpx-wasm   runtime library: WASI/wasmtime executor used by qpxf's `wasm` feature
 qpx-acme   runtime library: ACME HTTP-01 issuance/renewal and in-memory cert stores for qpxd
 qpx-h3     runtime library: clean-room HTTP/3 backend crate for qpxd (`http3-backend-qpx`)
@@ -29,7 +29,7 @@ Choose the backend by required protocol surface:
 - `http3-backend-qpx`: clean-room backend. It carries the clean-room terminate/listener path plus the full QPX-owned advanced HTTP/3 surface: CONNECT-UDP / MASQUE datagram relay, generic extended CONNECT, and WebTransport relay over HTTP/3 extended CONNECT.
 - Reverse HTTP/3 passthrough is backend-neutral because it stays in `qpxd` as raw UDP/QUIC session routing.
 
-The YAML schema is flat and maps directly to `qpx_core::config::types::*`. Top-level sections such as `system_log`, `metrics`, `auth`, `identity_sources`, and `ext_authz` are deserialized as written; reverse-route targets are expressed directly as `upstreams`, `backends`, `ipc`, or `local_response`.
+The YAML schema is canonical and edge-oriented. `qpx-core` deserializes canonical input (`telemetry`, `security`, `http`, `traffic`, `caches`, `edges[]`) and compiles it into the internal runtime config used by `qpxd`; reverse-route targets are represented as typed `target` objects.
 
 ### Request flow through qpxd
 
@@ -102,7 +102,7 @@ Shared building blocks that `qpxd`, `qpxr`, and `qpxc` all depend on. This crate
 
 ## Auth Runtime (`qpx-auth`)
 
-Runtime-only authentication machinery used by `qpxd`. This crate depends on `qpx-core::config` for auth schemas, but keeps LDAP, Basic/Digest parsing, and auth caches out of the shared core crate.
+Optional runtime-only built-in authentication machinery used by `qpxd` when `auth-basic`, `auth-digest`, or `auth-ldap-*` features are enabled. This crate depends on `qpx-core::config` for auth schemas, but keeps LDAP, Basic/Digest parsing, and auth caches out of the shared core crate and out of the default `qpxd` dependency graph.
 
 - `lib.rs`: crate root, public auth types, feature gating.
 - `auth/authenticator.rs`: `Authenticator` construction, Proxy-Authorization parsing, Basic/Digest verification, challenge generation.
@@ -211,7 +211,7 @@ Shared HTTP processing used by all three modes. Nothing in this directory is mod
 - `policy.rs`: shared policy evaluation for transparent and MITM paths — block/respond/proceed decision.
 - `mitm.rs`: MITM intercepted request handler — re-evaluates rules after TLS decryption, dispatches to upstream, supports WebSocket upgrade.
 - `mitm_dispatch.rs`: MITM HTTP dispatch internals — decrypted forward-mode policy, upstream dispatch, and listener-level HTTP module execution.
-- `modules.rs`: public in-process HTTP module/filter API — registry/factory surface for external Rust modules, per-request `HttpModuleContext`, borrowed/in-place request hooks, frozen request view for response-phase filters, and the ordered execution chain that runs request-header, cache, upstream, retry, response, error, and logging hooks. Built-ins (`response_compression`, `subrequest`, `cache_purge`) are registered through the same API as third-party modules.
+- `modules.rs`: public in-process HTTP module/filter API — registry/factory surface for external Rust modules, capability declarations, per-request `HttpModuleContext`, borrowed/in-place request hooks, frozen request view for response-phase filters, and stage-indexed compiled chains for request-header, cache, upstream, retry, response, error, and logging hooks. Built-ins (`response_compression`, `subrequest`, `cache_purge`) are registered through the same API as third-party modules.
 - `websocket.rs`: WebSocket upgrade detection and bidirectional upgraded-stream relay.
 - `upgrade.rs`: downstream HTTP/1 upgrade handoff — qpx-native `CONNECT` / `101 Switching Protocols` token that transfers the raw socket to tunnel handlers without routing through hyper's server adapter.
 - `local_response.rs`: policy response builder — constructs status/body/content-type/headers responses without upstream forwarding.
@@ -246,7 +246,7 @@ Outbound connection handling — how `qpxd` talks to origins and chained proxies
 - `pool.rs`: pooled connections to upstream proxies for forward-proxy chaining.
 - `connect.rs`: CONNECT-to-upstream helper — establishes a CONNECT tunnel through a chained proxy before forwarding.
 - `http1.rs`: HTTP/1.1 upstream proxy dispatch — absolute-form URI, WebSocket proxy, upstream endpoint parsing, Proxy-Authorization forwarding.
-- `origin.rs`: direct upstream dispatch (reverse/transparent) — dispatches `http://`, `https://`, `ws://`, and `wss://` upstreams plus the internal IPC URL path used by reverse transport. Routes `ipc`/`ipc+unix` targets to `ipc_client::proxy_ipc()`; selects h2-aware hyper sender for HTTP/HTTPS and the WebSocket upgrade path for WS/WSS; handles request URI rewriting. User-facing YAML expresses the IPC leg as `reverse[].routes[].ipc`.
+- `origin.rs`: direct upstream dispatch (reverse/transparent) — dispatches `http://`, `https://`, `ws://`, and `wss://` upstreams plus the internal IPC URL path used by reverse transport. Routes `ipc`/`ipc+unix` targets to `ipc_client::proxy_ipc()`; selects h2-aware hyper sender for HTTP/HTTPS and the WebSocket upgrade path for WS/WSS; handles request URI rewriting. User-facing YAML expresses the IPC leg as `edges[kind=reverse].routes[].target.type: ipc`.
 - `mod.rs`: module re-exports.
 
 ### Cache (`cache/`)
@@ -274,7 +274,7 @@ RFC 9111 proxy cache implementation. Used by both forward listeners and reverse 
 
 - `ftp.rs`: FTP-over-HTTP gateway — translates HTTP GET/PUT/LIST to FTP commands, PASV/PORT fallback, bounded transfer sizes.
 - `ipc_client.rs`: QPX-IPC client used by reverse `ipc:` routes. Sends an `IpcRequestMeta` JSON frame, then transfers request/response bodies: in `shm` mode via per-request `ShmRingBuffer` files (64 KiB chunks, EOF signalled by empty push); in `tcp` mode by streaming bytes directly over the connection. Maintains a small idle-connection pool per backend. Also contains the internal URL-based IPC helper path used by reverse transport. Entry points: `proxy_ipc_upstream()` and `proxy_ipc()`.
-- `exporter.rs`: capture event producer — writes serialized capture events to a shared-memory ring buffer (`ShmRingBuffer`), with queue/backpressure behavior controlled by config.
+- `exporter.rs`: capture event producer — writes serialized capture events to a shared-memory ring buffer (`ShmRingBuffer`), with queue/backpressure behavior controlled by config. Plaintext events are redacted before enqueue using configured header, query-key, and simple JSON-path rules.
 - `io_copy.rs`: bidirectional stream copy (used for CONNECT tunnels and WebSocket) with optional capture export hooks and idle timeout.
 - `io_prefix.rs`: `PrefixedIo` adapter — "unreads" a byte buffer back onto a stream after peeking (used for PROXY v2 metadata and TLS ClientHello inspection) so downstream consumers see the original byte stream from the beginning.
 - `net.rs`: socket helpers — `SO_REUSEPORT`, `SO_REUSEADDR`, TCP backlog, multi-socket listener binding.
@@ -354,15 +354,16 @@ Reusable WASI executor used by `qpxf` when built with feature `wasm`. This crate
 
 ## Function executor (`qpxf`)
 
-QPX-IPC server that executes CGI scripts and dispatches optional WASM execution through `qpx-wasm` on behalf of `qpxd`. `qpxd` normally connects to `qpxf` using reverse-route `ipc:` config. The protocol sends a JSON metadata frame first, then streams request/response bodies either over the same connection or via shared-memory ring buffers when both processes are on the same host.
+QPX-IPC server that executes CGI scripts, dispatches optional WASM execution through `qpx-wasm`, and proxies CGI-shaped requests to persistent FastCGI/SCGI responders on behalf of `qpxd`. `qpxd` normally connects to `qpxf` using reverse-route `ipc:` config. The protocol sends a JSON metadata frame first, then streams request/response bodies either over the same connection or via shared-memory ring buffers when both processes are on the same host.
 
 - `main.rs`: CLI (`--listen`, `--config`, `--workers`) plus `check --config` for config/backend validation, QPX-IPC connection accept loop, concurrency-limited request dispatch via `tokio::sync::Semaphore`. Listen address accepts TCP (`host:port`) or Unix socket (`unix:///path`). TCP listeners require `allow_insecure_tcp=true`. Safe Unix socket binding verifies an existing path is a socket before unlinking.
-- `config.rs`: YAML configuration schema with `deny_unknown_fields` — listen address, workers (concurrency limit), `allow_insecure_tcp`, connection caps (`max_connections`, `max_requests_per_connection`), request and connection idle timeouts, size limits (`max_params_bytes`, `max_stdin_bytes`), handler routing rules, CGI/WASM backend settings including per-backend stdout/stderr size limits.
+- `config.rs`: YAML configuration schema with `deny_unknown_fields` — listen address, workers (concurrency limit), `allow_insecure_tcp`, connection caps (`max_connections`, `max_requests_per_connection`), request and connection idle timeouts, size limits (`max_params_bytes`, `max_stdin_bytes`), handler routing rules, CGI/WASM/FastCGI/SCGI backend settings including per-backend concurrency and stdout/stderr size limits.
 - `server.rs`: QPX-IPC connection handler — reads `IpcRequestMeta` frame, routes to executor, streams body, writes `IpcResponseMeta` response frame, handles keep-alive, input idle timeout, and connection idle timeout.
 - `router.rs`: path-based request routing — matches incoming requests by `path_prefix`, `path_regex`, and `host` to the appropriate executor. Returns matched prefix for prefix-stripping in executors.
 - `executor/mod.rs`: `Executor` trait definition and shared request/response types (`CgiRequest`, `CgiResponse`). `matched_prefix` field enables correct script path resolution.
 - `executor/cgi.rs`: RFC 3875 CGI script executor — spawns external processes via `tokio::process::Command`, sets CGI environment variables (including `SERVER_SOFTWARE`), pipes stdin/stdout/stderr. Security: canonicalizes CGI root on startup, rejects `..` paths and symlink escapes, enforces configurable stdout/stderr size limits, reads stdout/stderr concurrently (prevents deadlock), post-timeout `wait()` ensures zombie process cleanup. Hop-by-hop headers are excluded from HTTP_* env.
-- `executor/wasm.rs`: thin adapter for feature `wasm` — translates `qpxf`'s `CgiRequest` into `qpx_wasm::WasmRequest`, starts `qpx_wasm::WasmExecutor`, and maps the returned execution handles back into the generic `Execution` shape used by the IPC server.
+- `executor/wasm.rs`: adapter for feature `wasm` — translates `qpxf`'s `CgiRequest` into `qpx_wasm::WasmRequest`, builds an optional pool of precompiled executors, applies per-handler concurrency limits, and maps the returned execution handles back into the generic `Execution` shape used by the IPC server.
+- `executor/persistent.rs`: persistent FastCGI/SCGI adapter — collects the request body within configured limits, builds CGI environment metadata, sends one request to a TCP or `unix://` backend, and returns raw CGI-compatible stdout/stderr to the IPC server.
 
 ---
 

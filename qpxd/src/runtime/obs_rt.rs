@@ -2,7 +2,7 @@ use crate::exporter::ExporterSink;
 use anyhow::{anyhow, Result};
 use std::sync::OnceLock;
 
-use super::ConfigRuntime;
+use super::RuntimeResources;
 
 #[derive(Clone)]
 pub struct ObsRuntime {
@@ -11,10 +11,11 @@ pub struct ObsRuntime {
 }
 
 impl ObsRuntime {
-    pub(super) fn build(config: &ConfigRuntime) -> Result<Self> {
-        let metric_names = MetricNames::from_prefix(config.identity.metrics_prefix.as_str());
+    pub(super) fn build(config: &RuntimeResources) -> Result<Self> {
+        let metric_names =
+            MetricNames::from_prefix(config.operational.identity.metrics_prefix.as_str());
         register_metric_names(metric_names.clone())?;
-        let exporter = match &config.exporter {
+        let exporter = match &config.operational.telemetry.exporter {
             Some(cfg) if cfg.enabled => Some(ExporterSink::from_config(cfg)?),
             _ => None,
         };

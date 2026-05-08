@@ -22,7 +22,7 @@ use crate::io_prefix::PrefixedIo;
 use crate::policy_context::{
     apply_ext_authz_action_overrides, attach_log_context, emit_audit_log, enforce_ext_authz,
     resolve_identity, sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
@@ -43,7 +43,7 @@ use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use h2::ext::Protocol as H2Protocol;
 use h2::{client as h2_client, Reason as H2Reason, RecvStream as H2RecvStream};
-use qpx_core::config::{ActionConfig, ActionKind, ListenerConfig};
+use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 #[cfg(feature = "mitm")]
@@ -93,13 +93,13 @@ pub(super) async fn handle_connect(
         return handle_h2_extended_connect(req, runtime, listener_name, remote_addr).await;
     }
     let state = runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
     let req_version = req.version();
-    let listener_cfg = state
-        .listener_config(listener_name)
-        .ok_or_else(|| anyhow!("listener not found"))?;
-    let effective_policy =
-        EffectivePolicyContext::from_single(listener_cfg.policy_context.as_ref());
+    let base_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, None)
+        .ok_or_else(|| anyhow!("listener plan not found"))?;
+    let effective_policy = base_plan.policy_context.clone();
 
     let authority = req
         .uri()
@@ -128,7 +128,7 @@ pub(super) async fn handle_connect(
             port: Some(port),
             ..Default::default()
         },
-        listener_cfg.destination_resolution.as_ref(),
+        base_plan.destination_resolution.as_ref(),
     );
 
     let ctx = RuleMatchContext {
@@ -236,21 +236,21 @@ pub(super) async fn handle_connect(
             return Ok(response);
         }
     };
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled CONNECT listener execution plan not found"))?;
     let request_limit_ctx =
         RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule.as_deref(), None);
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
-    } = state.policy.rate_limiters.collect_checked_request(
-        crate::rate_limit::RequestLimitCollectInput {
-            listener: Some(listener_name),
-            rule: matched_rule.as_deref(),
-            profile: None,
-            scope: crate::rate_limit::TransportScope::Connect,
-            extra: None,
-            ctx: &request_limit_ctx,
-            cost: 1,
-        },
+    } = state.policy.rate_limiters.collect_checked_plan_request(
+        &selected_plan.rate_limits,
+        None,
+        crate::rate_limit::TransportScope::Connect,
+        &request_limit_ctx,
+        1,
     )?;
     if let Some(retry_after) = retry_after {
         return Ok(finalize_response_for_request(
@@ -371,7 +371,7 @@ pub(super) async fn handle_connect(
         }
     };
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
 
     match action.kind {
         ActionKind::Block => {
@@ -419,6 +419,9 @@ pub(super) async fn handle_connect(
 
             #[cfg(feature = "mitm")]
             {
+                let listener_cfg = state
+                    .ingress_edge_settings(listener_name)
+                    .ok_or_else(|| anyhow!("listener not found"))?;
                 let tls_inspection = listener_cfg.tls_inspection.as_ref();
                 if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
                     let mut response = finalize_response_with_headers(
@@ -493,6 +496,7 @@ pub(super) async fn handle_connect(
                 let sanitized_headers_for_task = sanitized_headers.clone();
                 let identity_for_task = identity.clone();
                 let action_for_task = action.clone();
+                let matched_rule_for_task = matched_rule.as_ref().map(|rule| rule.to_string());
                 task::spawn(async move {
                     if let Err(err) = tunnel_connect(
                         req,
@@ -507,6 +511,7 @@ pub(super) async fn handle_connect(
                             sanitized_headers: sanitized_headers_for_task,
                             identity: identity_for_task,
                             initial_action: action_for_task,
+                            matched_rule: matched_rule_for_task,
                             verify_upstream: verify,
                             _concurrency_permits: concurrency_permits,
                             throttle: None,
@@ -589,6 +594,7 @@ pub(super) async fn handle_connect(
             let sanitized_headers_for_task = sanitized_headers.clone();
             let identity_for_task = identity.clone();
             let action_for_task = action.clone();
+            let matched_rule_for_task = matched_rule.as_ref().map(|rule| rule.to_string());
             task::spawn(async move {
                 if let Err(err) = tunnel_connect(
                     req,
@@ -603,6 +609,7 @@ pub(super) async fn handle_connect(
                         sanitized_headers: sanitized_headers_for_task,
                         identity: identity_for_task,
                         initial_action: action_for_task,
+                        matched_rule: matched_rule_for_task,
                         verify_upstream: false,
                         _concurrency_permits: concurrency_permits,
                         throttle,

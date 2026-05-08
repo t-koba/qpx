@@ -1,5 +1,7 @@
-listeners:
-- name: transparent-linux
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: transparent
+  name: transparent-linux
   listen: 0.0.0.0:15001
   default_action:
     type: block
@@ -11,20 +13,20 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
       host:
-      - '*.social.example'
-      - '*.gaming.example'
+      - "*.social.example"
+      - "*.gaming.example"
     action:
       type: block
   - name: direct-local-metadata
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
@@ -39,7 +41,7 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
@@ -47,8 +49,6 @@ listeners:
       - 80
       - 443
       host:
-      - '*'
+      - "*"
     action:
       type: direct
-  mode: transparent
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

@@ -1,16 +1,14 @@
-# Advanced matcher sample for reverse publishing.
-# `client_cert` is populated on TLS-terminated downstream requests when
-# `tls.client_ca` is configured. `upstream_cert` and `response_size` are
-# available to reverse `response_rules`.
-reverse:
-- name: reverse-cert-and-size-aware
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: reverse
+  name: reverse-cert-and-size-aware
   listen: 0.0.0.0:19451
   tls:
-    client_ca: ${QPX_TLS_CLIENT_CA:-/etc/qpx/client-ca.pem}
+    client_ca: "${QPX_TLS_CLIENT_CA:-/etc/qpx/client-ca.pem}"
     certificates:
     - sni: uploads.example.com
-      cert: ${QPX_TLS_CERT:-/etc/qpx/certs/uploads.example.com.crt}
-      key: ${QPX_TLS_KEY:-/etc/qpx/certs/uploads.example.com.key}
+      cert: "${QPX_TLS_CERT:-/etc/qpx/certs/uploads.example.com.crt}"
+      key: "${QPX_TLS_KEY:-/etc/qpx/certs/uploads.example.com.key}"
   routes:
   - name: uploads
     match:
@@ -23,7 +21,7 @@ reverse:
       - HTTP/2
       - HTTP/3
       request_size:
-      - '>=1M'
+      - ">=1M"
       client_cert:
         present: true
         san_dns:
@@ -37,7 +35,7 @@ reverse:
       - name: mark-large-certified-response
         match:
           response_size:
-          - '>=256K'
+          - ">=256K"
           upstream_cert:
             present: true
             san_dns:
@@ -50,6 +48,7 @@ reverse:
             suppress: true
           tags:
           - large-upload
-    upstreams:
-    - https://uploads-backend.internal.example.com:9443
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+    target:
+      type: upstream
+      upstreams:
+      - https://uploads-backend.internal.example.com:9443

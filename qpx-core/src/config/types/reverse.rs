@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ReverseConfig {
+pub struct ReverseEdgeConfig {
     pub name: String,
     pub listen: String,
     #[serde(default)]
@@ -101,6 +101,8 @@ pub struct ReverseRouteConfig {
     #[serde(default)]
     pub cache: Option<CachePolicyConfig>,
     #[serde(default)]
+    pub capture: Option<super::CapturePolicyConfig>,
+    #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
     #[serde(default)]
     pub path_rewrite: Option<PathRewriteConfig>,
@@ -142,6 +144,17 @@ pub struct IpcUpstreamConfig {
     pub address: String,
     #[serde(default = "default_ipc_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub body: IpcBodyLimitConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IpcBodyLimitConfig {
+    #[serde(default)]
+    pub max_request_bytes: Option<usize>,
+    #[serde(default)]
+    pub max_response_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

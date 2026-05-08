@@ -125,8 +125,8 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
 
 11. RFC 9111 (HTTP caching) baseline behavior + RFC 5861 extensions
    - Cache lookup/store pipeline is implemented for:
-     - forward listeners (`listeners[].cache`)
-     - reverse routes (`reverse[].routes[].cache`)
+     - forward edges (`edges[kind=forward].cache`)
+     - reverse routes (`edges[kind=reverse].routes[].cache`)
    - Cache-control handling includes:
      - request directives: `no-store`, `no-cache`, `max-age`, `max-stale`, `min-fresh`, `only-if-cached`
      - response directives: `no-store`, `private`, `public`, `no-cache`, `must-understand`, `must-revalidate`, `proxy-revalidate`, `s-maxage`, `max-age`
@@ -166,8 +166,8 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
 13. TLS terminate anti-fronting policy (operational security hardening)
    - Reverse TLS and reverse HTTP/3 terminate enforce SNI and Host/authority consistency by default.
    - Config:
-     - `reverse[].enforce_sni_host_match` (default `true`)
-     - `reverse[].sni_host_exceptions` (explicit opt-out allowlist globs)
+     - `edges[kind=reverse].enforce_sni_host_match` (default `true`)
+     - `edges[kind=reverse].sni_host_exceptions` (explicit opt-out allowlist globs)
    - Plain HTTP reverse listeners are not forced through this check.
    - Code:
      - `qpxd/src/reverse/security.rs`
@@ -273,7 +273,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
     - `qpxd` also generates a local `100 Continue` where required, and it normalizes standalone `1xx` responses correctly.
 
 5. RFC 9298 / RFC 6570 URI Template handling is implemented for CONNECT-UDP request matching and upstream expansion.
-    - Listener-side `listeners[].http3.connect_udp.uri_template` is strict: the request target must match the configured template exactly, including absolute-template `scheme`/`authority`, path structure, query structure, and the RFC 6570 operators/modifiers accepted by the configured variables.
+    - Edge-side `edges[].http3.connect_udp.uri_template` is strict: the request target must match the configured template exactly, including absolute-template `scheme`/`authority`, path structure, query structure, and the RFC 6570 operators/modifiers accepted by the configured variables.
     - The shared URI template engine supports scalar, list, and associative (map) composite expansion semantics, including explode and named query/path-parameter forms.
     - CONNECT-UDP uses that engine for upstream expansion; the current built-in CONNECT-UDP variables remain `target_host` and `target_port`, so list/map semantics are available through the template engine even though the built-in listener variables are scalar.
     - Full CONNECT-UDP relay, including HTTP/3 datagrams and chained upstream HTTP/3 proxying, is implemented on both HTTP/3 backends. `http3-backend-qpx` is the clean-room path; `http3-backend-h3` remains the upstream-`h3` path.

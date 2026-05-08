@@ -1,5 +1,7 @@
-listeners:
-- name: transparent-nonlinux
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: transparent
+  name: transparent-nonlinux
   listen: 0.0.0.0:15002
   default_action:
     type: block
@@ -8,32 +10,32 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
       sni:
-      - '*.corp.example.com'
+      - "*.corp.example.com"
     action:
       type: direct
   - name: block-streaming
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
       host:
-      - '*.video.example'
-      - '*.music.example'
+      - "*.video.example"
+      - "*.music.example"
     action:
       type: block
   - name: allow-private-web
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
@@ -41,8 +43,6 @@ listeners:
       - 80
       - 443
       host:
-      - '*'
+      - "*"
     action:
       type: direct
-  mode: transparent
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

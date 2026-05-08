@@ -13,17 +13,14 @@ pub(super) async fn dispatch_forward_request(
     remote_addr: std::net::SocketAddr,
 ) -> Result<Response<Body>> {
     let state = runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
-    let listener_cfg = state
-        .listener_config(listener_name)
-        .ok_or_else(|| anyhow!("listener not found"))?;
-    let effective_policy =
-        EffectivePolicyContext::from_single(listener_cfg.policy_context.as_ref());
-    let http_guard = listener_cfg
-        .http_guard_profile
-        .as_deref()
-        .and_then(|name| state.http_guard_profile(name));
-    let mut cache_policy = listener_cfg.cache.as_ref().filter(|c| c.enabled).cloned();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
+    let compiled_edge = state
+        .plan
+        .forward_edge(listener_name)
+        .ok_or_else(|| anyhow!("compiled forward edge not found"))?;
+    let listener_cfg = &compiled_edge.listener;
+    let effective_policy = compiled_edge.default_plan.policy_context.clone();
+    let http_guard = compiled_edge.default_plan.guard.as_deref();
     let is_ftp_request = base
         .scheme
         .as_deref()
@@ -72,11 +69,7 @@ pub(super) async fn dispatch_forward_request(
         sni: base.sni.as_deref(),
         path: base.path.as_deref(),
     };
-    let response_engine = state
-        .policy
-        .response_rules_by_listener
-        .get(listener_name)
-        .map(Arc::as_ref);
+    let response_engine = compiled_edge.default_plan.response_rules.as_deref();
     let response_candidates_for_request = response_engine
         .map(|engine| engine.candidate_profile(prefilter_ctx.clone()))
         .unwrap_or_default();
@@ -85,21 +78,26 @@ pub(super) async fn dispatch_forward_request(
         &response_candidates_for_request,
         prefilter_ctx.clone(),
     );
+    observation_plan.include_body(
+        compiled_edge
+            .flags
+            .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
+    );
     let guard_requires_buffering =
         http_guard.is_some_and(|profile| profile.requires_request_body_buffering(&req));
     observation_plan.include_body(guard_requires_buffering);
     let max_observed_request_body_bytes = http_guard
         .and_then(|profile| profile.request_body_observation_cap())
-        .map(|cap| cap.min(state.config.runtime.max_observed_request_body_bytes))
-        .unwrap_or(state.config.runtime.max_observed_request_body_bytes);
+        .map(|cap| cap.min(state.plan.limits.max_observed_request_body_bytes))
+        .unwrap_or(state.plan.limits.max_observed_request_body_bytes);
+    let max_observed_request_body_bytes =
+        compiled_edge.body_observation_limit(max_observed_request_body_bytes);
     let request_version_for_observation = req.version();
     req = match observation_plan
         .observe_request(
             req,
             max_observed_request_body_bytes,
-            std::time::Duration::from_millis(
-                state.config.runtime.http_header_read_timeout_ms.max(1),
-            ),
+            std::time::Duration::from_millis(state.plan.limits.http_header_read_timeout_ms.max(1)),
         )
         .await
     {
@@ -135,7 +133,7 @@ pub(super) async fn dispatch_forward_request(
             port: host.port,
             ..Default::default()
         },
-        listener_cfg.destination_resolution.as_ref(),
+        compiled_edge.default_plan.destination_resolution.as_ref(),
     );
     if let Some(profile) = http_guard {
         if let Some(reject) = profile.evaluate_request(&req)? {
@@ -263,21 +261,19 @@ pub(super) async fn dispatch_forward_request(
             return Ok(response);
         }
     };
+    let selected_plan = compiled_edge.execution_plan_for_rule(matched_rule.as_deref());
+    let mut cache_policy = selected_plan.cache.clone();
     let request_limit_ctx =
         RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule.as_deref(), None);
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
-    } = state.policy.rate_limiters.collect_checked_request(
-        crate::rate_limit::RequestLimitCollectInput {
-            listener: Some(listener_name),
-            rule: matched_rule.as_deref(),
-            profile: None,
-            scope: crate::rate_limit::TransportScope::Request,
-            extra: None,
-            ctx: &request_limit_ctx,
-            cost: 1,
-        },
+    } = state.policy.rate_limiters.collect_checked_plan_request(
+        &selected_plan.rate_limits,
+        None,
+        crate::rate_limit::TransportScope::Request,
+        &request_limit_ctx,
+        1,
     )?;
     if let Some(retry_after) = retry_after {
         let mut log_context = identity.to_log_context(matched_rule.as_deref(), None, None);
@@ -487,9 +483,9 @@ pub(super) async fn dispatch_forward_request(
     if let Some(response) = handle_max_forwards_in_place(
         &mut req,
         proxy_name,
-        state.config.runtime.trace_reflect_all_headers,
-        state.config.runtime.max_observed_request_body_bytes,
-        std::time::Duration::from_millis(state.config.runtime.http_header_read_timeout_ms.max(1)),
+        state.plan.limits.trace_reflect_all_headers,
+        state.plan.limits.max_observed_request_body_bytes,
+        std::time::Duration::from_millis(state.plan.limits.http_header_read_timeout_ms.max(1)),
     )
     .await
     {
@@ -520,13 +516,7 @@ pub(super) async fn dispatch_forward_request(
         req.headers_mut()
             .insert("host", http::HeaderValue::from_str(&host_value).unwrap());
     }
-    let http_modules_chain = state
-        .listener_http_modules(listener_name)
-        .cloned()
-        .unwrap_or_else(|| {
-            std::sync::Arc::new(crate::http::modules::CompiledHttpModuleChain::default())
-        });
-    let mut http_modules = http_modules_chain.start(
+    let mut http_modules = selected_plan.modules.start(
         state.clone(),
         crate::http::modules::HttpModuleSessionInit {
             proxy_kind: "forward",
@@ -551,7 +541,7 @@ pub(super) async fn dispatch_forward_request(
                 headers.as_deref(),
                 false,
             );
-            http_modules.on_logging(Some(&response), None);
+            http_modules.on_logging(Some(response.status()), None).await;
             annotate(&mut response, "http_module_local_response");
             return Ok(response);
         }
@@ -594,14 +584,15 @@ pub(super) async fn dispatch_forward_request(
         }
     };
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
-    let upgrade_wait_timeout = Duration::from_millis(state.config.runtime.upgrade_wait_timeout_ms);
-    let tunnel_idle_timeout = Duration::from_millis(state.config.runtime.tunnel_idle_timeout_ms);
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
+    let upgrade_wait_timeout = Duration::from_millis(state.plan.limits.upgrade_wait_timeout_ms);
+    let tunnel_idle_timeout = Duration::from_millis(state.plan.limits.tunnel_idle_timeout_ms);
     let http_authority = match host.port {
         Some(port) => format_authority_host_port(host.host.as_str(), port),
         None => host.host.clone(),
     };
-    let export_session = state.export_session(remote_addr, http_authority.as_str());
+    let export_session =
+        state.export_session_for_plan(selected_plan, remote_addr, http_authority.as_str());
     let websocket_connect_authority = match host.port {
         Some(port) => format_authority_host_port(host.host.as_str(), port),
         None => format_authority_host_port(host.host.as_str(), 80),
@@ -676,7 +667,7 @@ pub(super) async fn dispatch_forward_request(
                     headers.as_deref(),
                     false,
                 );
-                http_modules.on_logging(Some(&hit), None);
+                http_modules.on_logging(Some(hit.status()), None).await;
                 annotate(&mut hit, "cache_hit");
                 return Ok(hit);
             }
@@ -735,11 +726,7 @@ pub(super) async fn dispatch_forward_request(
                                         request_headers_snapshot: &snapshot,
                                         revalidation_state: Some(state),
                                         body_read_timeout: std::time::Duration::from_millis(
-                                            state_ref
-                                                .config
-                                                .runtime
-                                                .upstream_http_timeout_ms
-                                                .max(1),
+                                            state_ref.plan.limits.upstream_http_timeout_ms.max(1),
                                         ),
                                         backends,
                                     },
@@ -759,7 +746,7 @@ pub(super) async fn dispatch_forward_request(
                     headers.as_deref(),
                     false,
                 );
-                http_modules.on_logging(Some(&hit), None);
+                http_modules.on_logging(Some(hit.status()), None).await;
                 annotate(&mut hit, "cache_stale");
                 return Ok(hit);
             }
@@ -773,7 +760,7 @@ pub(super) async fn dispatch_forward_request(
                     headers.as_deref(),
                     false,
                 );
-                http_modules.on_logging(Some(&response), None);
+                http_modules.on_logging(Some(response.status()), None).await;
                 annotate(&mut response, "cache_only_if_cached_miss");
                 return Ok(response);
             }
@@ -823,7 +810,7 @@ pub(super) async fn dispatch_forward_request(
                                     headers.as_deref(),
                                     false,
                                 );
-                                http_modules.on_logging(Some(&hit), None);
+                                http_modules.on_logging(Some(hit.status()), None).await;
                                 annotate(&mut hit, "cache_collapsed_hit");
                                 return Ok(hit);
                             }
@@ -838,7 +825,7 @@ pub(super) async fn dispatch_forward_request(
                                     headers.as_deref(),
                                     false,
                                 );
-                                http_modules.on_logging(Some(&hit), None);
+                                http_modules.on_logging(Some(hit.status()), None).await;
                                 annotate(&mut hit, "cache_collapsed_stale");
                                 return Ok(hit);
                             }
@@ -853,7 +840,7 @@ pub(super) async fn dispatch_forward_request(
                                     headers.as_deref(),
                                     false,
                                 );
-                                http_modules.on_logging(Some(&response), None);
+                                http_modules.on_logging(Some(response.status()), None).await;
                                 annotate(&mut response, "cache_only_if_cached_miss");
                                 return Ok(response);
                             }
@@ -881,7 +868,7 @@ pub(super) async fn dispatch_forward_request(
     {
         Ok(resp) => resp,
         Err(err) => {
-            http_modules.on_error(&err);
+            http_modules.on_error(&err).await;
             if let Some(stale) = revalidation_state
                 .as_ref()
                 .and_then(crate::cache::maybe_build_stale_if_error_response)
@@ -897,7 +884,7 @@ pub(super) async fn dispatch_forward_request(
                     headers.as_deref(),
                     false,
                 );
-                http_modules.on_logging(Some(&stale), None);
+                http_modules.on_logging(Some(stale.status()), None).await;
                 annotate(&mut stale, "stale_if_error");
                 return Ok(stale);
             }
@@ -940,10 +927,14 @@ pub(super) async fn dispatch_forward_request(
         headers.clone(),
         request_rpc.as_ref(),
         ResponseBodyObservationLimits {
-            max_body_bytes: state.config.runtime.max_observed_response_body_bytes,
+            max_body_bytes: selected_plan
+                .body_observation_limit(state.plan.limits.max_observed_response_body_bytes),
             read_timeout: std::time::Duration::from_millis(
-                state.config.runtime.upstream_http_timeout_ms.max(1),
+                state.plan.limits.upstream_http_timeout_ms.max(1),
             ),
+            force_body: selected_plan
+                .flags
+                .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
         },
     )
     .await?
@@ -977,7 +968,7 @@ pub(super) async fn dispatch_forward_request(
                 updated_headers.as_deref(),
                 false,
             );
-            http_modules.on_logging(Some(&response), None);
+            http_modules.on_logging(Some(response.status()), None).await;
             annotate_with_tags(&mut response, "response_local_response", &policy_tags);
             return Ok(response);
         }
@@ -999,7 +990,7 @@ pub(super) async fn dispatch_forward_request(
                 headers.as_deref(),
                 false,
             );
-            http_modules.on_logging(Some(&stale), None);
+            http_modules.on_logging(Some(stale.status()), None).await;
             annotate(&mut stale, "stale_if_error");
             return Ok(stale);
         }
@@ -1017,7 +1008,7 @@ pub(super) async fn dispatch_forward_request(
                     request_headers_snapshot: snapshot,
                     revalidation_state,
                     body_read_timeout: std::time::Duration::from_millis(
-                        state.config.runtime.upstream_http_timeout_ms.max(1),
+                        state.plan.limits.upstream_http_timeout_ms.max(1),
                     ),
                     backends: &state.cache.backends,
                 },
@@ -1049,7 +1040,7 @@ pub(super) async fn dispatch_forward_request(
         headers.as_deref(),
         false,
     );
-    http_modules.on_logging(Some(&response), None);
+    http_modules.on_logging(Some(response.status()), None).await;
     annotate_with_tags(&mut response, "allow", &response_policy_tags);
     Ok(response)
 }

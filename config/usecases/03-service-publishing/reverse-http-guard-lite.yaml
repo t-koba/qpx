@@ -1,9 +1,6 @@
-# Lightweight reverse-edge hardening with a reusable HTTP guard profile.
-# This keeps the scope intentionally small: protocol safety, bounded parser
-# work, and simple JSON / multipart limits.
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-
-http_guard_profiles:
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+http:
+  guard_profiles:
   - name: strict-json-api
     normalize:
       path: true
@@ -27,15 +24,17 @@ http_guard_profiles:
       max_parts: 24
       max_name_bytes: 128
       max_filename_bytes: 256
-
-reverse:
-  - name: guarded-api
-    listen: 127.0.0.1:19443
-    routes:
-      - name: api
-        match:
-          host:
-            - api.example.com
-        http_guard_profile: strict-json-api
-        upstreams:
-          - http://127.0.0.1:19080
+edges:
+- kind: reverse
+  name: guarded-api
+  listen: 127.0.0.1:19443
+  routes:
+  - name: api
+    match:
+      host:
+      - api.example.com
+    http_guard_profile: strict-json-api
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:19080

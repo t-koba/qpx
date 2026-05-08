@@ -1,10 +1,11 @@
 use crate::http::modules::{default_http_module_registry, HttpModuleRegistry};
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use qpx_core::config::{Config, ListenerConfig, ReverseConfig};
-use std::ops::Deref;
+use qpx_core::config::{Config, ReverseEdgeConfig};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 #[path = "runtime/cache_rt.rs"]
 mod cache_rt;
@@ -12,6 +13,8 @@ mod cache_rt;
 mod config_rt;
 #[path = "runtime/obs_rt.rs"]
 mod obs_rt;
+#[path = "runtime/plan.rs"]
+mod plan;
 #[path = "runtime/policy_rt.rs"]
 mod policy_rt;
 #[path = "runtime/reload.rs"]
@@ -20,9 +23,15 @@ mod reload;
 mod security_rt;
 
 use cache_rt::CacheRuntime;
-use config_rt::ConfigRuntime;
+use config_rt::{MessageTexts, RuntimeResources};
 pub(crate) use obs_rt::metric_names;
 use obs_rt::ObsRuntime;
+#[cfg(test)]
+pub(crate) use plan::CompiledPlaintextCapturePlan;
+pub(crate) use plan::{
+    CompiledCapturePlan, CompiledEdge, CompiledListenerSettings, ExecutionPlan, PlanFlags,
+};
+pub use plan::{PlanCompiler, RuntimePlan};
 use policy_rt::PolicyRuntime;
 pub use reload::{ensure_hot_reload_compatible, requires_server_restart};
 use security_rt::SecurityRuntime;
@@ -37,19 +46,16 @@ pub struct Runtime {
 
 #[derive(Clone)]
 pub struct RuntimeState {
-    pub config: ConfigRuntime,
+    pub resources: RuntimeResources,
+    pub plan: Arc<RuntimePlan>,
+    pub messages: MessageTexts,
+    pub ftp_semaphore: Arc<Semaphore>,
+    pub connection_semaphore: Arc<Semaphore>,
+    pub upstreams: HashMap<String, String>,
     pub security: SecurityRuntime,
     pub policy: PolicyRuntime,
     pub cache: CacheRuntime,
     pub observability: ObsRuntime,
-}
-
-impl Deref for RuntimeState {
-    type Target = ConfigRuntime;
-
-    fn deref(&self) -> &Self::Target {
-        &self.config
-    }
 }
 
 impl Runtime {
@@ -81,8 +87,8 @@ impl Runtime {
 
 #[cfg(feature = "acme")]
 impl qpx_acme::ConfigProvider for Runtime {
-    fn current_config(&self) -> Arc<Config> {
-        self.state().config.raw.clone()
+    fn current_operational_config(&self) -> Arc<Config> {
+        self.state().resources.operational.clone()
     }
 }
 
@@ -95,13 +101,20 @@ impl RuntimeState {
         config: Config,
         http_module_registry: Arc<HttpModuleRegistry>,
     ) -> Result<Self> {
-        let config = ConfigRuntime::build_with_http_module_registry(config, http_module_registry)?;
-        let security = SecurityRuntime::build(&config)?;
-        let policy = PolicyRuntime::build(&config)?;
-        let cache = CacheRuntime::build(&config)?;
-        let observability = ObsRuntime::build(&config)?;
+        let resources =
+            RuntimeResources::build_with_http_module_registry(config, http_module_registry)?;
+        let plan = Arc::new(PlanCompiler { config: &resources }.compile()?);
+        let security = SecurityRuntime::build(&resources)?;
+        let policy = PolicyRuntime::build(&resources)?;
+        let cache = CacheRuntime::build(&resources)?;
+        let observability = ObsRuntime::build(&resources)?;
         Ok(Self {
-            config,
+            plan,
+            messages: resources.messages.clone(),
+            ftp_semaphore: resources.ftp_semaphore.clone(),
+            connection_semaphore: resources.connection_semaphore.clone(),
+            upstreams: resources.upstreams.clone(),
+            resources,
             security,
             policy,
             cache,
@@ -122,27 +135,47 @@ impl RuntimeState {
         )
     }
 
-    pub fn ca_cert_path(&self) -> Option<PathBuf> {
-        self.security.ca.as_ref().map(|ca| ca.cert_path())
-    }
-
-    pub fn listener_config(&self, name: &str) -> Option<&ListenerConfig> {
-        self.config.listener_config(name)
-    }
-
-    pub(crate) fn listener_http_modules(
+    pub fn export_session_for_plan(
         &self,
-        name: &str,
-    ) -> Option<&Arc<crate::http::modules::CompiledHttpModuleChain>> {
-        self.config.listener_http_modules(name)
+        plan: &ExecutionPlan,
+        client: impl ToString,
+        server: impl ToString,
+    ) -> Option<crate::exporter::ExportSession> {
+        let flags = plan.flags;
+        if !flags.contains(PlanFlags::CAPTURE_ENCRYPTED)
+            && !flags.contains(PlanFlags::CAPTURE_PLAINTEXT)
+        {
+            return None;
+        }
+        Some(self.observability.exporter.as_ref()?.session_with_capture(
+            client,
+            server,
+            &plan.capture,
+        ))
     }
 
-    pub fn reverse_config(&self, name: &str) -> Option<&ReverseConfig> {
-        self.config.reverse_config(name)
+    pub fn ca_cert_path(&self) -> Option<PathBuf> {
+        self.security
+            .destination
+            .tls
+            .ca
+            .as_ref()
+            .map(|ca| ca.cert_path())
+    }
+
+    pub fn ingress_edge_settings(&self, name: &str) -> Option<&CompiledListenerSettings> {
+        if let Some(edge) = self.plan.forward_edge(name) {
+            return Some(&edge.listener);
+        }
+        self.plan.transparent_edge(name).map(|edge| &edge.listener)
+    }
+
+    pub fn reverse_config(&self, name: &str) -> Option<&ReverseEdgeConfig> {
+        self.resources.reverse_config(name)
     }
 
     pub fn http_module_registry(&self) -> &Arc<HttpModuleRegistry> {
-        self.config.http_module_registry()
+        self.resources.http_module_registry()
     }
 
     pub(crate) fn classify_destination(
@@ -155,13 +188,6 @@ impl RuntimeState {
             .destination_resolution_defaults
             .with_override(resolution_override);
         self.policy.destination_classifier.classify(inputs, &policy)
-    }
-
-    pub(crate) fn http_guard_profile(
-        &self,
-        name: &str,
-    ) -> Option<&Arc<crate::http::guard::CompiledHttpGuardProfile>> {
-        self.policy.http_guard_profiles.get(name)
     }
 
     pub fn tls_verify_exception_matches(&self, listener: &str, host: &str) -> bool {

@@ -33,7 +33,7 @@ const ACME_HTTP01_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const ACME_HTTP01_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub trait ConfigProvider: Send + Sync {
-    fn current_config(&self) -> Arc<Config>;
+    fn current_operational_config(&self) -> Arc<Config>;
 }
 
 pub struct AcmeCertStore {
@@ -111,7 +111,7 @@ impl Http01TokenStore {
 }
 
 pub struct AcmeRuntime {
-    config_provider: Arc<dyn ConfigProvider>,
+    operational_config_provider: Arc<dyn ConfigProvider>,
     directory_url: String,
     renew_before_days: u64,
     contact_email: Option<String>,
@@ -166,7 +166,7 @@ pub fn init(
         .with_context(|| format!("failed to create ACME certs dir {}", certs_dir.display()))?;
 
     let rt = Arc::new(AcmeRuntime {
-        config_provider,
+        operational_config_provider: config_provider,
         directory_url: acme_directory_url(acme),
         renew_before_days: acme.renew_before_days,
         contact_email: acme.email.clone(),
@@ -272,8 +272,10 @@ pub async fn run_manager(state: Arc<AcmeRuntime>) -> Result<()> {
             },
         };
 
-        let current_config = state.config_provider.current_config();
-        let snis = desired_acme_snis(current_config.as_ref());
+        let current_operational = state
+            .operational_config_provider
+            .current_operational_config();
+        let snis = desired_acme_snis(current_operational.as_ref());
         for sni in snis {
             if let Err(err) = ensure_certificate(state.as_ref(), &acct, &sni).await {
                 warn!(sni = %sni, error = ?err, "acme certificate ensure failed");
@@ -349,8 +351,8 @@ fn acme_directory_url(acme: &AcmeConfig) -> String {
 
 fn desired_acme_snis(config: &Config) -> Vec<String> {
     let mut snis = HashSet::new();
-    for reverse in &config.reverse {
-        let Some(tls) = reverse.tls.as_ref() else {
+    for reverse_edges in config.reverse_edge_configs() {
+        let Some(tls) = reverse_edges.tls.as_ref() else {
             continue;
         };
         for cert in &tls.certificates {
@@ -372,8 +374,10 @@ fn cert_paths_for_sni(state: &AcmeRuntime, sni: &str) -> (PathBuf, PathBuf) {
 }
 
 fn preload_certs(state: &AcmeRuntime) -> Result<()> {
-    let current_config = state.config_provider.current_config();
-    for sni in desired_acme_snis(current_config.as_ref()) {
+    let current_operational = state
+        .operational_config_provider
+        .current_operational_config();
+    for sni in desired_acme_snis(current_operational.as_ref()) {
         if let Err(err) = load_cert_into_store(state, &sni) {
             warn!(sni = %sni, error = ?err, "failed to preload acme cert (will retry later)");
         }

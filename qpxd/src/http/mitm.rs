@@ -24,7 +24,7 @@ use crate::policy_context::{
     attach_log_context, emit_audit_log, enforce_ext_authz, merge_header_controls,
     merge_policy_tags, resolve_identity, sanitize_headers_for_policy,
     strip_untrusted_identity_headers, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
@@ -60,12 +60,12 @@ pub async fn proxy_mitm_request(
     route: MitmRouteContext<'_>,
 ) -> Result<Response<Body>> {
     let state = runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
     if let PreflightOutcome::Reject(response) = preflight_validate(
         &req,
         proxy_name,
         PreflightOptions::allow_connect(
-            state.config.runtime.trace_enabled,
+            state.plan.limits.trace_enabled,
             state.messages.trace_disabled.as_str(),
         ),
     ) {

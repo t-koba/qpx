@@ -1,5 +1,6 @@
 use crate::config::{BackendConfig, QpxfConfig};
 use crate::executor::cgi::CgiExecutor;
+use crate::executor::persistent::{FastCgiExecutor, ScgiExecutor};
 #[cfg(feature = "wasm")]
 use crate::executor::wasm::WasmExecutor;
 use crate::executor::Executor;
@@ -16,11 +17,13 @@ struct CompiledHandler {
     executor: Arc<dyn Executor>,
 }
 
-pub struct Router {
+pub type Router = CompiledRuntime;
+
+pub struct CompiledRuntime {
     handlers: Vec<CompiledHandler>,
 }
 
-impl Router {
+impl CompiledRuntime {
     pub fn new(config: &QpxfConfig) -> Result<Self> {
         let mut handlers = Vec::new();
         for h in &config.handlers {
@@ -34,6 +37,10 @@ impl Router {
                         "WASM backend requires the 'wasm' feature to be enabled"
                     ));
                 }
+                BackendConfig::FastCgi(fastcgi_config) => {
+                    Arc::new(FastCgiExecutor::new(fastcgi_config)?)
+                }
+                BackendConfig::Scgi(scgi_config) => Arc::new(ScgiExecutor::new(scgi_config)?),
             };
 
             let path_regex = h

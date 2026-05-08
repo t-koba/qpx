@@ -551,7 +551,7 @@ mod tests {
         let mut client = client.ready().await.expect("ready");
         let request = ::http::Request::builder()
             .method("GET")
-            .uri("https://reverse.test/asset")
+            .uri("https://reverse_edges.test/asset")
             .body(())
             .expect("request");
         let (mut response_future, _) = client.send_request(request, true).expect("send");
@@ -620,7 +620,7 @@ mod tests {
         let mut client = client.ready().await.expect("ready");
         let request = ::http::Request::builder()
             .method("GET")
-            .uri("https://reverse.test/reset")
+            .uri("https://reverse_edges.test/reset")
             .body(())
             .expect("request");
         let (response_future, _) = client.send_request(request, true).expect("send");
@@ -681,7 +681,7 @@ mod tests {
         let mut client = client.ready().await.expect("ready");
         let request = ::http::Request::builder()
             .method("GET")
-            .uri("https://reverse.test/trailers")
+            .uri("https://reverse_edges.test/trailers")
             .body(())
             .expect("request");
         let (response_future, _) = client.send_request(request, true).expect("send");
@@ -743,7 +743,7 @@ mod tests {
         let mut client = client.ready().await.expect("ready");
         let request = ::http::Request::builder()
             .method("GET")
-            .uri("https://reverse.test/mismatch")
+            .uri("https://reverse_edges.test/mismatch")
             .body(())
             .expect("request");
         let (response_future, _) = client.send_request(request, true).expect("send");
@@ -791,7 +791,7 @@ mod tests {
         let mut client = client.ready().await.expect("ready");
         let mut request = ::http::Request::builder()
             .method("CONNECT")
-            .uri("https://reverse.test/chat")
+            .uri("https://reverse_edges.test/chat")
             .body(())
             .expect("request");
         request
@@ -837,7 +837,7 @@ mod tests {
         let mut client = client.ready().await.expect("ready");
         let request = ::http::Request::builder()
             .method("POST")
-            .uri("https://reverse.test/upload")
+            .uri("https://reverse_edges.test/upload")
             .header(::http::header::CONTENT_LENGTH, "4")
             .body(())
             .expect("request");

@@ -1,5 +1,7 @@
-listeners:
-- name: transparent-xdp
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: transparent
+  name: transparent-xdp
   listen: 0.0.0.0:15150
   default_action:
     type: block
@@ -16,7 +18,7 @@ listeners:
       dst_port:
       - 443
       sni:
-      - '*.corp.example.com'
+      - "*.corp.example.com"
       - api.partner.example.com
     action:
       type: inspect
@@ -29,7 +31,7 @@ listeners:
       dst_port:
       - 80
       host:
-      - '*.corp.example.com'
+      - "*.corp.example.com"
       - intranet.example.com
     action:
       type: direct
@@ -43,7 +45,7 @@ listeners:
       - 80
       - 443
       host:
-      - '*'
+      - "*"
     action:
       type: direct
   xdp:
@@ -52,6 +54,4 @@ listeners:
     require_metadata: true
     trusted_peers:
     - 127.0.0.1/32
-    - ::1/128
-  mode: transparent
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+    - "::1/128"

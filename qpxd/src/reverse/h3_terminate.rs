@@ -13,7 +13,7 @@ use crate::sidecar_control::SidecarControl;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hyper::{Request, Response};
-use qpx_core::config::ReverseConfig;
+use qpx_core::config::ReverseEdgeConfig;
 use qpx_core::tls::{load_cert_chain, load_private_key};
 use std::collections::HashMap;
 #[cfg(test)]
@@ -45,15 +45,18 @@ pub(crate) fn prepare_reverse_terminate_socket(
 }
 
 pub(crate) async fn run_http3_terminate(
-    reverse: ReverseConfig,
+    reverse: ReverseEdgeConfig,
     listen_addr: SocketAddr,
     reverse_rt: super::ReloadableReverse,
     shutdown: watch::Receiver<SidecarControl>,
     endpoint_socket: QuinnEndpointSocket,
 ) -> Result<()> {
     let tls_config = build_reverse_tls_config(&reverse)?;
-    let runtime_cfg = reverse_rt.runtime.state().config.runtime.clone();
-    let max_bidi = runtime_cfg
+    let max_bidi = reverse_rt
+        .runtime
+        .state()
+        .plan
+        .limits
         .max_h3_streams_per_connection
         .min(u32::MAX as usize) as u32;
     let server_config = build_h3_server_config_from_tls(tls_config, max_bidi.max(1), 1024)?;
@@ -188,7 +191,7 @@ fn filter_quic_buffer_in_place(
 }
 
 pub(super) fn build_reverse_tls_config(
-    reverse: &ReverseConfig,
+    reverse: &ReverseEdgeConfig,
 ) -> Result<quinn::rustls::ServerConfig> {
     let tls = reverse
         .tls
@@ -297,13 +300,13 @@ struct ReverseH3Handler {
 impl H3RequestHandler for ReverseH3Handler {
     fn limits(&self) -> H3Limits {
         let state = self.reverse.runtime.state();
-        let limits = state.config.runtime.clone();
+        let limits = state.plan.limits;
         H3Limits {
             max_request_body_bytes: limits.max_h3_request_body_bytes,
             max_response_body_bytes: limits.max_h3_response_body_bytes,
             max_concurrent_streams_per_connection: limits.max_h3_streams_per_connection,
             read_timeout: Duration::from_millis(limits.h3_read_timeout_ms),
-            proxy_name: Arc::<str>::from(state.config.identity.proxy_name.as_str()),
+            proxy_name: Arc::<str>::from(state.plan.identity.proxy_name.as_ref()),
             error_body: Arc::<str>::from(state.messages.reverse_error.as_str()),
         }
     }
@@ -361,14 +364,14 @@ impl H3RequestHandler for ReverseH3Handler {
         _datagrams: Option<crate::http3::datagram::H3StreamDatagrams>,
     ) -> Result<()> {
         let state = self.reverse.runtime.state();
-        let proxy_name = state.config.identity.proxy_name.as_str();
+        let proxy_name = state.plan.identity.proxy_name.as_ref();
         if let Err(err) = send_h3_static_response(
             &mut req_stream,
             ::http::StatusCode::METHOD_NOT_ALLOWED,
             state.messages.reverse_error.as_bytes(),
             &http::Method::CONNECT,
             proxy_name,
-            state.config.runtime.max_h3_response_body_bytes,
+            state.plan.limits.max_h3_response_body_bytes,
         )
         .await
         {
@@ -384,9 +387,9 @@ mod tests {
     use crate::runtime::Runtime;
     use crate::tls::extract_client_hello_info_from_handshake;
     use qpx_core::config::{
-        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CacheConfig, Config,
-        IdentityConfig, MatchConfig, MessagesConfig, ReverseConfig, ReverseRouteConfig, RuleConfig,
-        RuntimeConfig, SystemLogConfig, UpstreamConfig,
+        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
+        IdentityConfig, MatchConfig, MessagesConfig, ReverseEdgeConfig, ReverseRouteConfig,
+        RuleConfig, RuntimeConfig, SystemLogConfig, UpstreamConfig,
     };
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -440,7 +443,7 @@ mod tests {
     fn build_reloadable_reverse_with_filter(
         connection_filter: Vec<RuleConfig>,
     ) -> super::super::ReloadableReverse {
-        let reverse_cfg = ReverseConfig {
+        let reverse_cfg = ReverseEdgeConfig {
             name: "test".to_string(),
             listen: "127.0.0.1:0".to_string(),
             tls: None,
@@ -463,6 +466,7 @@ mod tests {
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 path_rewrite: None,
                 upstream_trust_profile: None,
@@ -484,23 +488,28 @@ mod tests {
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime: RuntimeConfig::default(),
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: AuthConfig::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: AuthConfig::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            listeners: Vec::new(),
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            reverse: vec![reverse_cfg.clone()],
+            edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
             upstreams: vec![UpstreamConfig {
                 name: "upstream".to_string(),
                 url: "http://127.0.0.1:18080".to_string(),
@@ -509,7 +518,7 @@ mod tests {
                 discovery: None,
                 resilience: None,
             }],
-            cache: CacheConfig::default(),
+            caches: Vec::new(),
         };
         let runtime = Runtime::new(config).expect("runtime");
         super::super::ReloadableReverse::new(

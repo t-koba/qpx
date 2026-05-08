@@ -1,6 +1,12 @@
-listeners:
-- name: forward-debug-pages
-  listen: ${QPX_LR_FORWARD_LISTEN:-127.0.0.1:18181}
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+telemetry:
+  system_log:
+    level: info
+    format: json
+edges:
+- kind: forward
+  name: forward-debug-pages
+  listen: "${QPX_LR_FORWARD_LISTEN:-127.0.0.1:18181}"
   default_action:
     type: block
   rules:
@@ -8,11 +14,11 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
       - proxy.local
       path:
-      - /proxy/healthz
+      - "/proxy/healthz"
       method:
       - GET
     action:
@@ -28,10 +34,10 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
-      - '*.malware.invalid'
-      - '*.phishing.invalid'
+      - "*.malware.invalid"
+      - "*.phishing.invalid"
     action:
       type: respond
       local_response:
@@ -41,8 +47,3 @@ listeners:
     headers:
       response_set:
         X-Policy-Reason: security-category
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-system_log:
-  level: info
-  format: json

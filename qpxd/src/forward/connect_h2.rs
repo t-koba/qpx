@@ -12,13 +12,16 @@ pub(super) async fn handle_h2_extended_connect(
         .cloned()
         .ok_or_else(|| anyhow!("missing HTTP/2 extended CONNECT protocol"))?;
     let state = runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
     let req_version = req.version();
     let listener_cfg = state
-        .listener_config(listener_name)
+        .ingress_edge_settings(listener_name)
         .ok_or_else(|| anyhow!("listener not found"))?;
-    let effective_policy =
-        EffectivePolicyContext::from_single(listener_cfg.policy_context.as_ref());
+    let base_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, None)
+        .ok_or_else(|| anyhow!("listener plan not found"))?;
+    let effective_policy = base_plan.policy_context.clone();
 
     let authority = req
         .uri()
@@ -54,7 +57,7 @@ pub(super) async fn handle_h2_extended_connect(
             alpn: Some("h2"),
             ..Default::default()
         },
-        listener_cfg.destination_resolution.as_ref(),
+        base_plan.destination_resolution.as_ref(),
     );
     let request_uri = req.uri().to_string();
     let request_query_owned = req
@@ -169,21 +172,21 @@ pub(super) async fn handle_h2_extended_connect(
             return Ok(response);
         }
     };
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled HTTP/2 CONNECT listener execution plan not found"))?;
     let request_limit_ctx =
         RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule.as_deref(), None);
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
-    } = state.policy.rate_limiters.collect_checked_request(
-        crate::rate_limit::RequestLimitCollectInput {
-            listener: Some(listener_name),
-            rule: matched_rule.as_deref(),
-            profile: None,
-            scope: crate::rate_limit::TransportScope::Connect,
-            extra: None,
-            ctx: &request_limit_ctx,
-            cost: 1,
-        },
+    } = state.policy.rate_limiters.collect_checked_plan_request(
+        &selected_plan.rate_limits,
+        None,
+        crate::rate_limit::TransportScope::Connect,
+        &request_limit_ctx,
+        1,
     )?;
     if let Some(retry_after) = retry_after {
         return Ok(finalize_response_for_request(
@@ -371,9 +374,9 @@ pub(super) async fn handle_h2_extended_connect(
         }
     };
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
     let tunnel_idle_timeout =
-        Duration::from_millis(state.config.runtime.tunnel_idle_timeout_ms.max(1));
+        Duration::from_millis(state.plan.limits.tunnel_idle_timeout_ms.max(1));
     let declared_request_length = parse_h2_content_length(req.headers())?;
     let upstream = match open_upstream_h2_extended_connect_stream(
         req.uri(),

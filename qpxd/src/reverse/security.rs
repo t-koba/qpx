@@ -3,7 +3,7 @@ use crate::http::body::Body;
 use anyhow::{anyhow, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use hyper::Request;
-use qpx_core::config::ReverseConfig;
+use qpx_core::config::ReverseEdgeConfig;
 
 #[derive(Clone)]
 pub(crate) struct ReverseTlsHostPolicy {
@@ -12,7 +12,7 @@ pub(crate) struct ReverseTlsHostPolicy {
 }
 
 impl ReverseTlsHostPolicy {
-    pub(super) fn from_config(reverse: &ReverseConfig) -> Result<Self> {
+    pub(super) fn from_config(reverse: &ReverseEdgeConfig) -> Result<Self> {
         let exception_globs = if reverse.sni_host_exceptions.is_empty() {
             None
         } else {

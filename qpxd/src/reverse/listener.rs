@@ -121,8 +121,8 @@ pub(super) async fn run_reverse_tls_acceptor(
                 reverse
                     .runtime
                     .state()
-                    .config
-                    .runtime
+                    .plan
+                    .limits
                     .http_header_read_timeout_ms,
             );
             let (stream, remote_addr) = match resolve_remote_addr_with_xdp(
@@ -236,8 +236,8 @@ pub(super) async fn run_reverse_tls_acceptor(
                 reverse
                     .runtime
                     .state()
-                    .config
-                    .runtime
+                    .plan
+                    .limits
                     .http_header_read_timeout_ms,
             );
             let (stream, remote_addr) = match resolve_remote_addr_with_xdp(
@@ -345,8 +345,8 @@ pub(super) async fn run_reverse_http_acceptor(
                 reverse
                     .runtime
                     .state()
-                    .config
-                    .runtime
+                    .plan
+                    .limits
                     .http_header_read_timeout_ms,
             );
             let (stream, remote_addr) = match resolve_remote_addr_with_xdp(
@@ -387,7 +387,7 @@ pub(super) async fn run_reverse_http_acceptor(
             let stream = crate::io_prefix::PrefixedIo::new(stream, preface.clone());
             let conn = ReverseConnInfo::plain(remote_addr, local_port);
             if preface.as_ref() == H2_PREFACE {
-                let access_cfg = reverse.runtime.state().config.access_log.clone();
+                let access_cfg = reverse.runtime.state().resources.access_log.clone();
                 let service = AccessLogService::new(
                     ReverseInterimService {
                         reverse: reverse.clone(),
@@ -406,7 +406,7 @@ pub(super) async fn run_reverse_http_acceptor(
                     warn!(error = ?err, "reverse HTTP/2 connection failed");
                 }
             } else {
-                let access_cfg = reverse.runtime.state().config.access_log.clone();
+                let access_cfg = reverse.runtime.state().resources.access_log.clone();
                 let service = AccessLogService::new(
                     ReverseInterimService {
                         reverse: reverse.clone(),
@@ -440,7 +440,7 @@ async fn handle_tls_connection(
     let ReverseTlsContext { reverse } = ctx;
     let mut stream = stream;
     let peek_timeout =
-        Duration::from_millis(reverse.runtime.state().config.runtime.tls_peek_timeout_ms);
+        Duration::from_millis(reverse.runtime.state().plan.limits.tls_peek_timeout_ms);
     let peek = read_client_hello_with_timeout(&mut stream, peek_timeout).await?;
     let client_hello = extract_client_hello_info(&peek);
     let sni = client_hello
@@ -469,14 +469,8 @@ async fn handle_tls_connection(
         sni.as_deref(),
     ) {
         let addr = upstream.origin.connect_authority(443)?;
-        let upstream_timeout = Duration::from_millis(
-            reverse
-                .runtime
-                .state()
-                .config
-                .runtime
-                .upstream_http_timeout_ms,
-        );
+        let upstream_timeout =
+            Duration::from_millis(reverse.runtime.state().plan.limits.upstream_http_timeout_ms);
         let upstream_stream =
             tokio::time::timeout(upstream_timeout, TcpStream::connect(&addr)).await??;
         let _ = upstream_stream.set_nodelay(true);
@@ -486,14 +480,8 @@ async fn handle_tls_connection(
                 .state()
                 .export_session(remote_addr, server_addr)
         });
-        let idle_timeout = Duration::from_millis(
-            reverse
-                .runtime
-                .state()
-                .config
-                .runtime
-                .tunnel_idle_timeout_ms,
-        );
+        let idle_timeout =
+            Duration::from_millis(reverse.runtime.state().plan.limits.tunnel_idle_timeout_ms);
         copy_bidirectional_with_export_and_idle(
             stream,
             upstream_stream,
@@ -505,14 +493,8 @@ async fn handle_tls_connection(
         return Ok(());
     }
 
-    let tls_accept_timeout = Duration::from_millis(
-        reverse
-            .runtime
-            .state()
-            .config
-            .runtime
-            .upstream_http_timeout_ms,
-    );
+    let tls_accept_timeout =
+        Duration::from_millis(reverse.runtime.state().plan.limits.upstream_http_timeout_ms);
     let acceptor = compiled
         .tls_acceptor
         .as_ref()
@@ -537,12 +519,12 @@ async fn handle_tls_connection(
         reverse
             .runtime
             .state()
-            .config
-            .runtime
+            .plan
+            .limits
             .http_header_read_timeout_ms,
     );
     let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), peer_certificates);
-    let access_cfg = reverse.runtime.state().config.access_log.clone();
+    let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_name = reverse.name.clone();
     if negotiated_h2 {
         let service = AccessLogService::new(
@@ -583,9 +565,9 @@ mod tests {
     use crate::runtime::Runtime;
     use crate::tls::TlsClientHelloInfo;
     use qpx_core::config::{
-        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CacheConfig, Config,
-        IdentityConfig, MatchConfig, MessagesConfig, ReverseConfig, ReverseRouteConfig, RuleConfig,
-        RuntimeConfig, SystemLogConfig, TlsFingerprintMatchConfig, UpstreamConfig,
+        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
+        IdentityConfig, MatchConfig, MessagesConfig, ReverseEdgeConfig, ReverseRouteConfig,
+        RuleConfig, RuntimeConfig, SystemLogConfig, TlsFingerprintMatchConfig, UpstreamConfig,
     };
     use std::future::poll_fn;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -600,7 +582,7 @@ mod tests {
         upstream_addr: SocketAddr,
         connection_filter: Vec<RuleConfig>,
     ) -> ReloadableReverse {
-        let reverse_cfg = ReverseConfig {
+        let reverse_cfg = ReverseEdgeConfig {
             name: "test".to_string(),
             listen: "127.0.0.1:0".to_string(),
             tls: None,
@@ -623,6 +605,7 @@ mod tests {
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 path_rewrite: None,
                 upstream_trust_profile: None,
@@ -652,25 +635,30 @@ mod tests {
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime: RuntimeConfig::default(),
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: AuthConfig::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: AuthConfig::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            listeners: Vec::new(),
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            reverse: vec![reverse_cfg.clone()],
+            edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
             upstreams: vec![upstream_cfg],
-            cache: CacheConfig::default(),
+            caches: Vec::new(),
         };
         let runtime = Runtime::new(config).expect("runtime");
         ReloadableReverse::new(
@@ -818,7 +806,7 @@ mod tests {
             .await
             .expect("bind reverse");
         let addr = listener.local_addr().expect("reverse addr");
-        let access_cfg = reverse.runtime.state().config.access_log.clone();
+        let access_cfg = reverse.runtime.state().resources.access_log.clone();
         let service = AccessLogService::new(
             ReverseInterimService {
                 reverse,
@@ -985,7 +973,7 @@ async fn handle_tls_connection(
     let ReverseTlsContext { reverse } = ctx;
     let mut stream = stream;
     let peek_timeout =
-        Duration::from_millis(reverse.runtime.state().config.runtime.tls_peek_timeout_ms);
+        Duration::from_millis(reverse.runtime.state().plan.limits.tls_peek_timeout_ms);
     let peek = read_client_hello_with_timeout(&mut stream, peek_timeout).await?;
     let client_hello = extract_client_hello_info(&peek);
     let sni = client_hello
@@ -1014,14 +1002,8 @@ async fn handle_tls_connection(
         sni.as_deref(),
     ) {
         let addr = upstream.origin.connect_authority(443)?;
-        let upstream_timeout = Duration::from_millis(
-            reverse
-                .runtime
-                .state()
-                .config
-                .runtime
-                .upstream_http_timeout_ms,
-        );
+        let upstream_timeout =
+            Duration::from_millis(reverse.runtime.state().plan.limits.upstream_http_timeout_ms);
         let upstream_stream =
             tokio::time::timeout(upstream_timeout, TcpStream::connect(&addr)).await??;
         let _ = upstream_stream.set_nodelay(true);
@@ -1031,14 +1013,8 @@ async fn handle_tls_connection(
                 .state()
                 .export_session(remote_addr, server_addr)
         });
-        let idle_timeout = Duration::from_millis(
-            reverse
-                .runtime
-                .state()
-                .config
-                .runtime
-                .tunnel_idle_timeout_ms,
-        );
+        let idle_timeout =
+            Duration::from_millis(reverse.runtime.state().plan.limits.tunnel_idle_timeout_ms);
         copy_bidirectional_with_export_and_idle(
             stream,
             upstream_stream,
@@ -1050,14 +1026,8 @@ async fn handle_tls_connection(
         return Ok(());
     }
 
-    let tls_accept_timeout = Duration::from_millis(
-        reverse
-            .runtime
-            .state()
-            .config
-            .runtime
-            .upstream_http_timeout_ms,
-    );
+    let tls_accept_timeout =
+        Duration::from_millis(reverse.runtime.state().plan.limits.upstream_http_timeout_ms);
     let acceptor = compiled
         .tls_acceptor
         .as_ref()
@@ -1075,12 +1045,12 @@ async fn handle_tls_connection(
         reverse
             .runtime
             .state()
-            .config
-            .runtime
+            .plan
+            .limits
             .http_header_read_timeout_ms,
     );
     let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), None);
-    let access_cfg = reverse.runtime.state().config.access_log.clone();
+    let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_name = reverse.name.clone();
     if negotiated_h2 {
         let service = AccessLogService::new(

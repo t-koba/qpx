@@ -1,5 +1,6 @@
 use super::{
-    parse_module_settings, HttpModule, HttpModuleContext, HttpModuleFactory, HttpModuleRequestView,
+    parse_module_settings, BodyAccess, HttpModule, HttpModuleCapabilities, HttpModuleContext,
+    HttpModuleEvent, HttpModuleFactory, HttpModuleRequestView, HttpModuleStage, ModuleStages,
 };
 use crate::http::body::Body;
 use anyhow::{anyhow, Result};
@@ -57,7 +58,7 @@ impl ResponseCompressionModule {
         );
         append_vary_accept_encoding(&mut parts.headers);
         let body_read_timeout =
-            Duration::from_millis(ctx.runtime.config.runtime.upstream_http_timeout_ms.max(1));
+            Duration::from_millis(ctx.runtime.plan.limits.upstream_http_timeout_ms.max(1));
         let body = stream_compressed_body(body, encoding, &self.config, body_read_timeout);
         Ok(Response::from_parts(parts, body))
     }
@@ -69,12 +70,32 @@ impl HttpModule for ResponseCompressionModule {
         100
     }
 
-    async fn on_downstream_response(
+    fn capabilities(&self) -> HttpModuleCapabilities {
+        let mut capabilities =
+            HttpModuleCapabilities::headers_only(ModuleStages::DOWNSTREAM_RESPONSE);
+        capabilities.body_access = BodyAccess::Streaming;
+        capabilities.mutates_response_headers = true;
+        capabilities.needs_frozen_request = true;
+        capabilities
+    }
+
+    async fn call<'a>(
         &self,
+        stage: HttpModuleStage,
         ctx: &mut HttpModuleContext,
-        response: Response<Body>,
-    ) -> Result<Response<Body>> {
-        self.compress(ctx, response).await
+        event: HttpModuleEvent<'a>,
+    ) -> Result<HttpModuleEvent<'a>> {
+        let HttpModuleStage::DownstreamResponse = stage else {
+            return Ok(event);
+        };
+        let HttpModuleEvent::DownstreamResponse(response) = event else {
+            return Err(anyhow!(
+                "response_compression received invalid downstream_response event"
+            ));
+        };
+        Ok(HttpModuleEvent::DownstreamResponse(
+            self.compress(ctx, response).await?,
+        ))
     }
 }
 

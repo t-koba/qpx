@@ -3,7 +3,7 @@ use anyhow::anyhow;
 use anyhow::{Context, Result};
 use qpx_core::config::Config;
 #[cfg(feature = "http3")]
-use qpx_core::config::ListenerMode;
+use qpx_core::config::IngressEdgeMode;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "http3")]
 use std::collections::HashMap;
@@ -40,8 +40,8 @@ pub(crate) struct UdpBindingHandoff {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct InheritedUdpBindings {
-    listeners: Vec<InheritedUdpSocket>,
-    reverses: Vec<InheritedUdpSocket>,
+    forward_edges: Vec<InheritedUdpSocket>,
+    reverse_edge: Vec<InheritedUdpSocket>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,8 +56,8 @@ struct InheritedUdpSocket {
 
 #[cfg(all(feature = "http3", windows))]
 struct WindowsUdpBindingHandoff {
-    listeners: Vec<WindowsInheritedUdpSocket>,
-    reverses: Vec<WindowsInheritedUdpSocket>,
+    forward_edges: Vec<WindowsInheritedUdpSocket>,
+    reverse_edge: Vec<WindowsInheritedUdpSocket>,
 }
 
 #[cfg(all(feature = "http3", windows))]
@@ -74,7 +74,7 @@ impl UdpBindings {
             let mut listener_udp = HashMap::new();
             let mut reverse_udp = HashMap::new();
 
-            for listener in &config.listeners {
+            for listener in config.ingress_edges() {
                 let Some(http3) = listener.http3.as_ref().filter(|cfg| cfg.enabled) else {
                     continue;
                 };
@@ -86,32 +86,32 @@ impl UdpBindings {
                     format!("listener {} http3.listen is invalid", listener.name)
                 })?;
                 let socket = match listener.mode {
-                    ListenerMode::Forward => {
+                    IngressEdgeMode::Forward => {
                         crate::net::bind_udp_std_socket(addr, &config.runtime)?
                     }
-                    ListenerMode::Transparent => {
+                    IngressEdgeMode::Transparent => {
                         crate::transparent::udp_socket::bind_udp_std_listener(
                             addr,
-                            &config.runtime,
+                            config.runtime.reuse_port,
                         )?
                     }
                 };
                 listener_udp.insert(listener.name.clone(), socket);
             }
 
-            for reverse in &config.reverse {
-                let Some(http3) = reverse.http3.as_ref().filter(|cfg| cfg.enabled) else {
+            for reverse_edge in config.reverse_edge_configs() {
+                let Some(http3) = reverse_edge.http3.as_ref().filter(|cfg| cfg.enabled) else {
                     continue;
                 };
                 let listen = http3
                     .listen
                     .clone()
-                    .unwrap_or_else(|| reverse.listen.clone());
-                let addr: SocketAddr = listen
-                    .parse()
-                    .with_context(|| format!("reverse {} http3.listen is invalid", reverse.name))?;
+                    .unwrap_or_else(|| reverse_edge.listen.clone());
+                let addr: SocketAddr = listen.parse().with_context(|| {
+                    format!("reverse_edge {} http3.listen is invalid", reverse_edge.name)
+                })?;
                 let socket = crate::net::bind_udp_std_socket(addr, &config.runtime)?;
-                reverse_udp.insert(reverse.name.clone(), socket);
+                reverse_udp.insert(reverse_edge.name.clone(), socket);
             }
 
             Ok(Self {
@@ -137,7 +137,7 @@ impl UdpBindings {
             let mut listener_udp = HashMap::new();
             let mut reverse_udp = HashMap::new();
 
-            for listener in &config.listeners {
+            for listener in config.ingress_edges() {
                 let Some(http3) = listener.http3.as_ref().filter(|cfg| cfg.enabled) else {
                     continue;
                 };
@@ -156,23 +156,28 @@ impl UdpBindings {
                 listener_udp.insert(listener.name.clone(), socket);
             }
 
-            for reverse in &config.reverse {
-                let Some(http3) = reverse.http3.as_ref().filter(|cfg| cfg.enabled) else {
+            for reverse_edge in config.reverse_edge_configs() {
+                let Some(http3) = reverse_edge.http3.as_ref().filter(|cfg| cfg.enabled) else {
                     continue;
                 };
                 let listen = http3
                     .listen
                     .clone()
-                    .unwrap_or_else(|| reverse.listen.clone());
+                    .unwrap_or_else(|| reverse_edge.listen.clone());
                 let socket = previous
                     .udp_socket_for_listen(previous_config, listen.as_str())
                     .map(|socket| {
                         socket.with_context(|| {
-                            format!("failed to clone udp reverse binding for {}", reverse.name)
+                            format!(
+                                "failed to clone udp reverse_edge binding for {}",
+                                reverse_edge.name
+                            )
                         })
                     })
-                    .unwrap_or_else(|| bind_udp_for_reverse(reverse, config, listen.as_str()))?;
-                reverse_udp.insert(reverse.name.clone(), socket);
+                    .unwrap_or_else(|| {
+                        bind_udp_for_reverse(reverse_edge, config, listen.as_str())
+                    })?;
+                reverse_udp.insert(reverse_edge.name.clone(), socket);
             }
 
             Ok(Self {
@@ -192,7 +197,7 @@ impl UdpBindings {
 
     #[cfg(feature = "http3")]
     fn udp_socket_for_listen(&self, config: &Config, listen: &str) -> Option<Result<UdpSocket>> {
-        for listener in &config.listeners {
+        for listener in config.ingress_edges() {
             let old_listen = listener
                 .http3
                 .as_ref()
@@ -208,15 +213,23 @@ impl UdpBindings {
                 }
             }
         }
-        for reverse in &config.reverse {
-            let old_listen = reverse
+        for reverse_edge in config.reverse_edge_configs() {
+            let old_listen = reverse_edge
                 .http3
                 .as_ref()
                 .filter(|cfg| cfg.enabled)
-                .map(|cfg| cfg.listen.clone().unwrap_or_else(|| reverse.listen.clone()));
+                .map(|cfg| {
+                    cfg.listen
+                        .clone()
+                        .unwrap_or_else(|| reverse_edge.listen.clone())
+                });
             if old_listen.as_deref() == Some(listen) {
-                if let Some(socket) = self.reverse_udp.get(&reverse.name) {
-                    return Some(socket.try_clone().context("failed to clone udp reverse"));
+                if let Some(socket) = self.reverse_udp.get(&reverse_edge.name) {
+                    return Some(
+                        socket
+                            .try_clone()
+                            .context("failed to clone udp reverse_edge"),
+                    );
                 }
             }
         }
@@ -247,9 +260,9 @@ impl UdpBindings {
             let mut listener_udp = HashMap::new();
             let mut reverse_udp = HashMap::new();
 
-            for listener in &config.listeners {
+            for listener in config.ingress_edges() {
                 let maybe = inherited
-                    .listeners
+                    .forward_edges
                     .iter()
                     .find(|entry| entry.name == listener.name);
                 let expect_socket = listener
@@ -291,34 +304,37 @@ impl UdpBindings {
                 }
             }
 
-            for reverse in &config.reverse {
+            for reverse_edge in config.reverse_edge_configs() {
                 let maybe = inherited
-                    .reverses
+                    .reverse_edge
                     .iter()
-                    .find(|entry| entry.name == reverse.name);
-                let expect_socket = reverse
+                    .find(|entry| entry.name == reverse_edge.name);
+                let expect_socket = reverse_edge
                     .http3
                     .as_ref()
                     .map(|cfg| cfg.enabled)
                     .unwrap_or(false);
                 if expect_socket {
-                    let listen = reverse
+                    let listen = reverse_edge
                         .http3
                         .as_ref()
                         .and_then(|cfg| cfg.listen.clone())
-                        .unwrap_or_else(|| reverse.listen.clone());
+                        .unwrap_or_else(|| reverse_edge.listen.clone());
                     let entry = maybe.ok_or_else(|| {
-                        anyhow!("missing inherited udp reverse binding for {}", reverse.name)
+                        anyhow!(
+                            "missing inherited udp reverse_edge binding for {}",
+                            reverse_edge.name
+                        )
                     })?;
                     if entry.listen != listen {
                         return Err(anyhow!(
-                            "inherited udp reverse binding for {} does not match listen {}",
-                            reverse.name,
+                            "inherited udp reverse_edge binding for {} does not match listen {}",
+                            reverse_edge.name,
                             listen
                         ));
                     }
                     reverse_udp.insert(
-                        reverse.name.clone(),
+                        reverse_edge.name.clone(),
                         #[cfg(unix)]
                         adopt_inherited_udp_socket(entry.fd)?,
                         #[cfg(windows)]
@@ -326,8 +342,8 @@ impl UdpBindings {
                     );
                 } else if maybe.is_some() {
                     return Err(anyhow!(
-                        "unexpected inherited udp reverse binding for {}",
-                        reverse.name
+                        "unexpected inherited udp reverse_edge binding for {}",
+                        reverse_edge.name
                     ));
                 }
             }
@@ -365,7 +381,7 @@ impl UdpBindings {
             .map(|socket| {
                 socket
                     .try_clone()
-                    .with_context(|| format!("failed to clone udp reverse binding for {name}"))
+                    .with_context(|| format!("failed to clone udp reverse_edge binding for {name}"))
             })
             .transpose()
     }
@@ -387,7 +403,7 @@ impl UdpBindings {
                 let mut kept_fds = Vec::new();
                 let mut inherited = InheritedUdpBindings::default();
 
-                for listener in &config.listeners {
+                for listener in config.ingress_edges() {
                     if !listener
                         .http3
                         .as_ref()
@@ -404,15 +420,15 @@ impl UdpBindings {
                     let socket = self.listener_udp.get(&listener.name).ok_or_else(|| {
                         anyhow!("udp listener binding not found for {}", listener.name)
                     })?;
-                    inherited.listeners.push(InheritedUdpSocket {
+                    inherited.forward_edges.push(InheritedUdpSocket {
                         name: listener.name.clone(),
                         listen,
                         fd: duplicate_std_udp_socket_for_handoff(socket, &mut kept_fds)?,
                     });
                 }
 
-                for reverse in &config.reverse {
-                    if !reverse
+                for reverse_edge in config.reverse_edge_configs() {
+                    if !reverse_edge
                         .http3
                         .as_ref()
                         .map(|cfg| cfg.enabled)
@@ -420,16 +436,19 @@ impl UdpBindings {
                     {
                         continue;
                     }
-                    let listen = reverse
+                    let listen = reverse_edge
                         .http3
                         .as_ref()
                         .and_then(|cfg| cfg.listen.clone())
-                        .unwrap_or_else(|| reverse.listen.clone());
-                    let socket = self.reverse_udp.get(&reverse.name).ok_or_else(|| {
-                        anyhow!("udp reverse binding not found for {}", reverse.name)
+                        .unwrap_or_else(|| reverse_edge.listen.clone());
+                    let socket = self.reverse_udp.get(&reverse_edge.name).ok_or_else(|| {
+                        anyhow!(
+                            "udp reverse_edge binding not found for {}",
+                            reverse_edge.name
+                        )
                     })?;
-                    inherited.reverses.push(InheritedUdpSocket {
-                        name: reverse.name.clone(),
+                    inherited.reverse_edge.push(InheritedUdpSocket {
+                        name: reverse_edge.name.clone(),
                         listen,
                         fd: duplicate_std_udp_socket_for_handoff(socket, &mut kept_fds)?,
                     });
@@ -459,8 +478,8 @@ impl UdpBindings {
             #[cfg(feature = "http3")]
             {
                 let path = crate::windows_handoff::create_handoff_path(config, "udp-bindings")?;
-                let listeners = config
-                    .listeners
+                let forward_edges = config
+                    .ingress_edge_configs()
                     .iter()
                     .filter(|listener| {
                         listener
@@ -496,34 +515,40 @@ impl UdpBindings {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                let reverses = config
-                    .reverse
+                let reverse_edge = config
+                    .reverse_edge_configs()
                     .iter()
-                    .filter(|reverse| {
-                        reverse
+                    .filter(|reverse_edge| {
+                        reverse_edge
                             .http3
                             .as_ref()
                             .map(|cfg| cfg.enabled)
                             .unwrap_or(false)
                     })
-                    .map(|reverse| {
-                        let listen = reverse
+                    .map(|reverse_edge| {
+                        let listen = reverse_edge
                             .http3
                             .as_ref()
                             .and_then(|cfg| cfg.listen.clone())
-                            .unwrap_or_else(|| reverse.listen.clone());
+                            .unwrap_or_else(|| reverse_edge.listen.clone());
                         let socket = self
                             .reverse_udp
-                            .get(&reverse.name)
+                            .get(&reverse_edge.name)
                             .ok_or_else(|| {
-                                anyhow!("udp reverse binding not found for {}", reverse.name)
+                                anyhow!(
+                                    "udp reverse_edge binding not found for {}",
+                                    reverse_edge.name
+                                )
                             })?
                             .try_clone()
                             .with_context(|| {
-                                format!("failed to clone udp reverse binding for {}", reverse.name)
+                                format!(
+                                    "failed to clone udp reverse_edge binding for {}",
+                                    reverse_edge.name
+                                )
                             })?;
                         Ok(WindowsInheritedUdpSocket {
-                            name: reverse.name.clone(),
+                            name: reverse_edge.name.clone(),
                             listen,
                             socket,
                         })
@@ -533,8 +558,8 @@ impl UdpBindings {
                 Ok(UdpBindingHandoff {
                     env_value: path.display().to_string(),
                     pending: WindowsUdpBindingHandoff {
-                        listeners,
-                        reverses,
+                        forward_edges,
+                        reverse_edge,
                     },
                     cleanup_path: path,
                 })
@@ -551,8 +576,8 @@ impl UdpBindings {
                 Ok(UdpBindingHandoff {
                     env_value: path.display().to_string(),
                     pending: WindowsUdpBindingHandoff {
-                        listeners: Vec::new(),
-                        reverses: Vec::new(),
+                        forward_edges: Vec::new(),
+                        reverse_edge: Vec::new(),
                     },
                     cleanup_path: path,
                 })
@@ -570,9 +595,9 @@ impl UdpBindings {
         child_pid: u32,
     ) -> Result<()> {
         let inherited = InheritedUdpBindings {
-            listeners: handoff
+            forward_edges: handoff
                 .pending
-                .listeners
+                .ingress_edge_configs()
                 .iter()
                 .map(|entry| {
                     Ok(InheritedUdpSocket {
@@ -582,9 +607,9 @@ impl UdpBindings {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,
-            reverses: handoff
+            reverse_edge: handoff
                 .pending
-                .reverses
+                .reverse_edge
                 .iter()
                 .map(|entry| {
                     Ok(InheritedUdpSocket {
@@ -606,7 +631,7 @@ impl UdpBindings {
 
 #[cfg(feature = "http3")]
 fn bind_udp_for_listener(
-    listener: &qpx_core::config::ListenerConfig,
+    listener: &qpx_core::config::IngressEdgeConfig,
     config: &Config,
     listen: &str,
 ) -> Result<UdpSocket> {
@@ -614,22 +639,22 @@ fn bind_udp_for_listener(
         .parse()
         .with_context(|| format!("listener {} http3.listen is invalid", listener.name))?;
     match listener.mode {
-        ListenerMode::Forward => crate::net::bind_udp_std_socket(addr, &config.runtime),
-        ListenerMode::Transparent => {
-            crate::transparent::udp_socket::bind_udp_std_listener(addr, &config.runtime)
+        IngressEdgeMode::Forward => crate::net::bind_udp_std_socket(addr, &config.runtime),
+        IngressEdgeMode::Transparent => {
+            crate::transparent::udp_socket::bind_udp_std_listener(addr, config.runtime.reuse_port)
         }
     }
 }
 
 #[cfg(feature = "http3")]
 fn bind_udp_for_reverse(
-    reverse: &qpx_core::config::ReverseConfig,
+    reverse_edge: &qpx_core::config::ReverseEdgeConfig,
     config: &Config,
     listen: &str,
 ) -> Result<UdpSocket> {
     let addr = listen
         .parse()
-        .with_context(|| format!("reverse {} http3.listen is invalid", reverse.name))?;
+        .with_context(|| format!("reverse_edge {} http3.listen is invalid", reverse_edge.name))?;
     crate::net::bind_udp_std_socket(addr, &config.runtime)
 }
 
@@ -637,8 +662,8 @@ fn bind_udp_for_reverse(
 mod tests {
     use super::*;
     use qpx_core::config::{
-        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CacheConfig, Config,
-        Http3ListenerConfig, IdentityConfig, ListenerConfig, ListenerMode, MessagesConfig,
+        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
+        Http3IngressEdgeConfig, IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MessagesConfig,
         RuntimeConfig, SystemLogConfig,
     };
     fn test_config() -> Config {
@@ -650,31 +675,42 @@ mod tests {
                 reuse_port: false,
                 ..RuntimeConfig::default()
             },
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: AuthConfig::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: AuthConfig::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            listeners: vec![ListenerConfig {
+            edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
                 name: "forward".to_string(),
-                mode: ListenerMode::Forward,
+                mode: IngressEdgeMode::Forward,
                 listen: "127.0.0.1:0".to_string(),
                 default_action: ActionConfig {
                     kind: ActionKind::Direct,
                     upstream: None,
                     local_response: None,
                 },
+                original_dst: None,
                 tls_inspection: None,
                 rules: Vec::new(),
                 connection_filter: Vec::new(),
                 upstream_proxy: None,
-                http3: Some(Http3ListenerConfig {
+                http3: Some(Http3IngressEdgeConfig {
                     enabled: true,
                     listen: Some("127.0.0.1:0".to_string()),
                     connect_udp: None,
@@ -682,20 +718,16 @@ mod tests {
                 ftp: Default::default(),
                 xdp: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 policy_context: None,
                 http: None,
                 http_guard_profile: None,
                 destination_resolution: None,
                 http_modules: Vec::new(),
-            }],
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            reverse: Vec::new(),
+            })],
             upstreams: Vec::new(),
-            cache: CacheConfig::default(),
+            caches: Vec::new(),
         }
     }
 

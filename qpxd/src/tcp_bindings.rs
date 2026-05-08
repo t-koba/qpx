@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use qpx_core::config::{Config, ReverseConfig};
+use qpx_core::config::{Config, ReverseEdgeConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::TcpListener;
@@ -28,8 +28,8 @@ pub(crate) struct TcpBindingHandoff {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InheritedTcpBindings {
-    listeners: Vec<InheritedTcpGroup>,
-    reverses: Vec<InheritedTcpGroup>,
+    forward_edges: Vec<InheritedTcpGroup>,
+    reverse_edge: Vec<InheritedTcpGroup>,
     metrics: Option<InheritedSingleTcp>,
     #[cfg(feature = "acme")]
     acme_http01: Option<InheritedSingleTcp>,
@@ -56,8 +56,8 @@ struct InheritedSingleTcp {
 
 #[cfg(windows)]
 struct WindowsTcpBindingHandoff {
-    listeners: Vec<WindowsTcpGroup>,
-    reverses: Vec<WindowsTcpGroup>,
+    forward_edges: Vec<WindowsTcpGroup>,
+    reverse_edge: Vec<WindowsTcpGroup>,
     metrics: Option<WindowsSingleTcp>,
     #[cfg(feature = "acme")]
     acme_http01: Option<WindowsSingleTcp>,
@@ -67,7 +67,7 @@ struct WindowsTcpBindingHandoff {
 struct WindowsTcpGroup {
     name: String,
     listen: String,
-    listeners: Vec<TcpListener>,
+    forward_edges: Vec<TcpListener>,
 }
 
 #[cfg(windows)]
@@ -81,28 +81,29 @@ impl TcpBindings {
         let mut listener_tcp = HashMap::new();
         let mut reverse_tcp = HashMap::new();
 
-        for listener in &config.listeners {
+        for listener in config.ingress_edges() {
             let addr = listener
                 .listen
                 .parse()
                 .with_context(|| format!("listener {} listen is invalid", listener.name))?;
-            let listeners = crate::net::bind_tcp_std_listeners(addr, &config.runtime)?;
-            listener_tcp.insert(listener.name.clone(), listeners);
+            let forward_edges = crate::net::bind_tcp_std_listeners(addr, &config.runtime)?;
+            listener_tcp.insert(listener.name.clone(), forward_edges);
         }
 
-        for reverse in &config.reverse {
-            if !reverse_requires_tcp(reverse) {
+        for reverse_edge in config.reverse_edge_configs() {
+            if !reverse_requires_tcp(reverse_edge) {
                 continue;
             }
-            let addr = reverse
+            let addr = reverse_edge
                 .listen
                 .parse()
-                .with_context(|| format!("reverse {} listen is invalid", reverse.name))?;
-            let listeners = crate::net::bind_tcp_std_listeners(addr, &config.runtime)?;
-            reverse_tcp.insert(reverse.name.clone(), listeners);
+                .with_context(|| format!("reverse_edge {} listen is invalid", reverse_edge.name))?;
+            let forward_edges = crate::net::bind_tcp_std_listeners(addr, &config.runtime)?;
+            reverse_tcp.insert(reverse_edge.name.clone(), forward_edges);
         }
 
         let metrics = config
+            .telemetry
             .metrics
             .as_ref()
             .map(|metrics| bind_admin_listener(metrics.listen.as_str(), "metrics.listen"))
@@ -137,26 +138,29 @@ impl TcpBindings {
         let mut listener_tcp = HashMap::new();
         let mut reverse_tcp = HashMap::new();
 
-        for listener in &config.listeners {
-            let listeners = previous
+        for listener in config.ingress_edges() {
+            let forward_edges = previous
                 .tcp_group_for_listen(previous_config, listener.listen.as_str())
                 .map(|group| clone_std_tcp_group(group, "listener", listener.name.as_str()))
                 .unwrap_or_else(|| bind_tcp_group(listener.listen.as_str(), config, "listener"))?;
-            listener_tcp.insert(listener.name.clone(), listeners);
+            listener_tcp.insert(listener.name.clone(), forward_edges);
         }
 
-        for reverse in &config.reverse {
-            if !reverse_requires_tcp(reverse) {
+        for reverse_edge in config.reverse_edge_configs() {
+            if !reverse_requires_tcp(reverse_edge) {
                 continue;
             }
-            let listeners = previous
-                .tcp_group_for_listen(previous_config, reverse.listen.as_str())
-                .map(|group| clone_std_tcp_group(group, "reverse", reverse.name.as_str()))
-                .unwrap_or_else(|| bind_tcp_group(reverse.listen.as_str(), config, "reverse"))?;
-            reverse_tcp.insert(reverse.name.clone(), listeners);
+            let forward_edges = previous
+                .tcp_group_for_listen(previous_config, reverse_edge.listen.as_str())
+                .map(|group| clone_std_tcp_group(group, "reverse_edge", reverse_edge.name.as_str()))
+                .unwrap_or_else(|| {
+                    bind_tcp_group(reverse_edge.listen.as_str(), config, "reverse_edge")
+                })?;
+            reverse_tcp.insert(reverse_edge.name.clone(), forward_edges);
         }
 
         let metrics = config
+            .telemetry
             .metrics
             .as_ref()
             .map(|metrics| {
@@ -208,16 +212,16 @@ impl TcpBindings {
         config: &Config,
         listen: &str,
     ) -> Option<&'a Vec<TcpListener>> {
-        for listener in &config.listeners {
+        for listener in config.ingress_edges() {
             if listener.listen == listen {
                 if let Some(group) = self.listener_tcp.get(&listener.name) {
                     return Some(group);
                 }
             }
         }
-        for reverse in &config.reverse {
-            if reverse_requires_tcp(reverse) && reverse.listen == listen {
-                if let Some(group) = self.reverse_tcp.get(&reverse.name) {
+        for reverse_edge in config.reverse_edge_configs() {
+            if reverse_requires_tcp(reverse_edge) && reverse_edge.listen == listen {
+                if let Some(group) = self.reverse_tcp.get(&reverse_edge.name) {
                     return Some(group);
                 }
             }
@@ -227,6 +231,7 @@ impl TcpBindings {
 
     fn metrics_for_listen<'a>(&'a self, config: &Config, listen: &str) -> Option<&'a TcpListener> {
         config
+            .telemetry
             .metrics
             .as_ref()
             .filter(|metrics| metrics.listen == listen)
@@ -265,9 +270,9 @@ impl TcpBindings {
         let mut listener_tcp = HashMap::new();
         let mut reverse_tcp = HashMap::new();
 
-        for listener in &config.listeners {
+        for listener in config.ingress_edges() {
             let group = inherited
-                .listeners
+                .forward_edges
                 .iter()
                 .find(|group| group.name == listener.name)
                 .ok_or_else(|| {
@@ -282,9 +287,9 @@ impl TcpBindings {
             }
             listener_tcp.insert(listener.name.clone(), adopt_tcp_group(group)?);
         }
-        for group in &inherited.listeners {
+        for group in &inherited.forward_edges {
             if !config
-                .listeners
+                .ingress_edge_configs()
                 .iter()
                 .any(|listener| listener.name == group.name)
             {
@@ -295,44 +300,47 @@ impl TcpBindings {
             }
         }
 
-        for reverse in &config.reverse {
+        for reverse_edge in config.reverse_edge_configs() {
             let maybe_group = inherited
-                .reverses
+                .reverse_edge
                 .iter()
-                .find(|group| group.name == reverse.name);
-            if reverse_requires_tcp(reverse) {
+                .find(|group| group.name == reverse_edge.name);
+            if reverse_requires_tcp(reverse_edge) {
                 let group = maybe_group.ok_or_else(|| {
-                    anyhow!("missing inherited reverse binding for {}", reverse.name)
+                    anyhow!(
+                        "missing inherited reverse_edge binding for {}",
+                        reverse_edge.name
+                    )
                 })?;
-                if group.listen != reverse.listen {
+                if group.listen != reverse_edge.listen {
                     return Err(anyhow!(
-                        "inherited reverse binding for {} does not match listen {}",
-                        reverse.name,
-                        reverse.listen
+                        "inherited reverse_edge binding for {} does not match listen {}",
+                        reverse_edge.name,
+                        reverse_edge.listen
                     ));
                 }
-                reverse_tcp.insert(reverse.name.clone(), adopt_tcp_group(group)?);
+                reverse_tcp.insert(reverse_edge.name.clone(), adopt_tcp_group(group)?);
             } else if maybe_group.is_some() {
                 return Err(anyhow!(
-                    "unexpected inherited reverse binding for passthrough-only reverse {}",
-                    reverse.name
+                    "unexpected inherited reverse_edge binding for passthrough-only reverse_edge {}",
+                    reverse_edge.name
                 ));
             }
         }
-        for group in &inherited.reverses {
+        for group in &inherited.reverse_edge {
             if !config
-                .reverse
+                .reverse_edge_configs()
                 .iter()
-                .any(|reverse| reverse.name == group.name)
+                .any(|reverse_edge| reverse_edge.name == group.name)
             {
                 return Err(anyhow!(
-                    "unexpected inherited reverse binding {}",
+                    "unexpected inherited reverse_edge binding {}",
                     group.name
                 ));
             }
         }
 
-        let metrics = match (&config.metrics, inherited.metrics.as_ref()) {
+        let metrics = match (&config.telemetry.metrics, inherited.metrics.as_ref()) {
             (Some(metrics), Some(inherited)) => {
                 if inherited.listen != metrics.listen {
                     return Err(anyhow!(
@@ -403,12 +411,12 @@ impl TcpBindings {
     pub(crate) fn clone_reverse(&self, name: &str) -> Result<Vec<tokio::net::TcpListener>> {
         self.reverse_tcp
             .get(name)
-            .ok_or_else(|| anyhow!("reverse binding not found for {}", name))?
+            .ok_or_else(|| anyhow!("reverse_edge binding not found for {}", name))?
             .iter()
             .map(|listener| {
-                let cloned = listener
-                    .try_clone()
-                    .with_context(|| format!("failed to clone reverse binding for {}", name))?;
+                let cloned = listener.try_clone().with_context(|| {
+                    format!("failed to clone reverse_edge binding for {}", name)
+                })?;
                 crate::net::tokio_listener_from_std(cloned)
             })
             .collect()
@@ -450,41 +458,40 @@ impl TcpBindings {
         {
             let mut kept_fds = Vec::new();
             let mut inherited = InheritedTcpBindings {
-                listeners: Vec::new(),
-                reverses: Vec::new(),
+                forward_edges: Vec::new(),
+                reverse_edge: Vec::new(),
                 metrics: None,
                 #[cfg(feature = "acme")]
                 acme_http01: None,
             };
 
-            for listener in &config.listeners {
+            for listener in config.ingress_edges() {
                 let sockets = self
                     .listener_tcp
                     .get(&listener.name)
                     .ok_or_else(|| anyhow!("listener binding not found for {}", listener.name))?;
-                inherited.listeners.push(InheritedTcpGroup {
+                inherited.forward_edges.push(InheritedTcpGroup {
                     name: listener.name.clone(),
                     listen: listener.listen.clone(),
                     fds: duplicate_listeners_for_handoff(sockets, &mut kept_fds)?,
                 });
             }
 
-            for reverse in &config.reverse {
-                if !reverse_requires_tcp(reverse) {
+            for reverse_edge in config.reverse_edge_configs() {
+                if !reverse_requires_tcp(reverse_edge) {
                     continue;
                 }
-                let sockets = self
-                    .reverse_tcp
-                    .get(&reverse.name)
-                    .ok_or_else(|| anyhow!("reverse binding not found for {}", reverse.name))?;
-                inherited.reverses.push(InheritedTcpGroup {
-                    name: reverse.name.clone(),
-                    listen: reverse.listen.clone(),
+                let sockets = self.reverse_tcp.get(&reverse_edge.name).ok_or_else(|| {
+                    anyhow!("reverse_edge binding not found for {}", reverse_edge.name)
+                })?;
+                inherited.reverse_edge.push(InheritedTcpGroup {
+                    name: reverse_edge.name.clone(),
+                    listen: reverse_edge.listen.clone(),
                     fds: duplicate_listeners_for_handoff(sockets, &mut kept_fds)?,
                 });
             }
 
-            if let Some(metrics) = config.metrics.as_ref() {
+            if let Some(metrics) = config.telemetry.metrics.as_ref() {
                 let listener = self
                     .metrics
                     .as_ref()
@@ -521,8 +528,8 @@ impl TcpBindings {
         #[cfg(windows)]
         {
             let path = crate::windows_handoff::create_handoff_path(config, "tcp-bindings")?;
-            let listeners = config
-                .listeners
+            let forward_edges = config
+                .ingress_edge_configs()
                 .iter()
                 .map(|listener| {
                     let sockets = self.listener_tcp.get(&listener.name).ok_or_else(|| {
@@ -531,7 +538,7 @@ impl TcpBindings {
                     Ok(WindowsTcpGroup {
                         name: listener.name.clone(),
                         listen: listener.listen.clone(),
-                        listeners: sockets
+                        forward_edges: sockets
                             .iter()
                             .map(|listener| {
                                 listener.try_clone().context("failed to clone listener")
@@ -541,33 +548,33 @@ impl TcpBindings {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let reverses = config
-                .reverse
+            let reverse_edge = config
+                .reverse_edge_configs()
                 .iter()
-                .filter(|reverse| reverse_requires_tcp(reverse))
-                .map(|reverse| {
-                    let sockets = self
-                        .reverse_tcp
-                        .get(&reverse.name)
-                        .ok_or_else(|| anyhow!("reverse binding not found for {}", reverse.name))?;
+                .filter(|reverse_edge| reverse_requires_tcp(reverse_edge))
+                .map(|reverse_edge| {
+                    let sockets = self.reverse_tcp.get(&reverse_edge.name).ok_or_else(|| {
+                        anyhow!("reverse_edge binding not found for {}", reverse_edge.name)
+                    })?;
                     Ok(WindowsTcpGroup {
-                        name: reverse.name.clone(),
-                        listen: reverse.listen.clone(),
-                        listeners: sockets
+                        name: reverse_edge.name.clone(),
+                        listen: reverse_edge.listen.clone(),
+                        forward_edges: sockets
                             .iter()
                             .map(|listener| {
                                 listener
                                     .try_clone()
-                                    .context("failed to clone reverse listener")
+                                    .context("failed to clone reverse_edge listener")
                             })
                             .collect::<Result<Vec<_>>>()?,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let metrics = match config.metrics.as_ref() {
+            let metrics = match config.telemetry.metrics.as_ref() {
                 Some(metrics) => {
                     let listener = self
+                        .telemetry
                         .metrics
                         .as_ref()
                         .ok_or_else(|| anyhow!("metrics binding not found"))?;
@@ -605,8 +612,8 @@ impl TcpBindings {
             Ok(TcpBindingHandoff {
                 env_value: path.display().to_string(),
                 pending: WindowsTcpBindingHandoff {
-                    listeners,
-                    reverses,
+                    forward_edges,
+                    reverse_edge,
                     metrics,
                     #[cfg(feature = "acme")]
                     acme_http01,
@@ -626,16 +633,16 @@ impl TcpBindings {
         child_pid: u32,
     ) -> Result<()> {
         let inherited = InheritedTcpBindings {
-            listeners: handoff
+            forward_edges: handoff
                 .pending
-                .listeners
+                .ingress_edge_configs()
                 .iter()
                 .map(|group| {
                     Ok(InheritedTcpGroup {
                         name: group.name.clone(),
                         listen: group.listen.clone(),
                         sockets: group
-                            .listeners
+                            .ingress_edge_configs()
                             .iter()
                             .map(|listener| {
                                 crate::windows_handoff::duplicate_socket_for_child(
@@ -646,16 +653,16 @@ impl TcpBindings {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,
-            reverses: handoff
+            reverse_edge: handoff
                 .pending
-                .reverses
+                .reverse_edge
                 .iter()
                 .map(|group| {
                     Ok(InheritedTcpGroup {
                         name: group.name.clone(),
                         listen: group.listen.clone(),
                         sockets: group
-                            .listeners
+                            .ingress_edge_configs()
                             .iter()
                             .map(|listener| {
                                 crate::windows_handoff::duplicate_socket_for_child(
@@ -668,6 +675,7 @@ impl TcpBindings {
                 .collect::<Result<Vec<_>>>()?,
             metrics: handoff
                 .pending
+                .telemetry
                 .metrics
                 .as_ref()
                 .map(|single| {
@@ -724,15 +732,15 @@ fn clone_std_tcp_group(group: &[TcpListener], kind: &str, name: &str) -> Result<
         .collect()
 }
 
-fn reverse_requires_tcp(reverse: &ReverseConfig) -> bool {
-    !(reverse
+fn reverse_requires_tcp(reverse_edge: &ReverseEdgeConfig) -> bool {
+    !(reverse_edge
         .http3
         .as_ref()
         .map(|http3| {
             http3.enabled
                 && !http3.passthrough_upstreams.is_empty()
-                && reverse.routes.is_empty()
-                && reverse.tls_passthrough_routes.is_empty()
+                && reverse_edge.routes.is_empty()
+                && reverse_edge.tls_passthrough_routes.is_empty()
         })
         .unwrap_or(false))
 }
@@ -783,10 +791,10 @@ fn adopt_tcp_listener_windows(socket: &[u8]) -> Result<TcpListener> {
 
 #[cfg(unix)]
 fn duplicate_listeners_for_handoff(
-    listeners: &[TcpListener],
+    forward_edges: &[TcpListener],
     kept_fds: &mut Vec<std::os::fd::OwnedFd>,
 ) -> Result<Vec<i32>> {
-    listeners
+    forward_edges
         .iter()
         .map(|listener| duplicate_listener_for_handoff(listener, kept_fds))
         .collect()
@@ -839,8 +847,8 @@ fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {
 mod tests {
     use super::*;
     use qpx_core::config::{
-        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CacheConfig, Config,
-        IdentityConfig, ListenerConfig, ListenerMode, MessagesConfig, RuntimeConfig,
+        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
+        IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MessagesConfig, RuntimeConfig,
         SystemLogConfig,
     };
     fn test_config() -> Config {
@@ -854,26 +862,37 @@ mod tests {
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime,
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: AuthConfig::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: AuthConfig::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            listeners: vec![ListenerConfig {
+            edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
                 name: "forward".to_string(),
-                mode: ListenerMode::Forward,
+                mode: IngressEdgeMode::Forward,
                 listen: "127.0.0.1:0".to_string(),
                 default_action: ActionConfig {
                     kind: ActionKind::Direct,
                     upstream: None,
                     local_response: None,
                 },
+                original_dst: None,
                 tls_inspection: None,
                 rules: Vec::new(),
                 connection_filter: Vec::new(),
@@ -882,20 +901,16 @@ mod tests {
                 ftp: Default::default(),
                 xdp: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 policy_context: None,
                 http: None,
                 http_guard_profile: None,
                 destination_resolution: None,
                 http_modules: Vec::new(),
-            }],
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            reverse: Vec::new(),
+            })],
             upstreams: Vec::new(),
-            cache: CacheConfig::default(),
+            caches: Vec::new(),
         }
     }
 
@@ -923,8 +938,8 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let listeners = inherited.clone_listener("forward").expect("listener clone");
-            assert_eq!(listeners.len(), 1);
+            let forward_edges = inherited.clone_listener("forward").expect("listener clone");
+            assert_eq!(forward_edges.len(), 1);
         });
     }
 }

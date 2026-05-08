@@ -4,7 +4,7 @@ use crate::http3::quinn_socket::{
 };
 use crate::sidecar_control::SidecarControl;
 use anyhow::{anyhow, Result};
-use qpx_core::config::ReverseConfig;
+use qpx_core::config::ReverseEdgeConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -29,7 +29,7 @@ pub(crate) fn prepare_reverse_terminate_socket(
 }
 
 pub(crate) async fn run_http3_terminate(
-    _reverse: ReverseConfig,
+    _reverse: ReverseEdgeConfig,
     _listen_addr: SocketAddr,
     _reverse_rt: super::ReloadableReverse,
     _shutdown: watch::Receiver<SidecarControl>,
@@ -68,7 +68,7 @@ impl QuinnUdpIngressFilter for ReverseQuicPacketFilter {
 }
 
 pub(super) fn build_reverse_tls_config(
-    _reverse: &ReverseConfig,
+    _reverse: &ReverseEdgeConfig,
 ) -> Result<quinn::rustls::ServerConfig> {
     Err(anyhow!("invalid HTTP/3 backend feature selection"))
 }

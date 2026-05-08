@@ -1,3 +1,4 @@
+use crate::auth_runtime::AuthenticatedUser;
 use crate::http::body::Body;
 use crate::runtime::RuntimeState;
 use anyhow::{anyhow, Context, Result};
@@ -5,7 +6,6 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use http::header::HeaderName;
 use hyper::{HeaderMap, Request, Response};
-use qpx_auth::AuthenticatedUser;
 use qpx_core::config::{
     ActionConfig, ActionKind, AssertionClaimsMapConfig, AuditIncludeField, ExtAuthzConfig,
     ExtAuthzOnError, HeaderControl, IdentitySourceConfig, IdentitySourceHeadersConfig,
@@ -679,6 +679,7 @@ pub(crate) fn strip_untrusted_identity_headers(
         let source = state
             .security
             .identity_sources
+            .sources
             .get(source_name)
             .ok_or_else(|| anyhow!("identity source missing at runtime: {}", source_name))?;
         match &source.kind {
@@ -723,6 +724,7 @@ pub(crate) fn resolve_identity(
         let source = state
             .security
             .identity_sources
+            .sources
             .get(source_name)
             .ok_or_else(|| anyhow!("identity source missing at runtime: {}", source_name))?;
         let extracted = match &source.kind {
@@ -838,6 +840,7 @@ pub(crate) async fn enforce_ext_authz(
     };
     let cfg = state
         .security
+        .decisions
         .ext_authz
         .get(name)
         .ok_or_else(|| anyhow!("ext_authz missing at runtime: {}", name))?;
@@ -1292,12 +1295,26 @@ pub(crate) fn emit_audit_log(
     record: AuditRecord<'_>,
     context: &RequestLogContext,
 ) {
-    if !state.config.audit_log.output.enabled
+    if !state
+        .resources
+        .operational
+        .telemetry
+        .audit_log
+        .output
+        .enabled
         || !tracing::enabled!(target: "audit_log", Level::INFO)
     {
         return;
     }
-    let include = |field: AuditIncludeField| state.config.audit_log.include.contains(&field);
+    let include = |field: AuditIncludeField| {
+        state
+            .resources
+            .operational
+            .telemetry
+            .audit_log
+            .include
+            .contains(&field)
+    };
     tracing::info!(
         target: "audit_log",
         event = "policy",
@@ -1879,7 +1896,7 @@ mod tests {
             ..Default::default()
         };
         let err = validate_ext_authz_allow_mode(&allow, ExtAuthzMode::ReverseHttp)
-            .expect_err("reverse should reject force_inspect");
+            .expect_err("reverse_edges should reject force_inspect");
         assert!(err.to_string().contains("force_inspect"));
 
         let allow = ExtAuthzAllow {
@@ -1931,7 +1948,7 @@ mod tests {
         validate_ext_authz_allow_mode(&http_allow, ExtAuthzMode::ForwardHttp)
             .expect("forward http should accept cache_bypass");
         validate_ext_authz_allow_mode(&http_allow, ExtAuthzMode::ReverseHttp)
-            .expect("reverse http should accept cache_bypass");
+            .expect("reverse_edges http should accept cache_bypass");
 
         let reverse_allow = ExtAuthzAllow {
             headers: connect_allow.headers.clone(),
@@ -1942,7 +1959,7 @@ mod tests {
             ..Default::default()
         };
         validate_ext_authz_allow_mode(&reverse_allow, ExtAuthzMode::ReverseHttp)
-            .expect("reverse http should accept mirror_upstreams");
+            .expect("reverse_edges http should accept mirror_upstreams");
     }
 
     #[test]

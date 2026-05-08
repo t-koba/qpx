@@ -5,19 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["tls-rustls", "http3-backend-h3", "mitm", "acme", "digest-auth", "sha2-hash"]
+default = ["tls-rustls", "http3-backend-h3", "mitm", "acme"]
 
 tls-rustls = [
   "dep:rustls",
   "dep:tokio-rustls",
   "qpx-core/tls-rustls",
-  "qpx-auth/ldap-auth-rustls",
 ]
 tls-native = [
   "dep:native-tls",
   "dep:tokio-native-tls",
   "qpx-core/tls-native",
-  "qpx-auth/ldap-auth-native",
 ]
 
 # QUIC/HTTP/3 requires rustls (via quinn).
@@ -29,12 +27,15 @@ http3-backend-qpx = ["http3", "tls-rustls", "dep:quinn", "dep:qpx-h3"]
 mitm = ["tls-rustls"]
 acme = ["dep:qpx-acme", "tls-rustls", "qpx-acme/http3"]
 
-digest-auth = ["qpx-auth/digest-auth"]
+auth-basic = ["dep:qpx-auth", "qpx-auth/basic-auth"]
+auth-digest = ["auth-basic", "qpx-auth/digest-auth"]
+auth-ldap-rustls = ["auth-basic", "tls-rustls", "qpx-auth/ldap-auth-rustls"]
+auth-ldap-native = ["auth-basic", "tls-native", "qpx-auth/ldap-auth-native"]
 sha2-hash = []
 
 [dependencies]
 qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
-qpx-auth = { path = "../qpx-auth", default-features = false, features = ["auth-proxy"] }
+qpx-auth = { path = "../qpx-auth", default-features = false, optional = true }
 qpx-acme = { path = "../qpx-acme", optional = true }
 qpx-observability = { path = "../qpx-observability" }
 qpx-h3 = { path = "../qpx-h3", optional = true }

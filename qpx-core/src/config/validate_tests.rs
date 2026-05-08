@@ -34,7 +34,7 @@ fn upstream_tls_trust_rejects_invalid_pin() {
             client_cert: None,
             client_key: None,
         }),
-        "reverse route",
+        "reverse_edge route",
     )
     .expect_err("validation should fail");
     assert!(err

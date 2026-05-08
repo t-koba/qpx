@@ -3,9 +3,8 @@ use super::health::{
     UpstreamEndpoint,
 };
 use crate::http::body::Body;
-use crate::http::modules::{CompiledHttpModuleChain, HttpModuleRegistry};
+use crate::http::modules::HttpModuleRegistry;
 use crate::http::response_policy::HttpResponseRuleEngine;
-use crate::rate_limit::RateLimitSet;
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use hyper::Request;
@@ -13,8 +12,8 @@ use metrics::gauge;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use qpx_core::config::ReverseTlsPassthroughRouteConfig;
 use qpx_core::config::{
-    CachePolicyConfig, PathRewriteConfig, PolicyContextConfig, ReverseConfig, ReverseRouteConfig,
-    UpstreamConfig, UpstreamDiscoveryConfig,
+    PathRewriteConfig, ReverseEdgeConfig, ReverseRouteConfig, UpstreamConfig,
+    UpstreamDiscoveryConfig,
 };
 use qpx_core::matchers::CompiledMatch;
 use qpx_core::prefilter::{MatchPrefilterContext, MatchPrefilterIndex, StringInterner};
@@ -149,13 +148,9 @@ pub(super) struct CompiledRegexPathRewrite {
 pub(super) struct HttpRoute {
     matcher: CompiledMatch,
     pub(super) name: Option<Arc<str>>,
-    pub(super) policy_context: Option<PolicyContextConfig>,
     pub(super) local_response: Option<qpx_core::config::LocalResponseConfig>,
-    pub(super) cache_policy: Option<CachePolicyConfig>,
-    pub(super) rate_limit: RateLimitSet,
     pub(super) headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) ipc: Option<IpcUpstream>,
-    pub(super) http_modules: Arc<CompiledHttpModuleChain>,
     backends: Vec<WeightedBackend>,
     mirrors: Vec<MirrorTarget>,
     pub(super) response_rules: Option<Arc<HttpResponseRuleEngine>>,
@@ -176,7 +171,7 @@ pub(super) struct TlsPassthroughRoute {
 
 impl ReverseRouter {
     pub(super) fn new(
-        config: ReverseConfig,
+        config: ReverseEdgeConfig,
         upstream_configs: &[UpstreamConfig],
         http_module_registry: &HttpModuleRegistry,
     ) -> Result<Self> {

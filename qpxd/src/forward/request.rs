@@ -34,7 +34,7 @@ use crate::policy_context::{
     apply_ext_authz_action_overrides, attach_log_context, emit_audit_log, enforce_ext_authz,
     merge_header_controls, merge_policy_tags, resolve_identity, sanitize_headers_for_policy,
     strip_untrusted_identity_headers, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
@@ -61,12 +61,12 @@ pub(crate) async fn handle_request_inner(
     remote_addr: std::net::SocketAddr,
 ) -> Result<Response<Body>> {
     let state = runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
     if let PreflightOutcome::Reject(response) = preflight_validate(
         &req,
         proxy_name,
         PreflightOptions::allow_connect(
-            state.config.runtime.trace_enabled,
+            state.plan.limits.trace_enabled,
             state.messages.trace_disabled.as_str(),
         ),
     ) {
@@ -90,7 +90,10 @@ pub(crate) async fn handle_request_inner(
     Ok(response)
 }
 
-pub(crate) fn proxy_auth_required(chal: qpx_auth::AuthChallenge, message: &str) -> Response<Body> {
+pub(crate) fn proxy_auth_required(
+    chal: crate::auth_runtime::AuthChallenge,
+    message: &str,
+) -> Response<Body> {
     let mut builder = Response::builder().status(StatusCode::PROXY_AUTHENTICATION_REQUIRED);
     for header in chal.header_values {
         builder = builder.header("Proxy-Authenticate", header);
@@ -104,7 +107,7 @@ pub(crate) fn resolve_upstream(
     listener_name: &str,
 ) -> Result<Option<crate::upstream::pool::ResolvedUpstreamProxy>> {
     let listener = state
-        .listener_config(listener_name)
+        .ingress_edge_settings(listener_name)
         .ok_or_else(|| anyhow!("listener not found"))?;
     resolve_named_upstream(action, state, listener.upstream_proxy.as_deref())
 }
@@ -115,7 +118,7 @@ pub(crate) fn resolve_upstream_url(
     listener_name: &str,
 ) -> Result<Option<String>> {
     let listener = state
-        .listener_config(listener_name)
+        .ingress_edge_settings(listener_name)
         .ok_or_else(|| anyhow!("listener not found"))?;
     if matches!(action.kind, qpx_core::config::ActionKind::Direct) {
         return Ok(None);
@@ -146,7 +149,7 @@ pub(crate) fn resolve_upstream_url(
     }
     match action.kind {
         qpx_core::config::ActionKind::Proxy | qpx_core::config::ActionKind::Tunnel => Err(anyhow!(
-            "{:?} action requires an upstream reference (set action.upstream or listeners[].upstream_proxy)",
+            "{:?} action requires an upstream reference (set action.upstream or forward_edges[].upstream_proxy)",
             action.kind
         )),
         qpx_core::config::ActionKind::Inspect => Ok(None),

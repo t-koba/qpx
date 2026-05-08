@@ -1,17 +1,17 @@
-# Canonical sample for the built-in HTTP module surface.
-# - `type` selects the module implementation.
-# - `id` gives a stable operator label for logs and debugging.
-# - `order` controls execution order (lower runs earlier).
-cache:
-  backends:
-  - name: module-cache
-    kind: redis
-    endpoint: redis://127.0.0.1:6379/7
-    timeout_ms: 1200
-    max_object_bytes: 2097152
-
-listeners:
-- name: modules-forward
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+telemetry:
+  system_log:
+    level: info
+    format: json
+caches:
+- name: module-cache
+  kind: redis
+  endpoint: redis://127.0.0.1:6379/7
+  timeout_ms: 1200
+  max_object_bytes: 2097152
+edges:
+- kind: forward
+  name: modules-forward
   listen: 127.0.0.1:18097
   default_action:
     type: block
@@ -20,7 +20,7 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
       - app.example.com
     action:
@@ -50,6 +50,11 @@ listeners:
     url: http://127.0.0.1:19091/check
     method: POST
     timeout_ms: 250
+    max_response_bytes: 65536
+    allowed_schemes:
+    - http
+    allowed_hosts:
+    - 127.0.0.1
     pass_headers:
     - authorization
     - x-request-id
@@ -75,18 +80,14 @@ listeners:
     zstd: false
     gzip_level: 6
     brotli_level: 5
-  mode: forward
-
-reverse:
-- name: modules-reverse
+- kind: reverse
+  name: modules-reverse
   listen: 127.0.0.1:19497
   routes:
   - name: api
     match:
       host:
       - api.example.com
-    upstreams:
-    - http://127.0.0.1:19097
     http_modules:
     - type: subrequest
       id: response-metadata
@@ -95,6 +96,11 @@ reverse:
       phase: response_headers
       url: http://127.0.0.1:19092/metadata
       timeout_ms: 200
+      max_response_bytes: 65536
+      allowed_schemes:
+      - http
+      allowed_hosts:
+      - 127.0.0.1
       request_headers:
         X-Module: response-metadata
       copy_response_headers_to_response:
@@ -112,8 +118,7 @@ reverse:
       brotli: false
       zstd: true
       zstd_level: 9
-
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-system_log:
-  level: info
-  format: json
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:19097

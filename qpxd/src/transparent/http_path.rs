@@ -23,7 +23,7 @@ use crate::policy_context::{
     apply_ext_authz_action_overrides, attach_log_context, emit_audit_log, enforce_ext_authz,
     merge_header_controls, merge_policy_tags, resolve_identity, sanitize_headers_for_policy,
     strip_untrusted_identity_headers, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
@@ -58,8 +58,8 @@ where
 {
     let listener_name = listener_name.to_string();
     let header_read_timeout =
-        Duration::from_millis(runtime.state().config.runtime.http_header_read_timeout_ms);
-    let access_cfg = runtime.state().config.access_log.clone();
+        Duration::from_millis(runtime.state().plan.limits.http_header_read_timeout_ms);
+    let access_cfg = runtime.state().resources.access_log.clone();
     let access_name = Arc::<str>::from(listener_name.as_str());
 
     let service = handler_fn(move |req: Request<Body>| {
@@ -87,7 +87,7 @@ where
                     Ok(finalize_response_for_request(
                         &request_method,
                         request_version,
-                        error_state.config.identity.proxy_name.as_str(),
+                        error_state.plan.identity.proxy_name.as_ref(),
                         hyper::Response::builder()
                             .status(StatusCode::BAD_GATEWAY)
                             .body(Body::from(error_state.messages.proxy_error.clone()))

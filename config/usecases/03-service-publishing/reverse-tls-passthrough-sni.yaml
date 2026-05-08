@@ -1,11 +1,13 @@
-reverse:
-- name: reverse-tls-passthrough
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: reverse
+  name: reverse-tls-passthrough
   listen: 0.0.0.0:19444
   tls:
     certificates:
     - sni: fallback.example.com
-      cert: ${QPX_TLS_CERT:-/etc/qpx/certs/fallback.example.com.crt}
-      key: ${QPX_TLS_KEY:-/etc/qpx/certs/fallback.example.com.key}
+      cert: "${QPX_TLS_CERT:-/etc/qpx/certs/fallback.example.com.crt}"
+      key: "${QPX_TLS_KEY:-/etc/qpx/certs/fallback.example.com.key}"
   tls_passthrough_routes:
   - match:
       sni:
@@ -23,11 +25,12 @@ reverse:
       host:
       - fallback.example.com
     timeout_ms: 15000
-    lb: round_robin
     resilience:
       retry:
         attempts: 2
         backoff_ms: 100
-    upstreams:
-    - http://10.40.0.20:8080
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+    target:
+      type: upstream
+      upstreams:
+      - http://10.40.0.20:8080
+      lb: round_robin

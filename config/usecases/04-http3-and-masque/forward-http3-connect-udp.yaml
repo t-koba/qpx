@@ -1,14 +1,16 @@
-# Build-time note:
-# - Works with either HTTP/3 backend.
-# - Choose `http3-backend-qpx` if the same daemon build also needs
-#   WebTransport relay on the clean-room backend.
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 upstreams:
 - name: masque-chain
   url: https://masque-gateway.example.com:443
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-listeners:
-- name: forward-http3
-  listen: ${QPX_FORWARD_LISTEN:-127.0.0.1:8080}
+security:
+  auth:
+    users:
+    - username: tester
+      password: change-me
+edges:
+- kind: forward
+  name: forward-http3
+  listen: "${QPX_FORWARD_LISTEN:-127.0.0.1:8080}"
   default_action:
     type: block
   rules:
@@ -17,7 +19,7 @@ listeners:
       method:
       - CONNECT
       host:
-      - '*.corp.example'
+      - "*.corp.example"
     auth:
       require:
       - local
@@ -27,9 +29,9 @@ listeners:
   - name: block-ads
     match:
       host:
-      - '*.doubleclick.net'
-      - '*.googlesyndication.com'
-      - '*.adservice.google.com'
+      - "*.doubleclick.net"
+      - "*.googlesyndication.com"
+      - "*.adservice.google.com"
     action:
       type: block
   - name: http-require-auth
@@ -57,13 +59,8 @@ listeners:
       type: direct
   http3:
     enabled: true
-    listen: ${QPX_FORWARD_H3_LISTEN:-127.0.0.1:8443}
+    listen: "${QPX_FORWARD_H3_LISTEN:-127.0.0.1:8443}"
     connect_udp:
       enabled: true
       idle_timeout_secs: 45
       max_capsule_buffer_bytes: 262144
-  mode: forward
-auth:
-  users:
-  - username: tester
-    password: change-me

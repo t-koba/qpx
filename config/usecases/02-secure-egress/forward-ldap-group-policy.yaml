@@ -1,7 +1,19 @@
-# Direct LDAP bind/group policy sample.
-# Use this when qpx itself owns the auth hop; otherwise prefer trusted external identity inputs.
-listeners:
-- name: ldap-policy-forward
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+security:
+  auth:
+    ldap:
+      url: ldaps://ad.example.com:636
+      bind_dn: cn=qpx,ou=svc,dc=example,dc=com
+      bind_password_env: LDAP_BIND_PASSWORD
+      user_base_dn: ou=users,dc=example,dc=com
+      group_base_dn: ou=groups,dc=example,dc=com
+      require_starttls: true
+      user_filter: "(&(objectClass=person)(uid={username}))"
+      group_filter: "(&(objectClass=groupOfNames)(member={user_dn}))"
+      group_attr: cn
+edges:
+- kind: forward
+  name: ldap-policy-forward
   listen: 127.0.0.1:18083
   default_action:
     type: block
@@ -9,12 +21,12 @@ listeners:
     enabled: true
     verify_upstream: true
     verify_exceptions:
-    - '*.internal.example.com'
+    - "*.internal.example.com"
   rules:
   - name: inspect-dev-and-ops
     match:
       host:
-      - '*.corp.example.com'
+      - "*.corp.example.com"
       method:
       - GET
       - POST
@@ -40,16 +52,3 @@ listeners:
       - all-employees
     action:
       type: direct
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-auth:
-  ldap:
-    url: ldaps://ad.example.com:636
-    bind_dn: cn=qpx,ou=svc,dc=example,dc=com
-    bind_password_env: LDAP_BIND_PASSWORD
-    user_base_dn: ou=users,dc=example,dc=com
-    group_base_dn: ou=groups,dc=example,dc=com
-    require_starttls: true
-    user_filter: (&(objectClass=person)(uid={username}))
-    group_filter: (&(objectClass=groupOfNames)(member={user_dn}))
-    group_attr: cn

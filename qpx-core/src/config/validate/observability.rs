@@ -2,8 +2,8 @@ use anyhow::{anyhow, Result};
 use cidr::IpCidr;
 
 use super::super::types::{
-    AccessLogConfig, AcmeConfig, AuditLogConfig, Config, ExporterConfig, LogOutputConfig,
-    MetricsConfig, OtelConfig, SystemLogConfig,
+    AccessLogConfig, AcmeConfig, AuditLogConfig, CapturePolicyConfig, CaptureRedactionConfig,
+    Config, ExporterConfig, LogOutputConfig, MetricsConfig, OtelConfig, SystemLogConfig,
 };
 
 pub(super) fn validate_system_log_config(system: &SystemLogConfig) -> Result<()> {
@@ -267,6 +267,61 @@ pub(super) fn validate_exporter_config(exporter: &ExporterConfig) -> Result<()> 
     }
     if exporter.capture.max_chunk_bytes == 0 {
         return Err(anyhow!("exporter.capture.max_chunk_bytes must be >= 1"));
+    }
+    validate_capture_redaction(&exporter.capture.redact, "exporter.capture.redact")?;
+    Ok(())
+}
+
+pub(super) fn validate_capture_policy(
+    capture: Option<&CapturePolicyConfig>,
+    context: &str,
+) -> Result<()> {
+    let Some(capture) = capture else {
+        return Ok(());
+    };
+    if let Some(sample_percent) = capture.plaintext.sample_percent {
+        if sample_percent > 100 {
+            return Err(anyhow!("{context}.plaintext.sample_percent must be <= 100"));
+        }
+    }
+    if capture.plaintext.body {
+        match capture.plaintext.max_body_bytes {
+            Some(max_body_bytes) if max_body_bytes > 0 => {}
+            Some(_) => return Err(anyhow!("{context}.plaintext.max_body_bytes must be >= 1")),
+            None => {
+                return Err(anyhow!(
+                    "{context}.plaintext.max_body_bytes is required when plaintext.body is true"
+                ));
+            }
+        }
+    }
+    if let Some(max_body_bytes) = capture.plaintext.max_body_bytes {
+        if max_body_bytes == 0 {
+            return Err(anyhow!("{context}.plaintext.max_body_bytes must be >= 1"));
+        }
+    }
+    validate_capture_redaction(
+        &capture.plaintext.redact,
+        format!("{context}.plaintext.redact").as_str(),
+    )?;
+    Ok(())
+}
+
+fn validate_capture_redaction(redact: &CaptureRedactionConfig, context: &str) -> Result<()> {
+    for header in &redact.headers {
+        if header.trim().is_empty() {
+            return Err(anyhow!("{context}.headers[] must not be empty"));
+        }
+    }
+    for key in &redact.query_keys {
+        if key.trim().is_empty() {
+            return Err(anyhow!("{context}.query_keys[] must not be empty"));
+        }
+    }
+    for path in &redact.json_paths {
+        if path.trim().is_empty() {
+            return Err(anyhow!("{context}.json_paths[] must not be empty"));
+        }
     }
     Ok(())
 }

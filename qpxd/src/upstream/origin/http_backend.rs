@@ -611,7 +611,7 @@ fn spawn_origin_h2_connection_task(
 ) {
     tokio::spawn(async move {
         if let Err(err) = connection.await {
-            warn!(error = ?err, "reverse upstream h2 connection closed");
+            warn!(error = ?err, "reverse_edges upstream h2 connection closed");
         }
     });
 }
@@ -667,7 +667,7 @@ async fn try_take_ready_h2_sender(
                 warn!(
                     error = ?err,
                     upstream = %upstream,
-                    "reverse upstream pooled h2 connection closed"
+                    "reverse_edges upstream pooled h2 connection closed"
                 );
             }
             None => {}
@@ -701,7 +701,7 @@ async fn wait_for_h2_sender(
                 warn!(
                     error = ?err,
                     upstream = %upstream,
-                    "reverse upstream pooled h2 connection closed"
+                    "reverse_edges upstream pooled h2 connection closed"
                 );
             }
         }
@@ -1440,7 +1440,7 @@ mod tests {
 
         let first = proxy_http_with_interim(
             Request::builder()
-                .uri("http://reverse.test/one")
+                .uri("http://reverse_edges.test/one")
                 .body(Body::empty())?,
             &origin,
             "qpx-test",
@@ -1452,7 +1452,7 @@ mod tests {
 
         let second = proxy_http_with_interim(
             Request::builder()
-                .uri("http://reverse.test/two")
+                .uri("http://reverse_edges.test/two")
                 .body(Body::empty())?,
             &origin,
             "qpx-test",
@@ -1649,7 +1649,7 @@ mod tests {
 
         let first = proxy_https_with_options(
             Request::builder()
-                .uri("https://reverse.test/one")
+                .uri("https://reverse_edges.test/one")
                 .body(Body::empty())?,
             &origin,
             "qpx-test",
@@ -1667,7 +1667,7 @@ mod tests {
 
         let second = proxy_https_with_options(
             Request::builder()
-                .uri("https://reverse.test/two")
+                .uri("https://reverse_edges.test/two")
                 .body(Body::empty())?,
             &origin,
             "qpx-test",
@@ -1693,7 +1693,7 @@ mod tests {
 
         let first = proxy_https_with_options(
             Request::builder()
-                .uri("https://reverse.test/one")
+                .uri("https://reverse_edges.test/one")
                 .body(Body::empty())?,
             &origin,
             "qpx-test",
@@ -1710,7 +1710,7 @@ mod tests {
 
         let second = proxy_https_with_options(
             Request::builder()
-                .uri("https://reverse.test/two")
+                .uri("https://reverse_edges.test/two")
                 .body(Body::empty())?,
             &origin,
             "qpx-test",
@@ -1737,7 +1737,7 @@ mod tests {
 
         let first = proxy_https_with_options(
             Request::builder()
-                .uri("https://reverse.test/one")
+                .uri("https://reverse_edges.test/one")
                 .body(Body::empty())?,
             &origin,
             "qpx-test",
@@ -1753,7 +1753,7 @@ mod tests {
 
         let second = proxy_https_with_options(
             Request::builder()
-                .uri("https://reverse.test/two")
+                .uri("https://reverse_edges.test/two")
                 .body(Body::empty())?,
             &origin,
             "qpx-test",

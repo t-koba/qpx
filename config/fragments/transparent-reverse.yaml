@@ -1,6 +1,7 @@
-listeners:
-- name: include-transparent
-  listen: ${QPX_TRANSPARENT_LISTEN:-0.0.0.0:15005}
+edges:
+- kind: transparent
+  name: include-transparent
+  listen: "${QPX_TRANSPARENT_LISTEN:-0.0.0.0:15005}"
   default_action:
     type: block
   rules:
@@ -8,7 +9,7 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
@@ -19,19 +20,20 @@ listeners:
       - 443
     action:
       type: direct
-  mode: transparent
-reverse:
-- name: include-reverse
-  listen: ${QPX_REVERSE_LISTEN:-0.0.0.0:19083}
+- kind: reverse
+  name: include-reverse
+  listen: "${QPX_REVERSE_LISTEN:-0.0.0.0:19083}"
   routes:
   - match:
       host:
       - internal-app.example.com
     timeout_ms: 15000
-    lb: round_robin
     resilience:
       retry:
         attempts: 2
         backoff_ms: 100
-    upstreams:
-    - http://10.60.0.11:8080
+    target:
+      type: upstream
+      upstreams:
+      - http://10.60.0.11:8080
+      lb: round_robin

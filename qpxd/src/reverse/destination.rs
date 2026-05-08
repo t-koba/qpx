@@ -3,7 +3,7 @@ use crate::destination::{DestinationInputs, DestinationMetadata};
 use crate::runtime::RuntimeState;
 use crate::tls::UpstreamCertificateInfo;
 
-use qpx_core::config::{DestinationMinConfidenceConfig, DestinationResolutionOverrideConfig};
+use qpx_core::config::DestinationResolutionOverrideConfig;
 
 pub(super) fn classify_reverse_destination(
     state: &RuntimeState,
@@ -35,30 +35,4 @@ pub(super) fn classify_reverse_destination(
         },
         resolution_override,
     )
-}
-
-pub(super) fn merge_destination_resolution_override(
-    base: Option<&DestinationResolutionOverrideConfig>,
-    route: Option<&DestinationResolutionOverrideConfig>,
-) -> Option<DestinationResolutionOverrideConfig> {
-    match (base, route) {
-        (None, None) => None,
-        (Some(base), None) => Some(base.clone()),
-        (None, Some(route)) => Some(route.clone()),
-        (Some(base), Some(route)) => Some(DestinationResolutionOverrideConfig {
-            precedence: route.precedence.clone().or_else(|| base.precedence.clone()),
-            conflict_mode: route.conflict_mode.or(base.conflict_mode),
-            merge_mode: route.merge_mode.or(base.merge_mode),
-            min_confidence: match (&base.min_confidence, &route.min_confidence) {
-                (None, None) => None,
-                (Some(base), None) => Some(base.clone()),
-                (None, Some(route)) => Some(route.clone()),
-                (Some(base), Some(route)) => Some(DestinationMinConfidenceConfig {
-                    category: route.category.or(base.category),
-                    reputation: route.reputation.or(base.reputation),
-                    application: route.application.or(base.application),
-                }),
-            },
-        }),
-    }
 }

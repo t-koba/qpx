@@ -4,10 +4,10 @@ Quick HTTP proxy and server in Rust. Supports forward, reverse, and transparent 
 
 ## Features
 
-- **Forward proxy** — HTTP/HTTPS with rules, auth (Basic/Digest/LDAP), upstream chaining, FTP-over-HTTP gateway, WebSocket upgrade.
+- **Forward proxy** — HTTP/HTTPS with rules, optional built-in auth (Basic/Digest/LDAP), upstream chaining, FTP-over-HTTP gateway, WebSocket upgrade.
 - **Reverse proxy** — route by Host/SNI/path/src_ip, TLS termination, TLS passthrough by SNI, retry, health checks, header rewrite, path rewrite (strip/add/regex), canary traffic splitting, request mirroring, HTTP/3 termination, function executor forwarding (`ipc:` routes).
 - **Enterprise policy inputs** — trusted headers, mTLS subject mapping, signed JWS/JWT assertion verification, `ext_authz`, named sets/external feeds, and destination intelligence (`category` / `reputation` / `application`).
-- **HTTP modules** — public in-process request/response module API for `listeners[].http_modules` and `reverse[].routes[].http_modules`, with built-in `response_compression` (`gzip` / `br` / `zstd`), internal subrequests, and first-class cache purge.
+- **HTTP modules** — public in-process request/response module API for edge and reverse-route module chains, with built-in `response_compression` (`gzip` / `br` / `zstd`), internal subrequests, and first-class cache purge.
 - **ACME / Let's Encrypt** — automatic certificate issuance/renewal (HTTP-01) for reverse TLS termination (`qpxd` feature `acme`, enabled by default; requires `tls-rustls`).
 - **Function executor** — `qpxf` is a hardened executor for CGI scripts (path containment, concurrent I/O, size limits) and optional WASM modules via `qpx-wasm` (`wasmtime` with memory limits, epoch-based timeout). `qpxd` communicates with `qpxf` over the QPX-IPC protocol via reverse-route `ipc:` targets.
 - **Transparent proxy** — Linux `SO_ORIGINAL_DST` or protocol metadata routing (SNI, Host), with optional TLS MITM inspection.
@@ -25,7 +25,7 @@ qpx supports two TLS backends, selectable at build time:
 - `tls-rustls` (default backend): required for HTTP/3 (`http3`) and TLS inspection (`mitm`).
 - `tls-native`: uses `native-tls`/`tokio-native-tls` (HTTP/3 and TLS inspection are unavailable).
 
-`qpxd` default features are `tls-rustls`, `http3-backend-h3`, `mitm`, `acme`, `digest-auth`, and `sha2-hash`. `http3` is now an internal umbrella feature that must be activated by exactly one backend selector: `http3-backend-h3` (default) or `http3-backend-qpx`. `acme` is isolated in `qpx-acme`, can be disabled independently, and still requires `tls-rustls` when enabled.
+`qpxd` default features are `tls-rustls`, `http3-backend-h3`, `mitm`, and `acme`; built-in proxy authentication is opt-in. Enable `auth-basic` for local Basic auth, `auth-digest` for Digest, or `auth-ldap-rustls` / `auth-ldap-native` for LDAP. TLS backend selection does not enable LDAP. `http3` is an internal umbrella feature that must be activated by exactly one backend selector: `http3-backend-h3` (default) or `http3-backend-qpx`. `acme` is isolated in `qpx-acme`, can be disabled independently, and still requires `tls-rustls` when enabled.
 
 Choose the HTTP/3 backend by required behavior, not by listener YAML. Backend choice is build-time only.
 
@@ -172,9 +172,29 @@ exporter:
     plaintext: true
     encrypted: true
     max_chunk_bytes: 16384
+    redact:
+      headers: [authorization, cookie, set-cookie, proxy-authorization]
+      query_keys: [token, password, session, access_token]
+      json_paths: ["$.password", "$.access_token"]
 ```
 
 `qpxr` reads the same ring using `--shm-path` / `--shm-size-mb` (both default to the same values). When running `qpxd` and `qpxr` on the same host with default paths, no explicit path configuration is needed.
+
+For targeted plaintext debugging, attach `capture` to an edge or reverse route. Body capture is explicit and requires `max_body_bytes`:
+
+```yaml
+capture:
+  plaintext:
+    enabled: true
+    headers: true
+    body: true
+    sample_percent: 10
+    max_body_bytes: 16384
+    redact:
+      headers: [authorization, cookie, set-cookie]
+      query_keys: [token, password, session]
+      json_paths: ["$.password", "$.access_token"]
+```
 
 ## Function executor (`qpxf`)
 
@@ -182,12 +202,14 @@ exporter:
 
 For local deployments, `qpxf` defaults to a user-scoped `unix://` socket. Any TCP listener, including loopback, requires `allow_insecure_tcp=true`.
 
-`qpxf` supports two execution backends:
+`qpxf` supports four execution backends:
 
 | Backend | Description |
 |---------|-------------|
 | CGI scripts | Spawns external processes (RFC 3875). Path containment, symlink-escape prevention, concurrent I/O with deadlock prevention, configurable size limits. |
-| WASM modules | Executes WASI-compatible modules via `qpx-wasm` (`wasmtime` + `wasmtime-wasi`). Module/stdin/stdout/stderr size caps, memory limits via `ResourceLimiter`, request wall-clock timeout, and stderr capture. |
+| WASM modules | Executes WASI-compatible modules via `qpx-wasm` (`wasmtime` + `wasmtime-wasi`). Module/stdin/stdout/stderr size caps, memory limits via `ResourceLimiter`, request wall-clock timeout, stderr capture, and optional executor pool/prewarm settings. |
+| FastCGI | Sends CGI-shaped requests to a persistent FastCGI responder over TCP or `unix://`, with per-backend concurrency, timeout, stdin/stdout/stderr limits. |
+| SCGI | Sends CGI-shaped requests to a persistent SCGI responder over TCP or `unix://`, with per-backend concurrency, timeout, stdin/stdout/stderr limits. |
 
 The default `qpxf` build enables the `wasm` feature, which pulls in `qpx-wasm`. Use `cargo build -p qpxf --no-default-features` for a CGI-only build.
 
@@ -233,12 +255,12 @@ See `config/usecases/12-ipc-gateway/` for sample configs.
 - **Full index and usage guidance**: [`config/README.md`](config/README.md)
 - **Full example config**: [`config/qpx.example.yaml`](config/qpx.example.yaml)
 
-The YAML schema is flat and matches `qpx_core::config::types::*` directly. Write top-level sections such as `system_log`, `access_log`, `audit_log`, `metrics`, `otel`, `auth`, `identity_sources`, `ext_authz`, and `named_sets` directly, and express reverse-route targets as `upstreams`, `backends`, `ipc`, or `local_response`.
+The YAML schema is canonical and edge-oriented. Runtime tuning stays under `runtime`, observability belongs under `telemetry`, auth and policy inputs belong under `security`, reusable HTTP policy belongs under `http`, traffic shaping belongs under `traffic`, cache backends are listed under `caches`, and forward / reverse / transparent entry points are declared in `edges[]`. Reverse routes use a typed `target` object (`upstream`, `weighted`, `ipc`, `local_response`, or `tls_passthrough`) instead of mutually exclusive target fields.
 
 Two control-plane surfaces matter for the current schema:
 
 - Transport-aware shaping uses `rate_limit` / `rate_limit_profiles` with `apply_to`, `requests`, `traffic`, and `sessions`. This is the canonical surface for request, CONNECT, UDP, HTTP/3 datagram, and WebTransport shaping; WebTransport can be scoped at `webtransport`, `webtransport_bidi`, `webtransport_uni`, `webtransport_datagram`, or the `*_downstream` / `*_upstream` variants for direction-specific traffic/quota control.
-- Response-stage HTTP policy uses `listeners[].http.response_rules` and `reverse[].routes[].http.response_rules`. Reverse route retry/ejection/concurrency policy is expressed with `reverse[].routes[].resilience`.
+- Response-stage HTTP policy uses `edges[].http.response_rules` and reverse route `http.response_rules`. Reverse route retry/ejection/concurrency policy is expressed with route-level `resilience`.
 - RPC-aware policy is part of the same rule surface. `match.rpc.*` and `action.local_response.rpc` cover `gRPC`, `Connect`, and `gRPC-Web` without a separate protocol-specific config tree.
 
 > **Security note:** Forward and transparent samples default to `default_action: block` to prevent accidental open-proxy deployments. Explicit exceptions are `*-local-dev-direct.yaml` and `config/usecases/99-test-fixtures/*` (loopback-only dev/test profiles).
@@ -258,16 +280,17 @@ When multiple top-level `--config` files are passed to `qpxd`, they are merged i
 
 ### Reverse route target forms
 
-Reverse routes use exactly one of these shapes:
+Reverse routes use exactly one typed `target`:
 
-- `upstreams` / `backends[].upstreams` with literal `http://` / `https://` / `ws://` / `wss://` URLs
-- `upstreams` / `backends[].upstreams` with names from top-level `upstreams`
-- `ipc` for QPX-IPC forwarding to `qpxf`
-- route-level `local_response`
+- `target.type: upstream` with literal `http://` / `https://` / `ws://` / `wss://` URLs or names from top-level `upstreams`
+- `target.type: weighted` with weighted backend groups
+- `target.type: ipc` for QPX-IPC forwarding to `qpxf`
+- `target.type: local_response`
+- `target.type: tls_passthrough`
 
 ### Connection filters
 
-`connection_filter` is a separate early-drop surface on both `listeners[]` and `reverse[]`.
+`connection_filter` is a separate early-drop surface on `edges[]`.
 
 - It runs before full HTTP parsing and can reject unwanted traffic at accept time or, when TLS/QUIC metadata is available, at ClientHello time.
 - `connection_filter` requires `match:` and only accepts `action.type: block`.
@@ -281,10 +304,9 @@ See [`config/usecases/08-performance-and-xdp/connection-filter-early-drop.yaml`]
 
 Destination intelligence arbitration is configured once and then optionally overridden by scope:
 
-- `destination_resolution.defaults`
-- `listeners[].destination_resolution`
-- `reverse[].destination_resolution`
-- `reverse[].routes[].destination_resolution`
+- `security.destination.defaults`
+- `edges[].destination_resolution`
+- `edges[kind=reverse].routes[].destination_resolution`
 
 Use it to define evidence precedence (`cert` / `sni` / `host` / `ip` / `tls_fingerprint` / `heuristic`), conflict handling, merge mode, and minimum confidence thresholds for category / reputation / application classification.
 
@@ -292,10 +314,10 @@ See [`config/usecases/02-secure-egress/forward-destination-intelligence-and-trus
 
 ### HTTP guard profiles
 
-`http_guard_profiles` is the lightweight request-hardening surface for bounded parser work and protocol safety.
+`http.guard_profiles` is the lightweight request-hardening surface for bounded parser work and protocol safety.
 
 - Define reusable profiles at top level.
-- Attach them with `listeners[].http_guard_profile` or `reverse[].routes[].http_guard_profile`.
+- Attach them with `edges[].http_guard_profile` or `edges[kind=reverse].routes[].http_guard_profile`.
 - The current runtime enforces path/query/header/body limits, JSON depth / field count, multipart part/name/file limits, and basic smuggling / invalid-framing checks.
 
 See [`config/usecases/03-service-publishing/reverse-http-guard-lite.yaml`](config/usecases/03-service-publishing/reverse-http-guard-lite.yaml) and [`config/qpx.example.yaml`](config/qpx.example.yaml).
@@ -313,15 +335,15 @@ See [`config/usecases/03-service-publishing/reverse-rpc-aware-policy.yaml`](conf
 
 ### HTTP modules
 
-HTTP request/response modules are configured directly in YAML:
+HTTP request/response modules are configured on canonical edges and routes:
 
-- `listeners[].http_modules` applies to forward, transparent HTTP, and MITM HTTP paths.
-- `reverse[].routes[].http_modules` applies per reverse route.
+- `edges[].http_modules` applies to forward, transparent HTTP, and MITM HTTP paths.
+- `edges[kind=reverse].routes[].http_modules` applies per reverse route.
 
 Built-in modules:
 
 - `response_compression`: downstream response compression for `gzip`, `br`, and `zstd`. Use `min_body_bytes`, `max_body_bytes`, `content_types`, and per-algorithm levels (`gzip_level`, `brotli_level`, `zstd_level`) to tune when and how compression runs. Compression happens after cache writeback, so cached objects remain identity-encoded while clients receive compressed responses when `Accept-Encoding` allows it.
-- `subrequest`: internal absolute-URL subrequest at `request_headers` or `response_headers` phase. Use `pass_headers`, `request_headers`, `copy_response_headers_to_request`, `copy_response_headers_to_response`, and `response_mode` to shape what the sidecar call sees and how its result feeds back into the main transaction.
+- `subrequest`: internal absolute-URL subrequest at `request_headers` or `response_headers` phase. Subrequests must declare `allowed_schemes`, `allowed_hosts`, and `max_response_bytes`; redirects are denied by default. Use `pass_headers`, `request_headers`, `copy_response_headers_to_request`, `copy_response_headers_to_response`, and `response_mode` to shape what the sidecar call sees and how its result feeds back into the main transaction.
 - `cache_purge`: first-class HTTP purge endpoint for the configured cache key. Use `methods`, `response_status`, `response_body`, and `response_headers` to tailor the purge endpoint response. Requires `cache.enabled: true` on the listener or reverse route where it is used.
 
 Every module spec also accepts:
@@ -333,15 +355,19 @@ Custom in-process modules:
 
 - `qpxd` is now a library as well as a daemon binary. External Rust binaries can register custom module factories and then run the normal CLI/event loop.
 - Config is open by `type:`. `qpx-core` loads unknown module types without rejecting them, and `qpxd` resolves them against the runtime registry.
-- Public API surface is `qpxd::Daemon::builder()` plus `qpxd::module_api::{HttpModuleFactory, HttpModule, HttpModuleContext, HttpModuleRequestView, Body}`.
-- Request hooks are borrowed/in-place: `on_request_headers(&mut Request<Body>)` and `on_upstream_request(&mut Request<Body>)`. Response-phase hooks can read the frozen request view from `HttpModuleContext::frozen_request()`.
+- Public API surface is `qpxd::Daemon::builder()` plus `qpxd::module_api::{HttpModuleFactory, HttpModule, HttpModuleCapabilities, HttpModuleStage, HttpModuleEvent, ModuleStages, HttpModuleContext, HttpModuleRequestView, Body}`.
+- Modules declare capabilities so qpxd compiles stage-indexed chains and only calls modules for the stages they need. Built-in compression runs only on downstream responses, request-phase subrequests run only on request headers, and response-phase subrequests request a frozen request view only for routes that need it.
+- Modules implement one `call(stage, ctx, event)` entrypoint. Request events carry borrowed in-place requests; response events carry owned responses. Response-phase hooks can read the frozen request view from `HttpModuleContext::frozen_request()`.
 
 Minimal example:
 
 ```rust
 use anyhow::Result;
 use async_trait::async_trait;
-use qpxd::module_api::{Body, HttpModule, HttpModuleContext, HttpModuleFactory};
+use qpxd::module_api::{
+    Body, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
+    HttpModuleFactory, HttpModuleStage, ModuleStages,
+};
 use qpxd::{Daemon, HttpModuleConfig};
 use hyper::Response;
 use std::sync::Arc;
@@ -370,13 +396,24 @@ impl HttpModuleFactory for AddHeaderFactory {
 
 #[async_trait]
 impl HttpModule for AddHeader {
-    async fn on_downstream_response(
+    fn capabilities(&self) -> HttpModuleCapabilities {
+        HttpModuleCapabilities::headers_only(ModuleStages::DOWNSTREAM_RESPONSE)
+    }
+
+    async fn call<'a>(
         &self,
+        stage: HttpModuleStage,
         _ctx: &mut HttpModuleContext,
-        mut response: Response<Body>,
-    ) -> Result<Response<Body>> {
+        event: HttpModuleEvent<'a>,
+    ) -> Result<HttpModuleEvent<'a>> {
+        let HttpModuleStage::DownstreamResponse = stage else {
+            return Ok(event);
+        };
+        let HttpModuleEvent::DownstreamResponse(mut response) = event else {
+            anyhow::bail!("invalid downstream response event");
+        };
         response.headers_mut().insert(self.name.clone(), self.value.clone());
-        Ok(response)
+        Ok(HttpModuleEvent::DownstreamResponse(response))
     }
 }
 
@@ -391,9 +428,9 @@ fn main() -> Result<()> {
 Example:
 
 ```yaml
-listeners:
-  - name: forward
-    mode: forward
+edges:
+  - kind: forward
+    name: forward
     listen: 127.0.0.1:18080
     default_action: { type: direct }
     cache:
@@ -407,19 +444,24 @@ listeners:
         brotli: true
         zstd: true
 
-reverse:
-  - name: api
+  - kind: reverse
+    name: api
     listen: 127.0.0.1:18443
     routes:
       - match:
           host: [api.example.com]
-        upstreams:
-          - https://127.0.0.1:9443
+        target:
+          type: upstream
+          upstreams:
+            - https://127.0.0.1:9443
         http_modules:
           - type: subrequest
             name: authz
             phase: request_headers
-            url: http://127.0.0.1:19091/check?path={request.path}
+            url: http://127.0.0.1:19091/check?path={request.path:urlquery}
+            max_response_bytes: 65536
+            allowed_schemes: [http]
+            allowed_hosts: [127.0.0.1]
             response_mode: return_on_error
 ```
 
@@ -432,11 +474,13 @@ All string values support `${VAR}` and `${VAR:-default}` expansion at load time.
 ```yaml
 state_dir: "${QPX_STATE_DIR:-/var/lib/qpx}"
 
-metrics:
-  listen: "${QPX_METRICS_LISTEN:-127.0.0.1:9901}"
+telemetry:
+  metrics:
+    listen: "${QPX_METRICS_LISTEN:-127.0.0.1:9901}"
 
-reverse:
-  - name: edge
+edges:
+  - kind: reverse
+    name: edge
     listen: "${QPX_REVERSE_LISTEN:-127.0.0.1:8443}"
     tls:
       certificates:
@@ -510,6 +554,8 @@ See [`config/usecases/02-secure-egress/forward-trusted-identity-ext-authz.yaml`]
 
 `identity_sources[].type: signed_assertion` verifies JWS/JWT style assertions locally with `assertion.secret_env` or `assertion.public_key_env` and maps claims into `user`, `groups`, `device_id`, `tenant`, `auth_strength`, and `idp`. `ext_authz` allow responses share the same decision surface across forward, reverse, transparent, and MITM paths, including `override_upstream`, `timeout_override_ms`, `cache_bypass`, `mirror_upstreams`, `rate_limit_profile`, `force_inspect`, `force_tunnel`, and `policy_tags`; `timeout_ms` covers both response headers and body, and `max_response_bytes` caps the authorization response body before JSON parsing.
 
+Policy inputs include trusted headers, mTLS subject mapping, signed assertions, external authorization, named sets, external feeds, and destination intelligence. Optional built-in proxy authentication supports local Basic/Digest and LDAP.
+
 Built-in auth and identity mapping also expose a few advanced knobs that are easy to miss:
 
 - `auth.users[].ha1` accepts a precomputed SHA-256 Digest HA1, so you can enable Digest auth without storing a cleartext password.
@@ -528,9 +574,9 @@ See [`config/usecases/02-secure-egress/forward-local-auth-basic-digest.yaml`](co
 ### Local response policy
 
 ```yaml
-listeners:
-  - name: forward
-    mode: forward
+edges:
+  - kind: forward
+    name: forward
     listen: "127.0.0.1:8080"
     default_action: { type: direct }
     rules:

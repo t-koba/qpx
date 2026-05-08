@@ -53,6 +53,7 @@ fn route_policy_uses_configured_values() {
             http: None,
         }),
         cache: None,
+        capture: None,
         rate_limit: None,
         path_rewrite: None,
         upstream_trust_profile: None,
@@ -99,6 +100,7 @@ fn route_policy_default_health_and_lb() {
         timeout_ms: None,
         health_check: None,
         cache: None,
+        capture: None,
         rate_limit: None,
         path_rewrite: None,
         upstream_trust_profile: None,
@@ -138,6 +140,7 @@ fn route_policy_uses_lifecycle_values() {
         timeout_ms: None,
         health_check: None,
         cache: None,
+        capture: None,
         rate_limit: None,
         path_rewrite: None,
         upstream_trust_profile: None,
@@ -328,7 +331,7 @@ fn dynamic_discovery_churn_reuses_draining_endpoint_when_target_returns() {
 #[test]
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 fn tls_passthrough_prefilter_does_not_require_host_or_path() {
-    let cfg = ReverseConfig {
+    let cfg = ReverseEdgeConfig {
         name: "rev".to_string(),
         listen: "127.0.0.1:0".to_string(),
         tls: Some(qpx_core::config::ReverseTlsConfig {

@@ -1,14 +1,16 @@
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 
-use super::super::types::{CacheConfig, Config, UpstreamDiscoveryKind, UpstreamTlsTrustConfig};
+use super::super::types::{
+    CacheBackendConfig, Config, UpstreamDiscoveryKind, UpstreamTlsTrustConfig,
+};
 use super::rules::validate_resilience_config;
 use super::security::validate_upstream_trust_profile_ref;
 use super::UPSTREAM_URL_SCHEMES;
 
-pub(super) fn validate_cache_backends(cache: &CacheConfig) -> Result<HashSet<String>> {
+pub(super) fn validate_cache_backends(backends: &[CacheBackendConfig]) -> Result<HashSet<String>> {
     let mut cache_backends = HashSet::new();
-    for backend in &cache.backends {
+    for backend in backends {
         if backend.name.trim().is_empty() {
             return Err(anyhow!("cache backend name must not be empty"));
         }

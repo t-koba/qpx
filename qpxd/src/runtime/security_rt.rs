@@ -1,31 +1,67 @@
+use crate::auth_runtime::Authenticator;
 use crate::policy_context::{CompiledExtAuthz, CompiledIdentitySource};
 use anyhow::Result;
-use qpx_auth::Authenticator;
 use qpx_core::tls::CaStore;
 #[cfg(feature = "mitm")]
 use qpx_core::tls::{load_or_generate_ca, MitmConfig};
 use std::collections::HashMap;
+use std::ops::Deref;
 #[cfg(feature = "mitm")]
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::ConfigRuntime;
+use super::RuntimeResources;
 
 #[derive(Clone)]
 pub struct SecurityRuntime {
-    pub auth: Arc<Authenticator>,
+    pub auth: AuthRuntime,
+    pub identity_sources: IdentitySourceRuntime,
+    pub decisions: DecisionRuntime,
+    pub destination: DestinationPolicyRuntime,
+}
+
+#[derive(Clone)]
+pub struct AuthRuntime {
+    pub authenticator: Arc<Authenticator>,
+}
+
+impl Deref for AuthRuntime {
+    type Target = Authenticator;
+
+    fn deref(&self) -> &Self::Target {
+        &self.authenticator
+    }
+}
+
+#[derive(Clone)]
+pub struct IdentitySourceRuntime {
+    pub(crate) sources: HashMap<String, Arc<CompiledIdentitySource>>,
+}
+
+#[derive(Clone)]
+pub struct DecisionRuntime {
+    pub(crate) ext_authz: HashMap<String, Arc<CompiledExtAuthz>>,
+}
+
+#[derive(Clone)]
+pub struct DestinationPolicyRuntime {
+    pub tls: TlsSecurityRuntime,
+}
+
+#[derive(Clone)]
+pub struct TlsSecurityRuntime {
     pub ca: Option<CaStore>,
     #[cfg(feature = "mitm")]
     pub mitm: Option<MitmConfig>,
-    pub(crate) identity_sources: HashMap<String, Arc<CompiledIdentitySource>>,
-    pub(crate) ext_authz: HashMap<String, Arc<CompiledExtAuthz>>,
     #[cfg(feature = "mitm")]
     tls_verify_exception_sets: HashMap<String, globset::GlobSet>,
 }
 
 impl SecurityRuntime {
-    pub(super) fn build(config: &ConfigRuntime) -> Result<Self> {
+    pub(super) fn build(config: &RuntimeResources) -> Result<Self> {
         let identity_sources = config
+            .operational
+            .security
             .identity_sources
             .iter()
             .map(|source| {
@@ -36,6 +72,9 @@ impl SecurityRuntime {
             })
             .collect::<Result<HashMap<_, _>>>()?;
         let ext_authz = config
+            .operational
+            .security
+            .decisions
             .ext_authz
             .iter()
             .map(|cfg| {
@@ -46,16 +85,18 @@ impl SecurityRuntime {
             })
             .collect::<Result<HashMap<_, _>>>()?;
 
-        let auth = Arc::new(Authenticator::new(
-            &config.auth,
-            config.identity.auth_realm.as_str(),
-        )?);
+        let auth = AuthRuntime {
+            authenticator: Arc::new(Authenticator::new(
+                &config.operational.security.auth,
+                config.operational.identity.auth_realm.as_str(),
+            )?),
+        };
 
         #[cfg(feature = "mitm")]
         let mut tls_verify_exception_sets = HashMap::new();
         #[cfg(feature = "mitm")]
         {
-            for listener in &config.listeners {
+            for listener in config.operational.ingress_edge_configs() {
                 if let Some(tls) = listener.tls_inspection.as_ref() {
                     if !tls.verify_exceptions.is_empty() {
                         let mut builder = globset::GlobSetBuilder::new();
@@ -70,13 +111,14 @@ impl SecurityRuntime {
 
         #[cfg(feature = "mitm")]
         let state_dir = config
+            .operational
             .state_dir
             .as_deref()
             .map(expand_tilde)
             .unwrap_or_else(|| PathBuf::from(".qpx"));
 
         #[cfg(feature = "mitm")]
-        let (ca, mitm) = if any_tls_inspection_enabled(&config.listeners) {
+        let (ca, mitm) = if any_tls_inspection_enabled(config.operational.ingress_edges()) {
             let ca = Some(load_or_generate_ca(&state_dir)?);
             let mitm = Some(ca.as_ref().expect("ca").mitm_config()?);
             (ca, mitm)
@@ -87,21 +129,29 @@ impl SecurityRuntime {
         #[cfg(not(feature = "mitm"))]
         let ca = None;
 
-        Ok(Self {
-            auth,
+        let tls = TlsSecurityRuntime {
             ca,
             #[cfg(feature = "mitm")]
             mitm,
-            identity_sources,
-            ext_authz,
             #[cfg(feature = "mitm")]
             tls_verify_exception_sets,
+        };
+
+        Ok(Self {
+            auth,
+            identity_sources: IdentitySourceRuntime {
+                sources: identity_sources,
+            },
+            decisions: DecisionRuntime { ext_authz },
+            destination: DestinationPolicyRuntime { tls },
         })
     }
 
     #[cfg(feature = "mitm")]
     pub(super) fn tls_verify_exception_matches(&self, listener: &str, host: &str) -> bool {
-        self.tls_verify_exception_sets
+        self.destination
+            .tls
+            .tls_verify_exception_sets
             .get(listener)
             .map(|set| set.is_match(host))
             .unwrap_or(false)
@@ -109,8 +159,10 @@ impl SecurityRuntime {
 }
 
 #[cfg(feature = "mitm")]
-fn any_tls_inspection_enabled(listeners: &[qpx_core::config::ListenerConfig]) -> bool {
-    listeners.iter().any(|l| {
+fn any_tls_inspection_enabled<'a>(
+    forward_edges: impl IntoIterator<Item = &'a qpx_core::config::IngressEdgeConfig>,
+) -> bool {
+    forward_edges.into_iter().any(|l| {
         l.tls_inspection
             .as_ref()
             .map(|t| t.enabled)

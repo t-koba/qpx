@@ -1,5 +1,12 @@
-listeners:
-- name: e2e-forward
+state_dir: "${QPX_STATE_DIR:-/tmp/qpx-e2e-state}"
+security:
+  auth:
+    users:
+    - username: tester
+      password: secret
+edges:
+- kind: forward
+  name: e2e-forward
   listen: 127.0.0.1:18150
   default_action:
     type: direct
@@ -15,7 +22,7 @@ listeners:
       host:
       - 127.0.0.1
       path:
-      - /auth/*
+      - "/auth/*"
     auth:
       require:
       - local
@@ -26,7 +33,7 @@ listeners:
       host:
       - 127.0.0.1
       path:
-      - /headers
+      - "/headers"
     action:
       type: direct
     headers:
@@ -34,9 +41,3 @@ listeners:
         X-Test-Proxy: qpx-e2e
       response_set:
         X-E2E-Proxy: qpx-e2e
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-/tmp/qpx-e2e-state}
-auth:
-  users:
-  - username: tester
-    password: secret

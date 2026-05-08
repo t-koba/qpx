@@ -1,60 +1,72 @@
-listeners:
-- name: obs-forward
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+telemetry:
+  system_log:
+    level: debug
+    format: json
+  access_log:
+    enabled: true
+    path: "${QPX_STATE_DIR:-~/.local/share/qpx}/access.log"
+    format: combined
+    rotation: daily
+    rotation_count: 7
+    exclude:
+    - "/health"
+    - "/metrics"
+  audit_log:
+    enabled: true
+    path: "${QPX_STATE_DIR:-~/.local/share/qpx}/audit.log"
+    format: json
+    rotation: daily
+    rotation_count: 30
+    include:
+    - subject
+    - groups
+    - device_id
+    - posture
+    - auth_strength
+    - idp
+    - identity_source
+    - policy_tags
+    - ext_authz_policy_id
+    - matched_rule
+    - matched_route
+  metrics:
+    listen: 127.0.0.1:19901
+    path: "/metrics"
+  exporter:
+    enabled: true
+    shm_path: ''
+    shm_size_mb: 16
+    lossy: false
+    max_queue_events: 4096
+    capture:
+      plaintext: true
+      encrypted: true
+      max_chunk_bytes: 16384
+edges:
+- kind: forward
+  name: obs-forward
   listen: 127.0.0.1:18089
   default_action:
     type: block
+  capture:
+    plaintext:
+      enabled: true
+      headers: true
+      body: true
+      sample_percent: 100
+      max_body_bytes: 16384
+      redact:
+        headers: [authorization, cookie, set-cookie]
+        query_keys: [token, password, session]
+        json_paths: ["$.password", "$.access_token"]
   rules:
   - name: allow-loopback
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
-      - '*'
+      - "*"
     action:
       type: direct
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-system_log:
-  level: debug
-  format: json
-access_log:
-  enabled: true
-  path: ${QPX_STATE_DIR:-~/.local/share/qpx}/access.log
-  format: combined
-  rotation: daily
-  rotation_count: 7
-  exclude:
-  - /health
-  - /metrics
-audit_log:
-  enabled: true
-  path: ${QPX_STATE_DIR:-~/.local/share/qpx}/audit.log
-  format: json
-  rotation: daily
-  rotation_count: 30
-  include:
-  - subject
-  - groups
-  - device_id
-  - posture
-  - auth_strength
-  - idp
-  - identity_source
-  - policy_tags
-  - ext_authz_policy_id
-  - matched_rule
-  - matched_route
-metrics:
-  listen: 127.0.0.1:19901
-  path: /metrics
-exporter:
-  enabled: true
-  shm_path: ''
-  shm_size_mb: 16
-  lossy: false
-  max_queue_events: 4096
-  capture:
-    plaintext: true
-    encrypted: true
-    max_chunk_bytes: 16384

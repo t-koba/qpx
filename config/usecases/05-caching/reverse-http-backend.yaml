@@ -1,13 +1,21 @@
-reverse:
-- name: site
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+caches:
+- name: object-store-gateway
+  kind: http
+  endpoint: http://127.0.0.1:19080
+  timeout_ms: 1500
+  max_object_bytes: 2097152
+edges:
+- kind: reverse
+  name: site
   listen: 127.0.0.1:8443
   routes:
   - match:
       host:
       - cache.example.local
       path:
-      - /assets/*
-      - /docs/*
+      - "/assets/*"
+      - "/docs/*"
       method:
       - GET
       - HEAD
@@ -17,18 +25,14 @@ reverse:
       namespace: reverse-site-assets
       default_ttl_secs: 300
       max_object_bytes: 2097152
-    upstreams:
-    - http://127.0.0.1:18080
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:18080
   - match:
       host:
       - cache.example.local
-    upstreams:
-    - http://127.0.0.1:18081
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-cache:
-  backends:
-  - name: object-store-gateway
-    kind: http
-    endpoint: http://127.0.0.1:19080
-    timeout_ms: 1500
-    max_object_bytes: 2097152
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:18081

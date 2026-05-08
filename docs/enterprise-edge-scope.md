@@ -340,20 +340,20 @@ ext_authz:
     on_error: deny
 ```
 
-Per-listener, reverse, or per-route use:
+Per-edge or per-route use:
 
 ```yaml
-listeners:
-  - name: egress
-    mode: forward
+edges:
+  - kind: forward
+    name: egress
     listen: "0.0.0.0:8080"
     default_action: { type: block }
     policy_context:
       identity_sources: ["corp-access-proxy"]
       ext_authz: central-policy
 
-reverse:
-  - name: apps
+  - kind: reverse
+    name: apps
     listen: "0.0.0.0:443"
     policy_context:
       identity_sources: ["partner-mtls"]
@@ -363,7 +363,9 @@ reverse:
           host: ["finance.example.com"]
         policy_context:
           ext_authz: central-policy
-        upstreams: ["http://10.0.0.20:8080"]
+        target:
+          type: upstream
+          upstreams: ["http://10.0.0.20:8080"]
 ```
 
 ### 8.4 Rule matching with trusted identity context

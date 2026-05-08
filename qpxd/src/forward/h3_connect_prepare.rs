@@ -8,8 +8,8 @@ pub(crate) async fn prepare_h3_connect_request(
     connect_udp_cfg: Option<&ConnectUdpConfig>,
 ) -> Result<H3ConnectPreparation> {
     let state = handler.runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
-    let max_h3_response_body_bytes = state.config.runtime.max_h3_response_body_bytes;
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
+    let max_h3_response_body_bytes = state.plan.limits.max_h3_response_body_bytes;
     let protocol = req_head.extensions().get::<::h3::ext::Protocol>().copied();
     let is_connect_udp = protocol == Some(::h3::ext::Protocol::CONNECT_UDP);
     let is_extended_connect = protocol.is_some();
@@ -196,11 +196,11 @@ pub(crate) async fn prepare_h3_connect_request(
         return Ok(H3ConnectPreparation::Responded);
     }
 
-    let listener_cfg = state
-        .listener_config(handler.listener_name.as_ref())
-        .ok_or_else(|| anyhow!("listener not found"))?;
-    let effective_policy =
-        EffectivePolicyContext::from_single(listener_cfg.policy_context.as_ref());
+    let base_plan = state
+        .plan
+        .ingress_edge_execution_plan(handler.listener_name.as_ref(), None)
+        .ok_or_else(|| anyhow!("listener plan not found"))?;
+    let effective_policy = base_plan.policy_context.clone();
     let sanitized_headers =
         sanitize_headers_for_policy(&state, &effective_policy, conn.remote_addr.ip(), &headers)?;
     let mut identity = resolve_identity(
@@ -226,7 +226,7 @@ pub(crate) async fn prepare_h3_connect_request(
             alpn: Some("h3"),
             ..Default::default()
         },
-        listener_cfg.destination_resolution.as_ref(),
+        base_plan.destination_resolution.as_ref(),
     );
     let audit_path = req_head
         .uri()
@@ -344,6 +344,10 @@ pub(crate) async fn prepare_h3_connect_request(
             return Ok(H3ConnectPreparation::Responded);
         }
     };
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled HTTP/3 CONNECT listener execution plan not found"))?;
 
     let request_limit_ctx = RateLimitContext::from_identity(
         conn.remote_addr.ip(),
@@ -354,16 +358,12 @@ pub(crate) async fn prepare_h3_connect_request(
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
-    } = state.policy.rate_limiters.collect_checked_request(
-        crate::rate_limit::RequestLimitCollectInput {
-            listener: Some(handler.listener_name.as_ref()),
-            rule: matched_rule.as_deref(),
-            profile: None,
-            scope: crate::rate_limit::TransportScope::Connect,
-            extra: None,
-            ctx: &request_limit_ctx,
-            cost: 1,
-        },
+    } = state.policy.rate_limiters.collect_checked_plan_request(
+        &selected_plan.rate_limits,
+        None,
+        crate::rate_limit::TransportScope::Connect,
+        &request_limit_ctx,
+        1,
     )?;
     if let Some(retry_after) = retry_after {
         let log_context = identity.to_log_context(matched_rule.as_deref(), None, None);

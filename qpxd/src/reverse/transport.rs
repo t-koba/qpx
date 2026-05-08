@@ -61,9 +61,7 @@ mod reverse_response_rules;
 #[path = "tls_accept.rs"]
 mod tls_accept;
 
-use self::reverse_destination::{
-    classify_reverse_destination, merge_destination_resolution_override,
-};
+use self::reverse_destination::classify_reverse_destination;
 use self::reverse_dispatch::dispatch_reverse_request;
 use self::reverse_mirrors::{
     dispatch_mirrors, record_reverse_upstream_error, record_reverse_upstream_status,
@@ -169,7 +167,7 @@ pub(super) async fn handle_request_with_interim(
         empty_interim_response(finalize_response_for_request(
             &request_method,
             request_version,
-            state.config.identity.proxy_name.as_str(),
+            state.plan.identity.proxy_name.as_ref(),
             Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(Body::from(state.messages.reverse_error.clone()))
@@ -186,12 +184,12 @@ pub(crate) async fn handle_request_inner(
     conn: ReverseConnInfo,
 ) -> Result<(ReverseInterimResponses, Response<Body>)> {
     let state = runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
     if let PreflightOutcome::Reject(response) = preflight_validate(
         &req,
         proxy_name,
         PreflightOptions {
-            trace_enabled: state.config.runtime.trace_enabled,
+            trace_enabled: state.plan.limits.trace_enabled,
             trace_disabled_message: state.messages.trace_disabled.as_str(),
             connect_policy: ConnectPolicy::Reject {
                 status: StatusCode::METHOD_NOT_ALLOWED,

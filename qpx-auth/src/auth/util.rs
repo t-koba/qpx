@@ -1,4 +1,4 @@
-#[cfg(feature = "auth-proxy")]
+#[cfg(feature = "basic-auth")]
 pub(super) fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

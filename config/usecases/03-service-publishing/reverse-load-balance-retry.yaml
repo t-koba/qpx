@@ -1,5 +1,7 @@
-reverse:
-- name: reverse-lb-retry
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: reverse
+  name: reverse-lb-retry
   listen: 0.0.0.0:19081
   routes:
   - name: api-service
@@ -7,8 +9,8 @@ reverse:
       host:
       - api.example.com
       path:
-      - /v1/*
-      - /v2/*
+      - "/v1/*"
+      - "/v2/*"
       method:
       - GET
       - POST
@@ -18,7 +20,6 @@ reverse:
       warmup_ms: 3000
       slow_start_ms: 15000
       drain_timeout_ms: 10000
-    lb: round_robin
     resilience:
       retry:
         attempts: 3
@@ -40,13 +41,15 @@ reverse:
       fail_threshold: 3
       cooldown_ms: 30000
       http:
-        path: /healthz
+        path: "/healthz"
         method: GET
         expected_status:
         - 200
         - 204
-    upstreams:
-    - http://10.20.0.11:8080
-    - http://10.20.0.12:8080
-    - http://10.20.0.13:8080
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+    target:
+      type: upstream
+      upstreams:
+      - http://10.20.0.11:8080
+      - http://10.20.0.12:8080
+      - http://10.20.0.13:8080
+      lb: round_robin

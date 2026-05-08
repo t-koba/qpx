@@ -1,12 +1,6 @@
 use super::super::defaults::*;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
-pub struct CacheConfig {
-    #[serde(default)]
-    pub backends: Vec<CacheBackendConfig>,
-}
-
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct CacheBackendConfig {
     pub name: String,

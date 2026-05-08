@@ -86,6 +86,16 @@ pub struct SubrequestModuleConfig {
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
+    pub max_response_bytes: Option<usize>,
+    #[serde(default)]
+    pub allowed_schemes: Vec<String>,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default = "default_subrequest_deny_redirects")]
+    pub deny_redirects: bool,
+    #[serde(default = "default_subrequest_deny_private_ip_redirects")]
+    pub deny_private_ip_redirects: bool,
+    #[serde(default)]
     pub pass_headers: Vec<String>,
     #[serde(default)]
     pub request_headers: HashMap<String, String>,
@@ -95,6 +105,14 @@ pub struct SubrequestModuleConfig {
     pub copy_response_headers_to_response: Vec<HeaderCaptureConfig>,
     #[serde(default)]
     pub response_mode: Option<SubrequestResponseMode>,
+}
+
+fn default_subrequest_deny_redirects() -> bool {
+    true
+}
+
+fn default_subrequest_deny_private_ip_redirects() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

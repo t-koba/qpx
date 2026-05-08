@@ -1,16 +1,19 @@
-reverse:
-- name: e2e-reverse
+state_dir: "${QPX_STATE_DIR:-/tmp/qpx-e2e-state}"
+edges:
+- kind: reverse
+  name: e2e-reverse
   listen: 127.0.0.1:19150
   routes:
   - match:
       host:
       - reverse.local
     timeout_ms: 5000
-    lb: round_robin
     resilience:
       retry:
         attempts: 1
         backoff_ms: 20
-    upstreams:
-    - http://127.0.0.1:19092
-state_dir: ${QPX_STATE_DIR:-/tmp/qpx-e2e-state}
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:19092
+      lb: round_robin

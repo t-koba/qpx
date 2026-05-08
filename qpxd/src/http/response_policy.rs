@@ -16,6 +16,7 @@ use std::time::Duration;
 pub(crate) struct ResponseBodyObservationLimits {
     pub(crate) max_body_bytes: usize,
     pub(crate) read_timeout: Duration,
+    pub(crate) force_body: bool,
 }
 
 pub(crate) enum ListenerResponsePolicyDecision {
@@ -169,6 +170,16 @@ pub(crate) async fn apply_listener_response_policy(
     request_rpc: Option<&RpcMatchContext>,
     body_observation: ResponseBodyObservationLimits,
 ) -> Result<ListenerResponsePolicyDecision> {
+    let mut observation_plan = ResponseObservationPlan::from_policy_candidates(&candidates);
+    observation_plan.include_body(body_observation.force_body);
+    response = observation_plan
+        .observe_response(
+            response,
+            body_observation.max_body_bytes,
+            body_observation.read_timeout,
+        )
+        .await?;
+
     let Some(engine) = engine else {
         return Ok(ListenerResponsePolicyDecision::Continue {
             response,
@@ -179,15 +190,6 @@ pub(crate) async fn apply_listener_response_policy(
             policy_tags: Vec::new(),
         });
     };
-
-    let observation_plan = ResponseObservationPlan::from_policy_candidates(&candidates);
-    response = observation_plan
-        .observe_response(
-            response,
-            body_observation.max_body_bytes,
-            body_observation.read_timeout,
-        )
-        .await?;
     let response_rpc = if observation_plan.needs_rpc_observation {
         let default_request_rpc;
         let request_rpc = match request_rpc {
@@ -337,6 +339,7 @@ mod tests {
             ResponseBodyObservationLimits {
                 max_body_bytes: usize::MAX,
                 read_timeout: Duration::from_secs(1),
+                force_body: false,
             },
         )
         .await
@@ -357,6 +360,40 @@ mod tests {
                 assert_eq!(policy_tags, vec!["resp-tag".to_string()]);
                 let headers = headers.expect("headers");
                 assert!(headers.has_response_mutations());
+            }
+            ListenerResponsePolicyDecision::LocalResponse { .. } => {
+                panic!("expected continued response")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn forced_body_observation_buffers_response_without_rules() {
+        let response = Response::builder()
+            .status(200)
+            .body(Body::from("captured"))
+            .expect("response");
+        let decision = apply_listener_response_policy(
+            None,
+            ResponseRuleCandidates::default(),
+            RuleMatchContext::default(),
+            response,
+            None,
+            None,
+            ResponseBodyObservationLimits {
+                max_body_bytes: 16,
+                read_timeout: Duration::from_secs(1),
+                force_body: true,
+            },
+        )
+        .await
+        .expect("decision");
+
+        match decision {
+            ListenerResponsePolicyDecision::Continue { response, .. } => {
+                let observed = crate::http::body_size::observed_response_bytes(&response)
+                    .expect("response body should be buffered for capture");
+                assert_eq!(observed.as_ref(), b"captured");
             }
             ListenerResponsePolicyDecision::LocalResponse { .. } => {
                 panic!("expected continued response")
@@ -438,6 +475,7 @@ mod tests {
             ResponseBodyObservationLimits {
                 max_body_bytes: usize::MAX,
                 read_timeout: Duration::from_secs(1),
+                force_body: false,
             },
         )
         .await
@@ -518,6 +556,7 @@ mod tests {
             ResponseBodyObservationLimits {
                 max_body_bytes: usize::MAX,
                 read_timeout: Duration::from_secs(1),
+                force_body: false,
             },
         )
         .await

@@ -1,43 +1,8 @@
-listeners:
-- name: forward
-  listen: 127.0.0.1:8080
-  default_action:
-    type: block
-  rules:
-  - name: force-client-user-agent
-    match:
-      src_ip:
-      - 127.0.0.1/32
-      - ::1/128
-      host:
-      - example.com
-    action:
-      type: direct
-    headers:
-      request_set:
-        User-Agent: ManagedClient/1.0
-  - name: allow-loopback
-    match:
-      src_ip:
-      - 127.0.0.1/32
-      - ::1/128
-      host:
-      - '*'
-    action:
-      type: direct
-  cache:
-    enabled: true
-    backend: cache-gateway
-    namespace: forward-corp
-    default_ttl_secs: 30
-    max_object_bytes: 1048576
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 identity:
   proxy_name: corp-edge-proxy
   auth_realm: corp-proxy-auth
   metrics_prefix: corp_proxy
-  # Proxy-originated requests should not disclose version, host, or deployment details.
   generated_user_agent: CorpProxy
 messages:
   blocked: blocked by corp policy
@@ -49,11 +14,44 @@ messages:
   unsupported_ftp_method: ftp method not allowed by corp policy
   connect_udp_disabled: connect-udp is disabled by corp policy
   upstream_connect_udp_failed: upstream connect-udp chain failed
-cache:
-  backends:
-  - name: cache-gateway
-    kind: http
-    endpoint: https://cache-gw.example.com
-    timeout_ms: 1500
+caches:
+- name: cache-gateway
+  kind: http
+  endpoint: https://cache-gw.example.com
+  timeout_ms: 1500
+  max_object_bytes: 1048576
+  auth_header_env: CACHE_GW_AUTH_HEADER
+edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:8080
+  default_action:
+    type: block
+  rules:
+  - name: force-client-user-agent
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - "::1/128"
+      host:
+      - example.com
+    action:
+      type: direct
+    headers:
+      request_set:
+        User-Agent: ManagedClient/1.0
+  - name: allow-loopback
+    match:
+      src_ip:
+      - 127.0.0.1/32
+      - "::1/128"
+      host:
+      - "*"
+    action:
+      type: direct
+  cache:
+    enabled: true
+    backend: cache-gateway
+    namespace: forward-corp
+    default_ttl_secs: 30
     max_object_bytes: 1048576
-    auth_header_env: CACHE_GW_AUTH_HEADER

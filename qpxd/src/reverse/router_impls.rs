@@ -1,21 +1,17 @@
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use super::router_compile::compile_upstream_pool;
 use super::*;
-use crate::http::modules::compile_http_modules;
-use crate::rate_limit::RateLimitSet;
 
 impl HttpRoute {
     pub(in crate::reverse) fn from_config(
         config: ReverseRouteConfig,
         upstreams: &HashMap<&str, &UpstreamConfig>,
         interner: &mut StringInterner,
-        http_module_registry: &crate::http::modules::HttpModuleRegistry,
+        _http_module_registry: &crate::http::modules::HttpModuleRegistry,
     ) -> Result<(Self, qpx_core::prefilter::MatchPrefilterHint)> {
         let (matcher, hint) = CompiledMatch::compile(&config.r#match, interner)?;
         let policy = RoutePolicy::from_http_config(&config)?;
         let affinity = ReverseAffinityRuntime::from_config(config.affinity.as_ref())?;
-        let cache_policy = config.cache.clone();
-        let rate_limit = RateLimitSet::from_config(config.rate_limit.as_ref());
         let path_rewrite = config
             .path_rewrite
             .as_ref()
@@ -57,19 +53,13 @@ impl HttpRoute {
                 .unwrap_or(&[]),
         )?;
         let upstream_trust = CompiledUpstreamTlsTrust::from_config(config.upstream_trust.as_ref())?;
-        let http_modules =
-            compile_http_modules(config.http_modules.as_slice(), http_module_registry)?;
         Ok((
             Self {
                 matcher,
                 name: config.name.as_deref().map(Arc::<str>::from),
-                policy_context: config.policy_context.clone(),
                 local_response: config.local_response.clone(),
-                cache_policy,
-                rate_limit,
                 headers,
                 ipc,
-                http_modules,
                 backends,
                 mirrors,
                 response_rules,

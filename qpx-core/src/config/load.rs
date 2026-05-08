@@ -1,6 +1,7 @@
 use crate::envsubst::expand_env;
 use anyhow::{anyhow, Context, Result};
 use serde_yaml::{Mapping, Value};
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,52 +9,21 @@ use super::types::Config;
 use super::validate::validate_config;
 
 pub fn load_config(path: &Path) -> Result<Config> {
-    use serde::de::IntoDeserializer;
-
     let mut stack = Vec::new();
     let mut sources = Vec::new();
     let value = load_value(path, &mut stack, &mut sources)?;
-    let mut ignored = Vec::new();
-    let de = value.into_deserializer();
-    let config: Config = serde_ignored::deserialize(de, |path| ignored.push(path.to_string()))
-        .with_context(|| format!("failed to deserialize config: {}", path.display()))?;
-    if !ignored.is_empty() {
-        ignored.sort();
-        ignored.dedup();
-        return Err(anyhow!(
-            "unknown config keys (fix typos to avoid unexpected defaults): {}",
-            ignored.join(", ")
-        ));
-    }
-    validate_config(&config)?;
-    Ok(config)
+    deserialize_config_value(value, format_args!("{}", path.display()))
 }
 
 pub fn load_config_with_sources(path: &Path) -> Result<(Config, Vec<PathBuf>)> {
-    use serde::de::IntoDeserializer;
-
     let mut stack = Vec::new();
     let mut sources = Vec::new();
     let value = load_value(path, &mut stack, &mut sources)?;
-    let mut ignored = Vec::new();
-    let de = value.into_deserializer();
-    let config: Config = serde_ignored::deserialize(de, |path| ignored.push(path.to_string()))
-        .with_context(|| format!("failed to deserialize config: {}", path.display()))?;
-    if !ignored.is_empty() {
-        ignored.sort();
-        ignored.dedup();
-        return Err(anyhow!(
-            "unknown config keys (fix typos to avoid unexpected defaults): {}",
-            ignored.join(", ")
-        ));
-    }
-    validate_config(&config)?;
+    let config = deserialize_config_value(value, format_args!("{}", path.display()))?;
     Ok((config, sources))
 }
 
 pub fn load_configs(paths: &[PathBuf]) -> Result<Config> {
-    use serde::de::IntoDeserializer;
-
     if paths.is_empty() {
         return Err(anyhow!("no config files provided"));
     }
@@ -66,24 +36,45 @@ pub fn load_configs(paths: &[PathBuf]) -> Result<Config> {
         merged = merge_values(merged, value);
     }
 
+    deserialize_config_value(
+        merged,
+        format_args!("merged config from {}", path_list(paths)),
+    )
+}
+
+pub fn load_configs_with_sources(paths: &[PathBuf]) -> Result<(Config, Vec<PathBuf>)> {
+    if paths.is_empty() {
+        return Err(anyhow!("no config files provided"));
+    }
+
+    let mut sources = Vec::new();
+    let mut merged = Value::Mapping(Mapping::new());
+    for path in paths {
+        let mut stack = Vec::new();
+        let value = load_value(path, &mut stack, &mut sources)?;
+        merged = merge_values(merged, value);
+    }
+
+    let config = deserialize_config_value(
+        merged,
+        format_args!("merged config from {}", path_list(paths)),
+    )?;
+    Ok((config, sources))
+}
+
+fn deserialize_config_value(value: Value, context: fmt::Arguments<'_>) -> Result<Config> {
+    use serde::de::IntoDeserializer;
+
+    let context = context.to_string();
     let mut ignored = Vec::new();
-    let de = merged.into_deserializer();
+    let de = value.into_deserializer();
     let config: Config = serde_ignored::deserialize(de, |path| ignored.push(path.to_string()))
-        .with_context(|| {
-            format!(
-                "failed to deserialize config (merged): {}",
-                paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
+        .map_err(|err| anyhow!("failed to deserialize config: {context}: {err}"))?;
     if !ignored.is_empty() {
         ignored.sort();
         ignored.dedup();
         return Err(anyhow!(
-            "unknown config keys (fix typos to avoid unexpected defaults): {}",
+            "unknown config keys in {context} (fix typos to avoid unexpected defaults): {}",
             ignored.join(", ")
         ));
     }
@@ -91,44 +82,12 @@ pub fn load_configs(paths: &[PathBuf]) -> Result<Config> {
     Ok(config)
 }
 
-pub fn load_configs_with_sources(paths: &[PathBuf]) -> Result<(Config, Vec<PathBuf>)> {
-    use serde::de::IntoDeserializer;
-
-    if paths.is_empty() {
-        return Err(anyhow!("no config files provided"));
-    }
-
-    let mut sources = Vec::new();
-    let mut merged = Value::Mapping(Mapping::new());
-    for path in paths {
-        let mut stack = Vec::new();
-        let value = load_value(path, &mut stack, &mut sources)?;
-        merged = merge_values(merged, value);
-    }
-
-    let mut ignored = Vec::new();
-    let de = merged.into_deserializer();
-    let config: Config = serde_ignored::deserialize(de, |path| ignored.push(path.to_string()))
-        .with_context(|| {
-            format!(
-                "failed to deserialize config (merged): {}",
-                paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
-    if !ignored.is_empty() {
-        ignored.sort();
-        ignored.dedup();
-        return Err(anyhow!(
-            "unknown config keys (fix typos to avoid unexpected defaults): {}",
-            ignored.join(", ")
-        ));
-    }
-    validate_config(&config)?;
-    Ok((config, sources))
+fn path_list(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn load_value(path: &Path, stack: &mut Vec<PathBuf>, sources: &mut Vec<PathBuf>) -> Result<Value> {
@@ -178,12 +137,25 @@ fn merge_values(base: Value, overlay: Value) -> Value {
             for (k, v) in b {
                 let entry = a.remove(&k);
                 let merged = match entry {
+                    Some(existing) if k == Value::String("edges".to_string()) => {
+                        merge_sequence_values(existing, v)
+                    }
                     Some(existing) => merge_values(existing, v),
                     None => v,
                 };
                 a.insert(k, merged);
             }
             Value::Mapping(a)
+        }
+        (_, v) => v,
+    }
+}
+
+fn merge_sequence_values(base: Value, overlay: Value) -> Value {
+    match (base, overlay) {
+        (Value::Sequence(mut a), Value::Sequence(b)) => {
+            a.extend(b);
+            Value::Sequence(a)
         }
         (_, v) => v,
     }

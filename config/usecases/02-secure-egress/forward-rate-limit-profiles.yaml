@@ -1,5 +1,42 @@
-listeners:
-- name: forward-rate-limit
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+security:
+  decisions:
+    ext_authz:
+    - name: rate-aware-policy
+      endpoint: http://127.0.0.1:19091/check
+      timeout_ms: 300
+      send:
+        request: true
+        identity: true
+        selected_headers:
+        - user-agent
+        - content-type
+      on_error: deny
+traffic:
+  rate_limit_profiles:
+  - name: subject-burst
+    enabled: true
+    key: user
+    requests:
+      rps: 40
+      burst: 80
+    sessions:
+      max_concurrency: 20
+  - name: tenant-daily
+    enabled: true
+    key: tenant
+    requests:
+      quota:
+        interval_secs: 86400
+        amount: 250000
+  - name: upstream-concurrency
+    enabled: true
+    key: upstream
+    sessions:
+      max_concurrency: 64
+edges:
+- kind: forward
+  name: forward-rate-limit
   listen: 127.0.0.1:18091
   default_action:
     type: block
@@ -8,7 +45,7 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
       - docs.example.com
       - api.example.com
@@ -30,12 +67,12 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
       - downloads.example.com
       path:
-      - /packages/*
-      - /artifacts/*
+      - "/packages/*"
+      - "/artifacts/*"
       method:
       - GET
     action:
@@ -52,9 +89,9 @@ listeners:
       match:
         src_ip:
         - 127.0.0.1/32
-        - ::1/128
+        - "::1/128"
         host:
-        - '*'
+        - "*"
         response_status:
         - '429'
         - 500-599
@@ -78,37 +115,3 @@ listeners:
       max_concurrency: 100
   policy_context:
     ext_authz: rate-aware-policy
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-ext_authz:
-- name: rate-aware-policy
-  endpoint: http://127.0.0.1:19091/check
-  timeout_ms: 300
-  send:
-    request: true
-    identity: true
-    selected_headers:
-    - user-agent
-    - content-type
-  on_error: deny
-rate_limit_profiles:
-- name: subject-burst
-  enabled: true
-  key: user
-  requests:
-    rps: 40
-    burst: 80
-  sessions:
-    max_concurrency: 20
-- name: tenant-daily
-  enabled: true
-  key: tenant
-  requests:
-    quota:
-      interval_secs: 86400
-      amount: 250000
-- name: upstream-concurrency
-  enabled: true
-  key: upstream
-  sessions:
-    max_concurrency: 64
