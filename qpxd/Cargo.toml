@@ -85,7 +85,8 @@ h3-datagram = { workspace = true, optional = true }
 tokio.workspace = true
 socket2.workspace = true
 
-# Auth
+# Policy assertion verification and certificate/key parsing used by qpxd itself.
+# Built-in proxy auth providers stay in optional qpx-auth features above.
 base64.workspace = true
 pem.workspace = true
 ring.workspace = true

@@ -1,6 +1,8 @@
 use super::router_selection::{endpoint_lifecycle_state, EndpointLifecycleState};
 use super::*;
-use qpx_core::config::{HealthCheckConfig, MatchConfig, ResilienceConfig, ResilienceRetryConfig};
+use qpx_core::config::{
+    EdgeConfig, HealthCheckConfig, MatchConfig, ResilienceConfig, ResilienceRetryConfig,
+};
 
 fn empty_pool() -> Arc<UpstreamPool> {
     UpstreamPool::new(
@@ -370,6 +372,177 @@ fn tls_passthrough_prefilter_does_not_require_host_or_path() {
         .as_ref()
         .and_then(|upstream| upstream.origin.connect_authority(443).ok());
     assert_eq!(selected_addr.as_deref(), Some("127.0.0.1:8443"));
+}
+
+#[test]
+fn reverse_router_rejects_compiled_route_count_mismatch() {
+    let (cfg, compiled, registry) = compiled_reverse_fixture(false);
+    let mut bad = compiled.clone();
+    bad.routes = Vec::new().into();
+
+    let err = expect_router_error(ReverseRouter::new_with_plan(
+        cfg,
+        &[],
+        registry.as_ref(),
+        &bad,
+    ));
+    assert!(err.to_string().contains("compiled route count mismatch"));
+}
+
+#[test]
+fn reverse_router_rejects_compiled_route_identity_mismatch() {
+    let (mut cfg, compiled, registry) = compiled_reverse_fixture(false);
+    cfg.routes[0].name = Some("changed".to_string());
+
+    let err = expect_router_error(ReverseRouter::new_with_plan(
+        cfg,
+        &[],
+        registry.as_ref(),
+        &compiled,
+    ));
+    assert!(err.to_string().contains("route id mismatch"));
+}
+
+#[test]
+fn reverse_router_rejects_compiled_route_target_kind_mismatch() {
+    let (cfg, compiled, registry) = compiled_reverse_fixture(false);
+    let mut routes = compiled.routes.to_vec();
+    routes[0].target = CompiledReverseRouteTarget::LocalResponse { status: 204 };
+    let mut bad = compiled.clone();
+    bad.routes = routes.into();
+
+    let err = expect_router_error(ReverseRouter::new_with_plan(
+        cfg,
+        &[],
+        registry.as_ref(),
+        &bad,
+    ));
+    assert!(err.to_string().contains("route target kind mismatch"));
+}
+
+#[test]
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+fn reverse_router_rejects_compiled_tls_passthrough_count_mismatch() {
+    let (cfg, compiled, registry) = compiled_reverse_fixture(true);
+    let mut bad = compiled.clone();
+    bad.tls_passthrough_routes = Vec::new().into();
+
+    let err = expect_router_error(ReverseRouter::new_with_plan(
+        cfg,
+        &[],
+        registry.as_ref(),
+        &bad,
+    ));
+    assert!(err
+        .to_string()
+        .contains("compiled TLS passthrough route count mismatch"));
+}
+
+fn compiled_reverse_fixture(
+    include_tls_passthrough: bool,
+) -> (
+    ReverseEdgeConfig,
+    crate::runtime::CompiledReverseEdge,
+    Arc<HttpModuleRegistry>,
+) {
+    let cfg = ReverseEdgeConfig {
+        name: "rev".to_string(),
+        listen: "127.0.0.1:0".to_string(),
+        tls: include_tls_passthrough.then_some(qpx_core::config::ReverseTlsConfig {
+            certificates: Vec::new(),
+            client_ca: None,
+        }),
+        http3: None,
+        xdp: None,
+        enforce_sni_host_match: false,
+        sni_host_exceptions: Vec::new(),
+        policy_context: None,
+        destination_resolution: None,
+        connection_filter: Vec::new(),
+        routes: vec![ReverseRouteConfig {
+            name: Some("app".to_string()),
+            r#match: MatchConfig {
+                host: vec!["example.com".to_string()],
+                ..Default::default()
+            },
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["http://127.0.0.1:8080".to_string()],
+                lb: "round_robin".to_string(),
+            },
+            mirrors: Vec::new(),
+            headers: None,
+            timeout_ms: None,
+            health_check: None,
+            cache: None,
+            capture: None,
+            rate_limit: None,
+            path_rewrite: None,
+            upstream_trust_profile: None,
+            upstream_trust: None,
+            lifecycle: None,
+            affinity: None,
+            policy_context: None,
+            http: None,
+            http_guard_profile: None,
+            destination_resolution: None,
+            resilience: None,
+            http_modules: Vec::new(),
+        }],
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+        tls_passthrough_routes: if include_tls_passthrough {
+            vec![ReverseTlsPassthroughRouteConfig {
+                r#match: qpx_core::config::TlsPassthroughMatchConfig {
+                    src_ip: Vec::new(),
+                    dst_port: vec![443],
+                    sni: vec!["tls.example.com".to_string()],
+                },
+                upstreams: vec!["127.0.0.1:8443".to_string()],
+                lb: "round_robin".to_string(),
+                timeout_ms: None,
+                health_check: None,
+                resilience: None,
+                lifecycle: None,
+                affinity: None,
+            }]
+        } else {
+            Vec::new()
+        },
+        #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+        tls_passthrough_routes: Vec::new(),
+    };
+    let registry = crate::http::modules::default_http_module_registry();
+    let runtime_config = qpx_core::config::Config {
+        state_dir: None,
+        identity: Default::default(),
+        messages: Default::default(),
+        runtime: Default::default(),
+        telemetry: Default::default(),
+        security: Default::default(),
+        http: Default::default(),
+        traffic: Default::default(),
+        acme: None,
+        edges: vec![EdgeConfig::Reverse(cfg.clone())],
+        upstreams: Vec::new(),
+        caches: Vec::new(),
+    };
+    let state = crate::runtime::RuntimeState::build_with_http_module_registry(
+        runtime_config,
+        registry.clone(),
+    )
+    .expect("runtime state");
+    let compiled = state
+        .plan
+        .reverse_edge(cfg.name.as_str())
+        .expect("compiled edge")
+        .clone();
+    (cfg, compiled, registry)
+}
+
+fn expect_router_error(result: Result<ReverseRouter>) -> anyhow::Error {
+    match result {
+        Ok(_) => panic!("router construction should fail"),
+        Err(err) => err,
+    }
 }
 
 #[test]

@@ -158,12 +158,13 @@ pub fn canonical_schema_value() -> serde_json::Value {
             "httpModule": {
                 "type": "object",
                 "required": ["type"],
+                "additionalProperties": false,
                 "properties": {
                     "type": {"type": "string"},
                     "id": {"type": "string"},
-                    "order": {"type": "integer"}
-                },
-                "additionalProperties": true
+                    "order": {"type": "integer"},
+                    "settings": true
+                }
             },
             "httpPolicy": {
                 "type": "object",

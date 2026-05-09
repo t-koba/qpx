@@ -414,6 +414,8 @@ pub(super) async fn dispatch_transparent_request(
             scope_name: listener_name.to_string(),
             route_name: None,
             remote_ip: remote_addr.ip(),
+            sni: None,
+            identity_user: identity.user.clone(),
             cache_policy: None,
             cache_default_scheme: None,
         },

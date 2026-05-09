@@ -4,7 +4,7 @@ use crate::config::{
 };
 use crate::prefilter::{
     compile_text_patterns, dedup_uppercase_arc, is_ascii_uppercase_token, StringInterner,
-    TextPatternMatcher,
+    TextMatchMode, TextPatternMatcher,
 };
 use crate::rules::RuleMatchContext;
 use anyhow::{anyhow, Result};
@@ -12,6 +12,66 @@ use cidr::IpCidr;
 use regex::Regex;
 use std::collections::HashSet;
 use std::sync::Arc;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchTrace {
+    pub result: bool,
+    pub reasons: Vec<MatchReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchReason {
+    SrcIp {
+        configured: String,
+        actual: Option<String>,
+        result: bool,
+    },
+    DstPort {
+        configured: u16,
+        actual: Option<u16>,
+        result: bool,
+    },
+    Sni {
+        mode: MatchMode,
+        configured: String,
+        actual: Option<String>,
+        result: bool,
+    },
+    Host {
+        mode: MatchMode,
+        configured: String,
+        actual: Option<String>,
+        result: bool,
+    },
+    Method {
+        configured: String,
+        actual: Option<String>,
+        result: bool,
+    },
+    Path {
+        mode: MatchMode,
+        configured: String,
+        actual: Option<String>,
+        result: bool,
+    },
+    Header {
+        name: String,
+        configured: String,
+        actual: Option<String>,
+        result: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchMode {
+    Exact,
+    Prefix,
+    Suffix,
+    Glob,
+    Regex,
+    Cidr,
+    Any,
+}
 
 #[derive(Debug, Clone)]
 pub struct CompiledMatch {
@@ -582,6 +642,67 @@ impl CompiledMatch {
         true
     }
 
+    pub fn matches_with_trace(&self, ctx: &RuleMatchContext<'_>) -> MatchTrace {
+        let mut reasons = Vec::new();
+        for cidr in &self.src_ip {
+            reasons.push(MatchReason::SrcIp {
+                configured: cidr.to_string(),
+                actual: ctx.src_ip.map(|ip| ip.to_string()),
+                result: ctx.src_ip.is_some_and(|ip| cidr.contains(&ip)),
+            });
+        }
+        for port in &self.dst_port {
+            reasons.push(MatchReason::DstPort {
+                configured: *port,
+                actual: ctx.dst_port,
+                result: ctx.dst_port == Some(*port),
+            });
+        }
+        if let Some(host) = &self.host {
+            append_text_reasons(&mut reasons, TraceTextKind::Host, host, ctx.host);
+        }
+        if let Some(sni) = &self.sni {
+            append_text_reasons(&mut reasons, TraceTextKind::Sni, sni, ctx.sni);
+        }
+        for method in &self.method {
+            let result = ctx.method.is_some_and(|actual| {
+                actual == method.as_ref()
+                    || (!is_ascii_uppercase_token(actual)
+                        && actual.to_ascii_uppercase() == method.as_ref())
+            });
+            reasons.push(MatchReason::Method {
+                configured: method.to_string(),
+                actual: ctx.method.map(str::to_string),
+                result,
+            });
+        }
+        if let Some(path) = &self.path {
+            append_text_reasons(&mut reasons, TraceTextKind::Path, path, ctx.path);
+        }
+        for matcher in &self.headers_fast {
+            let (configured, actual, result) = trace_fast_header(matcher, ctx.headers);
+            reasons.push(MatchReason::Header {
+                name: matcher.name.to_string(),
+                configured,
+                actual,
+                result,
+            });
+        }
+        for matcher in &self.headers_regex {
+            let (actual, result) = trace_regex_header(matcher, ctx.headers);
+            reasons.push(MatchReason::Header {
+                name: matcher.name.to_string(),
+                configured: format!("regex:{}", matcher.regex.as_str()),
+                actual,
+                result,
+            });
+        }
+        MatchTrace {
+            result: self.matches(ctx),
+            reasons,
+        }
+    }
+
     pub fn requires_request_size(&self) -> bool {
         self.request_size.is_some()
             || self
@@ -1074,6 +1195,93 @@ fn dedup_u16(items: &[u16]) -> Vec<u16> {
     out
 }
 
+enum TraceTextKind {
+    Host,
+    Sni,
+    Path,
+}
+
+fn append_text_reasons(
+    out: &mut Vec<MatchReason>,
+    kind: TraceTextKind,
+    matcher: &TextPatternMatcher,
+    actual: Option<&str>,
+) {
+    for trace in matcher.trace(actual) {
+        let mode = match trace.mode {
+            TextMatchMode::Exact => MatchMode::Exact,
+            TextMatchMode::Suffix => MatchMode::Suffix,
+            TextMatchMode::Glob => pattern_mode(trace.configured.as_str()),
+            TextMatchMode::Regex => MatchMode::Regex,
+        };
+        match kind {
+            TraceTextKind::Host => out.push(MatchReason::Host {
+                mode,
+                configured: trace.configured,
+                actual: actual.map(str::to_string),
+                result: trace.result,
+            }),
+            TraceTextKind::Sni => out.push(MatchReason::Sni {
+                mode,
+                configured: trace.configured,
+                actual: actual.map(str::to_string),
+                result: trace.result,
+            }),
+            TraceTextKind::Path => out.push(MatchReason::Path {
+                mode,
+                configured: trace.configured,
+                actual: actual.map(str::to_string),
+                result: trace.result,
+            }),
+        }
+    }
+}
+
+fn pattern_mode(pattern: &str) -> MatchMode {
+    if pattern.ends_with('*') && !pattern[..pattern.len().saturating_sub(1)].contains(['*', '?']) {
+        MatchMode::Prefix
+    } else {
+        MatchMode::Glob
+    }
+}
+
+fn trace_fast_header(
+    matcher: &HeaderMatcherFast,
+    headers: Option<&http::HeaderMap>,
+) -> (String, Option<String>, bool) {
+    let configured = match &matcher.mode {
+        HeaderFastMode::Present => "<present>".to_string(),
+        HeaderFastMode::Exact(expected) => expected.to_string(),
+    };
+    let actual = headers.and_then(|headers| {
+        headers
+            .get_all(matcher.name.as_ref())
+            .iter()
+            .find_map(|value| value.to_str().ok().map(str::to_string))
+    });
+    let result = match &matcher.mode {
+        HeaderFastMode::Present => actual.is_some(),
+        HeaderFastMode::Exact(expected) => actual.as_deref() == Some(expected.as_ref()),
+    };
+    (configured, actual, result)
+}
+
+fn trace_regex_header(
+    matcher: &HeaderMatcherRegex,
+    headers: Option<&http::HeaderMap>,
+) -> (Option<String>, bool) {
+    let actual = headers.and_then(|headers| {
+        headers
+            .get_all(matcher.name.as_ref())
+            .iter()
+            .find_map(|value| value.to_str().ok().map(str::to_string))
+    });
+    let result = actual
+        .as_deref()
+        .is_some_and(|actual| matcher.regex.is_match(actual));
+    (actual, result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1170,6 +1378,68 @@ mod tests {
             ..Default::default()
         };
         assert!(compiled.matches(&ctx));
+    }
+
+    #[test]
+    fn compiled_match_trace_reports_exact_prefix_glob_regex_and_cidr() {
+        let cfg = MatchConfig {
+            src_ip: vec!["10.0.0.0/8".to_string()],
+            host: vec!["api.example.com".to_string()],
+            method: vec!["GET".to_string()],
+            path: vec![
+                "/v1/*".to_string(),
+                "/files/*.json".to_string(),
+                "re:^/v[0-9]+/users$".to_string(),
+            ],
+            ..Default::default()
+        };
+        let mut interner = StringInterner::default();
+        let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+        let ctx = RuleMatchContext {
+            src_ip: Some("10.1.2.3".parse().expect("ip")),
+            host: Some("api.example.com"),
+            method: Some("GET"),
+            path: Some("/v1/users"),
+            ..Default::default()
+        };
+
+        let trace = compiled.matches_with_trace(&ctx);
+
+        assert!(trace.result);
+        assert!(trace
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason, MatchReason::SrcIp { result: true, .. })));
+        assert!(trace.reasons.iter().any(|reason| matches!(
+            reason,
+            MatchReason::Host {
+                mode: MatchMode::Exact,
+                result: true,
+                ..
+            }
+        )));
+        assert!(trace.reasons.iter().any(|reason| matches!(
+            reason,
+            MatchReason::Path {
+                mode: MatchMode::Prefix,
+                result: true,
+                ..
+            }
+        )));
+        assert!(trace.reasons.iter().any(|reason| matches!(
+            reason,
+            MatchReason::Path {
+                mode: MatchMode::Glob,
+                ..
+            }
+        )));
+        assert!(trace.reasons.iter().any(|reason| matches!(
+            reason,
+            MatchReason::Path {
+                mode: MatchMode::Regex,
+                ..
+            }
+        )));
     }
 
     #[test]

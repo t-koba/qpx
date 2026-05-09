@@ -161,6 +161,7 @@ pub struct CompiledTransparentRule {
 
 #[derive(Clone)]
 pub struct CompiledReverseRoute {
+    pub id: Arc<str>,
     pub name: Arc<str>,
     pub matcher: CompiledMatch,
     pub(crate) hint: MatchPrefilterHint,
@@ -191,6 +192,18 @@ pub enum CompiledReverseRouteTarget {
     },
 }
 
+impl CompiledReverseRouteTarget {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Upstream { .. } => "upstream",
+            Self::Weighted { .. } => "weighted",
+            Self::Ipc { .. } => "ipc",
+            Self::LocalResponse { .. } => "local_response",
+            Self::TlsPassthrough { .. } => "tls_passthrough",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CompiledRouteBackend {
     pub name: Option<Arc<str>>,
@@ -200,8 +213,13 @@ pub struct CompiledRouteBackend {
 
 #[derive(Clone)]
 pub struct CompiledTlsPassthroughRoute {
+    pub id: Arc<str>,
     pub name: Arc<str>,
     pub matcher: CompiledMatch,
+    #[cfg_attr(
+        not(any(feature = "tls-rustls", feature = "tls-native")),
+        allow(dead_code)
+    )]
     pub(crate) hint: MatchPrefilterHint,
     pub target: CompiledReverseRouteTarget,
 }
@@ -515,13 +533,16 @@ impl<'a> PlanCompiler<'a> {
             let routes = reverse_edges
                 .routes
                 .iter()
-                .map(|route| {
+                .enumerate()
+                .map(|(idx, route)| {
                     let (matcher, hint) = CompiledMatch::compile(&route.r#match, &mut interner)?;
                     let mut plan =
                         execution_plan_for_reverse_route(self.config, reverse_edges, route)?;
                     apply_matcher_flags(&matcher, &mut plan);
+                    let id = Arc::<str>::from(route_id(idx, route.name.as_deref()));
                     Ok(CompiledReverseRoute {
-                        name: Arc::from(route.name.as_deref().unwrap_or("<unnamed>")),
+                        id: id.clone(),
+                        name: id,
                         matcher,
                         hint,
                         target: compile_reverse_route_target(&route.target),
@@ -537,6 +558,7 @@ impl<'a> PlanCompiler<'a> {
                     let (matcher, hint) =
                         CompiledMatch::compile_tls_passthrough(&route.r#match, &mut interner)?;
                     Ok(CompiledTlsPassthroughRoute {
+                        id: Arc::from(format!("tls_passthrough[{idx}]")),
                         name: Arc::from(format!("tls_passthrough[{idx}]")),
                         matcher,
                         hint,
@@ -629,6 +651,11 @@ impl<'a> PlanCompiler<'a> {
             },
         })
     }
+}
+
+fn route_id(idx: usize, name: Option<&str>) -> String {
+    name.map(str::to_string)
+        .unwrap_or_else(|| format!("route[{idx}]"))
 }
 
 fn apply_matcher_flags(matcher: &CompiledMatch, plan: &mut ExecutionPlan) {

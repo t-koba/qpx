@@ -64,9 +64,25 @@ struct DomainSuffixNode {
 pub struct TextPatternMatcher {
     exact: HashSet<Arc<str>>,
     suffix: Vec<Arc<str>>,
+    glob_patterns: Vec<Arc<str>>,
     glob: Option<GlobSet>,
     regex: Vec<Regex>,
     lowercase_input: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextMatchMode {
+    Exact,
+    Suffix,
+    Glob,
+    Regex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextMatchTrace {
+    pub mode: TextMatchMode,
+    pub configured: String,
+    pub result: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -227,6 +243,52 @@ impl TextPatternMatcher {
             return self.regex.iter().any(|regex| regex.is_match(normalized));
         }
         false
+    }
+
+    pub fn trace(&self, input: Option<&str>) -> Vec<TextMatchTrace> {
+        let normalized_owned;
+        let normalized = match input {
+            Some(input) if self.lowercase_input => {
+                normalized_owned = input.to_ascii_lowercase();
+                Some(normalized_owned.as_str())
+            }
+            Some(input) => Some(input),
+            None => None,
+        };
+        let mut out = Vec::new();
+        for exact in &self.exact {
+            out.push(TextMatchTrace {
+                mode: TextMatchMode::Exact,
+                configured: exact.to_string(),
+                result: normalized.is_some_and(|input| input == exact.as_ref()),
+            });
+        }
+        for suffix in &self.suffix {
+            out.push(TextMatchTrace {
+                mode: TextMatchMode::Suffix,
+                configured: suffix.to_string(),
+                result: normalized.is_some_and(|input| host_matches_suffix(input, suffix.as_ref())),
+            });
+        }
+        for glob in &self.glob_patterns {
+            out.push(TextMatchTrace {
+                mode: TextMatchMode::Glob,
+                configured: glob.to_string(),
+                result: normalized.is_some_and(|input| {
+                    Glob::new(glob.as_ref())
+                        .map(|glob| glob.compile_matcher().is_match(input))
+                        .unwrap_or(false)
+                }),
+            });
+        }
+        for regex in &self.regex {
+            out.push(TextMatchTrace {
+                mode: TextMatchMode::Regex,
+                configured: regex.as_str().to_string(),
+                result: normalized.is_some_and(|input| regex.is_match(input)),
+            });
+        }
+        out
     }
 }
 
@@ -709,6 +771,7 @@ pub(crate) fn compile_text_patterns(
     let mut suffix = Vec::new();
     let mut suffix_seen = HashSet::new();
     let mut complex = Vec::new();
+    let mut glob_patterns = Vec::new();
     let mut regex = Vec::new();
     let mut hint = TextPrefilterHint {
         any: false,
@@ -748,6 +811,8 @@ pub(crate) fn compile_text_patterns(
         }
 
         hint.complex = true;
+        let value = interner.intern(normalized.as_str());
+        glob_patterns.push(value);
         complex.push(normalized);
     }
 
@@ -755,6 +820,7 @@ pub(crate) fn compile_text_patterns(
         Some(TextPatternMatcher {
             exact,
             suffix,
+            glob_patterns,
             glob: build_globset(&complex)?,
             regex,
             lowercase_input: lowercase,

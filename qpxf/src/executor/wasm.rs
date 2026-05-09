@@ -132,4 +132,38 @@ mod tests {
 
         assert_eq!(executor.prewarmed_instances(), 2);
     }
+
+    #[tokio::test]
+    async fn wasm_executor_rejects_invalid_module_during_prewarm() {
+        let module = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("Cargo.toml");
+        let result = WasmExecutor::new(&WasmBackendConfig {
+            module,
+            precompile: true,
+            pool: Some(WasmPoolConfig {
+                min_idle: 1,
+                max_instances: 1,
+                prewarm: true,
+            }),
+            max_module_bytes: 1024 * 1024,
+            max_memory_mb: 16,
+            timeout_ms: 1000,
+            env: HashMap::new(),
+            max_stdin_bytes: 1024,
+            max_stdout_bytes: 1024,
+            max_stderr_bytes: 1024,
+        });
+        let err = match result {
+            Ok(_) => panic!("invalid module should fail during executor construction"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("WASM")
+                || err.to_string().contains("wasm")
+                || err.to_string().contains("module"),
+            "{err:?}"
+        );
+    }
 }

@@ -17,7 +17,7 @@ use qpx_core::config::{
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::{Arc, OnceLock};
 use tokio::time::{timeout, Duration};
 use tracing::warn;
@@ -381,6 +381,10 @@ pub trait HttpModule: Send + Sync {
 
     fn capabilities(&self) -> HttpModuleCapabilities;
 
+    fn explain(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     async fn call<'a>(
         &self,
         stage: HttpModuleStage,
@@ -402,6 +406,11 @@ impl CompiledHttpModule {
             Some(id) => format!("{} ({id})", self.type_name),
             None => self.type_name.to_string(),
         }
+    }
+
+    fn explain(&self) -> Option<(String, Vec<String>)> {
+        let detail = self.module.explain();
+        (!detail.is_empty()).then(|| (self.label(), detail))
     }
 }
 
@@ -472,6 +481,22 @@ impl CompiledHttpModuleChain {
             ("error", module_labels(&self.error)),
             ("log", module_labels(&self.log)),
         ]
+    }
+
+    pub(crate) fn explain_details(&self) -> Vec<(String, Vec<String>)> {
+        [
+            self.request_headers.as_ref(),
+            self.cache_lookup.as_ref(),
+            self.upstream_request.as_ref(),
+            self.upstream_response.as_ref(),
+            self.downstream_response.as_ref(),
+            self.retry.as_ref(),
+            self.error.as_ref(),
+            self.log.as_ref(),
+        ]
+        .into_iter()
+        .flat_map(|modules| modules.iter().filter_map(CompiledHttpModule::explain))
+        .collect()
     }
 
     pub(crate) fn start(
@@ -588,6 +613,8 @@ pub(crate) struct HttpModuleSessionInit {
     pub(crate) scope_name: String,
     pub(crate) route_name: Option<String>,
     pub(crate) remote_ip: IpAddr,
+    pub(crate) sni: Option<String>,
+    pub(crate) identity_user: Option<String>,
     pub(crate) cache_policy: Option<CachePolicyConfig>,
     pub(crate) cache_default_scheme: Option<String>,
 }
@@ -750,6 +777,8 @@ struct HttpModuleSession {
     scope_name: String,
     route_name: Option<String>,
     remote_ip: IpAddr,
+    sni: Option<String>,
+    identity_user: Option<String>,
     request: Option<FrozenRequestSnapshot>,
     response_status: Option<StatusCode>,
     cache_policy: Option<CachePolicyConfig>,
@@ -766,6 +795,8 @@ impl HttpModuleSession {
             scope_name: init.scope_name,
             route_name: init.route_name,
             remote_ip: init.remote_ip,
+            sni: init.sni,
+            identity_user: init.identity_user,
             request: None,
             response_status: None,
             cache_policy: init.cache_policy,
@@ -839,6 +870,14 @@ impl HttpModuleContext {
 
     pub fn remote_ip(&self) -> IpAddr {
         self.session.remote_ip
+    }
+
+    pub fn sni(&self) -> Option<&str> {
+        self.session.sni.as_deref()
+    }
+
+    pub fn identity_user(&self) -> Option<&str> {
+        self.session.identity_user.as_deref()
     }
 
     pub fn frozen_request(&self) -> Option<HttpModuleRequestView<'_>> {
@@ -1432,6 +1471,13 @@ impl SubrequestModule {
                 host
             ));
         }
+        if redirect_host_resolves_to_private_ip(&uri, host) {
+            return Err(anyhow!(
+                "subrequest {} redirect Location resolves to a private IP: {}",
+                self.name,
+                host
+            ));
+        }
         Ok(())
     }
 
@@ -1505,6 +1551,19 @@ impl HttpModule for SubrequestModule {
                 capabilities
             }
         }
+    }
+
+    fn explain(&self) -> Vec<String> {
+        vec![
+            format!("template: {}", self.url_template.summary()),
+            format!("allowed_schemes: {}", self.allowed_schemes.join(",")),
+            format!("allowed_hosts: {}", self.allowed_hosts.join(",")),
+            format!(
+                "redirect_policy: deny_redirects={}, deny_private_ip_redirects={}",
+                self.deny_redirects, self.deny_private_ip_redirects
+            ),
+            format!("max_response_bytes: {}", self.max_response_bytes),
+        ]
     }
 
     async fn call<'a>(
@@ -1656,9 +1715,55 @@ fn redirect_host_is_private_ip(host: &str) -> bool {
     }
 }
 
+fn redirect_host_resolves_to_private_ip(uri: &http::Uri, host: &str) -> bool {
+    if host.parse::<IpAddr>().is_ok() {
+        return false;
+    }
+    let port = uri
+        .port_u16()
+        .or_else(|| match uri.scheme_str() {
+            Some("https") => Some(443),
+            Some("http") => Some(80),
+            _ => None,
+        })
+        .unwrap_or(80);
+    (host, port)
+        .to_socket_addrs()
+        .map(|mut addrs| addrs.any(|addr| redirect_ip_is_private(addr.ip())))
+        .unwrap_or(false)
+}
+
+fn redirect_ip_is_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.octets()[0] == 0
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_unspecified()
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CompiledTemplate {
     parts: Arc<[TemplatePart]>,
+}
+
+impl CompiledTemplate {
+    fn summary(&self) -> String {
+        self.parts
+            .iter()
+            .map(TemplatePart::summary)
+            .collect::<Vec<_>>()
+            .join("")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1670,7 +1775,18 @@ enum TemplatePart {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+impl TemplatePart {
+    fn summary(&self) -> String {
+        match self {
+            TemplatePart::Literal(value) => value.to_string(),
+            TemplatePart::Placeholder { variable, modifier } => {
+                format!("{{{}:{}}}", variable.summary(), modifier.summary())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 enum TemplateVariable {
     ProxyKind,
     ProxyName,
@@ -1680,19 +1796,58 @@ enum TemplateVariable {
     RequestUri,
     RequestScheme,
     RequestHost,
+    RequestSni,
     RequestPath,
     RequestQuery,
+    RequestQueryKey(Arc<str>),
+    RequestHeader(HeaderName),
     RequestAuthority,
     RemoteIp,
+    IdentityUser,
     ResponseStatus,
+}
+
+impl TemplateVariable {
+    fn summary(&self) -> String {
+        match self {
+            TemplateVariable::ProxyKind => "proxy.kind".to_string(),
+            TemplateVariable::ProxyName => "proxy.name".to_string(),
+            TemplateVariable::ScopeName => "scope.name".to_string(),
+            TemplateVariable::RouteName => "route.name".to_string(),
+            TemplateVariable::RequestMethod => "request.method".to_string(),
+            TemplateVariable::RequestUri => "request.uri".to_string(),
+            TemplateVariable::RequestScheme => "request.scheme".to_string(),
+            TemplateVariable::RequestHost => "request.host".to_string(),
+            TemplateVariable::RequestSni => "request.sni".to_string(),
+            TemplateVariable::RequestPath => "request.path".to_string(),
+            TemplateVariable::RequestQuery => "request.query".to_string(),
+            TemplateVariable::RequestQueryKey(key) => format!("request.query.{key}"),
+            TemplateVariable::RequestHeader(name) => format!("request.header.{name}"),
+            TemplateVariable::RequestAuthority => "request.authority".to_string(),
+            TemplateVariable::RemoteIp => "remote.ip".to_string(),
+            TemplateVariable::IdentityUser => "identity.user".to_string(),
+            TemplateVariable::ResponseStatus => "response.status".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum TemplateModifier {
-    Raw,
     UrlQuery,
     PathSegment,
     Header,
+    Host,
+}
+
+impl TemplateModifier {
+    fn summary(self) -> &'static str {
+        match self {
+            TemplateModifier::UrlQuery => "urlquery",
+            TemplateModifier::PathSegment => "pathsegment",
+            TemplateModifier::Header => "header",
+            TemplateModifier::Host => "host",
+        }
+    }
 }
 
 fn compile_template(template: &str) -> Result<CompiledTemplate> {
@@ -1735,18 +1890,36 @@ fn parse_template_placeholder(placeholder: &str) -> Result<(TemplateVariable, Te
         "request.uri" => TemplateVariable::RequestUri,
         "request.scheme" => TemplateVariable::RequestScheme,
         "request.host" => TemplateVariable::RequestHost,
+        "request.sni" => TemplateVariable::RequestSni,
         "request.path" => TemplateVariable::RequestPath,
         "request.query" => TemplateVariable::RequestQuery,
         "request.authority" => TemplateVariable::RequestAuthority,
         "remote.ip" => TemplateVariable::RemoteIp,
+        "identity.user" => TemplateVariable::IdentityUser,
         "response.status" => TemplateVariable::ResponseStatus,
+        _ if variable.starts_with("request.header.") => {
+            let name = variable
+                .strip_prefix("request.header.")
+                .expect("prefix checked");
+            TemplateVariable::RequestHeader(parse_header_name(name)?)
+        }
+        _ if variable.starts_with("request.query.") => {
+            let name = variable
+                .strip_prefix("request.query.")
+                .expect("prefix checked");
+            if name.is_empty() {
+                return Err(anyhow!("request.query placeholder key must not be empty"));
+            }
+            TemplateVariable::RequestQueryKey(Arc::from(name))
+        }
         _ => return Err(anyhow!("unknown template placeholder variable: {variable}")),
     };
     let modifier = match modifier {
-        "raw" => TemplateModifier::Raw,
+        "raw" => return Err(anyhow!("raw template expansion is not allowed")),
         "urlquery" => TemplateModifier::UrlQuery,
         "pathsegment" => TemplateModifier::PathSegment,
         "header" => TemplateModifier::Header,
+        "host" => TemplateModifier::Host,
         _ => return Err(anyhow!("unknown template placeholder modifier: {modifier}")),
     };
     Ok((variable, modifier))
@@ -1777,10 +1950,29 @@ fn render_template(
                     TemplateVariable::RequestUri => request_uri.as_ref(),
                     TemplateVariable::RequestScheme => request.scheme().unwrap_or_default(),
                     TemplateVariable::RequestHost => request.host().unwrap_or_default(),
+                    TemplateVariable::RequestSni => ctx.sni().unwrap_or_default(),
                     TemplateVariable::RequestPath => request.path(),
                     TemplateVariable::RequestQuery => request.query().unwrap_or_default(),
+                    TemplateVariable::RequestQueryKey(key) => {
+                        let value = request
+                            .query()
+                            .and_then(|query| query_value(query, key.as_ref()))
+                            .unwrap_or_default();
+                        push_template_value(&mut out, value.as_ref(), *modifier)?;
+                        continue;
+                    }
+                    TemplateVariable::RequestHeader(name) => {
+                        let value = request
+                            .headers()
+                            .get(name)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default();
+                        push_template_value(&mut out, value, *modifier)?;
+                        continue;
+                    }
                     TemplateVariable::RequestAuthority => request.authority().unwrap_or_default(),
                     TemplateVariable::RemoteIp => remote_ip.as_str(),
+                    TemplateVariable::IdentityUser => ctx.identity_user().unwrap_or_default(),
                     TemplateVariable::ResponseStatus => response_status.as_str(),
                 };
                 push_template_value(&mut out, value, *modifier)?;
@@ -1792,7 +1984,6 @@ fn render_template(
 
 fn push_template_value(out: &mut String, value: &str, modifier: TemplateModifier) -> Result<()> {
     match modifier {
-        TemplateModifier::Raw => out.push_str(value),
         TemplateModifier::UrlQuery | TemplateModifier::PathSegment => {
             out.push_str(
                 utf8_percent_encode(value, NON_ALPHANUMERIC)
@@ -1801,14 +1992,49 @@ fn push_template_value(out: &mut String, value: &str, modifier: TemplateModifier
             );
         }
         TemplateModifier::Header => {
-            if value
-                .as_bytes()
-                .iter()
-                .any(|byte| matches!(byte, b'\r' | b'\n'))
-            {
-                return Err(anyhow!("template header value contains a line break"));
+            if value.as_bytes().iter().any(|byte| byte.is_ascii_control()) {
+                return Err(anyhow!(
+                    "template header value contains a control character"
+                ));
             }
+            HeaderValue::from_str(value)
+                .with_context(|| format!("invalid template header value: {value}"))?;
             out.push_str(value);
+        }
+        TemplateModifier::Host => {
+            validate_template_host(value)?;
+            out.push_str(value);
+        }
+    }
+    Ok(())
+}
+
+fn query_value(query: &str, key: &str) -> Option<String> {
+    url::form_urlencoded::parse(query.as_bytes())
+        .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
+}
+
+fn validate_template_host(value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(anyhow!("template host value must not be empty"));
+    }
+    if value.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    if value.as_bytes().iter().any(|byte| byte.is_ascii_control())
+        || value.contains(['/', '?', '#', '@', ':'])
+    {
+        return Err(anyhow!("template host value contains invalid characters"));
+    }
+    for label in value.split('.') {
+        if label.is_empty()
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(anyhow!("template host value is not a valid host name"));
         }
     }
     Ok(())
@@ -1901,6 +2127,8 @@ mod tests {
                 scope_name: "test-scope".to_string(),
                 route_name: Some("test-route".to_string()),
                 remote_ip: IpAddr::from_str("127.0.0.1").expect("ip"),
+                sni: Some("example.com".to_string()),
+                identity_user: Some("alice".to_string()),
                 cache_policy: None,
                 cache_default_scheme: None,
             },
@@ -1937,6 +2165,80 @@ mod tests {
             rendered,
             "http://127.0.0.1/check?path=%2Fa%2Fb&q=x%3D1%26y%3Dtwo"
         );
+    }
+
+    #[test]
+    fn subrequest_template_render_applies_pathsegment_header_host_and_identity_modifiers() {
+        let ctx = module_test_context();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/a/b?token=a%2Fb")
+            .header("x-request-id", "req-1")
+            .body(Body::empty())
+            .expect("request");
+        let request = HttpModuleRequestView::from_request(&req);
+        let template = compile_template(
+            "http://{request.host:host}/u/{identity.user:pathsegment}/{request.path:pathsegment}?token={request.query.token:urlquery}&rid={request.header.X-Request-Id:header}&sni={request.sni:host}",
+        )
+        .expect("template");
+
+        let rendered = render_template(&template, &request, &ctx).expect("rendered");
+
+        assert_eq!(
+            rendered,
+            "http://example.com/u/alice/%2Fa%2Fb?token=a%2Fb&rid=req-1&sni=example.com"
+        );
+    }
+
+    #[test]
+    fn subrequest_template_rejects_raw_unknown_modifier_and_bad_host() {
+        let raw = compile_template("http://example.com/{request.path:raw}")
+            .expect_err("raw should be rejected");
+        assert!(raw.to_string().contains("raw template expansion"));
+
+        let modifier = compile_template("http://example.com/{request.path:html}")
+            .expect_err("unknown modifier should be rejected");
+        assert!(modifier
+            .to_string()
+            .contains("unknown template placeholder modifier"));
+
+        let ctx = module_test_context();
+        let req = Request::builder()
+            .uri("/")
+            .header(HOST, "bad/host")
+            .body(Body::empty())
+            .expect("request");
+        let request = HttpModuleRequestView::from_request(&req);
+        let template = compile_template("http://{request.host:host}/check").expect("template");
+        let err = render_template(&template, &request, &ctx).expect_err("host should fail");
+        assert!(err.to_string().contains("template host value"));
+    }
+
+    #[test]
+    fn subrequest_template_header_modifier_rejects_control_characters() {
+        let ctx = module_test_context();
+        let req = Request::builder()
+            .uri("https://example.com/")
+            .body(Body::empty())
+            .expect("request");
+        let template = CompiledTemplate {
+            parts: vec![TemplatePart::Placeholder {
+                variable: TemplateVariable::RequestHeader(HeaderName::from_static("x-request-id")),
+                modifier: TemplateModifier::Header,
+            }]
+            .into(),
+        };
+        let mut req = req;
+        req.headers_mut().insert(
+            HeaderName::from_static("x-request-id"),
+            HeaderValue::from_bytes(b"ok\tbad").expect("header"),
+        );
+        let request = HttpModuleRequestView::from_request(&req);
+
+        let err =
+            render_template(&template, &request, &ctx).expect_err("control character should fail");
+
+        assert!(err.to_string().contains("control character"));
     }
 
     fn subrequest_config(url: &str) -> SubrequestModuleConfig {

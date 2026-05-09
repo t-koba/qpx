@@ -245,6 +245,39 @@ impl ReverseRouter {
                 .routes
                 .get(idx)
                 .expect("route count checked above");
+            let expected_id = route
+                .name
+                .as_deref()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("route[{idx}]"));
+            if compiled_route.id.as_ref() != expected_id {
+                anyhow::bail!(
+                    "reverse {} route id mismatch at index {}: config={}, plan={}",
+                    config.name,
+                    idx,
+                    expected_id,
+                    compiled_route.id
+                );
+            }
+            if route.name.as_deref().unwrap_or(expected_id.as_str()) != compiled_route.name.as_ref()
+            {
+                anyhow::bail!(
+                    "reverse {} route name mismatch at index {}: config={:?}, plan={}",
+                    config.name,
+                    idx,
+                    route.name,
+                    compiled_route.name
+                );
+            }
+            if reverse_target_kind(&route.target) != compiled_route.target.kind() {
+                anyhow::bail!(
+                    "reverse {} route target kind mismatch at index {}: config={}, plan={}",
+                    config.name,
+                    idx,
+                    reverse_target_kind(&route.target),
+                    compiled_route.target.kind()
+                );
+            }
             let (route, hint) = HttpRoute::from_config(
                 route,
                 &upstreams,
@@ -270,6 +303,14 @@ impl ReverseRouter {
                     .tls_passthrough_routes
                     .get(idx)
                     .expect("TLS passthrough route count checked above");
+                if compiled_route.target.kind() != "tls_passthrough" {
+                    anyhow::bail!(
+                        "reverse {} TLS passthrough target kind mismatch at index {}: plan={}",
+                        config.name,
+                        idx,
+                        compiled_route.target.kind()
+                    );
+                }
                 let (route, hint) = TlsPassthroughRoute::from_config(
                     route,
                     &upstreams,
@@ -526,6 +567,15 @@ impl ReverseRouter {
             pools.extend(route.health_upstream_pools());
         }
         pools
+    }
+}
+
+fn reverse_target_kind(target: &ReverseRouteTargetConfig) -> &'static str {
+    match target {
+        ReverseRouteTargetConfig::Upstream { .. } => "upstream",
+        ReverseRouteTargetConfig::Weighted { .. } => "weighted",
+        ReverseRouteTargetConfig::Ipc { .. } => "ipc",
+        ReverseRouteTargetConfig::LocalResponse { .. } => "local_response",
     }
 }
 

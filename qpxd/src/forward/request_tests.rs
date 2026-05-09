@@ -1031,8 +1031,9 @@ async fn forward_custom_http_module_registry_adds_response_header() {
                 destination_resolution: None,
                 http_modules: vec![serde_yaml::from_str(
                     r#"type: test_response_header
-header_name: x-in-process-module
-header_value: active"#,
+settings:
+  header_name: x-in-process-module
+  header_value: active"#,
                 )
                 .expect("http module config")],
             })],

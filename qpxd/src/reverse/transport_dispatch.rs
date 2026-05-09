@@ -438,6 +438,8 @@ pub(super) async fn dispatch_reverse_request(
             scope_name: reverse.name.as_ref().to_string(),
             route_name: route.name.as_deref().map(str::to_string),
             remote_ip: conn.remote_addr.ip(),
+            sni: conn.tls_sni.as_deref().map(str::to_string),
+            identity_user: identity.user.clone(),
             cache_policy: request_cache_policy.clone(),
             cache_default_scheme: Some(
                 if conn.tls_terminated { "https" } else { "http" }.to_string(),

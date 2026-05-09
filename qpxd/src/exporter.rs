@@ -501,7 +501,11 @@ mod tests {
     #[test]
     fn redacts_plaintext_headers_and_query_keys() {
         let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
-            headers: vec!["authorization".to_string()],
+            headers: vec![
+                "authorization".to_string(),
+                "cookie".to_string(),
+                "set-cookie".to_string(),
+            ],
             query_keys: vec!["token".to_string()],
             json_paths: vec![
                 "$.password".to_string(),
@@ -509,17 +513,53 @@ mod tests {
             ],
         });
         let out = redaction.redact_plaintext(
-            b"POST /api?token=secret&ok=yes HTTP/1.1\r\nauthorization: bearer secret\r\nhost: example.com\r\ncontent-type: application/json\r\n\r\n{\"password\":\"secret\",\"nested\":{\"access_token\":\"abc\"},\"ok\":true}",
+            b"POST /api?token=secret&ok=yes HTTP/1.1\r\nauthorization: bearer secret\r\ncookie: sid=secret\r\nset-cookie: sid=secret\r\nhost: example.com\r\ncontent-type: application/json\r\n\r\n{\"password\":\"secret\",\"nested\":{\"access_token\":\"abc\"},\"ok\":true}",
         );
         let text = String::from_utf8(out).expect("utf8");
         assert!(text.contains("token=<redacted>"));
         assert!(text.contains("authorization: <redacted>"));
+        assert!(text.contains("cookie: <redacted>"));
+        assert!(text.contains("set-cookie: <redacted>"));
         assert!(text.contains("host: example.com"));
         assert!(!text.contains("bearer secret"));
         assert!(text.contains("\"password\":\"<redacted>\""));
         assert!(text.contains("\"access_token\":\"<redacted>\""));
         assert!(!text.contains("\"secret\""));
         assert!(!text.contains("\"abc\""));
+    }
+
+    #[test]
+    fn plaintext_export_emits_only_redacted_and_truncated_payload() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let session = ExportSession {
+            tx,
+            session_id: "test-session".to_string(),
+            client: "client".to_string(),
+            server: "server".to_string(),
+            capture_plaintext: true,
+            capture_encrypted: false,
+            max_plaintext_bytes: Some(80),
+            max_chunk_bytes: 1024,
+            redaction: Arc::new(CaptureRedaction::from_config(&CaptureRedactionConfig {
+                headers: vec!["authorization".to_string()],
+                query_keys: vec!["token".to_string()],
+                json_paths: vec!["$.password".to_string()],
+            })),
+        };
+
+        session.emit_plaintext(
+            true,
+            b"POST /api?token=secret HTTP/1.1\r\nauthorization: bearer secret\r\ncontent-type: application/json\r\n\r\n{\"password\":\"secret\",\"extra\":\"this text must be truncated\"}",
+        );
+
+        let event = rx.try_recv().expect("redacted event");
+        let text = String::from_utf8(event.payload.to_vec()).expect("utf8");
+        assert_eq!(event.plane, CapturePlane::ClientServerPlaintext);
+        assert!(text.len() <= 80);
+        assert!(text.contains("token=<redacted>"));
+        assert!(text.contains("authorization: <redacted>"));
+        assert!(!text.contains("bearer secret"));
+        assert!(!text.contains("token=secret"));
     }
 
     #[test]

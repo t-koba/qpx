@@ -207,8 +207,8 @@ For local deployments, `qpxf` defaults to a user-scoped `unix://` socket. Any TC
 | Backend | Description |
 |---------|-------------|
 | CGI scripts | Spawns external processes (RFC 3875). Path containment, symlink-escape prevention, concurrent I/O with deadlock prevention, configurable size limits. |
-| WASM modules | Executes WASI-compatible modules via `qpx-wasm` (`wasmtime` + `wasmtime-wasi`). Module/stdin/stdout/stderr size caps, memory limits via `ResourceLimiter`, request wall-clock timeout, stderr capture, and optional executor pool/prewarm settings. |
-| FastCGI | Sends CGI-shaped requests to a persistent FastCGI responder over TCP or `unix://`, with a per-backend connection pool (`pool.max_concurrency`, `pool.max_idle`), timeout, stdin/stdout/stderr limits. |
+| WASM modules | Executes WASI-compatible modules via `qpx-wasm` (`wasmtime` + `wasmtime-wasi`). Module/stdin/stdout/stderr size caps, memory limits via `ResourceLimiter`, request wall-clock timeout, stderr capture, and optional executor pool/prewarm settings. Prewarm validates modules during executor construction. |
+| FastCGI | Sends CGI-shaped requests to a persistent FastCGI responder over TCP or `unix://`, with a per-backend connection pool (`pool.max_concurrency`, `pool.max_idle`), timeout, stdin/stdout/stderr limits. Pooled connections are reused only after a complete FastCGI end request; broken responders are discarded. |
 | SCGI | Sends CGI-shaped requests to an SCGI responder over TCP or `unix://` using per-request connections, with per-backend concurrency, timeout, stdin/stdout/stderr limits. |
 
 The default `qpxf` build enables the `wasm` feature, which pulls in `qpx-wasm`. Use `cargo build -p qpxf --no-default-features` for a CGI-only build.
@@ -343,7 +343,7 @@ HTTP request/response modules are configured on canonical edges and routes:
 Built-in modules:
 
 - `response_compression`: downstream response compression for `gzip`, `br`, and `zstd`. Use `min_body_bytes`, `max_body_bytes`, `content_types`, and per-algorithm levels (`gzip_level`, `brotli_level`, `zstd_level`) to tune when and how compression runs. Compression happens after cache writeback, so cached objects remain identity-encoded while clients receive compressed responses when `Accept-Encoding` allows it.
-- `subrequest`: internal absolute-URL subrequest at `request_headers` or `response_headers` phase. Subrequests must declare `allowed_schemes`, `allowed_hosts`, and `max_response_bytes`; redirects are denied by default. Use `pass_headers`, `request_headers`, `copy_response_headers_to_request`, `copy_response_headers_to_response`, and `response_mode` to shape what the sidecar call sees and how its result feeds back into the main transaction.
+- `subrequest`: internal absolute-URL subrequest at `request_headers` or `response_headers` phase. Subrequests must declare `allowed_schemes`, `allowed_hosts`, and `max_response_bytes`; redirects are denied by default and allowed redirects are still checked for private IP destinations. Templates require an explicit encoding context such as `url`, `pathsegment`, `header`, or `host`; raw expansion is rejected. Supported variables include `request.path`, `request.query`, `request.query.<key>`, `request.header.<name>`, `request.host`, `request.sni`, and `identity.user`. Use `pass_headers`, `request_headers`, `copy_response_headers_to_request`, `copy_response_headers_to_response`, and `response_mode` to shape what the sidecar call sees and how its result feeds back into the main transaction.
 - `cache_purge`: first-class HTTP purge endpoint for the configured cache key. Use `methods`, `response_status`, `response_body`, and `response_headers` to tailor the purge endpoint response. Requires `cache.enabled: true` on the listener or reverse route where it is used.
 
 Every module spec also accepts:
@@ -358,6 +358,8 @@ Custom in-process modules:
 - Public API surface is `qpxd::Daemon::builder()` plus `qpxd::module_api::{HttpModuleFactory, HttpModule, HttpModuleCapabilities, HttpModuleStage, HttpModuleEvent, ModuleStages, HttpModuleContext, HttpModuleRequestView, Body}`.
 - Modules declare capabilities so qpxd compiles stage-indexed chains and only calls modules for the stages they need. Built-in compression runs only on downstream responses, request-phase subrequests run only on request headers, and response-phase subrequests request a frozen request view only for routes that need it.
 - Modules implement one `call(stage, ctx, event)` entrypoint. Request events carry borrowed in-place requests; response events carry owned responses. Response-phase hooks can read the frozen request view from `HttpModuleContext::frozen_request()`.
+
+`qpxd explain` prints compiled module details, including subrequest template summaries, allowlists, redirect policy, and response-size caps. `qpxd match` evaluates the same compiled matchers used by dispatch and reports match reasons for reverse routes, TLS passthrough routes, forward rules, and transparent rules; use `--dst-port` when validating port-based rules.
 
 Minimal example:
 

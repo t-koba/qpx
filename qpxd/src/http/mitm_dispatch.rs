@@ -461,6 +461,8 @@ pub(super) async fn dispatch_mitm_request(
             scope_name: route.listener_name.to_string(),
             route_name: None,
             remote_ip: route.src_addr.ip(),
+            sni: Some(route.host.to_string()),
+            identity_user: identity.user.clone(),
             cache_policy: None,
             cache_default_scheme: None,
         },

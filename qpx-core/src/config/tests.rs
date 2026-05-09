@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, path::PathBuf};
@@ -22,6 +23,45 @@ fn unique_tmp_dir() -> PathBuf {
 
 fn write_config(path: &PathBuf, input: &str) -> std::io::Result<()> {
     fs::write(path, input)
+}
+
+#[test]
+fn canonical_schema_http_module_matches_serde_envelope() {
+    let schema = canonical_schema_value();
+    let http_module = schema
+        .pointer("/$defs/httpModule")
+        .expect("httpModule schema");
+    assert_eq!(
+        http_module
+            .get("additionalProperties")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert!(http_module.pointer("/properties/settings").is_some());
+
+    let fields = http_module
+        .pointer("/properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("httpModule properties")
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        fields,
+        ["id", "order", "settings", "type"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+    );
+
+    let minimal = serde_yaml::from_str::<HttpModuleConfig>(
+        r#"type: response_compression
+settings:
+  min_body_bytes: 1"#,
+    )
+    .expect("minimal settings module");
+    assert_eq!(minimal.r#type, "response_compression");
+    assert!(minimal.settings.get("min_body_bytes").is_some());
 }
 
 #[test]
@@ -800,6 +840,34 @@ fn load_config_supports_http_modules() {
             .http_modules
             .len(),
         1
+    );
+}
+
+#[test]
+fn load_config_rejects_inline_http_module_fields() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("inline-http-module.yaml");
+    write_config(
+        &cfg,
+        r#"edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action:
+    type: direct
+  http_modules:
+  - type: response_compression
+    min_body_bytes: 1"#,
+    )
+    .expect("write");
+
+    let err = load_config(&cfg).expect_err("inline module fields should be rejected");
+    fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        err.to_string().contains("min_body_bytes") || format!("{err:?}").contains("min_body_bytes"),
+        "unexpected error: {err:?}"
     );
 }
 

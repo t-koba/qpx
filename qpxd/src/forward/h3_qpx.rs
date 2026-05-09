@@ -17,8 +17,8 @@ use crate::http3::quinn_socket::{
 };
 use crate::policy_context::{
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord, ExtAuthzEnforcement,
+    ExtAuthzInput, ExtAuthzMode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
@@ -159,6 +159,8 @@ fn build_forward_tls_config(
     let state = runtime.state();
     let ca = state
         .security
+        .destination
+        .tls
         .ca
         .as_ref()
         .ok_or_else(|| anyhow!("forward HTTP/3 requires CA state"))?;
@@ -290,11 +292,7 @@ impl ForwardQpxHandler {
                 collect_forward_response(
                     response,
                     &request_method,
-                    self.runtime
-                        .state()
-                        .config
-                        .runtime
-                        .max_h3_response_body_bytes,
+                    self.runtime.state().plan.limits.max_h3_response_body_bytes,
                     h3_body_read_timeout(&self.runtime),
                 )
                 .await
@@ -354,11 +352,7 @@ impl ForwardQpxHandler {
         collect_forward_response(
             response,
             &http::Method::CONNECT,
-            self.runtime
-                .state()
-                .config
-                .runtime
-                .max_h3_response_body_bytes,
+            self.runtime.state().plan.limits.max_h3_response_body_bytes,
             h3_body_read_timeout(&self.runtime),
         )
         .await
@@ -382,11 +376,7 @@ impl ForwardQpxHandler {
         collect_forward_response(
             response,
             &method,
-            self.runtime
-                .state()
-                .config
-                .runtime
-                .max_h3_response_body_bytes,
+            self.runtime.state().plan.limits.max_h3_response_body_bytes,
             h3_body_read_timeout(&self.runtime),
         )
         .await
@@ -452,9 +442,6 @@ impl ForwardQpxHandler {
             return Ok(());
         }
 
-        let listener_cfg = state
-            .ingress_edge_settings(self.listener_name.as_ref())
-            .ok_or_else(|| anyhow!("listener not found"))?;
         let base_plan = state
             .plan
             .ingress_edge_execution_plan(self.listener_name.as_ref(), None)

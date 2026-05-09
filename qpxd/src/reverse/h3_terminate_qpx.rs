@@ -270,10 +270,10 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
                 self.reverse
                     .runtime
                     .state()
-                    .config
+                    .plan
                     .identity
                     .proxy_name
-                    .as_str(),
+                    .as_ref(),
                 Response::builder()
                     .status(StatusCode::METHOD_NOT_ALLOWED)
                     .body(crate::http::body::Body::from(
@@ -290,8 +290,8 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
                     self.reverse
                         .runtime
                         .state()
-                        .config
-                        .runtime
+                        .plan
+                        .limits
                         .h3_read_timeout_ms
                         .max(1),
                 ),
@@ -321,8 +321,8 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
                 self.reverse
                     .runtime
                     .state()
-                    .config
-                    .runtime
+                    .plan
+                    .limits
                     .h3_read_timeout_ms
                     .max(1),
             ),

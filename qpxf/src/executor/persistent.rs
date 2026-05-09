@@ -318,7 +318,9 @@ async fn run_fastcgi_on_stream(
     let mut stderr = BytesMut::new();
     loop {
         let Some((record_type, content)) = read_fastcgi_record(stream).await? else {
-            break;
+            return Err(anyhow!(
+                "fastcgi backend closed connection before end request"
+            ));
         };
         match record_type {
             FCGI_STDOUT => append_limited(&mut stdout, &content, max_stdout_bytes, "stdout")?,
@@ -505,6 +507,8 @@ mod tests {
     use std::io::{Cursor, Read};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio::time::{sleep, timeout, Duration};
 
     #[test]
     fn fastcgi_param_lengths_roundtrip_short_and_long() {
@@ -568,6 +572,181 @@ mod tests {
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn fastcgi_pool_discards_broken_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("addr").to_string();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_task = accepted.clone();
+        let server = tokio::spawn(async move {
+            let (mut broken, _) = listener.accept().await.expect("accept broken");
+            accepted_task.fetch_add(1, Ordering::SeqCst);
+            read_fastcgi_request_from_tcp(&mut broken).await;
+            drop(broken);
+
+            let (mut stream, _) = listener.accept().await.expect("accept replacement");
+            accepted_task.fetch_add(1, Ordering::SeqCst);
+            read_fastcgi_request_from_tcp(&mut stream).await;
+            write_fastcgi_record_to_tcp(&mut stream, FCGI_STDOUT, b"Status: 200 OK\r\n\r\nok")
+                .await;
+            write_fastcgi_record_to_tcp(&mut stream, FCGI_END_REQUEST, &[0; 8]).await;
+        });
+
+        let pool = FastCgiConnectionPool::new(address, 1, 1).expect("pool");
+        let err = pool
+            .execute(Vec::new(), Bytes::new(), 1024, 1024)
+            .await
+            .expect_err("broken connection should fail");
+        assert!(err.to_string().contains("closed connection"));
+
+        let (stdout, stderr) = pool
+            .execute(Vec::new(), Bytes::new(), 1024, 1024)
+            .await
+            .expect("replacement connection");
+        assert!(stderr.is_empty());
+        assert_eq!(stdout, Bytes::from_static(b"Status: 200 OK\r\n\r\nok"));
+        server.await.expect("server");
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn fastcgi_pool_respects_max_concurrency() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("addr").to_string();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            read_fastcgi_request_from_tcp(&mut stream).await;
+            release_rx.await.expect("release first request");
+            write_fastcgi_record_to_tcp(&mut stream, FCGI_STDOUT, b"Status: 200 OK\r\n\r\none")
+                .await;
+            write_fastcgi_record_to_tcp(&mut stream, FCGI_END_REQUEST, &[0; 8]).await;
+            read_fastcgi_request_from_tcp(&mut stream).await;
+            write_fastcgi_record_to_tcp(&mut stream, FCGI_STDOUT, b"Status: 200 OK\r\n\r\ntwo")
+                .await;
+            write_fastcgi_record_to_tcp(&mut stream, FCGI_END_REQUEST, &[0; 8]).await;
+        });
+
+        let pool = Arc::new(FastCgiConnectionPool::new(address, 1, 1).expect("pool"));
+        let first_pool = pool.clone();
+        let first = tokio::spawn(async move {
+            first_pool
+                .execute(Vec::new(), Bytes::new(), 1024, 1024)
+                .await
+                .expect("first")
+                .0
+        });
+        sleep(Duration::from_millis(50)).await;
+        let second_pool = pool.clone();
+        let mut second = tokio::spawn(async move {
+            second_pool
+                .execute(Vec::new(), Bytes::new(), 1024, 1024)
+                .await
+                .expect("second")
+                .0
+        });
+        assert!(timeout(Duration::from_millis(50), &mut second)
+            .await
+            .is_err());
+        release_tx.send(()).expect("release");
+        let first_stdout = first.await.expect("first join");
+        assert_eq!(
+            first_stdout,
+            Bytes::from_static(b"Status: 200 OK\r\n\r\none")
+        );
+        let second_stdout = second.await.expect("second join");
+        assert_eq!(
+            second_stdout,
+            Bytes::from_static(b"Status: 200 OK\r\n\r\ntwo")
+        );
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn scgi_executor_respects_max_concurrency() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("addr").to_string();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let (checked_tx, checked_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.expect("accept first");
+            let first_task = tokio::spawn(async move {
+                read_scgi_request_from_tcp(&mut first).await;
+                release_rx.await.expect("release first scgi request");
+                first
+                    .write_all(b"Status: 200 OK\r\n\r\none")
+                    .await
+                    .expect("first response");
+            });
+            assert!(
+                timeout(Duration::from_millis(75), listener.accept())
+                    .await
+                    .is_err(),
+                "second SCGI connection should wait for the concurrency permit"
+            );
+            checked_tx.send(()).expect("checked");
+            first_task.await.expect("first task");
+            let (mut second, _) = listener.accept().await.expect("accept second");
+            read_scgi_request_from_tcp(&mut second).await;
+            second
+                .write_all(b"Status: 200 OK\r\n\r\ntwo")
+                .await
+                .expect("second response");
+        });
+
+        let executor = Arc::new(
+            PersistentExecutor::new(address, 1000, 1, 1024, 1024, 1024).expect("executor"),
+        );
+        let first = tokio::spawn(start_persistent_request(executor.clone()));
+        sleep(Duration::from_millis(25)).await;
+        let second = tokio::spawn(start_persistent_request(executor.clone()));
+        checked_rx.await.expect("checked concurrency");
+        release_tx.send(()).expect("release");
+        let first_stdout = first.await.expect("first join");
+        assert_eq!(
+            first_stdout,
+            Bytes::from_static(b"Status: 200 OK\r\n\r\none")
+        );
+        let second_stdout = second.await.expect("second join");
+        assert_eq!(
+            second_stdout,
+            Bytes::from_static(b"Status: 200 OK\r\n\r\ntwo")
+        );
+        server.await.expect("server");
+    }
+
+    async fn start_persistent_request(executor: Arc<PersistentExecutor>) -> Bytes {
+        let mut execution = executor
+            .start(test_cgi_request())
+            .await
+            .expect("start request");
+        drop(execution.stdin);
+        let mut stdout = BytesMut::new();
+        while let Some(chunk) = execution.stdout.recv().await {
+            stdout.extend_from_slice(&chunk);
+        }
+        execution.done.await.expect("join").expect("done");
+        stdout.freeze()
+    }
+
+    fn test_cgi_request() -> CgiRequest {
+        CgiRequest {
+            script_name: "/index".to_string(),
+            path_info: String::new(),
+            query_string: String::new(),
+            request_method: "GET".to_string(),
+            content_type: String::new(),
+            content_length: 0,
+            server_protocol: "HTTP/1.1".to_string(),
+            server_name: "localhost".to_string(),
+            server_port: 80,
+            remote_addr: None,
+            remote_port: None,
+            http_headers: HashMap::new(),
+            matched_prefix: None,
+        }
+    }
+
     async fn read_fastcgi_request_from_tcp(stream: &mut TcpStream) {
         loop {
             let Some((record_type, content)) = read_fastcgi_record_from_tcp(stream).await else {
@@ -617,5 +796,29 @@ mod tests {
                 .await
                 .expect("padding");
         }
+    }
+
+    async fn read_scgi_request_from_tcp(stream: &mut TcpStream) {
+        let mut len = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            stream
+                .read_exact(&mut byte)
+                .await
+                .expect("netstring length");
+            if byte[0] == b':' {
+                break;
+            }
+            len.push(byte[0]);
+        }
+        let len = std::str::from_utf8(&len)
+            .expect("length utf8")
+            .parse::<usize>()
+            .expect("length");
+        let mut headers = vec![0u8; len];
+        stream.read_exact(&mut headers).await.expect("headers");
+        let mut comma = [0u8; 1];
+        stream.read_exact(&mut comma).await.expect("comma");
+        assert_eq!(comma[0], b',');
     }
 }

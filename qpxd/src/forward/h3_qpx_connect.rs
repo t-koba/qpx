@@ -14,8 +14,8 @@ use crate::http::common::{
 use crate::http::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord, ExtAuthzEnforcement,
+    ExtAuthzInput, ExtAuthzMode,
 };
 use crate::rate_limit::RateLimitContext;
 use anyhow::{anyhow, Result};
@@ -373,7 +373,7 @@ async fn handle_qpx_connect_udp_stream(
         .plan
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled qpx-h3 CONNECT-UDP execution plan not found"))?;
-    let mut request_limits = state.policy.rate_limiters.collect_plan_with_profile(
+    let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
         &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
         crate::rate_limit::TransportScope::Connect,
@@ -846,9 +846,6 @@ async fn prepare_qpx_connect_request(
         return Ok(QpxConnectPreparation::Responded);
     }
 
-    let listener_cfg = state
-        .ingress_edge_settings(handler.listener_name.as_ref())
-        .ok_or_else(|| anyhow!("listener not found"))?;
     let base_plan = state
         .plan
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), None)

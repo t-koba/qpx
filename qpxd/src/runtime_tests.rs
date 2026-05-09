@@ -185,8 +185,9 @@ fn runtime_rejects_unregistered_custom_http_modules() {
             http_modules: vec![serde_yaml::from_str(
                 r#"type: custom_filter
 id: inject
-header_name: x-custom
-header_value: yes"#,
+settings:
+  header_name: x-custom
+  header_value: yes"#,
             )
             .expect("http module config")],
         }));

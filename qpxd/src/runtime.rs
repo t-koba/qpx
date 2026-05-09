@@ -28,10 +28,11 @@ pub(crate) use obs_rt::metric_names;
 use obs_rt::ObsRuntime;
 #[cfg(test)]
 pub(crate) use plan::CompiledPlaintextCapturePlan;
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+pub(crate) use plan::CompiledTlsPassthroughRoute;
 pub(crate) use plan::{
     CompiledCapturePlan, CompiledEdge, CompiledListenerSettings, CompiledReverseEdge,
-    CompiledReverseRoute, CompiledReverseRouteTarget, CompiledTlsPassthroughRoute, ExecutionPlan,
-    PlanFlags,
+    CompiledReverseRoute, CompiledReverseRouteTarget, ExecutionPlan, PlanFlags,
 };
 pub use plan::{PlanCompiler, RuntimePlan};
 use policy_rt::PolicyRuntime;

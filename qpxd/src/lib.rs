@@ -134,6 +134,7 @@ impl Daemon {
                 config,
                 edge,
                 src_ip,
+                dst_port,
                 sni,
                 host,
                 method,
@@ -142,6 +143,7 @@ impl Daemon {
                 config,
                 edge,
                 src_ip,
+                dst_port,
                 sni,
                 host,
                 method,
@@ -256,6 +258,8 @@ enum Command {
         edge: String,
         #[arg(long)]
         src_ip: Option<IpAddr>,
+        #[arg(long)]
+        dst_port: Option<u16>,
         #[arg(long)]
         sni: Option<String>,
         #[arg(long)]
@@ -451,10 +455,11 @@ fn render_explain_plan(
                 append_plan_flags(&mut output, "  aggregate_execution_plan", edge.flags);
                 for route in edge.routes.iter() {
                     if route_filter_matches(route_filter, &route.name) {
-                        output.push_str(&format!(
-                            "  route {} matched_by: configured_match\n",
-                            route.name
-                        ));
+                        append_match_criteria(
+                            &mut output,
+                            &format!("  route {} match_criteria", route.name),
+                            &route.matcher,
+                        );
                         append_reverse_target(
                             &mut output,
                             &format!("  route {} target", route.name),
@@ -469,10 +474,11 @@ fn render_explain_plan(
                 }
                 for route in edge.tls_passthrough_routes.iter() {
                     if route_filter_matches(route_filter, &route.name) {
-                        output.push_str(&format!(
-                            "  route {} matched_by: configured_match\n",
-                            route.name
-                        ));
+                        append_match_criteria(
+                            &mut output,
+                            &format!("  route {} match_criteria", route.name),
+                            &route.matcher,
+                        );
                         append_reverse_target(
                             &mut output,
                             &format!("  route {} target", route.name),
@@ -541,6 +547,16 @@ fn append_execution_details(output: &mut String, plan: &runtime::ExecutionPlan) 
             output.push_str(&format!("      {stage}\n"));
             for module in modules {
                 output.push_str(&format!("        - {module}\n"));
+            }
+        }
+    }
+    let module_details = plan.modules.explain_details();
+    if !module_details.is_empty() {
+        output.push_str("    module_details\n");
+        for (module, details) in module_details {
+            output.push_str(&format!("      {module}\n"));
+            for detail in details {
+                output.push_str(&format!("        {detail}\n"));
             }
         }
     }
@@ -707,11 +723,60 @@ fn on_off(value: bool) -> &'static str {
     }
 }
 
+fn append_match_criteria(
+    output: &mut String,
+    label: &str,
+    matcher: &qpx_core::matchers::CompiledMatch,
+) {
+    let ctx = qpx_core::rules::RuleMatchContext::default();
+    let trace = matcher.matches_with_trace(&ctx);
+    output.push_str(label);
+    output.push('\n');
+    if trace.reasons.is_empty() {
+        output.push_str("    any: true\n");
+        return;
+    }
+    for reason in &trace.reasons {
+        match reason {
+            qpx_core::matchers::MatchReason::SrcIp { configured, .. } => {
+                append_match_criterion(output, "src_ip", Some("cidr"), configured)
+            }
+            qpx_core::matchers::MatchReason::DstPort { configured, .. } => {
+                append_match_criterion(output, "dst_port", Some("exact"), &configured.to_string())
+            }
+            qpx_core::matchers::MatchReason::Sni {
+                mode, configured, ..
+            } => append_match_criterion(output, "sni", Some(match_mode_label(*mode)), configured),
+            qpx_core::matchers::MatchReason::Host {
+                mode, configured, ..
+            } => append_match_criterion(output, "host", Some(match_mode_label(*mode)), configured),
+            qpx_core::matchers::MatchReason::Method { configured, .. } => {
+                append_match_criterion(output, "method", Some("exact"), configured)
+            }
+            qpx_core::matchers::MatchReason::Path {
+                mode, configured, ..
+            } => append_match_criterion(output, "path", Some(match_mode_label(*mode)), configured),
+            qpx_core::matchers::MatchReason::Header {
+                name, configured, ..
+            } => append_match_criterion(output, &format!("header.{name}"), None, configured),
+        }
+    }
+}
+
+fn append_match_criterion(output: &mut String, name: &str, mode: Option<&str>, configured: &str) {
+    output.push_str(&format!("    {name}\n"));
+    if let Some(mode) = mode {
+        output.push_str(&format!("      mode: {mode}\n"));
+    }
+    output.push_str(&format!("      configured: {configured}\n"));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn match_config(
     config_paths: Vec<PathBuf>,
     edge: String,
     src_ip: Option<IpAddr>,
+    dst_port: Option<u16>,
     sni: Option<String>,
     host: Option<String>,
     method: Option<String>,
@@ -727,6 +792,7 @@ fn match_config(
             state.plan.as_ref(),
             &edge,
             src_ip,
+            dst_port,
             sni.as_deref(),
             host.as_deref(),
             method.as_deref(),
@@ -736,10 +802,12 @@ fn match_config(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_match_plan(
     plan: &runtime::RuntimePlan,
     edge: &str,
     src_ip: Option<IpAddr>,
+    dst_port: Option<u16>,
     sni: Option<&str>,
     host: Option<&str>,
     method: Option<&str>,
@@ -747,6 +815,7 @@ fn render_match_plan(
 ) -> Result<String> {
     let ctx = qpx_core::rules::RuleMatchContext {
         src_ip,
+        dst_port,
         sni,
         host,
         method,
@@ -762,7 +831,7 @@ fn render_match_plan(
                         output.push_str(&format!("edge: {}\n", reverse.name));
                         output.push_str("kind: reverse\n");
                         output.push_str(&format!("route: {}\n", route.name));
-                        output.push_str("matched_by: configured_match\n");
+                        append_match_trace(&mut output, &route.matcher.matches_with_trace(&ctx));
                         append_reverse_target(&mut output, "target", &route.target);
                         append_execution_plan(&mut output, "execution_plan", &route.plan);
                         return Ok(output);
@@ -773,7 +842,7 @@ fn render_match_plan(
                         output.push_str(&format!("edge: {}\n", reverse.name));
                         output.push_str("kind: reverse\n");
                         output.push_str(&format!("route: {}\n", route.name));
-                        output.push_str("matched_by: configured_match\n");
+                        append_match_trace(&mut output, &route.matcher.matches_with_trace(&ctx));
                         append_reverse_target(&mut output, "target", &route.target);
                         return Ok(output);
                     }
@@ -789,6 +858,7 @@ fn render_match_plan(
                         output.push_str(&format!("edge: {}\n", forward.name));
                         output.push_str("kind: forward\n");
                         output.push_str(&format!("rule: {}\n", rule.name));
+                        append_match_trace(&mut output, &rule.matcher.matches_with_trace(&ctx));
                         append_execution_plan(&mut output, "execution_plan", &rule.plan);
                         return Ok(output);
                     }
@@ -807,6 +877,7 @@ fn render_match_plan(
                         output.push_str(&format!("edge: {}\n", transparent.name));
                         output.push_str("kind: transparent\n");
                         output.push_str(&format!("rule: {}\n", rule.name));
+                        append_match_trace(&mut output, &rule.matcher.matches_with_trace(&ctx));
                         append_execution_plan(&mut output, "execution_plan", &rule.plan);
                         return Ok(output);
                     }
@@ -821,6 +892,135 @@ fn render_match_plan(
         }
     }
     anyhow::bail!("edge not found: {edge}");
+}
+
+fn append_match_trace(output: &mut String, trace: &qpx_core::matchers::MatchTrace) {
+    output.push_str("matched_by\n");
+    if trace.reasons.is_empty() {
+        output.push_str("  any: true\n");
+        return;
+    }
+    for reason in &trace.reasons {
+        match reason {
+            qpx_core::matchers::MatchReason::SrcIp {
+                configured,
+                actual,
+                result,
+            } => append_match_reason(
+                output,
+                "src_ip",
+                Some("cidr"),
+                configured,
+                actual.as_deref(),
+                *result,
+            ),
+            qpx_core::matchers::MatchReason::DstPort {
+                configured,
+                actual,
+                result,
+            } => append_match_reason(
+                output,
+                "dst_port",
+                Some("exact"),
+                &configured.to_string(),
+                actual.map(|value| value.to_string()).as_deref(),
+                *result,
+            ),
+            qpx_core::matchers::MatchReason::Sni {
+                mode,
+                configured,
+                actual,
+                result,
+            } => append_match_reason(
+                output,
+                "sni",
+                Some(match_mode_label(*mode)),
+                configured,
+                actual.as_deref(),
+                *result,
+            ),
+            qpx_core::matchers::MatchReason::Host {
+                mode,
+                configured,
+                actual,
+                result,
+            } => append_match_reason(
+                output,
+                "host",
+                Some(match_mode_label(*mode)),
+                configured,
+                actual.as_deref(),
+                *result,
+            ),
+            qpx_core::matchers::MatchReason::Method {
+                configured,
+                actual,
+                result,
+            } => append_match_reason(
+                output,
+                "method",
+                Some("exact"),
+                configured,
+                actual.as_deref(),
+                *result,
+            ),
+            qpx_core::matchers::MatchReason::Path {
+                mode,
+                configured,
+                actual,
+                result,
+            } => append_match_reason(
+                output,
+                "path",
+                Some(match_mode_label(*mode)),
+                configured,
+                actual.as_deref(),
+                *result,
+            ),
+            qpx_core::matchers::MatchReason::Header {
+                name,
+                configured,
+                actual,
+                result,
+            } => append_match_reason(
+                output,
+                &format!("header.{name}"),
+                None,
+                configured,
+                actual.as_deref(),
+                *result,
+            ),
+        }
+    }
+}
+
+fn append_match_reason(
+    output: &mut String,
+    name: &str,
+    mode: Option<&str>,
+    configured: &str,
+    actual: Option<&str>,
+    result: bool,
+) {
+    output.push_str(&format!("  {name}\n"));
+    if let Some(mode) = mode {
+        output.push_str(&format!("    mode: {mode}\n"));
+    }
+    output.push_str(&format!("    configured: {configured}\n"));
+    output.push_str(&format!("    actual: {}\n", actual.unwrap_or("<missing>")));
+    output.push_str(&format!("    result: {}\n", on_off(result)));
+}
+
+fn match_mode_label(mode: qpx_core::matchers::MatchMode) -> &'static str {
+    match mode {
+        qpx_core::matchers::MatchMode::Exact => "exact",
+        qpx_core::matchers::MatchMode::Prefix => "prefix",
+        qpx_core::matchers::MatchMode::Suffix => "suffix",
+        qpx_core::matchers::MatchMode::Glob => "glob",
+        qpx_core::matchers::MatchMode::Regex => "regex",
+        qpx_core::matchers::MatchMode::Cidr => "cidr",
+        qpx_core::matchers::MatchMode::Any => "any",
+    }
 }
 
 async fn run(
@@ -2455,6 +2655,15 @@ mod cli_tests {
         assert!(schema.pointer("/$defs/routeTarget/oneOf").is_some());
         assert!(schema.pointer("/$defs/ipcBodyLimit").is_some());
         assert!(schema.pointer("/$defs/originalDst").is_some());
+        assert_eq!(
+            schema
+                .pointer("/$defs/httpModule/additionalProperties")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert!(schema
+            .pointer("/$defs/httpModule/properties/settings")
+            .is_some());
         assert!(schema.pointer("/properties/edges/items/oneOf").is_some());
 
         let json = serde_json::to_string_pretty(&schema).expect("json schema render");
@@ -2476,7 +2685,9 @@ mod cli_tests {
 
         assert!(output.contains("edge public-http"));
         assert!(output.contains("  kind: reverse"));
-        assert!(output.contains("  route app matched_by: configured_match"));
+        assert!(output.contains("  route app match_criteria"));
+        assert!(output.contains("    host"));
+        assert!(output.contains("      mode: exact"));
         assert!(output.contains("  route app target"));
         assert!(output.contains("    type: upstream"));
         assert!(output.contains("  route app"));
@@ -2492,6 +2703,7 @@ mod cli_tests {
             "public-http",
             None,
             None,
+            None,
             Some("localhost"),
             Some("GET"),
             Some("/"),
@@ -2500,13 +2712,19 @@ mod cli_tests {
         assert!(matched.contains("edge: public-http"));
         assert!(matched.contains("kind: reverse"));
         assert!(matched.contains("route: app"));
-        assert!(matched.contains("matched_by: configured_match"));
+        assert!(matched.contains("matched_by\n"));
+        assert!(matched.contains("  host\n"));
+        assert!(matched.contains("    mode: exact\n"));
+        assert!(matched.contains("    configured: localhost\n"));
+        assert!(matched.contains("    actual: localhost\n"));
+        assert!(matched.contains("    result: on\n"));
         assert!(matched.contains("target"));
         assert!(matched.contains("type: upstream"));
 
         let missed = render_match_plan(
             state.plan.as_ref(),
             "public-http",
+            None,
             None,
             None,
             Some("example.invalid"),
@@ -2517,12 +2735,200 @@ mod cli_tests {
         assert!(missed.contains("route: <no match>"));
     }
 
+    #[test]
+    fn match_renderer_reports_reverse_forward_and_transparent_reasons() {
+        let state = runtime_state_from_yaml(
+            "trace",
+            r#"
+edges:
+- kind: reverse
+  name: trace-reverse
+  listen: 127.0.0.1:0
+  routes:
+  - name: api
+    match:
+      src_ip: [10.0.0.0/8]
+      sni: [api.example.com]
+      host: [api.example.com]
+      method: [GET]
+      path:
+      - /v1/*
+      - /files/*.json
+      - re:^/v[0-9]+/users$
+    target:
+      type: upstream
+      upstreams: [http://127.0.0.1:8080]
+- kind: forward
+  name: trace-forward
+  listen: 127.0.0.1:0
+  default_action:
+    type: block
+  rules:
+  - name: upload
+    match:
+      src_ip: [192.0.2.0/24]
+      method: [POST]
+      path: [/upload/*]
+    action:
+      type: direct
+- kind: transparent
+  name: trace-transparent
+  listen: 127.0.0.1:0
+  original_dst:
+    source: linux_so_original_dst
+  default_action:
+    type: block
+  rules:
+  - name: internal
+    match:
+      host: [internal.example.com]
+      dst_port: [8080]
+    action:
+      type: direct
+"#,
+        );
+
+        let reverse = render_match_plan(
+            state.plan.as_ref(),
+            "trace-reverse",
+            Some("10.1.2.3".parse().expect("ip")),
+            None,
+            Some("api.example.com"),
+            Some("api.example.com"),
+            Some("GET"),
+            Some("/v2/users"),
+        )
+        .expect("reverse match");
+        assert!(reverse.contains("route: api"));
+        assert!(reverse.contains("  src_ip\n"));
+        assert!(reverse.contains("    mode: cidr\n"));
+        assert!(reverse.contains("  sni\n"));
+        assert!(reverse.contains("  host\n"));
+        assert!(reverse.contains("  method\n"));
+        assert!(reverse.contains("    mode: prefix\n"));
+        assert!(reverse.contains("    mode: glob\n"));
+        assert!(reverse.contains("    mode: regex\n"));
+
+        let forward = render_match_plan(
+            state.plan.as_ref(),
+            "trace-forward",
+            Some("192.0.2.44".parse().expect("ip")),
+            None,
+            None,
+            None,
+            Some("POST"),
+            Some("/upload/file"),
+        )
+        .expect("forward match");
+        assert!(forward.contains("kind: forward"));
+        assert!(forward.contains("rule: upload"));
+        assert!(forward.contains("  src_ip\n"));
+        assert!(forward.contains("  path\n"));
+
+        let transparent = render_match_plan(
+            state.plan.as_ref(),
+            "trace-transparent",
+            None,
+            Some(8080),
+            None,
+            Some("internal.example.com"),
+            Some("GET"),
+            Some("/"),
+        )
+        .expect("transparent match");
+        assert!(transparent.contains("kind: transparent"));
+        assert!(transparent.contains("rule: internal"));
+        assert!(transparent.contains("  host\n"));
+        assert!(transparent.contains("  dst_port\n"));
+    }
+
+    #[test]
+    fn explain_renderer_reports_all_reverse_target_kinds_and_generated_route_id() {
+        let state = runtime_state_from_yaml(
+            "target-kinds",
+            r#"
+edges:
+- kind: reverse
+  name: targets
+  listen: 127.0.0.1:0
+  tls:
+    certificates:
+    - sni: fallback.example.com
+      cert: /tmp/qpx-test.crt
+      key: /tmp/qpx-test.key
+  routes:
+  - match:
+      host: [upstream.example.com]
+    target:
+      type: upstream
+      upstreams: [http://127.0.0.1:8080]
+  - name: weighted
+    match:
+      host: [weighted.example.com]
+    target:
+      type: weighted
+      backends:
+      - name: stable
+        weight: 90
+        upstreams: [http://127.0.0.1:8081]
+      - name: canary
+        weight: 10
+        upstreams: [http://127.0.0.1:8082]
+  - name: ipc
+    match:
+      host: [ipc.example.com]
+    target:
+      type: ipc
+      endpoint: 127.0.0.1:19090
+      mode: tcp
+  - name: local
+    match:
+      host: [local.example.com]
+    target:
+      type: local_response
+      response:
+        status: 204
+  tls_passthrough_routes:
+  - match:
+      dst_port: [443]
+      sni: [tls.example.com]
+    upstreams: [127.0.0.1:8443]
+"#,
+        );
+
+        let output = render_explain_plan(state.plan.as_ref(), Some("targets"), None);
+        assert!(output.contains("  route route[0] match_criteria"));
+        assert!(output.contains("  route route[0] target"));
+        assert!(output.contains("    type: upstream"));
+        assert!(output.contains("  route weighted target"));
+        assert!(output.contains("    type: weighted"));
+        assert!(output.contains("  route ipc target"));
+        assert!(output.contains("    type: ipc"));
+        assert!(output.contains("  route local target"));
+        assert!(output.contains("    type: local_response"));
+        assert!(output.contains("  route tls_passthrough[0] target"));
+        assert!(output.contains("    type: tls_passthrough"));
+    }
+
     fn runtime_state_from_template(template: InitTemplate) -> RuntimeState {
         let path = temp_config_path(template);
         fs::write(&path, init_template_yaml(template)).expect("write template config");
         let loaded = qpx_core::config::load_config(&path).expect("template config loads");
         let _ = fs::remove_file(path);
         RuntimeState::build(loaded).expect("template runtime builds")
+    }
+
+    fn runtime_state_from_yaml(name: &str, yaml: &str) -> RuntimeState {
+        let mut path = std::env::temp_dir();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        path.push(format!("qpxd-cli-{name}-{}-{now}.yaml", std::process::id()));
+        fs::write(&path, yaml).expect("write config");
+        let loaded = qpx_core::config::load_config(&path).expect("config loads");
+        let _ = fs::remove_file(path);
+        RuntimeState::build(loaded).expect("runtime builds")
     }
 
     fn temp_config_path(template: InitTemplate) -> std::path::PathBuf {

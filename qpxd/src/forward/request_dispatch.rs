@@ -524,6 +524,8 @@ pub(super) async fn dispatch_forward_request(
             scope_name: listener_name.to_string(),
             route_name: None,
             remote_ip: remote_addr.ip(),
+            sni: None,
+            identity_user: identity.user.clone(),
             cache_policy: cache_policy.clone(),
             cache_default_scheme: Some(req.uri().scheme_str().unwrap_or("http").to_string()),
         },
