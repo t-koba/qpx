@@ -154,7 +154,9 @@ Clean-room HTTP/3 backend crate for `qpxd`.
 
 ### Entry point and runtime
 
-- `main.rs`: CLI (`run`, `check`, `upgrade`, and `gen-ca` when built with `tls-rustls`), merged config loading from one or more `--config` files, listener startup orchestration, config watch setup, and the process supervisor for in-place server-set restarts plus cross-platform binary-upgrade handoff.
+- `main.rs`: small binary entrypoint that calls the daemon library.
+- `lib.rs`: CLI command dispatch, config loading, listener startup orchestration, config watch setup, and the process supervisor for in-place server-set restarts plus cross-platform binary-upgrade handoff.
+- `cli_render.rs`: rendering for `qpxd explain` and `qpxd match`; it consumes compiled runtime plans and match traces without owning config loading or listener startup.
 - `runtime.rs`: shared runtime state container — holds the config snapshot, compiled rules, auth providers, TLS state, metrics handles, exporter sessions, and the hot-reload watcher. Passed as `Arc` to all request handlers. Also implements `qpx_acme::ConfigProvider` so the isolated ACME runtime can observe the latest config snapshot.
 - `sidecar_control.rs`: control-plane enum for UDP/HTTP3 sidecars — distinguishes normal running, graceful stop, and export-for-upgrade shutdown so sidecars can snapshot live session state before exit.
 - `tcp_bindings.rs`: process-handoff listener inventory — binds or adopts inherited TCP listeners for forward/transparent listeners, reverse TCP listeners, metrics, and ACME HTTP-01; serializes the inheritance manifest for child startup.
@@ -172,7 +174,7 @@ Handles explicit HTTP proxy requests (client sets proxy address).
 - `request_dispatch.rs`: forward HTTP dispatch internals — cache flow, upstream dispatch, and listener-level HTTP module execution.
 - `connect.rs`: CONNECT method handling — tunnel establishment, bidirectional relay, and TLS interception when policy selects inspect.
 - `policy.rs`: forward-mode policy evaluation — auth verification, group-based rule matching, auth cache lookup.
-- `h3.rs` / `h3_qpx.rs`: build-time selected HTTP/3 forward backend entrypoints. `h3.rs` is the upstream-`h3` backend for baseline HTTP/3, MASQUE, and generic extended CONNECT. `h3_qpx.rs` is the clean-room adapter that routes buffered request/response handling, CONNECT-UDP / MASQUE relay, generic extended CONNECT, and WebTransport relay through `qpx-h3`.
+- `h3.rs` / `h3_qpx.rs`: build-time selected HTTP/3 forward backend entrypoints. `h3.rs` is the upstream-`h3` backend for baseline HTTP/3, MASQUE, and generic extended CONNECT. `h3_qpx.rs` is the clean-room adapter that routes buffered request/response handling, CONNECT-UDP / MASQUE relay, generic extended CONNECT, and WebTransport relay through `qpx-h3`; response collection, static responses, and policy-response audit emission live in `h3_qpx_response.rs`.
 - `h3_connect.rs`: default `h3` backend HTTP/3 CONNECT tunnel — policy check + bidirectional stream relay.
 - `h3_connect_udp.rs`: default `h3` backend HTTP/3 CONNECT-UDP — MASQUE capsule handling, datagram relay, upstream proxy chaining.
 
@@ -211,7 +213,7 @@ Shared HTTP processing used by all three modes. Nothing in this directory is mod
 - `policy.rs`: shared policy evaluation for transparent and MITM paths — block/respond/proceed decision.
 - `mitm.rs`: MITM intercepted request handler — re-evaluates rules after TLS decryption, dispatches to upstream, supports WebSocket upgrade.
 - `mitm_dispatch.rs`: MITM HTTP dispatch internals — decrypted forward-mode policy, upstream dispatch, and listener-level HTTP module execution.
-- `modules.rs`: public in-process HTTP module/filter API — registry/factory surface for external Rust modules, capability declarations, per-request `HttpModuleContext`, borrowed/in-place request hooks, frozen request view for response-phase filters, and stage-indexed compiled chains for request-header, cache, upstream, retry, response, error, and logging hooks. Built-ins (`response_compression`, `subrequest`, `cache_purge`) are registered through the same API as third-party modules.
+- `modules.rs`: public in-process HTTP module/filter API — registry/factory surface for external Rust modules, capability declarations, per-request `HttpModuleContext`, borrowed/in-place request hooks, frozen request view for response-phase filters, and stage-indexed compiled chains for request-header, cache, upstream, retry, response, error, and logging hooks. Built-ins are registered through the same API as third-party modules; larger built-ins and template mechanics live in `http/modules/`.
 - `websocket.rs`: WebSocket upgrade detection and bidirectional upgraded-stream relay.
 - `upgrade.rs`: downstream HTTP/1 upgrade handoff — qpx-native `CONNECT` / `101 Switching Protocols` token that transfers the raw socket to tunnel handlers without routing through hyper's server adapter.
 - `local_response.rs`: policy response builder — constructs status/body/content-type/headers responses without upstream forwarding.
@@ -246,7 +248,7 @@ Outbound connection handling — how `qpxd` talks to origins and chained proxies
 - `pool.rs`: pooled connections to upstream proxies for forward-proxy chaining.
 - `connect.rs`: CONNECT-to-upstream helper — establishes a CONNECT tunnel through a chained proxy before forwarding.
 - `http1.rs`: HTTP/1.1 upstream proxy dispatch — absolute-form URI, WebSocket proxy, upstream endpoint parsing, Proxy-Authorization forwarding.
-- `origin.rs`: direct upstream dispatch (reverse/transparent) — dispatches `http://`, `https://`, `ws://`, and `wss://` upstreams plus the internal IPC URL path used by reverse transport. Routes `ipc`/`ipc+unix` targets to `ipc_client::proxy_ipc()`; selects h2-aware hyper sender for HTTP/HTTPS and the WebSocket upgrade path for WS/WSS; handles request URI rewriting. User-facing YAML expresses the IPC leg as `edges[kind=reverse].routes[].target.type: ipc`.
+- `origin.rs`: direct upstream dispatch (reverse/transparent) — dispatches `http://`, `https://`, `ws://`, and `wss://` upstreams plus the internal IPC URL path used by reverse transport. `origin/http_backend.rs` owns request preparation and HTTP/1/HTTP/2 execution; `origin/http_pool.rs` owns direct-origin pool keys, idle HTTP/1 slots, shared HTTP/2 senders, reservations, and eviction. Routes `ipc`/`ipc+unix` targets to `ipc_client::proxy_ipc()`; selects h2-aware hyper sender for HTTP/HTTPS and the WebSocket upgrade path for WS/WSS; handles request URI rewriting. User-facing YAML expresses the IPC leg as `edges[kind=reverse].routes[].target.type: ipc`.
 - `mod.rs`: module re-exports.
 
 ### Cache (`cache/`)
@@ -272,6 +274,7 @@ RFC 9111 proxy cache implementation. Used by both forward listeners and reverse 
 
 ### Other daemon modules
 
+- `policy_context.rs` / `policy_context/`: policy-context facade plus responsibility modules. `identity.rs` compiles and resolves trusted-header, mTLS, and signed-assertion identities; `ext_authz.rs` performs external authorization round trips and action/header overrides; `audit.rs` emits audit-log records; `util.rs` holds shared parsing/claim/header helpers used by those modules.
 - `ftp.rs`: FTP-over-HTTP gateway — translates HTTP GET/PUT/LIST to FTP commands, PASV/PORT fallback, bounded transfer sizes.
 - `ipc_client.rs`: QPX-IPC client used by reverse `ipc:` routes. Sends an `IpcRequestMeta` JSON frame, then transfers request/response bodies: in `shm` mode via per-request `ShmRingBuffer` files (64 KiB chunks, EOF signalled by empty push); in `tcp` mode by streaming bytes directly over the connection. Maintains a small idle-connection pool per backend. Also contains the internal URL-based IPC helper path used by reverse transport. Entry points: `proxy_ipc_upstream()` and `proxy_ipc()`.
 - `exporter.rs`: capture event producer — writes serialized capture events to a shared-memory ring buffer (`ShmRingBuffer`), with queue/backpressure behavior controlled by config. Plaintext events are redacted before enqueue using configured header, query-key, and simple JSON-path rules.
@@ -358,7 +361,8 @@ QPX-IPC server that executes CGI scripts, dispatches optional WASM execution thr
 
 - `main.rs`: CLI (`--listen`, `--config`, `--workers`) plus `check --config` for config/backend validation, QPX-IPC connection accept loop, concurrency-limited request dispatch via `tokio::sync::Semaphore`. Listen address accepts TCP (`host:port`) or Unix socket (`unix:///path`). TCP listeners require `allow_insecure_tcp=true`. Safe Unix socket binding verifies an existing path is a socket before unlinking.
 - `config.rs`: YAML configuration schema with `deny_unknown_fields` — listen address, workers (concurrency limit), `allow_insecure_tcp`, connection caps (`max_connections`, `max_requests_per_connection`), request and connection idle timeouts, size limits (`max_params_bytes`, `max_stdin_bytes`), handler routing rules, CGI/WASM/FastCGI/SCGI backend settings including FastCGI pool limits, SCGI per-request concurrency, and stdout/stderr size limits.
-- `server.rs`: QPX-IPC connection handler — reads `IpcRequestMeta` frame, routes to executor, streams body, writes `IpcResponseMeta` response frame, handles keep-alive, input idle timeout, and connection idle timeout.
+- `ipc_request.rs`: transport-independent QPX-IPC request planning — validates metadata size, parses URI/host, routes to an executor, builds the CGI request, and returns shared plain-text error responses.
+- `server.rs`: QPX-IPC connection handler — reads `IpcRequestMeta` frame, applies the transport-independent request plan, streams body, writes `IpcResponseMeta` response frame, handles keep-alive, input idle timeout, and connection idle timeout.
 - `router.rs`: path-based request routing — matches incoming requests by `path_prefix`, `path_regex`, and `host` to the appropriate executor. Returns matched prefix for prefix-stripping in executors.
 - `executor/mod.rs`: `Executor` trait definition and shared request/response types (`CgiRequest`, `CgiResponse`). `matched_prefix` field enables correct script path resolution.
 - `executor/cgi.rs`: RFC 3875 CGI script executor — spawns external processes via `tokio::process::Command`, sets CGI environment variables (including `SERVER_SOFTWARE`), pipes stdin/stdout/stderr. Security: canonicalizes CGI root on startup, rejects `..` paths and symlink escapes, enforces configurable stdout/stderr size limits, reads stdout/stderr concurrently (prevents deadlock), post-timeout `wait()` ensures zombie process cleanup. Hop-by-hop headers are excluded from HTTP_* env.

@@ -107,20 +107,25 @@ write_reverse_backend_config() {
   local ok_body="$3"
   local ok_path="$4"
 cat >"$cfg" <<YAML
-reverse:
-- name: h2-backend
+edges:
+- kind: reverse
+  name: h2-backend
   listen: 127.0.0.1:${listen_port}
   routes:
   - match:
       path:
       - ${ok_path}
-    local_response:
-      status: 200
-      body: ${ok_body}
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: ${ok_body}
   - match: {}
-    local_response:
-      status: 418
-      body: ROUTE_MISS
+    target:
+      type: local_response
+      response:
+        status: 418
+        body: ROUTE_MISS
 state_dir: ${STATE_DIR}
 YAML
 }
@@ -129,8 +134,9 @@ write_transparent_backend_config() {
   local cfg="$1"
   local listen_port="$2"
 cat >"$cfg" <<YAML
-listeners:
-- name: transparent-http2-backend
+edges:
+- kind: forward
+  name: transparent-http2-backend
   listen: 127.0.0.1:${listen_port}
   default_action:
     type: respond
@@ -152,7 +158,6 @@ listeners:
       local_response:
         status: 200
         body: H2TRACE!
-  mode: forward
 state_dir: ${STATE_DIR}
 YAML
 }
@@ -165,21 +170,27 @@ run_reverse_h2c_suite() {
   write_reverse_backend_config "$backend_cfg" "$REV_H2C_BACKEND_PORT" "H2REV!!" "/h2"
 
   cat >"$proxy_cfg" <<YAML
-reverse:
-- name: e2e-reverse-h2c
+upstreams:
+- name: h2c-backend
+  url: http://127.0.0.1:${REV_H2C_BACKEND_PORT}
+edges:
+- kind: reverse
+  name: e2e-reverse-h2c
   listen: 127.0.0.1:${REV_H2C_PROXY_PORT}
   routes:
   - match:
       host:
       - reverse.local
     timeout_ms: 5000
-    lb: round_robin
     resilience:
       retry:
         attempts: 1
         backoff_ms: 20
-    upstreams:
-    - http://127.0.0.1:${REV_H2C_BACKEND_PORT}
+    target:
+      type: upstream
+      lb: round_robin
+      upstreams:
+      - h2c-backend
 state_dir: ${STATE_DIR}
 YAML
 
@@ -214,8 +225,9 @@ run_transparent_h2c_suite() {
   write_transparent_backend_config "$backend_cfg" "$TRANS_BACKEND_PORT"
 
   cat >"$proxy_cfg" <<YAML
-listeners:
-- name: e2e-transparent
+edges:
+- kind: transparent
+  name: e2e-transparent
   listen: 127.0.0.1:${TRANS_PROXY_PORT}
   default_action:
     type: direct
@@ -237,7 +249,6 @@ listeners:
     headers:
       request_set:
         X-Transparent-Test: enabled
-  mode: transparent
 state_dir: ${STATE_DIR}
 YAML
 
@@ -280,8 +291,12 @@ run_reverse_tls_h2_suite() {
   write_reverse_backend_config "$backend_cfg" "$REV_TLS_BACKEND_PORT" "H2TLS!" "/h2"
 
   cat >"$proxy_cfg" <<YAML
-reverse:
-- name: rev-h2
+upstreams:
+- name: rev-h2-backend
+  url: http://127.0.0.1:${REV_TLS_BACKEND_PORT}
+edges:
+- kind: reverse
+  name: rev-h2
   listen: 127.0.0.1:${REV_TLS_PROXY_PORT}
   tls:
     certificates:
@@ -292,8 +307,10 @@ reverse:
   - match:
       host:
       - reverse.local
-    upstreams:
-    - http://127.0.0.1:${REV_TLS_BACKEND_PORT}
+    target:
+      type: upstream
+      upstreams:
+      - rev-h2-backend
 state_dir: ${STATE_DIR}
 YAML
 

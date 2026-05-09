@@ -57,8 +57,13 @@ impl ResponseCompressionModule {
             HeaderValue::from_static(encoding.http_name()),
         );
         append_vary_accept_encoding(&mut parts.headers);
-        let body_read_timeout =
-            Duration::from_millis(ctx.runtime.plan.limits.upstream_http_timeout_ms.max(1));
+        let body_read_timeout = Duration::from_millis(
+            ctx.runtime_state()
+                .plan
+                .limits
+                .upstream_http_timeout_ms
+                .max(1),
+        );
         let body = stream_compressed_body(body, encoding, &self.config, body_read_timeout);
         Ok(Response::from_parts(parts, body))
     }

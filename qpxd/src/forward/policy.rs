@@ -130,9 +130,9 @@ mod tests {
     use hyper::header::HeaderValue;
     use hyper::HeaderMap;
     use qpx_core::config::{
-        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
+        ActionConfig, ActionKind, AuthConfig, Config, DecisionConfig, HttpGlobalConfig,
         IdentityConfig, IngressEdgeConfig, IngressEdgeMode, LocalUser, MessagesConfig,
-        RuleAuthConfig, RuleConfig, RuntimeConfig, SystemLogConfig,
+        RuleAuthConfig, RuleConfig, RuntimeConfig, SecurityConfig, TelemetryConfig, TrafficConfig,
     };
 
     #[tokio::test]
@@ -142,24 +142,25 @@ mod tests {
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime: RuntimeConfig::default(),
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
-            acme: None,
-            exporter: None,
-            auth: AuthConfig {
-                users: vec![LocalUser {
-                    username: "user".to_string(),
-                    password: Some("pass".to_string()),
-                    ha1: None,
-                }],
-                ldap: None,
+            telemetry: TelemetryConfig::default(),
+            security: SecurityConfig {
+                auth: AuthConfig {
+                    users: vec![LocalUser {
+                        username: "user".to_string(),
+                        password: Some("pass".to_string()),
+                        ha1: None,
+                    }],
+                    ldap: None,
+                },
+                identity_sources: Vec::new(),
+                decisions: DecisionConfig::default(),
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
             },
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
+            http: HttpGlobalConfig::default(),
+            traffic: TrafficConfig::default(),
+            acme: None,
             edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
                 name: "forward".to_string(),
                 mode: IngressEdgeMode::Forward,

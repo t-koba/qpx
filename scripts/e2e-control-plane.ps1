@@ -165,8 +165,9 @@ runtime:
   acceptor_tasks_per_listener: $Acceptors
   reuse_port: false
   tcp_backlog: $tcpBacklog
-reverse:
-- name: control
+edges:
+- kind: reverse
+  name: control
   listen: 127.0.0.1:$Port
   routes:
   - name: health
@@ -175,14 +176,17 @@ reverse:
       - control.local
       path:
       - /health
-    local_response:
-      status: 200
-      body: $Body
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: $Body
 "@
     if ($Acceptors -gt 1) {
         $content += "`n"
         $content += @"
-- name: control-extra
+- kind: reverse
+  name: control-extra
   listen: 127.0.0.1:$RestartPort
   routes:
   - name: health
@@ -191,9 +195,11 @@ reverse:
       - control.local
       path:
       - /health
-    local_response:
-      status: 200
-      body: $Body
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: $Body
 "@
     }
     [System.IO.File]::WriteAllText($tmpConfig, $content, [System.Text.UTF8Encoding]::new($false))

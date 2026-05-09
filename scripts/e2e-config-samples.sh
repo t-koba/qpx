@@ -510,10 +510,8 @@ main() {
   require_cmd timeout
   require_cmd lsof
 
-  if [ ! -x "$QPXD_BIN" ]; then
-    echo "[E2E] building qpxd"
-    cargo build -q -p qpxd --locked
-  fi
+  echo "[E2E] building qpxd"
+  cargo build -q -p qpxd --locked --features auth-digest
   if [ ! -x "$QPXF_BIN" ]; then
     echo "[E2E] building qpxf"
     cargo build -q -p qpxf --locked

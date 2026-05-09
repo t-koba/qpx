@@ -30,6 +30,10 @@ pub fn temp_dir(prefix: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
+#[cfg(any(
+    feature = "auth-basic",
+    all(feature = "http3", feature = "tls-rustls", feature = "mitm")
+))]
 pub fn yaml_single_quote(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + 2);
     out.push('\'');
@@ -44,6 +48,10 @@ pub fn yaml_single_quote(input: &str) -> String {
     out
 }
 
+#[cfg(any(
+    feature = "auth-basic",
+    all(feature = "http3", feature = "tls-rustls", feature = "mitm")
+))]
 pub fn yaml_quote_path(path: &Path) -> String {
     yaml_single_quote(path.to_string_lossy().as_ref())
 }

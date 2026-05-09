@@ -1,6 +1,12 @@
 mod common;
 
-use anyhow::{anyhow, Context, Result};
+#[cfg(any(
+    feature = "auth-basic",
+    feature = "auth-digest",
+    all(feature = "http3", feature = "tls-rustls", feature = "mitm")
+))]
+use anyhow::anyhow;
+use anyhow::{Context, Result};
 #[cfg(all(
     feature = "http3-backend-qpx",
     feature = "tls-rustls",
@@ -11,17 +17,24 @@ use async_trait::async_trait;
 use base64::Engine;
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 use bytes::Bytes;
+#[cfg(any(
+    feature = "auth-basic",
+    all(feature = "http3", feature = "tls-rustls", feature = "mitm")
+))]
+use common::yaml_quote_path;
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 use common::{build_h3_test_client_config, build_quinn_client_endpoint};
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 use common::{pick_free_tcp_port, spawn_qpxd};
-use common::{
-    read_http1_head, serve_tcp_echo_once, spawn_qpxd_on_random_port, temp_dir, yaml_quote_path,
-};
+use common::{read_http1_head, serve_tcp_echo_once, spawn_qpxd_on_random_port, temp_dir};
 #[cfg(feature = "auth-basic")]
 use common::{send_http1_and_read_head, serve_http1_capture_once};
 #[cfg(feature = "auth-digest")]
 use sha2::{Digest, Sha256};
+#[cfg(any(
+    feature = "auth-basic",
+    all(feature = "http3", feature = "tls-rustls", feature = "mitm")
+))]
 use std::fs;
 use std::net::SocketAddr;
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]

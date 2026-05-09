@@ -1,7 +1,5 @@
 use anyhow::{anyhow, Result};
 use bytes::{Bytes, BytesMut};
-use http::Uri;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -10,7 +8,8 @@ use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
 use tracing::warn;
 
-use crate::executor::{CgiRequest, CgiResponse, Execution};
+use crate::executor::{CgiResponse, Execution};
+use crate::ipc_request::{plaintext_meta, plan_ipc_request, IpcPlainResponse};
 use crate::router::Router;
 
 use qpx_core::ipc::meta::{IpcRequestMeta, IpcResponseMeta};
@@ -118,20 +117,6 @@ fn meta_uses_shm(meta: &IpcRequestMeta) -> bool {
         || meta.res_body_shm_size_bytes.is_some()
 }
 
-fn meta_params_bytes(meta: &IpcRequestMeta) -> usize {
-    meta.params
-        .iter()
-        .map(|(k, v)| k.len().saturating_add(v.len()))
-        .sum()
-}
-
-fn declared_content_length(headers: &[(String, String)]) -> Option<usize> {
-    headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.parse().ok())
-}
-
 fn is_unexpected_eof(err: &anyhow::Error) -> bool {
     err.downcast_ref::<std::io::Error>()
         .is_some_and(|e| e.kind() == std::io::ErrorKind::UnexpectedEof)
@@ -139,61 +124,6 @@ fn is_unexpected_eof(err: &anyhow::Error) -> bool {
 
 fn validate_ipc_shm_token(token: &str, expected_prefix: &str) -> Result<()> {
     qpx_core::ipc::shm::validate_ipc_shm_token(token, expected_prefix)
-}
-
-fn host_only(authority: &str) -> Option<String> {
-    let authority = authority.trim();
-    if authority.is_empty() {
-        return None;
-    }
-    if let Some(v6) = authority.strip_prefix('[') {
-        let end = v6.find(']')?;
-        return Some(v6[..end].to_string());
-    }
-    Some(
-        authority
-            .split_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or(authority)
-            .to_string(),
-    )
-}
-
-fn host_port(authority: &str) -> (Option<String>, Option<u16>) {
-    let authority = authority.trim();
-    if authority.is_empty() {
-        return (None, None);
-    }
-    if let Some(v6) = authority.strip_prefix('[') {
-        let end = match v6.find(']') {
-            Some(v) => v,
-            None => return (None, None),
-        };
-        let host = v6[..end].to_string();
-        let rest = &v6[end + 1..];
-        let port = rest.strip_prefix(':').and_then(|p| p.parse::<u16>().ok());
-        return (Some(host), port);
-    }
-    let (host, port) = authority
-        .split_once(':')
-        .map(|(h, p)| (h.to_string(), p.parse::<u16>().ok()))
-        .unwrap_or((authority.to_string(), None));
-    (Some(host), port)
-}
-
-fn cgi_header_map(headers: Vec<(String, String)>) -> HashMap<String, String> {
-    let mut out: HashMap<String, String> = HashMap::new();
-    for (k, v) in headers {
-        let key = k.to_ascii_lowercase();
-        if let Some(existing) = out.get_mut(&key) {
-            let sep = if key == "cookie" { "; " } else { ", " };
-            existing.push_str(sep);
-            existing.push_str(&v);
-        } else {
-            out.insert(key, v);
-        }
-    }
-    out
 }
 
 async fn drain_req_ring(req_path: &Path, ring: &mut ShmRingBuffer, input_idle: Duration) {
@@ -232,6 +162,20 @@ async fn push_ring_bytes(
 
 async fn push_ring_eof(ring: &mut ShmRingBuffer, wait_timeout: Duration) -> Result<()> {
     push_ring_bytes(ring, &[], wait_timeout).await
+}
+
+async fn write_shm_plain_response<S>(
+    stream: &mut S,
+    ring: &mut ShmRingBuffer,
+    response: &IpcPlainResponse,
+    wait_timeout: Duration,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    write_frame(stream, &response.meta()).await?;
+    push_ring_bytes(ring, response.body, wait_timeout).await?;
+    push_ring_eof(ring, wait_timeout).await
 }
 
 async fn handle_one_request_shm<S>(
@@ -284,45 +228,10 @@ where
         warn!(error = ?e, "failed to unlink IPC response SHM doorbells");
     }
 
-    if meta_params_bytes(&meta) > max_params_bytes {
-        let res_meta = IpcResponseMeta {
-            status: 413,
-            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-        };
-        write_frame(stream, &res_meta).await?;
-        let _ = push_ring_bytes(&mut res_ring, b"params too large", input_idle).await;
-        let _ = push_ring_eof(&mut res_ring, input_idle).await;
-        drain_req_ring(&req_path, &mut req_ring, input_idle).await;
-        let _ = std::fs::remove_file(&res_path);
-        return Ok(());
-    }
-
-    let uri: Uri = meta
-        .uri
-        .parse()
-        .map_err(|e| anyhow!("invalid IPC request URI '{}': {e}", meta.uri))?;
-    let script_name = uri.path().to_string();
-    let query_string = uri.query().unwrap_or("").to_string();
-    let header_host = meta
-        .headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
-        .map(|(_, v)| v.as_str());
-    let route_host = header_host
-        .and_then(host_only)
-        .or_else(|| uri.authority().and_then(|a| host_only(a.as_str())));
-
-    let (executor, matched_prefix) = match router.route(script_name.as_str(), route_host.as_deref())
-    {
-        Some(v) => v,
-        None => {
-            let res_meta = IpcResponseMeta {
-                status: 404,
-                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-            };
-            write_frame(stream, &res_meta).await?;
-            let _ = push_ring_bytes(&mut res_ring, b"no handler matched", input_idle).await;
-            let _ = push_ring_eof(&mut res_ring, input_idle).await;
+    let plan = match plan_ipc_request(meta, router, max_params_bytes, max_stdin_bytes)? {
+        Ok(plan) => plan,
+        Err(response) => {
+            let _ = write_shm_plain_response(stream, &mut res_ring, &response, input_idle).await;
             drain_req_ring(&req_path, &mut req_ring, input_idle).await;
             let _ = std::fs::remove_file(&res_path);
             return Ok(());
@@ -332,68 +241,19 @@ where
     let _permit = match Arc::clone(semaphore).try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
-            let res_meta = IpcResponseMeta {
-                status: 503,
-                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-            };
-            write_frame(stream, &res_meta).await?;
-            let _ = push_ring_bytes(&mut res_ring, b"overloaded", input_idle).await;
-            let _ = push_ring_eof(&mut res_ring, input_idle).await;
+            let response = IpcPlainResponse::new(503, b"overloaded");
+            let _ = write_shm_plain_response(stream, &mut res_ring, &response, input_idle).await;
             drain_req_ring(&req_path, &mut req_ring, input_idle).await;
             let _ = std::fs::remove_file(&res_path);
             return Ok(());
         }
     };
 
-    let header_host = header_host.or_else(|| uri.authority().map(|a| a.as_str()));
-    let (server_name, server_port) = header_host
-        .map(host_port)
-        .unwrap_or((Some("localhost".to_string()), Some(80)));
-
-    let declared_stdin_bytes = declared_content_length(&meta.headers);
-    let cgi_req = CgiRequest {
-        script_name: script_name.clone(),
-        path_info: String::new(),
-        query_string: query_string.clone(),
-        request_method: meta.method.clone(),
-        content_type: meta
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default(),
-        content_length: declared_stdin_bytes.unwrap_or(0),
-        server_protocol: "HTTP/1.1".to_string(),
-        server_name: server_name.unwrap_or_else(|| "localhost".to_string()),
-        server_port: server_port.unwrap_or(80),
-        remote_addr: meta.params.get("REMOTE_ADDR").cloned(),
-        remote_port: meta.params.get("REMOTE_PORT").and_then(|p| p.parse().ok()),
-        http_headers: cgi_header_map(meta.headers),
-        matched_prefix: matched_prefix.clone(),
-    };
-
-    if cgi_req.content_length > max_stdin_bytes {
-        let res_meta = IpcResponseMeta {
-            status: 413,
-            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-        };
-        write_frame(stream, &res_meta).await?;
-        let _ = push_ring_bytes(&mut res_ring, b"request body too large", input_idle).await;
-        let _ = push_ring_eof(&mut res_ring, input_idle).await;
-        drain_req_ring(&req_path, &mut req_ring, input_idle).await;
-        let _ = std::fs::remove_file(&res_path);
-        return Ok(());
-    }
-
-    let expected_stdin_bytes = declared_stdin_bytes;
-    let exec = match executor.start(cgi_req).await {
+    let expected_stdin_bytes = plan.expected_stdin_bytes;
+    let exec = match plan.executor.start(plan.cgi_req).await {
         Ok(exec) => exec,
         Err(e) => {
-            let res_meta = IpcResponseMeta {
-                status: 502,
-                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-            };
-            write_frame(stream, &res_meta).await?;
+            write_frame(stream, &plaintext_meta(502)).await?;
             let msg = format!("executor start error: {}", e);
             let _ = push_ring_bytes(&mut res_ring, msg.as_bytes(), input_idle).await;
             let _ = push_ring_eof(&mut res_ring, input_idle).await;
@@ -646,6 +506,18 @@ where
     Ok(())
 }
 
+async fn write_tcp_plain_response<S>(
+    stream: &mut S,
+    response: &IpcPlainResponse,
+    output_idle: Duration,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    write_frame_with_timeout(stream, &response.meta(), output_idle).await?;
+    write_all_with_timeout(stream, response.body, output_idle).await
+}
+
 struct TcpRequestContext {
     router: Arc<Router>,
     semaphore: Arc<Semaphore>,
@@ -671,122 +543,37 @@ where
         max_params_bytes,
         max_stdin_bytes,
     } = ctx;
-    if meta_params_bytes(&meta) > max_params_bytes {
-        let res_meta = IpcResponseMeta {
-            status: 413,
-            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-        };
-        write_frame_with_timeout(&mut stream, &res_meta, output_idle).await?;
-        write_all_with_timeout(&mut stream, b"params too large", output_idle).await?;
-        let mut buf = [0u8; 65536];
-        loop {
-            let n = match timeout(input_idle, stream.read(&mut buf)).await {
-                Ok(Ok(0)) => break,
-                Ok(Ok(n)) => n,
-                _ => break,
-            };
-            let _ = n; // discard
-        }
-        return Ok(());
-    }
-
-    let uri: Uri = meta
-        .uri
-        .parse()
-        .map_err(|e| anyhow!("invalid IPC request URI '{}': {e}", meta.uri))?;
-    let script_name = uri.path().to_string();
-    let query_string = uri.query().unwrap_or("").to_string();
-    let header_host = meta
-        .headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
-        .map(|(_, v)| v.as_str());
-    let route_host = header_host
-        .and_then(host_only)
-        .or_else(|| uri.authority().and_then(|a| host_only(a.as_str())));
-
-    let (executor, matched_prefix) = match router.route(script_name.as_str(), route_host.as_deref())
-    {
-        Some(v) => v,
-        None => {
-            let res_meta = IpcResponseMeta {
-                status: 404,
-                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-            };
-            write_frame_with_timeout(&mut stream, &res_meta, output_idle).await?;
-            write_all_with_timeout(&mut stream, b"no handler matched", output_idle).await?;
+    let plan = match plan_ipc_request(meta, &router, max_params_bytes, max_stdin_bytes)? {
+        Ok(plan) => plan,
+        Err(response) => {
+            write_tcp_plain_response(&mut stream, &response, output_idle).await?;
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = match timeout(input_idle, stream.read(&mut buf)).await {
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(n)) => n,
+                    _ => break,
+                };
+                let _ = n; // discard
+            }
             return Ok(());
         }
-    };
-
-    let header_host = header_host.or_else(|| uri.authority().map(|a| a.as_str()));
-    let (server_name, server_port) = header_host
-        .map(host_port)
-        .unwrap_or((Some("localhost".to_string()), Some(80)));
-
-    let declared_stdin_bytes = declared_content_length(&meta.headers);
-    let cgi_req = CgiRequest {
-        script_name: script_name.clone(),
-        path_info: String::new(),
-        query_string: query_string.clone(),
-        request_method: meta.method.clone(),
-        content_type: meta
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default(),
-        content_length: declared_stdin_bytes.unwrap_or(0),
-        server_protocol: "HTTP/1.1".to_string(),
-        server_name: server_name.unwrap_or_else(|| "localhost".to_string()),
-        server_port: server_port.unwrap_or(80),
-        remote_addr: meta.params.get("REMOTE_ADDR").cloned(),
-        remote_port: meta.params.get("REMOTE_PORT").and_then(|p| p.parse().ok()),
-        http_headers: cgi_header_map(meta.headers),
-        matched_prefix: matched_prefix.clone(),
     };
 
     let _permit = match Arc::clone(&semaphore).try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
-            let res_meta = IpcResponseMeta {
-                status: 503,
-                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-            };
-            write_frame_with_timeout(&mut stream, &res_meta, output_idle).await?;
-            write_all_with_timeout(&mut stream, b"overloaded", output_idle).await?;
+            let response = IpcPlainResponse::new(503, b"overloaded");
+            write_tcp_plain_response(&mut stream, &response, output_idle).await?;
             return Ok(());
         }
     };
 
-    if cgi_req.content_length > max_stdin_bytes {
-        let res_meta = IpcResponseMeta {
-            status: 413,
-            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-        };
-        write_frame_with_timeout(&mut stream, &res_meta, output_idle).await?;
-        write_all_with_timeout(&mut stream, b"request body too large", output_idle).await?;
-        let mut buf = [0u8; 65536];
-        loop {
-            let n = match timeout(input_idle, stream.read(&mut buf)).await {
-                Ok(Ok(0)) => break,
-                Ok(Ok(n)) => n,
-                _ => break,
-            };
-            let _ = n; // discard
-        }
-        return Ok(());
-    }
-
-    let expected_stdin_bytes = declared_stdin_bytes;
-    let exec = match executor.start(cgi_req).await {
+    let expected_stdin_bytes = plan.expected_stdin_bytes;
+    let exec = match plan.executor.start(plan.cgi_req).await {
         Ok(exec) => exec,
         Err(e) => {
-            let res_meta = IpcResponseMeta {
-                status: 502,
-                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-            };
-            write_frame_with_timeout(&mut stream, &res_meta, output_idle).await?;
+            write_frame_with_timeout(&mut stream, &plaintext_meta(502), output_idle).await?;
             let msg = format!("executor start error: {}", e);
             write_all_with_timeout(&mut stream, msg.as_bytes(), output_idle).await?;
             return Ok(());
