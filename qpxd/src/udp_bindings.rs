@@ -1,6 +1,8 @@
 #[cfg(feature = "http3")]
 use anyhow::anyhow;
-use anyhow::{Context, Result};
+#[cfg(any(feature = "http3", unix))]
+use anyhow::Context;
+use anyhow::Result;
 use qpx_core::config::Config;
 #[cfg(feature = "http3")]
 use qpx_core::config::IngressEdgeMode;
@@ -32,7 +34,7 @@ pub(crate) struct UdpBindingHandoff {
     pub(crate) env_value: String,
     #[cfg(unix)]
     pub(crate) kept_fds: Vec<std::os::fd::OwnedFd>,
-    #[cfg(windows)]
+    #[cfg(all(feature = "http3", windows))]
     pending: WindowsUdpBindingHandoff,
     #[cfg(windows)]
     cleanup_path: PathBuf,
@@ -54,11 +56,9 @@ struct InheritedUdpSocket {
     socket: Vec<u8>,
 }
 
-#[cfg(windows)]
+#[cfg(all(feature = "http3", windows))]
 struct WindowsUdpBindingHandoff {
-    #[cfg(feature = "http3")]
     forward_edges: Vec<WindowsInheritedUdpSocket>,
-    #[cfg(feature = "http3")]
     reverse_edge: Vec<WindowsInheritedUdpSocket>,
 }
 
@@ -577,7 +577,6 @@ impl UdpBindings {
                 )?;
                 Ok(UdpBindingHandoff {
                     env_value: path.display().to_string(),
-                    pending: WindowsUdpBindingHandoff {},
                     cleanup_path: path,
                 })
             }

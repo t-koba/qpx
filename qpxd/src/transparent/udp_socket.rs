@@ -28,6 +28,8 @@ pub(crate) fn bind_udp_std_listener(
     if reuse_port {
         let _ = socket.set_reuse_port(true);
     }
+    #[cfg(not(unix))]
+    let _ = reuse_port;
     socket
         .set_nonblocking(true)
         .context("failed to set transparent UDP socket nonblocking")?;
