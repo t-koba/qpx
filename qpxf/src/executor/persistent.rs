@@ -7,7 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
 
@@ -260,10 +262,19 @@ async fn collect_stdin(rx: &mut mpsc::Receiver<Bytes>, limit: usize) -> Result<B
 
 async fn connect_backend(address: &str) -> Result<BoxedIo> {
     if let Some(path) = address.strip_prefix("unix://") {
-        let stream = UnixStream::connect(path)
-            .await
-            .with_context(|| format!("failed to connect unix backend {path}"))?;
-        Ok(Box::pin(stream))
+        #[cfg(unix)]
+        {
+            let stream = UnixStream::connect(path)
+                .await
+                .with_context(|| format!("failed to connect unix backend {path}"))?;
+            Ok(Box::pin(stream))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(anyhow!(
+                "unix backend addresses are not supported on this platform: {path}"
+            ))
+        }
     } else {
         let stream = TcpStream::connect(address)
             .await

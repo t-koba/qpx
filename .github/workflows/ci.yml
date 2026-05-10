@@ -86,7 +86,7 @@ jobs:
 
   e2e_control_plane_windows:
     name: control-plane e2e (windows)
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -137,7 +137,7 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-latest
           - name: windows-x86_64
-            os: windows-latest
+            os: windows-2022
           - name: macos-aarch64
             os: macos-14
     steps:
@@ -157,7 +157,7 @@ jobs:
       - name: test
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=1
 
       - name: clippy (default features)
         env:
@@ -181,7 +181,7 @@ jobs:
             os: macos-14
             use_cross: false
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            os: windows-2022
             use_cross: false
     steps:
       - uses: actions/checkout@v4
