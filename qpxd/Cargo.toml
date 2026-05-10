@@ -5,7 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["tls-rustls", "http3-backend-h3", "mitm", "acme"]
+default = [
+  "tls-rustls",
+  "http3-backend-h3",
+  "mitm",
+  "acme",
+  "auth-digest",
+  "auth-ldap-rustls",
+]
 
 tls-rustls = [
   "dep:rustls",

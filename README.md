@@ -25,7 +25,7 @@ qpx supports two TLS backends, selectable at build time:
 - `tls-rustls` (default backend): required for HTTP/3 (`http3`) and TLS inspection (`mitm`).
 - `tls-native`: uses `native-tls`/`tokio-native-tls` (HTTP/3 and TLS inspection are unavailable).
 
-`qpxd` default features are `tls-rustls`, `http3-backend-h3`, `mitm`, and `acme`; built-in proxy authentication is opt-in. Enable `auth-basic` for local Basic auth, `auth-digest` for Digest, or `auth-ldap-rustls` / `auth-ldap-native` for LDAP. TLS backend selection does not enable LDAP. `http3` is an internal umbrella feature that must be activated by exactly one backend selector: `http3-backend-h3` (default) or `http3-backend-qpx`. `acme` is isolated in `qpx-acme`, can be disabled independently, and still requires `tls-rustls` when enabled.
+`qpxd` default features are `tls-rustls`, `http3-backend-h3`, `mitm`, `acme`, `auth-digest`, and `auth-ldap-rustls`, which includes local Basic/Digest auth and LDAP-over-rustls support. Use `--no-default-features` with `auth-basic`, `auth-digest`, `auth-ldap-rustls`, or `auth-ldap-native` when you need a smaller or native-TLS-specific authentication build. TLS backend selection does not enable LDAP by itself outside the default feature set. `http3` is an internal umbrella feature that must be activated by exactly one backend selector: `http3-backend-h3` (default) or `http3-backend-qpx`. `acme` is isolated in `qpx-acme`, can be disabled independently, and still requires `tls-rustls` when enabled.
 
 Choose the HTTP/3 backend by required behavior, not by listener YAML. Backend choice is build-time only.
 
@@ -159,23 +159,24 @@ cargo run -p qpxc -- \
 
 For `tls-native` builds, use `qpxr --tls-pkcs12` and `qpxc --tls-client-pkcs12` instead of PEM `--tls-cert/--tls-key` and `--tls-client-cert/--tls-client-key`.
 
-**`qpxd` exporter config (`exporter:`):**
+**`qpxd` exporter config (`telemetry.exporter`):**
 
 ```yaml
-exporter:
-  enabled: true
-  shm_path: ""        # SHM file path. Empty = platform-private default path.
-  shm_size_mb: 16     # Must match qpxr --shm-size-mb (default: 16).
-  lossy: false        # true = drop events when ring is full; false = block with backpressure.
-  max_queue_events: 4096
-  capture:
-    plaintext: true
-    encrypted: true
-    max_chunk_bytes: 16384
-    redact:
-      headers: [authorization, cookie, set-cookie, proxy-authorization]
-      query_keys: [token, password, session, access_token]
-      json_paths: ["$.password", "$.access_token"]
+telemetry:
+  exporter:
+    enabled: true
+    shm_path: ""        # SHM file path. Empty = platform-private default path.
+    shm_size_mb: 16     # Must match qpxr --shm-size-mb (default: 16).
+    lossy: false        # true = drop events when ring is full; false = block with backpressure.
+    max_queue_events: 4096
+    capture:
+      plaintext: true
+      encrypted: true
+      max_chunk_bytes: 16384
+      redact:
+        headers: [authorization, cookie, set-cookie, proxy-authorization]
+        query_keys: [token, password, session, access_token]
+        json_paths: ["$.password", "$.access_token"]
 ```
 
 `qpxr` reads the same ring using `--shm-path` / `--shm-size-mb` (both default to the same values). When running `qpxd` and `qpxr` on the same host with default paths, no explicit path configuration is needed.

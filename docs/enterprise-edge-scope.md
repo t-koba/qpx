@@ -265,21 +265,22 @@ This section reflects the current configuration shape implemented in the repo.
 Keep built-in auth explicit and visibly secondary:
 
 ```yaml
-auth:
-  users:
-    - username: alice
-      password: change-me
-    - username: digest-only
-      ha1: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  ldap:
-    url: "ldaps://ad.example.com:636"
-    bind_dn: "cn=qpx,ou=svc,dc=example,dc=com"
-    bind_password_env: LDAP_BIND_PASSWORD
-    user_base_dn: "ou=users,dc=example,dc=com"
-    group_base_dn: "ou=groups,dc=example,dc=com"
-    user_filter: "(&(objectClass=person)(uid={username}))"
-    group_filter: "(&(objectClass=groupOfNames)(member={user_dn}))"
-    group_attr: "cn"
+security:
+  auth:
+    users:
+      - username: alice
+        password: change-me
+      - username: digest-only
+        ha1: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ldap:
+      url: "ldaps://ad.example.com:636"
+      bind_dn: "cn=qpx,ou=svc,dc=example,dc=com"
+      bind_password_env: LDAP_BIND_PASSWORD
+      user_base_dn: "ou=users,dc=example,dc=com"
+      group_base_dn: "ou=groups,dc=example,dc=com"
+      user_filter: "(&(objectClass=person)(uid={username}))"
+      group_filter: "(&(objectClass=groupOfNames)(member={user_dn}))"
+      group_attr: "cn"
 ```
 
 This is acceptable for tests and small deployments, but should not be the preferred path in examples aimed at enterprise operation.
@@ -289,35 +290,36 @@ This is acceptable for tests and small deployments, but should not be the prefer
 Use a separate config area for externally asserted identity:
 
 ```yaml
-identity_sources:
-  - name: corp-access-proxy
-    type: trusted_headers
-    from:
-      trusted_peers: ["10.0.0.0/8"]
-    headers:
-      user: "x-authenticated-user"
-      groups: "x-authenticated-groups"
-      device_id: "x-device-id"
-      posture: "x-device-posture"
-    strip_from_untrusted: true
+security:
+  identity_sources:
+    - name: corp-access-proxy
+      type: trusted_headers
+      from:
+        trusted_peers: ["10.0.0.0/8"]
+      headers:
+        user: "x-authenticated-user"
+        groups: "x-authenticated-groups"
+        device_id: "x-device-id"
+        posture: "x-device-posture"
+      strip_from_untrusted: true
 
-  - name: partner-mtls
-    type: mtls_subject
-    from:
-      client_ca: "/etc/qpx/client-ca.pem"
-    map:
-      user_from_san_uri_prefix: "spiffe://corp.example/user/"
-      user_from_subject_cn: true
+    - name: partner-mtls
+      type: mtls_subject
+      from:
+        client_ca: "/etc/qpx/client-ca.pem"
+      map:
+        user_from_san_uri_prefix: "spiffe://corp.example/user/"
+        user_from_subject_cn: true
 
-  - name: edge-jwt
-    type: signed_assertion
-    assertion:
-      header: "x-verified-jwt"
-      secret_env: EDGE_JWT_HMAC_SECRET
-      claims:
-        user_from_sub: true
-        groups: "groups"
-        groups_separator: ","
+    - name: edge-jwt
+      type: signed_assertion
+      assertion:
+        header: "x-verified-jwt"
+        secret_env: EDGE_JWT_HMAC_SECRET
+        claims:
+          user_from_sub: true
+          groups: "groups"
+          groups_separator: ","
 ```
 
 This makes the trust boundary explicit and prevents overloading `auth:` with unrelated concerns.
@@ -327,17 +329,19 @@ This makes the trust boundary explicit and prevents overloading `auth:` with unr
 Use an optional decision hook:
 
 ```yaml
-ext_authz:
-  - name: central-policy
-    kind: http
-    endpoint: "https://policy.example.com/check"
-    timeout_ms: 300
-    max_response_bytes: 1048576
-    send:
-      request: true
-      identity: true
-      selected_headers: ["user-agent", "content-type"]
-    on_error: deny
+security:
+  decisions:
+    ext_authz:
+      - name: central-policy
+        kind: http
+        endpoint: "https://policy.example.com/check"
+        timeout_ms: 300
+        max_response_bytes: 1048576
+        send:
+          request: true
+          identity: true
+          selected_headers: ["user-agent", "content-type"]
+        on_error: deny
 ```
 
 Per-edge or per-route use:
@@ -373,14 +377,19 @@ edges:
 Extend matching carefully:
 
 ```yaml
-rules:
-  - name: inspect-finance
-    match:
-      host: ["*.finance.example.com"]
-      identity:
-        groups: ["finance", "security"]
-        posture: ["managed", "compliant"]
-    action: { type: inspect }
+edges:
+  - kind: forward
+    name: finance-egress
+    listen: "0.0.0.0:8080"
+    default_action: { type: block }
+    rules:
+      - name: inspect-finance
+        match:
+          host: ["*.finance.example.com"]
+          identity:
+            groups: ["finance", "security"]
+            posture: ["managed", "compliant"]
+        action: { type: inspect }
 ```
 
 Important constraint:
@@ -399,15 +408,16 @@ Advanced public matchers also cover:
 Allow explicit propagation of decision context:
 
 ```yaml
-audit_log:
-  include:
-    - subject
-    - groups
-    - device_id
-    - posture
-    - idp
-    - ext_authz_policy_id
-    - matched_rule
+telemetry:
+  audit_log:
+    include:
+      - subject
+      - groups
+      - device_id
+      - posture
+      - idp
+      - ext_authz_policy_id
+      - matched_rule
 ```
 
 ## 9. Example deployment patterns
