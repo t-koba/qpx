@@ -10,7 +10,7 @@ default = []
 auth-core = ["dep:base64", "dep:ring"]
 basic-auth = ["auth-core"]
 digest-auth = ["auth-core", "dep:sha2"]
-ldap-auth = ["auth-core", "dep:ldap3", "dep:tokio"]
+ldap-auth = ["basic-auth", "dep:ldap3", "dep:tokio"]
 ldap-auth-rustls = ["ldap-auth", "ldap3/tls-rustls-ring"]
 ldap-auth-native = ["ldap-auth", "ldap3/tls-native"]
 
