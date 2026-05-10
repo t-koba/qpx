@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
   fmt:
     name: fmt
@@ -286,23 +291,23 @@ jobs:
           # - mitm/acme require tls-rustls
           # - auth features are named auth-basic/auth-digest/auth-ldap-rustls/auth-ldap-native
           for feats in \
-            ""
-            "tls-native"
-            "tls-rustls"
-            "tls-rustls,auth-basic"
-            "tls-rustls,auth-digest"
-            "tls-rustls,auth-ldap-rustls"
-            "tls-native,auth-ldap-native"
-            "tls-rustls,mitm"
-            "tls-rustls,acme"
-            "tls-rustls,mitm,acme"
-            "http3-backend-h3"
-            "http3-backend-h3,mitm"
-            "http3-backend-h3,acme"
-            "http3-backend-h3,mitm,acme"
-            "http3-backend-qpx"
-            "http3-backend-qpx,mitm"
-            "http3-backend-qpx,acme"
+            "" \
+            "tls-native" \
+            "tls-rustls" \
+            "tls-rustls,auth-basic" \
+            "tls-rustls,auth-digest" \
+            "tls-rustls,auth-ldap-rustls" \
+            "tls-native,auth-ldap-native" \
+            "tls-rustls,mitm" \
+            "tls-rustls,acme" \
+            "tls-rustls,mitm,acme" \
+            "http3-backend-h3" \
+            "http3-backend-h3,mitm" \
+            "http3-backend-h3,acme" \
+            "http3-backend-h3,mitm,acme" \
+            "http3-backend-qpx" \
+            "http3-backend-qpx,mitm" \
+            "http3-backend-qpx,acme" \
             "http3-backend-qpx,mitm,acme"; do
             run_clippy qpxd "${feats}"
           done
