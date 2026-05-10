@@ -574,7 +574,6 @@ impl TcpBindings {
             let metrics = match config.telemetry.metrics.as_ref() {
                 Some(metrics) => {
                     let listener = self
-                        .telemetry
                         .metrics
                         .as_ref()
                         .ok_or_else(|| anyhow!("metrics binding not found"))?;
@@ -635,14 +634,14 @@ impl TcpBindings {
         let inherited = InheritedTcpBindings {
             forward_edges: handoff
                 .pending
-                .ingress_edge_configs()
+                .forward_edges
                 .iter()
                 .map(|group| {
                     Ok(InheritedTcpGroup {
                         name: group.name.clone(),
                         listen: group.listen.clone(),
                         sockets: group
-                            .ingress_edge_configs()
+                            .forward_edges
                             .iter()
                             .map(|listener| {
                                 crate::windows_handoff::duplicate_socket_for_child(
@@ -662,7 +661,7 @@ impl TcpBindings {
                         name: group.name.clone(),
                         listen: group.listen.clone(),
                         sockets: group
-                            .ingress_edge_configs()
+                            .forward_edges
                             .iter()
                             .map(|listener| {
                                 crate::windows_handoff::duplicate_socket_for_child(
@@ -675,7 +674,6 @@ impl TcpBindings {
                 .collect::<Result<Vec<_>>>()?,
             metrics: handoff
                 .pending
-                .telemetry
                 .metrics
                 .as_ref()
                 .map(|single| {

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 #[cfg(all(feature = "http3", unix))]
 use crate::udp_socket_handoff::{adopt_inherited_udp_socket, duplicate_std_udp_socket_for_handoff};
-#[cfg(windows)]
+#[cfg(all(feature = "http3", windows))]
 use crate::udp_socket_handoff::{
     adopt_inherited_udp_socket_windows, duplicate_std_udp_socket_for_child,
 };
@@ -54,9 +54,11 @@ struct InheritedUdpSocket {
     socket: Vec<u8>,
 }
 
-#[cfg(all(feature = "http3", windows))]
+#[cfg(windows)]
 struct WindowsUdpBindingHandoff {
+    #[cfg(feature = "http3")]
     forward_edges: Vec<WindowsInheritedUdpSocket>,
+    #[cfg(feature = "http3")]
     reverse_edge: Vec<WindowsInheritedUdpSocket>,
 }
 
@@ -575,10 +577,7 @@ impl UdpBindings {
                 )?;
                 Ok(UdpBindingHandoff {
                     env_value: path.display().to_string(),
-                    pending: WindowsUdpBindingHandoff {
-                        forward_edges: Vec::new(),
-                        reverse_edge: Vec::new(),
-                    },
+                    pending: WindowsUdpBindingHandoff {},
                     cleanup_path: path,
                 })
             }
@@ -594,10 +593,12 @@ impl UdpBindings {
         handoff: &UdpBindingHandoff,
         child_pid: u32,
     ) -> Result<()> {
-        let inherited = InheritedUdpBindings {
-            forward_edges: handoff
+        #[cfg(feature = "http3")]
+        let inherited = {
+            let mut inherited = InheritedUdpBindings::default();
+            inherited.forward_edges = handoff
                 .pending
-                .ingress_edge_configs()
+                .forward_edges
                 .iter()
                 .map(|entry| {
                     Ok(InheritedUdpSocket {
@@ -606,8 +607,8 @@ impl UdpBindings {
                         socket: duplicate_std_udp_socket_for_child(&entry.socket, child_pid)?,
                     })
                 })
-                .collect::<Result<Vec<_>>>()?,
-            reverse_edge: handoff
+                .collect::<Result<Vec<_>>>()?;
+            inherited.reverse_edge = handoff
                 .pending
                 .reverse_edge
                 .iter()
@@ -618,7 +619,13 @@ impl UdpBindings {
                         socket: duplicate_std_udp_socket_for_child(&entry.socket, child_pid)?,
                     })
                 })
-                .collect::<Result<Vec<_>>>()?,
+                .collect::<Result<Vec<_>>>()?;
+            inherited
+        };
+        #[cfg(not(feature = "http3"))]
+        let inherited = {
+            let _ = child_pid;
+            InheritedUdpBindings::default()
         };
         crate::windows_handoff::write_json_file(handoff.cleanup_path.as_path(), &inherited)
     }
