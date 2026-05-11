@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use super::super::types::{Config, IdentityConfig, MessagesConfig, RuntimeConfig};
 
 pub(super) fn validate_listener_topology(config: &Config) -> Result<()> {
-    if config.listeners.is_empty() && config.reverse.is_empty() {
-        return Err(anyhow!("no listeners or reverse proxies configured"));
+    if config.edge_count() == 0 {
+        return Err(anyhow!("no edges configured"));
     }
     Ok(())
 }
@@ -41,12 +41,12 @@ pub(super) fn validate_identity_config(identity: &IdentityConfig) -> Result<()> 
             "identity.metrics_prefix must contain only [A-Za-z0-9_:]"
         ));
     }
-    if let Some(ua) = identity.generated_user_agent.as_deref() {
-        if ua.trim().is_empty() {
-            return Err(anyhow!(
-                "identity.generated_user_agent must not be empty when set"
-            ));
-        }
+    if let Some(ua) = identity.generated_user_agent.as_deref()
+        && ua.trim().is_empty()
+    {
+        return Err(anyhow!(
+            "identity.generated_user_agent must not be empty when set"
+        ));
     }
     Ok(())
 }
@@ -164,20 +164,20 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
     if runtime.h3_read_timeout_ms == 0 {
         return Err(anyhow!("runtime.h3_read_timeout_ms must be >= 1"));
     }
-    if let Some(worker_threads) = runtime.worker_threads {
-        if worker_threads == 0 {
-            return Err(anyhow!("runtime.worker_threads must be >= 1"));
-        }
+    if let Some(worker_threads) = runtime.worker_threads
+        && worker_threads == 0
+    {
+        return Err(anyhow!("runtime.worker_threads must be >= 1"));
     }
-    if let Some(max_blocking_threads) = runtime.max_blocking_threads {
-        if max_blocking_threads == 0 {
-            return Err(anyhow!("runtime.max_blocking_threads must be >= 1"));
-        }
+    if let Some(max_blocking_threads) = runtime.max_blocking_threads
+        && max_blocking_threads == 0
+    {
+        return Err(anyhow!("runtime.max_blocking_threads must be >= 1"));
     }
-    if let Some(acceptor_tasks) = runtime.acceptor_tasks_per_listener {
-        if acceptor_tasks == 0 {
-            return Err(anyhow!("runtime.acceptor_tasks_per_listener must be >= 1"));
-        }
+    if let Some(acceptor_tasks) = runtime.acceptor_tasks_per_listener
+        && acceptor_tasks == 0
+    {
+        return Err(anyhow!("runtime.acceptor_tasks_per_listener must be >= 1"));
     }
     if runtime.tcp_backlog <= 0 {
         return Err(anyhow!("runtime.tcp_backlog must be >= 1"));

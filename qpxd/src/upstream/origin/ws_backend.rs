@@ -1,21 +1,21 @@
 use crate::http::body::Body;
 use anyhow::Result;
-use hyper::header::{HeaderValue, HOST};
+use hyper::header::{HOST, HeaderValue};
 use hyper::{Request, Response, Uri};
 use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use crate::http::l7::prepare_request_with_headers_in_place;
 use crate::http::websocket::spawn_upgrade_tunnel;
-use crate::tls::client::connect_tls_http1_with_options;
 use crate::tls::CompiledUpstreamTlsTrust;
+use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::http1::{
-    normalize_websocket_switching_protocols_response, proxy_websocket_http1, WebsocketProxyConfig,
+    WebsocketProxyConfig, normalize_websocket_switching_protocols_response, proxy_websocket_http1,
 };
 
-use super::dispatch::{origin_scheme, OriginScheme};
 use super::OriginEndpoint;
+use super::dispatch::{OriginScheme, origin_scheme};
 
 pub(crate) async fn proxy_websocket(
     req: Request<Body>,
@@ -52,9 +52,9 @@ pub(crate) async fn proxy_websocket(
                 timeout_dur,
                 upgrade_wait_timeout,
                 tunnel_idle_timeout,
-                tunnel_label: "reverse",
-                upstream_context: "reverse websocket upstream proxy",
-                direct_context: "reverse websocket direct",
+                tunnel_label: "reverse_edges",
+                upstream_context: "reverse_edges websocket upstream proxy",
+                direct_context: "reverse_edges websocket direct",
             },
         )
         .await;
@@ -114,7 +114,7 @@ async fn proxy_wss(
     let authority = connect_authority.to_string();
     tokio::spawn(async move {
         if let Err(err) = conn.await {
-            warn!(error = ?err, upstream = %authority, "reverse websocket TLS upstream closed");
+            warn!(error = ?err, upstream = %authority, "reverse_edges websocket TLS upstream closed");
         }
     });
     let mut response = timeout(timeout_dur, sender.send_request(req))
@@ -124,7 +124,7 @@ async fn proxy_wss(
     spawn_upgrade_tunnel(
         &mut response,
         client_upgrade,
-        "reverse",
+        "reverse_edges",
         upgrade_wait_timeout,
         tunnel_idle_timeout,
     );

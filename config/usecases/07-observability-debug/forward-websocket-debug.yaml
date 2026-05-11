@@ -1,5 +1,7 @@
-listeners:
-- name: websocket-debug-forward
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: forward
+  name: websocket-debug-forward
   listen: 127.0.0.1:18086
   default_action:
     type: block
@@ -8,28 +10,26 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
       - ws.example.com
       headers:
       - name: upgrade
-        regex: (?i)websocket
+        regex: "(?i)websocket"
       - name: connection
-        regex: (?i).*upgrade.*
+        regex: "(?i).*upgrade.*"
     action:
       type: direct
   - name: allow-healthcheck
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
       - ws.example.com
       path:
-      - /healthz
+      - "/healthz"
       method:
       - GET
     action:
       type: direct
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

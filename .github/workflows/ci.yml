@@ -8,12 +8,17 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -23,14 +28,14 @@ jobs:
     name: typos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: crate-ci/typos@v1.43.5
 
   sensitive_artifacts:
     name: sensitive artifacts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: reject local paths, secrets, and runtime artifacts
         run: bash ./scripts/check-sensitive-artifacts.sh
 
@@ -38,7 +43,7 @@ jobs:
     name: doc
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --locked --no-deps --document-private-items
@@ -49,7 +54,7 @@ jobs:
     name: unused-dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: bnjbvr/cargo-machete@v0.6.0
 
@@ -57,7 +62,7 @@ jobs:
     name: e2e tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: install dependencies
@@ -81,9 +86,9 @@ jobs:
 
   e2e_control_plane_windows:
     name: control-plane e2e (windows)
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: build qpxd (no warnings)
@@ -98,7 +103,7 @@ jobs:
     name: perf smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: perf smoke (release)
@@ -110,7 +115,7 @@ jobs:
     name: config samples
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: install dependencies
@@ -132,11 +137,11 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-latest
           - name: windows-x86_64
-            os: windows-latest
+            os: windows-2022
           - name: macos-aarch64
             os: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -152,7 +157,7 @@ jobs:
       - name: test
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=1
 
       - name: clippy (default features)
         env:
@@ -176,10 +181,10 @@ jobs:
             os: macos-14
             use_cross: false
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            os: windows-2022
             use_cross: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -195,19 +200,27 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
           CARGO_TARGET_DIR: target/${{ matrix.target }}
+          QPXD_SAMPLE_RUSTLS_FEATURES: qpxd/auth-digest,qpxd/auth-ldap-rustls
+          QPXD_SAMPLE_NATIVE_FEATURES: auth-digest,auth-ldap-native
         shell: bash
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --workspace --release --locked --target ${{ matrix.target }}
+            cross build --workspace --release --locked --target ${{ matrix.target }} --features "${QPXD_SAMPLE_RUSTLS_FEATURES}"
           else
-            cargo build --workspace --release --locked --target ${{ matrix.target }}
+            cargo build --workspace --release --locked --target ${{ matrix.target }} --features "${QPXD_SAMPLE_RUSTLS_FEATURES}"
           fi
+
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin|x86_64-pc-windows-msvc)
+              cargo build -p qpxd --release --locked --target ${{ matrix.target }} --no-default-features --features "${QPXD_SAMPLE_NATIVE_FEATURES}"
+              ;;
+          esac
 
   clippy_feature_matrix:
     name: clippy (feature matrix, ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -255,10 +268,10 @@ jobs:
             run_clippy qpx-core "${feats}"
           done
 
-          # qpx-auth: valid auth-proxy / LDAP / digest combinations
+          # qpx-auth: explicit Basic / Digest / LDAP feature combinations
           for feats in \
             "" \
-            "auth-proxy" \
+            "basic-auth" \
             "digest-auth" \
             "ldap-auth-rustls" \
             "ldap-auth-native" \
@@ -276,37 +289,27 @@ jobs:
           # - tls backend: none | tls-native | tls-rustls
           # - HTTP/3 is selected by exactly one backend feature
           # - mitm/acme require tls-rustls
-          # - digest-auth / sha2-hash are independent toggles
-          qpxd_base_sets=(
-            ""
-            "tls-native"
-            "tls-rustls"
-            "tls-rustls,mitm"
-            "tls-rustls,acme"
-            "tls-rustls,mitm,acme"
-            "http3-backend-h3"
-            "http3-backend-h3,mitm"
-            "http3-backend-h3,acme"
-            "http3-backend-h3,mitm,acme"
-            "http3-backend-qpx"
-            "http3-backend-qpx,mitm"
-            "http3-backend-qpx,acme"
-            "http3-backend-qpx,mitm,acme"
-          )
-          qpxd_opt_sets=(
-            ""
-            "digest-auth"
-            "sha2-hash"
-            "digest-auth,sha2-hash"
-          )
-          for base in "${qpxd_base_sets[@]}"; do
-            for opt in "${qpxd_opt_sets[@]}"; do
-              feats="${base}"
-              if [[ -n "${opt}" ]]; then
-                if [[ -n "${feats}" ]]; then feats="${feats},${opt}"; else feats="${opt}"; fi
-              fi
-              run_clippy qpxd "${feats}"
-            done
+          # - auth features are named auth-basic/auth-digest/auth-ldap-rustls/auth-ldap-native
+          for feats in \
+            "" \
+            "tls-native" \
+            "tls-rustls" \
+            "tls-rustls,auth-basic" \
+            "tls-rustls,auth-digest" \
+            "tls-rustls,auth-ldap-rustls" \
+            "tls-native,auth-ldap-native" \
+            "tls-rustls,mitm" \
+            "tls-rustls,acme" \
+            "tls-rustls,mitm,acme" \
+            "http3-backend-h3" \
+            "http3-backend-h3,mitm" \
+            "http3-backend-h3,acme" \
+            "http3-backend-h3,mitm,acme" \
+            "http3-backend-qpx" \
+            "http3-backend-qpx,mitm" \
+            "http3-backend-qpx,acme" \
+            "http3-backend-qpx,mitm,acme"; do
+            run_clippy qpxd "${feats}"
           done
 
           # qpxr / qpxc: tls backend (none|tls-rustls|tls-native)
@@ -332,7 +335,7 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: rustsec/audit-check@v2.0.0
         with:

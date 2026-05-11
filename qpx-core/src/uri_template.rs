@@ -1,5 +1,5 @@
-use anyhow::{anyhow, bail, Result};
-use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
+use anyhow::{Result, anyhow, bail};
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use regex::Regex;
 use std::collections::HashMap;
 

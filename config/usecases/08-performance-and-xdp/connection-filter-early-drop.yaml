@@ -1,9 +1,7 @@
-# connection_filter is a separate early-drop DSL.
-# It runs before full HTTP parsing and only supports action.type=block plus
-# transport/TLS metadata matchers such as src_ip, dst_port, SNI, ALPN, TLS
-# version, and JA3/JA4 fingerprints.
-listeners:
-- name: forward-filtered
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: forward
+  name: forward-filtered
   listen: 0.0.0.0:18088
   default_action:
     type: block
@@ -22,21 +20,19 @@ listeners:
       src_ip:
       - 10.0.0.0/8
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
-      - '*'
+      - "*"
     action:
       type: direct
-  mode: forward
-
-reverse:
-- name: reverse-filtered
+- kind: reverse
+  name: reverse-filtered
   listen: 0.0.0.0:19488
   tls:
     certificates:
     - sni: app.example.com
-      cert: ${QPX_TLS_CERT:-/etc/qpx/certs/app.example.com.crt}
-      key: ${QPX_TLS_KEY:-/etc/qpx/certs/app.example.com.key}
+      cert: "${QPX_TLS_CERT:-/etc/qpx/certs/app.example.com.crt}"
+      key: "${QPX_TLS_KEY:-/etc/qpx/certs/app.example.com.key}"
   connection_filter:
   - name: drop-legacy-tls-clients
     match:
@@ -60,7 +56,7 @@ reverse:
   - match:
       host:
       - app.example.com
-    upstreams:
-    - http://127.0.0.1:19088
-
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:19088

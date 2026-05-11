@@ -3,9 +3,9 @@ use crate::http::body_size::{
     observed_request_bytes, observed_request_size, observed_request_trailers,
     observed_response_bytes, observed_response_size, observed_response_trailers,
 };
-use anyhow::{anyhow, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
+use anyhow::{Result, anyhow};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use http::{HeaderMap, Request, Response, StatusCode};
 use percent_encoding::percent_decode_str;

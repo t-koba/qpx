@@ -125,8 +125,9 @@ state_dir: '$STATE_DIR'
 runtime:
   acceptor_tasks_per_listener: $acceptors
   reuse_port: false
-reverse:
-- name: control
+edges:
+- kind: reverse
+  name: control
   listen: 127.0.0.1:$PORT
   routes:
   - name: health
@@ -135,9 +136,11 @@ reverse:
       - control.local
       path:
       - /health
-    local_response:
-      status: 200
-      body: $body
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: $body
 EOF
 
   mv "$tmp_cfg" "$CONFIG_FILE"

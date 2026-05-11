@@ -1,9 +1,9 @@
 use super::router::normalize_host_for_match;
 use crate::http::body::Body;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use hyper::Request;
-use qpx_core::config::ReverseConfig;
+use qpx_core::config::ReverseEdgeConfig;
 
 #[derive(Clone)]
 pub(crate) struct ReverseTlsHostPolicy {
@@ -12,7 +12,7 @@ pub(crate) struct ReverseTlsHostPolicy {
 }
 
 impl ReverseTlsHostPolicy {
-    pub(super) fn from_config(reverse: &ReverseConfig) -> Result<Self> {
+    pub(super) fn from_config(reverse: &ReverseEdgeConfig) -> Result<Self> {
         let exception_globs = if reverse.sni_host_exceptions.is_empty() {
             None
         } else {
@@ -98,12 +98,16 @@ mod tests {
             exception_globs: None,
         };
         let req = req_with_host("example.com");
-        assert!(policy
-            .validate_request(&req, Some("example.com"), true)
-            .is_ok());
-        assert!(policy
-            .validate_request(&req, Some("other.example"), true)
-            .is_err());
+        assert!(
+            policy
+                .validate_request(&req, Some("example.com"), true)
+                .is_ok()
+        );
+        assert!(
+            policy
+                .validate_request(&req, Some("other.example"), true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -125,9 +129,11 @@ mod tests {
             exception_globs: Some(builder.build().expect("glob set")),
         };
         let req = req_with_host("api.example.com");
-        assert!(policy
-            .validate_request(&req, Some("edge.example.com"), true)
-            .is_ok());
+        assert!(
+            policy
+                .validate_request(&req, Some("edge.example.com"), true)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -139,8 +145,10 @@ mod tests {
             exception_globs: Some(builder.build().expect("glob set")),
         };
         let req = req_with_host("internal.local");
-        assert!(policy
-            .validate_request(&req, Some("edge.example.com"), true)
-            .is_err());
+        assert!(
+            policy
+                .validate_request(&req, Some("edge.example.com"), true)
+                .is_err()
+        );
     }
 }

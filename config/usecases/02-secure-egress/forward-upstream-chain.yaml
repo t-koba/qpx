@@ -1,5 +1,10 @@
-listeners:
-- name: chained-forward
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+upstreams:
+- name: corp-egress
+  url: http://proxy.corp.example:3128
+edges:
+- kind: forward
+  name: chained-forward
   listen: 127.0.0.1:18081
   default_action:
     type: block
@@ -8,19 +13,19 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
-      - '*.malware.test'
-      - '*.phishing.test'
+      - "*.malware.test"
+      - "*.phishing.test"
     action:
       type: block
   - name: bypass-internal
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
-      - '*.corp.internal'
+      - "*.corp.internal"
       - status.corp.example
     action:
       type: direct
@@ -28,14 +33,9 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
-      - '*'
+      - "*"
     action:
       type: proxy
       upstream: corp-egress
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-upstreams:
-- name: corp-egress
-  url: http://proxy.corp.example:3128

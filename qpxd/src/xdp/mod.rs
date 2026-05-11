@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use cidr::IpCidr;
 use std::net::IpAddr;
@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tokio::time::{timeout, Instant};
+use tokio::time::{Instant, timeout};
 
 pub mod remote;
 

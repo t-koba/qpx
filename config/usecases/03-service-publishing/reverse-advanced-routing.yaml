@@ -1,5 +1,7 @@
-reverse:
-- name: reverse-advanced-routing
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: reverse
+  name: reverse-advanced-routing
   listen: 0.0.0.0:19083
   routes:
   - name: api-routing
@@ -7,18 +9,18 @@ reverse:
       host:
       - api.example.com
       path:
-      - /api/*
+      - "/api/*"
     headers:
       request_set:
         X-Proxy: qpx
       response_set:
         X-Proxy-Handled: qpx
     path_rewrite:
-      strip_prefix: /api
-      add_prefix: /v1
+      strip_prefix: "/api"
+      add_prefix: "/v1"
       regex:
-        pattern: ^/v1/legacy/(.*)$
-        replace: /v1/$1
+        pattern: "^/v1/legacy/(.*)$"
+        replace: "/v1/$1"
     resilience:
       max_upstream_concurrency: 128
       retry:
@@ -72,7 +74,6 @@ reverse:
             enabled: false
           tags:
           - upstream-error
-    lb: round_robin
     timeout_ms: 10000
     health_check:
       interval_ms: 5000
@@ -80,19 +81,20 @@ reverse:
       fail_threshold: 3
       cooldown_ms: 30000
       http:
-        path: /healthz
+        path: "/healthz"
         method: GET
         expected_status:
         - 200
         - 204
-    backends:
-    - name: stable
-      weight: 90
-      upstreams:
-      - http://10.40.0.11:8080
-      - http://10.40.0.12:8080
-    - name: canary
-      weight: 10
-      upstreams:
-      - http://10.40.0.99:8080
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+    target:
+      type: weighted
+      backends:
+      - name: stable
+        weight: 90
+        upstreams:
+        - http://10.40.0.11:8080
+        - http://10.40.0.12:8080
+      - name: canary
+        weight: 10
+        upstreams:
+        - http://10.40.0.99:8080

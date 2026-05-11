@@ -1,12 +1,12 @@
 use crate::http::address::parse_authority_host_port;
 use crate::http::body::Body;
 use crate::http::common::resolve_named_upstream;
-use crate::upstream::connect::{connect_tunnel_target, ConnectedTunnel};
+use crate::upstream::connect::{ConnectedTunnel, connect_tunnel_target};
 use crate::xdp;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use hyper::Request;
-use qpx_core::config::{ActionConfig, ListenerConfig};
+use qpx_core::config::{ActionConfig, IngressEdgeConfig, OriginalDstSource};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -48,10 +48,13 @@ impl ConnectTarget {
 
 #[derive(Clone, Debug)]
 pub(super) enum DestinationResolver {
-    Kernel,
+    Kernel {
+        original_dst_source: OriginalDstSource,
+    },
     XdpProxyV2 {
         require_metadata: bool,
         trusted_peers: Vec<cidr::IpCidr>,
+        original_dst_source: OriginalDstSource,
     },
 }
 
@@ -69,8 +72,10 @@ impl DestinationResolver {
         let mut stream = stream;
         let local_addr = stream.local_addr().ok();
         match self {
-            Self::Kernel => {
-                let target = original_dst_socket(&stream)
+            Self::Kernel {
+                original_dst_source,
+            } => {
+                let target = original_dst_socket(&stream, original_dst_source)
                     .ok()
                     // When a connection is made directly to the transparent listener (no NAT),
                     // SO_ORIGINAL_DST can be equal to the listener address. Treat that as
@@ -86,6 +91,7 @@ impl DestinationResolver {
             Self::XdpProxyV2 {
                 require_metadata,
                 trusted_peers,
+                original_dst_source,
             } => {
                 let trusted = xdp::peer_is_trusted(remote_addr.ip(), trusted_peers);
                 if !trusted {
@@ -95,7 +101,7 @@ impl DestinationResolver {
                             remote_addr
                         ));
                     }
-                    let target = original_dst_socket(&stream)
+                    let target = original_dst_socket(&stream, original_dst_source)
                         .ok()
                         .filter(|dst| local_addr != Some(*dst))
                         .map(ConnectTarget::Socket);
@@ -117,7 +123,7 @@ impl DestinationResolver {
                     .filter(|dst| local_addr != Some(*dst))
                     .map(ConnectTarget::Socket)
                     .or_else(|| {
-                        original_dst_socket(&stream)
+                        original_dst_socket(&stream, original_dst_source)
                             .ok()
                             .filter(|dst| local_addr != Some(*dst))
                             .map(ConnectTarget::Socket)
@@ -135,7 +141,7 @@ impl DestinationResolver {
 pub(super) fn resolve_upstream(
     action: &ActionConfig,
     state: &Arc<crate::runtime::RuntimeState>,
-    listener: &ListenerConfig,
+    listener: &crate::runtime::CompiledListenerSettings,
 ) -> Result<Option<crate::upstream::pool::ResolvedUpstreamProxy>> {
     resolve_named_upstream(action, state, listener.upstream_proxy.as_deref())
 }
@@ -189,20 +195,38 @@ pub(super) async fn connect_target_stream(
 }
 
 pub(super) fn destination_resolver_for_listener(
-    listener: &ListenerConfig,
+    listener: &IngressEdgeConfig,
 ) -> Result<DestinationResolver> {
+    let original_dst_source = listener
+        .original_dst
+        .as_ref()
+        .map(|config| config.source.clone())
+        .unwrap_or_default();
     if let Some(xdp_cfg) = xdp::compile_xdp_config(listener.xdp.as_ref())? {
         return Ok(DestinationResolver::XdpProxyV2 {
             require_metadata: xdp_cfg.require_metadata,
             trusted_peers: xdp_cfg.trusted_peers,
+            original_dst_source,
         });
     }
-    Ok(DestinationResolver::Kernel)
+    Ok(DestinationResolver::Kernel {
+        original_dst_source,
+    })
 }
 
 #[cfg(target_os = "linux")]
-fn original_dst_socket(stream: &tokio::net::TcpStream) -> Result<SocketAddr> {
-    use libc::{getsockopt, sockaddr_in, sockaddr_in6, socklen_t, SOL_IP, SOL_IPV6};
+fn original_dst_socket(
+    stream: &tokio::net::TcpStream,
+    source: &OriginalDstSource,
+) -> Result<SocketAddr> {
+    match source {
+        OriginalDstSource::LinuxSoOriginalDst => original_dst_socket_linux(stream),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn original_dst_socket_linux(stream: &tokio::net::TcpStream) -> Result<SocketAddr> {
+    use libc::{SOL_IP, SOL_IPV6, getsockopt, sockaddr_in, sockaddr_in6, socklen_t};
     use std::mem::MaybeUninit;
     use std::os::unix::io::AsRawFd;
 
@@ -269,7 +293,13 @@ fn original_dst_socket(stream: &tokio::net::TcpStream) -> Result<SocketAddr> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn original_dst_socket(_stream: &tokio::net::TcpStream) -> Result<SocketAddr> {
+fn original_dst_socket(
+    _stream: &tokio::net::TcpStream,
+    source: &OriginalDstSource,
+) -> Result<SocketAddr> {
+    match source {
+        OriginalDstSource::LinuxSoOriginalDst => {}
+    }
     Err(anyhow!(
         "original destination lookup unavailable on this OS"
     ))
@@ -350,6 +380,7 @@ mod tests {
         let resolver = DestinationResolver::XdpProxyV2 {
             require_metadata: true,
             trusted_peers: vec!["127.0.0.0/8".parse::<IpCidr>().expect("cidr")],
+            original_dst_source: OriginalDstSource::LinuxSoOriginalDst,
         };
         let (mut prefixed, effective_remote, target) = resolver
             .resolve_original_target(stream, remote_addr, Duration::from_secs(1))

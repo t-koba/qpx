@@ -1,12 +1,12 @@
 use crate::http::body::Body;
 use crate::tls::CompiledUpstreamTlsTrust;
 use crate::upstream::http1::{
-    open_upstream_proxy_sender as open_proxy_sender_once, parse_upstream_proxy_endpoint,
     UpstreamProxyEndpoint, UpstreamProxyScheme,
+    open_upstream_proxy_sender as open_proxy_sender_once, parse_upstream_proxy_endpoint,
 };
 use crate::upstream::origin::discover_origin_endpoints;
-use crate::upstream::raw_http1::{send_http1_request_with_interim, Http1ResponseWithInterim};
-use anyhow::{anyhow, Result};
+use crate::upstream::raw_http1::{Http1ResponseWithInterim, send_http1_request_with_interim};
+use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
 use http::header::PROXY_AUTHORIZATION;
 use hyper::{Request, Response, StatusCode};
@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, OnceLock};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Semaphore};
-use tokio::time::{timeout, Duration, Instant};
+use tokio::time::{Duration, Instant, timeout};
 use tracing::warn;
 use url::Url;
 
@@ -166,9 +166,11 @@ impl ManagedUpstreamEndpoint {
         self.reset_passive_counters();
         self.note_adaptive_success();
         if recovered {
-            counter!(crate::runtime::metric_names()
-                .forward_upstream_proxy_probe_success_total
-                .clone())
+            counter!(
+                crate::runtime::metric_names()
+                    .forward_upstream_proxy_probe_success_total
+                    .clone()
+            )
             .increment(1);
         }
     }

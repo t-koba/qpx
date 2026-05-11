@@ -1,18 +1,19 @@
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-system_log:
-  level: ${QPX_LOG_LEVEL:-info}
-  format: ${QPX_LOG_FORMAT:-json}
-metrics:
-  listen: ${QPX_METRICS_LISTEN:-127.0.0.1:19902}
-  path: ${QPX_METRICS_PATH:-/metrics}
-otel:
-  enabled: false
-  endpoint: http://127.0.0.1:4317
-  level: info
-  sample_percent: 100
-exporter:
-  enabled: false
-  shm_path: ''
-  shm_size_mb: 16
-  lossy: false
-  max_queue_events: 4096
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+telemetry:
+  system_log:
+    level: "${QPX_LOG_LEVEL:-info}"
+    format: "${QPX_LOG_FORMAT:-json}"
+  metrics:
+    listen: "${QPX_METRICS_LISTEN:-127.0.0.1:19902}"
+    path: "${QPX_METRICS_PATH:-/metrics}"
+  otel:
+    enabled: false
+    endpoint: http://127.0.0.1:4317
+    level: info
+    sample_percent: 100
+  exporter:
+    enabled: false
+    shm_path: ''
+    shm_size_mb: 16
+    lossy: false
+    max_queue_events: 4096

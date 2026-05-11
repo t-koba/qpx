@@ -1,6 +1,8 @@
 #[cfg(unix)]
 use anyhow::Context;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+#[cfg(any(feature = "http3", unix))]
+use anyhow::anyhow;
 
 #[cfg(any(feature = "http3", test))]
 #[cfg(unix)]

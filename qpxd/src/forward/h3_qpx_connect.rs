@@ -13,20 +13,20 @@ use crate::http::common::{
 };
 use crate::http::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    sanitize_headers_for_policy, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::{ActionConfig, ActionKind, ConnectUdpConfig};
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
 use qpx_observability::access_log::RequestLogContext;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::{lookup_host, UdpSocket};
-use tokio::time::{timeout, Duration};
+use tokio::net::{UdpSocket, lookup_host};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 #[derive(Debug)]
@@ -129,9 +129,9 @@ async fn handle_qpx_extended_connect_stream(
     datagrams: Option<qpx_h3::StreamDatagrams>,
 ) -> Result<()> {
     let state = handler.runtime.state();
-    let proxy_name = state.config.identity.proxy_name.clone();
+    let proxy_name = state.plan.identity.proxy_name.to_string();
     let tunnel_idle_timeout =
-        Duration::from_millis(state.config.runtime.tunnel_idle_timeout_ms.max(1));
+        Duration::from_millis(state.plan.limits.tunnel_idle_timeout_ms.max(1));
     let PreparedQpxConnect {
         host,
         port: _,
@@ -146,18 +146,17 @@ async fn handle_qpx_extended_connect_stream(
         rate_limit_context,
         sanitized_headers,
     } = prepared;
-    let mut request_limits = state.policy.rate_limiters.collect(
-        handler.listener_name.as_ref(),
-        matched_rule.as_deref(),
-        None,
-        crate::rate_limit::TransportScope::Connect,
-    );
-    request_limits.extend_from(&state.policy.rate_limiters.collect_profile(
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled qpx-h3 CONNECT execution plan not found"))?;
+    let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
+        &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
         crate::rate_limit::TransportScope::Connect,
-    )?);
+    )?;
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
     macro_rules! send_policy {
         ($req_stream:expr, $response:expr, $outcome:expr) => {
             send_qpx_policy_response(
@@ -217,7 +216,7 @@ async fn handle_qpx_extended_connect_stream(
             proxy_name: proxy_name.as_str(),
             upstream: action.upstream.as_deref(),
             verify_upstream: state
-                .listener_config(handler.listener_name.as_ref())
+                .ingress_edge_settings(handler.listener_name.as_ref())
                 .and_then(|listener| listener.tls_inspection.as_ref())
                 .map(|cfg| {
                     cfg.verify_upstream
@@ -268,7 +267,7 @@ async fn handle_qpx_extended_connect_stream(
     for interim in interim {
         let interim = crate::http3::codec::sanitize_interim_response_for_h3(interim)?;
         timeout(
-            Duration::from_millis(state.config.runtime.h3_read_timeout_ms.max(1)),
+            Duration::from_millis(state.plan.limits.h3_read_timeout_ms.max(1)),
             req_stream.send_response_head(&interim),
         )
         .await
@@ -280,14 +279,14 @@ async fn handle_qpx_extended_connect_stream(
             upstream_stream,
             proxy_name.as_str(),
             response_headers.as_deref(),
-            Duration::from_millis(state.config.runtime.h3_read_timeout_ms.max(1)),
+            Duration::from_millis(state.plan.limits.h3_read_timeout_ms.max(1)),
         )?;
         send_qpx_response_stream(
             &mut req_stream,
             response,
             &http::Method::CONNECT,
-            state.config.runtime.max_h3_response_body_bytes,
-            Duration::from_millis(state.config.runtime.h3_read_timeout_ms.max(1)),
+            state.plan.limits.max_h3_response_body_bytes,
+            Duration::from_millis(state.plan.limits.h3_read_timeout_ms.max(1)),
         )
         .await?;
         if let Some(task) = datagram_task {
@@ -304,7 +303,7 @@ async fn handle_qpx_extended_connect_stream(
         response_headers.as_deref(),
     )?;
     timeout(
-        Duration::from_millis(state.config.runtime.h3_read_timeout_ms.max(1)),
+        Duration::from_millis(state.plan.limits.h3_read_timeout_ms.max(1)),
         req_stream.send_response_head(&established),
     )
     .await
@@ -354,7 +353,7 @@ async fn handle_qpx_connect_udp_stream(
     datagrams: Option<qpx_h3::StreamDatagrams>,
 ) -> Result<()> {
     let state = handler.runtime.state();
-    let proxy_name = state.config.identity.proxy_name.clone();
+    let proxy_name = state.plan.identity.proxy_name.to_string();
     let connect_udp_cfg = handler.connect_udp.clone();
     let PreparedQpxConnect {
         host,
@@ -370,18 +369,17 @@ async fn handle_qpx_connect_udp_stream(
         mut rate_limit_context,
         ..
     } = prepared;
-    let mut request_limits = state.policy.rate_limiters.collect(
-        handler.listener_name.as_ref(),
-        matched_rule.as_deref(),
-        None,
-        crate::rate_limit::TransportScope::Connect,
-    );
-    request_limits.extend_from(&state.policy.rate_limiters.collect_profile(
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled qpx-h3 CONNECT-UDP execution plan not found"))?;
+    let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
+        &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
         crate::rate_limit::TransportScope::Connect,
-    )?);
+    )?;
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
     macro_rules! send_policy {
         ($req_stream:expr, $response:expr, $outcome:expr) => {
             send_qpx_policy_response(
@@ -450,7 +448,7 @@ async fn handle_qpx_connect_udp_stream(
             port,
             proxy_name.as_str(),
             state
-                .listener_config(handler.listener_name.as_ref())
+                .ingress_edge_settings(handler.listener_name.as_ref())
                 .and_then(|listener| listener.tls_inspection.as_ref())
                 .map(|cfg| {
                     cfg.verify_upstream
@@ -491,7 +489,7 @@ async fn handle_qpx_connect_udp_stream(
         for interim in &upstream_chain.interim {
             let interim = crate::http3::codec::sanitize_interim_response_for_h3(interim.clone())?;
             timeout(
-                Duration::from_millis(state.config.runtime.h3_read_timeout_ms.max(1)),
+                Duration::from_millis(state.plan.limits.h3_read_timeout_ms.max(1)),
                 req_stream.send_response_head(&interim),
             )
             .await
@@ -704,7 +702,7 @@ async fn prepare_qpx_connect_request(
         connect_udp_cfg,
     } = input;
     let state = handler.runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
     let is_connect_udp = protocol == Some(&qpx_h3::Protocol::ConnectUdp);
     let is_extended_connect = protocol.is_some();
 
@@ -848,11 +846,11 @@ async fn prepare_qpx_connect_request(
         return Ok(QpxConnectPreparation::Responded);
     }
 
-    let listener_cfg = state
-        .listener_config(handler.listener_name.as_ref())
-        .ok_or_else(|| anyhow!("listener not found"))?;
-    let effective_policy =
-        EffectivePolicyContext::from_single(listener_cfg.policy_context.as_ref());
+    let base_plan = state
+        .plan
+        .ingress_edge_execution_plan(handler.listener_name.as_ref(), None)
+        .ok_or_else(|| anyhow!("listener plan not found"))?;
+    let effective_policy = base_plan.policy_context.clone();
     let sanitized_headers =
         sanitize_headers_for_policy(&state, &effective_policy, conn.remote_addr.ip(), &headers)?;
     let mut identity = resolve_identity(
@@ -878,7 +876,7 @@ async fn prepare_qpx_connect_request(
             alpn: Some("h3"),
             ..Default::default()
         },
-        listener_cfg.destination_resolution.as_ref(),
+        base_plan.destination_resolution.as_ref(),
     );
     let audit_path = req_head
         .uri()
@@ -931,6 +929,7 @@ async fn prepare_qpx_connect_request(
                 allowed.matched_rule.map(|rule: Arc<str>| rule.to_string()),
             )
         }
+        #[cfg(feature = "auth-basic")]
         Ok(ForwardPolicyDecision::Challenge(challenge)) => {
             let log_context = identity.to_log_context(None, None, None);
             let response = finalize_response_for_request(
@@ -958,6 +957,7 @@ async fn prepare_qpx_connect_request(
             .await?;
             return Ok(QpxConnectPreparation::Responded);
         }
+        #[cfg(feature = "auth-basic")]
         Ok(ForwardPolicyDecision::Forbidden) => {
             let log_context = identity.to_log_context(None, None, None);
             let response = finalize_response_for_request(
@@ -996,6 +996,10 @@ async fn prepare_qpx_connect_request(
             return Ok(QpxConnectPreparation::Responded);
         }
     };
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled qpx-h3 CONNECT listener execution plan not found"))?;
 
     let request_limit_ctx = RateLimitContext::from_identity(
         conn.remote_addr.ip(),
@@ -1006,16 +1010,12 @@ async fn prepare_qpx_connect_request(
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
-    } = state.policy.rate_limiters.collect_checked_request(
-        crate::rate_limit::RequestLimitCollectInput {
-            listener: Some(handler.listener_name.as_ref()),
-            rule: matched_rule.as_deref(),
-            profile: None,
-            scope: crate::rate_limit::TransportScope::Http3Datagram,
-            extra: None,
-            ctx: &request_limit_ctx,
-            cost: 1,
-        },
+    } = state.policy.rate_limiters.collect_checked_plan_request(
+        &selected_plan.rate_limits,
+        None,
+        crate::rate_limit::TransportScope::Http3Datagram,
+        &request_limit_ctx,
+        1,
     )?;
     if let Some(retry_after) = retry_after {
         let log_context = identity.to_log_context(matched_rule.as_deref(), None, None);
@@ -1256,80 +1256,12 @@ fn validate_qpx_connect_head(
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
     crate::http::semantics::validate_expect_header(headers)
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
-    if req_head.method() != http::Method::CONNECT {
-        return Err(anyhow!("CONNECT method required"));
-    }
-    match protocol {
-        Some(qpx_h3::Protocol::ConnectUdp) => {
-            let scheme = req_head
-                .uri()
-                .scheme_str()
-                .ok_or_else(|| anyhow!("CONNECT-UDP requires :scheme"))?;
-            if scheme.trim().is_empty() {
-                return Err(anyhow!("CONNECT-UDP :scheme must not be empty"));
-            }
-            let path = req_head
-                .uri()
-                .path_and_query()
-                .map(|pq| pq.as_str())
-                .ok_or_else(|| anyhow!("CONNECT-UDP requires :path"))?;
-            if path.trim().is_empty() {
-                return Err(anyhow!("CONNECT-UDP :path must not be empty"));
-            }
-            let capsule_protocol = headers
-                .get("capsule-protocol")
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim);
-            if capsule_protocol != Some("?1") {
-                return Err(anyhow!("CONNECT-UDP requires Capsule-Protocol: ?1"));
-            }
-        }
-        Some(_) => {
-            let scheme = req_head
-                .uri()
-                .scheme_str()
-                .ok_or_else(|| anyhow!("extended CONNECT requires :scheme"))?;
-            if scheme.trim().is_empty() {
-                return Err(anyhow!("extended CONNECT :scheme must not be empty"));
-            }
-            let path = req_head
-                .uri()
-                .path_and_query()
-                .map(|pq| pq.as_str())
-                .ok_or_else(|| anyhow!("extended CONNECT requires :path"))?;
-            if path.trim().is_empty() {
-                return Err(anyhow!("extended CONNECT :path must not be empty"));
-            }
-        }
-        None => {
-            if req_head.uri().scheme_str().is_some() || req_head.uri().path_and_query().is_some() {
-                return Err(anyhow!(
-                    "CONNECT request target must be authority-form without scheme/path"
-                ));
-            }
-        }
-    }
-
-    let host_values: Vec<_> = headers.get_all(http::header::HOST).iter().collect();
-    if host_values.len() > 1 {
-        return Err(anyhow!("multiple Host headers are not allowed"));
-    }
-    if let Some(value) = host_values.first() {
-        let raw = value
-            .to_str()
-            .map_err(|_| anyhow!("invalid Host header"))?
-            .trim();
-        if raw.is_empty() {
-            return Err(anyhow!("Host header must not be empty"));
-        }
-        let (host_name, host_port) =
-            crate::http::address::parse_authority_host_port(raw, authority_port)
-                .ok_or_else(|| anyhow!("invalid Host header"))?;
-        if host_port != authority_port || !host_name.eq_ignore_ascii_case(authority_host) {
-            return Err(anyhow!("Host header does not match CONNECT authority"));
-        }
-    }
-    Ok(())
+    let protocol = match protocol {
+        Some(qpx_h3::Protocol::ConnectUdp) => H3ConnectProtocol::ConnectUdp,
+        Some(_) => H3ConnectProtocol::Extended,
+        None => H3ConnectProtocol::Plain,
+    };
+    validate_h3_connect_pseudo_headers(req_head, headers, authority_host, authority_port, protocol)
 }
 
 fn build_qpx_connect_success_head(

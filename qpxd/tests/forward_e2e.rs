@@ -1,25 +1,40 @@
 mod common;
 
-use anyhow::{anyhow, Context, Result};
+#[cfg(any(
+    feature = "auth-basic",
+    feature = "auth-digest",
+    all(feature = "http3", feature = "tls-rustls", feature = "mitm")
+))]
+use anyhow::anyhow;
+use anyhow::{Context, Result};
 #[cfg(all(
     feature = "http3-backend-qpx",
     feature = "tls-rustls",
     feature = "mitm"
 ))]
 use async_trait::async_trait;
+#[cfg(feature = "auth-basic")]
 use base64::Engine;
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 use bytes::Bytes;
+#[cfg(any(
+    feature = "auth-basic",
+    all(feature = "http3", feature = "tls-rustls", feature = "mitm")
+))]
+use common::yaml_quote_path;
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 use common::{build_h3_test_client_config, build_quinn_client_endpoint};
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 use common::{pick_free_tcp_port, spawn_qpxd};
-use common::{
-    read_http1_head, send_http1_and_read_head, serve_http1_capture_once, serve_tcp_echo_once,
-    spawn_qpxd_on_random_port, temp_dir, yaml_quote_path,
-};
-#[cfg(feature = "digest-auth")]
+use common::{read_http1_head, serve_tcp_echo_once, spawn_qpxd_on_random_port, temp_dir};
+#[cfg(feature = "auth-basic")]
+use common::{send_http1_and_read_head, serve_http1_capture_once};
+#[cfg(feature = "auth-digest")]
 use sha2::{Digest, Sha256};
+#[cfg(any(
+    feature = "auth-basic",
+    all(feature = "http3", feature = "tls-rustls", feature = "mitm")
+))]
 use std::fs;
 use std::net::SocketAddr;
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
@@ -61,6 +76,7 @@ use quinn::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use rcgen::generate_simple_self_signed;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(feature = "auth-basic")]
 async fn forward_proxy_supports_basic_and_digest_proxy_auth() -> Result<()> {
     let dir = temp_dir("qpxd-forward-auth-e2e")?;
     let state_dir = dir.join("state");
@@ -70,8 +86,9 @@ async fn forward_proxy_supports_basic_and_digest_proxy_auth() -> Result<()> {
     let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("forward-auth.log"), |port| {
         let state_dir_yaml = yaml_quote_path(&state_dir);
         format!(
-            r#"listeners:
-- name: forward
+            r#"edges:
+- kind: forward
+  name: forward
   listen: 127.0.0.1:{port}
   default_action:
     type: direct
@@ -85,15 +102,15 @@ async fn forward_proxy_supports_basic_and_digest_proxy_auth() -> Result<()> {
       - local
     action:
       type: direct
-  mode: forward
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-auth:
-  users:
-  - username: tester
-    password: secret"#,
+security:
+  auth:
+    users:
+    - username: tester
+      password: secret"#,
             state_dir_yaml = state_dir_yaml
         )
     })?;
@@ -115,13 +132,13 @@ auth:
         .into_iter()
         .find(|value| value.starts_with("Basic "))
         .ok_or_else(|| anyhow!("missing Basic challenge"))?;
-    #[cfg(feature = "digest-auth")]
+    #[cfg(feature = "auth-digest")]
     let digest_challenge = header_values(&headers, "proxy-authenticate")
         .into_iter()
         .find(|value| value.starts_with("Digest "))
         .ok_or_else(|| anyhow!("missing Digest challenge"))?;
     assert!(basic_challenge.contains("realm="));
-    #[cfg(feature = "digest-auth")]
+    #[cfg(feature = "auth-digest")]
     assert!(digest_challenge.contains("nonce="));
 
     let basic_auth = format!(
@@ -142,7 +159,7 @@ auth:
         "upstream request leaked proxy auth header:\n{basic_upstream}"
     );
 
-    #[cfg(feature = "digest-auth")]
+    #[cfg(feature = "auth-digest")]
     {
         let (digest_backend_addr, digest_capture) = serve_http1_capture_once(
             b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nDIGEST".to_vec(),
@@ -193,13 +210,13 @@ async fn forward_connect_tunnels_bytes() -> Result<()> {
 
     let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("forward-connect.log"), |port| {
         format!(
-            r#"listeners:
-- name: forward
+            r#"edges:
+- kind: forward
+  name: forward
   listen: 127.0.0.1:{port}
   default_action:
     type: direct
   rules: []
-  mode: forward
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#
@@ -244,8 +261,9 @@ async fn forward_h3_connect_udp_smoke() -> Result<()> {
     fs::write(
         &cfg,
         format!(
-            r#"listeners:
-- name: forward-h3
+            r#"edges:
+- kind: forward
+  name: forward-h3
   listen: 127.0.0.1:{tcp_port}
   default_action:
     type: direct
@@ -258,7 +276,6 @@ async fn forward_h3_connect_udp_smoke() -> Result<()> {
     listen: 127.0.0.1:{udp_port}
     connect_udp:
       enabled: true
-  mode: forward
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
@@ -339,8 +356,9 @@ async fn forward_h3_qpx_extended_connect_smoke() -> Result<()> {
     fs::write(
         &cfg,
         format!(
-            r#"listeners:
-- name: forward-h3
+            r#"edges:
+- kind: forward
+  name: forward-h3
   listen: 127.0.0.1:{tcp_port}
   default_action:
     type: direct
@@ -353,7 +371,6 @@ async fn forward_h3_qpx_extended_connect_smoke() -> Result<()> {
     listen: 127.0.0.1:{udp_port}
     connect_udp:
       enabled: true
-  mode: forward
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
@@ -453,8 +470,9 @@ async fn forward_h3_qpx_webtransport_rate_limit_scope_enforced() -> Result<()> {
     fs::write(
         &cfg,
         format!(
-            r#"listeners:
-- name: forward-h3
+            r#"edges:
+- kind: forward
+  name: forward-h3
   listen: 127.0.0.1:{tcp_port}
   default_action:
     type: direct
@@ -473,7 +491,6 @@ async fn forward_h3_qpx_webtransport_rate_limit_scope_enforced() -> Result<()> {
     listen: 127.0.0.1:{udp_port}
     connect_udp:
       enabled: true
-  mode: forward
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
@@ -530,8 +547,9 @@ async fn forward_h3_qpx_webtransport_individual_flow_scopes_smoke() -> Result<()
     fs::write(
         &cfg,
         format!(
-            r#"listeners:
-- name: forward-h3
+            r#"edges:
+- kind: forward
+  name: forward-h3
   listen: 127.0.0.1:{tcp_port}
   default_action:
     type: direct
@@ -557,7 +575,6 @@ async fn forward_h3_qpx_webtransport_individual_flow_scopes_smoke() -> Result<()
     listen: 127.0.0.1:{udp_port}
     connect_udp:
       enabled: true
-  mode: forward
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
@@ -661,6 +678,7 @@ runtime:
     Ok(())
 }
 
+#[cfg(feature = "auth-basic")]
 fn header_values(headers: &[(String, String)], name: &str) -> Vec<String> {
     let name = name.to_ascii_lowercase();
     headers
@@ -670,7 +688,7 @@ fn header_values(headers: &[(String, String)], name: &str) -> Vec<String> {
         .collect()
 }
 
-#[cfg(feature = "digest-auth")]
+#[cfg(feature = "auth-digest")]
 fn build_digest_proxy_authorization(
     challenge: &str,
     username: &str,
@@ -703,7 +721,7 @@ fn build_digest_proxy_authorization(
     ))
 }
 
-#[cfg(feature = "digest-auth")]
+#[cfg(feature = "auth-digest")]
 fn parse_digest_challenge(input: &str) -> std::collections::HashMap<String, String> {
     let payload = input
         .strip_prefix("Digest ")
@@ -723,7 +741,7 @@ fn parse_digest_challenge(input: &str) -> std::collections::HashMap<String, Stri
     out
 }
 
-#[cfg(feature = "digest-auth")]
+#[cfg(feature = "auth-digest")]
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(digest.len() * 2);

@@ -1,0 +1,16 @@
+runtime: {}
+telemetry:
+  system_log:
+    level: info
+security: {}
+http: {}
+traffic: {}
+edges:
+  - kind: transparent
+    name: transparent-egress
+    listen: 0.0.0.0:15001
+    original_dst:
+      source: linux_so_original_dst
+    default_action:
+      type: direct
+    rules: []

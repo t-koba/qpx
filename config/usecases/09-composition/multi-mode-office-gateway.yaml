@@ -1,24 +1,17 @@
-reverse:
-- name: office-reverse
-  listen: 0.0.0.0:19082
-  routes:
-  - match:
-      host:
-      - devportal.example.com
-    timeout_ms: 15000
-    lb: round_robin
-    resilience:
-      retry:
-        attempts: 2
-        backoff_ms: 100
-    upstreams:
-    - http://10.50.0.15:8080
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 upstreams:
 - name: corp-egress
   url: http://proxy.corp.example:3128
-listeners:
-- name: office-forward
+telemetry:
+  system_log:
+    level: info
+    format: json
+  metrics:
+    listen: 127.0.0.1:19900
+    path: "/metrics"
+edges:
+- kind: forward
+  name: office-forward
   listen: 0.0.0.0:18088
   default_action:
     type: block
@@ -30,7 +23,7 @@ listeners:
       - 172.16.0.0/12
       - 192.168.0.0/16
       host:
-      - '*.corp.internal'
+      - "*.corp.internal"
     action:
       type: direct
   - name: allow-office-egress
@@ -40,12 +33,12 @@ listeners:
       - 172.16.0.0/12
       - 192.168.0.0/16
       host:
-      - '*'
+      - "*"
     action:
       type: proxy
       upstream: corp-egress
-  mode: forward
-- name: office-transparent
+- kind: transparent
+  name: office-transparent
   listen: 0.0.0.0:15004
   default_action:
     type: block
@@ -60,13 +53,23 @@ listeners:
       - 80
       - 443
       host:
-      - '*'
+      - "*"
     action:
       type: direct
-  mode: transparent
-system_log:
-  level: info
-  format: json
-metrics:
-  listen: 127.0.0.1:19900
-  path: /metrics
+- kind: reverse
+  name: office-reverse
+  listen: 0.0.0.0:19082
+  routes:
+  - match:
+      host:
+      - devportal.example.com
+    timeout_ms: 15000
+    resilience:
+      retry:
+        attempts: 2
+        backoff_ms: 100
+    target:
+      type: upstream
+      upstreams:
+      - http://10.50.0.15:8080
+      lb: round_robin

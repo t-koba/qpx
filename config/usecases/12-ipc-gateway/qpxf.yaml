@@ -27,6 +27,10 @@ handlers:
     type: wasm
     module: ${QPXF_SAMPLE_WASM_MODULE:-config/usecases/12-ipc-gateway/assets/wasm/echo.wat}
     precompile: true
+    pool:
+      min_idle: 1
+      max_instances: 4
+      prewarm: true
     max_module_bytes: 134217728
     max_stdin_bytes: 33554432
     max_memory_mb: 128

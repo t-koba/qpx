@@ -1,7 +1,7 @@
 #[cfg(feature = "tls-rustls")]
 mod imp {
 
-    use anyhow::{anyhow, Context, Result};
+    use anyhow::{Context, Result, anyhow};
     use chrono::Datelike as _;
     use lru::LruCache;
     use rcgen::{
@@ -181,13 +181,13 @@ mod imp {
     }
 
     fn ensure_path_not_symlink(path: &Path, label: &str) -> Result<()> {
-        if let Ok(meta) = fs::symlink_metadata(path) {
-            if meta.file_type().is_symlink() {
-                return Err(anyhow!(
-                    "{label} path must not be a symlink: {}",
-                    path.display()
-                ));
-            }
+        if let Ok(meta) = fs::symlink_metadata(path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(anyhow!(
+                "{label} path must not be a symlink: {}",
+                path.display()
+            ));
         }
         Ok(())
     }
@@ -486,10 +486,10 @@ mod imp {
                 .server_name()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            if let Ok(mut cache) = self.cache.lock() {
-                if let Some(entry) = cache.get(&server_name) {
-                    return Some(entry.clone());
-                }
+            if let Ok(mut cache) = self.cache.lock()
+                && let Some(entry) = cache.get(&server_name)
+            {
+                return Some(entry.clone());
             }
             let issued = self.issue_cert(&server_name).ok()?;
             if let Ok(mut cache) = self.cache.lock() {
@@ -558,7 +558,7 @@ mod imp {
             _ => {
                 return Err(anyhow!(
                     "client_cert_chain and client_key must be set together"
-                ))
+                ));
             }
         };
         if insecure_skip_verify {
@@ -583,7 +583,7 @@ pub fn init_rustls_crypto_provider() {
 // --- Stub implementation when tls-rustls is not enabled ---
 
 #[cfg(not(feature = "tls-rustls"))]
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 #[cfg(not(feature = "tls-rustls"))]
 use std::path::{Path, PathBuf};
 

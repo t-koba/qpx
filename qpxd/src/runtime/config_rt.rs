@@ -1,108 +1,71 @@
-use crate::http::modules::{compile_http_modules, CompiledHttpModuleChain, HttpModuleRegistry};
-use crate::upstream::pool::{build_named_upstream_proxies, UpstreamProxyCluster};
-use anyhow::{anyhow, Result};
+use crate::http::modules::HttpModuleRegistry;
+use crate::upstream::pool::{UpstreamProxyCluster, build_named_upstream_proxies};
+use anyhow::{Result, anyhow};
 use qpx_core::config::{
-    CertificateMatchConfig, Config, IdentityMatchConfig, ListenerConfig, MatchConfig, NamedSetKind,
-    ReverseConfig, RuleConfig, TlsFingerprintMatchConfig, TlsPassthroughMatchConfig,
-    UpstreamTlsTrustConfig,
+    AccessLogConfig, AuditLogConfig, CertificateMatchConfig, Config, IdentityMatchConfig,
+    MatchConfig, NamedSetKind, ReverseEdgeConfig, RuleConfig, TlsFingerprintMatchConfig,
+    TlsPassthroughMatchConfig, UpstreamTlsTrustConfig,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 #[derive(Clone)]
-pub struct ConfigRuntime {
-    pub raw: Arc<Config>,
+pub struct RuntimeResources {
+    pub operational: Arc<Config>,
     pub messages: MessageTexts,
-    listener_indices: HashMap<String, usize>,
+    pub access_log: AccessLogConfig,
+    pub audit_log: AuditLogConfig,
     reverse_indices: HashMap<String, usize>,
     pub ftp_semaphore: Arc<Semaphore>,
     pub connection_semaphore: Arc<Semaphore>,
     pub upstreams: HashMap<String, String>,
     pub(crate) upstream_proxies: HashMap<String, Arc<UpstreamProxyCluster>>,
-    pub(crate) http_modules_by_listener: HashMap<String, Arc<CompiledHttpModuleChain>>,
     pub(crate) http_module_registry: Arc<HttpModuleRegistry>,
 }
 
-impl Deref for ConfigRuntime {
-    type Target = Config;
-
-    fn deref(&self) -> &Self::Target {
-        self.raw.as_ref()
-    }
-}
-
-impl ConfigRuntime {
+impl RuntimeResources {
     pub(super) fn build_with_http_module_registry(
         mut config: Config,
         http_module_registry: Arc<HttpModuleRegistry>,
     ) -> Result<Self> {
         expand_upstream_trust_profiles_in_config(&mut config)?;
         expand_named_sets_in_config(&mut config)?;
-        let raw = Arc::new(config);
-        let mut listener_indices = HashMap::new();
+        let operational = Arc::new(config);
         let mut reverse_indices = HashMap::new();
-        for (idx, listener) in raw.listeners.iter().enumerate() {
-            listener_indices.insert(listener.name.clone(), idx);
-        }
-        for (idx, reverse) in raw.reverse.iter().enumerate() {
-            reverse_indices.insert(reverse.name.clone(), idx);
+        for (idx, reverse_edge) in operational.reverse_edge_configs().iter().enumerate() {
+            reverse_indices.insert(reverse_edge.name.clone(), idx);
         }
 
-        let messages = MessageTexts::from_config(raw.as_ref());
-        let ftp_semaphore = Arc::new(Semaphore::new(raw.runtime.max_ftp_concurrency));
-        let connection_semaphore = Arc::new(Semaphore::new(raw.runtime.max_concurrent_connections));
-        let upstreams = raw
+        let messages = MessageTexts::from_config(operational.as_ref());
+        let ftp_semaphore = Arc::new(Semaphore::new(operational.runtime.max_ftp_concurrency));
+        let connection_semaphore = Arc::new(Semaphore::new(
+            operational.runtime.max_concurrent_connections,
+        ));
+        let upstreams = operational
             .upstreams
             .iter()
             .map(|u| (u.name.clone(), u.url.clone()))
             .collect();
-        let upstream_proxies = build_named_upstream_proxies(raw.upstreams.as_slice())?;
-        let http_modules_by_listener = raw
-            .listeners
-            .iter()
-            .map(|listener| {
-                Ok((
-                    listener.name.clone(),
-                    compile_http_modules(
-                        listener.http_modules.as_slice(),
-                        http_module_registry.as_ref(),
-                    )?,
-                ))
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
-
+        let upstream_proxies = build_named_upstream_proxies(operational.upstreams.as_slice())?;
         Ok(Self {
-            raw,
+            operational: operational.clone(),
             messages,
-            listener_indices,
+            access_log: operational.telemetry.access_log.clone(),
+            audit_log: operational.telemetry.audit_log.clone(),
             reverse_indices,
             ftp_semaphore,
             connection_semaphore,
             upstreams,
             upstream_proxies,
-            http_modules_by_listener,
             http_module_registry,
         })
     }
 
-    pub(super) fn listener_config(&self, name: &str) -> Option<&ListenerConfig> {
-        let idx = *self.listener_indices.get(name)?;
-        self.raw.listeners.get(idx)
-    }
-
-    pub(super) fn reverse_config(&self, name: &str) -> Option<&ReverseConfig> {
+    pub(super) fn reverse_config(&self, name: &str) -> Option<&ReverseEdgeConfig> {
         let idx = *self.reverse_indices.get(name)?;
-        self.raw.reverse.get(idx)
-    }
-
-    pub(super) fn listener_http_modules(
-        &self,
-        name: &str,
-    ) -> Option<&Arc<CompiledHttpModuleChain>> {
-        self.http_modules_by_listener.get(name)
+        self.operational.reverse_edges().nth(idx)
     }
 
     pub(super) fn http_module_registry(&self) -> &Arc<HttpModuleRegistry> {
@@ -122,7 +85,7 @@ pub(super) fn expand_named_sets_in_config(config: &mut Config) -> Result<()> {
         return Ok(());
     }
 
-    for listener in &mut config.listeners {
+    for listener in config.ingress_edges_mut() {
         for rule in &mut listener.rules {
             expand_rule_named_sets(rule, &registry, &format!("listener {}", listener.name))?;
         }
@@ -135,19 +98,19 @@ pub(super) fn expand_named_sets_in_config(config: &mut Config) -> Result<()> {
         }
     }
 
-    for reverse in &mut config.reverse {
-        for rule in &mut reverse.connection_filter {
+    for reverse_edge in config.reverse_edges_mut() {
+        for rule in &mut reverse_edge.connection_filter {
             expand_rule_named_sets(
                 rule,
                 &registry,
-                &format!("reverse {} connection_filter", reverse.name),
+                &format!("reverse_edge {} connection_filter", reverse_edge.name),
             )?;
         }
-        for (idx, route) in reverse.routes.iter_mut().enumerate() {
+        for (idx, route) in reverse_edge.routes.iter_mut().enumerate() {
             expand_match_config(
                 &mut route.r#match,
                 &registry,
-                &format!("reverse {} route[{idx}]", reverse.name),
+                &format!("reverse_edge {} route[{idx}]", reverse_edge.name),
             )?;
             if let Some(http) = route.http.as_mut() {
                 for (rule_idx, response_rule) in http.response_rules.iter_mut().enumerate() {
@@ -156,19 +119,19 @@ pub(super) fn expand_named_sets_in_config(config: &mut Config) -> Result<()> {
                             match_cfg,
                             &registry,
                             &format!(
-                                "reverse {} route[{idx}] http.response_rules[{rule_idx}]",
-                                reverse.name
+                                "reverse_edge {} route[{idx}] http.response_rules[{rule_idx}]",
+                                reverse_edge.name
                             ),
                         )?;
                     }
                 }
             }
         }
-        for (idx, route) in reverse.tls_passthrough_routes.iter_mut().enumerate() {
+        for (idx, route) in reverse_edge.tls_passthrough_routes.iter_mut().enumerate() {
             expand_tls_passthrough_match(
                 &mut route.r#match,
                 &registry,
-                &format!("reverse {} tls_passthrough[{idx}]", reverse.name),
+                &format!("reverse_edge {} tls_passthrough[{idx}]", reverse_edge.name),
             )?;
         }
     }
@@ -178,7 +141,7 @@ pub(super) fn expand_named_sets_in_config(config: &mut Config) -> Result<()> {
 
 fn load_named_set_registry(config: &Config) -> Result<HashMap<String, LoadedNamedSet>> {
     let mut registry = HashMap::new();
-    for set in &config.named_sets {
+    for set in &config.security.named_sets {
         let mut values = Vec::new();
         append_unique_strings(&mut values, set.values.iter().cloned());
         if let Some(path) = set.file.as_deref() {
@@ -224,11 +187,12 @@ fn append_unique_strings(out: &mut Vec<String>, values: impl IntoIterator<Item =
 }
 
 pub(super) fn expand_upstream_trust_profiles_in_config(config: &mut Config) -> Result<()> {
-    if config.upstream_trust_profiles.is_empty() {
+    if config.security.upstream_trust_profiles.is_empty() {
         return Ok(());
     }
 
     let registry = config
+        .security
         .upstream_trust_profiles
         .iter()
         .map(|profile| (profile.name.clone(), profile.trust.clone()))
@@ -243,7 +207,7 @@ pub(super) fn expand_upstream_trust_profiles_in_config(config: &mut Config) -> R
         )?;
     }
 
-    for listener in &mut config.listeners {
+    for listener in config.ingress_edges_mut() {
         if let Some(tls) = listener.tls_inspection.as_mut() {
             tls.upstream_trust = merge_upstream_trust_profile(
                 tls.upstream_trust_profile.as_deref(),
@@ -254,13 +218,13 @@ pub(super) fn expand_upstream_trust_profiles_in_config(config: &mut Config) -> R
         }
     }
 
-    for reverse in &mut config.reverse {
-        for (idx, route) in reverse.routes.iter_mut().enumerate() {
+    for reverse_edge in config.reverse_edges_mut() {
+        for (idx, route) in reverse_edge.routes.iter_mut().enumerate() {
             route.upstream_trust = merge_upstream_trust_profile(
                 route.upstream_trust_profile.as_deref(),
                 route.upstream_trust.take(),
                 &registry,
-                &format!("reverse {} route[{idx}]", reverse.name),
+                &format!("reverse_edge {} route[{idx}]", reverse_edge.name),
             )?;
         }
     }

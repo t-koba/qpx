@@ -1,5 +1,13 @@
-reverse:
-- name: reverse-affinity-policy
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+caches:
+- name: reverse-redis
+  kind: redis
+  endpoint: redis://127.0.0.1:6379/4
+  timeout_ms: 1500
+  max_object_bytes: 2097152
+edges:
+- kind: reverse
+  name: reverse-affinity-policy
   listen: 0.0.0.0:19084
   routes:
   - name: store-api
@@ -7,8 +15,8 @@ reverse:
       host:
       - store.example.com
       path:
-      - /api/*
-      - /cart/*
+      - "/api/*"
+      - "/cart/*"
     http:
       response_rules:
       - name: maintenance-fallback
@@ -36,7 +44,7 @@ reverse:
           - 200-299
           headers:
           - name: set-cookie
-            regex: .+
+            regex: ".+"
         effects:
           cache:
             bypass: true
@@ -61,21 +69,15 @@ reverse:
         attempts: 2
         backoff_ms: 100
     timeout_ms: 10000
-    backends:
-    - name: stable
-      weight: 95
-      upstreams:
-      - http://10.70.0.11:8080
-      - http://10.70.0.12:8080
-    - name: canary
-      weight: 5
-      upstreams:
-      - http://10.70.0.99:8080
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-cache:
-  backends:
-  - name: reverse-redis
-    kind: redis
-    endpoint: redis://127.0.0.1:6379/4
-    timeout_ms: 1500
-    max_object_bytes: 2097152
+    target:
+      type: weighted
+      backends:
+      - name: stable
+        weight: 95
+        upstreams:
+        - http://10.70.0.11:8080
+        - http://10.70.0.12:8080
+      - name: canary
+        weight: 5
+        upstreams:
+        - http://10.70.0.99:8080

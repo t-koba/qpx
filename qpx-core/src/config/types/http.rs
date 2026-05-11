@@ -1,11 +1,12 @@
 use super::super::defaults::*;
 use super::{HeaderControl, LocalResponseConfig, MatchConfig};
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use serde_yaml::{Mapping, Value};
-use std::collections::{BTreeMap, HashMap};
+use serde::de::DeserializeOwned;
+use serde_yaml::Value;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct HttpModuleConfig {
     #[serde(rename = "type")]
     pub r#type: String,
@@ -13,8 +14,8 @@ pub struct HttpModuleConfig {
     pub id: Option<String>,
     #[serde(default)]
     pub order: Option<i16>,
-    #[serde(flatten)]
-    pub settings: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub settings: Value,
 }
 
 impl HttpModuleConfig {
@@ -22,11 +23,10 @@ impl HttpModuleConfig {
     where
         T: DeserializeOwned,
     {
-        let mut mapping = Mapping::new();
-        for (key, value) in &self.settings {
-            mapping.insert(Value::String(key.clone()), value.clone());
+        if self.settings.is_null() {
+            return serde_yaml::from_value(Value::Mapping(Default::default()));
         }
-        serde_yaml::from_value(Value::Mapping(mapping))
+        serde_yaml::from_value(self.settings.clone())
     }
 }
 
@@ -86,6 +86,16 @@ pub struct SubrequestModuleConfig {
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
+    pub max_response_bytes: Option<usize>,
+    #[serde(default)]
+    pub allowed_schemes: Vec<String>,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default = "default_subrequest_deny_redirects")]
+    pub deny_redirects: bool,
+    #[serde(default = "default_subrequest_deny_private_ip_redirects")]
+    pub deny_private_ip_redirects: bool,
+    #[serde(default)]
     pub pass_headers: Vec<String>,
     #[serde(default)]
     pub request_headers: HashMap<String, String>,
@@ -95,6 +105,14 @@ pub struct SubrequestModuleConfig {
     pub copy_response_headers_to_response: Vec<HeaderCaptureConfig>,
     #[serde(default)]
     pub response_mode: Option<SubrequestResponseMode>,
+}
+
+fn default_subrequest_deny_redirects() -> bool {
+    true
+}
+
+fn default_subrequest_deny_private_ip_redirects() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

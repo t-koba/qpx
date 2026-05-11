@@ -1,8 +1,7 @@
-# Reverse publish to WebSocket backends over both ws:// and wss://.
-# Health checks stay HTTP-shaped: qpx normalizes ws:// -> http:// and
-# wss:// -> https:// for route health probes.
-reverse:
-- name: reverse-websocket-upstream
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: reverse
+  name: reverse-websocket-upstream
   listen: 0.0.0.0:19446
   routes:
   - name: chat-ws
@@ -10,7 +9,6 @@ reverse:
       host:
       - chat.example.com
     timeout_ms: 60000
-    lb: round_robin
     resilience:
       retry:
         attempts: 1
@@ -21,20 +19,22 @@ reverse:
       fail_threshold: 3
       cooldown_ms: 30000
       http:
-        path: /healthz
+        path: "/healthz"
         method: GET
         expected_status:
         - 200
         - 204
-    upstreams:
-    - ws://10.50.0.10:8080
-    - ws://10.50.0.11:8080
+    target:
+      type: upstream
+      upstreams:
+      - ws://10.50.0.10:8080
+      - ws://10.50.0.11:8080
+      lb: round_robin
   - name: events-wss
     match:
       host:
       - events.example.com
     timeout_ms: 60000
-    lb: round_robin
     resilience:
       retry:
         attempts: 1
@@ -48,11 +48,13 @@ reverse:
       fail_threshold: 3
       cooldown_ms: 30000
       http:
-        path: /healthz
+        path: "/healthz"
         method: GET
         expected_status:
         - 200
         - 204
-    upstreams:
-    - wss://events-backend.internal.example.com:8443
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
+    target:
+      type: upstream
+      upstreams:
+      - wss://events-backend.internal.example.com:8443
+      lb: round_robin

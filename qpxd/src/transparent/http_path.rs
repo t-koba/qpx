@@ -1,6 +1,6 @@
-use super::destination::{resolve_http_target, resolve_upstream, ConnectTarget};
+use super::destination::{ConnectTarget, resolve_http_target, resolve_upstream};
 use crate::destination::DestinationInputs;
-use crate::http::base_fields::{extract_base_request_fields, BaseRequestContext};
+use crate::http::base_fields::{BaseRequestContext, extract_base_request_fields};
 use crate::http::body::Body;
 use crate::http::body_size::observed_request_size;
 use crate::http::common::{
@@ -8,29 +8,29 @@ use crate::http::common::{
     too_many_requests_response as too_many_requests,
 };
 use crate::http::http1_codec::serve_http1_with_interim;
-use crate::http::interim::{serve_h2_with_interim, sniff_h2_preface, H2_PREFACE};
+use crate::http::interim::{H2_PREFACE, serve_h2_with_interim, sniff_h2_preface};
 use crate::http::l7::{
     finalize_response_for_request, finalize_response_with_headers_in_place,
     handle_max_forwards_in_place, prepare_request_with_headers_in_place,
 };
-use crate::http::policy::{evaluate_listener_policy, ListenerPolicyDecision};
-use crate::http::preflight::{preflight_validate, PreflightOptions, PreflightOutcome};
+use crate::http::policy::{ListenerPolicyDecision, evaluate_listener_policy};
+use crate::http::preflight::{PreflightOptions, PreflightOutcome, preflight_validate};
 use crate::http::response_policy::{
-    apply_listener_response_policy, ListenerResponsePolicyDecision, ResponseBodyObservationLimits,
+    ListenerResponsePolicyDecision, ResponseBodyObservationLimits, apply_listener_response_policy,
 };
 use crate::http::websocket::is_websocket_upgrade;
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, attach_log_context, emit_audit_log, enforce_ext_authz,
     merge_header_controls, merge_policy_tags, resolve_identity, sanitize_headers_for_policy,
-    strip_untrusted_identity_headers, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    strip_untrusted_identity_headers, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
 use crate::upstream::http1::{
-    proxy_http1_request_with_interim, proxy_websocket_http1, WebsocketProxyConfig,
+    WebsocketProxyConfig, proxy_http1_request_with_interim, proxy_websocket_http1,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use hyper::{Request, StatusCode};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
@@ -58,8 +58,8 @@ where
 {
     let listener_name = listener_name.to_string();
     let header_read_timeout =
-        Duration::from_millis(runtime.state().config.runtime.http_header_read_timeout_ms);
-    let access_cfg = runtime.state().config.access_log.clone();
+        Duration::from_millis(runtime.state().plan.limits.http_header_read_timeout_ms);
+    let access_cfg = runtime.state().resources.access_log.clone();
     let access_name = Arc::<str>::from(listener_name.as_str());
 
     let service = handler_fn(move |req: Request<Body>| {
@@ -87,7 +87,7 @@ where
                     Ok(finalize_response_for_request(
                         &request_method,
                         request_version,
-                        error_state.config.identity.proxy_name.as_str(),
+                        error_state.plan.identity.proxy_name.as_ref(),
                         hyper::Response::builder()
                             .status(StatusCode::BAD_GATEWAY)
                             .body(Body::from(error_state.messages.proxy_error.clone()))

@@ -1,20 +1,21 @@
 use super::{
-    parse_module_settings, HttpModule, HttpModuleContext, HttpModuleFactory, HttpModuleRequestView,
+    BodyAccess, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
+    HttpModuleFactory, HttpModuleRequestView, HttpModuleStage, ModuleStages, parse_module_settings,
 };
 use crate::http::body::Body;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, VARY};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use hyper::Response;
 use qpx_core::config::{HttpModuleConfig, ResponseCompressionModuleConfig};
 use std::io::{self, Write};
-use std::sync::{mpsc as std_mpsc, Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, mpsc as std_mpsc};
 use tokio::sync::oneshot;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub(super) struct ResponseCompressionModuleFactory;
@@ -56,8 +57,13 @@ impl ResponseCompressionModule {
             HeaderValue::from_static(encoding.http_name()),
         );
         append_vary_accept_encoding(&mut parts.headers);
-        let body_read_timeout =
-            Duration::from_millis(ctx.runtime.config.runtime.upstream_http_timeout_ms.max(1));
+        let body_read_timeout = Duration::from_millis(
+            ctx.runtime_state()
+                .plan
+                .limits
+                .upstream_http_timeout_ms
+                .max(1),
+        );
         let body = stream_compressed_body(body, encoding, &self.config, body_read_timeout);
         Ok(Response::from_parts(parts, body))
     }
@@ -69,12 +75,32 @@ impl HttpModule for ResponseCompressionModule {
         100
     }
 
-    async fn on_downstream_response(
+    fn capabilities(&self) -> HttpModuleCapabilities {
+        let mut capabilities =
+            HttpModuleCapabilities::headers_only(ModuleStages::DOWNSTREAM_RESPONSE);
+        capabilities.body_access = BodyAccess::Streaming;
+        capabilities.mutates_response_headers = true;
+        capabilities.needs_frozen_request = true;
+        capabilities
+    }
+
+    async fn call<'a>(
         &self,
+        stage: HttpModuleStage,
         ctx: &mut HttpModuleContext,
-        response: Response<Body>,
-    ) -> Result<Response<Body>> {
-        self.compress(ctx, response).await
+        event: HttpModuleEvent<'a>,
+    ) -> Result<HttpModuleEvent<'a>> {
+        let HttpModuleStage::DownstreamResponse = stage else {
+            return Ok(event);
+        };
+        let HttpModuleEvent::DownstreamResponse(response) = event else {
+            return Err(anyhow!(
+                "response_compression received invalid downstream_response event"
+            ));
+        };
+        Ok(HttpModuleEvent::DownstreamResponse(
+            self.compress(ctx, response).await?,
+        ))
     }
 }
 

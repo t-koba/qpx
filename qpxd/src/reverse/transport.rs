@@ -1,14 +1,14 @@
-use super::request_template::{request_is_retryable, ReverseRequestTemplate};
-use super::router::{normalize_host_for_match, ReverseRouter};
+use super::request_template::{ReverseRequestTemplate, request_is_retryable};
+use super::router::{ReverseRouter, normalize_host_for_match};
 use crate::cache::CacheRequestKey;
 use crate::http::base_fields::{
-    extract_base_request_fields, BaseRequestContext, BaseRequestFields,
+    BaseRequestContext, BaseRequestFields, extract_base_request_fields,
 };
 use crate::http::body::Body;
 use crate::http::body_size::{buffer_request_body, observed_request_size};
 use crate::http::cache_flow::{
-    clone_request_head_for_revalidation, lookup_with_revalidation,
-    process_upstream_response_for_cache, CacheLookupDecision, CacheWritebackContext,
+    CacheLookupDecision, CacheWritebackContext, clone_request_head_for_revalidation,
+    lookup_with_revalidation, process_upstream_response_for_cache,
 };
 use crate::http::common::too_many_requests_response as too_many_requests;
 use crate::http::header_control::apply_request_headers;
@@ -18,32 +18,32 @@ use crate::http::l7::{
 };
 use crate::http::local_response::build_local_response;
 use crate::http::preflight::{
-    preflight_validate, ConnectPolicy, PreflightOptions, PreflightOutcome,
+    ConnectPolicy, PreflightOptions, PreflightOutcome, preflight_validate,
 };
 use crate::http::websocket::is_websocket_upgrade;
-use crate::ipc_client::{proxy_ipc, proxy_ipc_upstream, ClientConnInfo};
+use crate::ipc_client::{ClientConnInfo, proxy_ipc, proxy_ipc_upstream};
 use crate::policy_context::{
+    AuditRecord, EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     attach_log_context, emit_audit_log, enforce_ext_authz, merge_header_controls,
     merge_policy_tags, resolve_identity, sanitize_headers_for_policy,
-    strip_untrusted_identity_headers, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    strip_untrusted_identity_headers, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
 use crate::tls::UpstreamCertificateInfo;
 use crate::upstream::origin::{
-    proxy_http, proxy_http_with_interim, proxy_websocket, OriginEndpoint,
+    OriginEndpoint, proxy_http, proxy_http_with_interim, proxy_websocket,
 };
 use crate::upstream::raw_http1::InterimResponseHead;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::{Method, Request, Response, StatusCode};
 use metrics::{counter, histogram};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_core::rules::CompiledHeaderControl;
 use std::convert::Infallible;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::time::{sleep, timeout, Duration, Instant};
+use std::sync::atomic::Ordering;
+use tokio::time::{Duration, Instant, sleep, timeout};
 use tracing::warn;
 use url::Url;
 
@@ -61,18 +61,16 @@ mod reverse_response_rules;
 #[path = "tls_accept.rs"]
 mod tls_accept;
 
-use self::reverse_destination::{
-    classify_reverse_destination, merge_destination_resolution_override,
-};
+use self::reverse_destination::classify_reverse_destination;
 use self::reverse_dispatch::dispatch_reverse_request;
 use self::reverse_mirrors::{
     dispatch_mirrors, record_reverse_upstream_error, record_reverse_upstream_status,
     record_reverse_upstream_timeout, request_is_templateable, request_seed,
 };
 use self::reverse_path_rewrite::apply_path_rewrite;
-use self::reverse_response_rules::{apply_response_rules, ResponseRuleInput};
+use self::reverse_response_rules::{ResponseRuleInput, apply_response_rules};
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
-pub(in crate::reverse) use self::tls_accept::{build_tls_acceptor, ReverseTlsAcceptor};
+pub(in crate::reverse) use self::tls_accept::{ReverseTlsAcceptor, build_tls_acceptor};
 
 enum ResponseRuleDecision {
     Continue {
@@ -169,7 +167,7 @@ pub(super) async fn handle_request_with_interim(
         empty_interim_response(finalize_response_for_request(
             &request_method,
             request_version,
-            state.config.identity.proxy_name.as_str(),
+            state.plan.identity.proxy_name.as_ref(),
             Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(Body::from(state.messages.reverse_error.clone()))
@@ -186,12 +184,12 @@ pub(crate) async fn handle_request_inner(
     conn: ReverseConnInfo,
 ) -> Result<(ReverseInterimResponses, Response<Body>)> {
     let state = runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
     if let PreflightOutcome::Reject(response) = preflight_validate(
         &req,
         proxy_name,
         PreflightOptions {
-            trace_enabled: state.config.runtime.trace_enabled,
+            trace_enabled: state.plan.limits.trace_enabled,
             trace_disabled_message: state.messages.trace_disabled.as_str(),
             connect_policy: ConnectPolicy::Reject {
                 status: StatusCode::METHOD_NOT_ALLOWED,

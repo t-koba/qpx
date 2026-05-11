@@ -1,13 +1,14 @@
-# Loopback-only TRACE diagnostic profile.
-# TRACE stays opt-in and keeps header reflection sanitized by default.
-# Example:
-#   curl -x http://127.0.0.1:18087 -X TRACE -H 'Max-Forwards: 0' http://trace.local/diag
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 runtime:
   trace_enabled: true
   trace_reflect_all_headers: false
-
-listeners:
-- name: forward-trace-debug
+telemetry:
+  system_log:
+    level: info
+    format: json
+edges:
+- kind: forward
+  name: forward-trace-debug
   listen: 127.0.0.1:18087
   default_action:
     type: block
@@ -16,7 +17,7 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
       - trace.local
       method:
@@ -25,9 +26,3 @@ listeners:
       - GET
     action:
       type: direct
-  mode: forward
-
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-system_log:
-  level: info
-  format: json

@@ -1,7 +1,18 @@
-# Built-in local auth sample for tests, local development, or small deployments.
-# Enterprise profiles should usually prefer trusted identity_sources + ext_authz.
-listeners:
-- name: local-auth-forward
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+security:
+  auth:
+    users:
+    - username: alice@example.invalid
+      password: change-me
+    - username: bob@example.invalid
+      password: change-me
+    - username: ops@example.invalid
+      password: change-me
+    - username: digestonly@example.invalid
+      ha1: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+edges:
+- kind: forward
+  name: local-auth-forward
   listen: 127.0.0.1:18082
   default_action:
     type: block
@@ -9,22 +20,9 @@ listeners:
   - name: allow-authenticated-users
     match:
       host:
-      - '*'
+      - "*"
     auth:
       require:
       - local
     action:
       type: direct
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-auth:
-  users:
-  - username: alice@example.invalid
-    password: change-me
-  - username: bob@example.invalid
-    password: change-me
-  - username: ops@example.invalid
-    password: change-me
-  - username: digestonly@example.invalid
-    # SHA-256 HA1 lets you preload Digest credentials without storing a cleartext password.
-    ha1: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

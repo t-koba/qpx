@@ -1,0 +1,31 @@
+listen: ${QPXF_UNIX_LISTEN}
+workers: 8
+max_connections: 64
+max_requests_per_connection: 64
+max_params_bytes: 1048576
+max_stdin_bytes: 33554432
+input_idle_timeout_ms: 30000
+conn_idle_timeout_ms: 60000
+handlers:
+- match:
+    path_prefix: /php/
+  backend:
+    type: fastcgi
+    address: ${QPXF_FASTCGI_ADDRESS:-127.0.0.1:9000}
+    timeout_ms: 3000
+    pool:
+      max_concurrency: 128
+      max_idle: 16
+    max_stdin_bytes: 33554432
+    max_stdout_bytes: 33554432
+    max_stderr_bytes: 1048576
+- match:
+    path_prefix: /scgi/
+  backend:
+    type: scgi
+    address: ${QPXF_SCGI_ADDRESS:-127.0.0.1:4000}
+    timeout_ms: 3000
+    max_concurrency: 128
+    max_stdin_bytes: 33554432
+    max_stdout_bytes: 33554432
+    max_stderr_bytes: 1048576

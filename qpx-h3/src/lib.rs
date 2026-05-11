@@ -7,10 +7,10 @@ mod response;
 mod server;
 mod transport;
 
-pub use client::{open_extended_connect_stream, ExtendedConnectStream};
+pub use client::{ExtendedConnectStream, open_extended_connect_stream};
 pub use server::{
-    serve_connection, ConnectionInfo, Protocol, Request, RequestHandler, Response, Settings,
-    SupportLevel, WebTransportSession,
+    ConnectionInfo, Protocol, Request, RequestHandler, Response, Settings, SupportLevel,
+    WebTransportSession, serve_connection,
 };
 pub use transport::{
     BidiStream, OpenStreams, RequestStream, StreamDatagrams, UniRecvStream, UniSendStream,

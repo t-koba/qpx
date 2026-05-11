@@ -2,7 +2,7 @@ use anyhow::Result;
 use ldap3::{LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
 use qpx_core::config::LdapConfig;
 use std::fmt::Write as _;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 #[derive(Debug, Clone)]
 pub struct LdapAuthenticator {

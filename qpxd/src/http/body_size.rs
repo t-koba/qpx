@@ -1,8 +1,8 @@
 use crate::http::body::Body;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use http::header::CONTENT_LENGTH;
 use http::HeaderMap;
+use http::header::CONTENT_LENGTH;
 use hyper::{Request, Response};
 use std::fmt;
 use std::time::Duration;
@@ -262,7 +262,7 @@ fn parse_content_length(headers: &http::HeaderMap) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     #[tokio::test]
     async fn buffer_request_body_rejects_before_exceeding_hard_cap() {

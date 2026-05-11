@@ -1,18 +1,18 @@
-use super::super::connect::{decide_connect_action_from_client_hello, ConnectPolicyInput};
+use super::super::connect::{ConnectPolicyInput, decide_connect_action_from_client_hello};
 #[cfg(feature = "mitm")]
 use crate::http::body::Body;
 #[cfg(feature = "mitm")]
 use crate::http::http1_codec::serve_http1_with_interim;
 #[cfg(feature = "mitm")]
-use crate::http::mitm::{proxy_mitm_request, MitmRouteContext};
+use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
 use crate::http3::server::H3ServerRequestStream;
 #[cfg(feature = "mitm")]
-use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream};
-#[cfg(feature = "mitm")]
 use crate::tls::CompiledUpstreamTlsTrust;
-use crate::tls::{extract_client_hello_info, looks_like_tls_client_hello, TlsClientHelloInfo};
+#[cfg(feature = "mitm")]
+use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream};
+use crate::tls::{TlsClientHelloInfo, extract_client_hello_info, looks_like_tls_client_hello};
 use crate::upstream::connect::TunnelIo;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes};
 #[cfg(feature = "mitm")]
 use hyper::Request;
@@ -147,7 +147,7 @@ pub(super) async fn prepare_h3_connect_stream(
     Option<TlsClientHelloInfo>,
     ActionConfig,
 )> {
-    let peek_timeout = Duration::from_millis(runtime.state().config.runtime.tls_peek_timeout_ms);
+    let peek_timeout = Duration::from_millis(runtime.state().plan.limits.tls_peek_timeout_ms);
     let sniff = sniff_h3_connect_client_hello(&mut req_stream, peek_timeout).await?;
     let client_hello = looks_like_tls_client_hello(&sniff)
         .then(|| extract_client_hello_info(&sniff))
@@ -258,7 +258,7 @@ pub(super) async fn mitm_h3_connect_stream(input: MitmH3ConnectInput) -> Result<
             let connect_host = connect_host.clone();
             let upstream_cert = upstream_cert.clone();
             async move {
-                let proxy_name = runtime.state().config.identity.proxy_name.clone();
+                let proxy_name = runtime.state().plan.identity.proxy_name.to_string();
                 let proxy_error = runtime.state().messages.proxy_error.clone();
                 let request_method = inner_req.method().clone();
                 let request_version = inner_req.version();
@@ -290,7 +290,7 @@ pub(super) async fn mitm_h3_connect_stream(input: MitmH3ConnectInput) -> Result<
                 }
             }
         });
-        let access_cfg = runtime.state().config.access_log.clone();
+        let access_cfg = runtime.state().resources.access_log.clone();
         let service = AccessLogService::new(
             service,
             remote_addr,

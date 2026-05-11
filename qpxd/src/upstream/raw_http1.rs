@@ -1,9 +1,9 @@
 use crate::http::body::Body;
 use crate::tls::UpstreamCertificateInfo;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use hyper::header::{
-    HeaderMap, HeaderName, HeaderValue, CONNECTION, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING,
+    CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, TRAILER, TRANSFER_ENCODING,
 };
 use hyper::{Method, Request, Response, StatusCode, Version};
 use std::future::Future;
@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 const MAX_HEADER_BYTES: usize = 128 * 1024;
@@ -160,10 +160,10 @@ where
     if use_chunked {
         headers.remove(CONTENT_LENGTH);
         headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
-        if let Some(names) = announced_trailers.as_deref() {
-            if let Ok(value) = HeaderValue::from_str(names) {
-                headers.insert(TRAILER, value);
-            }
+        if let Some(names) = announced_trailers.as_deref()
+            && let Ok(value) = HeaderValue::from_str(names)
+        {
+            headers.insert(TRAILER, value);
         }
     } else if declared_length.is_none() {
         headers.remove(CONTENT_LENGTH);
@@ -281,12 +281,13 @@ where
         None => body.trailers().await?,
     };
     stream.write_all(b"0\r\n").await?;
-    if let Some(trailers) = trailers {
-        if allow_trailers && crate::http::semantics::validate_request_trailers(&trailers).is_ok() {
-            let mut trailer_block = Vec::with_capacity(256);
-            serialize_headers(&trailers, &mut trailer_block)?;
-            stream.write_all(&trailer_block).await?;
-        }
+    if let Some(trailers) = trailers
+        && allow_trailers
+        && crate::http::semantics::validate_request_trailers(&trailers).is_ok()
+    {
+        let mut trailer_block = Vec::with_capacity(256);
+        serialize_headers(&trailers, &mut trailer_block)?;
+        stream.write_all(&trailer_block).await?;
     }
     stream.write_all(b"\r\n").await?;
     Ok(())
@@ -392,15 +393,14 @@ where
 {
     let body = match head.body_kind {
         ResponseBodyKind::Empty => {
-            if let Some(recycler) = recycler {
-                if head.status != StatusCode::SWITCHING_PROTOCOLS
-                    && prefix.is_empty()
-                    && response_keep_alive(head.version, &head.headers)
-                {
-                    tokio::spawn(async move {
-                        recycler.recycle(stream).await;
-                    });
-                }
+            if let Some(recycler) = recycler
+                && head.status != StatusCode::SWITCHING_PROTOCOLS
+                && prefix.is_empty()
+                && response_keep_alive(head.version, &head.headers)
+            {
+                tokio::spawn(async move {
+                    recycler.recycle(stream).await;
+                });
             }
             Body::empty()
         }
@@ -463,15 +463,15 @@ where
         };
         match result {
             Ok(Some((stream, leftover))) => {
-                if let Some(recycler) = recycler {
-                    if leftover.is_empty() {
-                        recycler.recycle(stream).await;
-                    }
+                if let Some(recycler) = recycler
+                    && leftover.is_empty()
+                {
+                    recycler.recycle(stream).await;
                 }
             }
             Ok(None) => {}
             Err(err) => {
-                warn!(error = ?err, "reverse raw http/1 response body relay failed");
+                warn!(error = ?err, "reverse_edges raw http/1 response body relay failed");
                 sender.abort();
             }
         }
@@ -821,7 +821,7 @@ fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {
                 .map_err(|_| anyhow!("invalid content-length value: {}", part.trim()))?;
             match parsed {
                 Some(existing) if existing != len => {
-                    return Err(anyhow!("conflicting content-length values"))
+                    return Err(anyhow!("conflicting content-length values"));
                 }
                 Some(_) => {}
                 None => parsed = Some(len),
@@ -876,9 +876,11 @@ mod tests {
                     break;
                 }
             }
-            assert!(std::str::from_utf8(&raw)
-                .expect("utf8")
-                .starts_with("GET /asset HTTP/1.1\r\n"));
+            assert!(
+                std::str::from_utf8(&raw)
+                    .expect("utf8")
+                    .starts_with("GET /asset HTTP/1.1\r\n")
+            );
             stream
                 .write_all(
                     b"HTTP/1.1 103 Early Hints\r\nLink: </app.css>; rel=preload; as=style\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",

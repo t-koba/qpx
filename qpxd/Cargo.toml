@@ -5,19 +5,24 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["tls-rustls", "http3-backend-h3", "mitm", "acme", "digest-auth", "sha2-hash"]
+default = [
+  "tls-rustls",
+  "http3-backend-h3",
+  "mitm",
+  "acme",
+  "auth-digest",
+  "auth-ldap-rustls",
+]
 
 tls-rustls = [
   "dep:rustls",
   "dep:tokio-rustls",
   "qpx-core/tls-rustls",
-  "qpx-auth/ldap-auth-rustls",
 ]
 tls-native = [
   "dep:native-tls",
   "dep:tokio-native-tls",
   "qpx-core/tls-native",
-  "qpx-auth/ldap-auth-native",
 ]
 
 # QUIC/HTTP/3 requires rustls (via quinn).
@@ -29,12 +34,14 @@ http3-backend-qpx = ["http3", "tls-rustls", "dep:quinn", "dep:qpx-h3"]
 mitm = ["tls-rustls"]
 acme = ["dep:qpx-acme", "tls-rustls", "qpx-acme/http3"]
 
-digest-auth = ["qpx-auth/digest-auth"]
-sha2-hash = []
+auth-basic = ["dep:qpx-auth", "qpx-auth/basic-auth"]
+auth-digest = ["auth-basic", "qpx-auth/digest-auth"]
+auth-ldap-rustls = ["auth-basic", "tls-rustls", "qpx-auth/ldap-auth-rustls"]
+auth-ldap-native = ["auth-basic", "tls-native", "qpx-auth/ldap-auth-native"]
 
 [dependencies]
 qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
-qpx-auth = { path = "../qpx-auth", default-features = false, features = ["auth-proxy"] }
+qpx-auth = { path = "../qpx-auth", default-features = false, optional = true }
 qpx-acme = { path = "../qpx-acme", optional = true }
 qpx-observability = { path = "../qpx-observability" }
 qpx-h3 = { path = "../qpx-h3", optional = true }
@@ -85,7 +92,8 @@ h3-datagram = { workspace = true, optional = true }
 tokio.workspace = true
 socket2.workspace = true
 
-# Auth
+# Policy assertion verification and certificate/key parsing used by qpxd itself.
+# Built-in proxy auth providers stay in optional qpx-auth features above.
 base64.workspace = true
 pem.workspace = true
 ring.workspace = true
@@ -99,6 +107,7 @@ uuid = { version = "1.21.0", features = ["v4"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Networking_WinSock",
+  "Win32_Security",
   "Win32_System_Threading",
 ] }
 

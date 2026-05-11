@@ -1,5 +1,5 @@
 use crate::http::body::Body;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use hyper::{Method, Request, Response, StatusCode};
 use qpx_core::config::FtpConfig;
@@ -421,10 +421,10 @@ fn parse_ftp_status_code(line: &str) -> Result<u16> {
 }
 
 fn ensure_safe_ftp_path(path: Option<&str>) -> Result<()> {
-    if let Some(path) = path {
-        if path.as_bytes().iter().any(|b| matches!(b, b'\r' | b'\n')) {
-            return Err(anyhow!("FTP path contains a line break"));
-        }
+    if let Some(path) = path
+        && path.as_bytes().iter().any(|b| matches!(b, b'\r' | b'\n'))
+    {
+        return Err(anyhow!("FTP path contains a line break"));
     }
     Ok(())
 }

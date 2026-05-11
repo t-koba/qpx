@@ -16,7 +16,7 @@ jobs:
       ASAN_OPTIONS: detect_leaks=0
       RUSTFLAGS: -Zsanitizer=address
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
@@ -34,7 +34,7 @@ jobs:
     name: fuzz smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
       - name: install fuzzing toolchain
         run: |

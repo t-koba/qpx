@@ -1,6 +1,6 @@
 use super::freshness::active_range;
 use super::freshness::current_age_secs;
-use super::types::{ByteRangeSpec, CachedResponseEnvelope, RequestDirectives, CACHE_HEADER};
+use super::types::{ByteRangeSpec, CACHE_HEADER, CachedResponseEnvelope, RequestDirectives};
 use crate::http::body::Body;
 use anyhow::Result;
 use base64::Engine;
@@ -151,15 +151,15 @@ pub(super) fn merge_headers_after_304(
         }
         saw.insert(lower.clone());
 
-        if is_304_mergeable_header(lower.as_str()) {
-            if let Some(values) = nm.get(lower.as_str()) {
-                if replaced.insert(lower.clone()) {
-                    for v in values {
-                        out.push((name.clone(), v.clone()));
-                    }
+        if is_304_mergeable_header(lower.as_str())
+            && let Some(values) = nm.get(lower.as_str())
+        {
+            if replaced.insert(lower.clone()) {
+                for v in values {
+                    out.push((name.clone(), v.clone()));
                 }
-                continue;
             }
+            continue;
         }
         out.push((name.clone(), value.clone()));
     }

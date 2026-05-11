@@ -1,6 +1,5 @@
-use serde::Deserialize;
-
 mod cache;
+mod canonical;
 mod core;
 mod http;
 mod listener;
@@ -12,6 +11,7 @@ mod security;
 mod upstream;
 
 pub use self::cache::*;
+pub use self::canonical::*;
 pub use self::core::*;
 pub use self::http::*;
 pub use self::listener::*;
@@ -22,52 +22,85 @@ pub use self::rules::*;
 pub use self::security::*;
 pub use self::upstream::*;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    #[serde(default)]
     pub state_dir: Option<String>,
-    #[serde(default)]
     pub identity: IdentityConfig,
-    #[serde(default)]
     pub messages: MessagesConfig,
-    #[serde(default)]
     pub runtime: RuntimeConfig,
-    #[serde(default)]
-    pub system_log: SystemLogConfig,
-    #[serde(default)]
-    pub access_log: AccessLogConfig,
-    #[serde(default)]
-    pub audit_log: AuditLogConfig,
-    #[serde(default)]
-    pub metrics: Option<MetricsConfig>,
-    #[serde(default)]
-    pub otel: Option<OtelConfig>,
-    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+    pub security: SecurityConfig,
+    pub http: HttpGlobalConfig,
+    pub traffic: TrafficConfig,
     pub acme: Option<AcmeConfig>,
-    #[serde(default)]
-    pub exporter: Option<ExporterConfig>,
-    #[serde(default)]
-    pub auth: AuthConfig,
-    #[serde(default)]
-    pub identity_sources: Vec<IdentitySourceConfig>,
-    #[serde(default)]
-    pub ext_authz: Vec<ExtAuthzConfig>,
-    #[serde(default)]
-    pub destination_resolution: DestinationResolutionConfig,
-    #[serde(default)]
-    pub named_sets: Vec<NamedSetConfig>,
-    #[serde(default)]
-    pub http_guard_profiles: Vec<HttpGuardProfileConfig>,
-    #[serde(default)]
-    pub rate_limit_profiles: Vec<RateLimitProfileConfig>,
-    #[serde(default)]
-    pub upstream_trust_profiles: Vec<UpstreamTlsTrustProfileConfig>,
-    #[serde(default)]
-    pub listeners: Vec<ListenerConfig>,
-    #[serde(default)]
-    pub reverse: Vec<ReverseConfig>,
-    #[serde(default)]
+    pub edges: Vec<EdgeConfig>,
     pub upstreams: Vec<UpstreamConfig>,
-    #[serde(default)]
-    pub cache: CacheConfig,
+    pub caches: Vec<CacheBackendConfig>,
+}
+
+impl Config {
+    pub fn ingress_edges(&self) -> impl Iterator<Item = &IngressEdgeConfig> {
+        self.edges.iter().filter_map(EdgeConfig::as_ingress)
+    }
+
+    pub fn ingress_edge_configs(&self) -> Vec<&IngressEdgeConfig> {
+        self.ingress_edges().collect()
+    }
+
+    pub fn ingress_edges_mut(&mut self) -> impl Iterator<Item = &mut IngressEdgeConfig> {
+        self.edges.iter_mut().filter_map(EdgeConfig::as_ingress_mut)
+    }
+
+    pub fn reverse_edges(&self) -> impl Iterator<Item = &ReverseEdgeConfig> {
+        self.edges.iter().filter_map(EdgeConfig::as_reverse)
+    }
+
+    pub fn reverse_edge_configs(&self) -> Vec<&ReverseEdgeConfig> {
+        self.reverse_edges().collect()
+    }
+
+    pub fn reverse_edges_mut(&mut self) -> impl Iterator<Item = &mut ReverseEdgeConfig> {
+        self.edges.iter_mut().filter_map(EdgeConfig::as_reverse_mut)
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EdgeConfig {
+    Forward(IngressEdgeConfig),
+    Reverse(ReverseEdgeConfig),
+    Transparent(IngressEdgeConfig),
+}
+
+impl EdgeConfig {
+    pub fn as_ingress(&self) -> Option<&IngressEdgeConfig> {
+        match self {
+            Self::Forward(edge) | Self::Transparent(edge) => Some(edge),
+            Self::Reverse(_) => None,
+        }
+    }
+
+    pub fn as_ingress_mut(&mut self) -> Option<&mut IngressEdgeConfig> {
+        match self {
+            Self::Forward(edge) | Self::Transparent(edge) => Some(edge),
+            Self::Reverse(_) => None,
+        }
+    }
+
+    pub fn as_reverse(&self) -> Option<&ReverseEdgeConfig> {
+        match self {
+            Self::Reverse(edge) => Some(edge),
+            Self::Forward(_) | Self::Transparent(_) => None,
+        }
+    }
+
+    pub fn as_reverse_mut(&mut self) -> Option<&mut ReverseEdgeConfig> {
+        match self {
+            Self::Reverse(edge) => Some(edge),
+            Self::Forward(_) | Self::Transparent(_) => None,
+        }
+    }
 }

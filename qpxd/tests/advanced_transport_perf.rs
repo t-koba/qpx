@@ -4,7 +4,7 @@
     feature = "mitm"
 ))]
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -184,8 +184,9 @@ async fn run_connect_udp_round() -> Result<()> {
     fs::write(
         &cfg,
         format!(
-            r#"listeners:
-- name: forward-h3
+            r#"edges:
+- kind: forward
+  name: forward-h3
   listen: 127.0.0.1:{tcp_port}
   default_action:
     type: direct
@@ -198,7 +199,6 @@ async fn run_connect_udp_round() -> Result<()> {
     listen: 127.0.0.1:{udp_port}
     connect_udp:
       enabled: true
-  mode: forward
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
@@ -269,8 +269,9 @@ async fn run_extended_connect_round() -> Result<()> {
     fs::write(
         &cfg,
         format!(
-            r#"listeners:
-- name: forward-h3
+            r#"edges:
+- kind: forward
+  name: forward-h3
   listen: 127.0.0.1:{tcp_port}
   default_action:
     type: direct
@@ -283,7 +284,6 @@ async fn run_extended_connect_round() -> Result<()> {
     listen: 127.0.0.1:{udp_port}
     connect_udp:
       enabled: true
-  mode: forward
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
@@ -366,8 +366,9 @@ async fn run_webtransport_round() -> Result<()> {
     fs::write(
         &cfg,
         format!(
-            r#"listeners:
-- name: forward-h3
+            r#"edges:
+- kind: forward
+  name: forward-h3
   listen: 127.0.0.1:{tcp_port}
   default_action:
     type: direct
@@ -380,7 +381,6 @@ async fn run_webtransport_round() -> Result<()> {
     listen: 127.0.0.1:{udp_port}
     connect_udp:
       enabled: true
-  mode: forward
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1

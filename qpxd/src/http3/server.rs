@@ -1,10 +1,10 @@
 use crate::http::body::Body;
 use crate::http::l7::finalize_response_for_request;
 use crate::http3::codec::hyper_response_to_h3;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use hyper::{Response, StatusCode};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub type H3ServerRequestStream = ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
@@ -40,7 +40,7 @@ pub async fn read_h3_request_body(
             None => {
                 return Err(H3ReadBodyError::Stream(anyhow!(
                     "HTTP/3 request body length overflow"
-                )))
+                )));
             }
         };
         if next > max_body_bytes {

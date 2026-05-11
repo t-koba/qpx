@@ -1,24 +1,11 @@
-reverse:
-- name: policy-reverse
-  listen: 127.0.0.1:19180
-  routes:
-  - match:
-      host:
-      - status.example.com
-      path:
-      - /healthz
-    local_response:
-      status: 200
-      content_type: application/json
-      body: '{"ok":true,"source":"qpx"}'
-  - match:
-      host:
-      - status.example.com
-    upstreams:
-    - http://127.0.0.1:8080
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-listeners:
-- name: policy-forward
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+telemetry:
+  system_log:
+    level: info
+    format: json
+edges:
+- kind: forward
+  name: policy-forward
   listen: 127.0.0.1:18180
   default_action:
     type: block
@@ -27,10 +14,10 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
-      - '*.doubleclick.net'
-      - '*.googlesyndication.com'
+      - "*.doubleclick.net"
+      - "*.googlesyndication.com"
     action:
       type: respond
       local_response:
@@ -39,8 +26,8 @@ listeners:
         body: blocked by corporate policy
         headers:
           X-Policy-Id: adblock-1
-  mode: forward
-- name: policy-transparent
+- kind: transparent
+  name: policy-transparent
   listen: 127.0.0.1:15180
   default_action:
     type: block
@@ -49,7 +36,7 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
       - maintenance.internal
     action:
@@ -57,7 +44,25 @@ listeners:
       local_response:
         status: 503
         body: service under maintenance
-  mode: transparent
-system_log:
-  level: info
-  format: json
+- kind: reverse
+  name: policy-reverse
+  listen: 127.0.0.1:19180
+  routes:
+  - match:
+      host:
+      - status.example.com
+      path:
+      - "/healthz"
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: application/json
+        body: '{"ok":true,"source":"qpx"}'
+  - match:
+      host:
+      - status.example.com
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:8080

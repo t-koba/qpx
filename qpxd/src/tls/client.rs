@@ -1,9 +1,9 @@
 use super::builder;
 pub(crate) use super::builder::{BoxTlsStream, IoStream};
+use super::cert_info::UpstreamCertificateInfo;
 #[cfg(test)]
 #[cfg(feature = "tls-rustls")]
 use super::cert_info::extract_upstream_certificate_info;
-use super::cert_info::UpstreamCertificateInfo;
 use super::trust::CompiledUpstreamTlsTrust;
 use anyhow::Result;
 use tokio::net::TcpStream;

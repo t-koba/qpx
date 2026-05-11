@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use quinn::{AsyncUdpSocket, UdpPoller};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -219,10 +219,10 @@ impl RouteState {
                 .any(|cid| self.cids.contains(&cid));
         }
         for len in &self.known_server_cid_lens {
-            if let Some(cid) = parse_quic_short_dcid(packet, *len) {
-                if self.cids.contains(&cid) {
-                    return true;
-                }
+            if let Some(cid) = parse_quic_short_dcid(packet, *len)
+                && self.cids.contains(&cid)
+            {
+                return true;
             }
         }
         false
@@ -266,7 +266,7 @@ impl OwnedTransmit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InheritedQuicBrokers {
     forward: Vec<InheritedQuicBroker>,
-    reverse: Vec<InheritedQuicBroker>,
+    reverse_edges: Vec<InheritedQuicBroker>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,7 +295,7 @@ pub(crate) struct QuinnBrokerRestoreSet {
     #[cfg(any(unix, windows))]
     forward: HashMap<String, QuinnBrokerStream>,
     #[cfg(any(unix, windows))]
-    reverse: HashMap<String, QuinnBrokerStream>,
+    reverse_edges: HashMap<String, QuinnBrokerStream>,
 }
 
 impl QuinnBrokerRestoreSet {
@@ -326,9 +326,9 @@ impl QuinnBrokerRestoreSet {
                     .forward
                     .insert(entry.name, adopt_unix_stream(entry.fd)?);
             }
-            for entry in inherited.reverse {
+            for entry in inherited.reverse_edges {
                 restore
-                    .reverse
+                    .reverse_edges
                     .insert(entry.name, adopt_unix_stream(entry.fd)?);
             }
             Ok(Some(restore))
@@ -348,8 +348,8 @@ impl QuinnBrokerRestoreSet {
                     connect_windows_broker(entry.addr.as_str(), entry.token.as_str())?,
                 );
             }
-            for entry in inherited.reverse {
-                restore.reverse.insert(
+            for entry in inherited.reverse_edges {
+                restore.reverse_edges.insert(
                     entry.name,
                     connect_windows_broker(entry.addr.as_str(), entry.token.as_str())?,
                 );
@@ -370,7 +370,7 @@ impl QuinnBrokerRestoreSet {
 
     #[cfg(any(unix, windows))]
     pub(crate) fn take_reverse(&mut self, name: &str) -> Option<QuinnBrokerStream> {
-        self.reverse.remove(name)
+        self.reverse_edges.remove(name)
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -386,13 +386,13 @@ impl QuinnBrokerRestoreSet {
 
         #[cfg(any(unix, windows))]
         {
-            if self.forward.is_empty() && self.reverse.is_empty() {
+            if self.forward.is_empty() && self.reverse_edges.is_empty() {
                 return Ok(());
             }
             Err(anyhow!(
-                "unused inherited QUIC brokers remain: forward={:?}, reverse={:?}",
+                "unused inherited QUIC brokers remain: forward={:?}, reverse_edges={:?}",
                 self.forward.keys().collect::<Vec<_>>(),
-                self.reverse.keys().collect::<Vec<_>>(),
+                self.reverse_edges.keys().collect::<Vec<_>>(),
             ))
         }
     }
@@ -488,7 +488,7 @@ impl LocalQuinnBrokerHandle {
         };
         match self.kind {
             QuinnBrokerKind::Forward => inherited.forward.push(entry),
-            QuinnBrokerKind::ReverseTerminate => inherited.reverse.push(entry),
+            QuinnBrokerKind::ReverseTerminate => inherited.reverse_edges.push(entry),
         }
         Ok(())
     }
@@ -550,7 +550,7 @@ impl LocalQuinnBrokerHandle {
         accept_tasks.push(task);
         match self.kind {
             QuinnBrokerKind::Forward => inherited.forward.push(entry),
-            QuinnBrokerKind::ReverseTerminate => inherited.reverse.push(entry),
+            QuinnBrokerKind::ReverseTerminate => inherited.reverse_edges.push(entry),
         }
         Ok(())
     }
@@ -580,7 +580,7 @@ pub(crate) fn prepare_quic_broker_handoff(
         }
         let mut inherited = InheritedQuicBrokers {
             forward: Vec::new(),
-            reverse: Vec::new(),
+            reverse_edges: Vec::new(),
         };
         let mut kept_fds = Vec::new();
         let mut attached: Vec<LocalQuinnBrokerHandle> = Vec::new();
@@ -615,7 +615,7 @@ pub(crate) fn prepare_quic_broker_handoff(
         }
         let mut inherited = InheritedQuicBrokers {
             forward: Vec::new(),
-            reverse: Vec::new(),
+            reverse_edges: Vec::new(),
         };
         let mut accept_tasks = Vec::new();
         for handle in handles {
@@ -1094,24 +1094,23 @@ impl AsyncUdpSocket for RemoteBrokerSocket {
     }
 
     fn try_send(&self, transmit: &quinn::udp::Transmit) -> std::io::Result<()> {
-        if self.mode.load(Ordering::SeqCst) == RemoteMode::Brokered as u8 {
-            if let Some(writer) = self
+        if self.mode.load(Ordering::SeqCst) == RemoteMode::Brokered as u8
+            && let Some(writer) = self
                 .outbound_writer
                 .lock()
                 .expect("outbound writer lock")
                 .clone()
-            {
-                writer
-                    .send(BrokerFrame::OutboundTransmit(OwnedTransmit {
-                        destination: transmit.destination,
-                        ecn: transmit.ecn,
-                        contents: transmit.contents.to_vec(),
-                        segment_size: transmit.segment_size,
-                        src_ip: transmit.src_ip,
-                    }))
-                    .map_err(|_| std::io::Error::new(ErrorKind::BrokenPipe, "broker closed"))?;
-                return Ok(());
-            }
+        {
+            writer
+                .send(BrokerFrame::OutboundTransmit(OwnedTransmit {
+                    destination: transmit.destination,
+                    ecn: transmit.ecn,
+                    contents: transmit.contents.to_vec(),
+                    segment_size: transmit.segment_size,
+                    src_ip: transmit.src_ip,
+                }))
+                .map_err(|_| std::io::Error::new(ErrorKind::BrokenPipe, "broker closed"))?;
+            return Ok(());
         }
         self.io.try_io(Interest::WRITABLE, || {
             self.inner.send((&*self.io).into(), transmit)
@@ -1667,25 +1666,30 @@ mod tests {
             identity: Default::default(),
             messages: Default::default(),
             runtime: Default::default(),
-            system_log: Default::default(),
-            access_log: Default::default(),
-            audit_log: Default::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: Default::default(),
+                access_log: Default::default(),
+                audit_log: Default::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: Default::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: Default::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            listeners: Vec::new(),
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            reverse: Vec::new(),
+            edges: Vec::new(),
             upstreams: Vec::new(),
-            cache: Default::default(),
+            caches: Vec::new(),
         }
     }
 
@@ -1718,7 +1722,7 @@ mod tests {
         let _guard = crate::test_env_lock().lock().expect("env lock");
 
         let forward_socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("forward bind");
-        let reverse_socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("reverse bind");
+        let reverse_socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("reverse_edges bind");
         let (_, forward_handle) = new_local_broker_socket(
             "forward-h3",
             QuinnBrokerKind::Forward,
@@ -1727,12 +1731,12 @@ mod tests {
         )
         .expect("forward broker");
         let (_, reverse_handle) = new_local_broker_socket(
-            "reverse-h3",
+            "reverse_edges-h3",
             QuinnBrokerKind::ReverseTerminate,
             reverse_socket,
             Arc::new(NoopQuinnUdpIngressFilter),
         )
-        .expect("reverse broker");
+        .expect("reverse_edges broker");
 
         let handoff =
             prepare_quic_broker_handoff(&[forward_handle, reverse_handle], &test_config())
@@ -1752,8 +1756,8 @@ mod tests {
             "forward broker should restore by role"
         );
         assert!(
-            restored.take_reverse("reverse-h3").is_some(),
-            "reverse broker should restore by role"
+            restored.take_reverse("reverse_edges-h3").is_some(),
+            "reverse_edges broker should restore by role"
         );
         restored.ensure_consumed().expect("restore consumed");
     }

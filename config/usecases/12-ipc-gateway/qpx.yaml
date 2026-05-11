@@ -1,21 +1,25 @@
-reverse:
-- name: ipc-gateway
-  listen: ${QPX_IPC_GATEWAY_LISTEN:-127.0.0.1:8080}
+edges:
+- kind: reverse
+  name: ipc-gateway
+  listen: "${QPX_IPC_GATEWAY_LISTEN:-127.0.0.1:8080}"
   routes:
   - name: function-executor
     match:
       path:
-      - /cgi-bin/*
-      - /wasm/*
-    ipc:
+      - "/cgi-bin/*"
+      - "/wasm/*"
+    target:
+      type: ipc
+      endpoint: "${QPXF_UNIX_LISTEN}"
       mode: shm
-      address: ${QPXF_UNIX_LISTEN}
       timeout_ms: 30000
   - name: not-found
     match:
       path:
-      - /*
-    local_response:
-      status: 404
-      content_type: text/plain
-      body: not found
+      - "/*"
+    target:
+      type: local_response
+      response:
+        status: 404
+        content_type: text/plain
+        body: not found

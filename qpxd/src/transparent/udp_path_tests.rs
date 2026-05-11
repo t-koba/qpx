@@ -2,9 +2,9 @@ use super::*;
 use crate::http3::capsule::encode_quic_varint;
 use crate::runtime::Runtime;
 use qpx_core::config::{
-    AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CacheConfig, Config,
-    Http3ListenerConfig, IdentityConfig, ListenerConfig, ListenerMode, MatchConfig, MessagesConfig,
-    RuleConfig, RuntimeConfig, SystemLogConfig, TlsFingerprintMatchConfig,
+    AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
+    Http3IngressEdgeConfig, IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MatchConfig,
+    MessagesConfig, RuleConfig, RuntimeConfig, SystemLogConfig, TlsFingerprintMatchConfig,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -177,26 +177,37 @@ fn runtime_for_quic_block(ja4: &str) -> Runtime {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: vec![ListenerConfig {
+        edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
             name: "transparent".to_string(),
-            mode: ListenerMode::Transparent,
+            mode: IngressEdgeMode::Transparent,
             listen: "127.0.0.1:0".to_string(),
             default_action: ActionConfig {
                 kind: ActionKind::Tunnel,
                 upstream: None,
                 local_response: None,
             },
+            original_dst: None,
             tls_inspection: None,
             rules: vec![RuleConfig {
                 name: "block-quic-ja4".to_string(),
@@ -220,7 +231,7 @@ fn runtime_for_quic_block(ja4: &str) -> Runtime {
             }],
             connection_filter: Vec::new(),
             upstream_proxy: None,
-            http3: Some(Http3ListenerConfig {
+            http3: Some(Http3IngressEdgeConfig {
                 enabled: true,
                 listen: None,
                 connect_udp: None,
@@ -228,20 +239,16 @@ fn runtime_for_quic_block(ja4: &str) -> Runtime {
             ftp: Default::default(),
             xdp: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             policy_context: None,
             http: None,
             http_guard_profile: None,
             destination_resolution: None,
             http_modules: Vec::new(),
-        }],
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: Vec::new(),
+        })],
         upstreams: Vec::new(),
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     })
     .expect("runtime")
 }

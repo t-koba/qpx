@@ -6,14 +6,14 @@ use crate::tls::{
 };
 use crate::{
     connection_filter::{
-        emit_connection_filter_audit, evaluate_connection_filter, ConnectionFilterStage,
+        ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
     },
     runtime::metric_names,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use metrics::{counter, histogram};
-use qpx_core::config::ListenerConfig;
+use qpx_core::config::IngressEdgeConfig;
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -32,13 +32,13 @@ mod udp_path;
 #[cfg(feature = "http3")]
 pub(crate) mod udp_socket;
 
-use self::destination::{destination_resolver_for_listener, DestinationResolver};
+use self::destination::{DestinationResolver, destination_resolver_for_listener};
 
 pub async fn run_tcp(
-    listener: ListenerConfig,
+    listener: IngressEdgeConfig,
     runtime: Runtime,
     shutdown: watch::Receiver<bool>,
-    listeners: Vec<TcpListener>,
+    forward_edges: Vec<TcpListener>,
 ) -> Result<()> {
     let addr: SocketAddr = listener.listen.parse()?;
     let listener_name = listener.name.clone();
@@ -46,12 +46,12 @@ pub async fn run_tcp(
     info!(
         addr = %addr,
         listener = %listener.name,
-        acceptors = listeners.len(),
+        acceptors = forward_edges.len(),
         "transparent listener starting"
     );
 
-    let mut accept_tasks = Vec::with_capacity(listeners.len() + 1);
-    for tcp_listener in listeners {
+    let mut accept_tasks = Vec::with_capacity(forward_edges.len() + 1);
+    for tcp_listener in forward_edges {
         let runtime = runtime.clone();
         let listener_name = listener_name.clone();
         let resolver = resolver.clone();
@@ -80,7 +80,7 @@ pub async fn run_tcp(
 
 #[cfg(feature = "http3")]
 pub async fn run_udp(
-    listener: ListenerConfig,
+    listener: IngressEdgeConfig,
     runtime: Runtime,
     shutdown: watch::Receiver<SidecarControl>,
     udp_socket: std::net::UdpSocket,
@@ -183,7 +183,7 @@ async fn handle_connection(
     let started = Instant::now();
     let _ = stream.set_nodelay(true);
     let metadata_timeout =
-        Duration::from_millis(runtime.state().config.runtime.http_header_read_timeout_ms);
+        Duration::from_millis(runtime.state().plan.limits.http_header_read_timeout_ms);
     let (mut stream, remote_addr, original_target) = resolver
         .resolve_original_target(stream, remote_addr, metadata_timeout)
         .await?;
@@ -219,7 +219,7 @@ async fn handle_connection(
         return Ok(());
     }
     let state = runtime.state();
-    let peek_timeout = Duration::from_millis(state.config.runtime.tls_peek_timeout_ms);
+    let peek_timeout = Duration::from_millis(state.plan.limits.tls_peek_timeout_ms);
     let sniff = read_client_hello_with_timeout(&mut stream, peek_timeout)
         .await
         .context("transparent TLS peek timed out")?;
@@ -283,11 +283,13 @@ async fn handle_connection(
                     "result" => outcome.metric_result()
                 )
                 .increment(1);
-                histogram!(state
-                    .observability
-                    .metric_names
-                    .transparent_latency_ms
-                    .clone())
+                histogram!(
+                    state
+                        .observability
+                        .metric_names
+                        .transparent_latency_ms
+                        .clone()
+                )
                 .record(started.elapsed().as_secs_f64() * 1000.0);
                 return Ok(());
             }
@@ -318,11 +320,13 @@ async fn handle_connection(
             "result" => "ok"
         )
         .increment(1);
-        histogram!(state
-            .observability
-            .metric_names
-            .transparent_latency_ms
-            .clone())
+        histogram!(
+            state
+                .observability
+                .metric_names
+                .transparent_latency_ms
+                .clone()
+        )
         .record(started.elapsed().as_secs_f64() * 1000.0);
     } else {
         let state = runtime.state();

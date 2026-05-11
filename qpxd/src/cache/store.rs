@@ -8,8 +8,8 @@ use super::freshness::{
 };
 use super::invalidate::invalidate_primary;
 use super::types::{
-    CacheBackend, CacheRequestKey, CachedResponseEnvelope, ResponseDirectives, RevalidationState,
-    VarySpec, CACHE_HEADER, INDEX_TTL_SECS, MAX_CACHE_OBJECT_BYTES,
+    CACHE_HEADER, CacheBackend, CacheRequestKey, CachedResponseEnvelope, INDEX_TTL_SECS,
+    MAX_CACHE_OBJECT_BYTES, ResponseDirectives, RevalidationState, VarySpec,
 };
 use super::util::{
     cache_namespace, load_variant_index, now_millis, sanitize_cached_headers_for_storage,

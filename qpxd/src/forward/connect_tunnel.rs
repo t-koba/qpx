@@ -15,6 +15,7 @@ pub(super) struct TunnelConnectContext {
     pub sanitized_headers: HeaderMap,
     pub identity: crate::policy_context::ResolvedIdentity,
     pub initial_action: ActionConfig,
+    pub matched_rule: Option<String>,
     pub verify_upstream: bool,
     pub _concurrency_permits: Option<crate::rate_limit::ConcurrencyPermits>,
     pub throttle: Option<BandwidthThrottle>,
@@ -28,10 +29,10 @@ pub(super) async fn tunnel_connect(
 ) -> Result<()> {
     let state = runtime.state();
     let listener_cfg = state
-        .listener_config(ctx.listener_name.as_str())
+        .ingress_edge_settings(ctx.listener_name.as_str())
         .ok_or_else(|| anyhow!("listener not found"))?;
-    let upgrade_wait = Duration::from_millis(state.config.runtime.upgrade_wait_timeout_ms);
-    let upstream_timeout = Duration::from_millis(state.config.runtime.upstream_http_timeout_ms);
+    let upgrade_wait = Duration::from_millis(state.plan.limits.upgrade_wait_timeout_ms);
+    let upstream_timeout = Duration::from_millis(state.plan.limits.upstream_http_timeout_ms);
     let upgraded = timeout(upgrade_wait, crate::http::upgrade::on(&mut req)).await??;
     let (client_io, client_hello, mut action) =
         prepare_connect_client_io(upgraded, &runtime, &ctx).await?;
@@ -44,6 +45,7 @@ pub(super) async fn tunnel_connect(
         sanitized_headers,
         identity,
         initial_action,
+        matched_rule,
         verify_upstream,
         _concurrency_permits,
         throttle,
@@ -51,54 +53,52 @@ pub(super) async fn tunnel_connect(
     let mut server = Some(server);
     let listener_upstream_trust = listener_upstream_trust(listener_cfg)?;
 
-    if let Some(client_hello) = client_hello.as_ref() {
-        if listener_requires_upstream_cert_preview(listener_cfg)
-            && matches!(
-                action.kind,
-                ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
-            )
+    if let Some(client_hello) = client_hello.as_ref()
+        && listener_requires_upstream_cert_preview(listener_cfg)
+        && matches!(
+            action.kind,
+            ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
+        )
+    {
+        let preview_verify = listener_cfg
+            .tls_inspection
+            .as_ref()
+            .map(|cfg| {
+                cfg.verify_upstream
+                    && !state.tls_verify_exception_matches(listener_name.as_str(), host.as_str())
+            })
+            .unwrap_or(true);
+        let preview_server = server
+            .take()
+            .expect("CONNECT upstream tunnel must exist before cert preview");
+        match preview_tls_certificate_with_options(
+            host.as_str(),
+            preview_server.io,
+            preview_verify,
+            listener_upstream_trust.as_deref(),
+        )
+        .await
         {
-            let preview_verify = listener_cfg
-                .tls_inspection
-                .as_ref()
-                .map(|cfg| {
-                    cfg.verify_upstream
-                        && !state
-                            .tls_verify_exception_matches(listener_name.as_str(), host.as_str())
+            Ok(upstream_cert) => {
+                action = decide_connect_action_from_tls_metadata(ConnectPolicyInput {
+                    runtime: &runtime,
+                    listener_name: listener_name.as_str(),
+                    remote_addr,
+                    host: host.as_str(),
+                    port,
+                    authority: authority.as_str(),
+                    sanitized_headers: &sanitized_headers,
+                    identity: &identity,
+                    client_hello,
+                    upstream_cert: Some(&upstream_cert),
                 })
-                .unwrap_or(true);
-            let preview_server = server
-                .take()
-                .expect("CONNECT upstream tunnel must exist before cert preview");
-            match preview_tls_certificate_with_options(
-                host.as_str(),
-                preview_server.io,
-                preview_verify,
-                listener_upstream_trust.as_deref(),
-            )
-            .await
-            {
-                Ok(upstream_cert) => {
-                    action = decide_connect_action_from_tls_metadata(ConnectPolicyInput {
-                        runtime: &runtime,
-                        listener_name: listener_name.as_str(),
-                        remote_addr,
-                        host: host.as_str(),
-                        port,
-                        authority: authority.as_str(),
-                        sanitized_headers: &sanitized_headers,
-                        identity: &identity,
-                        client_hello,
-                        upstream_cert: Some(&upstream_cert),
-                    })
-                    .await?;
+                .await?;
+            }
+            Err(err) => {
+                if listener_upstream_trust.is_some() {
+                    return Err(err);
                 }
-                Err(err) => {
-                    if listener_upstream_trust.is_some() {
-                        return Err(err);
-                    }
-                    warn!(error = ?err, "forward CONNECT upstream certificate preview failed");
-                }
+                warn!(error = ?err, "forward CONNECT upstream certificate preview failed");
             }
         }
     }
@@ -116,7 +116,7 @@ pub(super) async fn tunnel_connect(
                 host.as_str(),
                 port,
                 upstream.as_ref(),
-                state.config.identity.proxy_name.as_str(),
+                state.plan.identity.proxy_name.as_ref(),
                 upstream_timeout,
             )
             .await?,
@@ -146,6 +146,8 @@ pub(super) async fn tunnel_connect(
                 }
                 let mitm = state
                     .security
+                    .destination
+                    .tls
                     .mitm
                     .clone()
                     .ok_or_else(|| anyhow!("mitm not available"))?;
@@ -162,8 +164,8 @@ pub(super) async fn tunnel_connect(
                 let upstream_cert = Arc::new(upstream_cert);
                 let connect_host = host.clone();
                 let header_read_timeout =
-                    Duration::from_millis(state.config.runtime.http_header_read_timeout_ms);
-                let access_cfg = state.config.access_log.clone();
+                    Duration::from_millis(state.plan.limits.http_header_read_timeout_ms);
+                let access_cfg = state.resources.access_log.clone();
                 let access_name = Arc::<str>::from(listener_name.as_str());
                 let service = handler_fn(move |inner_req: Request<Body>| {
                     let sender = sender.clone();
@@ -172,7 +174,7 @@ pub(super) async fn tunnel_connect(
                     let connect_host = connect_host.clone();
                     let upstream_cert = upstream_cert.clone();
                     async move {
-                        let proxy_name = runtime.state().config.identity.proxy_name.clone();
+                        let proxy_name = runtime.state().plan.identity.proxy_name.to_string();
                         let proxy_error = runtime.state().messages.proxy_error.clone();
                         let request_method = inner_req.method().clone();
                         let request_version = inner_req.version();
@@ -224,10 +226,14 @@ pub(super) async fn tunnel_connect(
         }
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {
             let server = server.expect("reconnected server for CONNECT tunnel");
-            let export = server
-                .peer_addr
-                .and_then(|server_addr| state.export_session(remote_addr, server_addr));
-            let idle_timeout = Duration::from_millis(state.config.runtime.tunnel_idle_timeout_ms);
+            let selected_plan = state
+                .plan
+                .ingress_edge_execution_plan(listener_name.as_str(), matched_rule.as_deref())
+                .ok_or_else(|| anyhow!("compiled CONNECT listener execution plan not found"))?;
+            let export = server.peer_addr.and_then(|server_addr| {
+                state.export_session_for_plan(selected_plan, remote_addr, server_addr)
+            });
+            let idle_timeout = Duration::from_millis(state.plan.limits.tunnel_idle_timeout_ms);
             copy_bidirectional_with_export_and_idle(
                 client_io,
                 server.io,
@@ -249,7 +255,7 @@ pub(super) async fn prepare_connect_client_io<I>(
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let peek_timeout = Duration::from_millis(runtime.state().config.runtime.tls_peek_timeout_ms);
+    let peek_timeout = Duration::from_millis(runtime.state().plan.limits.tls_peek_timeout_ms);
     let sniff = try_read_client_hello_with_timeout(&mut upgraded, peek_timeout).await?;
     let client_hello = looks_like_tls_client_hello(&sniff)
         .then(|| extract_client_hello_info(&sniff))

@@ -74,19 +74,19 @@ pub(crate) fn preflight_validate<B>(
         )));
     }
 
-    if req.method() == Method::CONNECT {
-        if let ConnectPolicy::Reject { status, body } = options.connect_policy {
-            return PreflightOutcome::Reject(Box::new(finalize_response_for_request(
-                &Method::CONNECT,
-                req.version(),
-                proxy_name,
-                Response::builder()
-                    .status(status)
-                    .body(Body::from(body.to_owned()))
-                    .unwrap_or_else(|_| bad_request(body)),
-                false,
-            )));
-        }
+    if req.method() == Method::CONNECT
+        && let ConnectPolicy::Reject { status, body } = options.connect_policy
+    {
+        return PreflightOutcome::Reject(Box::new(finalize_response_for_request(
+            &Method::CONNECT,
+            req.version(),
+            proxy_name,
+            Response::builder()
+                .status(status)
+                .body(Body::from(body.to_owned()))
+                .unwrap_or_else(|_| bad_request(body)),
+            false,
+        )));
     }
 
     PreflightOutcome::Continue

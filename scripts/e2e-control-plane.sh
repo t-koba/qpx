@@ -111,8 +111,9 @@ runtime:
   acceptor_tasks_per_listener: $acceptors
   reuse_port: false
   tcp_backlog: $tcp_backlog
-reverse:
-- name: control
+edges:
+- kind: reverse
+  name: control
   listen: 127.0.0.1:$PORT
   routes:
   - name: health
@@ -121,14 +122,17 @@ reverse:
       - control.local
       path:
       - /health
-    local_response:
-      status: 200
-      body: $body
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: $body
 EOF
 
   if [ "$acceptors" -gt 1 ]; then
     cat >>"$tmp_cfg" <<EOF
-- name: control-extra
+- kind: reverse
+  name: control-extra
   listen: 127.0.0.1:$RESTART_PORT
   routes:
   - name: health
@@ -137,9 +141,11 @@ EOF
       - control.local
       path:
       - /health
-    local_response:
-      status: 200
-      body: $body
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: $body
 EOF
   fi
 

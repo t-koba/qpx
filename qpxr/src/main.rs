@@ -1,15 +1,15 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use byteorder_slice::LittleEndian;
 use bytes::Bytes;
 use cidr::IpCidr;
 use clap::Parser;
 use etherparse::PacketBuilder;
+use pcap_file::pcapng::Block;
 use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
 use pcap_file::pcapng::blocks::interface_description::{
     InterfaceDescriptionBlock, InterfaceDescriptionOption,
 };
 use pcap_file::pcapng::blocks::section_header::{SectionHeaderBlock, SectionHeaderOption};
-use pcap_file::pcapng::Block;
 use pcap_file::{DataLink, Endianness};
 
 use qpx_core::exporter::STREAM_PREFACE_LINE;
@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc};
 use tokio::task::spawn_blocking;
 use tokio::time::timeout;
 use tracing::{info, warn};
@@ -42,9 +42,9 @@ compile_error!("qpxr: features tls-rustls and tls-native are mutually exclusive"
 #[cfg(feature = "tls-rustls")]
 use qpx_core::tls::{load_cert_chain, load_private_key};
 #[cfg(feature = "tls-rustls")]
-use rustls::server::WebPkiClientVerifier;
-#[cfg(feature = "tls-rustls")]
 use rustls::RootCertStore;
+#[cfg(feature = "tls-rustls")]
+use rustls::server::WebPkiClientVerifier;
 
 #[cfg(feature = "tls-rustls")]
 type TlsAcceptor = tokio_rustls::TlsAcceptor;
@@ -515,10 +515,10 @@ impl ExporterHub {
     }
 
     async fn publish_encoded_block(&self, ts_unix_nanos: u64, encoded: Bytes) {
-        if let Some(tx) = self.file_sink.as_ref() {
-            if let Err(err) = tx.send(encoded.clone()).await {
-                warn!(error = ?err, "pcapng file sink disconnected");
-            }
+        if let Some(tx) = self.file_sink.as_ref()
+            && let Err(err) = tx.send(encoded.clone()).await
+        {
+            warn!(error = ?err, "pcapng file sink disconnected");
         }
         {
             let mut history = self.history.write().await;
@@ -777,10 +777,10 @@ fn open_secure_file(path: &Path) -> Result<File> {
 }
 
 fn ensure_not_symlink(path: &Path, label: &str) -> Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Err(anyhow!("{label} must not be a symlink: {}", path.display()));
-        }
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        return Err(anyhow!("{label} must not be a symlink: {}", path.display()));
     }
     Ok(())
 }
@@ -1406,9 +1406,10 @@ mod tests {
             unsafe_allow_insecure: false,
         })
         .expect_err("loopback stream should require auth");
-        assert!(err
-            .to_string()
-            .contains("local users are not authenticated"));
+        assert!(
+            err.to_string()
+                .contains("local users are not authenticated")
+        );
     }
 
     #[test]

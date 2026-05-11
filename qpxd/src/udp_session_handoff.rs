@@ -5,7 +5,7 @@ use crate::udp_socket_handoff::{adopt_inherited_udp_socket, duplicate_std_udp_so
 use crate::udp_socket_handoff::{
     adopt_inherited_udp_socket_windows, duplicate_std_udp_socket_for_child,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use qpx_core::config::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -261,7 +261,7 @@ impl UdpSessionRestoreState {
         };
         if restore.listen != expected_listen {
             return Err(anyhow!(
-                "reverse HTTP/3 passthrough handoff for {} expected listen {}, got {}",
+                "reverse_edge HTTP/3 passthrough handoff for {} expected listen {}, got {}",
                 name,
                 expected_listen,
                 restore.listen
@@ -424,7 +424,7 @@ impl UdpSessionRestoreState {
                             Ok(WindowsReversePassthroughSessionRestore {
                                 session_id: session.session_id,
                                 socket: session.socket.try_clone().context(
-                                    "failed to clone reverse passthrough udp session socket",
+                                    "failed to clone reverse_edge passthrough udp session socket",
                                 )?,
                                 upstream_local_addr: session.upstream_local_addr,
                                 upstream_peer_addr: session.upstream_peer_addr,
@@ -843,8 +843,8 @@ fn validate_connected_socket(
 mod tests {
     use super::*;
     use qpx_core::config::{
-        AccessLogConfig, AuditLogConfig, AuthConfig, CacheConfig, Config, IdentityConfig,
-        MessagesConfig, RuntimeConfig, SystemLogConfig,
+        AccessLogConfig, AuditLogConfig, AuthConfig, Config, IdentityConfig, MessagesConfig,
+        RuntimeConfig, SystemLogConfig,
     };
     fn test_config() -> Config {
         Config {
@@ -852,25 +852,30 @@ mod tests {
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime: RuntimeConfig::default(),
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: AuthConfig::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: AuthConfig::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            listeners: Vec::new(),
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            reverse: Vec::new(),
+            edges: Vec::new(),
             upstreams: Vec::new(),
-            cache: CacheConfig::default(),
+            caches: Vec::new(),
         }
     }
 

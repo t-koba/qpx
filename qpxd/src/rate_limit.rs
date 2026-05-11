@@ -1,5 +1,7 @@
-use anyhow::{anyhow, Result};
-use qpx_core::config::{ListenerConfig, RateLimitApplyTo, RateLimitConfig, RateLimitProfileConfig};
+use anyhow::{Result, anyhow};
+use qpx_core::config::{
+    IngressEdgeConfig, RateLimitApplyTo, RateLimitConfig, RateLimitProfileConfig,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
@@ -119,7 +121,7 @@ impl TokenBucket {
 struct BucketEntry {
     bucket: TokenBucket,
     last_seen: Instant,
-    gen: u64,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -141,12 +143,12 @@ impl LimiterInner {
     }
 
     fn prune(&mut self, now: Instant) {
-        while let Some((key, gen)) = self.queue.front().cloned() {
+        while let Some((key, generation)) = self.queue.front().cloned() {
             let Some(entry) = self.buckets.get(&key) else {
                 let _ = self.queue.pop_front();
                 continue;
             };
-            if entry.gen != gen {
+            if entry.generation != generation {
                 let _ = self.queue.pop_front();
                 continue;
             }
@@ -237,22 +239,22 @@ impl RateLimiter {
         let shard = self.shard_for(&key);
         let mut inner = self.shards[shard].lock().expect("rate limiter mutex");
         inner.prune(now);
-        let (gen, decision) = {
+        let (generation, decision) = {
             let entry = inner
                 .buckets
                 .entry(key.clone())
                 .or_insert_with(|| BucketEntry {
                     bucket: TokenBucket::new(self.capacity, self.refill_per_sec, now),
                     last_seen: now,
-                    gen: 0,
+                    generation: 0,
                 });
             entry.last_seen = now;
-            entry.gen = entry.gen.wrapping_add(1);
-            let gen = entry.gen;
+            entry.generation = entry.generation.wrapping_add(1);
+            let generation = entry.generation;
             let decision = entry.bucket.try_take(now, cost);
-            (gen, decision)
+            (generation, decision)
         };
-        inner.queue.push_back((key, gen));
+        inner.queue.push_back((key, generation));
         decision
     }
 
@@ -263,22 +265,22 @@ impl RateLimiter {
         let shard = self.shard_for(&key);
         let mut inner = self.shards[shard].lock().expect("rate limiter mutex");
         inner.prune(now);
-        let (gen, delay) = {
+        let (generation, delay) = {
             let entry = inner
                 .buckets
                 .entry(key.clone())
                 .or_insert_with(|| BucketEntry {
                     bucket: TokenBucket::new(self.capacity, self.refill_per_sec, now),
                     last_seen: now,
-                    gen: 0,
+                    generation: 0,
                 });
             entry.last_seen = now;
-            entry.gen = entry.gen.wrapping_add(1);
-            let gen = entry.gen;
+            entry.generation = entry.generation.wrapping_add(1);
+            let generation = entry.generation;
             let delay = entry.bucket.reserve_delay(now, cost);
-            (gen, delay)
+            (generation, delay)
         };
-        inner.queue.push_back((key, gen));
+        inner.queue.push_back((key, generation));
         delay
     }
 }
@@ -469,9 +471,27 @@ pub(crate) struct RateLimitSet {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ListenerRateLimits {
-    pub(crate) listener: RateLimitSet,
-    pub(crate) rules: HashMap<String, RateLimitSet>,
+pub(crate) struct CompiledRateLimitPlan {
+    pub(crate) base: RateLimitSet,
+    pub(crate) selected: RateLimitSet,
+}
+
+impl CompiledRateLimitPlan {
+    pub(crate) fn from_sets(base: RateLimitSet, selected: RateLimitSet) -> Self {
+        Self { base, selected }
+    }
+
+    pub(crate) fn collect(&self, scope: TransportScope) -> AppliedRateLimits {
+        let mut out = AppliedRateLimits::default();
+        out.extend_set(&self.base, scope);
+        out.extend_set(&self.selected, scope);
+        out
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty_for_scope(&self, scope: TransportScope) -> bool {
+        self.collect(scope).is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -495,16 +515,6 @@ pub(crate) struct RequestLimitAcquire {
     pub(crate) retry_after: Option<Duration>,
 }
 
-pub(crate) struct RequestLimitCollectInput<'a> {
-    pub(crate) listener: Option<&'a str>,
-    pub(crate) rule: Option<&'a str>,
-    pub(crate) profile: Option<&'a str>,
-    pub(crate) scope: TransportScope,
-    pub(crate) extra: Option<&'a RateLimitSet>,
-    pub(crate) ctx: &'a RateLimitContext,
-    pub(crate) cost: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TransportScope {
     Request,
@@ -525,45 +535,14 @@ pub(crate) enum TransportScope {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RateLimiters {
-    listeners: HashMap<String, ListenerRateLimits>,
     profiles: HashMap<String, RateLimitSet>,
 }
 
 impl RateLimiters {
-    pub(crate) fn from_config(
-        listeners: &[ListenerConfig],
+    pub(crate) fn from_config<'a>(
+        _listeners: impl IntoIterator<Item = &'a IngressEdgeConfig>,
         profiles: &[RateLimitProfileConfig],
     ) -> Self {
-        let mut out = HashMap::new();
-        for listener in listeners {
-            let mut limits = ListenerRateLimits {
-                listener: RateLimitSet::from_config(listener.rate_limit.as_ref()),
-                ..Default::default()
-            };
-            for rule in &listener.rules {
-                let set = RateLimitSet::from_config(rule.rate_limit.as_ref());
-                if set.requests.is_some()
-                    || set.bytes.is_some()
-                    || set.concurrency.is_some()
-                    || set.request_quota.is_some()
-                    || set.byte_quota.is_some()
-                    || set.session_quota.is_some()
-                {
-                    limits.rules.insert(rule.name.clone(), set);
-                }
-            }
-            if limits.listener.requests.is_some()
-                || limits.listener.bytes.is_some()
-                || limits.listener.concurrency.is_some()
-                || limits.listener.request_quota.is_some()
-                || limits.listener.byte_quota.is_some()
-                || limits.listener.session_quota.is_some()
-                || !limits.rules.is_empty()
-            {
-                out.insert(listener.name.clone(), limits);
-            }
-        }
-
         let mut compiled_profiles = HashMap::new();
         for profile in profiles {
             let set = RateLimitSet::from_config(Some(&profile.limit));
@@ -579,7 +558,6 @@ impl RateLimiters {
         }
 
         Self {
-            listeners: out,
             profiles: compiled_profiles,
         }
     }
@@ -600,55 +578,32 @@ impl RateLimiters {
         Ok(out)
     }
 
-    pub(crate) fn collect(
+    pub(crate) fn collect_checked_plan_request(
         &self,
-        listener: &str,
-        rule: Option<&str>,
+        plan: &CompiledRateLimitPlan,
         profile: Option<&str>,
         scope: TransportScope,
-    ) -> AppliedRateLimits {
-        let mut out = AppliedRateLimits::default();
-        if let Some(listener_limits) = self.listeners.get(listener) {
-            out.extend_set(&listener_limits.listener, scope);
-            if let Some(rule) = rule {
-                if let Some(rule_limits) = listener_limits.rules.get(rule) {
-                    out.extend_set(rule_limits, scope);
-                }
-            }
-        }
-        if let Some(profile) = profile {
-            if let Some(profile_limits) = self.profiles.get(profile) {
-                out.extend_set(profile_limits, scope);
-            }
-        }
-        out
-    }
-
-    pub(crate) fn collect_checked_request(
-        &self,
-        input: RequestLimitCollectInput<'_>,
+        ctx: &RateLimitContext,
+        cost: u64,
     ) -> Result<RequestLimitAcquire> {
-        let RequestLimitCollectInput {
-            listener,
-            rule,
-            profile,
-            scope,
-            extra,
-            ctx,
-            cost,
-        } = input;
-        let mut limits = AppliedRateLimits::default();
-        if let Some(listener) = listener {
-            limits.extend_from(&self.collect(listener, rule, None, scope));
-        }
-        if let Some(extra) = extra {
-            limits.extend_set(extra, scope);
-        }
+        let mut limits = plan.collect(scope);
         let retry_after = limits.merge_profile_and_check(self, profile, scope, ctx, cost)?;
         Ok(RequestLimitAcquire {
             limits,
             retry_after,
         })
+    }
+
+    #[cfg(feature = "http3")]
+    pub(crate) fn collect_plan_with_profile(
+        &self,
+        plan: &CompiledRateLimitPlan,
+        profile: Option<&str>,
+        scope: TransportScope,
+    ) -> Result<AppliedRateLimits> {
+        let mut limits = plan.collect(scope);
+        limits.extend_from(&self.collect_profile(profile, scope)?);
+        Ok(limits)
     }
 }
 
@@ -938,19 +893,20 @@ fn text_key(value: Option<&str>, missing: &str) -> Arc<str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qpx_core::config::{ActionConfig, ActionKind, ListenerMode};
+    use qpx_core::config::{ActionConfig, ActionKind, IngressEdgeMode};
 
     #[test]
     fn collect_profile_rejects_unknown_profile_name() {
-        let listener = ListenerConfig {
+        let listener = IngressEdgeConfig {
             name: "forward".to_string(),
-            mode: ListenerMode::Forward,
+            mode: IngressEdgeMode::Forward,
             listen: "127.0.0.1:0".to_string(),
             default_action: ActionConfig {
                 kind: ActionKind::Direct,
                 upstream: None,
                 local_response: None,
             },
+            original_dst: None,
             tls_inspection: None,
             rules: Vec::new(),
             connection_filter: Vec::new(),
@@ -959,6 +915,7 @@ mod tests {
             ftp: Default::default(),
             xdp: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             policy_context: None,
             http: None,
@@ -983,16 +940,22 @@ mod tests {
         };
         let limiters = RateLimiters::from_config(&[listener], &[profile]);
 
-        assert!(limiters
-            .collect_profile(Some("missing"), TransportScope::Request)
-            .is_err());
-        assert!(limiters
-            .collect_profile(Some("known"), TransportScope::Request)
-            .is_ok());
-        assert!(limiters
-            .collect_profile(None, TransportScope::Request)
-            .expect("no profile")
-            .is_empty());
+        assert!(
+            limiters
+                .collect_profile(Some("missing"), TransportScope::Request)
+                .is_err()
+        );
+        assert!(
+            limiters
+                .collect_profile(Some("known"), TransportScope::Request)
+                .is_ok()
+        );
+        assert!(
+            limiters
+                .collect_profile(None, TransportScope::Request)
+                .expect("no profile")
+                .is_empty()
+        );
     }
 
     #[test]

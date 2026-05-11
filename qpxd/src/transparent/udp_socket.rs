@@ -5,17 +5,14 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
-pub(super) fn bind_udp_listener(
-    addr: SocketAddr,
-    runtime: &qpx_core::config::RuntimeConfig,
-) -> Result<UdpSocket> {
-    let std_socket = bind_udp_std_listener(addr, runtime)?;
+pub(super) fn bind_udp_listener(addr: SocketAddr, reuse_port: bool) -> Result<UdpSocket> {
+    let std_socket = bind_udp_std_listener(addr, reuse_port)?;
     UdpSocket::from_std(std_socket).context("tokio UDP socket conversion failed")
 }
 
 pub(crate) fn bind_udp_std_listener(
     addr: SocketAddr,
-    _runtime: &qpx_core::config::RuntimeConfig,
+    reuse_port: bool,
 ) -> Result<std::net::UdpSocket> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
@@ -28,9 +25,11 @@ pub(crate) fn bind_udp_std_listener(
         .set_reuse_address(true)
         .context("failed to set transparent UDP SO_REUSEADDR")?;
     #[cfg(unix)]
-    if _runtime.reuse_port {
+    if reuse_port {
         let _ = socket.set_reuse_port(true);
     }
+    #[cfg(not(unix))]
+    let _ = reuse_port;
     socket
         .set_nonblocking(true)
         .context("failed to set transparent UDP socket nonblocking")?;

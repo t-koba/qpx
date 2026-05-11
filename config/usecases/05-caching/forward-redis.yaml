@@ -1,5 +1,13 @@
-listeners:
-- name: forward
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+caches:
+- name: redis-local
+  kind: redis
+  endpoint: redis://127.0.0.1:6379/0
+  timeout_ms: 1200
+  max_object_bytes: 1048576
+edges:
+- kind: forward
+  name: forward
   listen: 127.0.0.1:8080
   default_action:
     type: block
@@ -8,7 +16,7 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       method:
       - GET
       - HEAD
@@ -23,12 +31,12 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       method:
       - GET
       - HEAD
       host:
-      - '*'
+      - "*"
     action:
       type: direct
   cache:
@@ -36,13 +44,4 @@ listeners:
     backend: redis-local
     namespace: forward-default
     default_ttl_secs: 60
-    max_object_bytes: 1048576
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-cache:
-  backends:
-  - name: redis-local
-    kind: redis
-    endpoint: redis://127.0.0.1:6379/0
-    timeout_ms: 1200
     max_object_bytes: 1048576

@@ -1,21 +1,20 @@
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use super::router_compile::compile_upstream_pool;
 use super::*;
-use crate::http::modules::compile_http_modules;
-use crate::rate_limit::RateLimitSet;
 
 impl HttpRoute {
     pub(in crate::reverse) fn from_config(
         config: ReverseRouteConfig,
         upstreams: &HashMap<&str, &UpstreamConfig>,
         interner: &mut StringInterner,
-        http_module_registry: &crate::http::modules::HttpModuleRegistry,
+        _http_module_registry: &crate::http::modules::HttpModuleRegistry,
+        compiled_route: &crate::runtime::CompiledReverseRoute,
     ) -> Result<(Self, qpx_core::prefilter::MatchPrefilterHint)> {
-        let (matcher, hint) = CompiledMatch::compile(&config.r#match, interner)?;
+        let _ = interner;
+        let matcher = compiled_route.matcher.clone();
+        let hint = compiled_route.hint.clone();
         let policy = RoutePolicy::from_http_config(&config)?;
         let affinity = ReverseAffinityRuntime::from_config(config.affinity.as_ref())?;
-        let cache_policy = config.cache.clone();
-        let rate_limit = RateLimitSet::from_config(config.rate_limit.as_ref());
         let path_rewrite = config
             .path_rewrite
             .as_ref()
@@ -28,25 +27,25 @@ impl HttpRoute {
             .transpose()?
             .map(Arc::new);
 
-        let ipc = config
-            .ipc
-            .as_ref()
-            .map(IpcUpstream::from_config)
-            .transpose()?;
-        if ipc.is_some() && (!config.upstreams.is_empty() || !config.backends.is_empty()) {
-            return Err(anyhow::anyhow!(
-                "reverse route ipc cannot be combined with upstreams/backends"
-            ));
-        }
-        let backends = if ipc.is_some() {
-            Vec::new()
-        } else {
-            compile_backends(
-                config.upstreams,
-                config.backends,
-                upstreams,
-                &policy.lifecycle,
-            )?
+        let (local_response, ipc, backends) = match config.target {
+            ReverseRouteTargetConfig::Upstream {
+                upstreams: refs, ..
+            } => (
+                None,
+                None,
+                compile_backends(refs, Vec::new(), upstreams, &policy.lifecycle)?,
+            ),
+            ReverseRouteTargetConfig::Weighted { backends, .. } => (
+                None,
+                None,
+                compile_backends(Vec::new(), backends, upstreams, &policy.lifecycle)?,
+            ),
+            ReverseRouteTargetConfig::Ipc { config } => {
+                (None, Some(IpcUpstream::from_config(&config)?), Vec::new())
+            }
+            ReverseRouteTargetConfig::LocalResponse { response } => {
+                (Some(*response), None, Vec::new())
+            }
         };
         let mirrors = compile_mirrors(config.mirrors, upstreams, &policy.lifecycle)?;
         let response_rules = compile_response_rules(
@@ -57,19 +56,15 @@ impl HttpRoute {
                 .unwrap_or(&[]),
         )?;
         let upstream_trust = CompiledUpstreamTlsTrust::from_config(config.upstream_trust.as_ref())?;
-        let http_modules =
-            compile_http_modules(config.http_modules.as_slice(), http_module_registry)?;
         Ok((
             Self {
                 matcher,
                 name: config.name.as_deref().map(Arc::<str>::from),
-                policy_context: config.policy_context.clone(),
-                local_response: config.local_response.clone(),
-                cache_policy,
-                rate_limit,
+                target: compiled_route.target.clone(),
+                plan: compiled_route.plan.clone(),
+                local_response,
                 headers,
                 ipc,
-                http_modules,
                 backends,
                 mirrors,
                 response_rules,
@@ -407,8 +402,11 @@ impl TlsPassthroughRoute {
         config: ReverseTlsPassthroughRouteConfig,
         upstreams: &HashMap<&str, &UpstreamConfig>,
         interner: &mut StringInterner,
+        compiled_route: &crate::runtime::CompiledTlsPassthroughRoute,
     ) -> Result<(Self, qpx_core::prefilter::MatchPrefilterHint)> {
-        let (matcher, hint) = CompiledMatch::compile_tls_passthrough(&config.r#match, interner)?;
+        let _ = interner;
+        let matcher = compiled_route.matcher.clone();
+        let hint = compiled_route.hint.clone();
         let policy = RoutePolicy::from_tls_config(&config)?;
         let affinity = ReverseAffinityRuntime::from_config(config.affinity.as_ref())?;
         let upstreams =
@@ -462,7 +460,7 @@ impl RoutePolicy {
             .as_ref()
             .and_then(|resilience| resilience.max_upstream_concurrency);
         Self::from_parts(RoutePolicyParts {
-            lb: config.lb.as_str(),
+            lb: config.target.lb().unwrap_or("round_robin"),
             retry_attempts,
             retry_backoff_ms,
             timeout_ms: config.timeout_ms,

@@ -1,6 +1,6 @@
 use crate::http::body::Body;
 use crate::http::http1_codec::serve_http1_with_interim;
-use crate::http::interim::{serve_h2_with_interim, sniff_h2_preface, H2_PREFACE};
+use crate::http::interim::{H2_PREFACE, serve_h2_with_interim, sniff_h2_preface};
 use crate::http::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
 #[cfg(feature = "http3")]
@@ -8,14 +8,14 @@ use crate::sidecar_control::SidecarControl;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use crate::{
     connection_filter::{
-        emit_connection_filter_audit, evaluate_connection_filter, ConnectionFilterStage,
+        ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
     },
     runtime::metric_names,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::{Request, Response, StatusCode};
 use metrics::{counter, histogram};
-use qpx_core::config::ListenerConfig;
+use qpx_core::config::IngressEdgeConfig;
 use qpx_core::rules::RuleMatchContext;
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 use qpx_observability::handler_fn;
@@ -68,13 +68,14 @@ mod policy;
 mod request;
 
 #[cfg(any(feature = "mitm", all(feature = "http3", feature = "http3-backend-h3")))]
-pub(crate) use policy::{evaluate_forward_policy, ForwardPolicyDecision};
+pub(crate) use policy::{ForwardPolicyDecision, evaluate_forward_policy};
 pub(crate) use request::handle_request_inner;
 #[cfg(feature = "mitm")]
+#[cfg(feature = "auth-basic")]
 pub(crate) use request::proxy_auth_required;
 
 pub async fn run_tcp(
-    listener: ListenerConfig,
+    listener: IngressEdgeConfig,
     runtime: Runtime,
     shutdown: watch::Receiver<bool>,
     tcp_listeners: Vec<TcpListener>,
@@ -118,7 +119,7 @@ pub async fn run_tcp(
 
 #[cfg(feature = "http3")]
 pub async fn run_h3(
-    listener: ListenerConfig,
+    listener: IngressEdgeConfig,
     runtime: Runtime,
     shutdown: watch::Receiver<SidecarControl>,
     endpoint_socket: crate::http3::quinn_socket::QuinnEndpointSocket,
@@ -190,7 +191,7 @@ async fn run_forward_acceptor(
         tokio::spawn(async move {
             let _permit = permit;
             let header_read_timeout =
-                Duration::from_millis(runtime.state().config.runtime.http_header_read_timeout_ms);
+                Duration::from_millis(runtime.state().plan.limits.http_header_read_timeout_ms);
             let metadata_timeout = header_read_timeout;
             let (stream, effective_remote_addr) = match resolve_remote_addr_with_xdp(
                 stream,
@@ -244,7 +245,7 @@ async fn run_forward_acceptor(
                 }
             };
             let stream = crate::io_prefix::PrefixedIo::new(stream, preface.clone());
-            let access_cfg = runtime.state().config.access_log.clone();
+            let access_cfg = runtime.state().resources.access_log.clone();
             let access_name = Arc::<str>::from(listener_name.as_str());
             let service = handler_fn(move |req| {
                 handle_request(
@@ -302,7 +303,7 @@ async fn handle_request(
             Ok(finalize_response_for_request(
                 &request_method,
                 request_version,
-                state.config.identity.proxy_name.as_str(),
+                state.plan.identity.proxy_name.as_ref(),
                 Response::builder()
                     .status(StatusCode::BAD_GATEWAY)
                     .body(Body::from(state.messages.proxy_error.clone()))

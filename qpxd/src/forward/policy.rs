@@ -1,7 +1,9 @@
+#[cfg(feature = "auth-basic")]
+use crate::auth_runtime::AuthChallenge;
+use crate::auth_runtime::{AuthOutcome, AuthenticatedUser};
 use crate::runtime::Runtime;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::HeaderMap;
-use qpx_auth::{AuthChallenge, AuthOutcome, AuthenticatedUser};
 use qpx_core::config::ActionConfig;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_core::rules::RuleMatchContext;
@@ -17,7 +19,9 @@ pub(crate) struct AllowedPolicy {
 
 pub(crate) enum ForwardPolicyDecision {
     Allow(Box<AllowedPolicy>),
+    #[cfg(feature = "auth-basic")]
     Challenge(AuthChallenge),
+    #[cfg(feature = "auth-basic")]
     Forbidden,
 }
 
@@ -85,9 +89,11 @@ pub(crate) async fn evaluate_forward_policy(
                         }
                         authenticated_user = Some(user);
                     }
+                    #[cfg(feature = "auth-basic")]
                     AuthOutcome::Challenge(challenge) => {
-                        return Ok(ForwardPolicyDecision::Challenge(challenge))
+                        return Ok(ForwardPolicyDecision::Challenge(challenge));
                     }
+                    #[cfg(feature = "auth-basic")]
                     AuthOutcome::Denied(_) => return Ok(ForwardPolicyDecision::Forbidden),
                 }
             } else if !auth_cfg.groups.is_empty() {
@@ -121,18 +127,18 @@ fn normalized_require_key(require: &[String]) -> String {
     providers.join(",")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "auth-basic"))]
 mod tests {
     use super::*;
     use crate::runtime::Runtime;
-    use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
-    use hyper::header::HeaderValue;
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use hyper::HeaderMap;
+    use hyper::header::HeaderValue;
     use qpx_core::config::{
-        AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CacheConfig, Config,
-        IdentityConfig, ListenerConfig, ListenerMode, LocalUser, MessagesConfig, RuleAuthConfig,
-        RuleConfig, RuntimeConfig, SystemLogConfig,
+        ActionConfig, ActionKind, AuthConfig, Config, DecisionConfig, HttpGlobalConfig,
+        IdentityConfig, IngressEdgeConfig, IngressEdgeMode, LocalUser, MessagesConfig,
+        RuleAuthConfig, RuleConfig, RuntimeConfig, SecurityConfig, TelemetryConfig, TrafficConfig,
     };
 
     #[tokio::test]
@@ -142,33 +148,35 @@ mod tests {
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime: RuntimeConfig::default(),
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
-            acme: None,
-            exporter: None,
-            auth: AuthConfig {
-                users: vec![LocalUser {
-                    username: "user".to_string(),
-                    password: Some("pass".to_string()),
-                    ha1: None,
-                }],
-                ldap: None,
+            telemetry: TelemetryConfig::default(),
+            security: SecurityConfig {
+                auth: AuthConfig {
+                    users: vec![LocalUser {
+                        username: "user".to_string(),
+                        password: Some("pass".to_string()),
+                        ha1: None,
+                    }],
+                    ldap: None,
+                },
+                identity_sources: Vec::new(),
+                decisions: DecisionConfig::default(),
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
             },
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            listeners: vec![ListenerConfig {
+            http: HttpGlobalConfig::default(),
+            traffic: TrafficConfig::default(),
+            acme: None,
+            edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
                 name: "forward".to_string(),
-                mode: ListenerMode::Forward,
+                mode: IngressEdgeMode::Forward,
                 listen: "127.0.0.1:0".to_string(),
                 default_action: ActionConfig {
                     kind: ActionKind::Block,
                     upstream: None,
                     local_response: None,
                 },
+                original_dst: None,
                 tls_inspection: None,
                 rules: vec![
                     RuleConfig {
@@ -205,20 +213,16 @@ mod tests {
                 ftp: Default::default(),
                 xdp: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 policy_context: None,
                 http: None,
                 http_guard_profile: None,
                 destination_resolution: None,
                 http_modules: Vec::new(),
-            }],
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            reverse: Vec::new(),
+            })],
             upstreams: Vec::new(),
-            cache: CacheConfig::default(),
+            caches: Vec::new(),
         };
 
         let runtime = Runtime::new(config).expect("runtime");

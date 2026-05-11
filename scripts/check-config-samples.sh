@@ -68,7 +68,7 @@ main() {
   require_cmd openssl
 
   echo "[CONFIG] building qpxd and qpxf"
-  cargo build -q -p qpxd -p qpxf --locked --target-dir "$RUSTLS_TARGET_DIR"
+  cargo build -q -p qpxd -p qpxf --locked --features qpxd/auth-digest,qpxd/auth-ldap-rustls --target-dir "$RUSTLS_TARGET_DIR"
 
   if [ ! -x "$QPXD_BIN" ]; then
     echo "missing built qpxd binary: $QPXD_BIN" >&2
@@ -90,6 +90,7 @@ main() {
 
   run_qpxf_check "$ROOT_DIR/config/usecases/12-ipc-gateway/qpxf.yaml"
   run_qpxf_check "$ROOT_DIR/config/usecases/12-ipc-gateway/qpxf-tcp.yaml"
+  run_qpxf_check "$ROOT_DIR/config/usecases/12-ipc-gateway/qpxf-fastcgi.yaml"
 
   echo "[CONFIG] all qpxd/qpxf sample configs validated"
 }

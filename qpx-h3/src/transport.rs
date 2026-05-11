@@ -1,14 +1,14 @@
 use crate::protocol::{
-    encode_varint, read_varint_slice, validate_message_stream_frame, write_frame, FRAME_DATA,
-    FRAME_HEADERS, H3_DATAGRAM_ERROR, H3_FRAME_UNEXPECTED,
+    FRAME_DATA, FRAME_HEADERS, H3_DATAGRAM_ERROR, H3_FRAME_UNEXPECTED, encode_varint,
+    read_varint_slice, validate_message_stream_frame, write_frame,
 };
-use crate::qpack::{encode_response_head, encode_trailers, HeaderDecodeError, QpackConnection};
-use anyhow::{anyhow, Result};
+use crate::qpack::{HeaderDecodeError, QpackConnection, encode_response_head, encode_trailers};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 const WEBTRANSPORT_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -137,12 +137,13 @@ impl RequestStream {
     }
 
     pub async fn finish(&mut self) -> Result<()> {
-        if let Some(state) = self.response_state.as_ref() {
-            if state.response_started && !state.final_sent {
-                return Err(anyhow!(
-                    "HTTP/3 response ended without final response HEADERS"
-                ));
-            }
+        if let Some(state) = self.response_state.as_ref()
+            && state.response_started
+            && !state.final_sent
+        {
+            return Err(anyhow!(
+                "HTTP/3 response ended without final response HEADERS"
+            ));
         }
         self.send.finish()?;
         Ok(())
@@ -288,12 +289,13 @@ impl RequestSendStream {
     }
 
     pub async fn finish(&mut self) -> Result<()> {
-        if let Some(state) = self.response_state.as_ref() {
-            if state.response_started && !state.final_sent {
-                return Err(anyhow!(
-                    "HTTP/3 response ended without final response HEADERS"
-                ));
-            }
+        if let Some(state) = self.response_state.as_ref()
+            && state.response_started
+            && !state.final_sent
+        {
+            return Err(anyhow!(
+                "HTTP/3 response ended without final response HEADERS"
+            ));
         }
         self.send.finish()?;
         Ok(())

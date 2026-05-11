@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,10 @@ pub fn temp_dir(prefix: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
+#[cfg(any(
+    feature = "auth-basic",
+    all(feature = "http3", feature = "tls-rustls", feature = "mitm")
+))]
 pub fn yaml_single_quote(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + 2);
     out.push('\'');
@@ -44,6 +48,10 @@ pub fn yaml_single_quote(input: &str) -> String {
     out
 }
 
+#[cfg(any(
+    feature = "auth-basic",
+    all(feature = "http3", feature = "tls-rustls", feature = "mitm")
+))]
 pub fn yaml_quote_path(path: &Path) -> String {
     yaml_single_quote(path.to_string_lossy().as_ref())
 }
@@ -141,6 +149,7 @@ pub fn spawn_qpxd_on_random_port(
 
 pub type Http1Head = (u16, Vec<(String, String)>, Vec<u8>);
 
+#[cfg(feature = "auth-basic")]
 pub async fn send_http1_and_read_head(addr: SocketAddr, request_bytes: &[u8]) -> Result<Http1Head> {
     let mut stream = timeout(Duration::from_secs(3), TcpStream::connect(addr))
         .await
@@ -215,6 +224,7 @@ pub fn parse_http1_head(buf: &[u8]) -> Result<Http1Head> {
     Ok((code, headers, rest.to_vec()))
 }
 
+#[cfg(feature = "auth-basic")]
 pub async fn serve_http1_capture_once(
     response_bytes: Vec<u8>,
 ) -> Result<(SocketAddr, oneshot::Receiver<Vec<u8>>)> {
@@ -229,6 +239,7 @@ pub async fn serve_http1_capture_once(
     Ok((addr, rx))
 }
 
+#[cfg(feature = "auth-basic")]
 async fn run_http1_capture_once(
     listener: TcpListener,
     response_bytes: Vec<u8>,

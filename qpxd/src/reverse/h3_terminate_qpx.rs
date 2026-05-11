@@ -1,12 +1,12 @@
 use crate::http3::quinn_socket::{
-    build_server_endpoint, prepare_server_endpoint_socket, PreparedServerEndpointSocket,
-    QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket, QuinnUdpIngressFilter,
+    PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket,
+    QuinnUdpIngressFilter, build_server_endpoint, prepare_server_endpoint_socket,
 };
 use crate::sidecar_control::SidecarControl;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use hyper::{Response, StatusCode};
-use qpx_core::config::ReverseConfig;
+use qpx_core::config::ReverseEdgeConfig;
 use qpx_core::tls::{load_cert_chain, load_private_key};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -36,15 +36,18 @@ pub(crate) fn prepare_reverse_terminate_socket(
 }
 
 pub(crate) async fn run_http3_terminate(
-    reverse: ReverseConfig,
+    reverse: ReverseEdgeConfig,
     listen_addr: SocketAddr,
     reverse_rt: super::ReloadableReverse,
     mut shutdown: watch::Receiver<SidecarControl>,
     endpoint_socket: QuinnEndpointSocket,
 ) -> Result<()> {
     let tls_config = build_reverse_tls_config(&reverse)?;
-    let runtime_cfg = reverse_rt.runtime.state().config.runtime.clone();
-    let max_bidi = runtime_cfg
+    let max_bidi = reverse_rt
+        .runtime
+        .state()
+        .plan
+        .limits
         .max_h3_streams_per_connection
         .min(u32::MAX as usize) as u32;
     let server_config =
@@ -126,7 +129,7 @@ impl QuinnUdpIngressFilter for ReverseQuicPacketFilter {
 }
 
 pub(super) fn build_reverse_tls_config(
-    reverse: &ReverseConfig,
+    reverse: &ReverseEdgeConfig,
 ) -> Result<quinn::rustls::ServerConfig> {
     let tls = reverse
         .tls
@@ -149,8 +152,8 @@ pub(super) fn build_reverse_tls_config(
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        use quinn::rustls::server::WebPkiClientVerifier;
         use quinn::rustls::RootCertStore;
+        use quinn::rustls::server::WebPkiClientVerifier;
         let certs = load_cert_chain(Path::new(client_ca))?;
         let mut roots = RootCertStore::empty();
         let (added, _) = roots.add_parsable_certificates(certs);
@@ -235,7 +238,7 @@ struct ReverseQpxHandler {
 impl qpx_h3::RequestHandler for ReverseQpxHandler {
     fn settings(&self) -> qpx_h3::Settings {
         let state = self.reverse.runtime.state();
-        let limits = state.config.runtime.clone();
+        let limits = state.plan.limits;
         qpx_h3::Settings {
             enable_extended_connect: false,
             enable_datagram: false,
@@ -257,8 +260,8 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
             .reverse
             .runtime
             .state()
-            .config
-            .runtime
+            .plan
+            .limits
             .max_h3_response_body_bytes;
         if request.head.method() == http::Method::CONNECT || request.protocol.is_some() {
             let response = crate::http::l7::finalize_response_for_request(
@@ -267,10 +270,10 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
                 self.reverse
                     .runtime
                     .state()
-                    .config
+                    .plan
                     .identity
                     .proxy_name
-                    .as_str(),
+                    .as_ref(),
                 Response::builder()
                     .status(StatusCode::METHOD_NOT_ALLOWED)
                     .body(crate::http::body::Body::from(
@@ -287,8 +290,8 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
                     self.reverse
                         .runtime
                         .state()
-                        .config
-                        .runtime
+                        .plan
+                        .limits
                         .h3_read_timeout_ms
                         .max(1),
                 ),
@@ -318,8 +321,8 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
                 self.reverse
                     .runtime
                     .state()
-                    .config
-                    .runtime
+                    .plan
+                    .limits
                     .h3_read_timeout_ms
                     .max(1),
             ),

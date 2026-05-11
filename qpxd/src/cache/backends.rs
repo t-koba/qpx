@@ -1,5 +1,5 @@
 use super::types::CacheBackend;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use qpx_core::config::CacheBackendConfig;
 use std::collections::HashMap;
 use std::sync::Arc;

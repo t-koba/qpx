@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -344,7 +344,7 @@ const ENCODE_TABLE: [(usize, u64); 257] = [
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, ENCODE_TABLE};
+    use super::{ENCODE_TABLE, decode};
 
     fn encode_for_test(input: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();

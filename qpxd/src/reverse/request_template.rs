@@ -1,5 +1,5 @@
 use crate::http::body::Body;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::BytesMut;
 use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use hyper::{Request, Uri};

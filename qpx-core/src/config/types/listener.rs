@@ -7,9 +7,9 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ListenerConfig {
+pub struct IngressEdgeConfig {
     pub name: String,
-    pub mode: ListenerMode,
+    pub mode: IngressEdgeMode,
     pub listen: String,
     pub default_action: ActionConfig,
     #[serde(default)]
@@ -21,13 +21,15 @@ pub struct ListenerConfig {
     #[serde(default)]
     pub upstream_proxy: Option<String>,
     #[serde(default)]
-    pub http3: Option<Http3ListenerConfig>,
+    pub http3: Option<Http3IngressEdgeConfig>,
     #[serde(default)]
     pub ftp: FtpConfig,
     #[serde(default)]
     pub xdp: Option<XdpConfig>,
     #[serde(default)]
     pub cache: Option<CachePolicyConfig>,
+    #[serde(default)]
+    pub capture: Option<super::CapturePolicyConfig>,
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
     #[serde(default)]
@@ -40,11 +42,13 @@ pub struct ListenerConfig {
     pub http_guard_profile: Option<String>,
     #[serde(default)]
     pub http_modules: Vec<HttpModuleConfig>,
+    #[serde(default)]
+    pub original_dst: Option<OriginalDstConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum ListenerMode {
+pub enum IngressEdgeMode {
     Forward,
     Transparent,
 }
@@ -66,7 +70,7 @@ pub struct TlsInspectionConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct Http3ListenerConfig {
+pub struct Http3IngressEdgeConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
@@ -85,6 +89,20 @@ pub struct XdpConfig {
     pub require_metadata: bool,
     #[serde(default)]
     pub trusted_peers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OriginalDstConfig {
+    #[serde(default)]
+    pub source: OriginalDstSource,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OriginalDstSource {
+    #[default]
+    LinuxSoOriginalDst,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use qpx_core::config::{
     AccessLogConfig, AuditLogConfig, LogOutputConfig, OtelConfig, SystemLogConfig,
 };
@@ -6,11 +6,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::time::Duration;
 use tracing::{Event, Subscriber};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::EnvFilter;
 
-use super::tracing_support::{build_otel_layer, OtelGuard};
+use super::tracing_support::{OtelGuard, build_otel_layer};
 
 #[derive(Debug)]
 pub struct LogGuards {
@@ -170,11 +170,11 @@ pub fn init_logging(
     audit: &AuditLogConfig,
     otel: Option<&OtelConfig>,
 ) -> Result<LogGuards> {
+    use tracing_subscriber::Layer;
     use tracing_subscriber::filter::Directive;
     use tracing_subscriber::filter::{LevelFilter, Targets};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::Layer;
 
     let mut system_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(system.level.clone()));
@@ -315,10 +315,10 @@ pub fn init_logging(
 }
 
 fn expand_tilde_path(input: &str) -> PathBuf {
-    if let Some(stripped) = input.strip_prefix("~/") {
-        if let Some(home) = dirs_next::home_dir() {
-            return home.join(stripped);
-        }
+    if let Some(stripped) = input.strip_prefix("~/")
+        && let Some(home) = dirs_next::home_dir()
+    {
+        return home.join(stripped);
     }
     PathBuf::from(input)
 }
@@ -483,13 +483,13 @@ fn reject_untrusted_log_ancestor(_path: &Path, _meta: &fs::Metadata) -> Result<(
 }
 
 fn reject_symlink_path(path: &Path) -> Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Err(anyhow!(
-                "refusing to write logs through symlink path {}",
-                path.display()
-            ));
-        }
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        return Err(anyhow!(
+            "refusing to write logs through symlink path {}",
+            path.display()
+        ));
     }
     Ok(())
 }

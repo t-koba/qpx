@@ -1,14 +1,16 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 
-use super::super::types::{CacheConfig, Config, UpstreamDiscoveryKind, UpstreamTlsTrustConfig};
+use super::super::types::{
+    CacheBackendConfig, Config, UpstreamDiscoveryKind, UpstreamTlsTrustConfig,
+};
+use super::UPSTREAM_URL_SCHEMES;
 use super::rules::validate_resilience_config;
 use super::security::validate_upstream_trust_profile_ref;
-use super::UPSTREAM_URL_SCHEMES;
 
-pub(super) fn validate_cache_backends(cache: &CacheConfig) -> Result<HashSet<String>> {
+pub(super) fn validate_cache_backends(backends: &[CacheBackendConfig]) -> Result<HashSet<String>> {
     let mut cache_backends = HashSet::new();
-    for backend in &cache.backends {
+    for backend in backends {
         if backend.name.trim().is_empty() {
             return Err(anyhow!("cache backend name must not be empty"));
         }
@@ -143,13 +145,13 @@ pub(super) fn validate_upstream_configs(
                     upstream.name
                 ));
             }
-            if let Some(name) = discovery.name.as_deref() {
-                if name.trim().is_empty() {
-                    return Err(anyhow!(
-                        "upstream {} discovery.name must not be empty when set",
-                        upstream.name
-                    ));
-                }
+            if let Some(name) = discovery.name.as_deref()
+                && name.trim().is_empty()
+            {
+                return Err(anyhow!(
+                    "upstream {} discovery.name must not be empty when set",
+                    upstream.name
+                ));
             }
             match discovery.kind {
                 UpstreamDiscoveryKind::Dns => {}

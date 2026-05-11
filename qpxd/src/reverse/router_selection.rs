@@ -3,10 +3,10 @@ use crate::http::body::Body;
 use hyper::Request;
 use ring::rand::{SecureRandom, SystemRandom};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::reverse::health::{now_millis, EndpointLifecycleRuntime, UpstreamEndpoint};
+use crate::reverse::health::{EndpointLifecycleRuntime, UpstreamEndpoint, now_millis};
 
 pub(super) fn select_upstream_inner(
     upstreams: &[Arc<UpstreamEndpoint>],

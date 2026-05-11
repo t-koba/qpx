@@ -1,5 +1,7 @@
-listeners:
-- name: selective-mitm-forward
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: forward
+  name: selective-mitm-forward
   listen: 127.0.0.1:18084
   default_action:
     type: block
@@ -7,15 +9,15 @@ listeners:
     enabled: true
     verify_upstream: true
     verify_exceptions:
-    - '*.internal.example.com'
+    - "*.internal.example.com"
   rules:
   - name: inspect-work-sites
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       sni:
-      - '*.work.example.com'
+      - "*.work.example.com"
       - api.partner.example
     action:
       type: inspect
@@ -23,30 +25,28 @@ listeners:
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       sni:
-      - '*.bank.example'
-      - '*.payments.example'
+      - "*.bank.example"
+      - "*.payments.example"
     action:
       type: direct
   - name: block-known-bad
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
-      - '*.botnet.invalid'
-      - '*.malware.test'
+      - "*.botnet.invalid"
+      - "*.malware.test"
     action:
       type: block
   - name: allow-loopback
     match:
       src_ip:
       - 127.0.0.1/32
-      - ::1/128
+      - "::1/128"
       host:
-      - '*'
+      - "*"
     action:
       type: direct
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -208,15 +208,13 @@ impl PeerControlState {
                     ));
                 }
                 let mut inner = self.inner.lock().await;
-                if let Some(previous) = inner.goaway_id {
-                    if goaway_id > previous {
-                        return Err(ConnectionClose::new(
-                            H3_ID_ERROR,
-                            format!(
-                                "received GOAWAY id {goaway_id} greater than previous {previous}"
-                            ),
-                        ));
-                    }
+                if let Some(previous) = inner.goaway_id
+                    && goaway_id > previous
+                {
+                    return Err(ConnectionClose::new(
+                        H3_ID_ERROR,
+                        format!("received GOAWAY id {goaway_id} greater than previous {previous}"),
+                    ));
                 }
                 inner.goaway_id = Some(goaway_id);
                 Ok(())
@@ -224,15 +222,15 @@ impl PeerControlState {
             FRAME_MAX_PUSH_ID => {
                 let max_push_id = parse_single_varint_payload(payload, "MAX_PUSH_ID")?;
                 let mut inner = self.inner.lock().await;
-                if let Some(previous) = inner.max_push_id {
-                    if max_push_id < previous {
-                        return Err(ConnectionClose::new(
-                            H3_ID_ERROR,
-                            format!(
-                                "received MAX_PUSH_ID {max_push_id} lower than previous {previous}"
-                            ),
-                        ));
-                    }
+                if let Some(previous) = inner.max_push_id
+                    && max_push_id < previous
+                {
+                    return Err(ConnectionClose::new(
+                        H3_ID_ERROR,
+                        format!(
+                            "received MAX_PUSH_ID {max_push_id} lower than previous {previous}"
+                        ),
+                    ));
                 }
                 inner.max_push_id = Some(max_push_id);
                 Ok(())
@@ -487,10 +485,10 @@ pub(crate) fn decode_settings_frame(payload: &[u8]) -> Result<PeerSettings> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_settings_frame, encode_varint, push_varint, read_frame, read_varint_slice,
-        validate_control_stream_frame, validate_message_stream_frame, PeerControlState,
         FRAME_CANCEL_PUSH, FRAME_DATA, FRAME_GOAWAY, FRAME_MAX_PUSH_ID, FRAME_PING,
         FRAME_PUSH_PROMISE, FRAME_WINDOW_UPDATE, H3_FRAME_ERROR, H3_FRAME_UNEXPECTED, H3_ID_ERROR,
+        PeerControlState, decode_settings_frame, encode_varint, push_varint, read_frame,
+        read_varint_slice, validate_control_stream_frame, validate_message_stream_frame,
     };
 
     #[test]

@@ -4,9 +4,9 @@ use anyhow::anyhow;
 use anyhow::{Context, Result};
 use qpx_core::config::Config;
 #[cfg(windows)]
-use serde::de::DeserializeOwned;
-#[cfg(windows)]
 use serde::Serialize;
+#[cfg(windows)]
+use serde::de::DeserializeOwned;
 #[cfg(windows)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -29,12 +29,12 @@ use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{
-    WSADuplicateSocketW, WSASocketW, WSAStartup, FROM_PROTOCOL_INFO, INVALID_SOCKET, SOCKET_ERROR,
-    WSADATA, WSAPROTOCOL_INFOW, WSA_FLAG_OVERLAPPED,
+    FROM_PROTOCOL_INFO, INVALID_SOCKET, SOCKET_ERROR, WSA_FLAG_OVERLAPPED, WSADATA,
+    WSADuplicateSocketW, WSAPROTOCOL_INFOW, WSASocketW, WSAStartup,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, OpenEventW, ResetEvent, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+    CreateEventW, EVENT_MODIFY_STATE, OpenEventW, ResetEvent, SetEvent, WaitForSingleObject,
 };
 
 #[cfg(windows)]

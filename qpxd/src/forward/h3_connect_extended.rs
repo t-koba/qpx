@@ -3,14 +3,14 @@ use crate::http::l7::{finalize_response_with_headers, prepare_request_with_heade
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
 use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::quic::build_h3_client_config;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes};
 use hyper::{Response, StatusCode};
 use qpx_core::rules::CompiledHeaderControl;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::lookup_host;
-use tokio::time::{timeout, Duration, Instant};
+use tokio::time::{Duration, Instant, timeout};
 use tracing::warn;
 
 pub(super) struct UpstreamExtendedConnectStream {
@@ -401,11 +401,10 @@ pub(super) async fn relay_h3_extended_connect_stream(
                 let Some(payload) = down_payload else {
                     break;
                 };
-                if let Some(datagrams) = upstream_datagrams.as_mut() {
-                    if let Err(err) = datagrams.sender.send_datagram(payload) {
+                if let Some(datagrams) = upstream_datagrams.as_mut()
+                    && let Err(err) = datagrams.sender.send_datagram(payload) {
                         warn!(error = ?err, "forward HTTP/3 extended CONNECT upstream datagram send failed");
                     }
-                }
                 idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
             }
             up_payload = async {
@@ -418,11 +417,10 @@ pub(super) async fn relay_h3_extended_connect_stream(
                 let Some(payload) = up_payload else {
                     break;
                 };
-                if let Some(datagrams) = downstream_datagrams.as_mut() {
-                    if let Err(err) = datagrams.sender.send_datagram(payload) {
+                if let Some(datagrams) = downstream_datagrams.as_mut()
+                    && let Err(err) = datagrams.sender.send_datagram(payload) {
                         warn!(error = ?err, "forward HTTP/3 extended CONNECT downstream datagram send failed");
                     }
-                }
                 idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
             }
         }

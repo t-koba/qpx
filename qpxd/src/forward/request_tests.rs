@@ -2,11 +2,11 @@ use super::*;
 use crate::http::body::to_bytes;
 use crate::runtime::Runtime;
 use qpx_core::config::{
-    AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CacheConfig, Config,
-    ExtAuthzConfig, ExtAuthzSendConfig, HttpModuleConfig, HttpPolicyConfig,
-    HttpResponseEffectsConfig, HttpResponseRuleConfig, IdentityConfig, ListenerConfig,
-    ListenerMode, LocalResponseConfig, MatchConfig, MessagesConfig, PolicyContextConfig,
-    RpcMatchConfig, RuleConfig, RuntimeConfig, SystemLogConfig,
+    AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config, ExtAuthzConfig,
+    ExtAuthzSendConfig, HttpModuleConfig, HttpPolicyConfig, HttpResponseEffectsConfig,
+    HttpResponseRuleConfig, IdentityConfig, IngressEdgeConfig, IngressEdgeMode,
+    LocalResponseConfig, MatchConfig, MessagesConfig, PolicyContextConfig, RpcMatchConfig,
+    RuleConfig, RuntimeConfig, SystemLogConfig,
 };
 use std::collections::HashMap;
 use std::io::Read;
@@ -21,26 +21,37 @@ async fn request_size_rule_uses_actual_chunked_body_size() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: vec![ListenerConfig {
+        edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
             name: "forward".to_string(),
-            mode: ListenerMode::Forward,
+            mode: IngressEdgeMode::Forward,
             listen: "127.0.0.1:0".to_string(),
             default_action: ActionConfig {
                 kind: ActionKind::Block,
                 upstream: None,
                 local_response: None,
             },
+            original_dst: None,
             tls_inspection: None,
             rules: vec![RuleConfig {
                 name: "size".to_string(),
@@ -69,20 +80,16 @@ async fn request_size_rule_uses_actual_chunked_body_size() {
             ftp: Default::default(),
             xdp: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             policy_context: None,
             http: None,
             http_guard_profile: None,
             destination_resolution: None,
             http_modules: Vec::new(),
-        }],
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: Vec::new(),
+        })],
         upstreams: Vec::new(),
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
     let (mut sender, body) = Body::channel();
@@ -149,26 +156,37 @@ async fn forward_request_preserves_upstream_early_hints() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: vec![ListenerConfig {
+        edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
             name: "forward".to_string(),
-            mode: ListenerMode::Forward,
+            mode: IngressEdgeMode::Forward,
             listen: "127.0.0.1:0".to_string(),
             default_action: ActionConfig {
                 kind: ActionKind::Direct,
                 upstream: None,
                 local_response: None,
             },
+            original_dst: None,
             tls_inspection: None,
             rules: Vec::new(),
             connection_filter: Vec::new(),
@@ -177,20 +195,16 @@ async fn forward_request_preserves_upstream_early_hints() {
             ftp: Default::default(),
             xdp: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             policy_context: None,
             http: None,
             http_guard_profile: None,
             destination_resolution: None,
             http_modules: Vec::new(),
-        }],
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: Vec::new(),
+        })],
         upstreams: Vec::new(),
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     })
     .expect("runtime");
 
@@ -346,26 +360,37 @@ async fn forward_response_rule_matches_request_derived_rpc_fields() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: vec![ListenerConfig {
+        edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
             name: "forward".to_string(),
-            mode: ListenerMode::Forward,
+            mode: IngressEdgeMode::Forward,
             listen: "127.0.0.1:0".to_string(),
             default_action: ActionConfig {
                 kind: ActionKind::Direct,
                 upstream: None,
                 local_response: None,
             },
+            original_dst: None,
             tls_inspection: None,
             rules: Vec::new(),
             connection_filter: Vec::new(),
@@ -374,6 +399,7 @@ async fn forward_response_rule_matches_request_derived_rpc_fields() {
             ftp: Default::default(),
             xdp: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             policy_context: None,
             http: Some(HttpPolicyConfig {
@@ -403,14 +429,9 @@ async fn forward_response_rule_matches_request_derived_rpc_fields() {
             http_guard_profile: None,
             destination_resolution: None,
             http_modules: Vec::new(),
-        }],
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: Vec::new(),
+        })],
         upstreams: Vec::new(),
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     })
     .expect("runtime");
 
@@ -474,26 +495,37 @@ async fn assert_forward_response_rule_matches_streaming(
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: vec![ListenerConfig {
+        edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
             name: "forward".to_string(),
-            mode: ListenerMode::Forward,
+            mode: IngressEdgeMode::Forward,
             listen: "127.0.0.1:0".to_string(),
             default_action: ActionConfig {
                 kind: ActionKind::Direct,
                 upstream: None,
                 local_response: None,
             },
+            original_dst: None,
             tls_inspection: None,
             rules: Vec::new(),
             connection_filter: Vec::new(),
@@ -502,6 +534,7 @@ async fn assert_forward_response_rule_matches_streaming(
             ftp: Default::default(),
             xdp: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             policy_context: None,
             http: Some(HttpPolicyConfig {
@@ -529,14 +562,9 @@ async fn assert_forward_response_rule_matches_streaming(
             http_guard_profile: None,
             destination_resolution: None,
             http_modules: Vec::new(),
-        }],
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: Vec::new(),
+        })],
         upstreams: Vec::new(),
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     })
     .expect("runtime");
 
@@ -591,34 +619,45 @@ async fn ext_authz_unknown_rate_limit_profile_fails_closed() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: vec![ExtAuthzConfig {
+                    name: "authz".to_string(),
+                    kind: Default::default(),
+                    endpoint: format!("http://{authz_addr}"),
+                    timeout_ms: 1_000,
+                    max_response_bytes: 1024 * 1024,
+                    send: ExtAuthzSendConfig::default(),
+                    on_error: Default::default(),
+                }],
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: vec![ExtAuthzConfig {
-            name: "authz".to_string(),
-            kind: Default::default(),
-            endpoint: format!("http://{authz_addr}"),
-            timeout_ms: 1_000,
-            max_response_bytes: 1024 * 1024,
-            send: ExtAuthzSendConfig::default(),
-            on_error: Default::default(),
-        }],
-        destination_resolution: Default::default(),
-        listeners: vec![ListenerConfig {
+        edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
             name: "forward".to_string(),
-            mode: ListenerMode::Forward,
+            mode: IngressEdgeMode::Forward,
             listen: "127.0.0.1:0".to_string(),
             default_action: ActionConfig {
                 kind: ActionKind::Direct,
                 upstream: None,
                 local_response: None,
             },
+            original_dst: None,
             tls_inspection: None,
             rules: Vec::new(),
             connection_filter: Vec::new(),
@@ -627,6 +666,7 @@ async fn ext_authz_unknown_rate_limit_profile_fails_closed() {
             ftp: Default::default(),
             xdp: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             policy_context: Some(PolicyContextConfig {
                 identity_sources: Vec::new(),
@@ -636,14 +676,9 @@ async fn ext_authz_unknown_rate_limit_profile_fails_closed() {
             http_guard_profile: None,
             destination_resolution: None,
             http_modules: Vec::new(),
-        }],
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: Vec::new(),
+        })],
         upstreams: Vec::new(),
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     })
     .expect("runtime");
     let request = Request::builder()
@@ -679,26 +714,37 @@ async fn forward_http_module_compresses_responses() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: vec![ListenerConfig {
+        edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
             name: "forward".to_string(),
-            mode: ListenerMode::Forward,
+            mode: IngressEdgeMode::Forward,
             listen: "127.0.0.1:0".to_string(),
             default_action: ActionConfig {
                 kind: ActionKind::Direct,
                 upstream: None,
                 local_response: None,
             },
+            original_dst: None,
             tls_inspection: None,
             rules: Vec::new(),
             connection_filter: Vec::new(),
@@ -707,33 +753,32 @@ async fn forward_http_module_compresses_responses() {
             ftp: Default::default(),
             xdp: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             policy_context: None,
             http: None,
             http_guard_profile: None,
             destination_resolution: None,
-            http_modules: vec![serde_yaml::from_str(
-                r#"type: response_compression
-min_body_bytes: 1
-max_body_bytes: 65536
-content_types:
-  - text/plain
-gzip: true
-brotli: false
-zstd: false
-gzip_level: 6
-brotli_level: 5
-zstd_level: 3"#,
-            )
-            .expect("http module config")],
-        }],
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: Vec::new(),
+            http_modules: vec![
+                serde_yaml::from_str(
+                    r#"type: response_compression
+settings:
+  min_body_bytes: 1
+  max_body_bytes: 65536
+  content_types:
+    - text/plain
+  gzip: true
+  brotli: false
+  zstd: false
+  gzip_level: 6
+  brotli_level: 5
+  zstd_level: 3"#,
+                )
+                .expect("http module config"),
+            ],
+        })],
         upstreams: Vec::new(),
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     })
     .expect("runtime");
     let request = Request::builder()
@@ -779,26 +824,37 @@ async fn forward_http_module_subrequest_can_short_circuit() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: vec![ListenerConfig {
+        edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
             name: "forward".to_string(),
-            mode: ListenerMode::Forward,
+            mode: IngressEdgeMode::Forward,
             listen: "127.0.0.1:0".to_string(),
             default_action: ActionConfig {
                 kind: ActionKind::Direct,
                 upstream: None,
                 local_response: None,
             },
+            original_dst: None,
             tls_inspection: None,
             rules: Vec::new(),
             connection_filter: Vec::new(),
@@ -807,30 +863,32 @@ async fn forward_http_module_subrequest_can_short_circuit() {
             ftp: Default::default(),
             xdp: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             policy_context: None,
             http: None,
             http_guard_profile: None,
             destination_resolution: None,
-            http_modules: vec![serde_yaml::from_str(&format!(
-                r#"type: subrequest
-name: authz
-phase: request_headers
-url: http://{subrequest_addr}/check?path={{request.path}}
-timeout_ms: 1000
-pass_headers:
-  - x-test
-response_mode: return_on_error"#
-            ))
-            .expect("http module config")],
-        }],
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: Vec::new(),
+            http_modules: vec![
+                serde_yaml::from_str(&format!(
+                    r#"type: subrequest
+settings:
+  name: authz
+  phase: request_headers
+  url: http://{subrequest_addr}/check?path={{request.path:urlquery}}
+  timeout_ms: 1000
+  max_response_bytes: 65536
+  allowed_schemes: [http]
+  allowed_hosts: [127.0.0.1]
+  pass_headers:
+    - x-test
+  response_mode: return_on_error"#
+                ))
+                .expect("http module config"),
+            ],
+        })],
         upstreams: Vec::new(),
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     })
     .expect("runtime");
     let request = Request::builder()
@@ -884,15 +942,30 @@ impl crate::module_api::HttpModuleFactory for TestResponseHeaderModuleFactory {
 
 #[async_trait::async_trait]
 impl crate::module_api::HttpModule for TestResponseHeaderModule {
-    async fn on_downstream_response(
+    fn capabilities(&self) -> crate::module_api::HttpModuleCapabilities {
+        crate::module_api::HttpModuleCapabilities::headers_only(
+            crate::module_api::ModuleStages::DOWNSTREAM_RESPONSE,
+        )
+    }
+
+    async fn call<'a>(
         &self,
+        stage: crate::module_api::HttpModuleStage,
         _ctx: &mut crate::module_api::HttpModuleContext,
-        mut response: hyper::Response<crate::module_api::Body>,
-    ) -> anyhow::Result<hyper::Response<crate::module_api::Body>> {
+        event: crate::module_api::HttpModuleEvent<'a>,
+    ) -> anyhow::Result<crate::module_api::HttpModuleEvent<'a>> {
+        let crate::module_api::HttpModuleStage::DownstreamResponse = stage else {
+            return Ok(event);
+        };
+        let crate::module_api::HttpModuleEvent::DownstreamResponse(mut response) = event else {
+            anyhow::bail!("invalid downstream response event");
+        };
         response
             .headers_mut()
             .insert(self.header_name.clone(), self.header_value.clone());
-        Ok(response)
+        Ok(crate::module_api::HttpModuleEvent::DownstreamResponse(
+            response,
+        ))
     }
 }
 
@@ -915,26 +988,37 @@ async fn forward_custom_http_module_registry_adds_response_header() {
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
             runtime: RuntimeConfig::default(),
-            system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
-            audit_log: AuditLogConfig::default(),
-            metrics: None,
-            otel: None,
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: AuthConfig::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    ext_authz: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
             acme: None,
-            exporter: None,
-            auth: AuthConfig::default(),
-            identity_sources: Vec::new(),
-            ext_authz: Vec::new(),
-            destination_resolution: Default::default(),
-            listeners: vec![ListenerConfig {
+            edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
                 name: "forward".to_string(),
-                mode: ListenerMode::Forward,
+                mode: IngressEdgeMode::Forward,
                 listen: "127.0.0.1:0".to_string(),
                 default_action: ActionConfig {
                     kind: ActionKind::Direct,
                     upstream: None,
                     local_response: None,
                 },
+                original_dst: None,
                 tls_inspection: None,
                 rules: Vec::new(),
                 connection_filter: Vec::new(),
@@ -943,25 +1027,24 @@ async fn forward_custom_http_module_registry_adds_response_header() {
                 ftp: Default::default(),
                 xdp: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 policy_context: None,
                 http: None,
                 http_guard_profile: None,
                 destination_resolution: None,
-                http_modules: vec![serde_yaml::from_str(
-                    r#"type: test_response_header
-header_name: x-in-process-module
-header_value: active"#,
-                )
-                .expect("http module config")],
-            }],
-            named_sets: Vec::new(),
-            http_guard_profiles: Vec::new(),
-            rate_limit_profiles: Vec::new(),
-            upstream_trust_profiles: Vec::new(),
-            reverse: Vec::new(),
+                http_modules: vec![
+                    serde_yaml::from_str(
+                        r#"type: test_response_header
+settings:
+  header_name: x-in-process-module
+  header_value: active"#,
+                    )
+                    .expect("http module config"),
+                ],
+            })],
             upstreams: Vec::new(),
-            cache: CacheConfig::default(),
+            caches: Vec::new(),
         })
         .expect("runtime");
     let request = Request::builder()

@@ -1,11 +1,11 @@
 use super::health::{
-    now_millis, probe_upstream, EndpointLifecycleRuntime, HealthCheckRuntime, PassiveHealthRuntime,
-    UpstreamEndpoint,
+    EndpointLifecycleRuntime, HealthCheckRuntime, PassiveHealthRuntime, UpstreamEndpoint,
+    now_millis, probe_upstream,
 };
 use crate::http::body::Body;
-use crate::http::modules::{CompiledHttpModuleChain, HttpModuleRegistry};
+use crate::http::modules::HttpModuleRegistry;
 use crate::http::response_policy::HttpResponseRuleEngine;
-use crate::rate_limit::RateLimitSet;
+use crate::runtime::{CompiledReverseEdge, CompiledReverseRouteTarget, ExecutionPlan};
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use hyper::Request;
@@ -13,7 +13,7 @@ use metrics::gauge;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use qpx_core::config::ReverseTlsPassthroughRouteConfig;
 use qpx_core::config::{
-    CachePolicyConfig, PathRewriteConfig, PolicyContextConfig, ReverseConfig, ReverseRouteConfig,
+    PathRewriteConfig, ReverseEdgeConfig, ReverseRouteConfig, ReverseRouteTargetConfig,
     UpstreamConfig, UpstreamDiscoveryConfig,
 };
 use qpx_core::matchers::CompiledMatch;
@@ -23,10 +23,10 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use tokio::sync::watch;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use crate::ipc_client::IpcUpstream;
@@ -149,13 +149,11 @@ pub(super) struct CompiledRegexPathRewrite {
 pub(super) struct HttpRoute {
     matcher: CompiledMatch,
     pub(super) name: Option<Arc<str>>,
-    pub(super) policy_context: Option<PolicyContextConfig>,
+    pub(super) target: CompiledReverseRouteTarget,
+    pub(super) plan: ExecutionPlan,
     pub(super) local_response: Option<qpx_core::config::LocalResponseConfig>,
-    pub(super) cache_policy: Option<CachePolicyConfig>,
-    pub(super) rate_limit: RateLimitSet,
     pub(super) headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) ipc: Option<IpcUpstream>,
-    pub(super) http_modules: Arc<CompiledHttpModuleChain>,
     backends: Vec<WeightedBackend>,
     mirrors: Vec<MirrorTarget>,
     pub(super) response_rules: Option<Arc<HttpResponseRuleEngine>>,
@@ -175,11 +173,65 @@ pub(super) struct TlsPassthroughRoute {
 }
 
 impl ReverseRouter {
+    #[cfg(test)]
     pub(super) fn new(
-        config: ReverseConfig,
+        config: ReverseEdgeConfig,
         upstream_configs: &[UpstreamConfig],
         http_module_registry: &HttpModuleRegistry,
     ) -> Result<Self> {
+        let runtime_config = qpx_core::config::Config {
+            state_dir: None,
+            identity: Default::default(),
+            messages: Default::default(),
+            runtime: Default::default(),
+            telemetry: Default::default(),
+            security: Default::default(),
+            http: Default::default(),
+            traffic: Default::default(),
+            acme: None,
+            edges: vec![qpx_core::config::EdgeConfig::Reverse(config.clone())],
+            upstreams: upstream_configs.to_vec(),
+            caches: Vec::new(),
+        };
+        let state = crate::runtime::RuntimeState::build_with_http_module_registry(
+            runtime_config,
+            Arc::new(http_module_registry.clone()),
+        )?;
+        let compiled_edge = state
+            .plan
+            .reverse_edge(config.name.as_str())
+            .ok_or_else(|| anyhow::anyhow!("compiled reverse edge missing for {}", config.name))?;
+        Self::new_with_plan(
+            config,
+            upstream_configs,
+            http_module_registry,
+            compiled_edge,
+        )
+    }
+
+    pub(super) fn new_with_plan(
+        config: ReverseEdgeConfig,
+        upstream_configs: &[UpstreamConfig],
+        http_module_registry: &HttpModuleRegistry,
+        compiled_edge: &CompiledReverseEdge,
+    ) -> Result<Self> {
+        if config.routes.len() != compiled_edge.routes.len() {
+            anyhow::bail!(
+                "reverse {} compiled route count mismatch: config={}, plan={}",
+                config.name,
+                config.routes.len(),
+                compiled_edge.routes.len()
+            );
+        }
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+        if config.tls_passthrough_routes.len() != compiled_edge.tls_passthrough_routes.len() {
+            anyhow::bail!(
+                "reverse {} compiled TLS passthrough route count mismatch: config={}, plan={}",
+                config.name,
+                config.tls_passthrough_routes.len(),
+                compiled_edge.tls_passthrough_routes.len()
+            );
+        }
         let upstreams = upstream_configs
             .iter()
             .map(|cfg| (cfg.name.as_str(), cfg))
@@ -188,9 +240,51 @@ impl ReverseRouter {
         let mut http_routes = Vec::with_capacity(config.routes.len());
         let mut http_hints = Vec::with_capacity(config.routes.len());
 
-        for route in config.routes {
-            let (route, hint) =
-                HttpRoute::from_config(route, &upstreams, &mut interner, http_module_registry)?;
+        for (idx, route) in config.routes.into_iter().enumerate() {
+            let compiled_route = compiled_edge
+                .routes
+                .get(idx)
+                .expect("route count checked above");
+            let expected_id = route
+                .name
+                .as_deref()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("route[{idx}]"));
+            if compiled_route.id.as_ref() != expected_id {
+                anyhow::bail!(
+                    "reverse {} route id mismatch at index {}: config={}, plan={}",
+                    config.name,
+                    idx,
+                    expected_id,
+                    compiled_route.id
+                );
+            }
+            if route.name.as_deref().unwrap_or(expected_id.as_str()) != compiled_route.name.as_ref()
+            {
+                anyhow::bail!(
+                    "reverse {} route name mismatch at index {}: config={:?}, plan={}",
+                    config.name,
+                    idx,
+                    route.name,
+                    compiled_route.name
+                );
+            }
+            if reverse_target_kind(&route.target) != compiled_route.target.kind() {
+                anyhow::bail!(
+                    "reverse {} route target kind mismatch at index {}: config={}, plan={}",
+                    config.name,
+                    idx,
+                    reverse_target_kind(&route.target),
+                    compiled_route.target.kind()
+                );
+            }
+            let (route, hint) = HttpRoute::from_config(
+                route,
+                &upstreams,
+                &mut interner,
+                http_module_registry,
+                compiled_route,
+            )?;
             http_routes.push(route);
             http_hints.push(hint);
         }
@@ -204,9 +298,25 @@ impl ReverseRouter {
         let (tls_routes, tls_prefilter) = {
             let mut tls_routes = Vec::with_capacity(config.tls_passthrough_routes.len());
             let mut tls_hints = Vec::with_capacity(config.tls_passthrough_routes.len());
-            for route in config.tls_passthrough_routes {
-                let (route, hint) =
-                    TlsPassthroughRoute::from_config(route, &upstreams, &mut interner)?;
+            for (idx, route) in config.tls_passthrough_routes.into_iter().enumerate() {
+                let compiled_route = compiled_edge
+                    .tls_passthrough_routes
+                    .get(idx)
+                    .expect("TLS passthrough route count checked above");
+                if compiled_route.target.kind() != "tls_passthrough" {
+                    anyhow::bail!(
+                        "reverse {} TLS passthrough target kind mismatch at index {}: plan={}",
+                        config.name,
+                        idx,
+                        compiled_route.target.kind()
+                    );
+                }
+                let (route, hint) = TlsPassthroughRoute::from_config(
+                    route,
+                    &upstreams,
+                    &mut interner,
+                    compiled_route,
+                )?;
                 tls_routes.push(route);
                 tls_hints.push(hint);
             }
@@ -457,6 +567,15 @@ impl ReverseRouter {
             pools.extend(route.health_upstream_pools());
         }
         pools
+    }
+}
+
+fn reverse_target_kind(target: &ReverseRouteTargetConfig) -> &'static str {
+    match target {
+        ReverseRouteTargetConfig::Upstream { .. } => "upstream",
+        ReverseRouteTargetConfig::Weighted { .. } => "weighted",
+        ReverseRouteTargetConfig::Ipc { .. } => "ipc",
+        ReverseRouteTargetConfig::LocalResponse { .. } => "local_response",
     }
 }
 

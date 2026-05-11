@@ -1,13 +1,16 @@
 use crate::http::body::Body;
+use crate::http::body_size::{observed_request_bytes, observed_response_bytes};
 use crate::http::common::http_version_label;
 use anyhow::Result;
 use hyper::{Request, Response};
 use metrics::counter;
-use qpx_core::config::ExporterConfig;
-use qpx_core::exporter::{unix_timestamp_nanos, CaptureDirection, CaptureEvent, CapturePlane};
+use qpx_core::config::{CaptureRedactionConfig, ExporterConfig};
+use qpx_core::exporter::{CaptureDirection, CaptureEvent, CapturePlane, unix_timestamp_nanos};
 use qpx_core::shm_ring::ShmRingBuffer;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -18,6 +21,7 @@ pub struct ExporterSink {
     capture_plaintext: bool,
     capture_encrypted: bool,
     max_chunk_bytes: usize,
+    redaction: Arc<CaptureRedaction>,
 }
 
 #[derive(Clone)]
@@ -28,7 +32,16 @@ pub struct ExportSession {
     server: String,
     capture_plaintext: bool,
     capture_encrypted: bool,
+    max_plaintext_bytes: Option<usize>,
     max_chunk_bytes: usize,
+    redaction: Arc<CaptureRedaction>,
+}
+
+#[derive(Clone)]
+struct CaptureRedaction {
+    headers: Vec<String>,
+    query_keys: Vec<String>,
+    json_paths: Vec<Vec<String>>,
 }
 
 impl ExporterSink {
@@ -51,6 +64,7 @@ impl ExporterSink {
         let capture_plaintext = config.capture.plaintext;
         let capture_encrypted = config.capture.encrypted;
         let max_chunk_bytes = config.capture.max_chunk_bytes.max(1);
+        let redaction = Arc::new(CaptureRedaction::from_config(&config.capture.redact));
 
         tokio::spawn(async move {
             run_export_loop(ring, lossy, rx).await;
@@ -62,6 +76,7 @@ impl ExporterSink {
             capture_plaintext,
             capture_encrypted,
             max_chunk_bytes,
+            redaction,
         })
     }
 
@@ -75,8 +90,218 @@ impl ExporterSink {
             server: server.to_string(),
             capture_plaintext: self.capture_plaintext,
             capture_encrypted: self.capture_encrypted,
+            max_plaintext_bytes: None,
             max_chunk_bytes: self.max_chunk_bytes,
+            redaction: self.redaction.clone(),
         }
+    }
+
+    pub fn session_with_capture(
+        &self,
+        client: impl ToString,
+        server: impl ToString,
+        capture: &crate::runtime::CompiledCapturePlan,
+    ) -> ExportSession {
+        let session_index = self.session_counter.fetch_add(1, Ordering::Relaxed);
+        let session_id = format!("{}-{}", unix_timestamp_nanos(), session_index);
+        let client = client.to_string();
+        let server = server.to_string();
+        let capture_plaintext = capture
+            .plaintext
+            .as_ref()
+            .map(|plaintext| {
+                (plaintext.headers || plaintext.body)
+                    && sample_allows(
+                        session_id.as_str(),
+                        client.as_str(),
+                        server.as_str(),
+                        plaintext.sample_percent,
+                    )
+            })
+            .unwrap_or(false);
+        let scoped_redaction = capture
+            .plaintext
+            .as_ref()
+            .map(|plaintext| Arc::new(CaptureRedaction::from_config(&plaintext.redact)))
+            .unwrap_or_else(|| self.redaction.clone());
+        ExportSession {
+            tx: self.tx.clone(),
+            session_id,
+            client,
+            server,
+            capture_plaintext,
+            capture_encrypted: capture.encrypted,
+            max_plaintext_bytes: capture
+                .plaintext
+                .as_ref()
+                .filter(|plaintext| plaintext.body)
+                .and_then(|plaintext| plaintext.max_body_bytes),
+            max_chunk_bytes: self.max_chunk_bytes,
+            redaction: scoped_redaction,
+        }
+    }
+}
+
+fn sample_allows(
+    session_id: &str,
+    client: &str,
+    server: &str,
+    sample_percent: Option<u32>,
+) -> bool {
+    let Some(sample_percent) = sample_percent else {
+        return true;
+    };
+    if sample_percent >= 100 {
+        return true;
+    }
+    if sample_percent == 0 {
+        return false;
+    }
+    let mut hasher = DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    client.hash(&mut hasher);
+    server.hash(&mut hasher);
+    hasher.finish() % 100 < sample_percent as u64
+}
+
+impl CaptureRedaction {
+    fn from_config(config: &CaptureRedactionConfig) -> Self {
+        Self {
+            headers: config
+                .headers
+                .iter()
+                .map(|header| header.to_ascii_lowercase())
+                .collect(),
+            query_keys: config
+                .query_keys
+                .iter()
+                .map(|key| key.to_ascii_lowercase())
+                .collect(),
+            json_paths: config
+                .json_paths
+                .iter()
+                .filter_map(|path| compile_json_path(path))
+                .collect(),
+        }
+    }
+
+    fn redact_plaintext(&self, payload: &[u8]) -> Vec<u8> {
+        let Ok(text) = std::str::from_utf8(payload) else {
+            return payload.to_vec();
+        };
+        let mut out = String::with_capacity(text.len());
+        for (idx, line) in text.split_inclusive('\n').enumerate() {
+            if idx == 0 {
+                out.push_str(self.redact_request_line(line).as_str());
+                continue;
+            }
+            if let Some((name, _)) = line.split_once(':')
+                && self
+                    .headers
+                    .iter()
+                    .any(|header| header.eq_ignore_ascii_case(name.trim()))
+            {
+                out.push_str(name);
+                out.push_str(": <redacted>\r\n");
+                continue;
+            }
+            out.push_str(line);
+        }
+        self.redact_json_body(out).into_bytes()
+    }
+
+    fn redact_request_line(&self, line: &str) -> String {
+        let mut parts = line.splitn(3, ' ');
+        let Some(method) = parts.next() else {
+            return line.to_string();
+        };
+        let Some(target) = parts.next() else {
+            return line.to_string();
+        };
+        let Some(version) = parts.next() else {
+            return line.to_string();
+        };
+        let Some((path, query)) = target.split_once('?') else {
+            return line.to_string();
+        };
+        let redacted_query = query
+            .split('&')
+            .map(|pair| {
+                let key = pair.split_once('=').map(|(key, _)| key).unwrap_or(pair);
+                if self
+                    .query_keys
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(key))
+                {
+                    format!("{key}=<redacted>")
+                } else {
+                    pair.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        format!("{method} {path}?{redacted_query} {version}")
+    }
+
+    fn redact_json_body(&self, text: String) -> String {
+        if self.json_paths.is_empty() {
+            return text;
+        }
+        let Some((head, body, separator)) = split_http_message(text.as_str()) else {
+            return text;
+        };
+        if !head.lines().any(|line| {
+            line.to_ascii_lowercase()
+                .starts_with("content-type: application/json")
+        }) {
+            return text;
+        }
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body.trim_end()) else {
+            return text;
+        };
+        for path in &self.json_paths {
+            redact_json_value(&mut value, path);
+        }
+        let Ok(redacted_body) = serde_json::to_string(&value) else {
+            return text;
+        };
+        format!("{head}{separator}{redacted_body}")
+    }
+}
+
+fn compile_json_path(path: &str) -> Option<Vec<String>> {
+    let path = path.trim().strip_prefix("$.")?;
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.split('.').map(str::to_string).collect())
+}
+
+fn split_http_message(text: &str) -> Option<(&str, &str, &'static str)> {
+    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+        return Some((head, body, "\r\n\r\n"));
+    }
+    text.split_once("\n\n")
+        .map(|(head, body)| (head, body, "\n\n"))
+}
+
+fn redact_json_value(value: &mut serde_json::Value, path: &[String]) {
+    let Some((head, tail)) = path.split_first() else {
+        *value = serde_json::Value::String("<redacted>".to_string());
+        return;
+    };
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(next) = map.get_mut(head) {
+                redact_json_value(next, tail);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_json_value(item, path);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -99,6 +324,11 @@ impl ExportSession {
             return;
         }
         let direction = bool_to_direction(client_to_server);
+        let payload = self.redaction.redact_plaintext(payload);
+        let payload = match self.max_plaintext_bytes {
+            Some(max) => &payload[..payload.len().min(max)],
+            None => payload.as_slice(),
+        };
         self.emit(CapturePlane::ClientServerPlaintext, direction, payload);
     }
 
@@ -220,6 +450,9 @@ pub fn serialize_request_preview(req: &Request<Body>) -> Vec<u8> {
         out.push_str("\r\n");
     }
     out.push_str("\r\n");
+    if let Some(body) = observed_request_bytes(req) {
+        out.push_str(std::str::from_utf8(body.as_ref()).unwrap_or("<non-utf8 body>"));
+    }
     out.into_bytes()
 }
 
@@ -246,6 +479,9 @@ pub fn serialize_response_preview(response: &Response<Body>) -> Vec<u8> {
         out.push_str("\r\n");
     }
     out.push_str("\r\n");
+    if let Some(body) = observed_response_bytes(response) {
+        out.push_str(std::str::from_utf8(body.as_ref()).unwrap_or("<non-utf8 body>"));
+    }
     out.into_bytes()
 }
 
@@ -254,5 +490,145 @@ fn bool_to_direction(client_to_server: bool) -> CaptureDirection {
         CaptureDirection::ClientToServer
     } else {
         CaptureDirection::ServerToClient
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_plaintext_headers_and_query_keys() {
+        let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
+            headers: vec![
+                "authorization".to_string(),
+                "cookie".to_string(),
+                "set-cookie".to_string(),
+            ],
+            query_keys: vec!["token".to_string()],
+            json_paths: vec![
+                "$.password".to_string(),
+                "$.nested.access_token".to_string(),
+            ],
+        });
+        let out = redaction.redact_plaintext(
+            b"POST /api?token=secret&ok=yes HTTP/1.1\r\nauthorization: bearer secret\r\ncookie: sid=secret\r\nset-cookie: sid=secret\r\nhost: example.com\r\ncontent-type: application/json\r\n\r\n{\"password\":\"secret\",\"nested\":{\"access_token\":\"abc\"},\"ok\":true}",
+        );
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(text.contains("token=<redacted>"));
+        assert!(text.contains("authorization: <redacted>"));
+        assert!(text.contains("cookie: <redacted>"));
+        assert!(text.contains("set-cookie: <redacted>"));
+        assert!(text.contains("host: example.com"));
+        assert!(!text.contains("bearer secret"));
+        assert!(text.contains("\"password\":\"<redacted>\""));
+        assert!(text.contains("\"access_token\":\"<redacted>\""));
+        assert!(!text.contains("\"secret\""));
+        assert!(!text.contains("\"abc\""));
+    }
+
+    #[test]
+    fn plaintext_export_emits_only_redacted_and_truncated_payload() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let session = ExportSession {
+            tx,
+            session_id: "test-session".to_string(),
+            client: "client".to_string(),
+            server: "server".to_string(),
+            capture_plaintext: true,
+            capture_encrypted: false,
+            max_plaintext_bytes: Some(80),
+            max_chunk_bytes: 1024,
+            redaction: Arc::new(CaptureRedaction::from_config(&CaptureRedactionConfig {
+                headers: vec!["authorization".to_string()],
+                query_keys: vec!["token".to_string()],
+                json_paths: vec!["$.password".to_string()],
+            })),
+        };
+
+        session.emit_plaintext(
+            true,
+            b"POST /api?token=secret HTTP/1.1\r\nauthorization: bearer secret\r\ncontent-type: application/json\r\n\r\n{\"password\":\"secret\",\"extra\":\"this text must be truncated\"}",
+        );
+
+        let event = rx.try_recv().expect("redacted event");
+        let text = String::from_utf8(event.payload.to_vec()).expect("utf8");
+        assert_eq!(event.plane, CapturePlane::ClientServerPlaintext);
+        assert!(text.len() <= 80);
+        assert!(text.contains("token=<redacted>"));
+        assert!(text.contains("authorization: <redacted>"));
+        assert!(!text.contains("bearer secret"));
+        assert!(!text.contains("token=secret"));
+    }
+
+    #[test]
+    fn scoped_session_can_enable_targeted_capture() {
+        let (tx, _rx) = mpsc::channel(1);
+        let sink = ExporterSink {
+            tx,
+            session_counter: Arc::new(AtomicU64::new(1)),
+            capture_plaintext: false,
+            capture_encrypted: false,
+            max_chunk_bytes: 1024,
+            redaction: Arc::new(CaptureRedaction::from_config(
+                &CaptureRedactionConfig::default(),
+            )),
+        };
+
+        let capture = crate::runtime::CompiledCapturePlan {
+            encrypted: false,
+            plaintext: Some(crate::runtime::CompiledPlaintextCapturePlan {
+                headers: true,
+                body: true,
+                sample_percent: Some(100),
+                max_body_bytes: Some(4),
+                redact: CaptureRedactionConfig {
+                    headers: vec!["x-secret".to_string()],
+                    query_keys: Vec::new(),
+                    json_paths: Vec::new(),
+                },
+            }),
+        };
+        let session = sink.session_with_capture("client", "server", &capture);
+
+        assert!(session.capture_plaintext);
+        assert!(!session.capture_encrypted);
+        assert_eq!(session.max_plaintext_bytes, Some(4));
+        assert!(
+            session
+                .redaction
+                .headers
+                .iter()
+                .any(|header| header == "x-secret")
+        );
+    }
+
+    #[test]
+    fn scoped_session_respects_zero_percent_sampling() {
+        let (tx, _rx) = mpsc::channel(1);
+        let sink = ExporterSink {
+            tx,
+            session_counter: Arc::new(AtomicU64::new(1)),
+            capture_plaintext: false,
+            capture_encrypted: false,
+            max_chunk_bytes: 1024,
+            redaction: Arc::new(CaptureRedaction::from_config(
+                &CaptureRedactionConfig::default(),
+            )),
+        };
+        let capture = crate::runtime::CompiledCapturePlan {
+            encrypted: false,
+            plaintext: Some(crate::runtime::CompiledPlaintextCapturePlan {
+                headers: true,
+                body: false,
+                sample_percent: Some(0),
+                max_body_bytes: None,
+                redact: CaptureRedactionConfig::default(),
+            }),
+        };
+
+        let session = sink.session_with_capture("client", "server", &capture);
+
+        assert!(!session.capture_plaintext);
     }
 }

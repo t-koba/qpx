@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use cidr::IpCidr;
 use std::collections::HashSet;
 
@@ -19,13 +19,13 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
         if !names.insert(source.name.clone()) {
             return Err(anyhow!("duplicate identity_sources name: {}", source.name));
         }
-        if let Some(client_ca) = source.from.client_ca.as_deref() {
-            if client_ca.trim().is_empty() {
-                return Err(anyhow!(
-                    "identity_sources {} from.client_ca must not be empty when set",
-                    source.name
-                ));
-            }
+        if let Some(client_ca) = source.from.client_ca.as_deref()
+            && client_ca.trim().is_empty()
+        {
+            return Err(anyhow!(
+                "identity_sources {} from.client_ca must not be empty when set",
+                source.name
+            ));
         }
         for cidr in &source.from.trusted_peers {
             if cidr.trim().is_empty() {
@@ -117,29 +117,29 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                             source.name
                         )
                     })?;
-                    if let Some(prefix) = map.user_from_san_uri_prefix.as_deref() {
-                        if prefix.trim().is_empty() {
-                            return Err(anyhow!(
-                                "identity_sources {} map.user_from_san_uri_prefix must not be empty when set",
-                                source.name
-                            ));
-                        }
+                    if let Some(prefix) = map.user_from_san_uri_prefix.as_deref()
+                        && prefix.trim().is_empty()
+                    {
+                        return Err(anyhow!(
+                            "identity_sources {} map.user_from_san_uri_prefix must not be empty when set",
+                            source.name
+                        ));
                     }
-                    if let Some(auth_strength) = map.auth_strength.as_deref() {
-                        if auth_strength.trim().is_empty() {
-                            return Err(anyhow!(
-                                "identity_sources {} map.auth_strength must not be empty when set",
-                                source.name
-                            ));
-                        }
+                    if let Some(auth_strength) = map.auth_strength.as_deref()
+                        && auth_strength.trim().is_empty()
+                    {
+                        return Err(anyhow!(
+                            "identity_sources {} map.auth_strength must not be empty when set",
+                            source.name
+                        ));
                     }
-                    if let Some(idp) = map.idp.as_deref() {
-                        if idp.trim().is_empty() {
-                            return Err(anyhow!(
-                                "identity_sources {} map.idp must not be empty when set",
-                                source.name
-                            ));
-                        }
+                    if let Some(idp) = map.idp.as_deref()
+                        && idp.trim().is_empty()
+                    {
+                        return Err(anyhow!(
+                            "identity_sources {} map.idp must not be empty when set",
+                            source.name
+                        ));
                     }
                     if map.user_from_san_uri_prefix.is_none()
                         && !map.user_from_subject_cn
@@ -176,13 +176,13 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                     assertion.header.as_str(),
                     &format!("identity_sources {} assertion.header", source.name),
                 )?;
-                if let Some(prefix) = assertion.prefix.as_deref() {
-                    if prefix.trim().is_empty() {
-                        return Err(anyhow!(
-                            "identity_sources {} assertion.prefix must not be empty when set",
-                            source.name
-                        ));
-                    }
+                if let Some(prefix) = assertion.prefix.as_deref()
+                    && prefix.trim().is_empty()
+                {
+                    return Err(anyhow!(
+                        "identity_sources {} assertion.prefix must not be empty when set",
+                        source.name
+                    ));
                 }
                 let secret_env = assertion
                     .secret_env
@@ -200,21 +200,21 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                         source.name
                     ));
                 }
-                if let Some(issuer) = assertion.issuer.as_deref() {
-                    if issuer.trim().is_empty() {
-                        return Err(anyhow!(
-                            "identity_sources {} assertion.issuer must not be empty when set",
-                            source.name
-                        ));
-                    }
+                if let Some(issuer) = assertion.issuer.as_deref()
+                    && issuer.trim().is_empty()
+                {
+                    return Err(anyhow!(
+                        "identity_sources {} assertion.issuer must not be empty when set",
+                        source.name
+                    ));
                 }
-                if let Some(audience) = assertion.audience.as_deref() {
-                    if audience.trim().is_empty() {
-                        return Err(anyhow!(
-                            "identity_sources {} assertion.audience must not be empty when set",
-                            source.name
-                        ));
-                    }
+                if let Some(audience) = assertion.audience.as_deref()
+                    && audience.trim().is_empty()
+                {
+                    return Err(anyhow!(
+                        "identity_sources {} assertion.audience must not be empty when set",
+                        source.name
+                    ));
                 }
                 let configured_algorithms = default_signed_assertion_algorithms(assertion);
                 let mut needs_secret = false;
@@ -232,7 +232,7 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                                 "identity_sources {} assertion.algorithms has unsupported algorithm: {}",
                                 source.name,
                                 other
-                            ))
+                            ));
                         }
                     }
                 }
@@ -249,13 +249,13 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                     ));
                 }
                 let claims = &assertion.claims;
-                if let Some(separator) = claims.groups_separator.as_deref() {
-                    if separator.is_empty() {
-                        return Err(anyhow!(
-                            "identity_sources {} assertion.claims.groups_separator must not be empty when set",
-                            source.name
-                        ));
-                    }
+                if let Some(separator) = claims.groups_separator.as_deref()
+                    && separator.is_empty()
+                {
+                    return Err(anyhow!(
+                        "identity_sources {} assertion.claims.groups_separator must not be empty when set",
+                        source.name
+                    ));
                 }
                 let mut any = claims.user_from_sub;
                 for (label, claim) in [
@@ -304,13 +304,13 @@ pub(super) fn validate_named_sets(named_sets: &[NamedSetConfig]) -> Result<()> {
                 set.name
             ));
         }
-        if let Some(file) = set.file.as_deref() {
-            if file.trim().is_empty() {
-                return Err(anyhow!(
-                    "named_sets {} file must not be empty when set",
-                    set.name
-                ));
-            }
+        if let Some(file) = set.file.as_deref()
+            && file.trim().is_empty()
+        {
+            return Err(anyhow!(
+                "named_sets {} file must not be empty when set",
+                set.name
+            ));
         }
         for value in &set.values {
             if value.trim().is_empty() {
@@ -463,10 +463,10 @@ fn validate_destination_min_confidence(
         ("reputation", min_confidence.reputation),
         ("application", min_confidence.application),
     ] {
-        if let Some(value) = value {
-            if value > 100 {
-                return Err(anyhow!("{context}.{field} must be 0..=100"));
-            }
+        if let Some(value) = value
+            && value > 100
+        {
+            return Err(anyhow!("{context}.{field} must be 0..=100"));
         }
     }
     Ok(())
@@ -559,13 +559,13 @@ pub(super) fn validate_auth_config(auth: &AuthConfig) -> Result<()> {
         if !local_usernames.insert(user.username.clone()) {
             return Err(anyhow!("duplicate auth.users username: {}", user.username));
         }
-        if let Some(password) = user.password.as_deref() {
-            if password.trim().is_empty() {
-                return Err(anyhow!(
-                    "auth.users {} password must not be empty when set",
-                    user.username
-                ));
-            }
+        if let Some(password) = user.password.as_deref()
+            && password.trim().is_empty()
+        {
+            return Err(anyhow!(
+                "auth.users {} password must not be empty when set",
+                user.username
+            ));
         }
         if let Some(ha1) = user.ha1.as_deref() {
             if ha1.trim().is_empty() {

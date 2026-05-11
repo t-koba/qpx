@@ -1,26 +1,26 @@
-use anyhow::{anyhow, Result};
-use qpx_core::config::{Config, ListenerConfig, ReverseConfig, RuntimeConfig, XdpConfig};
+use anyhow::{Result, anyhow};
+use qpx_core::config::{Config, IngressEdgeConfig, ReverseEdgeConfig, RuntimeConfig, XdpConfig};
 
 pub fn ensure_hot_reload_compatible(old: &Config, new: &Config) -> Result<()> {
     if old.state_dir != new.state_dir {
         return Err(anyhow!("state_dir changed; restart required"));
     }
-    if old.system_log != new.system_log {
+    if old.telemetry.system_log != new.telemetry.system_log {
         return Err(anyhow!("system_log changed; restart required"));
     }
-    if old.access_log != new.access_log {
+    if old.telemetry.access_log != new.telemetry.access_log {
         return Err(anyhow!("access_log changed; restart required"));
     }
-    if old.audit_log != new.audit_log {
+    if old.telemetry.audit_log != new.telemetry.audit_log {
         return Err(anyhow!("audit_log changed; restart required"));
     }
     if old.acme != new.acme {
         return Err(anyhow!("acme changed; restart required"));
     }
-    if old.otel != new.otel {
+    if old.telemetry.otel != new.telemetry.otel {
         return Err(anyhow!("otel changed; restart required"));
     }
-    if old.metrics != new.metrics {
+    if old.telemetry.metrics != new.telemetry.metrics {
         return Err(anyhow!("metrics listener config changed; restart required"));
     }
     if old.identity.metrics_prefix != new.identity.metrics_prefix {
@@ -38,24 +38,32 @@ pub fn requires_server_restart(old: &Config, new: &Config) -> bool {
         return true;
     }
 
-    if old.listeners.len() != new.listeners.len() {
+    if old.ingress_edge_configs().len() != new.ingress_edge_configs().len() {
         return true;
     }
-    for (old_listener, new_listener) in old.listeners.iter().zip(new.listeners.iter()) {
+    for (old_listener, new_listener) in old
+        .ingress_edge_configs()
+        .iter()
+        .zip(new.ingress_edge_configs().iter())
+    {
         if old_listener.name != new_listener.name
             || old_listener.listen != new_listener.listen
-            || listener_mode_tag(old_listener) != listener_mode_tag(new_listener)
+            || ingress_edge_mode_tag(old_listener) != ingress_edge_mode_tag(new_listener)
             || listener_http3_signature(old_listener) != listener_http3_signature(new_listener)
-            || listener_xdp_signature(old_listener) != listener_xdp_signature(new_listener)
+            || ingress_edge_xdp_signature(old_listener) != ingress_edge_xdp_signature(new_listener)
         {
             return true;
         }
     }
 
-    if old.reverse.len() != new.reverse.len() {
+    if old.reverse_edge_configs().len() != new.reverse_edge_configs().len() {
         return true;
     }
-    for (old_reverse, new_reverse) in old.reverse.iter().zip(new.reverse.iter()) {
+    for (old_reverse, new_reverse) in old
+        .reverse_edge_configs()
+        .iter()
+        .zip(new.reverse_edge_configs().iter())
+    {
         if old_reverse.name != new_reverse.name || old_reverse.listen != new_reverse.listen {
             return true;
         }
@@ -79,10 +87,10 @@ fn runtime_server_signature(runtime: &RuntimeConfig) -> (Option<usize>, bool, i3
     )
 }
 
-fn listener_mode_tag(listener: &ListenerConfig) -> &'static str {
+fn ingress_edge_mode_tag(listener: &IngressEdgeConfig) -> &'static str {
     match listener.mode {
-        qpx_core::config::ListenerMode::Forward => "forward",
-        qpx_core::config::ListenerMode::Transparent => "transparent",
+        qpx_core::config::IngressEdgeMode::Forward => "forward",
+        qpx_core::config::IngressEdgeMode::Transparent => "transparent",
     }
 }
 
@@ -96,7 +104,7 @@ type ReverseStartupSignature = (
 );
 
 fn listener_http3_signature(
-    listener: &ListenerConfig,
+    listener: &IngressEdgeConfig,
 ) -> (
     bool,
     Option<String>,
@@ -108,32 +116,35 @@ fn listener_http3_signature(
     }
 }
 
-fn listener_xdp_signature(listener: &ListenerConfig) -> XdpSignature {
+fn ingress_edge_xdp_signature(listener: &IngressEdgeConfig) -> XdpSignature {
     xdp_signature(listener.xdp.as_ref())
 }
 
-fn reverse_startup_signature(reverse: &ReverseConfig) -> ReverseStartupSignature {
-    let tls_enabled = reverse.tls.is_some();
-    let xdp = xdp_signature(reverse.xdp.as_ref());
-    let http3 = reverse_http3_signature(reverse);
+fn reverse_startup_signature(reverse_edges: &ReverseEdgeConfig) -> ReverseStartupSignature {
+    let tls_enabled = reverse_edges.tls.is_some();
+    let xdp = xdp_signature(reverse_edges.xdp.as_ref());
+    let http3 = reverse_http3_signature(reverse_edges);
     let h3_terminate_uses_tls = http3
         .as_ref()
         .map(|(_, passthrough_upstreams, ..)| passthrough_upstreams.is_empty())
         .unwrap_or(false);
     let h3_tls = if h3_terminate_uses_tls {
-        reverse.tls.clone()
+        reverse_edges.tls.clone()
     } else {
         None
     };
     (tls_enabled, xdp, http3, h3_tls)
 }
 
-fn reverse_http3_signature(reverse: &ReverseConfig) -> Option<ReverseHttp3Signature> {
-    let cfg = reverse.http3.as_ref()?;
+fn reverse_http3_signature(reverse_edges: &ReverseEdgeConfig) -> Option<ReverseHttp3Signature> {
+    let cfg = reverse_edges.http3.as_ref()?;
     if !cfg.enabled {
         return None;
     }
-    let listen = cfg.listen.clone().unwrap_or_else(|| reverse.listen.clone());
+    let listen = cfg
+        .listen
+        .clone()
+        .unwrap_or_else(|| reverse_edges.listen.clone());
     Some((
         listen,
         cfg.passthrough_upstreams.clone(),

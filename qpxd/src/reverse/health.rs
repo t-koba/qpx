@@ -1,17 +1,17 @@
 use crate::http::body::Body;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::header::HOST;
 use hyper::{Request, StatusCode, Uri};
 use metrics::counter;
 use qpx_core::config::{EndpointLifecycleConfig, HealthCheckConfig, HttpHealthCheckConfig};
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 use url::Url;
 
 use crate::upstream::origin::OriginEndpoint;
-use crate::{tls::client::connect_tls_http1_with_options, tls::CompiledUpstreamTlsTrust};
+use crate::{tls::CompiledUpstreamTlsTrust, tls::client::connect_tls_http1_with_options};
 
 const ADAPTIVE_MIN_SAMPLES: u32 = 8;
 const ADAPTIVE_MAX_SAMPLES: u32 = 32;
@@ -224,9 +224,11 @@ impl UpstreamEndpoint {
         self.note_adaptive_success();
         if recovered {
             self.begin_recovery_window(lifecycle);
-            counter!(crate::runtime::metric_names()
-                .reverse_upstream_probe_success_total
-                .clone())
+            counter!(
+                crate::runtime::metric_names()
+                    .reverse_upstream_probe_success_total
+                    .clone()
+            )
             .increment(1);
         }
     }
@@ -247,9 +249,11 @@ impl UpstreamEndpoint {
         self.note_adaptive_success();
         if recovered {
             self.begin_recovery_window(lifecycle);
-            counter!(crate::runtime::metric_names()
-                .reverse_upstream_probe_success_total
-                .clone())
+            counter!(
+                crate::runtime::metric_names()
+                    .reverse_upstream_probe_success_total
+                    .clone()
+            )
             .increment(1);
         }
     }

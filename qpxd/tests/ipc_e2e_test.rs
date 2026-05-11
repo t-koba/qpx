@@ -44,19 +44,19 @@ mod e2e {
 
     fn write_qpxd_config(path: &std::path::Path, qpxd_listen: &str, qpxf_addr: &str) {
         let config = format!(
-            r#"reverse:
-- name: e2e
+            r#"edges:
+- kind: reverse
+  name: e2e
   listen: '{qpxd_listen}'
   routes:
   - match:
       path:
       - /*
-    ipc:
+    target:
+      type: ipc
+      endpoint: '{qpxf_addr}'
       mode: tcp
-      address: '{qpxf_addr}'
-      timeout_ms: 5000
-system_log:
-  level: trace"#,
+      timeout_ms: 5000"#,
         );
         std::fs::write(path, config).unwrap();
     }

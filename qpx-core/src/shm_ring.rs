@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use memmap2::MmapMut;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File, OpenOptions};
@@ -519,7 +519,7 @@ impl ShmDoorbell {
 
     async fn wait(&self) -> Result<()> {
         use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-        use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+        use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
 
         let handle = self.handle;
         tokio::task::spawn_blocking(move || {
@@ -864,10 +864,10 @@ fn reject_untrusted_shm_ancestor(path: &Path, meta: &fs::Metadata) -> Result<()>
 }
 
 fn ensure_not_symlink(path: &Path, label: &str) -> Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Err(anyhow!("{label} must not be a symlink: {}", path.display()));
-        }
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        return Err(anyhow!("{label} must not be a symlink: {}", path.display()));
     }
     Ok(())
 }

@@ -55,19 +55,18 @@ pub(crate) fn validate_h3_trailer_field(
 pub(crate) fn append_header(headers: &mut HeaderMap, name: &str, value: &[u8]) -> Result<()> {
     let name = HeaderName::from_bytes(name.as_bytes())?;
     let value = HeaderValue::from_bytes(value)?;
-    if name == http::header::COOKIE {
-        if let Some(existing) = headers.get(http::header::COOKIE).cloned() {
-            let mut merged =
-                Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
-            merged.extend_from_slice(existing.as_bytes());
-            merged.extend_from_slice(b"; ");
-            merged.extend_from_slice(value.as_bytes());
-            headers.insert(
-                http::header::COOKIE,
-                HeaderValue::from_bytes(merged.as_slice())?,
-            );
-            return Ok(());
-        }
+    if name == http::header::COOKIE
+        && let Some(existing) = headers.get(http::header::COOKIE).cloned()
+    {
+        let mut merged = Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
+        merged.extend_from_slice(existing.as_bytes());
+        merged.extend_from_slice(b"; ");
+        merged.extend_from_slice(value.as_bytes());
+        headers.insert(
+            http::header::COOKIE,
+            HeaderValue::from_bytes(merged.as_slice())?,
+        );
+        return Ok(());
     }
     headers.append(name, value);
     Ok(())

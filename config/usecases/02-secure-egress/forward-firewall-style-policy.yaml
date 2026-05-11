@@ -1,6 +1,16 @@
-listeners:
-- name: firewall-forward
-  listen: ${QPX_FIREWALL_LISTEN:-127.0.0.1:18090}
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+upstreams:
+- name: security-egress
+  url: http://proxy.security.example:3128
+security:
+  auth:
+    users:
+    - username: secops
+      password: change-me
+edges:
+- kind: forward
+  name: firewall-forward
+  listen: "${QPX_FIREWALL_LISTEN:-127.0.0.1:18090}"
   default_action:
     type: block
   tls_inspection:
@@ -15,8 +25,8 @@ listeners:
       host:
       - api.corp.example.com
       path:
-      - /v1/*
-      - /v2/*
+      - "/v1/*"
+      - "/v2/*"
       method:
       - GET
       - POST
@@ -46,22 +56,13 @@ listeners:
       - ws.lab.example.com
       headers:
       - name: upgrade
-        regex: (?i)websocket
+        regex: "(?i)websocket"
     action:
       type: direct
   - name: deny-social-media
     match:
       host:
-      - '*.social.example'
-      - '*.video.example'
+      - "*.social.example"
+      - "*.video.example"
     action:
       type: block
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-upstreams:
-- name: security-egress
-  url: http://proxy.security.example:3128
-auth:
-  users:
-  - username: secops
-    password: change-me

@@ -3,10 +3,10 @@ use crate::destination::DestinationMetadata;
 use crate::http::base_fields::BaseRequestFields;
 use crate::http::body::Body;
 use crate::http::response_policy::{
-    apply_listener_response_policy, ListenerResponsePolicyDecision, ResponseBodyObservationLimits,
+    ListenerResponsePolicyDecision, ResponseBodyObservationLimits, apply_listener_response_policy,
 };
 use crate::http::rpc::RpcMatchContext;
-use crate::http::rule_context::{build_response_rule_match_context, ResponseRuleContextInput};
+use crate::http::rule_context::{ResponseRuleContextInput, build_response_rule_match_context};
 use crate::policy_context::ResolvedIdentity;
 use crate::tls::UpstreamCertificateInfo;
 use anyhow::Result;
@@ -28,6 +28,7 @@ pub(super) struct ResponseRuleInput<'a> {
     pub(super) response: Response<Body>,
     pub(super) max_observed_response_body_bytes: usize,
     pub(super) response_body_read_timeout: Duration,
+    pub(super) force_response_body_observation: bool,
 }
 
 pub(super) async fn apply_response_rules(
@@ -45,29 +46,25 @@ pub(super) async fn apply_response_rules(
         response,
         max_observed_response_body_bytes,
         response_body_read_timeout,
+        force_response_body_observation,
     } = input;
-    let Some(engine) = route.response_rules.as_ref() else {
-        return Ok(ResponseRuleDecision::Continue {
-            response,
-            route_headers,
-            cache_bypass: false,
-            suppress_retry: false,
-            mirror: None,
-            policy_tags: Arc::from(Vec::<String>::new()),
-        });
-    };
-    let candidates = engine.candidate_profile(MatchPrefilterContext {
-        method: Some(base.method.as_str()),
-        dst_port: base.dst_port,
-        src_ip: base.peer_ip,
-        host: base.host.as_deref(),
-        sni: base.sni.as_deref(),
-        path: base.path.as_deref(),
-    });
+    let engine = route.response_rules.as_deref();
+    let candidates = engine
+        .map(|engine| {
+            engine.candidate_profile(MatchPrefilterContext {
+                method: Some(base.method.as_str()),
+                dst_port: base.dst_port,
+                src_ip: base.peer_ip,
+                host: base.host.as_deref(),
+                sni: base.sni.as_deref(),
+                path: base.path.as_deref(),
+            })
+        })
+        .unwrap_or_default();
     let response_status = response.status().as_u16();
     let response_headers = response.headers().clone();
     let decision = apply_listener_response_policy(
-        Some(engine),
+        engine,
         candidates,
         build_response_rule_match_context(ResponseRuleContextInput {
             base,
@@ -86,6 +83,7 @@ pub(super) async fn apply_response_rules(
         ResponseBodyObservationLimits {
             max_body_bytes: max_observed_response_body_bytes,
             read_timeout: response_body_read_timeout,
+            force_body: force_response_body_observation,
         },
     )
     .await?;

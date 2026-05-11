@@ -10,7 +10,7 @@ pub(crate) use cert_info::UpstreamCertificateInfo;
 #[cfg(feature = "http3")]
 pub(crate) use sniff::extract_client_hello_info_from_handshake;
 pub(crate) use sniff::{
-    extract_client_hello_info, looks_like_tls_client_hello, read_client_hello_with_timeout,
-    try_read_client_hello_with_timeout, TlsClientHelloInfo,
+    TlsClientHelloInfo, extract_client_hello_info, looks_like_tls_client_hello,
+    read_client_hello_with_timeout, try_read_client_hello_with_timeout,
 };
 pub(crate) use trust::CompiledUpstreamTlsTrust;

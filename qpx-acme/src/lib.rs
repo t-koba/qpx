@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
@@ -33,7 +33,7 @@ const ACME_HTTP01_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const ACME_HTTP01_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub trait ConfigProvider: Send + Sync {
-    fn current_config(&self) -> Arc<Config>;
+    fn current_operational_config(&self) -> Arc<Config>;
 }
 
 pub struct AcmeCertStore {
@@ -111,7 +111,7 @@ impl Http01TokenStore {
 }
 
 pub struct AcmeRuntime {
-    config_provider: Arc<dyn ConfigProvider>,
+    operational_config_provider: Arc<dyn ConfigProvider>,
     directory_url: String,
     renew_before_days: u64,
     contact_email: Option<String>,
@@ -166,7 +166,7 @@ pub fn init(
         .with_context(|| format!("failed to create ACME certs dir {}", certs_dir.display()))?;
 
     let rt = Arc::new(AcmeRuntime {
-        config_provider,
+        operational_config_provider: config_provider,
         directory_url: acme_directory_url(acme),
         renew_before_days: acme.renew_before_days,
         contact_email: acme.email.clone(),
@@ -272,8 +272,10 @@ pub async fn run_manager(state: Arc<AcmeRuntime>) -> Result<()> {
             },
         };
 
-        let current_config = state.config_provider.current_config();
-        let snis = desired_acme_snis(current_config.as_ref());
+        let current_operational = state
+            .operational_config_provider
+            .current_operational_config();
+        let snis = desired_acme_snis(current_operational.as_ref());
         for sni in snis {
             if let Err(err) = ensure_certificate(state.as_ref(), &acct, &sni).await {
                 warn!(sni = %sni, error = ?err, "acme certificate ensure failed");
@@ -349,8 +351,8 @@ fn acme_directory_url(acme: &AcmeConfig) -> String {
 
 fn desired_acme_snis(config: &Config) -> Vec<String> {
     let mut snis = HashSet::new();
-    for reverse in &config.reverse {
-        let Some(tls) = reverse.tls.as_ref() else {
+    for reverse_edges in config.reverse_edge_configs() {
+        let Some(tls) = reverse_edges.tls.as_ref() else {
             continue;
         };
         for cert in &tls.certificates {
@@ -372,8 +374,10 @@ fn cert_paths_for_sni(state: &AcmeRuntime, sni: &str) -> (PathBuf, PathBuf) {
 }
 
 fn preload_certs(state: &AcmeRuntime) -> Result<()> {
-    let current_config = state.config_provider.current_config();
-    for sni in desired_acme_snis(current_config.as_ref()) {
+    let current_operational = state
+        .operational_config_provider
+        .current_operational_config();
+    for sni in desired_acme_snis(current_operational.as_ref()) {
         if let Err(err) = load_cert_into_store(state, &sni) {
             warn!(sni = %sni, error = ?err, "failed to preload acme cert (will retry later)");
         }
@@ -409,18 +413,16 @@ fn load_cert_into_store(state: &AcmeRuntime, sni: &str) -> Result<()> {
 }
 
 async fn load_or_create_account(state: &AcmeRuntime) -> Result<Account> {
-    if let Ok(data) = fs::read(&state.account_path) {
-        if !data.is_empty() {
-            let credentials: AccountCredentials =
-                serde_json::from_slice(&data).with_context(|| {
-                    format!("invalid acme account {}", state.account_path.display())
-                })?;
-            let builder = Account::builder().with_context(|| "acme client init failed")?;
-            return builder
-                .from_credentials(credentials)
-                .await
-                .with_context(|| "failed to load acme account credentials");
-        }
+    if let Ok(data) = fs::read(&state.account_path)
+        && !data.is_empty()
+    {
+        let credentials: AccountCredentials = serde_json::from_slice(&data)
+            .with_context(|| format!("invalid acme account {}", state.account_path.display()))?;
+        let builder = Account::builder().with_context(|| "acme client init failed")?;
+        return builder
+            .from_credentials(credentials)
+            .await
+            .with_context(|| "failed to load acme account credentials");
     }
 
     let contact = state
@@ -450,16 +452,17 @@ async fn load_or_create_account(state: &AcmeRuntime) -> Result<Account> {
 
 async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -> Result<()> {
     let (cert_path, key_path) = cert_paths_for_sni(state, sni);
-    if cert_path.exists() && key_path.exists() {
-        if let Ok(not_after) = read_leaf_not_after(&cert_path) {
-            match should_renew(not_after, state.renew_before_days) {
-                Ok(false) => {
-                    let _ = load_cert_into_store(state, sni);
-                    return Ok(());
-                }
-                Ok(true) => {}
-                Err(_) => {}
+    if cert_path.exists()
+        && key_path.exists()
+        && let Ok(not_after) = read_leaf_not_after(&cert_path)
+    {
+        match should_renew(not_after, state.renew_before_days) {
+            Ok(false) => {
+                let _ = load_cert_into_store(state, sni);
+                return Ok(());
             }
+            Ok(true) => {}
+            Err(_) => {}
         }
     }
 
@@ -694,13 +697,13 @@ fn write_bytes_file(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
     #[cfg(not(unix))]
     {
         let _ = mode;
-        if let Ok(meta) = fs::symlink_metadata(path) {
-            if meta.file_type().is_symlink() {
-                return Err(anyhow!(
-                    "refusing to write through symlink path {}",
-                    path.display()
-                ));
-            }
+        if let Ok(meta) = fs::symlink_metadata(path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(anyhow!(
+                "refusing to write through symlink path {}",
+                path.display()
+            ));
         }
         fs::write(path, contents)?;
         Ok(())

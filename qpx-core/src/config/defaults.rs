@@ -162,8 +162,8 @@ pub(super) fn default_reverse_h3_passthrough_max_amplification() -> u32 {
     3
 }
 
-pub(super) fn default_destination_resolution_precedence(
-) -> Vec<crate::config::DestinationEvidenceSourceKind> {
+pub(super) fn default_destination_resolution_precedence()
+-> Vec<crate::config::DestinationEvidenceSourceKind> {
     vec![
         crate::config::DestinationEvidenceSourceKind::PolicyContext,
         crate::config::DestinationEvidenceSourceKind::Cert,
@@ -332,7 +332,7 @@ pub(super) fn default_message_proxy_auth_required() -> String {
 }
 
 pub(super) fn default_message_reverse_error() -> String {
-    "reverse error".to_string()
+    "reverse_edge error".to_string()
 }
 
 pub(super) fn default_message_cache_miss() -> String {

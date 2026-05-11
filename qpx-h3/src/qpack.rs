@@ -2,7 +2,7 @@ use crate::huffman;
 use crate::protocol::QPACK_DECOMPRESSION_FAILED;
 pub(crate) use crate::qpack_fields::validate_h3_regular_field;
 use crate::qpack_fields::{append_header, validate_h3_response_field, validate_h3_trailer_field};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
 use http::{HeaderMap, Method, Uri};
 use std::collections::{HashSet, VecDeque};
@@ -1392,12 +1392,12 @@ const STATIC_TABLE: [(&str, &str); 99] = [
 #[cfg(test)]
 mod tests {
     use super::{
-        append_header, decode_field_section_prefix, decode_request_head_from_fields,
-        decode_required_insert_count, encode_header_prefix, encode_prefixed_int,
-        encode_request_head, encode_response_head, encode_string, encode_trailers,
-        fuzz_qpack_decoder, static_field, validate_h3_regular_field, validate_h3_response_field,
-        validate_h3_trailer_field, DecoderState, FieldDecodeError, DEFAULT_DYNAMIC_TABLE_CAPACITY,
-        DEFAULT_MAX_BLOCKED_STREAMS, STATIC_TABLE,
+        DEFAULT_DYNAMIC_TABLE_CAPACITY, DEFAULT_MAX_BLOCKED_STREAMS, DecoderState,
+        FieldDecodeError, STATIC_TABLE, append_header, decode_field_section_prefix,
+        decode_request_head_from_fields, decode_required_insert_count, encode_header_prefix,
+        encode_prefixed_int, encode_request_head, encode_response_head, encode_string,
+        encode_trailers, fuzz_qpack_decoder, static_field, validate_h3_regular_field,
+        validate_h3_response_field, validate_h3_trailer_field,
     };
     use http::HeaderValue;
 
@@ -1455,9 +1455,11 @@ mod tests {
         let state = DecoderState::new(0, DEFAULT_MAX_BLOCKED_STREAMS, u64::MAX);
         let decoded = state.decode_field_lines(&payload).unwrap().fields;
         assert_eq!(decoded[0], (":status".to_string(), b"204".to_vec()));
-        assert!(decoded
-            .iter()
-            .any(|(name, value)| name == "capsule-protocol" && value.as_slice() == b"?1"));
+        assert!(
+            decoded
+                .iter()
+                .any(|(name, value)| name == "capsule-protocol" && value.as_slice() == b"?1")
+        );
     }
 
     #[test]

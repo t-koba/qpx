@@ -1,5 +1,5 @@
 use crate::http::body::Body;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use hyper::{Request, Response};
 use qpx_core::config::{IpcMode, IpcUpstreamConfig};
@@ -16,7 +16,7 @@ use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use url::Url;
@@ -108,13 +108,26 @@ async fn push_request_ring_bytes(
 async fn write_request_body_to_shm(
     body: &mut Body,
     mut req_ring: ShmRingBuffer,
+    max_request_bytes: Option<usize>,
     timeout_dur: Duration,
 ) -> Result<()> {
+    let mut seen = 0usize;
     while let Some(chunk) = timeout(timeout_dur, body.data())
         .await
         .map_err(|_| anyhow!("IPC request body read timed out"))?
     {
         let data = chunk.map_err(|err| anyhow!("IPC request body read failed: {}", err))?;
+        seen = seen
+            .checked_add(data.len())
+            .ok_or_else(|| anyhow!("IPC request body size overflow"))?;
+        if let Some(limit) = max_request_bytes
+            && seen > limit
+        {
+            return Err(anyhow!(
+                "IPC request body exceeds max_request_bytes ({})",
+                limit
+            ));
+        }
         for part in data.chunks(SHM_PUSH_CHUNK_BYTES) {
             push_request_ring_bytes(&mut req_ring, part, timeout_dur).await?;
         }
@@ -168,6 +181,8 @@ pub(crate) struct IpcUpstream {
     mode: IpcMode,
     backend: IpcBackend,
     timeout: Duration,
+    max_request_bytes: Option<usize>,
+    max_response_bytes: Option<usize>,
 }
 
 impl IpcUpstream {
@@ -176,11 +191,17 @@ impl IpcUpstream {
             mode: cfg.mode.clone(),
             backend: parse_ipc_address(cfg.address.as_str())?,
             timeout: Duration::from_millis(cfg.timeout_ms),
+            max_request_bytes: cfg.body.max_request_bytes,
+            max_response_bytes: cfg.body.max_response_bytes,
         })
     }
 
     pub(crate) fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    pub(crate) fn endpoint_label(&self) -> String {
+        self.backend.pool_key()
     }
 
     fn effective_timeout(&self, route_timeout: Duration) -> Duration {
@@ -422,10 +443,8 @@ fn build_ipc_meta(req: &Request<Body>, conn: ClientConnInfo) -> IpcRequestMeta {
     }
     // HTTP/2 and HTTP/3 requests carry the authority in the URI/metadata rather than a Host
     // header. CGI expects HTTP_HOST, so synthesize it when missing.
-    if !has_host {
-        if let Some(authority) = req.uri().authority() {
-            headers.push(("host".to_string(), authority.as_str().to_string()));
-        }
+    if !has_host && let Some(authority) = req.uri().authority() {
+        headers.push(("host".to_string(), authority.as_str().to_string()));
     }
 
     let mut params = HashMap::new();
@@ -449,7 +468,7 @@ fn build_ipc_meta(req: &Request<Body>, conn: ClientConnInfo) -> IpcRequestMeta {
 pub(crate) async fn proxy_ipc(
     req: Request<Body>,
     url: &Url,
-    proxy_name: &str,
+    _proxy_name: &str,
 ) -> Result<Response<Body>> {
     let mode = IpcMode::Tcp;
     let backend = match url.scheme() {
@@ -469,11 +488,14 @@ pub(crate) async fn proxy_ipc(
     };
     proxy_ipc_backend(
         req,
-        &backend,
-        mode,
-        proxy_name,
-        ClientConnInfo::default(),
-        Duration::from_secs(30),
+        IpcBackendRequest {
+            backend: &backend,
+            mode,
+            conn: ClientConnInfo::default(),
+            max_request_bytes: None,
+            max_response_bytes: None,
+            timeout_dur: Duration::from_secs(30),
+        },
     )
     .await
 }
@@ -481,30 +503,46 @@ pub(crate) async fn proxy_ipc(
 pub(crate) async fn proxy_ipc_upstream(
     req: Request<Body>,
     upstream: &IpcUpstream,
-    proxy_name: &str,
+    _proxy_name: &str,
     conn: ClientConnInfo,
     route_timeout: Duration,
 ) -> Result<Response<Body>> {
     let timeout_dur = upstream.effective_timeout(route_timeout);
     proxy_ipc_backend(
         req,
-        &upstream.backend,
-        upstream.mode.clone(),
-        proxy_name,
-        conn,
-        timeout_dur,
+        IpcBackendRequest {
+            backend: &upstream.backend,
+            mode: upstream.mode.clone(),
+            conn,
+            max_request_bytes: upstream.max_request_bytes,
+            max_response_bytes: upstream.max_response_bytes,
+            timeout_dur,
+        },
     )
     .await
 }
 
+struct IpcBackendRequest<'a> {
+    backend: &'a IpcBackend,
+    mode: IpcMode,
+    conn: ClientConnInfo,
+    max_request_bytes: Option<usize>,
+    max_response_bytes: Option<usize>,
+    timeout_dur: Duration,
+}
+
 async fn proxy_ipc_backend(
     mut req: Request<Body>,
-    backend: &IpcBackend,
-    mode: IpcMode,
-    _proxy_name: &str,
-    conn: ClientConnInfo,
-    timeout_dur: Duration,
+    backend_request: IpcBackendRequest<'_>,
 ) -> Result<Response<Body>> {
+    let IpcBackendRequest {
+        backend,
+        mode,
+        conn,
+        max_request_bytes,
+        max_response_bytes,
+        timeout_dur,
+    } = backend_request;
     let mut meta = build_ipc_meta(&req, conn);
     let uuid = uuid::Uuid::new_v4().to_string();
 
@@ -544,7 +582,9 @@ async fn proxy_ipc_backend(
         let req_ring = req_ring.unwrap();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<()>>();
         let handle = tokio::spawn(async move {
-            let result = write_request_body_to_shm(req.body_mut(), req_ring, timeout_dur).await;
+            let result =
+                write_request_body_to_shm(req.body_mut(), req_ring, max_request_bytes, timeout_dur)
+                    .await;
             if let Err(Err(err)) = result_tx.send(result) {
                 warn!(error = ?err, "IPC SHM request body writer failed after response started");
             }
@@ -553,11 +593,23 @@ async fn proxy_ipc_backend(
         body_writer_result_rx = Some(result_rx);
     } else {
         // Stream req body over tcp
+        let mut seen = 0usize;
         while let Some(chunk) = timeout(timeout_dur, req.body_mut().data())
             .await
             .map_err(|_| anyhow!("IPC TCP request body read timed out"))?
         {
             let data = chunk?;
+            seen = seen
+                .checked_add(data.len())
+                .ok_or_else(|| anyhow!("IPC request body size overflow"))?;
+            if let Some(limit) = max_request_bytes
+                && seen > limit
+            {
+                return Err(anyhow!(
+                    "IPC request body exceeds max_request_bytes ({})",
+                    limit
+                ));
+            }
             timeout(timeout_dur, stream.write_all(&data))
                 .await
                 .map_err(|_| anyhow!("IPC TCP request body write timed out"))??;
@@ -586,11 +638,27 @@ async fn proxy_ipc_backend(
         let body_writer_abort = body_writer_abort;
         tokio::spawn(async move {
             let mut reusable = true;
+            let mut seen = 0usize;
             loop {
                 match res_ring.try_pop() {
                     Ok(Some(data)) => {
                         if data.is_empty() {
                             break; // EOF
+                        }
+                        seen = match seen.checked_add(data.len()) {
+                            Some(seen) => seen,
+                            None => {
+                                sender.abort();
+                                reusable = false;
+                                break;
+                            }
+                        };
+                        if let Some(limit) = max_response_bytes
+                            && seen > limit
+                        {
+                            sender.abort();
+                            reusable = false;
+                            break;
                         }
                         if sender.send_data(Bytes::from(data)).await.is_err() {
                             reusable = false;
@@ -629,6 +697,7 @@ async fn proxy_ipc_backend(
     } else {
         tokio::spawn(async move {
             let mut buf = [0u8; 65536];
+            let mut seen = 0usize;
             loop {
                 let read = tokio::select! {
                     read = stream.read(&mut buf) => Some(read),
@@ -644,6 +713,19 @@ async fn proxy_ipc_backend(
                     None => break,
                     Some(Ok(0)) => break,
                     Some(Ok(n)) => {
+                        seen = match seen.checked_add(n) {
+                            Some(seen) => seen,
+                            None => {
+                                sender.abort();
+                                break;
+                            }
+                        };
+                        if let Some(limit) = max_response_bytes
+                            && seen > limit
+                        {
+                            sender.abort();
+                            break;
+                        }
                         if sender
                             .send_data(Bytes::copy_from_slice(&buf[..n]))
                             .await
@@ -691,7 +773,7 @@ mod tests {
         sender.send_data(Bytes::from_static(b"abc")).await.unwrap();
         sender.abort();
 
-        let err = write_request_body_to_shm(&mut body, writer, Duration::from_secs(1))
+        let err = write_request_body_to_shm(&mut body, writer, None, Duration::from_secs(1))
             .await
             .expect_err("body error should propagate");
         assert!(err.to_string().contains("request body read failed"));
@@ -701,6 +783,20 @@ mod tests {
         let waited = timeout(Duration::from_millis(100), reader.wait_for_data()).await;
         assert!(waited.is_err(), "unexpected clean EOF in request ring");
 
+        let _ = std::fs::remove_file(req_path);
+    }
+
+    #[tokio::test]
+    async fn shm_body_writer_enforces_request_body_limit() {
+        let req_path = temp_shm_path("ipc-body-limit");
+        let writer = ShmRingBuffer::create_or_open(&req_path, 64 * 1024).unwrap();
+        let mut body = Body::from(Bytes::from_static(b"abcdef"));
+
+        let err = write_request_body_to_shm(&mut body, writer, Some(4), Duration::from_secs(1))
+            .await
+            .expect_err("body limit should fail");
+
+        assert!(err.to_string().contains("max_request_bytes"));
         let _ = std::fs::remove_file(req_path);
     }
 

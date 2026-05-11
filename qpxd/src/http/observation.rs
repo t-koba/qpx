@@ -77,6 +77,10 @@ impl ResponseObservationPlan {
         }
     }
 
+    pub(crate) fn include_body(&mut self, needs_body: bool) {
+        self.needs_body |= needs_body;
+    }
+
     pub(crate) async fn observe_response(
         self,
         response: Response<Body>,

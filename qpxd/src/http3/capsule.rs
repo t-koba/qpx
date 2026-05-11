@@ -1,5 +1,5 @@
 #[cfg(any(test, feature = "http3"))]
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 #[cfg(any(test, feature = "http3"))]
 use bytes::{Buf, Bytes, BytesMut};
 

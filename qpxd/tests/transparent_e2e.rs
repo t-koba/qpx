@@ -23,13 +23,13 @@ async fn transparent_http_uses_host_fallback_when_original_dst_is_unavailable() 
     let (port, _qpxd) =
         spawn_qpxd_on_random_port(&cfg, dir.join("transparent-host.log"), |port| {
             format!(
-                r#"listeners:
-- name: transparent
+                r#"edges:
+- kind: transparent
+  name: transparent
   listen: 127.0.0.1:{port}
   default_action:
     type: direct
   rules: []
-  mode: transparent
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#
@@ -64,8 +64,9 @@ async fn transparent_http_accepts_proxy_v2_original_destination_metadata() -> Re
     let (port, _qpxd) =
         spawn_qpxd_on_random_port(&cfg, dir.join("transparent-proxyv2.log"), |port| {
             format!(
-                r#"listeners:
-- name: transparent
+                r#"edges:
+- kind: transparent
+  name: transparent
   listen: 127.0.0.1:{port}
   default_action:
     type: direct
@@ -76,7 +77,6 @@ async fn transparent_http_accepts_proxy_v2_original_destination_metadata() -> Re
     require_metadata: true
     trusted_peers:
     - 127.0.0.1/32
-  mode: transparent
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#
@@ -115,13 +115,13 @@ async fn transparent_http_rejects_connect() -> Result<()> {
     let (port, _qpxd) =
         spawn_qpxd_on_random_port(&cfg, dir.join("transparent-connect.log"), |port| {
             format!(
-                r#"listeners:
-- name: transparent
+                r#"edges:
+- kind: transparent
+  name: transparent
   listen: 127.0.0.1:{port}
   default_action:
     type: direct
   rules: []
-  mode: transparent
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#

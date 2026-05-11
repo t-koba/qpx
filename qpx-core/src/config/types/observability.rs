@@ -154,6 +154,8 @@ pub struct ExporterCaptureConfig {
     pub encrypted: bool,
     #[serde(default = "default_exporter_max_chunk_bytes")]
     pub max_chunk_bytes: usize,
+    #[serde(default)]
+    pub redact: CaptureRedactionConfig,
 }
 
 impl Default for ExporterCaptureConfig {
@@ -162,6 +164,62 @@ impl Default for ExporterCaptureConfig {
             plaintext: default_exporter_capture_plaintext(),
             encrypted: default_exporter_capture_encrypted(),
             max_chunk_bytes: default_exporter_max_chunk_bytes(),
+            redact: CaptureRedactionConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct CaptureRedactionConfig {
+    #[serde(default = "default_capture_redact_headers")]
+    pub headers: Vec<String>,
+    #[serde(default = "default_capture_redact_query_keys")]
+    pub query_keys: Vec<String>,
+    #[serde(default)]
+    pub json_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapturePolicyConfig {
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub plaintext: CapturePlaintextPolicyConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapturePlaintextPolicyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub headers: bool,
+    #[serde(default)]
+    pub body: bool,
+    #[serde(default)]
+    pub sample_percent: Option<u32>,
+    #[serde(default)]
+    pub max_body_bytes: Option<usize>,
+    #[serde(default)]
+    pub redact: CaptureRedactionConfig,
+}
+
+fn default_capture_redact_headers() -> Vec<String> {
+    [
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "proxy-authorization",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn default_capture_redact_query_keys() -> Vec<String> {
+    ["token", "password", "session", "access_token"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }

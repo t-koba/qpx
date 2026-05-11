@@ -1,8 +1,8 @@
 #[cfg(any(feature = "tls-rustls", feature = "tls-native", test))]
 use crate::tls::cert_info::UpstreamCertificateInfo;
+use anyhow::Result;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native", test))]
 use anyhow::anyhow;
-use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use qpx_core::config::UpstreamTlsTrustConfig;
 use regex::Regex;
@@ -212,11 +212,12 @@ impl PatternSet {
             let Some(normalized) = normalize_domain(value.as_str()) else {
                 continue;
             };
-            if let Some(rest) = normalized.strip_prefix("*.") {
-                if !rest.is_empty() && is_exact_pattern(rest) {
-                    suffix.push(rest.to_string());
-                    continue;
-                }
+            if let Some(rest) = normalized.strip_prefix("*.")
+                && !rest.is_empty()
+                && is_exact_pattern(rest)
+            {
+                suffix.push(rest.to_string());
+                continue;
             }
             if let Some(pattern) = extract_regex_pattern(normalized.as_str()) {
                 regex.push(Regex::new(pattern)?);

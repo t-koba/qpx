@@ -11,14 +11,14 @@ mod http1_service_shutdown_support;
 #[path = "support/http2_client.rs"]
 mod http2_client_support;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::{Buf, Bytes};
 use collect_body_support::collect_body;
 use empty_body_support::empty_body;
 use full_body_support::full_body;
+use http_body_util::combinators::BoxBody;
 use http1_service_shutdown_support::spawn_http1_service_with_shutdown;
 use http2_client_support::handshake_http2;
-use http_body_util::combinators::BoxBody;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use std::collections::HashMap;
@@ -27,13 +27,13 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Mutex};
-use tokio::time::{timeout, Instant};
+use tokio::sync::{Mutex, oneshot};
+use tokio::time::{Instant, timeout};
 
 type TestBody = BoxBody<Bytes, std::convert::Infallible>;
 
@@ -66,13 +66,13 @@ async fn rfc911x_contract_inner() -> Result<()> {
             spawn_qpxd_on_random_port(&cfg_path, dir.join("qpxd-forward.log"), |port| {
                 let state_dir_yaml = yaml_quote_path(&state_dir);
                 format!(
-                    r#"listeners:
-- name: forward
+                    r#"edges:
+- kind: forward
+  name: forward
   listen: 127.0.0.1:{port}
   default_action:
     type: direct
   rules: []
-  mode: forward
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
@@ -430,8 +430,9 @@ async fn cache_contract() -> Result<()> {
         spawn_qpxd_on_random_port(&cfg_path, dir.join("qpxd-cache-forward.log"), |port| {
             let state_dir_yaml = yaml_quote_path(&state_dir);
             format!(
-                r#"listeners:
-- name: forward
+                r#"edges:
+- kind: forward
+  name: forward
   listen: 127.0.0.1:{port}
   default_action:
     type: direct
@@ -442,18 +443,16 @@ async fn cache_contract() -> Result<()> {
     namespace: contract
     default_ttl_secs: 60
     max_object_bytes: 1048576
-  mode: forward
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
-cache:
-  backends:
-  - name: http-cache
-    kind: http
-    endpoint: http://{cache_addr}
-    timeout_ms: 1500
-    max_object_bytes: 1048576"#,
+caches:
+- name: http-cache
+  kind: http
+  endpoint: http://{cache_addr}
+  timeout_ms: 1500
+  max_object_bytes: 1048576"#,
                 state_dir_yaml = state_dir_yaml
             )
         })?;
@@ -501,8 +500,9 @@ async fn http2_h2c_contract() -> Result<()> {
         let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("rev-h2c.log"), |port| {
             let state_dir_yaml = yaml_quote_path(&state_dir);
             format!(
-                r#"reverse:
-- name: rev-h2c
+                r#"edges:
+- kind: reverse
+  name: rev-h2c
   listen: 127.0.0.1:{port}
   routes:
   - match:
@@ -510,11 +510,12 @@ async fn http2_h2c_contract() -> Result<()> {
       - reverse.local
       path:
       - /h2
-    local_response:
-      status: 200
-      body: H2OK
-state_dir:
-  {state_dir_yaml}
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: H2OK
+state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,
@@ -570,8 +571,9 @@ runtime:
         let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("trans-h2c.log"), |port| {
             let state_dir_yaml = yaml_quote_path(&state_dir);
             format!(
-                r#"listeners:
-- name: transparent
+                r#"edges:
+- kind: transparent
+  name: transparent
   listen: 127.0.0.1:{port}
   default_action:
     type: direct
@@ -587,7 +589,6 @@ runtime:
     headers:
       request_set:
         X-Transparent-Test: enabled
-  mode: transparent
 state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
@@ -659,8 +660,9 @@ async fn http2_tls_alpn_contract() -> Result<()> {
         let cert_yaml = yaml_quote_path(&cert_path);
         let key_yaml = yaml_quote_path(&key_path);
         format!(
-            r#"reverse:
-- name: rev-h2
+            r#"edges:
+- kind: reverse
+  name: rev-h2
   listen: 127.0.0.1:{port}
   tls:
     certificates:
@@ -673,11 +675,12 @@ async fn http2_tls_alpn_contract() -> Result<()> {
       - reverse.local
       path:
       - /h2
-    local_response:
-      status: 200
-      body: H2TLS
-state_dir:
-  {state_dir_yaml}
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: H2TLS
+state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,
@@ -738,8 +741,9 @@ async fn http3_reverse_terminate_smoke() -> Result<()> {
         let cert_yaml = yaml_quote_path(&cert_path);
         let key_yaml = yaml_quote_path(&key_path);
         format!(
-            r#"reverse:
-- name: rev-h3
+            r#"edges:
+- kind: reverse
+  name: rev-h3
   listen: 127.0.0.1:{port}
   tls:
     certificates:
@@ -754,11 +758,12 @@ async fn http3_reverse_terminate_smoke() -> Result<()> {
       - reverse.local
       path:
       - /h3
-    local_response:
-      status: 200
-      body: H3OK
-state_dir:
-  {state_dir_yaml}
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: H3OK
+state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,

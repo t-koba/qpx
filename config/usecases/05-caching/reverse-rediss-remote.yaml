@@ -1,5 +1,13 @@
-reverse:
-- name: app
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+caches:
+- name: redis-remote-tls
+  kind: redis
+  endpoint: rediss://cache.example.com:6380/2
+  timeout_ms: 2000
+  max_object_bytes: 1048576
+edges:
+- kind: reverse
+  name: app
   listen: 127.0.0.1:8443
   routes:
   - match:
@@ -11,13 +19,7 @@ reverse:
       namespace: reverse-app
       default_ttl_secs: 60
       max_object_bytes: 1048576
-    upstreams:
-    - http://127.0.0.1:9000
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}
-cache:
-  backends:
-  - name: redis-remote-tls
-    kind: redis
-    endpoint: rediss://cache.example.com:6380/2
-    timeout_ms: 2000
-    max_object_bytes: 1048576
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:9000

@@ -1,6 +1,6 @@
 use crate::sidecar_control::SidecarControl;
 use crate::udp_session_handoff::{ReversePassthroughListenerRestore, UdpSessionRestoreState};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use qpx_core::config::ReverseHttp3Config;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};

@@ -3,7 +3,7 @@ use crate::rate_limit::{QuotaLimiter, RateLimitContext, RateLimiter};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 
 #[derive(Clone)]
 pub struct BandwidthThrottle {

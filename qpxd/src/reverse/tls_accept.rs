@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Result};
-use qpx_core::config::ReverseConfig;
+use anyhow::{Result, anyhow};
+use qpx_core::config::ReverseEdgeConfig;
 #[cfg(feature = "tls-rustls")]
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ pub(in crate::reverse) type ReverseTlsAcceptor = tokio_rustls::TlsAcceptor;
 
 #[cfg(feature = "tls-rustls")]
 pub(in crate::reverse) fn build_tls_acceptor(
-    reverse: &ReverseConfig,
+    reverse: &ReverseEdgeConfig,
 ) -> Result<ReverseTlsAcceptor> {
     use qpx_core::tls::load_cert_chain;
     use rustls::server::WebPkiClientVerifier;
@@ -145,7 +145,7 @@ impl NativeTlsAcceptor {
 
 #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
 pub(in crate::reverse) fn build_tls_acceptor(
-    reverse: &ReverseConfig,
+    reverse: &ReverseEdgeConfig,
 ) -> Result<ReverseTlsAcceptor> {
     use anyhow::Context;
     use std::collections::HashMap;

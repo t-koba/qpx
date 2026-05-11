@@ -4,15 +4,15 @@ use crate::http3::listener::{
 };
 use crate::http3::quic::build_h3_server_config_from_tls;
 use crate::http3::quinn_socket::{
-    build_server_endpoint, prepare_server_endpoint_socket, NoopQuinnUdpIngressFilter,
-    PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket,
+    NoopQuinnUdpIngressFilter, PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream,
+    QuinnEndpointSocket, build_server_endpoint, prepare_server_endpoint_socket,
 };
 use crate::runtime::Runtime;
 use crate::sidecar_control::SidecarControl;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use hyper::{Request, Response, StatusCode};
-use qpx_core::config::{ConnectUdpConfig, Http3ListenerConfig, ListenerConfig};
+use qpx_core::config::{ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -34,9 +34,9 @@ pub(crate) fn prepare_http3_listener_socket(
 }
 
 pub(crate) async fn run_http3_listener(
-    listener: ListenerConfig,
+    listener: IngressEdgeConfig,
     runtime: Runtime,
-    http3_cfg: Http3ListenerConfig,
+    http3_cfg: Http3IngressEdgeConfig,
     shutdown: watch::Receiver<SidecarControl>,
     endpoint_socket: QuinnEndpointSocket,
 ) -> Result<()> {
@@ -52,9 +52,11 @@ pub(crate) async fn run_http3_listener(
         uri_template: None,
     });
 
-    let runtime_cfg = runtime.state().config.runtime.clone();
     let tls_config = build_forward_tls_config(&listener, &runtime, listen_addr)?;
-    let max_bidi = runtime_cfg
+    let max_bidi = runtime
+        .state()
+        .plan
+        .limits
         .max_h3_streams_per_connection
         .min(u32::MAX as usize) as u32;
     let quic_config = build_h3_server_config_from_tls(tls_config, max_bidi.max(1), 256)?;
@@ -84,13 +86,15 @@ pub(crate) async fn run_http3_listener(
 }
 
 fn build_forward_tls_config(
-    listener: &ListenerConfig,
+    listener: &IngressEdgeConfig,
     runtime: &Runtime,
     listen_addr: SocketAddr,
 ) -> Result<quinn::rustls::ServerConfig> {
     let state = runtime.state();
     let ca = state
         .security
+        .destination
+        .tls
         .ca
         .as_ref()
         .ok_or_else(|| anyhow!("forward HTTP/3 requires CA state"))?;
@@ -126,13 +130,13 @@ pub(super) struct ForwardH3Handler {
 impl H3RequestHandler for ForwardH3Handler {
     fn limits(&self) -> H3Limits {
         let state = self.runtime.state();
-        let limits = state.config.runtime.clone();
+        let limits = state.plan.limits;
         H3Limits {
             max_request_body_bytes: limits.max_h3_request_body_bytes,
             max_response_body_bytes: limits.max_h3_response_body_bytes,
             max_concurrent_streams_per_connection: limits.max_h3_streams_per_connection,
             read_timeout: Duration::from_millis(limits.h3_read_timeout_ms),
-            proxy_name: Arc::<str>::from(state.config.identity.proxy_name.as_str()),
+            proxy_name: Arc::<str>::from(state.plan.identity.proxy_name.as_ref()),
             error_body: Arc::<str>::from(state.messages.proxy_error.as_str()),
         }
     }
@@ -163,7 +167,7 @@ impl H3RequestHandler for ForwardH3Handler {
                 crate::http::l7::finalize_response_for_request(
                     &request_method,
                     request_version,
-                    state.config.identity.proxy_name.as_str(),
+                    state.plan.identity.proxy_name.as_ref(),
                     Response::builder()
                         .status(StatusCode::BAD_GATEWAY)
                         .body(Body::from(state.messages.proxy_error.clone()))
@@ -209,7 +213,7 @@ impl H3RequestHandler for ForwardH3Handler {
                 H3HttpResponse::final_only(crate::http::l7::finalize_response_for_request(
                     &request_method,
                     request_version,
-                    state.config.identity.proxy_name.as_str(),
+                    state.plan.identity.proxy_name.as_ref(),
                     Response::builder()
                         .status(StatusCode::BAD_GATEWAY)
                         .body(Body::from(state.messages.proxy_error.clone()))

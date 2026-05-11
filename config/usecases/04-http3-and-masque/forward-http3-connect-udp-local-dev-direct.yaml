@@ -1,9 +1,7 @@
-# Build-time note:
-# - Works with either HTTP/3 backend.
-# - Choose `http3-backend-qpx` if this local-dev build also needs
-#   WebTransport relay.
-listeners:
-- name: forward-http3-dev
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+edges:
+- kind: forward
+  name: forward-http3-dev
   listen: 127.0.0.1:18080
   default_action:
     type: direct
@@ -11,9 +9,9 @@ listeners:
   - name: block-ads
     match:
       host:
-      - '*.doubleclick.net'
-      - '*.googlesyndication.com'
-      - '*.adservice.google.com'
+      - "*.doubleclick.net"
+      - "*.googlesyndication.com"
+      - "*.adservice.google.com"
     action:
       type: block
   http3:
@@ -23,5 +21,3 @@ listeners:
       enabled: true
       idle_timeout_secs: 45
       max_capsule_buffer_bytes: 262144
-  mode: forward
-state_dir: ${QPX_STATE_DIR:-~/.local/share/qpx}

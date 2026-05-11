@@ -1,6 +1,14 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use percent_encoding::percent_decode_str;
 use qpx_core::uri_template::UriTemplate;
+
+#[cfg(feature = "http3")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::forward) enum H3ConnectProtocol {
+    Plain,
+    ConnectUdp,
+    Extended,
+}
 
 #[cfg(all(feature = "http3", feature = "http3-backend-h3"))]
 pub(super) fn validate_h3_connect_head(
@@ -14,64 +22,56 @@ pub(super) fn validate_h3_connect_head(
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
     crate::http::semantics::validate_expect_header(headers)
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
+    let protocol = if allow_extended_connect {
+        match req_head.extensions().get::<::h3::ext::Protocol>().copied() {
+            Some(::h3::ext::Protocol::CONNECT_UDP) => H3ConnectProtocol::ConnectUdp,
+            Some(_) => H3ConnectProtocol::Extended,
+            None => return Err(anyhow!("extended CONNECT protocol required")),
+        }
+    } else {
+        H3ConnectProtocol::Plain
+    };
+    validate_h3_connect_pseudo_headers(req_head, headers, authority_host, authority_port, protocol)
+}
+
+#[cfg(feature = "http3")]
+pub(in crate::forward) fn validate_h3_connect_pseudo_headers(
+    req_head: &::http::Request<()>,
+    headers: &http::HeaderMap,
+    authority_host: &str,
+    authority_port: u16,
+    protocol: H3ConnectProtocol,
+) -> Result<()> {
     if req_head.method() != ::http::Method::CONNECT {
         return Err(anyhow!("CONNECT method required"));
     }
-    if allow_extended_connect {
-        match req_head.extensions().get::<::h3::ext::Protocol>().copied() {
-            Some(::h3::ext::Protocol::CONNECT_UDP) => {
-                // RFC 9298 section 3.4: :scheme and :path are derived from the expanded URI
-                // template and MUST be present (non-empty). Unlike CONNECT, :authority is the
-                // proxy authority.
-                let scheme = req_head
-                    .uri()
-                    .scheme_str()
-                    .ok_or_else(|| anyhow!("CONNECT-UDP requires :scheme"))?;
-                if scheme.trim().is_empty() {
-                    return Err(anyhow!("CONNECT-UDP :scheme must not be empty"));
-                }
-                let path = req_head
-                    .uri()
-                    .path_and_query()
-                    .map(|pq| pq.as_str())
-                    .ok_or_else(|| anyhow!("CONNECT-UDP requires :path"))?;
-                if path.trim().is_empty() {
-                    return Err(anyhow!("CONNECT-UDP :path must not be empty"));
-                }
-                let capsule_protocol = headers
-                    .get("capsule-protocol")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|v| v.trim());
-                if capsule_protocol != Some("?1") {
-                    return Err(anyhow!("CONNECT-UDP requires Capsule-Protocol: ?1"));
-                }
-            }
-            Some(_) => {
-                let scheme = req_head
-                    .uri()
-                    .scheme_str()
-                    .ok_or_else(|| anyhow!("extended CONNECT requires :scheme"))?;
-                if scheme.trim().is_empty() {
-                    return Err(anyhow!("extended CONNECT :scheme must not be empty"));
-                }
-                let path = req_head
-                    .uri()
-                    .path_and_query()
-                    .map(|pq| pq.as_str())
-                    .ok_or_else(|| anyhow!("extended CONNECT requires :path"))?;
-                if path.trim().is_empty() {
-                    return Err(anyhow!("extended CONNECT :path must not be empty"));
-                }
-            }
-            None => {
-                return Err(anyhow!("extended CONNECT protocol required"));
+
+    match protocol {
+        H3ConnectProtocol::ConnectUdp => {
+            // RFC 9298 section 3.4: :scheme and :path are derived from the expanded URI
+            // template and MUST be present (non-empty). Unlike CONNECT, :authority is the
+            // proxy authority.
+            validate_extended_connect_target(req_head, "CONNECT-UDP")?;
+            let capsule_protocol = headers
+                .get("capsule-protocol")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim);
+            if capsule_protocol != Some("?1") {
+                return Err(anyhow!("CONNECT-UDP requires Capsule-Protocol: ?1"));
             }
         }
-    } else if req_head.uri().scheme_str().is_some() || req_head.uri().path_and_query().is_some() {
-        return Err(anyhow!(
-            "CONNECT request target must be authority-form without scheme/path"
-        ));
+        H3ConnectProtocol::Extended => {
+            validate_extended_connect_target(req_head, "extended CONNECT")?;
+        }
+        H3ConnectProtocol::Plain => {
+            if req_head.uri().scheme_str().is_some() || req_head.uri().path_and_query().is_some() {
+                return Err(anyhow!(
+                    "CONNECT request target must be authority-form without scheme/path"
+                ));
+            }
+        }
     }
+
     let host_values: Vec<_> = headers.get_all(http::header::HOST).iter().collect();
     if host_values.len() > 1 {
         return Err(anyhow!("multiple Host headers are not allowed"));
@@ -90,6 +90,29 @@ pub(super) fn validate_h3_connect_head(
         if host_port != authority_port || !host_name.eq_ignore_ascii_case(authority_host) {
             return Err(anyhow!("Host header does not match CONNECT authority"));
         }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "http3")]
+fn validate_extended_connect_target(
+    req_head: &::http::Request<()>,
+    label: &'static str,
+) -> Result<()> {
+    let scheme = req_head
+        .uri()
+        .scheme_str()
+        .ok_or_else(|| anyhow!("{label} requires :scheme"))?;
+    if scheme.trim().is_empty() {
+        return Err(anyhow!("{label} :scheme must not be empty"));
+    }
+    let path = req_head
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .ok_or_else(|| anyhow!("{label} requires :path"))?;
+    if path.trim().is_empty() {
+        return Err(anyhow!("{label} :path must not be empty"));
     }
     Ok(())
 }

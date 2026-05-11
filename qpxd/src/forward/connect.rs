@@ -1,6 +1,8 @@
-use super::policy::{evaluate_forward_policy, ForwardPolicyDecision};
+use super::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 use crate::destination::DestinationInputs;
-use crate::forward::request::{proxy_auth_required, resolve_upstream, resolve_upstream_url};
+#[cfg(feature = "auth-basic")]
+use crate::forward::request::proxy_auth_required;
+use crate::forward::request::{resolve_upstream, resolve_upstream_url};
 use crate::http::address::parse_authority_host_port;
 use crate::http::body::Body;
 use crate::http::common::{
@@ -17,49 +19,49 @@ use crate::http::l7::{
     finalize_response_with_headers, prepare_request_with_headers_in_place,
 };
 use crate::http::local_response::build_local_response;
-use crate::io_copy::{copy_bidirectional_with_export_and_idle, BandwidthThrottle};
+use crate::io_copy::{BandwidthThrottle, copy_bidirectional_with_export_and_idle};
 use crate::io_prefix::PrefixedIo;
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, attach_log_context, emit_audit_log, enforce_ext_authz,
-    resolve_identity, sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    resolve_identity, sanitize_headers_for_policy, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
 use crate::tls::client::preview_tls_certificate_with_options;
-use crate::tls::client::{connect_tls_h2_h1_with_options, BoxTlsStream};
+use crate::tls::client::{BoxTlsStream, connect_tls_h2_h1_with_options};
 use crate::tls::{
-    extract_client_hello_info, looks_like_tls_client_hello, try_read_client_hello_with_timeout,
     CompiledUpstreamTlsTrust, TlsClientHelloInfo, UpstreamCertificateInfo,
+    extract_client_hello_info, looks_like_tls_client_hello, try_read_client_hello_with_timeout,
 };
-use crate::upstream::connect::{connect_tunnel_target, ConnectedTunnel};
+use crate::upstream::connect::{ConnectedTunnel, connect_tunnel_target};
 use ::http::{
     HeaderMap, HeaderMap as Http1HeaderMap, Method, Request, Request as Http1Request, Response,
     Response as Http1Response, StatusCode, Uri,
 };
 #[cfg(feature = "mitm")]
 use anyhow::Context;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use h2::ext::Protocol as H2Protocol;
-use h2::{client as h2_client, Reason as H2Reason, RecvStream as H2RecvStream};
-use qpx_core::config::{ActionConfig, ActionKind, ListenerConfig};
+use h2::{Reason as H2Reason, RecvStream as H2RecvStream, client as h2_client};
+use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 #[cfg(feature = "mitm")]
 use std::sync::Arc;
 use std::{
-    future::{poll_fn, Future},
+    future::{Future, poll_fn},
     pin::Pin,
     task::Poll,
 };
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::{TcpStream, lookup_host};
 use tokio::task;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 #[cfg(feature = "mitm")]
-use crate::http::mitm::{proxy_mitm_request, MitmRouteContext};
+use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
 #[cfg(feature = "mitm")]
 use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream};
 
@@ -73,15 +75,16 @@ mod connect_inspect;
 mod connect_tunnel;
 
 use self::connect_extended::{
-    default_port_for_scheme, open_upstream_h2_extended_connect_stream,
-    spawn_h2_extended_connect_relay, H2ExtendedConnectUpstream,
+    H2ExtendedConnectUpstream, default_port_for_scheme, open_upstream_h2_extended_connect_stream,
+    spawn_h2_extended_connect_relay,
 };
 use self::connect_h2::handle_h2_extended_connect;
 pub(super) use self::connect_inspect::{
-    decide_connect_action_from_client_hello, decide_connect_action_from_tls_metadata,
-    listener_requires_upstream_cert_preview, listener_upstream_trust, ConnectPolicyInput,
+    ConnectPolicyInput, decide_connect_action_from_client_hello,
+    decide_connect_action_from_tls_metadata, listener_requires_upstream_cert_preview,
+    listener_upstream_trust,
 };
-use self::connect_tunnel::{tunnel_connect, TunnelConnectContext};
+use self::connect_tunnel::{TunnelConnectContext, tunnel_connect};
 
 pub(super) async fn handle_connect(
     req: Request<Body>,
@@ -93,13 +96,13 @@ pub(super) async fn handle_connect(
         return handle_h2_extended_connect(req, runtime, listener_name, remote_addr).await;
     }
     let state = runtime.state();
-    let proxy_name = state.config.identity.proxy_name.as_str();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
     let req_version = req.version();
-    let listener_cfg = state
-        .listener_config(listener_name)
-        .ok_or_else(|| anyhow!("listener not found"))?;
-    let effective_policy =
-        EffectivePolicyContext::from_single(listener_cfg.policy_context.as_ref());
+    let base_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, None)
+        .ok_or_else(|| anyhow!("listener plan not found"))?;
+    let effective_policy = base_plan.policy_context.clone();
 
     let authority = req
         .uri()
@@ -128,7 +131,7 @@ pub(super) async fn handle_connect(
             port: Some(port),
             ..Default::default()
         },
-        listener_cfg.destination_resolution.as_ref(),
+        base_plan.destination_resolution.as_ref(),
     );
 
     let ctx = RuleMatchContext {
@@ -174,6 +177,7 @@ pub(super) async fn handle_connect(
             identity.supplement_builtin_auth(allowed.authenticated_user.as_ref());
             (allowed.action, allowed.matched_rule)
         }
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Challenge(chal) => {
             let log_context = identity.to_log_context(None, None, None);
             let response = proxy_auth_required(chal, state.messages.proxy_auth_required.as_str());
@@ -205,6 +209,7 @@ pub(super) async fn handle_connect(
             );
             return Ok(response);
         }
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Forbidden => {
             let log_context = identity.to_log_context(None, None, None);
             let mut response = finalize_response_for_request(
@@ -236,21 +241,21 @@ pub(super) async fn handle_connect(
             return Ok(response);
         }
     };
+    let selected_plan = state
+        .plan
+        .ingress_edge_execution_plan(listener_name, matched_rule.as_deref())
+        .ok_or_else(|| anyhow!("compiled CONNECT listener execution plan not found"))?;
     let request_limit_ctx =
         RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule.as_deref(), None);
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
-    } = state.policy.rate_limiters.collect_checked_request(
-        crate::rate_limit::RequestLimitCollectInput {
-            listener: Some(listener_name),
-            rule: matched_rule.as_deref(),
-            profile: None,
-            scope: crate::rate_limit::TransportScope::Connect,
-            extra: None,
-            ctx: &request_limit_ctx,
-            cost: 1,
-        },
+    } = state.policy.rate_limiters.collect_checked_plan_request(
+        &selected_plan.rate_limits,
+        None,
+        crate::rate_limit::TransportScope::Connect,
+        &request_limit_ctx,
+        1,
     )?;
     if let Some(retry_after) = retry_after {
         return Ok(finalize_response_for_request(
@@ -371,7 +376,7 @@ pub(super) async fn handle_connect(
         }
     };
     let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.config.runtime.upstream_http_timeout_ms));
+        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
 
     match action.kind {
         ActionKind::Block => {
@@ -419,6 +424,9 @@ pub(super) async fn handle_connect(
 
             #[cfg(feature = "mitm")]
             {
+                let listener_cfg = state
+                    .ingress_edge_settings(listener_name)
+                    .ok_or_else(|| anyhow!("listener not found"))?;
                 let tls_inspection = listener_cfg.tls_inspection.as_ref();
                 if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
                     let mut response = finalize_response_with_headers(
@@ -493,6 +501,7 @@ pub(super) async fn handle_connect(
                 let sanitized_headers_for_task = sanitized_headers.clone();
                 let identity_for_task = identity.clone();
                 let action_for_task = action.clone();
+                let matched_rule_for_task = matched_rule.as_ref().map(|rule| rule.to_string());
                 task::spawn(async move {
                     if let Err(err) = tunnel_connect(
                         req,
@@ -507,6 +516,7 @@ pub(super) async fn handle_connect(
                             sanitized_headers: sanitized_headers_for_task,
                             identity: identity_for_task,
                             initial_action: action_for_task,
+                            matched_rule: matched_rule_for_task,
                             verify_upstream: verify,
                             _concurrency_permits: concurrency_permits,
                             throttle: None,
@@ -589,6 +599,7 @@ pub(super) async fn handle_connect(
             let sanitized_headers_for_task = sanitized_headers.clone();
             let identity_for_task = identity.clone();
             let action_for_task = action.clone();
+            let matched_rule_for_task = matched_rule.as_ref().map(|rule| rule.to_string());
             task::spawn(async move {
                 if let Err(err) = tunnel_connect(
                     req,
@@ -603,6 +614,7 @@ pub(super) async fn handle_connect(
                         sanitized_headers: sanitized_headers_for_task,
                         identity: identity_for_task,
                         initial_action: action_for_task,
+                        matched_rule: matched_rule_for_task,
                         verify_upstream: false,
                         _concurrency_permits: concurrency_permits,
                         throttle,

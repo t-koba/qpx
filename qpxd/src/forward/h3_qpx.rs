@@ -1,4 +1,5 @@
-use super::policy::{evaluate_forward_policy, ForwardPolicyDecision};
+use super::policy::{ForwardPolicyDecision, evaluate_forward_policy};
+#[cfg(feature = "auth-basic")]
 use super::request::proxy_auth_required;
 use crate::http::body::Body;
 use crate::http::common::{
@@ -12,29 +13,27 @@ use crate::http::l7::{
 use crate::http::local_response::build_local_response;
 use crate::http3::codec::{h1_headers_to_http, h3_request_to_hyper, http_headers_to_h1};
 use crate::http3::quinn_socket::{
-    build_server_endpoint, prepare_server_endpoint_socket, NoopQuinnUdpIngressFilter,
-    PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket,
+    NoopQuinnUdpIngressFilter, PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream,
+    QuinnEndpointSocket, build_server_endpoint, prepare_server_endpoint_socket,
 };
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord,
-    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    sanitize_headers_for_policy, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
 use crate::sidecar_control::SidecarControl;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use bytes::Bytes;
 use hyper::{Response, StatusCode};
-use qpx_core::config::{ActionKind, ConnectUdpConfig, Http3ListenerConfig, ListenerConfig};
+use qpx_core::config::{ActionKind, ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig};
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
-use qpx_observability::access_log::RequestLogContext;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::lookup_host;
 use tokio::sync::watch;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 #[path = "h3_connect_parse.rs"]
@@ -43,13 +42,22 @@ mod h3_connect_parse;
 mod h3_qpx_connect;
 #[path = "h3_qpx_relay.rs"]
 mod h3_qpx_relay;
+#[path = "h3_qpx_response.rs"]
+mod h3_qpx_response;
 #[path = "h3_qpx_webtransport.rs"]
 mod h3_qpx_webtransport;
 
-use self::h3_connect_parse::{parse_connect_authority_required, parse_connect_udp_target};
+use self::h3_connect_parse::{
+    H3ConnectProtocol, parse_connect_authority_required, parse_connect_udp_target,
+    validate_h3_connect_pseudo_headers,
+};
 use self::h3_qpx_connect::handle_qpx_connect_stream;
+use self::h3_qpx_response::{
+    QpxPolicyResponseContext, collect_forward_response, send_qpx_policy_response,
+    send_qpx_response_stream, send_qpx_static_response,
+};
 use self::h3_qpx_webtransport::{
-    relay_qpx_webtransport_session, QpxWebTransportRelayContext, WebTransportFlowLimits,
+    QpxWebTransportRelayContext, WebTransportFlowLimits, relay_qpx_webtransport_session,
 };
 
 pub(crate) fn prepare_http3_listener_socket(
@@ -67,9 +75,9 @@ pub(crate) fn prepare_http3_listener_socket(
 }
 
 pub(crate) async fn run_http3_listener(
-    listener: ListenerConfig,
+    listener: IngressEdgeConfig,
     runtime: Runtime,
-    http3_cfg: Http3ListenerConfig,
+    http3_cfg: Http3IngressEdgeConfig,
     mut shutdown: watch::Receiver<SidecarControl>,
     endpoint_socket: QuinnEndpointSocket,
 ) -> Result<()> {
@@ -85,9 +93,11 @@ pub(crate) async fn run_http3_listener(
         uri_template: None,
     });
 
-    let runtime_cfg = runtime.state().config.runtime.clone();
     let tls_config = build_forward_tls_config(&listener, &runtime, listen_addr)?;
-    let max_bidi = runtime_cfg
+    let max_bidi = runtime
+        .state()
+        .plan
+        .limits
         .max_h3_streams_per_connection
         .min(u32::MAX as usize) as u32;
     let quic_config =
@@ -150,13 +160,15 @@ pub(crate) async fn run_http3_listener(
 }
 
 fn build_forward_tls_config(
-    listener: &ListenerConfig,
+    listener: &IngressEdgeConfig,
     runtime: &Runtime,
     listen_addr: SocketAddr,
 ) -> Result<quinn::rustls::ServerConfig> {
     let state = runtime.state();
     let ca = state
         .security
+        .destination
+        .tls
         .ca
         .as_ref()
         .ok_or_else(|| anyhow!("forward HTTP/3 requires CA state"))?;
@@ -192,7 +204,7 @@ struct ForwardQpxHandler {
 impl qpx_h3::RequestHandler for ForwardQpxHandler {
     fn settings(&self) -> qpx_h3::Settings {
         let state = self.runtime.state();
-        let limits = state.config.runtime.clone();
+        let limits = state.plan.limits;
         qpx_h3::Settings {
             enable_extended_connect: true,
             enable_datagram: true,
@@ -226,11 +238,7 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
         collect_forward_response(
             response,
             &request_method,
-            self.runtime
-                .state()
-                .config
-                .runtime
-                .max_h3_response_body_bytes,
+            self.runtime.state().plan.limits.max_h3_response_body_bytes,
             h3_body_read_timeout(&self.runtime),
         )
         .await
@@ -292,11 +300,7 @@ impl ForwardQpxHandler {
                 collect_forward_response(
                     response,
                     &request_method,
-                    self.runtime
-                        .state()
-                        .config
-                        .runtime
-                        .max_h3_response_body_bytes,
+                    self.runtime.state().plan.limits.max_h3_response_body_bytes,
                     h3_body_read_timeout(&self.runtime),
                 )
                 .await
@@ -349,18 +353,14 @@ impl ForwardQpxHandler {
         let response = crate::http::l7::finalize_response_for_request(
             &http::Method::CONNECT,
             http::Version::HTTP_3,
-            self.runtime.state().config.identity.proxy_name.as_str(),
+            self.runtime.state().plan.identity.proxy_name.as_ref(),
             response,
             false,
         );
         collect_forward_response(
             response,
             &http::Method::CONNECT,
-            self.runtime
-                .state()
-                .config
-                .runtime
-                .max_h3_response_body_bytes,
+            self.runtime.state().plan.limits.max_h3_response_body_bytes,
             h3_body_read_timeout(&self.runtime),
         )
         .await
@@ -375,7 +375,7 @@ impl ForwardQpxHandler {
         let response = crate::http::l7::finalize_response_for_request(
             &method,
             http::Version::HTTP_3,
-            self.runtime.state().config.identity.proxy_name.as_str(),
+            self.runtime.state().plan.identity.proxy_name.as_ref(),
             Response::builder()
                 .status(status)
                 .body(crate::http::body::Body::from(body))?,
@@ -384,11 +384,7 @@ impl ForwardQpxHandler {
         collect_forward_response(
             response,
             &method,
-            self.runtime
-                .state()
-                .config
-                .runtime
-                .max_h3_response_body_bytes,
+            self.runtime.state().plan.limits.max_h3_response_body_bytes,
             h3_body_read_timeout(&self.runtime),
         )
         .await
@@ -402,10 +398,10 @@ impl ForwardQpxHandler {
         session: qpx_h3::WebTransportSession,
     ) -> Result<()> {
         let state = self.runtime.state();
-        let proxy_name = state.config.identity.proxy_name.clone();
-        let max_h3_response_body_bytes = state.config.runtime.max_h3_response_body_bytes;
+        let proxy_name = state.plan.identity.proxy_name.to_string();
+        let max_h3_response_body_bytes = state.plan.limits.max_h3_response_body_bytes;
         let tunnel_idle_timeout =
-            Duration::from_millis(state.config.runtime.tunnel_idle_timeout_ms.max(1));
+            Duration::from_millis(state.plan.limits.tunnel_idle_timeout_ms.max(1));
 
         let req_authority = match req_head.uri().authority().map(|a| a.as_str().to_string()) {
             Some(authority) => authority,
@@ -454,11 +450,11 @@ impl ForwardQpxHandler {
             return Ok(());
         }
 
-        let listener_cfg = state
-            .listener_config(self.listener_name.as_ref())
-            .ok_or_else(|| anyhow!("listener not found"))?;
-        let effective_policy =
-            EffectivePolicyContext::from_single(listener_cfg.policy_context.as_ref());
+        let base_plan = state
+            .plan
+            .ingress_edge_execution_plan(self.listener_name.as_ref(), None)
+            .ok_or_else(|| anyhow!("listener plan not found"))?;
+        let effective_policy = base_plan.policy_context.clone();
         let sanitized_headers = sanitize_headers_for_policy(
             &state,
             &effective_policy,
@@ -485,7 +481,7 @@ impl ForwardQpxHandler {
                 alpn: Some("h3"),
                 ..Default::default()
             },
-            listener_cfg.destination_resolution.as_ref(),
+            base_plan.destination_resolution.as_ref(),
         );
         let audit_path = req_head
             .uri()
@@ -548,6 +544,7 @@ impl ForwardQpxHandler {
                     allowed.matched_rule.map(|rule: Arc<str>| rule.to_string()),
                 )
             }
+            #[cfg(feature = "auth-basic")]
             Ok(ForwardPolicyDecision::Challenge(challenge)) => {
                 let log_context = identity.to_log_context(None, None, None);
                 let response = finalize_response_for_request(
@@ -575,6 +572,7 @@ impl ForwardQpxHandler {
                 .await?;
                 return Ok(());
             }
+            #[cfg(feature = "auth-basic")]
             Ok(ForwardPolicyDecision::Forbidden) => {
                 let log_context = identity.to_log_context(None, None, None);
                 let response = finalize_response_for_request(
@@ -613,6 +611,10 @@ impl ForwardQpxHandler {
                 return Ok(());
             }
         };
+        let selected_plan = state
+            .plan
+            .ingress_edge_execution_plan(self.listener_name.as_ref(), matched_rule.as_deref())
+            .ok_or_else(|| anyhow!("compiled WebTransport listener execution plan not found"))?;
 
         let request_limit_ctx = RateLimitContext::from_identity(
             conn.remote_addr.ip(),
@@ -623,16 +625,12 @@ impl ForwardQpxHandler {
         let crate::rate_limit::RequestLimitAcquire {
             limits: mut request_limits,
             retry_after,
-        } = state.policy.rate_limiters.collect_checked_request(
-            crate::rate_limit::RequestLimitCollectInput {
-                listener: Some(self.listener_name.as_ref()),
-                rule: matched_rule.as_deref(),
-                profile: None,
-                scope: crate::rate_limit::TransportScope::Webtransport,
-                extra: None,
-                ctx: &request_limit_ctx,
-                cost: 1,
-            },
+        } = state.policy.rate_limiters.collect_checked_plan_request(
+            &selected_plan.rate_limits,
+            None,
+            crate::rate_limit::TransportScope::Webtransport,
+            &request_limit_ctx,
+            1,
         )?;
         if let Some(retry_after) = retry_after {
             let log_context = identity.to_log_context(matched_rule.as_deref(), None, None);
@@ -870,9 +868,8 @@ impl ForwardQpxHandler {
             ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {}
         }
 
-        let upstream_timeout = timeout_override.unwrap_or_else(|| {
-            Duration::from_millis(state.config.runtime.upstream_http_timeout_ms)
-        });
+        let upstream_timeout = timeout_override
+            .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
         let _concurrency_permits = match request_limits.acquire_concurrency(&request_limit_ctx) {
             Some(permits) => Some(permits),
             None => {
@@ -909,7 +906,7 @@ impl ForwardQpxHandler {
             proxy_name.as_str(),
             action.upstream.as_deref(),
             state
-                .listener_config(self.listener_name.as_ref())
+                .ingress_edge_settings(self.listener_name.as_ref())
                 .and_then(|listener| listener.tls_inspection.as_ref())
                 .map(|cfg| {
                     cfg.verify_upstream
@@ -1043,64 +1040,57 @@ impl ForwardQpxHandler {
         );
         let flow_limits = {
             let rate_limiters = &state.policy.rate_limiters;
-            let listener = self.listener_name.as_ref();
-            let rule = matched_rule.as_deref();
+            let selected_plan = state
+                .plan
+                .ingress_edge_execution_plan(self.listener_name.as_ref(), matched_rule.as_deref())
+                .ok_or_else(|| anyhow!("compiled WebTransport execution plan not found"))?;
             let profile = rate_limit_profile.as_deref();
             WebTransportFlowLimits {
-                bidi: rate_limiters.collect(
-                    listener,
-                    rule,
+                bidi: rate_limiters.collect_plan_with_profile(
+                    &selected_plan.rate_limits,
                     profile,
                     crate::rate_limit::TransportScope::WebtransportBidi,
-                ),
-                bidi_downstream: rate_limiters.collect(
-                    listener,
-                    rule,
+                )?,
+                bidi_downstream: rate_limiters.collect_plan_with_profile(
+                    &selected_plan.rate_limits,
                     profile,
                     crate::rate_limit::TransportScope::WebtransportBidiDownstream,
-                ),
-                bidi_upstream: rate_limiters.collect(
-                    listener,
-                    rule,
+                )?,
+                bidi_upstream: rate_limiters.collect_plan_with_profile(
+                    &selected_plan.rate_limits,
                     profile,
                     crate::rate_limit::TransportScope::WebtransportBidiUpstream,
-                ),
-                uni: rate_limiters.collect(
-                    listener,
-                    rule,
+                )?,
+                uni: rate_limiters.collect_plan_with_profile(
+                    &selected_plan.rate_limits,
                     profile,
                     crate::rate_limit::TransportScope::WebtransportUni,
-                ),
-                uni_downstream: rate_limiters.collect(
-                    listener,
-                    rule,
+                )?,
+                uni_downstream: rate_limiters.collect_plan_with_profile(
+                    &selected_plan.rate_limits,
                     profile,
                     crate::rate_limit::TransportScope::WebtransportUniDownstream,
-                ),
-                uni_upstream: rate_limiters.collect(
-                    listener,
-                    rule,
+                )?,
+                uni_upstream: rate_limiters.collect_plan_with_profile(
+                    &selected_plan.rate_limits,
                     profile,
                     crate::rate_limit::TransportScope::WebtransportUniUpstream,
-                ),
-                datagram: rate_limiters.collect(
-                    listener,
-                    rule,
+                )?,
+                datagram: rate_limiters.collect_plan_with_profile(
+                    &selected_plan.rate_limits,
                     profile,
                     crate::rate_limit::TransportScope::WebtransportDatagram,
-                ),
-                datagram_downstream: rate_limiters.collect(
-                    listener,
-                    rule,
+                )?,
+                datagram_downstream: rate_limiters.collect_plan_with_profile(
+                    &selected_plan.rate_limits,
                     profile,
                     crate::rate_limit::TransportScope::WebtransportDatagramDownstream,
-                ),
-                datagram_upstream: rate_limiters.collect(
-                    listener,
-                    rule,
+                )?,
+                datagram_upstream: rate_limiters.collect_plan_with_profile(
+                    &selected_plan.rate_limits,
                     profile,
                     crate::rate_limit::TransportScope::WebtransportDatagramUpstream,
-                ),
+                )?,
             }
         };
         let relay_result = relay_qpx_webtransport_session(QpxWebTransportRelayContext {
@@ -1136,159 +1126,8 @@ impl ForwardQpxHandler {
     }
 }
 
-async fn collect_forward_response(
-    mut response: Response<crate::http::body::Body>,
-    request_method: &http::Method,
-    max_body_bytes: usize,
-    body_read_timeout: Duration,
-) -> Result<qpx_h3::Response> {
-    let interim = crate::http::interim::take_interim_response_heads(&mut response)
-        .into_iter()
-        .filter_map(|head| {
-            let mut response = http::Response::builder()
-                .status(head.status)
-                .body(())
-                .ok()?;
-            *response.headers_mut() = head.headers;
-            Some(response)
-        })
-        .collect();
-    let (head, body, trailers): (http::Response<()>, bytes::Bytes, Option<http::HeaderMap>) =
-        crate::http3::codec::hyper_response_to_h3(
-            response,
-            request_method,
-            max_body_bytes,
-            body_read_timeout,
-        )
-        .await?;
-    Ok(qpx_h3::Response {
-        interim,
-        response: head.map(|_| body),
-        trailers,
-    })
-}
-
-async fn send_qpx_static_response(
-    req_stream: &mut qpx_h3::RequestStream,
-    status: StatusCode,
-    body: &[u8],
-) -> Result<()> {
-    const STATIC_RESPONSE_SEND_TIMEOUT: Duration = Duration::from_secs(30);
-
-    let response = http::Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_LENGTH, body.len().to_string())
-        .body(())?;
-    tokio::time::timeout(
-        STATIC_RESPONSE_SEND_TIMEOUT,
-        req_stream.send_response_head(&response),
-    )
-    .await
-    .map_err(|_| anyhow!("forward qpx-h3 response send timeout"))??;
-    if !body.is_empty() {
-        tokio::time::timeout(
-            STATIC_RESPONSE_SEND_TIMEOUT,
-            req_stream.send_data(Bytes::copy_from_slice(body)),
-        )
-        .await
-        .map_err(|_| anyhow!("forward qpx-h3 response body send timeout"))??;
-    }
-    tokio::time::timeout(STATIC_RESPONSE_SEND_TIMEOUT, req_stream.finish())
-        .await
-        .map_err(|_| anyhow!("forward qpx-h3 response finish timeout"))?
-}
-
-async fn send_qpx_response_stream(
-    req_stream: &mut qpx_h3::RequestStream,
-    response: Response<Body>,
-    request_method: &http::Method,
-    max_body_bytes: usize,
-    body_read_timeout: Duration,
-) -> Result<()> {
-    let (head, body, trailers): (http::Response<()>, Bytes, Option<http::HeaderMap>) =
-        crate::http3::codec::hyper_response_to_h3(
-            response,
-            request_method,
-            max_body_bytes,
-            body_read_timeout,
-        )
-        .await?;
-    tokio::time::timeout(body_read_timeout, req_stream.send_response_head(&head))
-        .await
-        .map_err(|_| anyhow!("forward qpx-h3 response send timeout"))??;
-    if !body.is_empty() {
-        tokio::time::timeout(body_read_timeout, req_stream.send_data(body))
-            .await
-            .map_err(|_| anyhow!("forward qpx-h3 response body send timeout"))??;
-    }
-    if let Some(trailers) = trailers.as_ref() {
-        tokio::time::timeout(body_read_timeout, req_stream.send_trailers(trailers))
-            .await
-            .map_err(|_| anyhow!("forward qpx-h3 response trailer send timeout"))??;
-    }
-    tokio::time::timeout(body_read_timeout, req_stream.finish())
-        .await
-        .map_err(|_| anyhow!("forward qpx-h3 response finish timeout"))?
-}
-
-async fn send_qpx_policy_response(
-    req_stream: &mut qpx_h3::RequestStream,
-    response: Response<Body>,
-    ctx: QpxPolicyResponseContext<'_>,
-) -> Result<()> {
-    let QpxPolicyResponseContext {
-        state,
-        listener_name,
-        conn,
-        host,
-        path,
-        outcome,
-        matched_rule,
-        ext_authz_policy_id,
-        log_context,
-    } = ctx;
-    emit_audit_log(
-        state,
-        AuditRecord {
-            kind: "forward",
-            name: listener_name,
-            remote_ip: conn.remote_addr.ip(),
-            host: Some(host),
-            sni: Some(host),
-            method: Some("CONNECT"),
-            path,
-            outcome,
-            status: Some(response.status().as_u16()),
-            matched_rule,
-            matched_route: None,
-            ext_authz_policy_id,
-        },
-        log_context,
-    );
-    send_qpx_response_stream(
-        req_stream,
-        response,
-        &http::Method::CONNECT,
-        state.config.runtime.max_h3_response_body_bytes,
-        Duration::from_millis(state.config.runtime.h3_read_timeout_ms.max(1)),
-    )
-    .await
-}
-
 fn h3_body_read_timeout(runtime: &Runtime) -> Duration {
-    Duration::from_millis(runtime.state().config.runtime.h3_read_timeout_ms.max(1))
-}
-
-pub(super) struct QpxPolicyResponseContext<'a> {
-    pub(super) state: &'a crate::runtime::RuntimeState,
-    pub(super) listener_name: &'a str,
-    pub(super) conn: &'a qpx_h3::ConnectionInfo,
-    pub(super) host: &'a str,
-    pub(super) path: Option<&'a str>,
-    pub(super) outcome: &'static str,
-    pub(super) matched_rule: Option<&'a str>,
-    pub(super) ext_authz_policy_id: Option<&'a str>,
-    pub(super) log_context: &'a RequestLogContext,
+    Duration::from_millis(runtime.state().plan.limits.h3_read_timeout_ms.max(1))
 }
 
 fn validate_qpx_webtransport_head(

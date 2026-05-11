@@ -1,71 +1,58 @@
 use crate::connection_filter::compile_connection_filter;
 use crate::destination::{CompiledDestinationResolutionPolicy, DestinationClassifier};
-use crate::http::guard::{compile_http_guard_profiles, CompiledHttpGuardProfile};
-use crate::http::response_policy::HttpResponseRuleEngine;
 use crate::rate_limit::RateLimiters;
 use anyhow::Result;
 use qpx_core::rules::RuleEngine;
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use super::ConfigRuntime;
+use super::RuntimeResources;
 
 #[derive(Clone)]
 pub struct PolicyRuntime {
     pub rules_by_listener: HashMap<String, RuleEngine>,
-    pub(crate) response_rules_by_listener: HashMap<String, Arc<HttpResponseRuleEngine>>,
     pub connection_filters_by_listener: HashMap<String, RuleEngine>,
     pub connection_filters_by_reverse: HashMap<String, RuleEngine>,
     pub(crate) rate_limiters: RateLimiters,
     pub(crate) destination_classifier: DestinationClassifier,
     pub(crate) destination_resolution_defaults: CompiledDestinationResolutionPolicy,
-    pub(crate) http_guard_profiles: HashMap<String, Arc<CompiledHttpGuardProfile>>,
 }
 
 impl PolicyRuntime {
-    pub(super) fn build(config: &ConfigRuntime) -> Result<Self> {
+    pub(super) fn build(config: &RuntimeResources) -> Result<Self> {
         let mut rules_by_listener = HashMap::new();
-        let mut response_rules_by_listener = HashMap::new();
         let mut connection_filters_by_listener = HashMap::new();
         let mut connection_filters_by_reverse = HashMap::new();
-        for listener in &config.listeners {
+        for listener in config.operational.ingress_edge_configs() {
             let engine = RuleEngine::new(listener.rules.clone(), listener.default_action.clone())?;
             rules_by_listener.insert(listener.name.clone(), engine);
-            if let Some(http) = listener.http.as_ref() {
-                if let Some(engine) = HttpResponseRuleEngine::new(http.response_rules.as_slice())? {
-                    response_rules_by_listener.insert(listener.name.clone(), Arc::new(engine));
-                }
-            }
             if let Some(engine) = compile_connection_filter(listener.connection_filter.clone())? {
                 connection_filters_by_listener.insert(listener.name.clone(), engine);
             }
         }
-        for reverse in &config.reverse {
-            if let Some(engine) = compile_connection_filter(reverse.connection_filter.clone())? {
-                connection_filters_by_reverse.insert(reverse.name.clone(), engine);
+        for reverse_edges in config.operational.reverse_edge_configs() {
+            if let Some(engine) =
+                compile_connection_filter(reverse_edges.connection_filter.clone())?
+            {
+                connection_filters_by_reverse.insert(reverse_edges.name.clone(), engine);
             }
         }
 
         let rate_limiters = RateLimiters::from_config(
-            config.listeners.as_slice(),
-            config.rate_limit_profiles.as_slice(),
+            config.operational.ingress_edge_configs(),
+            config.operational.traffic.rate_limit_profiles.as_slice(),
         );
-        let destination_classifier = DestinationClassifier::from_config(config.raw.as_ref())?;
+        let destination_classifier =
+            DestinationClassifier::from_config(config.operational.as_ref())?;
         let destination_resolution_defaults = CompiledDestinationResolutionPolicy::from_config(
-            &config.destination_resolution.defaults,
+            &config.operational.security.destination.defaults,
         );
-        let http_guard_profiles =
-            compile_http_guard_profiles(config.http_guard_profiles.as_slice());
-
         Ok(Self {
             rules_by_listener,
-            response_rules_by_listener,
             connection_filters_by_listener,
             connection_filters_by_reverse,
             rate_limiters,
             destination_classifier,
             destination_resolution_defaults,
-            http_guard_profiles,
         })
     }
 }

@@ -1,0 +1,21 @@
+runtime: {}
+telemetry:
+  system_log:
+    level: info
+security: {}
+http: {}
+traffic: {}
+upstreams:
+  - name: app
+    url: http://127.0.0.1:8080
+edges:
+  - kind: reverse
+    name: public-http
+    listen: 0.0.0.0:8080
+    routes:
+      - name: app
+        match:
+          host: [localhost]
+        target:
+          type: upstream
+          upstreams: [app]

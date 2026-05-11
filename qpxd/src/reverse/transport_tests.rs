@@ -7,12 +7,12 @@ use crate::runtime::Runtime;
 use crate::tls::UpstreamCertificateInfo;
 use http::header::CONTENT_LENGTH;
 use qpx_core::config::{
-    AccessLogConfig, AuditLogConfig, AuthConfig, CacheConfig, CertificateMatchConfig, Config,
+    AccessLogConfig, AuditLogConfig, AuthConfig, CertificateMatchConfig, Config,
     DestinationDimensionMatchConfig, DestinationMatchConfig, ExtAuthzConfig, ExtAuthzSendConfig,
     HeaderControl, HttpPolicyConfig, HttpResponseCacheEffectsConfig, HttpResponseEffectsConfig,
     HttpResponseRuleConfig, IdentityConfig, LocalResponseConfig, MatchConfig, MessagesConfig,
     NamedSetConfig, NamedSetKind, PolicyContextConfig, RateLimitConfig, RateLimitProfileConfig,
-    ReverseConfig, ReverseRouteConfig, RpcMatchConfig, RuntimeConfig, SystemLogConfig,
+    ReverseEdgeConfig, ReverseRouteConfig, RpcMatchConfig, RuntimeConfig, SystemLogConfig,
     UpstreamConfig,
 };
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -158,7 +158,7 @@ fn decode_gzip(bytes: &[u8]) -> String {
 fn build_router(response_rules: Vec<HttpResponseRuleConfig>) -> ReverseRouter {
     let registry = crate::http::modules::default_http_module_registry();
     ReverseRouter::new(
-        ReverseConfig {
+        ReverseEdgeConfig {
             name: "test".to_string(),
             listen: "127.0.0.1:0".to_string(),
             tls: None,
@@ -172,21 +172,21 @@ fn build_router(response_rules: Vec<HttpResponseRuleConfig>) -> ReverseRouter {
             routes: vec![ReverseRouteConfig {
                 name: Some("test".to_string()),
                 r#match: MatchConfig::default(),
-                upstreams: vec!["upstream".to_string()],
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                    upstreams: vec!["upstream".to_string()],
+                    lb: "round_robin".to_string(),
+                },
                 mirrors: Vec::new(),
-                local_response: None,
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 path_rewrite: None,
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: Some(HttpPolicyConfig { response_rules }),
@@ -383,6 +383,7 @@ async fn response_rule_can_force_local_response_and_merge_headers() {
         response,
         max_observed_response_body_bytes: usize::MAX,
         response_body_read_timeout: std::time::Duration::from_secs(1),
+        force_response_body_observation: false,
     })
     .await
     .expect("apply");
@@ -395,14 +396,18 @@ async fn response_rule_can_force_local_response_and_merge_headers() {
         } => {
             assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
             let headers = route_headers.expect("merged headers");
-            assert!(headers
-                .response_set()
-                .iter()
-                .any(|(name, value)| name == "x-base" && value == "route"));
-            assert!(headers
-                .response_set()
-                .iter()
-                .any(|(name, value)| name == "x-rule" && value == "local"));
+            assert!(
+                headers
+                    .response_set()
+                    .iter()
+                    .any(|(name, value)| name == "x-base" && value == "route")
+            );
+            assert!(
+                headers
+                    .response_set()
+                    .iter()
+                    .any(|(name, value)| name == "x-rule" && value == "local")
+            );
         }
         ResponseRuleDecision::Continue { .. } => panic!("expected local response"),
     }
@@ -461,6 +466,7 @@ async fn response_rule_matches_request_derived_rpc_fields() {
         response,
         max_observed_response_body_bytes: usize::MAX,
         response_body_read_timeout: std::time::Duration::from_secs(1),
+        force_response_body_observation: false,
     })
     .await
     .expect("apply");
@@ -502,7 +508,7 @@ async fn assert_reverse_response_rule_matches_streaming(
         1,
     )
     .await;
-    let reverse_cfg = ReverseConfig {
+    let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
         listen: "127.0.0.1:0".to_string(),
         tls: None,
@@ -516,21 +522,21 @@ async fn assert_reverse_response_rule_matches_streaming(
         routes: vec![ReverseRouteConfig {
             name: Some("grpc".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             path_rewrite: None,
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: Some(HttpPolicyConfig {
@@ -567,23 +573,28 @@ async fn assert_reverse_response_rule_matches_streaming(
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: Vec::new(),
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: vec![reverse_cfg.clone()],
+        edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
         upstreams: vec![UpstreamConfig {
             name: "upstream".to_string(),
             url: format!("http://{upstream_addr}"),
@@ -592,7 +603,7 @@ async fn assert_reverse_response_rule_matches_streaming(
             discovery: None,
             resilience: None,
         }],
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
     let reverse = super::super::ReloadableReverse::new(
@@ -672,6 +683,7 @@ async fn response_rule_can_bypass_cache_without_replacing_response() {
         response,
         max_observed_response_body_bytes: usize::MAX,
         response_body_read_timeout: std::time::Duration::from_secs(1),
+        force_response_body_observation: false,
     })
     .await
     .expect("apply");
@@ -744,6 +756,7 @@ async fn response_rule_matches_actual_chunked_response_size() {
         response,
         max_observed_response_body_bytes: usize::MAX,
         response_body_read_timeout: std::time::Duration::from_secs(1),
+        force_response_body_observation: false,
     })
     .await
     .expect("apply");
@@ -818,6 +831,7 @@ async fn response_rule_matches_destination_and_upstream_cert_context() {
         response,
         max_observed_response_body_bytes: usize::MAX,
         response_body_read_timeout: std::time::Duration::from_secs(1),
+        force_response_body_observation: false,
     })
     .await
     .expect("apply");
@@ -884,6 +898,7 @@ async fn response_rule_matches_client_cert_context() {
         response,
         max_observed_response_body_bytes: usize::MAX,
         response_body_read_timeout: std::time::Duration::from_secs(1),
+        force_response_body_observation: false,
     })
     .await
     .expect("apply");
@@ -898,7 +913,7 @@ async fn response_rule_matches_client_cert_context() {
 
 #[tokio::test]
 async fn route_match_uses_actual_chunked_request_size() {
-    let reverse_cfg = ReverseConfig {
+    let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
         listen: "127.0.0.1:0".to_string(),
         tls: None,
@@ -916,27 +931,26 @@ async fn route_match_uses_actual_chunked_request_size() {
                     request_size: vec!["4".to_string()],
                     ..Default::default()
                 },
-                upstreams: vec!["upstream".to_string()],
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                    response: Box::new(LocalResponseConfig {
+                        status: 204,
+                        body: String::new(),
+                        content_type: None,
+                        headers: HashMap::new(),
+                        rpc: None,
+                    }),
+                },
                 mirrors: Vec::new(),
-                local_response: Some(LocalResponseConfig {
-                    status: 204,
-                    body: String::new(),
-                    content_type: None,
-                    headers: HashMap::new(),
-                    rpc: None,
-                }),
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 path_rewrite: None,
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: None,
@@ -948,27 +962,26 @@ async fn route_match_uses_actual_chunked_request_size() {
             ReverseRouteConfig {
                 name: Some("fallback".to_string()),
                 r#match: MatchConfig::default(),
-                upstreams: vec!["upstream".to_string()],
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                    response: Box::new(LocalResponseConfig {
+                        status: 409,
+                        body: "fallback".to_string(),
+                        content_type: Some("text/plain".to_string()),
+                        headers: HashMap::new(),
+                        rpc: None,
+                    }),
+                },
                 mirrors: Vec::new(),
-                local_response: Some(LocalResponseConfig {
-                    status: 409,
-                    body: "fallback".to_string(),
-                    content_type: Some("text/plain".to_string()),
-                    headers: HashMap::new(),
-                    rpc: None,
-                }),
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 path_rewrite: None,
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: None,
@@ -985,23 +998,28 @@ async fn route_match_uses_actual_chunked_request_size() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: Vec::new(),
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: vec![reverse_cfg.clone()],
+        edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
         upstreams: vec![UpstreamConfig {
             name: "upstream".to_string(),
             url: "http://127.0.0.1:8080".to_string(),
@@ -1010,7 +1028,7 @@ async fn route_match_uses_actual_chunked_request_size() {
             discovery: None,
             resilience: None,
         }],
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
     let reverse = super::super::ReloadableReverse::new(
@@ -1051,7 +1069,7 @@ async fn route_match_uses_actual_chunked_request_size() {
 
 #[tokio::test]
 async fn route_match_uses_destination_category() {
-    let reverse_cfg = ReverseConfig {
+    let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
         listen: "127.0.0.1:0".to_string(),
         tls: None,
@@ -1077,27 +1095,26 @@ async fn route_match_uses_destination_category() {
                     }),
                     ..Default::default()
                 },
-                upstreams: Vec::new(),
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                    response: Box::new(LocalResponseConfig {
+                        status: 204,
+                        body: String::new(),
+                        content_type: None,
+                        headers: HashMap::new(),
+                        rpc: None,
+                    }),
+                },
                 mirrors: Vec::new(),
-                local_response: Some(LocalResponseConfig {
-                    status: 204,
-                    body: String::new(),
-                    content_type: None,
-                    headers: HashMap::new(),
-                    rpc: None,
-                }),
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 cache: None,
+                capture: None,
                 rate_limit: None,
                 path_rewrite: None,
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: None,
@@ -1109,27 +1126,26 @@ async fn route_match_uses_destination_category() {
             ReverseRouteConfig {
                 name: Some("fallback".to_string()),
                 r#match: MatchConfig::default(),
-                upstreams: Vec::new(),
-                backends: Vec::new(),
+                target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                    response: Box::new(LocalResponseConfig {
+                        status: 409,
+                        body: "fallback".to_string(),
+                        content_type: Some("text/plain".to_string()),
+                        headers: HashMap::new(),
+                        rpc: None,
+                    }),
+                },
                 mirrors: Vec::new(),
-                local_response: Some(LocalResponseConfig {
-                    status: 409,
-                    body: "fallback".to_string(),
-                    content_type: Some("text/plain".to_string()),
-                    headers: HashMap::new(),
-                    rpc: None,
-                }),
                 headers: None,
-                lb: "round_robin".to_string(),
                 timeout_ms: None,
                 health_check: None,
                 rate_limit: None,
                 cache: None,
+                capture: None,
                 path_rewrite: None,
                 upstream_trust_profile: None,
                 upstream_trust: None,
                 lifecycle: None,
-                ipc: None,
                 affinity: None,
                 policy_context: None,
                 http: None,
@@ -1146,30 +1162,35 @@ async fn route_match_uses_destination_category() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: vec![NamedSetConfig {
+                name: "category:ai".to_string(),
+                kind: NamedSetKind::Domain,
+                values: vec!["*.openai.com".to_string()],
+                file: None,
+            }],
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: Vec::new(),
-        named_sets: vec![NamedSetConfig {
-            name: "category:ai".to_string(),
-            kind: NamedSetKind::Domain,
-            values: vec!["*.openai.com".to_string()],
-            file: None,
-        }],
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: vec![reverse_cfg.clone()],
+        edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
         upstreams: Vec::new(),
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
     let reverse = super::super::ReloadableReverse::new(
@@ -1204,7 +1225,7 @@ async fn reverse_ext_authz_rate_limit_profile_is_enforced() {
         2,
     )
     .await;
-    let reverse_cfg = ReverseConfig {
+    let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
         listen: "127.0.0.1:0".to_string(),
         tls: None,
@@ -1218,27 +1239,26 @@ async fn reverse_ext_authz_rate_limit_profile_is_enforced() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: Vec::new(),
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                response: Box::new(LocalResponseConfig {
+                    status: 204,
+                    body: String::new(),
+                    content_type: None,
+                    headers: HashMap::new(),
+                    rpc: None,
+                }),
+            },
             mirrors: Vec::new(),
-            local_response: Some(LocalResponseConfig {
-                status: 204,
-                body: String::new(),
-                content_type: None,
-                headers: HashMap::new(),
-                rpc: None,
-            }),
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             path_rewrite: None,
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: Some(PolicyContextConfig {
                 identity_sources: Vec::new(),
@@ -1257,47 +1277,54 @@ async fn reverse_ext_authz_rate_limit_profile_is_enforced() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
-        acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: vec![ExtAuthzConfig {
-            name: "authz".to_string(),
-            kind: Default::default(),
-            endpoint: format!("http://{}", authz_addr),
-            timeout_ms: 1_000,
-            max_response_bytes: 1024 * 1024,
-            send: ExtAuthzSendConfig::default(),
-            on_error: Default::default(),
-        }],
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: vec![RateLimitProfileConfig {
-            name: "reverse-profile".to_string(),
-            limit: RateLimitConfig {
-                enabled: true,
-                apply_to: vec![qpx_core::config::RateLimitApplyTo::Request],
-                key: "global".to_string(),
-                requests: Some(qpx_core::config::RateLimitRequestsConfig {
-                    rps: Some(1),
-                    burst: Some(1),
-                    quota: None,
-                }),
-                traffic: None,
-                sessions: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: vec![ExtAuthzConfig {
+                    name: "authz".to_string(),
+                    kind: Default::default(),
+                    endpoint: format!("http://{}", authz_addr),
+                    timeout_ms: 1_000,
+                    max_response_bytes: 1024 * 1024,
+                    send: ExtAuthzSendConfig::default(),
+                    on_error: Default::default(),
+                }],
             },
-        }],
-        upstream_trust_profiles: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: Vec::new(),
-        reverse: vec![reverse_cfg.clone()],
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig {
+            rate_limit_profiles: vec![RateLimitProfileConfig {
+                name: "reverse-profile".to_string(),
+                limit: RateLimitConfig {
+                    enabled: true,
+                    apply_to: vec![qpx_core::config::RateLimitApplyTo::Request],
+                    key: "global".to_string(),
+                    requests: Some(qpx_core::config::RateLimitRequestsConfig {
+                        rps: Some(1),
+                        burst: Some(1),
+                        quota: None,
+                    }),
+                    traffic: None,
+                    sessions: None,
+                },
+            }],
+        },
+        acme: None,
+        edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
         upstreams: Vec::new(),
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
     let reverse = super::super::ReloadableReverse::new(
@@ -1355,7 +1382,7 @@ async fn handle_request_with_interim_returns_early_hints_for_h3_downstream() {
             .expect("write response");
     });
 
-    let reverse_cfg = ReverseConfig {
+    let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
         listen: "127.0.0.1:0".to_string(),
         tls: None,
@@ -1369,21 +1396,21 @@ async fn handle_request_with_interim_returns_early_hints_for_h3_downstream() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             path_rewrite: None,
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: None,
@@ -1407,25 +1434,30 @@ async fn handle_request_with_interim_returns_early_hints_for_h3_downstream() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: Vec::new(),
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: vec![reverse_cfg.clone()],
+        edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
         upstreams: vec![upstream_cfg],
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
     let reverse = super::super::ReloadableReverse::new(
@@ -1475,7 +1507,7 @@ async fn reverse_route_http_module_compresses_responses() {
         1,
     )
     .await;
-    let reverse_cfg = ReverseConfig {
+    let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
         listen: "127.0.0.1:0".to_string(),
         tls: None,
@@ -1489,41 +1521,44 @@ async fn reverse_route_http_module_compresses_responses() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             path_rewrite: None,
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: None,
             http_guard_profile: None,
             destination_resolution: None,
             resilience: None,
-            http_modules: vec![serde_yaml::from_str(
-                r#"type: response_compression
-min_body_bytes: 1
-max_body_bytes: 65536
-content_types:
-  - text/plain
-gzip: true
-brotli: false
-zstd: false
-gzip_level: 6
-brotli_level: 5
-zstd_level: 3"#,
-            )
-            .expect("http module config")],
+            http_modules: vec![
+                serde_yaml::from_str(
+                    r#"type: response_compression
+settings:
+  min_body_bytes: 1
+  max_body_bytes: 65536
+  content_types:
+    - text/plain
+  gzip: true
+  brotli: false
+  zstd: false
+  gzip_level: 6
+  brotli_level: 5
+  zstd_level: 3"#,
+                )
+                .expect("http module config"),
+            ],
         }],
         tls_passthrough_routes: Vec::new(),
     };
@@ -1532,23 +1567,28 @@ zstd_level: 3"#,
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: Vec::new(),
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: vec![reverse_cfg.clone()],
+        edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
         upstreams: vec![UpstreamConfig {
             name: "upstream".to_string(),
             url: format!("http://{upstream_addr}"),
@@ -1557,7 +1597,7 @@ zstd_level: 3"#,
             discovery: None,
             resilience: None,
         }],
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
     let reverse = super::super::ReloadableReverse::new(
@@ -1610,7 +1650,7 @@ async fn reverse_route_http_module_can_inject_subrequest_headers() {
         1,
     )
     .await;
-    let reverse_cfg = ReverseConfig {
+    let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
         listen: "127.0.0.1:0".to_string(),
         tls: None,
@@ -1624,38 +1664,44 @@ async fn reverse_route_http_module_can_inject_subrequest_headers() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             path_rewrite: None,
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: None,
             http_guard_profile: None,
             destination_resolution: None,
             resilience: None,
-            http_modules: vec![serde_yaml::from_str(&format!(
-                r#"type: subrequest
-name: header-inject
-phase: response_headers
-url: http://{subrequest_addr}/headers
-timeout_ms: 1000
-copy_response_headers_to_response:
-  - from: x-decision
-    to: x-module-decision"#
-            ))
-            .expect("http module config")],
+            http_modules: vec![
+                serde_yaml::from_str(&format!(
+                    r#"type: subrequest
+settings:
+  name: header-inject
+  phase: response_headers
+  url: http://{subrequest_addr}/headers
+  timeout_ms: 1000
+  max_response_bytes: 65536
+  allowed_schemes: [http]
+  allowed_hosts: [127.0.0.1]
+  copy_response_headers_to_response:
+    - from: x-decision
+      to: x-module-decision"#
+                ))
+                .expect("http module config"),
+            ],
         }],
         tls_passthrough_routes: Vec::new(),
     };
@@ -1664,23 +1710,28 @@ copy_response_headers_to_response:
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: Vec::new(),
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: vec![reverse_cfg.clone()],
+        edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
         upstreams: vec![UpstreamConfig {
             name: "upstream".to_string(),
             url: format!("http://{upstream_addr}"),
@@ -1689,7 +1740,7 @@ copy_response_headers_to_response:
             discovery: None,
             resilience: None,
         }],
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
     let reverse = super::super::ReloadableReverse::new(
@@ -1754,7 +1805,7 @@ async fn handle_request_with_interim_returns_early_hints_for_h2_downstream() {
             .expect("write response");
     });
 
-    let reverse_cfg = ReverseConfig {
+    let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
         listen: "127.0.0.1:0".to_string(),
         tls: None,
@@ -1768,21 +1819,21 @@ async fn handle_request_with_interim_returns_early_hints_for_h2_downstream() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             path_rewrite: None,
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: None,
@@ -1806,25 +1857,30 @@ async fn handle_request_with_interim_returns_early_hints_for_h2_downstream() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: Vec::new(),
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: vec![reverse_cfg.clone()],
+        edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
         upstreams: vec![upstream_cfg],
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
     let reverse = super::super::ReloadableReverse::new(
@@ -1891,7 +1947,7 @@ async fn handle_request_with_interim_returns_early_hints_for_h1_downstream() {
             .expect("write response");
     });
 
-    let reverse_cfg = ReverseConfig {
+    let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
         listen: "127.0.0.1:0".to_string(),
         tls: None,
@@ -1905,21 +1961,21 @@ async fn handle_request_with_interim_returns_early_hints_for_h1_downstream() {
         routes: vec![ReverseRouteConfig {
             name: Some("route".to_string()),
             r#match: MatchConfig::default(),
-            upstreams: vec!["upstream".to_string()],
-            backends: Vec::new(),
+            target: qpx_core::config::ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
             mirrors: Vec::new(),
-            local_response: None,
             headers: None,
-            lb: "round_robin".to_string(),
             timeout_ms: None,
             health_check: None,
             cache: None,
+            capture: None,
             rate_limit: None,
             path_rewrite: None,
             upstream_trust_profile: None,
             upstream_trust: None,
             lifecycle: None,
-            ipc: None,
             affinity: None,
             policy_context: None,
             http: None,
@@ -1943,25 +1999,30 @@ async fn handle_request_with_interim_returns_early_hints_for_h1_downstream() {
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
         runtime: RuntimeConfig::default(),
-        system_log: SystemLogConfig::default(),
-        access_log: AccessLogConfig::default(),
-        audit_log: AuditLogConfig::default(),
-        metrics: None,
-        otel: None,
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
         acme: None,
-        exporter: None,
-        auth: AuthConfig::default(),
-        identity_sources: Vec::new(),
-        ext_authz: Vec::new(),
-        destination_resolution: Default::default(),
-        listeners: Vec::new(),
-        named_sets: Vec::new(),
-        http_guard_profiles: Vec::new(),
-        rate_limit_profiles: Vec::new(),
-        upstream_trust_profiles: Vec::new(),
-        reverse: vec![reverse_cfg.clone()],
+        edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
         upstreams: vec![upstream_cfg],
-        cache: CacheConfig::default(),
+        caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
     let reverse = super::super::ReloadableReverse::new(
