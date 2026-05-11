@@ -27,6 +27,13 @@ const INIT_STATE_READY: u32 = 2;
 const SHM_MAGIC: [u8; 8] = *b"QPXSHM2\0";
 const SHM_VERSION: u32 = 2;
 
+// Shared-memory layout invariants:
+// - every mapping is exactly HEADER_SIZE + capacity bytes;
+// - header offsets stay aligned for AtomicUsize / AtomicU32 on supported targets;
+// - init_or_validate_header gates all typed atomic references into the mmap;
+// - only this module creates typed references or slices from the mapping;
+// - the payload area is always addressed modulo the validated capacity.
+
 /// Prevent pathological allocations if the ring gets corrupted or incorrectly sized.
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024; // 1 MiB
 

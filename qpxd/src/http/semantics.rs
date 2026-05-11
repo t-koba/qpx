@@ -268,8 +268,11 @@ fn is_prohibited_trailer_field(name: &str) -> bool {
     )
 }
 
-#[cfg(feature = "http3")]
-#[cfg(all(feature = "http3", feature = "http3-backend-h3"))]
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
 pub fn validate_h2_h3_connect_headers(headers: &HeaderMap) -> Result<(), RequestValidationError> {
     validate_request_body_length_headers(headers)?;
     validate_h2_h3_request_headers(Version::HTTP_3, headers)

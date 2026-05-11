@@ -1,9 +1,6 @@
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use std::collections::HashMap;
 
-#[cfg(all(feature = "ldap-auth-rustls", feature = "ldap-auth-native"))]
-compile_error!("qpx-auth: features ldap-auth-rustls and ldap-auth-native are mutually exclusive");
-
 #[path = "auth/authenticator.rs"]
 mod authenticator;
 #[cfg(feature = "ldap-auth")]

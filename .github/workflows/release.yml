@@ -53,7 +53,7 @@ jobs:
 
       - name: Build
         env:
-          QPXD_SAMPLE_RUSTLS_FEATURES: qpxd/auth-digest,qpxd/auth-ldap-rustls
+          QPXD_SAMPLE_RUSTLS_FEATURES: qpxd/auth-digest,qpxd/auth-ldap
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --workspace --release --locked --target ${{ matrix.target }} --features "${QPXD_SAMPLE_RUSTLS_FEATURES}"

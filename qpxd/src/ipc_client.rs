@@ -579,7 +579,9 @@ async fn proxy_ipc_backend(
 
     if mode == IpcMode::Shm {
         // Stream req body to shm ring
-        let req_ring = req_ring.unwrap();
+        let req_ring = req_ring
+            .take()
+            .ok_or_else(|| anyhow!("IPC SHM request ring missing after setup"))?;
         let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<()>>();
         let handle = tokio::spawn(async move {
             let result =
@@ -633,8 +635,12 @@ async fn proxy_ipc_backend(
     let (mut sender, body) = Body::channel();
 
     if mode == IpcMode::Shm {
-        let mut res_ring = res_ring.unwrap();
-        let res_path = res_path_fs.unwrap();
+        let mut res_ring = res_ring
+            .take()
+            .ok_or_else(|| anyhow!("IPC SHM response ring missing after setup"))?;
+        let res_path = res_path_fs
+            .take()
+            .ok_or_else(|| anyhow!("IPC SHM response path missing after setup"))?;
         let body_writer_abort = body_writer_abort;
         tokio::spawn(async move {
             let mut reusable = true;

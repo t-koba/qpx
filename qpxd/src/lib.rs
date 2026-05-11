@@ -17,20 +17,14 @@ pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-#[cfg(all(feature = "tls-rustls", feature = "tls-native"))]
-compile_error!("qpxd: features tls-rustls and tls-native are mutually exclusive");
-
 #[cfg(all(feature = "http3", not(feature = "tls-rustls")))]
 compile_error!("qpxd: feature http3 requires tls-rustls");
-
-#[cfg(all(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-compile_error!("qpxd: features http3-backend-h3 and http3-backend-qpx are mutually exclusive");
 
 #[cfg(all(
     feature = "http3",
     not(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))
 ))]
-compile_error!("qpxd: feature http3 requires exactly one HTTP/3 backend feature");
+compile_error!("qpxd: feature http3 requires at least one HTTP/3 backend feature");
 
 #[cfg(all(feature = "mitm", not(feature = "tls-rustls")))]
 compile_error!("qpxd: feature mitm requires tls-rustls");
@@ -46,6 +40,7 @@ mod cache;
 mod cli_render;
 #[cfg(test)]
 use cli_render::{render_explain_plan, render_match_plan};
+mod config_reload;
 mod connection_filter;
 mod destination;
 mod exporter;
@@ -499,11 +494,8 @@ async fn run(
     )?;
     let mut admin = AdminTasks::start(&config, runtime.clone(), proxy.tcp_bindings())?;
 
-    let configs = config_paths
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let reload_handler =
+        config_reload::ConfigReloadHandler::new(config_paths.clone(), http_module_registry.clone());
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let mut watcher = notify::recommended_watcher(move |res| {
         let _ = tx.blocking_send(res);
@@ -527,10 +519,11 @@ async fn run(
 
     loop {
         let tcp_task = &mut proxy.tcp_task;
-        let exportable_sidecar_task = proxy
-            .exportable_sidecar_task
-            .as_mut()
-            .expect("exportable sidecar task must exist while event loop is active");
+        let Some(exportable_sidecar_task) = proxy.exportable_sidecar_task.as_mut() else {
+            return Err(anyhow::anyhow!(
+                "exportable sidecar task must exist while event loop is active"
+            ));
+        };
         let brokered_h3_task = &mut proxy.brokered_h3_task;
         tokio::select! {
             joined = tcp_task => {
@@ -559,196 +552,17 @@ async fn run(
                     return Ok(());
                 };
                 match event {
-                    Ok(_) => match load_configs_with_sources(&config_paths) {
-                        Ok((new_config, sources)) => {
-                            if let Err(err) = runtime::ensure_hot_reload_compatible(&current, &new_config) {
-                                warn!(error = ?err, "config reload requires process restart; reload ignored");
-                                if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                                    tracing::warn!(
-                                        target: "audit_log",
-                                        event = "config_reload",
-                                        outcome = "ignored",
-                                        reason = "hot_reload_incompatible",
-                                        configs = %configs,
-                                        error = ?err,
-                                    );
-                                }
-                                continue;
-                            }
-
-                            let watch_sources = watch_sources_for_config(&new_config, sources);
-                            let restart_required = runtime::requires_server_restart(&current, &new_config);
-                            if restart_required {
-                                match runtime::Runtime::with_http_module_registry(
-                                    new_config.clone(),
-                                    http_module_registry.clone(),
-                                ) {
-                                    Ok(new_runtime) => {
-                                        let next_state = new_runtime.state();
-                                        if let Err(err) = validate_runtime_state(next_state.as_ref()) {
-                                            warn!(error = ?err, "config reload reverse compile failed");
-                                            if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                                                tracing::warn!(
-                                                    target: "audit_log",
-                                                    event = "config_reload",
-                                                    outcome = "failed",
-                                                    reason = "reverse_compile_error",
-                                                    configs = %configs,
-                                                    error = ?err,
-                                                );
-                                            }
-                                            continue;
-                                        }
-
-                                        let tcp_bindings = match tcp_bindings::TcpBindings::bind_for_hot_reload(
-                                            &new_config,
-                                            &current,
-                                            proxy.tcp_bindings(),
-                                        ) {
-                                            Ok(bindings) => bindings,
-                                            Err(err) => {
-                                                warn!(error = ?err, "config reload bind failed");
-                                                continue;
-                                            }
-                                        };
-                                        let udp_bindings = match udp_bindings::UdpBindings::bind_for_hot_reload(
-                                            &new_config,
-                                            &current,
-                                            proxy.udp_bindings(),
-                                        ) {
-                                            Ok(bindings) => bindings,
-                                            Err(err) => {
-                                                warn!(error = ?err, "config reload udp bind failed");
-                                                continue;
-                                            }
-                                        };
-                                        let old_upstream_limit = current
-                                            .runtime
-                                            .upstream_proxy_max_concurrent_per_endpoint;
-                                        crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
-                                            next_state.plan.limits
-                                                .upstream_proxy_max_concurrent_per_endpoint,
-                                        );
-                                        let new_proxy = match ProxyTasks::start(
-                                            &new_config,
-                                            new_runtime.clone(),
-                                            tcp_bindings,
-                                            udp_bindings,
-                                            None,
-                                            #[cfg(feature = "http3")]
-                                            None,
-                                        ) {
-                                            Ok(tasks) => tasks,
-                                            Err(err) => {
-                                                crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
-                                                    old_upstream_limit,
-                                                );
-                                                warn!(error = ?err, "config reload start failed; keeping old proxy tasks");
-                                                continue;
-                                            }
-                                        };
-                                        let old_proxy = std::mem::replace(&mut proxy, new_proxy);
-                                        if let Err(err) = old_proxy.stop_all().await {
-                                            warn!(error = ?err, "old proxy tasks failed while draining after reload");
-                                        }
-                                        crate::upstream::origin::clear_direct_origin_connection_pools();
-                                        log_runtime_ready(&new_runtime);
-                                        let _ = refresh_watches(&mut watcher, &mut watched, watch_sources);
-                                        info!("config reloaded; listener/reverse server set restarted");
-                                        if tracing::enabled!(target: "audit_log", tracing::Level::INFO) {
-                                            tracing::info!(
-                                                target: "audit_log",
-                                                event = "config_reload",
-                                                outcome = "applied",
-                                                mode = "restart",
-                                                configs = %configs,
-                                            );
-                                        }
-                                        current = new_config;
-                                        runtime = new_runtime;
-                                    }
-                                    Err(err) => {
-                                        warn!(error = ?err, "config reload failed");
-                                        if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                                            tracing::warn!(
-                                                target: "audit_log",
-                                                event = "config_reload",
-                                                outcome = "failed",
-                                                configs = %configs,
-                                                error = ?err,
-                                            );
-                                        }
-                                    }
-                                }
-                            } else {
-                                match runtime::RuntimeState::build_with_http_module_registry(
-                                    new_config.clone(),
-                                    http_module_registry.clone(),
-                                ) {
-                                    Ok(state) => {
-                                        if let Err(err) = validate_runtime_state(&state) {
-                                            warn!(error = ?err, "config reload reverse compile failed");
-                                            if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                                                tracing::warn!(
-                                                    target: "audit_log",
-                                                    event = "config_reload",
-                                                    outcome = "failed",
-                                                    reason = "reverse_compile_error",
-                                                    configs = %configs,
-                                                    error = ?err,
-                                                );
-                                            }
-                                            continue;
-                                        }
-                                        let upstream_proxy_max_concurrent_per_endpoint = state.plan.limits
-                                            .upstream_proxy_max_concurrent_per_endpoint;
-                                        runtime.swap(state);
-                                        crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
-                                            upstream_proxy_max_concurrent_per_endpoint,
-                                        );
-                                        crate::upstream::origin::clear_direct_origin_connection_pools();
-                                        let _ = refresh_watches(&mut watcher, &mut watched, watch_sources);
-                                        info!("config reloaded");
-                                        if tracing::enabled!(target: "audit_log", tracing::Level::INFO) {
-                                            tracing::info!(
-                                                target: "audit_log",
-                                                event = "config_reload",
-                                                outcome = "applied",
-                                                mode = "in_place",
-                                                configs = %configs,
-                                            );
-                                        }
-                                        current = new_config;
-                                    }
-                                    Err(err) => {
-                                        warn!(error = ?err, "config reload failed");
-                                        if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                                            tracing::warn!(
-                                                target: "audit_log",
-                                                event = "config_reload",
-                                                outcome = "failed",
-                                                configs = %configs,
-                                                error = ?err,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            warn!(error = ?err, "config reload parse failed");
-                            if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                                tracing::warn!(
-                                    target: "audit_log",
-                                    event = "config_reload",
-                                    outcome = "failed",
-                                    reason = "parse_error",
-                                    configs = %configs,
-                                    error = ?err,
-                                );
-                            }
-                        }
-                    },
+                    Ok(_) => {
+                        reload_handler
+                            .handle_config_event(
+                                &mut current,
+                                &mut runtime,
+                                &mut proxy,
+                                &mut watcher,
+                                &mut watched,
+                            )
+                            .await?;
+                    }
                     Err(err) => warn!(error = ?err, "watch error"),
                 }
             },
@@ -760,42 +574,18 @@ async fn run(
                 }
             } => {
                 upgrade_requested?;
-                if let Some(trigger) = &upgrade_trigger {
-                    trigger.acknowledge()?;
-                }
-                info!("binary upgrade requested");
-                let sidecar_handoff = proxy
-                    .prepare_binary_upgrade(&current)
-                    .await
-                    .context("failed to prepare sidecars before binary upgrade")?;
-                match upgrade::spawn_upgraded_child(
-                    proxy.tcp_bindings(),
-                    proxy.udp_bindings(),
-                    if sidecar_handoff.udp_sessions.is_empty() {
-                        None
-                    } else {
-                        Some(&sidecar_handoff.udp_sessions)
-                    },
-                    #[cfg(feature = "http3")]
-                    sidecar_handoff.quic_brokers.as_ref(),
+                if config_reload::handle_upgrade_request(
+                    &upgrade_trigger,
+                    &mut proxy,
+                    &mut admin,
+                    &runtime,
                     &current,
                 )
-                .await
+                .await?
                 {
-                    Ok(()) => {
-                        admin.abort_all();
-                        proxy.shutdown_tcp().await?;
-                        wait_for_connection_drain(&runtime).await;
-                        return Ok(());
-                    }
-                    Err(err) => {
-                        warn!(error = ?err, "binary upgrade failed; restarting exportable UDP sidecars on current process");
-                        proxy.rollback_failed_upgrade(
-                            &current,
-                            runtime.clone(),
-                            sidecar_handoff.udp_sessions,
-                        )?;
-                    }
+                    proxy.shutdown_tcp().await?;
+                    wait_for_connection_drain(&runtime).await;
+                    return Ok(());
                 }
             },
         }
@@ -1244,7 +1034,7 @@ impl ProxyTasks {
             &mut *self
                 .exportable_sidecar_export
                 .lock()
-                .expect("exportable sidecar export lock"),
+                .map_err(|_| anyhow::anyhow!("exportable sidecar export lock poisoned"))?,
         );
         self.reset_exportable_sidecar_control();
         Ok(exported)

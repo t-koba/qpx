@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use qpx_core::config::ReverseHttp3Config;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Mutex as StdMutex, RwLock};
 use tokio::net::UdpSocket;
@@ -17,6 +17,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 
 const MAX_CIDS_PER_SESSION: usize = 32;
+const UNSPECIFIED_V4: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+const UNSPECIFIED_V6: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
 
 pub(crate) struct Http3PassthroughRuntime {
     pub(crate) reverse: super::ReloadableReverse,
@@ -159,11 +161,17 @@ impl PassthroughSession {
     }
 
     fn current_client_addr(&self) -> SocketAddr {
-        *self.client_addr.lock().expect("client addr lock")
+        *self
+            .client_addr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn update_client_addr(&self, client_addr: SocketAddr) -> Option<SocketAddr> {
-        let mut guard = self.client_addr.lock().expect("client addr lock");
+        let mut guard = self
+            .client_addr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *guard == client_addr {
             return None;
         }
@@ -248,18 +256,24 @@ impl PassthroughSession {
     fn snapshot_cids(&self) -> Vec<QuicConnectionId> {
         self.cids
             .lock()
-            .expect("session cids lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .copied()
             .collect()
     }
 
     fn attach_relay_task(&self, task: JoinHandle<()>) {
-        *self.relay_task.lock().expect("relay task lock") = Some(task);
+        *self
+            .relay_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
     }
 
     fn take_relay_task(&self) -> Option<JoinHandle<()>> {
-        self.relay_task.lock().expect("relay task lock").take()
+        self.relay_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 }
 
@@ -298,7 +312,7 @@ impl SessionIndex {
         let cids = session
             .cids
             .lock()
-            .expect("session cids lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .copied()
             .collect::<Vec<_>>();
@@ -340,7 +354,10 @@ impl SessionIndex {
         let Some(session) = self.sessions.get(&session_id) else {
             return;
         };
-        let mut session_cids = session.cids.lock().expect("session cids lock");
+        let mut session_cids = session
+            .cids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for cid in cids {
             if session_cids.contains(&cid) {
                 continue;
@@ -688,7 +705,9 @@ pub(crate) async fn run_http3_passthrough(
             _ = cleanup.tick() => {
                 let now_ms = instant_to_millis(run_started, Instant::now());
                 let expired = {
-                    let mut guard = sessions.write().expect("session index write lock");
+                    let mut guard = sessions
+                        .write()
+                        .map_err(|_| anyhow!("session index write lock poisoned"))?;
                     drain_session_touches(&mut guard, &mut touch_rx);
                     guard.evict_expired(now_ms, idle_timeout_ms)
                 };
@@ -725,7 +744,9 @@ pub(crate) async fn run_http3_passthrough(
                 let mut needs_index_update = false;
 
                 {
-                    let guard = sessions.read().expect("session index read lock");
+                    let guard = sessions
+                        .read()
+                        .map_err(|_| anyhow!("session index read lock poisoned"))?;
                     if let Some(id) = guard.find_session_for_client_packet(client_addr, &payload)
                         && let Some(session) = guard.session(id) {
                             session.mark_client_seen(now_ms, payload.len() as u64);
@@ -746,7 +767,9 @@ pub(crate) async fn run_http3_passthrough(
                 }
 
                 if let Some(id) = session_id.filter(|_| needs_index_update) {
-                    let mut guard = sessions.write().expect("session index write lock");
+                    let mut guard = sessions
+                        .write()
+                        .map_err(|_| anyhow!("session index write lock poisoned"))?;
                     guard.update_client_address(id, client_addr);
                     guard.observe_client_packet(id, &payload);
                 }
@@ -767,9 +790,9 @@ pub(crate) async fn run_http3_passthrough(
             let idx = rr_counter.fetch_add(1, Ordering::Relaxed);
             let upstream_addr = upstream_addrs[idx % upstream_addrs.len()];
             let bind_addr: SocketAddr = if upstream_addr.is_ipv4() {
-                "0.0.0.0:0".parse().unwrap()
+                UNSPECIFIED_V4
             } else {
-                "[::]:0".parse().unwrap()
+                UNSPECIFIED_V6
             };
             let socket: Arc<UdpSocket> = Arc::new(UdpSocket::bind(bind_addr).await?);
             socket.connect(upstream_addr).await?;
@@ -780,7 +803,9 @@ pub(crate) async fn run_http3_passthrough(
 
             let mut created = false;
             let socket = {
-                let mut guard = sessions.write().expect("session index write lock");
+                let mut guard = sessions
+                    .write()
+                    .map_err(|_| anyhow!("session index write lock poisoned"))?;
                 drain_session_touches(&mut guard, &mut touch_rx);
                 while guard.sessions.len() >= max_sessions {
                     let Some(evicted) = guard.evict_oldest() else {
@@ -821,7 +846,9 @@ pub(crate) async fn run_http3_passthrough(
                 let upstream_out = socket.clone();
                 let touch_tx_out = touch_tx.clone();
                 if let Some(session) = {
-                    let guard = sessions.read().expect("session index read lock");
+                    let guard = sessions
+                        .read()
+                        .map_err(|_| anyhow!("session index read lock poisoned"))?;
                     guard.session(session_id)
                 } {
                     let relay_task = spawn_passthrough_upstream_relay(PassthroughRelayContext {
@@ -865,7 +892,9 @@ async fn drain_passthrough_sessions(
     export_sink: &Mutex<UdpSessionRestoreState>,
 ) -> Result<()> {
     let drained = {
-        let mut guard = sessions.write().expect("session index write lock");
+        let mut guard = sessions
+            .write()
+            .map_err(|_| anyhow!("session index write lock poisoned"))?;
         guard.drain_all()
     };
     for (_, session) in &drained {
@@ -911,7 +940,7 @@ async fn drain_passthrough_sessions(
         }
         export_sink
             .lock()
-            .expect("reverse passthrough export lock")
+            .map_err(|_| anyhow!("reverse passthrough export lock poisoned"))?
             .insert_reverse_passthrough(
                 reverse_name.to_string(),
                 ReversePassthroughListenerRestore {
@@ -964,7 +993,9 @@ async fn restore_passthrough_sessions(
             })
             .collect::<Vec<_>>();
         {
-            let mut guard = sessions.write().expect("session index write lock");
+            let mut guard = sessions
+                .write()
+                .map_err(|_| anyhow!("session index write lock poisoned"))?;
             guard.insert_restored(restored.session_id, session.clone(), cids);
         }
         let relay_task = spawn_passthrough_upstream_relay(PassthroughRelayContext {
@@ -1019,7 +1050,9 @@ fn spawn_passthrough_upstream_relay(ctx: PassthroughRelayContext) -> JoinHandle<
             };
             let now_ms = instant_to_millis(run_started, Instant::now());
             let (allowed, needs_index_update) = {
-                let guard = sessions.read().expect("session index read lock");
+                let Ok(guard) = sessions.read() else {
+                    break;
+                };
                 match guard.session(session_id) {
                     Some(session) => {
                         session.mark_upstream_seen(now_ms);
@@ -1045,7 +1078,9 @@ fn spawn_passthrough_upstream_relay(ctx: PassthroughRelayContext) -> JoinHandle<
                 continue;
             }
             if needs_index_update {
-                let mut guard = sessions.write().expect("session index write lock");
+                let Ok(mut guard) = sessions.write() else {
+                    break;
+                };
                 guard.observe_upstream_packet(session_id, &recv_buf[..n]);
             }
             let client_addr = *client_addr_rx.borrow();
@@ -1053,8 +1088,9 @@ fn spawn_passthrough_upstream_relay(ctx: PassthroughRelayContext) -> JoinHandle<
                 break;
             }
         }
-        let mut guard = sessions.write().expect("session index write lock");
-        let _ = guard.remove_session(session_id);
+        if let Ok(mut guard) = sessions.write() {
+            let _ = guard.remove_session(session_id);
+        }
     })
 }
 

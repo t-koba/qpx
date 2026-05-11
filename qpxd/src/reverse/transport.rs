@@ -142,7 +142,11 @@ fn empty_interim_response(response: Response<Body>) -> (ReverseInterimResponses,
     (Vec::new(), response)
 }
 
-#[cfg(all(feature = "http3", feature = "http3-backend-h3"))]
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
 pub(super) async fn handle_request(
     req: Request<Body>,
     reverse: super::ReloadableReverse,
@@ -161,20 +165,21 @@ pub(super) async fn handle_request_with_interim(
     let state = runtime.state();
     let request_method = req.method().clone();
     let request_version = req.version();
-    let result = handle_request_inner(req, reverse, runtime, conn).await;
-    Ok(result.unwrap_or_else(|err| {
-        warn!(error = ?err, "reverse handling failed");
-        empty_interim_response(finalize_response_for_request(
-            &request_method,
-            request_version,
-            state.plan.identity.proxy_name.as_ref(),
-            Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from(state.messages.reverse_error.clone()))
-                .unwrap(),
-            false,
-        ))
-    }))
+    match handle_request_inner(req, reverse, runtime, conn).await {
+        Ok(response) => Ok(response),
+        Err(err) => {
+            warn!(error = ?err, "reverse handling failed");
+            let mut response = Response::new(Body::from(state.messages.reverse_error.clone()));
+            *response.status_mut() = StatusCode::BAD_GATEWAY;
+            Ok(empty_interim_response(finalize_response_for_request(
+                &request_method,
+                request_version,
+                state.plan.identity.proxy_name.as_ref(),
+                response,
+                false,
+            )))
+        }
+    }
 }
 
 pub(crate) async fn handle_request_inner(

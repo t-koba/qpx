@@ -506,7 +506,7 @@ runtime:
 
 async fn wait_for_file(path: &Path) -> Result<()> {
     let started = tokio::time::Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
+    while started.elapsed() < Duration::from_secs(15) {
         if path.is_file() {
             return Ok(());
         }

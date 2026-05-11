@@ -11,7 +11,7 @@ default = [
   "mitm",
   "acme",
   "auth-digest",
-  "auth-ldap-rustls",
+  "auth-ldap",
 ]
 
 tls-rustls = [
@@ -36,8 +36,7 @@ acme = ["dep:qpx-acme", "tls-rustls", "qpx-acme/http3"]
 
 auth-basic = ["dep:qpx-auth", "qpx-auth/basic-auth"]
 auth-digest = ["auth-basic", "qpx-auth/digest-auth"]
-auth-ldap-rustls = ["auth-basic", "tls-rustls", "qpx-auth/ldap-auth-rustls"]
-auth-ldap-native = ["auth-basic", "tls-native", "qpx-auth/ldap-auth-native"]
+auth-ldap = ["auth-basic", "qpx-auth/ldap-auth"]
 
 [dependencies]
 qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }

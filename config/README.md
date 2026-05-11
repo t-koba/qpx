@@ -69,7 +69,7 @@ HTTP/3 backend selection is a build-time `qpxd` feature choice. YAML does not se
 ### 02-secure-egress (`config/usecases/02-secure-egress`)
 - `forward-upstream-chain.yaml`: forward proxy chained to upstream proxy.
 - `forward-local-auth-basic-digest.yaml`: optional built-in multi-user local auth (Basic/Digest) baseline for tests, local development, or small deployments; requires `qpxd` `auth-basic` / `auth-digest` features and shows both cleartext `password` and precomputed Digest `ha1`.
-- `forward-ldap-group-policy.yaml`: optional direct LDAP bind/group policy when `qpx` itself terminates the auth hop; requires `auth-ldap-rustls` or `auth-ldap-native` and includes `user_filter`, `group_filter`, and `group_attr` overrides for non-default directory schemas.
+- `forward-ldap-group-policy.yaml`: optional direct LDAP bind/group policy when `qpx` itself terminates the auth hop; requires `auth-ldap` and includes `user_filter`, `group_filter`, and `group_attr` overrides for non-default directory schemas.
 - `forward-trusted-identity-ext-authz.yaml`: trusted identity ingestion + external authz policy callout.
 - `forward-signed-assertion-policy.yaml`: locally verified signed identity assertions (`signed_assertion`) + external authz, including `user_from_sub`.
 - `forward-tls-inspection-selective.yaml`: selective TLS inspection/tunnel/block.

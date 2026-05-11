@@ -10,7 +10,11 @@ pub(in crate::forward) enum H3ConnectProtocol {
     Extended,
 }
 
-#[cfg(all(feature = "http3", feature = "http3-backend-h3"))]
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
 pub(super) fn validate_h3_connect_head(
     req_head: &::http::Request<()>,
     headers: &http::HeaderMap,
@@ -332,7 +336,11 @@ pub(super) fn default_port_for_scheme(scheme: &str) -> u16 {
     }
 }
 
-#[cfg(all(feature = "http3", feature = "http3-backend-h3"))]
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
 pub(super) fn format_authority(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') {
         format!("[{}]:{}", host, port)

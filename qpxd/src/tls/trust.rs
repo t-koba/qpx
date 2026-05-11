@@ -162,7 +162,7 @@ impl UpstreamTlsClientAuth {
         self.cert.as_os_str().is_empty() && self.key.as_os_str().is_empty()
     }
 
-    #[cfg(feature = "tls-native")]
+    #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
     pub(crate) fn is_configured(&self) -> bool {
         !self.cert.as_os_str().is_empty() && !self.key.as_os_str().is_empty()
     }

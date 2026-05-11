@@ -18,7 +18,7 @@ use anyhow::{Context, Result, anyhow};
 use metrics::{counter, histogram};
 use qpx_core::config::{ActionKind, IngressEdgeConfig};
 use qpx_core::rules::RuleMatchContext;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tokio::net::UdpSocket;
@@ -32,6 +32,9 @@ mod udp_session;
 use self::udp_session::parse_quic_long_header;
 use self::udp_session::{SessionIndex, TransparentUdpSession, TransparentUdpSessionInit};
 use super::udp_socket::{bind_udp_listener, recv_transparent_datagram};
+
+const UNSPECIFIED_V4: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+const UNSPECIFIED_V6: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
 
 struct NewUdpSessionContext<'a> {
     listener_socket: Arc<UdpSocket>,
@@ -127,7 +130,9 @@ pub(super) async fn run_transparent_udp_listener(
             _ = cleanup.tick() => {
                 let now_ms = run_started.elapsed().as_millis() as u64;
                 let expired = {
-                    let mut guard = sessions.write().expect("transparent udp session lock");
+                    let mut guard = sessions
+                        .write()
+                        .map_err(|_| anyhow!("transparent udp session lock poisoned"))?;
                     guard.evict_expired(now_ms, idle_timeout_ms)
                 };
                 for session in expired {
@@ -142,7 +147,9 @@ pub(super) async fn run_transparent_udp_listener(
                     .filter(|target| Some(*target) != socket.local_addr().ok())
                     .map(|target| target.to_string());
                 let existing = {
-                    let guard = sessions.read().expect("transparent udp session lock");
+                    let guard = sessions
+                        .read()
+                        .map_err(|_| anyhow!("transparent udp session lock poisoned"))?;
                     guard.find_session_for_client_packet(
                         client_addr,
                         target_key.as_deref(),
@@ -171,7 +178,9 @@ pub(super) async fn run_transparent_udp_listener(
                                 target = %session.target_key,
                                 "transparent UDP upstream send failed"
                             );
-                            let mut guard = sessions.write().expect("transparent udp session lock");
+                            let mut guard = sessions
+                                .write()
+                                .map_err(|_| anyhow!("transparent udp session lock poisoned"))?;
                             if let Some(session_id) = guard.find_session_for_client_packet(
                                 client_addr,
                                 target_key.as_deref(),
@@ -183,7 +192,9 @@ pub(super) async fn run_transparent_udp_listener(
                             "error"
                         } else {
                             let session_id = {
-                                let guard = sessions.read().expect("transparent udp session lock");
+                                let guard = sessions
+                                    .read()
+                                    .map_err(|_| anyhow!("transparent udp session lock poisoned"))?;
                                 guard.find_session_for_client_packet(
                                     client_addr,
                                     target_key.as_deref(),
@@ -191,7 +202,9 @@ pub(super) async fn run_transparent_udp_listener(
                                 )
                             };
                             if let Some(session_id) = session_id {
-                                let mut guard = sessions.write().expect("transparent udp session lock");
+                                let mut guard = sessions
+                                    .write()
+                                    .map_err(|_| anyhow!("transparent udp session lock poisoned"))?;
                                 guard.update_client_address(session_id, client_addr);
                                 guard.observe_client_packet(session_id, &packet);
                             }
@@ -261,7 +274,9 @@ async fn drain_transparent_udp_sessions(
     export_sink: &Mutex<UdpSessionRestoreState>,
 ) -> Result<()> {
     let drained = {
-        let mut guard = sessions.write().expect("transparent udp session lock");
+        let mut guard = sessions
+            .write()
+            .map_err(|_| anyhow!("transparent udp session lock poisoned"))?;
         guard.drain_all()
     };
     for (_, session) in &drained {
@@ -309,7 +324,7 @@ async fn drain_transparent_udp_sessions(
         }
         export_sink
             .lock()
-            .expect("transparent export lock")
+            .map_err(|_| anyhow!("transparent export lock poisoned"))?
             .insert_transparent(
                 listener_name.to_string(),
                 TransparentUdpListenerRestore {
@@ -378,7 +393,9 @@ async fn restore_transparent_udp_sessions(
             })
             .collect::<Vec<_>>();
         {
-            let mut guard = sessions.write().expect("transparent udp session lock");
+            let mut guard = sessions
+                .write()
+                .map_err(|_| anyhow!("transparent udp session lock poisoned"))?;
             guard.insert_restored(restored.session_id, session.clone(), cids);
         }
         let relay_task = spawn_transparent_udp_relay(
@@ -435,7 +452,9 @@ fn spawn_transparent_udp_relay(
                 break;
             }
             {
-                let mut guard = sessions.write().expect("transparent udp session lock");
+                let Ok(mut guard) = sessions.write() else {
+                    break;
+                };
                 guard.observe_upstream_packet(session_id, &recv_buf[..n]);
             }
             let client_addr = session.current_client_addr();
@@ -447,8 +466,9 @@ fn spawn_transparent_udp_relay(
                 break;
             }
         }
-        let mut guard = sessions.write().expect("transparent udp session lock");
-        let _ = guard.remove_session(session_id);
+        if let Ok(mut guard) = sessions.write() {
+            let _ = guard.remove_session(session_id);
+        }
     })
 }
 
@@ -749,7 +769,9 @@ async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Result<&'stati
         concurrency_permits,
     }));
     {
-        let mut guard = sessions.write().expect("transparent udp session lock");
+        let mut guard = sessions
+            .write()
+            .map_err(|_| anyhow!("transparent udp session lock poisoned"))?;
         guard.insert(session_id, session.clone());
         guard.observe_client_packet(session_id, &packet);
     }
@@ -800,9 +822,9 @@ async fn connect_udp_target(target: &ConnectTarget, timeout_dur: Duration) -> Re
     match target {
         ConnectTarget::Socket(addr) => {
             let bind_addr: SocketAddr = if addr.is_ipv4() {
-                "0.0.0.0:0".parse().unwrap()
+                UNSPECIFIED_V4
             } else {
-                "[::]:0".parse().unwrap()
+                UNSPECIFIED_V6
             };
             let udp = UdpSocket::bind(bind_addr).await?;
             timeout(timeout_dur, udp.connect(*addr)).await??;
@@ -814,9 +836,9 @@ async fn connect_udp_target(target: &ConnectTarget, timeout_dur: Duration) -> Re
                 .next()
                 .ok_or_else(|| anyhow!("no UDP target address resolved for {}:{}", host, port))?;
             let bind_addr: SocketAddr = if resolved.is_ipv4() {
-                "0.0.0.0:0".parse().unwrap()
+                UNSPECIFIED_V4
             } else {
-                "[::]:0".parse().unwrap()
+                UNSPECIFIED_V6
             };
             let udp = UdpSocket::bind(bind_addr).await?;
             timeout(timeout_dur, udp.connect(resolved)).await??;

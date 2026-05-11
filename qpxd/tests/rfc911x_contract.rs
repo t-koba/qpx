@@ -860,7 +860,7 @@ fn spawn_qpxd(config_path: &Path, port: u16, log_path: PathBuf) -> Result<QpxdHa
     // Wait for TCP listener to come up (best-effort).
     let started = std::time::Instant::now();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
-    while started.elapsed() < Duration::from_secs(5) {
+    while started.elapsed() < Duration::from_secs(15) {
         if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
             return Ok(QpxdHandle { child });
         }

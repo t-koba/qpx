@@ -36,7 +36,7 @@ impl Authenticator {
         }
         if config.ldap.is_some() {
             return Err(anyhow!(
-                "built-in LDAP auth is configured but this qpxd build was compiled without auth-ldap-rustls/auth-ldap-native"
+                "built-in LDAP auth is configured but this qpxd build was compiled without auth-ldap"
             ));
         }
         Ok(Self)
@@ -58,7 +58,7 @@ impl Authenticator {
             }));
         }
         Err(anyhow!(
-            "built-in auth provider {:?} requires qpxd auth-basic/auth-digest/auth-ldap-* build support",
+            "built-in auth provider {:?} requires qpxd auth-basic/auth-digest/auth-ldap build support",
             required_providers
         ))
     }

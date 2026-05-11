@@ -36,18 +36,14 @@ mod connect_udp_upstream;
     not(feature = "http3-backend-qpx")
 ))]
 pub(crate) mod h3;
-#[cfg(all(
-    feature = "http3",
-    feature = "http3-backend-qpx",
-    not(feature = "http3-backend-h3")
-))]
+#[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
 #[path = "h3_qpx.rs"]
 pub(crate) mod h3;
 #[cfg(all(
     feature = "http3",
     not(any(
         all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")),
-        all(feature = "http3-backend-qpx", not(feature = "http3-backend-h3"))
+        feature = "http3-backend-qpx"
     ))
 ))]
 #[path = "h3_invalid.rs"]
