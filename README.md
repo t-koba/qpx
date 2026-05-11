@@ -537,6 +537,14 @@ Notes:
 - `scripts/e2e-control-plane.ps1` exercises the Windows `qpxd upgrade --pid <parent-pid>` handoff path end-to-end on CI.
 - `scripts/e2e-control-plane-soak.sh` verifies that live loopback traffic survives reload/restart/upgrade sequencing without failed requests.
 
+### Code Quality And Safety
+
+qpx treats parser, TLS sniffing, shared-memory capture, and policy matching code
+as security-sensitive components. CI gates formatting, typos, sensitive artifact
+checks, documentation warnings, unused dependency checks, sample configuration
+validation, e2e tests, multi-platform builds, feature-matrix clippy, RustSec
+audit, CodeQL, AddressSanitizer smoke tests, and fuzz smoke tests.
+
 ### Continuous Security QA
 
 The repo's CI keeps several security-focused gates beyond normal unit/integration testing:

@@ -93,6 +93,9 @@ impl ShmRingBuffer {
             ));
         }
 
+        // SAFETY: `file` is opened read/write, has been sized to exactly `size_bytes`, and
+        // remains alive until the mapping is created. All typed access into the mapping is kept
+        // inside this module and guarded by header validation below.
         let mut mmap = unsafe { MmapMut::map_mut(&file)? };
         init_or_validate_header(&mut mmap, capacity)?;
         let data_doorbell = ShmDoorbell::create_or_open(path, DoorbellKind::Data)?;
@@ -106,26 +109,34 @@ impl ShmRingBuffer {
     }
 
     fn read_idx(&self) -> &AtomicUsize {
+        // SAFETY: `create_or_open` maps at least `HEADER_SIZE + capacity` bytes and
+        // `init_or_validate_header` validates the header layout before any instance is returned.
+        // The offset is usize-aligned by construction.
         unsafe { &*(self.mmap.as_ptr().add(READ_IDX_OFFSET) as *const AtomicUsize) }
     }
 
     fn write_idx(&self) -> &AtomicUsize {
+        // SAFETY: same header layout invariant as `read_idx`; the offset is usize-aligned.
         unsafe { &*(self.mmap.as_ptr().add(WRITE_IDX_OFFSET) as *const AtomicUsize) }
     }
 
     fn max_msg_bytes(&self) -> &AtomicUsize {
+        // SAFETY: same header layout invariant as `read_idx`; the offset is usize-aligned.
         unsafe { &*(self.mmap.as_ptr().add(MAX_MSG_BYTES_OFFSET) as *const AtomicUsize) }
     }
 
     fn consumer_waiting(&self) -> &AtomicU32 {
+        // SAFETY: same header layout invariant as `read_idx`; the offset is u32-aligned.
         unsafe { &*(self.mmap.as_ptr().add(CONSUMER_WAITING_OFFSET) as *const AtomicU32) }
     }
 
     fn producer_waiting(&self) -> &AtomicU32 {
+        // SAFETY: same header layout invariant as `read_idx`; the offset is u32-aligned.
         unsafe { &*(self.mmap.as_ptr().add(PRODUCER_WAITING_OFFSET) as *const AtomicU32) }
     }
 
     fn producer_need_bytes(&self) -> &AtomicUsize {
+        // SAFETY: same header layout invariant as `read_idx`; the offset is usize-aligned.
         unsafe { &*(self.mmap.as_ptr().add(PRODUCER_NEED_BYTES_OFFSET) as *const AtomicUsize) }
     }
 
@@ -315,6 +326,9 @@ impl ShmRingBuffer {
 
     fn write_bytes_at(&mut self, offset: usize, data: &[u8]) {
         let end_idx = offset + data.len();
+        // SAFETY: the payload area starts immediately after the fixed header and has exactly
+        // `self.capacity` bytes. Callers compute `offset` from ring indices modulo capacity; the
+        // copy logic below handles wrapping without indexing outside the payload slice.
         let payload_ptr = unsafe { self.mmap.as_mut_ptr().add(HEADER_SIZE) };
         let payload_slice = unsafe { std::slice::from_raw_parts_mut(payload_ptr, self.capacity) };
 
@@ -331,6 +345,8 @@ impl ShmRingBuffer {
 
     fn read_bytes_at(&self, offset: usize, out_buf: &mut [u8]) {
         let end_idx = offset + out_buf.len();
+        // SAFETY: the payload slice is the same validated `self.capacity` range used by writes.
+        // Reads are bounded by ring indices and split explicitly when the requested range wraps.
         let payload_ptr = unsafe { self.mmap.as_ptr().add(HEADER_SIZE) };
         let payload_slice = unsafe { std::slice::from_raw_parts(payload_ptr, self.capacity) };
 
@@ -409,6 +425,8 @@ struct ShmDoorbell {
 impl ShmDoorbell {
     fn create_or_open(path: &Path, kind: DoorbellKind) -> Result<Self> {
         let name = std::ffi::CString::new(doorbell_name(path, kind))?;
+        // SAFETY: `name` is a NUL-terminated CString whose pointer remains valid for the call.
+        // The semaphore is created with private permissions and stored until `Drop` closes it.
         let sem = unsafe { libc::sem_open(name.as_ptr(), libc::O_CREAT, 0o600, 0) };
         if sem as isize == -1 {
             return Err(anyhow!(
@@ -424,6 +442,7 @@ impl ShmDoorbell {
 
     fn signal(&self) -> Result<()> {
         let sem = self.sem as *mut libc::sem_t;
+        // SAFETY: `self.sem` is produced by a successful `sem_open` and is closed only in `Drop`.
         if unsafe { libc::sem_post(sem) } != 0 {
             return Err(anyhow!(
                 "failed to signal shared memory doorbell semaphore: {}",
@@ -438,6 +457,7 @@ impl ShmDoorbell {
         tokio::task::spawn_blocking(move || {
             let sem = sem as *mut libc::sem_t;
             loop {
+                // SAFETY: `sem` is a live named semaphore handle copied from `self.sem`.
                 if unsafe { libc::sem_wait(sem) } == 0 {
                     return Ok(());
                 }
@@ -453,6 +473,7 @@ impl ShmDoorbell {
     }
 
     fn unlink(&self) -> Result<()> {
+        // SAFETY: `self.name` is the same valid CString used to open the named semaphore.
         if unsafe { libc::sem_unlink(self.name.as_ptr()) } == 0 {
             return Ok(());
         }
@@ -468,6 +489,8 @@ impl ShmDoorbell {
 impl Drop for ShmDoorbell {
     fn drop(&mut self) {
         let sem = self.sem as *mut libc::sem_t;
+        // SAFETY: `sem` was returned by `sem_open`; double close is prevented by ownership of
+        // `ShmDoorbell`.
         unsafe {
             libc::sem_close(sem);
         }
@@ -493,6 +516,7 @@ impl ShmDoorbell {
             .chain(std::iter::once(0))
             .collect();
         // Auto-reset event (manual_reset = FALSE) with initial_state = FALSE.
+        // SAFETY: `name` is a NUL-terminated UTF-16 buffer valid for the duration of the call.
         let handle = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
         if handle.is_null() {
             return Err(anyhow!(
@@ -508,6 +532,7 @@ impl ShmDoorbell {
     fn signal(&self) -> Result<()> {
         use windows_sys::Win32::System::Threading::SetEvent;
         let handle = self.handle as windows_sys::Win32::Foundation::HANDLE;
+        // SAFETY: `handle` was returned by `CreateEventW` and is owned by this `ShmDoorbell`.
         if unsafe { SetEvent(handle) } == 0 {
             return Err(anyhow!(
                 "failed to signal shared memory doorbell event: {}",
@@ -524,6 +549,8 @@ impl ShmDoorbell {
         let handle = self.handle;
         tokio::task::spawn_blocking(move || {
             let handle = handle as windows_sys::Win32::Foundation::HANDLE;
+            // SAFETY: `handle` is a valid event handle owned by this doorbell while the wait task
+            // is spawned from a borrowed `&self`.
             let rc = unsafe { WaitForSingleObject(handle, INFINITE) };
             if rc != WAIT_OBJECT_0 {
                 return Err(anyhow!(
@@ -547,6 +574,7 @@ impl ShmDoorbell {
 impl Drop for ShmDoorbell {
     fn drop(&mut self) {
         let handle = self.handle as windows_sys::Win32::Foundation::HANDLE;
+        // SAFETY: `handle` was returned by `CreateEventW`; ownership is unique to `ShmDoorbell`.
         unsafe {
             let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
         }
@@ -615,6 +643,8 @@ fn open_shm_file(path: &Path) -> Result<File> {
 }
 
 fn init_or_validate_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
+    // SAFETY: callers pass the mapping created from a file sized to `HEADER_SIZE + capacity`;
+    // `INIT_STATE_OFFSET` is within the fixed header and aligned for `AtomicU32`.
     let init_state = unsafe { &*(mmap.as_ptr().add(INIT_STATE_OFFSET) as *const AtomicU32) };
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -679,6 +709,9 @@ fn init_or_validate_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
 }
 
 fn init_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
+    // SAFETY: the mapping is at least `HEADER_SIZE + capacity` bytes, and every pointer below is
+    // within the fixed header at an offset aligned for the target atomic type. This module is the
+    // sole creator of typed atomic references into the mapping.
     unsafe {
         let read_idx_ptr = mmap.as_mut_ptr().add(READ_IDX_OFFSET) as *mut AtomicUsize;
         let write_idx_ptr = mmap.as_mut_ptr().add(WRITE_IDX_OFFSET) as *mut AtomicUsize;
@@ -709,6 +742,7 @@ fn init_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
 }
 
 fn validate_header(mmap: &MmapMut, expected_capacity: usize) -> Result<()> {
+    // SAFETY: `QUEUE_SIZE_OFFSET` is inside the fixed header and aligned for `AtomicUsize`.
     let stored_capacity = unsafe {
         let size_ptr = mmap.as_ptr().add(QUEUE_SIZE_OFFSET) as *const AtomicUsize;
         (*size_ptr).load(Ordering::Acquire)
@@ -801,6 +835,7 @@ fn set_private_shm_dir_permissions(path: &Path) -> Result<()> {
 fn resolve_trusted_shm_symlink(path: &Path, meta: &fs::Metadata) -> Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
+    // SAFETY: `geteuid` is side-effect free and has no preconditions.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow!(
@@ -835,6 +870,7 @@ fn reject_untrusted_shm_ancestor(path: &Path, meta: &fs::Metadata) -> Result<()>
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let sticky_bit = libc::S_ISVTX;
     let sticky = mode & sticky_bit != 0;
+    // SAFETY: `geteuid` is side-effect free and has no preconditions.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow!(
