@@ -1,7 +1,7 @@
 use super::CacheBackend;
 use crate::http::address::format_authority_host_port;
-use crate::tls::client::{connect_tls_http1, IoStream};
-use anyhow::{anyhow, Result};
+use crate::tls::client::{IoStream, connect_tls_http1};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use qpx_core::config::CacheBackendConfig;
 #[cfg(unix)]
@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use url::Url;
 
 type DynStream = crate::tls::client::BoxTlsStream;
@@ -199,10 +199,10 @@ fn parse_endpoint(endpoint: &str) -> Result<RedisEndpointSpec> {
 
 fn db_from_url(url: &Url) -> Option<u32> {
     let from_path = url.path().trim_start_matches('/').trim();
-    if !from_path.is_empty() {
-        if let Ok(db) = from_path.parse::<u32>() {
-            return Some(db);
-        }
+    if !from_path.is_empty()
+        && let Ok(db) = from_path.parse::<u32>()
+    {
+        return Some(db);
     }
     url.query_pairs()
         .find_map(|(k, v)| (k == "db").then(|| v.parse::<u32>().ok()).flatten())

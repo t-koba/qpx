@@ -5,8 +5,6 @@ use super::digest::{parse_sha256_ha1, sha256_hex};
 
 #[derive(Debug, Clone)]
 pub(super) struct LocalUserEntry {
-    #[allow(dead_code)]
-    pub(super) username: String,
     pub(super) password: Option<String>,
     #[cfg(feature = "digest-auth")]
     pub(super) digest_ha1_sha256: Option<String>,
@@ -23,7 +21,6 @@ impl LocalUserEntry {
             })
         });
         Self {
-            username: user.username.clone(),
             password: user.password.clone(),
             #[cfg(feature = "digest-auth")]
             digest_ha1_sha256,

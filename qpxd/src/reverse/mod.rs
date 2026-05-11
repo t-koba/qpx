@@ -49,22 +49,22 @@ mod security;
 mod transport;
 
 use crate::connection_filter::{
-    emit_connection_filter_audit, evaluate_connection_filter, ConnectionFilterStage,
+    ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
 };
 use crate::runtime::Runtime;
-use crate::runtime::{metric_names, CompiledReverseEdge};
+use crate::runtime::{CompiledReverseEdge, metric_names};
 use crate::tls::TlsClientHelloInfo;
 #[cfg(feature = "http3")]
 use crate::transparent::quic::{extract_quic_client_hello_info, looks_like_quic_initial};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
 use metrics::counter;
 use qpx_core::config::{Config, ReverseEdgeConfig, UpstreamConfig};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::watch;
 use tokio::sync::Mutex;
+use tokio::sync::watch;
 use tracing::{info, warn};
 
 #[derive(Clone)]

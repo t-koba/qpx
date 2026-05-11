@@ -3,8 +3,8 @@ use crate::http::body_size::set_observed_request_size;
 use crate::http3::codec::{h3_request_to_hyper, sanitize_interim_response_for_h3};
 use crate::http3::datagram::{DatagramRegistration, H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::server::{
-    read_h3_request_body, send_h3_response, send_h3_static_response, H3ReadBodyError,
-    H3ServerRequestStream,
+    H3ReadBodyError, H3ServerRequestStream, read_h3_request_body, send_h3_response,
+    send_h3_static_response,
 };
 use crate::sidecar_control::SidecarControl;
 use anyhow::Result;
@@ -13,7 +13,7 @@ use bytes::Bytes;
 use hyper::{Request, Response};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::{Semaphore, watch};
 use tokio::time::Duration;
 use tracing::{info, warn};
 
@@ -389,16 +389,16 @@ async fn handle_stream<H: H3RequestHandler>(
     };
 
     let req_body_len = req_body.len();
-    if let Some(content_length) = declared_content_length {
-        if content_length != req_body_len as u64 {
-            warn!(
-                expected = content_length,
-                actual = req_body_len,
-                "HTTP/3 request content-length mismatch"
-            );
-            reject_malformed_h3_request(&mut req_stream);
-            return;
-        }
+    if let Some(content_length) = declared_content_length
+        && content_length != req_body_len as u64
+    {
+        warn!(
+            expected = content_length,
+            actual = req_body_len,
+            "HTTP/3 request content-length mismatch"
+        );
+        reject_malformed_h3_request(&mut req_stream);
+        return;
     }
     let mut req = match h3_request_to_hyper(req_head, req_body, req_trailers) {
         Ok(req) => req,

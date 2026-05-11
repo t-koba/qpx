@@ -10,9 +10,9 @@ use crate::upstream::origin::proxy_http;
 use anyhow::Error;
 use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use hyper::{Request, StatusCode};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::time::{timeout, Duration};
+use std::sync::atomic::Ordering;
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub(super) fn request_seed(conn: &ReverseConnInfo, host: &str, req: &Request<Body>) -> u64 {

@@ -1,6 +1,6 @@
 use crate::http::body::Body;
-use crate::policy_context::{emit_audit_log, AuditRecord};
-use anyhow::{anyhow, Result};
+use crate::policy_context::{AuditRecord, emit_audit_log};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use hyper::{Response, StatusCode};
 use qpx_observability::access_log::RequestLogContext;

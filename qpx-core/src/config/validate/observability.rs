@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use cidr::IpCidr;
 
 use super::super::types::{
@@ -135,10 +135,10 @@ pub(super) fn validate_otel_config(otel: &OtelConfig) -> Result<()> {
     if otel.sample_percent > 100 {
         return Err(anyhow!("otel.sample_percent must be between 0 and 100"));
     }
-    if let Some(service) = otel.service_name.as_deref() {
-        if service.trim().is_empty() {
-            return Err(anyhow!("otel.service_name must not be empty when set"));
-        }
+    if let Some(service) = otel.service_name.as_deref()
+        && service.trim().is_empty()
+    {
+        return Err(anyhow!("otel.service_name must not be empty when set"));
     }
     for (key, value) in &otel.headers {
         let key = key.trim();
@@ -214,10 +214,10 @@ pub(super) fn validate_acme_config(config: &Config, acme: &AcmeConfig) -> Result
             "acme.staging and acme.directory_url are mutually exclusive"
         ));
     }
-    if let Some(email) = acme.email.as_deref() {
-        if email.trim().is_empty() {
-            return Err(anyhow!("acme.email must not be empty when set"));
-        }
+    if let Some(email) = acme.email.as_deref()
+        && email.trim().is_empty()
+    {
+        return Err(anyhow!("acme.email must not be empty when set"));
     }
     let Some(listen) = acme.http01_listen.as_deref() else {
         return Err(anyhow!(
@@ -279,10 +279,10 @@ pub(super) fn validate_capture_policy(
     let Some(capture) = capture else {
         return Ok(());
     };
-    if let Some(sample_percent) = capture.plaintext.sample_percent {
-        if sample_percent > 100 {
-            return Err(anyhow!("{context}.plaintext.sample_percent must be <= 100"));
-        }
+    if let Some(sample_percent) = capture.plaintext.sample_percent
+        && sample_percent > 100
+    {
+        return Err(anyhow!("{context}.plaintext.sample_percent must be <= 100"));
     }
     if capture.plaintext.body {
         match capture.plaintext.max_body_bytes {
@@ -295,10 +295,10 @@ pub(super) fn validate_capture_policy(
             }
         }
     }
-    if let Some(max_body_bytes) = capture.plaintext.max_body_bytes {
-        if max_body_bytes == 0 {
-            return Err(anyhow!("{context}.plaintext.max_body_bytes must be >= 1"));
-        }
+    if let Some(max_body_bytes) = capture.plaintext.max_body_bytes
+        && max_body_bytes == 0
+    {
+        return Err(anyhow!("{context}.plaintext.max_body_bytes must be >= 1"));
     }
     validate_capture_redaction(
         &capture.plaintext.redact,

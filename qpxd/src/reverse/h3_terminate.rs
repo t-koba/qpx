@@ -5,12 +5,12 @@ use crate::http3::listener::{
 };
 use crate::http3::quic::build_h3_server_config_from_tls;
 use crate::http3::quinn_socket::{
-    build_server_endpoint, prepare_server_endpoint_socket, PreparedServerEndpointSocket,
-    QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket, QuinnUdpIngressFilter,
+    PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket,
+    QuinnUdpIngressFilter, build_server_endpoint, prepare_server_endpoint_socket,
 };
-use crate::http3::server::{send_h3_static_response, H3ServerRequestStream};
+use crate::http3::server::{H3ServerRequestStream, send_h3_static_response};
 use crate::sidecar_control::SidecarControl;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use hyper::{Request, Response};
 use qpx_core::config::ReverseEdgeConfig;
@@ -214,8 +214,8 @@ pub(super) fn build_reverse_tls_config(
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        use quinn::rustls::server::WebPkiClientVerifier;
         use quinn::rustls::RootCertStore;
+        use quinn::rustls::server::WebPkiClientVerifier;
         let certs = load_cert_chain(Path::new(client_ca))?;
         let mut roots = RootCertStore::empty();
         let (added, _) = roots.add_parsable_certificates(certs);

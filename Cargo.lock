@@ -2392,7 +2392,7 @@ dependencies = [
 
 [[package]]
 name = "qpx-acme"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "qpx-auth"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "qpx-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "qpx-h3"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "qpx-observability"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cidr",
@@ -2496,7 +2496,7 @@ dependencies = [
 
 [[package]]
 name = "qpx-wasm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2508,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "qpxc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2521,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "qpxd"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2582,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "qpxf"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2603,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "qpxr"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "byteorder_slice",
@@ -5023,7 +5023,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "syn 2.0.117",

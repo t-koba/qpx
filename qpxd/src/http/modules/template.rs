@@ -1,7 +1,7 @@
-use super::{parse_header_name, HttpModuleContext, HttpModuleRequestView};
-use anyhow::{anyhow, Context, Result};
+use super::{HttpModuleContext, HttpModuleRequestView, parse_header_name};
+use anyhow::{Context, Result, anyhow};
 use http::{HeaderName, HeaderValue};
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use std::net::IpAddr;
 use std::sync::Arc;
 

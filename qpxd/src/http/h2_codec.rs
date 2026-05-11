@@ -1,17 +1,17 @@
 use crate::http::body::Body;
 use crate::upstream::raw_http1::InterimResponseHead;
 use ::http::{Request as Http1Request, Response as Http1Response};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use h2::server::SendResponse;
 use h2::Reason;
 use h2::RecvStream;
+use h2::server::SendResponse;
 use hyper::header::{CONTENT_LENGTH, COOKIE};
 use hyper::{Request, Response, Uri};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::spawn;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 use tracing::warn;
 
 const H2_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -126,13 +126,13 @@ pub async fn send_h2_response_with_interim(
         sent_len = sent_len
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| anyhow!("HTTP/2 response body length overflow"))?;
-        if let Some(expected) = declared_length {
-            if sent_len > expected {
-                send_stream.send_reset(Reason::PROTOCOL_ERROR);
-                return Err(anyhow!(
-                    "HTTP/2 response body exceeded declared content-length"
-                ));
-            }
+        if let Some(expected) = declared_length
+            && sent_len > expected
+        {
+            send_stream.send_reset(Reason::PROTOCOL_ERROR);
+            return Err(anyhow!(
+                "HTTP/2 response body exceeded declared content-length"
+            ));
         }
         if !chunk.is_empty() {
             send_stream.send_data(chunk, false)?;
@@ -146,13 +146,13 @@ pub async fn send_h2_response_with_interim(
             return Err(err);
         }
     };
-    if let Some(expected) = declared_length {
-        if sent_len != expected {
-            send_stream.send_reset(Reason::PROTOCOL_ERROR);
-            return Err(anyhow!(
-                "HTTP/2 response body ended before declared content-length was satisfied"
-            ));
-        }
+    if let Some(expected) = declared_length
+        && sent_len != expected
+    {
+        send_stream.send_reset(Reason::PROTOCOL_ERROR);
+        return Err(anyhow!(
+            "HTTP/2 response body ended before declared content-length was satisfied"
+        ));
     }
     if let Some(mut trailers) = trailers {
         let removed = crate::http::semantics::sanitize_response_trailers(&mut trailers);
@@ -197,16 +197,16 @@ pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::Header
             .map_err(|e| anyhow!("invalid header name from HTTP/2 message: {e}"))?;
         let value = http::HeaderValue::from_bytes(value.as_bytes())
             .map_err(|e| anyhow!("invalid header value from HTTP/2 message: {e}"))?;
-        if name == COOKIE {
-            if let Some(existing) = headers.get(COOKIE).cloned() {
-                let mut merged =
-                    Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
-                merged.extend_from_slice(existing.as_bytes());
-                merged.extend_from_slice(b"; ");
-                merged.extend_from_slice(value.as_bytes());
-                headers.insert(COOKIE, http::HeaderValue::from_bytes(merged.as_slice())?);
-                continue;
-            }
+        if name == COOKIE
+            && let Some(existing) = headers.get(COOKIE).cloned()
+        {
+            let mut merged =
+                Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
+            merged.extend_from_slice(existing.as_bytes());
+            merged.extend_from_slice(b"; ");
+            merged.extend_from_slice(value.as_bytes());
+            headers.insert(COOKIE, http::HeaderValue::from_bytes(merged.as_slice())?);
+            continue;
         }
         headers.append(name, value);
     }
@@ -568,13 +568,17 @@ mod tests {
                 .and_then(|value: &::http::HeaderValue| value.to_str().ok()),
             Some("</app.css>; rel=preload; as=style")
         );
-        assert!(!interim
-            .headers()
-            .contains_key(::http::header::CONTENT_LENGTH));
+        assert!(
+            !interim
+                .headers()
+                .contains_key(::http::header::CONTENT_LENGTH)
+        );
         assert!(!interim.headers().contains_key(::http::header::TRAILER));
-        assert!(!interim
-            .headers()
-            .contains_key(::http::header::TRANSFER_ENCODING));
+        assert!(
+            !interim
+                .headers()
+                .contains_key(::http::header::TRANSFER_ENCODING)
+        );
 
         let response = response_future.await.expect("final response");
         assert_eq!(response.status(), ::http::StatusCode::OK);
@@ -626,12 +630,16 @@ mod tests {
         let (response_future, _) = client.send_request(request, true).expect("send");
         let response = response_future.await.expect("response");
         assert_eq!(response.status(), ::http::StatusCode::RESET_CONTENT);
-        assert!(!response
-            .headers()
-            .contains_key(::http::header::CONTENT_LENGTH));
-        assert!(!response
-            .headers()
-            .contains_key(::http::header::TRANSFER_ENCODING));
+        assert!(
+            !response
+                .headers()
+                .contains_key(::http::header::CONTENT_LENGTH)
+        );
+        assert!(
+            !response
+                .headers()
+                .contains_key(::http::header::TRANSFER_ENCODING)
+        );
         assert!(!response.headers().contains_key(::http::header::TRAILER));
         let body = h2_response_to_hyper(response).expect("convert");
         assert!(to_bytes(body.into_body()).await.expect("body").is_empty());
@@ -727,9 +735,10 @@ mod tests {
                     )
                     .await
                     .expect_err("mismatch should fail");
-                    assert!(err
-                        .to_string()
-                        .contains("ended before declared content-length"));
+                    assert!(
+                        err.to_string()
+                            .contains("ended before declared content-length")
+                    );
                 });
             }
         });

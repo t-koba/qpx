@@ -40,24 +40,24 @@ impl CompiledHttpGuardProfile {
     }
 
     pub(crate) fn evaluate_request(&self, req: &Request<Body>) -> Result<Option<HttpGuardReject>> {
-        if self.profile.protocol_safety.smuggling {
-            if let Some(reject) = validate_smuggling(req) {
-                return Ok(Some(reject));
-            }
+        if self.profile.protocol_safety.smuggling
+            && let Some(reject) = validate_smuggling(req)
+        {
+            return Ok(Some(reject));
         }
-        if self.profile.protocol_safety.invalid_framing {
-            if let Some(reject) = validate_invalid_framing(req) {
-                return Ok(Some(reject));
-            }
+        if self.profile.protocol_safety.invalid_framing
+            && let Some(reject) = validate_invalid_framing(req)
+        {
+            return Ok(Some(reject));
         }
 
         let path = normalized_path(req, self.profile.normalize.path);
-        if let Some(limit) = self.profile.limits.path_bytes {
-            if path.len() > limit {
-                return Ok(Some(payload_too_large(
-                    "request path exceeds http_guard limit",
-                )));
-            }
+        if let Some(limit) = self.profile.limits.path_bytes
+            && path.len() > limit
+        {
+            return Ok(Some(payload_too_large(
+                "request path exceeds http_guard limit",
+            )));
         }
 
         let query = normalized_query(req, self.profile.normalize.query);
@@ -70,14 +70,13 @@ impl CompiledHttpGuardProfile {
         }
 
         let body_size = crate::http::body_size::observed_request_size(req);
-        if let Some(limit) = self.profile.limits.body_bytes {
-            if let Some(size) = body_size {
-                if size as usize > limit {
-                    return Ok(Some(payload_too_large(
-                        "request body exceeds http_guard limit",
-                    )));
-                }
-            }
+        if let Some(limit) = self.profile.limits.body_bytes
+            && let Some(size) = body_size
+            && size as usize > limit
+        {
+            return Ok(Some(payload_too_large(
+                "request body exceeds http_guard limit",
+            )));
         }
 
         let buffered = crate::http::body_size::observed_request_bytes(req);
@@ -98,10 +97,10 @@ fn validate_header_limits(
     req: &Request<Body>,
     profile: &HttpGuardProfileConfig,
 ) -> Option<HttpGuardReject> {
-    if let Some(limit) = profile.limits.header_count {
-        if req.headers().len() > limit {
-            return Some(bad_request("header count exceeds http_guard limit"));
-        }
+    if let Some(limit) = profile.limits.header_count
+        && req.headers().len() > limit
+    {
+        return Some(bad_request("header count exceeds http_guard limit"));
     }
     if let Some(limit) = profile.limits.header_bytes {
         let total = req
@@ -127,20 +126,20 @@ fn validate_query_limits(
     query: &[(String, String)],
     profile: &HttpGuardProfileConfig,
 ) -> Option<HttpGuardReject> {
-    if let Some(limit) = profile.limits.query_pairs {
-        if query.len() > limit {
-            return Some(bad_request("query pair count exceeds http_guard limit"));
-        }
+    if let Some(limit) = profile.limits.query_pairs
+        && query.len() > limit
+    {
+        return Some(bad_request("query pair count exceeds http_guard limit"));
     }
-    if let Some(limit) = profile.limits.query_key_bytes {
-        if query.iter().any(|(key, _)| key.len() > limit) {
-            return Some(bad_request("query key exceeds http_guard limit"));
-        }
+    if let Some(limit) = profile.limits.query_key_bytes
+        && query.iter().any(|(key, _)| key.len() > limit)
+    {
+        return Some(bad_request("query key exceeds http_guard limit"));
     }
-    if let Some(limit) = profile.limits.query_value_bytes {
-        if query.iter().any(|(_, value)| value.len() > limit) {
-            return Some(bad_request("query value exceeds http_guard limit"));
-        }
+    if let Some(limit) = profile.limits.query_value_bytes
+        && query.iter().any(|(_, value)| value.len() > limit)
+    {
+        return Some(bad_request("query value exceeds http_guard limit"));
     }
     None
 }
@@ -164,17 +163,17 @@ fn validate_json_limits(
         return Some(bad_request("invalid JSON body for http_guard profile"));
     };
     let (depth, fields) = json_stats(&value, 1);
-    if let Some(limit) = profile.json.max_depth {
-        if depth > limit {
-            return Some(payload_too_large("JSON depth exceeds http_guard limit"));
-        }
+    if let Some(limit) = profile.json.max_depth
+        && depth > limit
+    {
+        return Some(payload_too_large("JSON depth exceeds http_guard limit"));
     }
-    if let Some(limit) = profile.json.max_fields {
-        if fields > limit {
-            return Some(payload_too_large(
-                "JSON field count exceeds http_guard limit",
-            ));
-        }
+    if let Some(limit) = profile.json.max_fields
+        && fields > limit
+    {
+        return Some(payload_too_large(
+            "JSON field count exceeds http_guard limit",
+        ));
     }
     None
 }
@@ -200,12 +199,12 @@ fn validate_multipart_limits(
             continue;
         }
         parts += 1;
-        if let Some(limit) = profile.multipart.max_parts {
-            if parts > limit {
-                return Some(payload_too_large(
-                    "multipart part count exceeds http_guard limit",
-                ));
-            }
+        if let Some(limit) = profile.multipart.max_parts
+            && parts > limit
+        {
+            return Some(payload_too_large(
+                "multipart part count exceeds http_guard limit",
+            ));
         }
         for line in chunk.lines() {
             if !line
@@ -214,23 +213,21 @@ fn validate_multipart_limits(
             {
                 continue;
             }
-            if let Some(name) = disposition_param(line, "name") {
-                if let Some(limit) = profile.multipart.max_name_bytes {
-                    if name.len() > limit {
-                        return Some(payload_too_large(
-                            "multipart field name exceeds http_guard limit",
-                        ));
-                    }
-                }
+            if let Some(name) = disposition_param(line, "name")
+                && let Some(limit) = profile.multipart.max_name_bytes
+                && name.len() > limit
+            {
+                return Some(payload_too_large(
+                    "multipart field name exceeds http_guard limit",
+                ));
             }
-            if let Some(filename) = disposition_param(line, "filename") {
-                if let Some(limit) = profile.multipart.max_filename_bytes {
-                    if filename.len() > limit {
-                        return Some(payload_too_large(
-                            "multipart filename exceeds http_guard limit",
-                        ));
-                    }
-                }
+            if let Some(filename) = disposition_param(line, "filename")
+                && let Some(limit) = profile.multipart.max_filename_bytes
+                && filename.len() > limit
+            {
+                return Some(payload_too_large(
+                    "multipart filename exceeds http_guard limit",
+                ));
             }
         }
     }

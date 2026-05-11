@@ -231,9 +231,11 @@ async fn normalize_h2_upstream_connect_headers_strips_proxy_auth_and_adds_via() 
     );
 
     let normalized = normalize_h2_upstream_connect_headers(&uri, &headers, "qpx").expect("headers");
-    assert!(normalized
-        .get(::http::header::PROXY_AUTHORIZATION)
-        .is_none());
+    assert!(
+        normalized
+            .get(::http::header::PROXY_AUTHORIZATION)
+            .is_none()
+    );
     assert!(normalized.get(::http::header::CONNECTION).is_none());
     assert_eq!(
         normalized

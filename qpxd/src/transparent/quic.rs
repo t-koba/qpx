@@ -1,9 +1,9 @@
 use crate::http3::capsule::decode_quic_varint;
-use crate::tls::{extract_client_hello_info_from_handshake, TlsClientHelloInfo};
+use crate::tls::{TlsClientHelloInfo, extract_client_hello_info_from_handshake};
 use bytes::BytesMut;
-use rustls::quic::{Keys, Version};
 use rustls::CipherSuite;
 use rustls::Side;
+use rustls::quic::{Keys, Version};
 
 const QUIC_V1: u32 = 0x0000_0001;
 const QUIC_V2: u32 = 0x6b33_43cf;

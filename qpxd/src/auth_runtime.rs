@@ -2,7 +2,7 @@
 pub(crate) use qpx_auth::{AuthChallenge, AuthOutcome, AuthenticatedUser, Authenticator};
 
 #[cfg(not(feature = "auth-basic"))]
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 #[cfg(not(feature = "auth-basic"))]
 use qpx_core::config::AuthConfig;
 #[cfg(not(feature = "auth-basic"))]
@@ -17,20 +17,15 @@ pub struct AuthenticatedUser {
 }
 
 #[cfg(not(feature = "auth-basic"))]
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AuthChallenge {
     pub header_values: Vec<String>,
-    pub stale: bool,
 }
 
 #[cfg(not(feature = "auth-basic"))]
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum AuthOutcome {
     Allowed(AuthenticatedUser),
-    Challenge(AuthChallenge),
-    Denied(String),
 }
 
 #[cfg(not(feature = "auth-basic"))]

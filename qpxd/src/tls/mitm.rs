@@ -4,7 +4,7 @@ use crate::upstream::connect::TunnelIo;
 use anyhow::Result;
 use qpx_core::tls::MitmConfig;
 use std::sync::Arc;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tokio_rustls::TlsAcceptor;
 use tracing::warn;
 

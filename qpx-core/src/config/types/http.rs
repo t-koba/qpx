@@ -1,7 +1,7 @@
 use super::super::defaults::*;
 use super::{HeaderControl, LocalResponseConfig, MatchConfig};
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_yaml::Value;
 use std::collections::HashMap;
 

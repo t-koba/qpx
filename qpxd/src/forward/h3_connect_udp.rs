@@ -1,8 +1,8 @@
 use super::h3::ForwardH3Handler;
 use super::h3_connect::{
-    build_h3_connect_success_response, normalize_h3_upstream_connect_headers,
-    prepare_h3_connect_request, recv_upstream_h3_response_with_interim, send_h3_policy_response,
-    H3ConnectPreparation, H3PolicyResponseContext,
+    H3ConnectPreparation, H3PolicyResponseContext, build_h3_connect_success_response,
+    normalize_h3_upstream_connect_headers, prepare_h3_connect_request,
+    recv_upstream_h3_response_with_interim, send_h3_policy_response,
 };
 use crate::http::body::Body;
 use crate::http::l7::finalize_response_with_headers;
@@ -14,16 +14,16 @@ use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::quic::build_h3_client_config;
 use crate::http3::server::H3ServerRequestStream;
-use crate::policy_context::{emit_audit_log, AuditRecord};
+use crate::policy_context::{AuditRecord, emit_audit_log};
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use hyper::{Response, StatusCode};
 use qpx_core::config::ConnectUdpConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::{lookup_host, UdpSocket};
-use tokio::time::{sleep, timeout, Duration, Instant};
+use tokio::net::{UdpSocket, lookup_host};
+use tokio::time::{Duration, Instant, sleep, timeout};
 use tracing::warn;
 
 pub(super) async fn handle_h3_connect_udp(
@@ -731,11 +731,10 @@ async fn relay_h3_connect_udp_stream_chained(
                 )
                 .await?;
                 let mut sent = false;
-                if let Some(datagrams) = upstream_datagrams.as_mut() {
-                    if datagrams.sender.send_datagram(payload).is_ok() {
+                if let Some(datagrams) = upstream_datagrams.as_mut()
+                    && datagrams.sender.send_datagram(payload).is_ok() {
                         sent = true;
                     }
-                }
                 if !sent {
                     let capsule = encode_datagram_capsule_value(fallback.as_ref())?;
                     timeout(idle_timeout, upstream_send.send_data(capsule))
@@ -762,11 +761,10 @@ async fn relay_h3_connect_udp_stream_chained(
                 )
                 .await?;
                 let mut sent = false;
-                if let Some(datagrams) = downstream_datagrams.as_mut() {
-                    if datagrams.sender.send_datagram(payload).is_ok() {
+                if let Some(datagrams) = downstream_datagrams.as_mut()
+                    && datagrams.sender.send_datagram(payload).is_ok() {
                         sent = true;
                     }
-                }
                 if !sent {
                     let capsule = encode_datagram_capsule_value(fallback.as_ref())?;
                     timeout(idle_timeout, downstream_send.send_data(capsule))

@@ -3,15 +3,15 @@ mod ext_authz;
 mod identity;
 mod util;
 
-pub(crate) use audit::{emit_audit_log, AuditRecord};
+pub(crate) use audit::{AuditRecord, emit_audit_log};
 pub(crate) use ext_authz::{
+    CompiledExtAuthz, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, enforce_ext_authz, merge_header_controls,
-    validate_ext_authz_allow_mode, CompiledExtAuthz, ExtAuthzEnforcement, ExtAuthzInput,
-    ExtAuthzMode,
+    validate_ext_authz_allow_mode,
 };
 pub(crate) use identity::{
-    resolve_identity, sanitize_headers_for_policy, strip_untrusted_identity_headers,
-    CompiledIdentitySource, EffectivePolicyContext, ResolvedIdentity,
+    CompiledIdentitySource, EffectivePolicyContext, ResolvedIdentity, resolve_identity,
+    sanitize_headers_for_policy, strip_untrusted_identity_headers,
 };
 
 pub(crate) fn attach_log_context(

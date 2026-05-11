@@ -1,12 +1,12 @@
 use bytes::Buf;
 use bytes::Bytes;
+use h3::error::Code;
 use h3::error::connection_error_creators::CloseStream;
 use h3::error::internal_error::InternalConnectionError;
-use h3::error::Code;
 use h3::quic::StreamId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 
 pub(crate) type H3DatagramSender =

@@ -1,6 +1,6 @@
 use crate::http::body::Body;
 use crate::http::rpc::build_rpc_local_response;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::LocalResponseConfig;
 

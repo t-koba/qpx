@@ -1,4 +1,4 @@
-use super::router_selection::{endpoint_lifecycle_state, EndpointLifecycleState};
+use super::router_selection::{EndpointLifecycleState, endpoint_lifecycle_state};
 use super::*;
 use qpx_core::config::{
     EdgeConfig, HealthCheckConfig, MatchConfig, ResilienceConfig, ResilienceRetryConfig,
@@ -433,9 +433,10 @@ fn reverse_router_rejects_compiled_tls_passthrough_count_mismatch() {
         registry.as_ref(),
         &bad,
     ));
-    assert!(err
-        .to_string()
-        .contains("compiled TLS passthrough route count mismatch"));
+    assert!(
+        err.to_string()
+            .contains("compiled TLS passthrough route count mismatch")
+    );
 }
 
 fn compiled_reverse_fixture(

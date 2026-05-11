@@ -68,10 +68,10 @@ pub(super) fn parse_request_directives(headers: &http::HeaderMap) -> RequestDire
 
     if !saw_cache_control {
         for value in headers.get_all(PRAGMA) {
-            if let Ok(v) = value.to_str() {
-                if v.to_ascii_lowercase().contains("no-cache") {
-                    directives.no_cache = true;
-                }
+            if let Ok(v) = value.to_str()
+                && v.to_ascii_lowercase().contains("no-cache")
+            {
+                directives.no_cache = true;
             }
         }
     }
@@ -140,10 +140,10 @@ pub(super) fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDi
                 if let Some(value) = value.as_deref() {
                     out.stale_while_revalidate = parse_u64_directive(value);
                 }
-            } else if directive == "stale-if-error" {
-                if let Some(value) = value.as_deref() {
-                    out.stale_if_error = parse_u64_directive(value);
-                }
+            } else if directive == "stale-if-error"
+                && let Some(value) = value.as_deref()
+            {
+                out.stale_if_error = parse_u64_directive(value);
             }
         }
     }
@@ -155,10 +155,10 @@ pub(super) fn parse_response_directives_from_vec(
 ) -> ResponseDirectives {
     let mut map = http::HeaderMap::new();
     for (k, v) in headers {
-        if let Ok(name) = http::HeaderName::from_bytes(k.as_bytes()) {
-            if let Ok(value) = http::HeaderValue::from_str(v) {
-                map.append(name, value);
-            }
+        if let Ok(name) = http::HeaderName::from_bytes(k.as_bytes())
+            && let Ok(value) = http::HeaderValue::from_str(v)
+        {
+            map.append(name, value);
         }
     }
     parse_response_directives(&map)

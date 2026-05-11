@@ -1,8 +1,8 @@
-#[cfg(feature = "http3")]
-use anyhow::anyhow;
 #[cfg(any(feature = "http3", unix))]
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(feature = "http3")]
+use anyhow::anyhow;
 use qpx_core::config::Config;
 #[cfg(feature = "http3")]
 use qpx_core::config::IngressEdgeMode;
@@ -209,10 +209,10 @@ impl UdpBindings {
                         .clone()
                         .unwrap_or_else(|| listener.listen.clone())
                 });
-            if old_listen.as_deref() == Some(listen) {
-                if let Some(socket) = self.listener_udp.get(&listener.name) {
-                    return Some(socket.try_clone().context("failed to clone udp listener"));
-                }
+            if old_listen.as_deref() == Some(listen)
+                && let Some(socket) = self.listener_udp.get(&listener.name)
+            {
+                return Some(socket.try_clone().context("failed to clone udp listener"));
             }
         }
         for reverse_edge in config.reverse_edge_configs() {
@@ -225,14 +225,14 @@ impl UdpBindings {
                         .clone()
                         .unwrap_or_else(|| reverse_edge.listen.clone())
                 });
-            if old_listen.as_deref() == Some(listen) {
-                if let Some(socket) = self.reverse_udp.get(&reverse_edge.name) {
-                    return Some(
-                        socket
-                            .try_clone()
-                            .context("failed to clone udp reverse_edge"),
-                    );
-                }
+            if old_listen.as_deref() == Some(listen)
+                && let Some(socket) = self.reverse_udp.get(&reverse_edge.name)
+            {
+                return Some(
+                    socket
+                        .try_clone()
+                        .context("failed to clone udp reverse_edge"),
+                );
             }
         }
         None
@@ -594,32 +594,32 @@ impl UdpBindings {
     ) -> Result<()> {
         #[cfg(feature = "http3")]
         let inherited = {
-            let mut inherited = InheritedUdpBindings::default();
-            inherited.forward_edges = handoff
-                .pending
-                .forward_edges
-                .iter()
-                .map(|entry| {
-                    Ok(InheritedUdpSocket {
-                        name: entry.name.clone(),
-                        listen: entry.listen.clone(),
-                        socket: duplicate_std_udp_socket_for_child(&entry.socket, child_pid)?,
+            InheritedUdpBindings {
+                forward_edges: handoff
+                    .pending
+                    .forward_edges
+                    .iter()
+                    .map(|entry| {
+                        Ok(InheritedUdpSocket {
+                            name: entry.name.clone(),
+                            listen: entry.listen.clone(),
+                            socket: duplicate_std_udp_socket_for_child(&entry.socket, child_pid)?,
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            inherited.reverse_edge = handoff
-                .pending
-                .reverse_edge
-                .iter()
-                .map(|entry| {
-                    Ok(InheritedUdpSocket {
-                        name: entry.name.clone(),
-                        listen: entry.listen.clone(),
-                        socket: duplicate_std_udp_socket_for_child(&entry.socket, child_pid)?,
+                    .collect::<Result<Vec<_>>>()?,
+                reverse_edge: handoff
+                    .pending
+                    .reverse_edge
+                    .iter()
+                    .map(|entry| {
+                        Ok(InheritedUdpSocket {
+                            name: entry.name.clone(),
+                            listen: entry.listen.clone(),
+                            socket: duplicate_std_udp_socket_for_child(&entry.socket, child_pid)?,
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            inherited
+                    .collect::<Result<Vec<_>>>()?,
+            }
         };
         #[cfg(not(feature = "http3"))]
         let inherited = {

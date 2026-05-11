@@ -287,11 +287,12 @@ impl PatternSet {
                 }
                 NamedSetKind::Domain => {
                     let normalized = value.trim_end_matches('.').to_ascii_lowercase();
-                    if let Some(rest) = normalized.strip_prefix("*.") {
-                        if !rest.is_empty() && is_exact_pattern(rest) {
-                            suffix.push(rest.to_string());
-                            continue;
-                        }
+                    if let Some(rest) = normalized.strip_prefix("*.")
+                        && !rest.is_empty()
+                        && is_exact_pattern(rest)
+                    {
+                        suffix.push(rest.to_string());
+                        continue;
                     }
                     if is_exact_pattern(normalized.as_str()) {
                         exact.insert(normalized);
@@ -729,10 +730,10 @@ fn string_evidence(
     if let Some(value) = inputs.cert_fingerprint_sha256.and_then(normalized_text) {
         out.push((value, DestinationEvidenceSource::CertFingerprint));
     }
-    if matches!(evidence_kind, DestinationEvidenceKind::Application) {
-        if let Some(value) = inputs.alpn.and_then(normalized_text) {
-            out.push((value, DestinationEvidenceSource::Alpn));
-        }
+    if matches!(evidence_kind, DestinationEvidenceKind::Application)
+        && let Some(value) = inputs.alpn.and_then(normalized_text)
+    {
+        out.push((value, DestinationEvidenceSource::Alpn));
     }
     if let Some(value) = inputs.ja4.and_then(normalized_text) {
         out.push((value, DestinationEvidenceSource::FingerprintJa4));

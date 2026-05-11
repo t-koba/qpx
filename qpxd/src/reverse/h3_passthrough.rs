@@ -4,12 +4,12 @@ use crate::udp_session_handoff::{
     UdpSessionRestoreState,
 };
 use crate::udp_socket_handoff::duplicate_tokio_udp_socket;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use qpx_core::config::ReverseHttp3Config;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Mutex as StdMutex, RwLock};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
@@ -349,10 +349,10 @@ impl SessionIndex {
                 break;
             }
             // Avoid allowing one session to steal CID routing from another session.
-            if let Some(existing) = self.by_cid.get(&cid).copied() {
-                if existing != session_id {
-                    continue;
-                }
+            if let Some(existing) = self.by_cid.get(&cid).copied()
+                && existing != session_id
+            {
+                continue;
             }
             session_cids.insert(cid);
             self.by_cid.insert(cid, session_id);
@@ -371,10 +371,10 @@ impl SessionIndex {
                     session_id,
                     [long.dcid, long.scid].into_iter().flatten().collect(),
                 );
-                if long.scid_len > 0 {
-                    if let Some(session) = self.sessions.get(&session_id) {
-                        session.set_client_cid_len(long.scid_len);
-                    }
+                if long.scid_len > 0
+                    && let Some(session) = self.sessions.get(&session_id)
+                {
+                    session.set_client_cid_len(long.scid_len);
                 }
             }
             return;
@@ -386,10 +386,10 @@ impl SessionIndex {
                 session_id,
                 [long.dcid, long.scid].into_iter().flatten().collect(),
             );
-            if long.scid_len > 0 {
-                if let Some(session) = self.sessions.get(&session_id) {
-                    session.set_client_cid_len(long.scid_len);
-                }
+            if long.scid_len > 0
+                && let Some(session) = self.sessions.get(&session_id)
+            {
+                session.set_client_cid_len(long.scid_len);
             }
         } else if let Some(cid) = parse_quic_short_dcid(packet, server_cid_len) {
             self.register_cids(session_id, vec![cid]);
@@ -418,10 +418,10 @@ impl SessionIndex {
                     session.set_client_cid_len(long.dcid_len);
                 }
             }
-        } else if let Some(len) = client_cid_len {
-            if let Some(cid) = parse_quic_short_dcid(packet, len) {
-                self.register_cids(session_id, vec![cid]);
-            }
+        } else if let Some(len) = client_cid_len
+            && let Some(cid) = parse_quic_short_dcid(packet, len)
+        {
+            self.register_cids(session_id, vec![cid]);
         }
     }
 
@@ -437,14 +437,13 @@ impl SessionIndex {
         // Try long-header IDs first.
         if let Some(long) = parse_quic_long_header(packet) {
             for cid in [long.dcid, long.scid].into_iter().flatten() {
-                if let Some(id) = self.by_cid.get(&cid).copied() {
-                    if self
+                if let Some(id) = self.by_cid.get(&cid).copied()
+                    && self
                         .sessions
                         .get(&id)
                         .is_some_and(|session| session.current_client_addr() == client_addr)
-                    {
-                        return Some(id);
-                    }
+                {
+                    return Some(id);
                 }
             }
         }
@@ -453,16 +452,14 @@ impl SessionIndex {
         let first = *packet.first()?;
         if (first & 0x80) == 0 {
             for len in &self.known_server_cid_lens {
-                if let Some(cid) = parse_quic_short_dcid(packet, *len) {
-                    if let Some(id) = self.by_cid.get(&cid).copied() {
-                        if self
-                            .sessions
-                            .get(&id)
-                            .is_some_and(|session| session.current_client_addr() == client_addr)
-                        {
-                            return Some(id);
-                        }
-                    }
+                if let Some(cid) = parse_quic_short_dcid(packet, *len)
+                    && let Some(id) = self.by_cid.get(&cid).copied()
+                    && self
+                        .sessions
+                        .get(&id)
+                        .is_some_and(|session| session.current_client_addr() == client_addr)
+                {
+                    return Some(id);
                 }
             }
         }
@@ -527,11 +524,7 @@ fn encode_cid_len(value: Option<u8>) -> u8 {
 }
 
 fn decode_cid_len(value: u8) -> Option<u8> {
-    if value == 0 {
-        None
-    } else {
-        Some(value)
-    }
+    if value == 0 { None } else { Some(value) }
 }
 
 fn instant_to_millis(start: Instant, now: Instant) -> u64 {
@@ -733,8 +726,8 @@ pub(crate) async fn run_http3_passthrough(
 
                 {
                     let guard = sessions.read().expect("session index read lock");
-                    if let Some(id) = guard.find_session_for_client_packet(client_addr, &payload) {
-                        if let Some(session) = guard.session(id) {
+                    if let Some(id) = guard.find_session_for_client_packet(client_addr, &payload)
+                        && let Some(session) = guard.session(id) {
                             session.mark_client_seen(now_ms, payload.len() as u64);
                             let _ = touch_tx.send(SessionTouch {
                                 seen_ms: now_ms,
@@ -750,7 +743,6 @@ pub(crate) async fn run_http3_passthrough(
                                 &payload,
                             );
                         }
-                    }
                 }
 
                 if let Some(id) = session_id.filter(|_| needs_index_update) {

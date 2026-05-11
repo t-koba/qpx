@@ -3,11 +3,11 @@ use crate::http3::capsule::{
     encode_datagram_capsule_value, take_next_capsule,
 };
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use qpx_core::config::ConnectUdpConfig;
 use tokio::net::UdpSocket;
-use tokio::time::{sleep, timeout, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep, timeout};
 use tracing::warn;
 
 pub(super) async fn relay_qpx_extended_connect_stream(

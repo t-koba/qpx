@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use qpx_core::config::{
     IngressEdgeConfig, RateLimitApplyTo, RateLimitConfig, RateLimitProfileConfig,
 };
@@ -121,7 +121,7 @@ impl TokenBucket {
 struct BucketEntry {
     bucket: TokenBucket,
     last_seen: Instant,
-    gen: u64,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -143,12 +143,12 @@ impl LimiterInner {
     }
 
     fn prune(&mut self, now: Instant) {
-        while let Some((key, gen)) = self.queue.front().cloned() {
+        while let Some((key, generation)) = self.queue.front().cloned() {
             let Some(entry) = self.buckets.get(&key) else {
                 let _ = self.queue.pop_front();
                 continue;
             };
-            if entry.gen != gen {
+            if entry.generation != generation {
                 let _ = self.queue.pop_front();
                 continue;
             }
@@ -239,22 +239,22 @@ impl RateLimiter {
         let shard = self.shard_for(&key);
         let mut inner = self.shards[shard].lock().expect("rate limiter mutex");
         inner.prune(now);
-        let (gen, decision) = {
+        let (generation, decision) = {
             let entry = inner
                 .buckets
                 .entry(key.clone())
                 .or_insert_with(|| BucketEntry {
                     bucket: TokenBucket::new(self.capacity, self.refill_per_sec, now),
                     last_seen: now,
-                    gen: 0,
+                    generation: 0,
                 });
             entry.last_seen = now;
-            entry.gen = entry.gen.wrapping_add(1);
-            let gen = entry.gen;
+            entry.generation = entry.generation.wrapping_add(1);
+            let generation = entry.generation;
             let decision = entry.bucket.try_take(now, cost);
-            (gen, decision)
+            (generation, decision)
         };
-        inner.queue.push_back((key, gen));
+        inner.queue.push_back((key, generation));
         decision
     }
 
@@ -265,22 +265,22 @@ impl RateLimiter {
         let shard = self.shard_for(&key);
         let mut inner = self.shards[shard].lock().expect("rate limiter mutex");
         inner.prune(now);
-        let (gen, delay) = {
+        let (generation, delay) = {
             let entry = inner
                 .buckets
                 .entry(key.clone())
                 .or_insert_with(|| BucketEntry {
                     bucket: TokenBucket::new(self.capacity, self.refill_per_sec, now),
                     last_seen: now,
-                    gen: 0,
+                    generation: 0,
                 });
             entry.last_seen = now;
-            entry.gen = entry.gen.wrapping_add(1);
-            let gen = entry.gen;
+            entry.generation = entry.generation.wrapping_add(1);
+            let generation = entry.generation;
             let delay = entry.bucket.reserve_delay(now, cost);
-            (gen, delay)
+            (generation, delay)
         };
-        inner.queue.push_back((key, gen));
+        inner.queue.push_back((key, generation));
         delay
     }
 }
@@ -594,7 +594,6 @@ impl RateLimiters {
         })
     }
 
-    #[allow(dead_code)]
     pub(crate) fn collect_plan_with_profile(
         &self,
         plan: &CompiledRateLimitPlan,
@@ -940,16 +939,22 @@ mod tests {
         };
         let limiters = RateLimiters::from_config(&[listener], &[profile]);
 
-        assert!(limiters
-            .collect_profile(Some("missing"), TransportScope::Request)
-            .is_err());
-        assert!(limiters
-            .collect_profile(Some("known"), TransportScope::Request)
-            .is_ok());
-        assert!(limiters
-            .collect_profile(None, TransportScope::Request)
-            .expect("no profile")
-            .is_empty());
+        assert!(
+            limiters
+                .collect_profile(Some("missing"), TransportScope::Request)
+                .is_err()
+        );
+        assert!(
+            limiters
+                .collect_profile(Some("known"), TransportScope::Request)
+                .is_ok()
+        );
+        assert!(
+            limiters
+                .collect_profile(None, TransportScope::Request)
+                .expect("no profile")
+                .is_empty()
+        );
     }
 
     #[test]

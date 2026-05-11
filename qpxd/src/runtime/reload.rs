@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use qpx_core::config::{Config, IngressEdgeConfig, ReverseEdgeConfig, RuntimeConfig, XdpConfig};
 
 pub fn ensure_hot_reload_compatible(old: &Config, new: &Config) -> Result<()> {

@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, mpsc, oneshot};
 use tracing::info;
 use wasmtime::*;
 use wasmtime_wasi::p1::{self, WasiP1Ctx};

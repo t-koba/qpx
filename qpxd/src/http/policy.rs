@@ -1,7 +1,7 @@
 use crate::http::body::Body;
 use crate::http::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::http::local_response::build_local_response;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::{Method, Response, Version};
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::{CompiledHeaderControl, RuleEngine, RuleMatchContext};

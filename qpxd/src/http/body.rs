@@ -8,11 +8,11 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::task::{Context, Poll};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BodyError {

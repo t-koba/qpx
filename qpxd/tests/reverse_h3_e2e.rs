@@ -1,6 +1,6 @@
 #![cfg(all(feature = "http3", feature = "tls-rustls"))]
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::{Buf, Bytes};
 use quinn::crypto::rustls::QuicClientConfig;
 use std::fs;

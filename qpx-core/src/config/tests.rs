@@ -245,13 +245,11 @@ fn load_config_supports_include_and_env() {
         &base,
         r#"include:
 - include.yaml
-state_dir: ${QPX_TEST_STATE_DIR}"#,
+state_dir: ${QPX_TEST_STATE_DIR:-/tmp/qpx-state}"#,
     )
     .expect("write base");
 
-    std::env::set_var("QPX_TEST_STATE_DIR", "/tmp/qpx-state");
     let loaded = load_config(&base).expect("load config");
-    std::env::remove_var("QPX_TEST_STATE_DIR");
     fs::remove_dir_all(&dir).ok();
 
     assert_eq!(loaded.state_dir.as_deref(), Some("/tmp/qpx-state"));
@@ -362,9 +360,7 @@ security:
       require_starttls: false"#,
     )
     .expect("write");
-    std::env::set_var("LDAP_BIND_PASSWORD", "dummy");
     let err = load_config(&cfg).expect_err("must fail");
-    std::env::remove_var("LDAP_BIND_PASSWORD");
     fs::remove_dir_all(&dir).ok();
     assert!(
         err.to_string()
@@ -730,11 +726,13 @@ fn load_config_allows_reverse_backends_mirrors_headers_and_regex_rewrite() {
     assert_eq!(backends.len(), 2);
     assert_eq!(route.mirrors.len(), 1);
     assert!(route.headers.is_some());
-    assert!(route
-        .path_rewrite
-        .as_ref()
-        .and_then(|r| r.regex.as_ref())
-        .is_some());
+    assert!(
+        route
+            .path_rewrite
+            .as_ref()
+            .and_then(|r| r.regex.as_ref())
+            .is_some()
+    );
 }
 
 #[test]
@@ -943,9 +941,10 @@ fn load_config_rejects_unknown_http_module_chain_ref() {
     let err = load_config(&cfg).expect_err("unknown module chain should fail");
     fs::remove_dir_all(&dir).ok();
 
-    assert!(err
-        .to_string()
-        .contains("references unknown http.module_chains entry: missing"));
+    assert!(
+        err.to_string()
+            .contains("references unknown http.module_chains entry: missing")
+    );
 }
 
 #[test]

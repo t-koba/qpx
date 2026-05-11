@@ -16,9 +16,9 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "MIT"
-version = "0.2.0"
+version = "0.3.0"
 
 [workspace.dependencies]
 anyhow = "1"

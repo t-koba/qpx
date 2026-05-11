@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 
 use super::super::types::{Config, ReverseRouteTargetConfig};
@@ -227,54 +227,54 @@ pub(super) fn validate_reverse_edge_configs(
             .as_ref()
             .map(|h| !h.passthrough_upstreams.is_empty())
             .unwrap_or(false);
-        if let Some(h3) = reverse_edge.http3.as_ref() {
-            if h3.enabled {
-                if let Some(listen) = h3.listen.as_deref() {
-                    let listen = listen.trim();
-                    if listen.is_empty() {
-                        return Err(anyhow!(
-                            "reverse_edge {} http3.listen must not be empty when set",
-                            reverse_edge.name
-                        ));
-                    }
-                    listen.parse::<std::net::SocketAddr>().map_err(|e| {
-                        anyhow!(
-                            "reverse_edge {} http3.listen is invalid: {}",
-                            reverse_edge.name,
-                            e
-                        )
-                    })?;
-                }
-                if h3.passthrough_max_sessions == 0 {
+        if let Some(h3) = reverse_edge.http3.as_ref()
+            && h3.enabled
+        {
+            if let Some(listen) = h3.listen.as_deref() {
+                let listen = listen.trim();
+                if listen.is_empty() {
                     return Err(anyhow!(
-                        "reverse_edge {} http3.passthrough_max_sessions must be >= 1",
+                        "reverse_edge {} http3.listen must not be empty when set",
                         reverse_edge.name
                     ));
                 }
-                if h3.passthrough_idle_timeout_secs == 0 {
-                    return Err(anyhow!(
-                        "reverse_edge {} http3.passthrough_idle_timeout_secs must be >= 1",
-                        reverse_edge.name
-                    ));
-                }
-                if h3.passthrough_max_new_sessions_per_sec == 0 {
-                    return Err(anyhow!(
-                        "reverse_edge {} http3.passthrough_max_new_sessions_per_sec must be >= 1",
-                        reverse_edge.name
-                    ));
-                }
-                if h3.passthrough_min_client_bytes == 0 {
-                    return Err(anyhow!(
-                        "reverse_edge {} http3.passthrough_min_client_bytes must be >= 1",
-                        reverse_edge.name
-                    ));
-                }
-                if h3.passthrough_max_amplification == 0 {
-                    return Err(anyhow!(
-                        "reverse_edge {} http3.passthrough_max_amplification must be >= 1",
-                        reverse_edge.name
-                    ));
-                }
+                listen.parse::<std::net::SocketAddr>().map_err(|e| {
+                    anyhow!(
+                        "reverse_edge {} http3.listen is invalid: {}",
+                        reverse_edge.name,
+                        e
+                    )
+                })?;
+            }
+            if h3.passthrough_max_sessions == 0 {
+                return Err(anyhow!(
+                    "reverse_edge {} http3.passthrough_max_sessions must be >= 1",
+                    reverse_edge.name
+                ));
+            }
+            if h3.passthrough_idle_timeout_secs == 0 {
+                return Err(anyhow!(
+                    "reverse_edge {} http3.passthrough_idle_timeout_secs must be >= 1",
+                    reverse_edge.name
+                ));
+            }
+            if h3.passthrough_max_new_sessions_per_sec == 0 {
+                return Err(anyhow!(
+                    "reverse_edge {} http3.passthrough_max_new_sessions_per_sec must be >= 1",
+                    reverse_edge.name
+                ));
+            }
+            if h3.passthrough_min_client_bytes == 0 {
+                return Err(anyhow!(
+                    "reverse_edge {} http3.passthrough_min_client_bytes must be >= 1",
+                    reverse_edge.name
+                ));
+            }
+            if h3.passthrough_max_amplification == 0 {
+                return Err(anyhow!(
+                    "reverse_edge {} http3.passthrough_max_amplification must be >= 1",
+                    reverse_edge.name
+                ));
             }
         }
         if h3_passthrough {
@@ -486,13 +486,13 @@ pub(super) fn validate_reverse_edge_configs(
                                 false,
                             )?;
                         }
-                        if let Some(name) = backend.name.as_deref() {
-                            if name.trim().is_empty() {
-                                return Err(anyhow!(
-                                    "reverse_edge {} route backend name must not be empty when set",
-                                    reverse_edge.name
-                                ));
-                            }
+                        if let Some(name) = backend.name.as_deref()
+                            && name.trim().is_empty()
+                        {
+                            return Err(anyhow!(
+                                "reverse_edge {} route backend name must not be empty when set",
+                                reverse_edge.name
+                            ));
                         }
                     }
                 }
@@ -522,13 +522,13 @@ pub(super) fn validate_reverse_edge_configs(
                         false,
                     )?;
                 }
-                if let Some(name) = mirror.name.as_deref() {
-                    if name.trim().is_empty() {
-                        return Err(anyhow!(
-                            "reverse_edge {} route mirror name must not be empty when set",
-                            reverse_edge.name
-                        ));
-                    }
+                if let Some(name) = mirror.name.as_deref()
+                    && name.trim().is_empty()
+                {
+                    return Err(anyhow!(
+                        "reverse_edge {} route mirror name must not be empty when set",
+                        reverse_edge.name
+                    ));
                 }
             }
             if has_local && !route.mirrors.is_empty() {

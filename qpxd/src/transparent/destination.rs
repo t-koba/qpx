@@ -1,9 +1,9 @@
 use crate::http::address::parse_authority_host_port;
 use crate::http::body::Body;
 use crate::http::common::resolve_named_upstream;
-use crate::upstream::connect::{connect_tunnel_target, ConnectedTunnel};
+use crate::upstream::connect::{ConnectedTunnel, connect_tunnel_target};
 use crate::xdp;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use hyper::Request;
 use qpx_core::config::{ActionConfig, IngressEdgeConfig, OriginalDstSource};
@@ -226,7 +226,7 @@ fn original_dst_socket(
 
 #[cfg(target_os = "linux")]
 fn original_dst_socket_linux(stream: &tokio::net::TcpStream) -> Result<SocketAddr> {
-    use libc::{getsockopt, sockaddr_in, sockaddr_in6, socklen_t, SOL_IP, SOL_IPV6};
+    use libc::{SOL_IP, SOL_IPV6, getsockopt, sockaddr_in, sockaddr_in6, socklen_t};
     use std::mem::MaybeUninit;
     use std::os::unix::io::AsRawFd;
 

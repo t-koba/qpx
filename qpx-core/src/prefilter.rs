@@ -233,10 +233,10 @@ impl TextPatternMatcher {
             return true;
         }
 
-        if let Some(glob) = &self.glob {
-            if glob.is_match(normalized) {
-                return true;
-            }
+        if let Some(glob) = &self.glob
+            && glob.is_match(normalized)
+        {
+            return true;
         }
 
         if !self.regex.is_empty() {
@@ -533,10 +533,10 @@ impl MatchPrefilterIndex {
 
     fn fill_port_mask(&self, out: &mut [u64], port: Option<u16>) {
         out.copy_from_slice(&self.port_any.words);
-        if let Some(port) = port {
-            if let Some(mask) = self.port_map.get(&port) {
-                bit_or_assign(out, &mask.words);
-            }
+        if let Some(port) = port
+            && let Some(mask) = self.port_map.get(&port)
+        {
+            bit_or_assign(out, &mask.words);
         }
     }
 
@@ -799,15 +799,13 @@ pub(crate) fn compile_text_patterns(
             continue;
         }
 
-        if allow_domain_suffix {
-            if let Some(suffix_text) = extract_domain_suffix(&normalized) {
-                let suffix_interned = interner.intern(suffix_text);
-                if suffix_seen.insert(suffix_interned.clone()) {
-                    suffix.push(suffix_interned.clone());
-                    hint.suffix.push(suffix_interned);
-                }
-                continue;
+        if allow_domain_suffix && let Some(suffix_text) = extract_domain_suffix(&normalized) {
+            let suffix_interned = interner.intern(suffix_text);
+            if suffix_seen.insert(suffix_interned.clone()) {
+                suffix.push(suffix_interned.clone());
+                hint.suffix.push(suffix_interned);
             }
+            continue;
         }
 
         hint.complex = true;

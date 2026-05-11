@@ -1,21 +1,21 @@
 use super::{
-    parse_module_settings, BodyAccess, HttpModule, HttpModuleCapabilities, HttpModuleContext,
-    HttpModuleEvent, HttpModuleFactory, HttpModuleRequestView, HttpModuleStage, ModuleStages,
+    BodyAccess, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
+    HttpModuleFactory, HttpModuleRequestView, HttpModuleStage, ModuleStages, parse_module_settings,
 };
 use crate::http::body::Body;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, VARY};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use hyper::Response;
 use qpx_core::config::{HttpModuleConfig, ResponseCompressionModuleConfig};
 use std::io::{self, Write};
-use std::sync::{mpsc as std_mpsc, Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, mpsc as std_mpsc};
 use tokio::sync::oneshot;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub(super) struct ResponseCompressionModuleFactory;

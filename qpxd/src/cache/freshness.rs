@@ -37,10 +37,10 @@ pub(super) fn initial_age_secs_from_vec(
 ) -> u64 {
     let mut map = http::HeaderMap::new();
     for (k, v) in headers {
-        if let Ok(name) = http::HeaderName::from_bytes(k.as_bytes()) {
-            if let Ok(value) = http::HeaderValue::from_str(v) {
-                map.append(name, value);
-            }
+        if let Ok(name) = http::HeaderName::from_bytes(k.as_bytes())
+            && let Ok(value) = http::HeaderValue::from_str(v)
+        {
+            map.append(name, value);
         }
     }
     initial_age_secs(&map, response_time_ms, response_delay_secs)
@@ -89,14 +89,13 @@ pub(super) fn conditional_not_modified(
         if req.if_none_match.iter().any(|tag| tag == "*") {
             return true;
         }
-        if let Some(etag) = header_value(&envelope.headers, ETAG.as_str()) {
-            if req
+        if let Some(etag) = header_value(&envelope.headers, ETAG.as_str())
+            && req
                 .if_none_match
                 .iter()
                 .any(|candidate| weak_etag_eq(candidate, etag.as_str()))
-            {
-                return true;
-            }
+        {
+            return true;
         }
         // RFC 9110: If-None-Match takes precedence over If-Modified-Since.
         return false;
@@ -106,10 +105,9 @@ pub(super) fn conditional_not_modified(
         req.if_modified_since,
         header_value(&envelope.headers, LAST_MODIFIED.as_str())
             .and_then(|v| parse_http_date_secs(&v)),
-    ) {
-        if last_modified <= if_modified_since {
-            return true;
-        }
+    ) && last_modified <= if_modified_since
+    {
+        return true;
     }
 
     false
@@ -127,10 +125,9 @@ pub(super) fn precondition_failed(
         req.if_unmodified_since,
         header_value(&envelope.headers, LAST_MODIFIED.as_str())
             .and_then(|v| parse_http_date_secs(&v)),
-    ) {
-        if last_modified > if_unmodified_since {
-            return true;
-        }
+    ) && last_modified > if_unmodified_since
+    {
+        return true;
     }
 
     false
@@ -141,10 +138,10 @@ pub(super) fn active_range<'a>(
     envelope: &CachedResponseEnvelope,
 ) -> Option<&'a ByteRangeSpec> {
     let range = req.range.as_ref()?;
-    if let Some(if_range) = req.if_range.as_ref() {
-        if !if_range_matches(if_range, envelope) {
-            return None;
-        }
+    if let Some(if_range) = req.if_range.as_ref()
+        && !if_range_matches(if_range, envelope)
+    {
+        return None;
     }
     Some(range)
 }
@@ -185,10 +182,10 @@ pub(super) fn freshness_lifetime_secs_from_vec(
 ) -> Option<u64> {
     let mut map = http::HeaderMap::new();
     for (k, v) in headers {
-        if let Ok(name) = http::HeaderName::from_bytes(k.as_bytes()) {
-            if let Ok(value) = http::HeaderValue::from_str(v) {
-                map.append(name, value);
-            }
+        if let Ok(name) = http::HeaderName::from_bytes(k.as_bytes())
+            && let Ok(value) = http::HeaderValue::from_str(v)
+        {
+            map.append(name, value);
         }
     }
     freshness_lifetime_secs(&map, policy, now_ms, directives)

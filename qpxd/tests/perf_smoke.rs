@@ -5,7 +5,7 @@ mod http2_client_support;
 #[path = "support/test_client.rs"]
 mod test_client_support;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 #[cfg(all(feature = "http3", feature = "tls-rustls"))]
 use bytes::Buf;
 use bytes::Bytes;

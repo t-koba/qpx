@@ -3,13 +3,13 @@ use crate::http::semantics::append_via_for_version;
 use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::http1::UpstreamProxyScheme;
 use crate::upstream::pool::ResolvedUpstreamProxy;
-use anyhow::{anyhow, Result};
-use hyper::header::{HeaderMap, HeaderName, HeaderValue, HOST};
+use anyhow::{Result, anyhow};
+use hyper::header::{HOST, HeaderMap, HeaderName, HeaderValue};
 use hyper::{StatusCode, Version};
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub type TunnelIo = crate::tls::client::BoxTlsStream;
 

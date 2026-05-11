@@ -1,12 +1,12 @@
 use crate::config::{BackendConfig, QpxfConfig};
+use crate::executor::Executor;
 use crate::executor::cgi::CgiExecutor;
 use crate::executor::persistent::{FastCgiExecutor, ScgiExecutor};
 #[cfg(feature = "wasm")]
 use crate::executor::wasm::WasmExecutor;
-use crate::executor::Executor;
+use anyhow::Result;
 #[cfg(not(feature = "wasm"))]
 use anyhow::anyhow;
-use anyhow::Result;
 use regex::Regex;
 use std::sync::Arc;
 
@@ -77,10 +77,10 @@ impl CompiledRuntime {
                     continue;
                 }
             }
-            if let Some(regex) = &h.path_regex {
-                if !regex.is_match(script_name) {
-                    continue;
-                }
+            if let Some(regex) = &h.path_regex
+                && !regex.is_match(script_name)
+            {
+                continue;
             }
             if let Some(expected_host) = &h.host {
                 match host {

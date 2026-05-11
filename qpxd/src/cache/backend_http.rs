@@ -1,7 +1,7 @@
 use super::CacheBackend;
 use crate::http::body::Body;
 use crate::tls::client::connect_tls_http1;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::BytesMut;
 use hyper::header::HOST;
@@ -143,14 +143,13 @@ impl CacheBackend for HttpCacheBackend {
             .get(http::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<usize>().ok())
+            && length > self.max_object_bytes
         {
-            if length > self.max_object_bytes {
-                return Err(anyhow!(
-                    "http cache get payload too large: {} > {}",
-                    length,
-                    self.max_object_bytes
-                ));
-            }
+            return Err(anyhow!(
+                "http cache get payload too large: {} > {}",
+                length,
+                self.max_object_bytes
+            ));
         }
         let body = timeout(
             self.timeout,

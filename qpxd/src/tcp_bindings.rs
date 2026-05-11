@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use qpx_core::config::{Config, ReverseEdgeConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -213,17 +213,18 @@ impl TcpBindings {
         listen: &str,
     ) -> Option<&'a Vec<TcpListener>> {
         for listener in config.ingress_edges() {
-            if listener.listen == listen {
-                if let Some(group) = self.listener_tcp.get(&listener.name) {
-                    return Some(group);
-                }
+            if listener.listen == listen
+                && let Some(group) = self.listener_tcp.get(&listener.name)
+            {
+                return Some(group);
             }
         }
         for reverse_edge in config.reverse_edge_configs() {
-            if reverse_requires_tcp(reverse_edge) && reverse_edge.listen == listen {
-                if let Some(group) = self.reverse_tcp.get(&reverse_edge.name) {
-                    return Some(group);
-                }
+            if reverse_requires_tcp(reverse_edge)
+                && reverse_edge.listen == listen
+                && let Some(group) = self.reverse_tcp.get(&reverse_edge.name)
+            {
+                return Some(group);
             }
         }
         None

@@ -5,7 +5,7 @@ use crate::udp_socket_handoff::{adopt_inherited_udp_socket, duplicate_std_udp_so
 use crate::udp_socket_handoff::{
     adopt_inherited_udp_socket_windows, duplicate_std_udp_socket_for_child,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use qpx_core::config::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

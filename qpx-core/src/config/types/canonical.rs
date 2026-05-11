@@ -12,7 +12,7 @@ use super::{
     UpstreamConfig, UpstreamTlsTrustConfig, UpstreamTlsTrustProfileConfig, XdpConfig,
 };
 use super::{Config, RuntimeConfig};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Deserializer};
 use serde_json::json;
 use std::collections::HashMap;

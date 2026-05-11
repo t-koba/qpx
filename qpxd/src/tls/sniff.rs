@@ -1,5 +1,5 @@
 use tokio::io::AsyncReadExt;
-use tokio::time::{timeout, Duration, Instant};
+use tokio::time::{Duration, Instant, timeout};
 
 const MAX_CLIENT_HELLO_PEEK_BYTES: usize = 64 * 1024;
 
@@ -155,10 +155,10 @@ fn required_client_hello_peek_bytes(buf: &[u8]) -> Option<usize> {
             }
         }
 
-        if let Some(total) = total_handshake_bytes {
-            if handshake_bytes >= total {
-                return None;
-            }
+        if let Some(total) = total_handshake_bytes
+            && handshake_bytes >= total
+        {
+            return None;
         }
 
         pos = record_end;
@@ -194,11 +194,11 @@ fn reassemble_client_hello_handshake(buf: &[u8]) -> Option<Vec<u8>> {
             let hs_len = read_u24(&handshake, 1)?;
             total = Some(hs_len.saturating_add(4));
         }
-        if let Some(total) = total {
-            if handshake.len() >= total {
-                handshake.truncate(total);
-                return Some(handshake);
-            }
+        if let Some(total) = total
+            && handshake.len() >= total
+        {
+            handshake.truncate(total);
+            return Some(handshake);
         }
         pos = record_end;
     }

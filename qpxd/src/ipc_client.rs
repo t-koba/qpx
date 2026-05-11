@@ -1,5 +1,5 @@
 use crate::http::body::Body;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use hyper::{Request, Response};
 use qpx_core::config::{IpcMode, IpcUpstreamConfig};
@@ -16,7 +16,7 @@ use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use url::Url;
@@ -120,13 +120,13 @@ async fn write_request_body_to_shm(
         seen = seen
             .checked_add(data.len())
             .ok_or_else(|| anyhow!("IPC request body size overflow"))?;
-        if let Some(limit) = max_request_bytes {
-            if seen > limit {
-                return Err(anyhow!(
-                    "IPC request body exceeds max_request_bytes ({})",
-                    limit
-                ));
-            }
+        if let Some(limit) = max_request_bytes
+            && seen > limit
+        {
+            return Err(anyhow!(
+                "IPC request body exceeds max_request_bytes ({})",
+                limit
+            ));
         }
         for part in data.chunks(SHM_PUSH_CHUNK_BYTES) {
             push_request_ring_bytes(&mut req_ring, part, timeout_dur).await?;
@@ -443,10 +443,8 @@ fn build_ipc_meta(req: &Request<Body>, conn: ClientConnInfo) -> IpcRequestMeta {
     }
     // HTTP/2 and HTTP/3 requests carry the authority in the URI/metadata rather than a Host
     // header. CGI expects HTTP_HOST, so synthesize it when missing.
-    if !has_host {
-        if let Some(authority) = req.uri().authority() {
-            headers.push(("host".to_string(), authority.as_str().to_string()));
-        }
+    if !has_host && let Some(authority) = req.uri().authority() {
+        headers.push(("host".to_string(), authority.as_str().to_string()));
     }
 
     let mut params = HashMap::new();
@@ -470,7 +468,7 @@ fn build_ipc_meta(req: &Request<Body>, conn: ClientConnInfo) -> IpcRequestMeta {
 pub(crate) async fn proxy_ipc(
     req: Request<Body>,
     url: &Url,
-    proxy_name: &str,
+    _proxy_name: &str,
 ) -> Result<Response<Body>> {
     let mode = IpcMode::Tcp;
     let backend = match url.scheme() {
@@ -490,13 +488,14 @@ pub(crate) async fn proxy_ipc(
     };
     proxy_ipc_backend(
         req,
-        &backend,
-        mode,
-        proxy_name,
-        ClientConnInfo::default(),
-        None,
-        None,
-        Duration::from_secs(30),
+        IpcBackendRequest {
+            backend: &backend,
+            mode,
+            conn: ClientConnInfo::default(),
+            max_request_bytes: None,
+            max_response_bytes: None,
+            timeout_dur: Duration::from_secs(30),
+        },
     )
     .await
 }
@@ -504,35 +503,46 @@ pub(crate) async fn proxy_ipc(
 pub(crate) async fn proxy_ipc_upstream(
     req: Request<Body>,
     upstream: &IpcUpstream,
-    proxy_name: &str,
+    _proxy_name: &str,
     conn: ClientConnInfo,
     route_timeout: Duration,
 ) -> Result<Response<Body>> {
     let timeout_dur = upstream.effective_timeout(route_timeout);
     proxy_ipc_backend(
         req,
-        &upstream.backend,
-        upstream.mode.clone(),
-        proxy_name,
-        conn,
-        upstream.max_request_bytes,
-        upstream.max_response_bytes,
-        timeout_dur,
+        IpcBackendRequest {
+            backend: &upstream.backend,
+            mode: upstream.mode.clone(),
+            conn,
+            max_request_bytes: upstream.max_request_bytes,
+            max_response_bytes: upstream.max_response_bytes,
+            timeout_dur,
+        },
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn proxy_ipc_backend(
-    mut req: Request<Body>,
-    backend: &IpcBackend,
+struct IpcBackendRequest<'a> {
+    backend: &'a IpcBackend,
     mode: IpcMode,
-    _proxy_name: &str,
     conn: ClientConnInfo,
     max_request_bytes: Option<usize>,
     max_response_bytes: Option<usize>,
     timeout_dur: Duration,
+}
+
+async fn proxy_ipc_backend(
+    mut req: Request<Body>,
+    backend_request: IpcBackendRequest<'_>,
 ) -> Result<Response<Body>> {
+    let IpcBackendRequest {
+        backend,
+        mode,
+        conn,
+        max_request_bytes,
+        max_response_bytes,
+        timeout_dur,
+    } = backend_request;
     let mut meta = build_ipc_meta(&req, conn);
     let uuid = uuid::Uuid::new_v4().to_string();
 
@@ -592,13 +602,13 @@ async fn proxy_ipc_backend(
             seen = seen
                 .checked_add(data.len())
                 .ok_or_else(|| anyhow!("IPC request body size overflow"))?;
-            if let Some(limit) = max_request_bytes {
-                if seen > limit {
-                    return Err(anyhow!(
-                        "IPC request body exceeds max_request_bytes ({})",
-                        limit
-                    ));
-                }
+            if let Some(limit) = max_request_bytes
+                && seen > limit
+            {
+                return Err(anyhow!(
+                    "IPC request body exceeds max_request_bytes ({})",
+                    limit
+                ));
             }
             timeout(timeout_dur, stream.write_all(&data))
                 .await
@@ -643,12 +653,12 @@ async fn proxy_ipc_backend(
                                 break;
                             }
                         };
-                        if let Some(limit) = max_response_bytes {
-                            if seen > limit {
-                                sender.abort();
-                                reusable = false;
-                                break;
-                            }
+                        if let Some(limit) = max_response_bytes
+                            && seen > limit
+                        {
+                            sender.abort();
+                            reusable = false;
+                            break;
                         }
                         if sender.send_data(Bytes::from(data)).await.is_err() {
                             reusable = false;
@@ -710,11 +720,11 @@ async fn proxy_ipc_backend(
                                 break;
                             }
                         };
-                        if let Some(limit) = max_response_bytes {
-                            if seen > limit {
-                                sender.abort();
-                                break;
-                            }
+                        if let Some(limit) = max_response_bytes
+                            && seen > limit
+                        {
+                            sender.abort();
+                            break;
                         }
                         if sender
                             .send_data(Bytes::copy_from_slice(&buf[..n]))

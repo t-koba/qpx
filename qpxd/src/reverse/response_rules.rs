@@ -3,10 +3,10 @@ use crate::destination::DestinationMetadata;
 use crate::http::base_fields::BaseRequestFields;
 use crate::http::body::Body;
 use crate::http::response_policy::{
-    apply_listener_response_policy, ListenerResponsePolicyDecision, ResponseBodyObservationLimits,
+    ListenerResponsePolicyDecision, ResponseBodyObservationLimits, apply_listener_response_policy,
 };
 use crate::http::rpc::RpcMatchContext;
-use crate::http::rule_context::{build_response_rule_match_context, ResponseRuleContextInput};
+use crate::http::rule_context::{ResponseRuleContextInput, build_response_rule_match_context};
 use crate::policy_context::ResolvedIdentity;
 use crate::tls::UpstreamCertificateInfo;
 use anyhow::Result;

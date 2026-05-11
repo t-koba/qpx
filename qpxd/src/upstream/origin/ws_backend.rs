@@ -1,21 +1,21 @@
 use crate::http::body::Body;
 use anyhow::Result;
-use hyper::header::{HeaderValue, HOST};
+use hyper::header::{HOST, HeaderValue};
 use hyper::{Request, Response, Uri};
 use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use crate::http::l7::prepare_request_with_headers_in_place;
 use crate::http::websocket::spawn_upgrade_tunnel;
-use crate::tls::client::connect_tls_http1_with_options;
 use crate::tls::CompiledUpstreamTlsTrust;
+use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::http1::{
-    normalize_websocket_switching_protocols_response, proxy_websocket_http1, WebsocketProxyConfig,
+    WebsocketProxyConfig, normalize_websocket_switching_protocols_response, proxy_websocket_http1,
 };
 
-use super::dispatch::{origin_scheme, OriginScheme};
 use super::OriginEndpoint;
+use super::dispatch::{OriginScheme, origin_scheme};
 
 pub(crate) async fn proxy_websocket(
     req: Request<Body>,

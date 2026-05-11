@@ -16,17 +16,17 @@ use crate::http::local_response::build_local_response;
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
 use crate::http3::datagram::H3StreamDatagrams;
 use crate::http3::listener::H3ConnInfo;
-use crate::http3::server::{send_h3_response, send_h3_static_response, H3ServerRequestStream};
+use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord, ExtAuthzEnforcement,
-    ExtAuthzInput, ExtAuthzMode,
+    sanitize_headers_for_policy, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::tls::client::preview_tls_certificate_with_options;
-use crate::upstream::connect::connect_tunnel_target;
 use crate::upstream::connect::TunnelIo;
-use anyhow::{anyhow, Result};
+use crate::upstream::connect::connect_tunnel_target;
+use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::{ActionConfig, ActionKind, ConnectUdpConfig};
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
@@ -47,9 +47,9 @@ mod h3_connect_prepare;
 mod h3_connect_tunnel;
 
 use self::h3_connect_extended::{
-    finalize_h3_connect_head_response, open_upstream_extended_connect_stream,
-    relay_h3_extended_connect_stream, upstream_extended_connect_error_response,
-    UpstreamExtendedConnectStream,
+    UpstreamExtendedConnectStream, finalize_h3_connect_head_response,
+    open_upstream_extended_connect_stream, relay_h3_extended_connect_stream,
+    upstream_extended_connect_error_response,
 };
 pub(super) use self::h3_connect_extended::{
     normalize_h3_upstream_connect_headers, recv_upstream_h3_response_with_interim,

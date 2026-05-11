@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::net::IpAddr;
 
 use crate::runtime;
 
@@ -317,11 +316,7 @@ fn append_flag(output: &mut String, label: &str, value: bool) {
 }
 
 fn on_off(value: bool) -> &'static str {
-    if value {
-        "on"
-    } else {
-        "off"
-    }
+    if value { "on" } else { "off" }
 }
 
 fn append_match_criteria(
@@ -372,47 +367,42 @@ fn append_match_criterion(output: &mut String, name: &str, mode: Option<&str>, c
     output.push_str(&format!("      configured: {configured}\n"));
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct MatchPlanRequest<'a> {
+    pub(crate) edge: &'a str,
+    pub(crate) ctx: qpx_core::rules::RuleMatchContext<'a>,
+}
+
 pub(crate) fn render_match_plan(
     plan: &runtime::RuntimePlan,
-    edge: &str,
-    src_ip: Option<IpAddr>,
-    dst_port: Option<u16>,
-    sni: Option<&str>,
-    host: Option<&str>,
-    method: Option<&str>,
-    path: Option<&str>,
+    request: MatchPlanRequest<'_>,
 ) -> Result<String> {
-    let ctx = qpx_core::rules::RuleMatchContext {
-        src_ip,
-        dst_port,
-        sni,
-        host,
-        method,
-        path,
-        ..Default::default()
-    };
     let mut output = String::new();
     for compiled_edge in plan.edges.iter() {
         match compiled_edge {
-            runtime::CompiledEdge::Reverse(reverse) if reverse.name.as_ref() == edge => {
+            runtime::CompiledEdge::Reverse(reverse) if reverse.name.as_ref() == request.edge => {
                 for route in reverse.routes.iter() {
-                    if route.matches(&ctx) {
+                    if route.matches(&request.ctx) {
                         output.push_str(&format!("edge: {}\n", reverse.name));
                         output.push_str("kind: reverse\n");
                         output.push_str(&format!("route: {}\n", route.name));
-                        append_match_trace(&mut output, &route.matcher.matches_with_trace(&ctx));
+                        append_match_trace(
+                            &mut output,
+                            &route.matcher.matches_with_trace(&request.ctx),
+                        );
                         append_reverse_target(&mut output, "target", &route.target);
                         append_execution_plan(&mut output, "execution_plan", &route.plan);
                         return Ok(output);
                     }
                 }
                 for route in reverse.tls_passthrough_routes.iter() {
-                    if route.matches(&ctx) {
+                    if route.matches(&request.ctx) {
                         output.push_str(&format!("edge: {}\n", reverse.name));
                         output.push_str("kind: reverse\n");
                         output.push_str(&format!("route: {}\n", route.name));
-                        append_match_trace(&mut output, &route.matcher.matches_with_trace(&ctx));
+                        append_match_trace(
+                            &mut output,
+                            &route.matcher.matches_with_trace(&request.ctx),
+                        );
                         append_reverse_target(&mut output, "target", &route.target);
                         return Ok(output);
                     }
@@ -422,13 +412,16 @@ pub(crate) fn render_match_plan(
                 output.push_str("route: <no match>\n");
                 return Ok(output);
             }
-            runtime::CompiledEdge::Forward(forward) if forward.name.as_ref() == edge => {
+            runtime::CompiledEdge::Forward(forward) if forward.name.as_ref() == request.edge => {
                 for rule in forward.rules.iter() {
-                    if rule.matches(&ctx) {
+                    if rule.matches(&request.ctx) {
                         output.push_str(&format!("edge: {}\n", forward.name));
                         output.push_str("kind: forward\n");
                         output.push_str(&format!("rule: {}\n", rule.name));
-                        append_match_trace(&mut output, &rule.matcher.matches_with_trace(&ctx));
+                        append_match_trace(
+                            &mut output,
+                            &rule.matcher.matches_with_trace(&request.ctx),
+                        );
                         append_execution_plan(&mut output, "execution_plan", &rule.plan);
                         return Ok(output);
                     }
@@ -440,14 +433,17 @@ pub(crate) fn render_match_plan(
                 return Ok(output);
             }
             runtime::CompiledEdge::Transparent(transparent)
-                if transparent.name.as_ref() == edge =>
+                if transparent.name.as_ref() == request.edge =>
             {
                 for rule in transparent.rules.iter() {
-                    if rule.matches(&ctx) {
+                    if rule.matches(&request.ctx) {
                         output.push_str(&format!("edge: {}\n", transparent.name));
                         output.push_str("kind: transparent\n");
                         output.push_str(&format!("rule: {}\n", rule.name));
-                        append_match_trace(&mut output, &rule.matcher.matches_with_trace(&ctx));
+                        append_match_trace(
+                            &mut output,
+                            &rule.matcher.matches_with_trace(&request.ctx),
+                        );
                         append_execution_plan(&mut output, "execution_plan", &rule.plan);
                         return Ok(output);
                     }
@@ -461,7 +457,7 @@ pub(crate) fn render_match_plan(
             _ => {}
         }
     }
-    anyhow::bail!("edge not found: {edge}");
+    anyhow::bail!("edge not found: {}", request.edge);
 }
 
 fn append_match_trace(output: &mut String, trace: &qpx_core::matchers::MatchTrace) {

@@ -29,32 +29,13 @@ pub(super) fn build_otel_layer(
     OtelGuard,
 )> {
     use opentelemetry::global;
-    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
     use opentelemetry_sdk::propagation::TraceContextPropagator;
     use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
-    use tracing_subscriber::filter::Directive;
     use tracing_subscriber::Layer;
+    use tracing_subscriber::filter::Directive;
 
     global::set_text_map_propagator(TraceContextPropagator::new());
-
-    if !cfg.headers.is_empty() {
-        let mut entries = cfg
-            .headers
-            .iter()
-            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-            .collect::<Vec<_>>();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        let encoded = entries
-            .into_iter()
-            .map(|(k, v)| {
-                let v = url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
-                format!("{k}={v}")
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        std::env::set_var("OTEL_EXPORTER_OTLP_HEADERS", encoded.as_str());
-        std::env::set_var("OTEL_EXPORTER_OTLP_TRACES_HEADERS", encoded.as_str());
-    }
 
     let endpoint = cfg
         .endpoint
@@ -67,9 +48,28 @@ pub(super) fn build_otel_layer(
         format!("http://{}", endpoint)
     };
 
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
+    let mut exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
-        .with_endpoint(endpoint)
+        .with_endpoint(endpoint);
+    if !cfg.headers.is_empty() {
+        let mut headers = http::HeaderMap::new();
+        for (key, value) in &cfg.headers {
+            let header_name = key.trim().parse::<http::HeaderName>().map_err(|err| {
+                anyhow::anyhow!("invalid otel header metadata key {}: {err}", key.trim())
+            })?;
+            let header_value = value.trim().parse::<http::HeaderValue>().map_err(|err| {
+                anyhow::anyhow!(
+                    "invalid otel header metadata value for {}: {err}",
+                    header_name.as_str()
+                )
+            })?;
+            headers.insert(header_name, header_value);
+        }
+        let metadata =
+            opentelemetry_otlp::tonic_types::metadata::MetadataMap::from_headers(headers);
+        exporter = exporter.with_metadata(metadata);
+    }
+    let exporter = exporter
         .build()
         .map_err(|e| anyhow::anyhow!("otel exporter build failed: {e}"))?;
 

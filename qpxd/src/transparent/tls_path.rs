@@ -1,12 +1,13 @@
-use super::destination::{connect_target_stream, resolve_upstream, ConnectTarget};
+use super::destination::{ConnectTarget, connect_target_stream, resolve_upstream};
 use crate::destination::DestinationInputs;
 #[cfg(feature = "mitm")]
 use crate::http::body::Body;
 #[cfg(feature = "mitm")]
 use crate::http::http1_codec::serve_http1_with_interim;
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    validate_ext_authz_allow_mode, AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
@@ -14,7 +15,7 @@ use crate::tls::client::preview_tls_certificate_with_options;
 use crate::tls::{CompiledUpstreamTlsTrust, TlsClientHelloInfo, UpstreamCertificateInfo};
 #[cfg(feature = "mitm")]
 use anyhow::Context;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 #[cfg(feature = "mitm")]
 use hyper::Request;
 use qpx_core::config::{ActionConfig, ActionKind};
@@ -27,13 +28,13 @@ use qpx_observability::handler_fn;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::time::Duration;
 #[cfg(feature = "mitm")]
 use tokio::time::timeout;
-use tokio::time::Duration;
 use tracing::warn;
 
 #[cfg(feature = "mitm")]
-use crate::http::mitm::{proxy_mitm_request, MitmRouteContext};
+use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
 #[cfg(feature = "mitm")]
 use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream};
 

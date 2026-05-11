@@ -1,19 +1,19 @@
 use crate::http::body::Body;
 use crate::http::common::request_with_shared_client;
 use crate::http::websocket::spawn_upgrade_tunnel;
-use crate::tls::client::connect_tls_http1_with_options;
 use crate::tls::CompiledUpstreamTlsTrust;
+use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::origin::OriginEndpoint;
 use crate::upstream::pool::send_via_upstream_proxy;
-use crate::upstream::raw_http1::{send_http1_request_with_interim, Http1ResponseWithInterim};
-use anyhow::{anyhow, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
+use crate::upstream::raw_http1::{Http1ResponseWithInterim, send_http1_request_with_interim};
+use anyhow::{Result, anyhow};
 use base64::Engine;
-use hyper::header::{HeaderValue, CONNECTION, HOST, PROXY_AUTHORIZATION, UPGRADE};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use hyper::header::{CONNECTION, HOST, HeaderValue, PROXY_AUTHORIZATION, UPGRADE};
 use hyper::{Request, Response, Uri};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::time::{timeout, Instant};
+use tokio::time::{Instant, timeout};
 use tracing::warn;
 use url::Url;
 
@@ -137,7 +137,7 @@ pub fn parse_upstream_proxy_endpoint(upstream: &str) -> Result<UpstreamProxyEndp
                 return Err(anyhow!(
                     "unsupported upstream proxy scheme: {} (expected http/https)",
                     other
-                ))
+                ));
             }
         };
         let host = url

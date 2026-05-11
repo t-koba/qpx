@@ -1,18 +1,18 @@
 use super::semantics::validate_request_trailers;
 use crate::http::body::Body;
 use crate::upstream::raw_http1::InterimResponseHead;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use hyper::header::{
-    HeaderMap, HeaderName, HeaderValue, CONNECTION, CONTENT_LENGTH, EXPECT, TRAILER,
+    CONNECTION, CONTENT_LENGTH, EXPECT, HeaderMap, HeaderName, HeaderValue, TRAILER,
     TRANSFER_ENCODING,
 };
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 const MAX_HEADER_BYTES: usize = 128 * 1024;
 const READ_BUF_SIZE: usize = 16 * 1024;
 const MAX_CHUNKED_BODY_BYTES: u64 = 1024 * 1024 * 1024;
@@ -556,10 +556,10 @@ async fn write_close_delimited_response_body<W>(
 where
     W: AsyncRead + AsyncWrite + Unpin,
 {
-    if let Some(chunk) = first_chunk {
-        if !chunk.is_empty() {
-            write_all_with_timeout(writer, &chunk).await?;
-        }
+    if let Some(chunk) = first_chunk
+        && !chunk.is_empty()
+    {
+        write_all_with_timeout(writer, &chunk).await?;
     }
     while let Some(chunk) = read_response_body_chunk(body, body_read_timeout).await? {
         let chunk = chunk?;
@@ -698,14 +698,14 @@ where
         if size == 0 {
             let trailers =
                 read_trailer_headers(&mut read_half, &mut read_buf, read_timeout).await?;
-            if let Some(trailers) = trailers {
-                if validate_request_trailers(&trailers).is_ok() {
-                    let _ = if deliver {
-                        sender.send_trailers(trailers).await
-                    } else {
-                        Ok(())
-                    };
-                }
+            if let Some(trailers) = trailers
+                && validate_request_trailers(&trailers).is_ok()
+            {
+                let _ = if deliver {
+                    sender.send_trailers(trailers).await
+                } else {
+                    Ok(())
+                };
             }
             return Ok((read_half, read_buf));
         }
@@ -1125,7 +1125,7 @@ fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {
                 .map_err(|_| anyhow!("invalid content-length value: {}", part.trim()))?;
             match parsed {
                 Some(existing) if existing != len => {
-                    return Err(anyhow!("conflicting content-length values"))
+                    return Err(anyhow!("conflicting content-length values"));
                 }
                 Some(_) => {}
                 None => parsed = Some(len),

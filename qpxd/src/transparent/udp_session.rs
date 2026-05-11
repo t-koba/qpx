@@ -1,7 +1,7 @@
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
@@ -303,10 +303,10 @@ impl SessionIndex {
             if session_cids.len() >= MAX_CIDS_PER_SESSION {
                 break;
             }
-            if let Some(existing) = self.by_cid.get(&cid).copied() {
-                if existing != session_id {
-                    continue;
-                }
+            if let Some(existing) = self.by_cid.get(&cid).copied()
+                && existing != session_id
+            {
+                continue;
             }
             session_cids.insert(cid);
             self.by_cid.insert(cid, session_id);
@@ -324,10 +324,10 @@ impl SessionIndex {
                     session_id,
                     [long.dcid, long.scid].into_iter().flatten().collect(),
                 );
-                if long.scid_len > 0 {
-                    if let Some(session) = self.sessions.get(&session_id) {
-                        session.set_client_cid_len(long.scid_len);
-                    }
+                if long.scid_len > 0
+                    && let Some(session) = self.sessions.get(&session_id)
+                {
+                    session.set_client_cid_len(long.scid_len);
                 }
             }
             return;
@@ -338,10 +338,10 @@ impl SessionIndex {
                 session_id,
                 [long.dcid, long.scid].into_iter().flatten().collect(),
             );
-            if long.scid_len > 0 {
-                if let Some(session) = self.sessions.get(&session_id) {
-                    session.set_client_cid_len(long.scid_len);
-                }
+            if long.scid_len > 0
+                && let Some(session) = self.sessions.get(&session_id)
+            {
+                session.set_client_cid_len(long.scid_len);
             }
         } else if let Some(cid) = parse_quic_short_dcid(packet, server_cid_len) {
             self.register_cids(session_id, vec![cid]);
@@ -367,10 +367,10 @@ impl SessionIndex {
                     session.set_client_cid_len(long.dcid_len);
                 }
             }
-        } else if let Some(len) = client_cid_len {
-            if let Some(cid) = parse_quic_short_dcid(packet, len) {
-                self.register_cids(session_id, vec![cid]);
-            }
+        } else if let Some(len) = client_cid_len
+            && let Some(cid) = parse_quic_short_dcid(packet, len)
+        {
+            self.register_cids(session_id, vec![cid]);
         }
     }
 
@@ -380,26 +380,24 @@ impl SessionIndex {
         target_key: Option<&str>,
         packet: &[u8],
     ) -> Option<u64> {
-        if let Some(target_key) = target_key {
-            if let Some(session_id) = self
+        if let Some(target_key) = target_key
+            && let Some(session_id) = self
                 .by_target
                 .get(&(client_addr, target_key.to_string()))
                 .copied()
-            {
-                return Some(session_id);
-            }
+        {
+            return Some(session_id);
         }
 
         if let Some(long) = parse_quic_long_header(packet) {
             for cid in [long.dcid, long.scid].into_iter().flatten() {
-                if let Some(id) = self.by_cid.get(&cid).copied() {
-                    if self
+                if let Some(id) = self.by_cid.get(&cid).copied()
+                    && self
                         .sessions
                         .get(&id)
                         .is_some_and(|session| session.current_client_addr() == client_addr)
-                    {
-                        return Some(id);
-                    }
+                {
+                    return Some(id);
                 }
             }
         }
@@ -407,16 +405,14 @@ impl SessionIndex {
         let first = *packet.first()?;
         if (first & 0x80) == 0 {
             for len in &self.known_server_cid_lens {
-                if let Some(cid) = parse_quic_short_dcid(packet, *len) {
-                    if let Some(id) = self.by_cid.get(&cid).copied() {
-                        if self
-                            .sessions
-                            .get(&id)
-                            .is_some_and(|session| session.current_client_addr() == client_addr)
-                        {
-                            return Some(id);
-                        }
-                    }
+                if let Some(cid) = parse_quic_short_dcid(packet, *len)
+                    && let Some(id) = self.by_cid.get(&cid).copied()
+                    && self
+                        .sessions
+                        .get(&id)
+                        .is_some_and(|session| session.current_client_addr() == client_addr)
+                {
+                    return Some(id);
                 }
             }
         }
@@ -468,9 +464,5 @@ fn encode_cid_len(value: Option<u8>) -> u8 {
 }
 
 fn decode_cid_len(value: u8) -> Option<u8> {
-    if value == 0 {
-        None
-    } else {
-        Some(value)
-    }
+    if value == 0 { None } else { Some(value) }
 }

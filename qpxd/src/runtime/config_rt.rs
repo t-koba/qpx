@@ -1,6 +1,6 @@
 use crate::http::modules::HttpModuleRegistry;
-use crate::upstream::pool::{build_named_upstream_proxies, UpstreamProxyCluster};
-use anyhow::{anyhow, Result};
+use crate::upstream::pool::{UpstreamProxyCluster, build_named_upstream_proxies};
+use anyhow::{Result, anyhow};
 use qpx_core::config::{
     AccessLogConfig, AuditLogConfig, CertificateMatchConfig, Config, IdentityMatchConfig,
     MatchConfig, NamedSetKind, ReverseEdgeConfig, RuleConfig, TlsFingerprintMatchConfig,

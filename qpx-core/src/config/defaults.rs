@@ -162,8 +162,8 @@ pub(super) fn default_reverse_h3_passthrough_max_amplification() -> u32 {
     3
 }
 
-pub(super) fn default_destination_resolution_precedence(
-) -> Vec<crate::config::DestinationEvidenceSourceKind> {
+pub(super) fn default_destination_resolution_precedence()
+-> Vec<crate::config::DestinationEvidenceSourceKind> {
     vec![
         crate::config::DestinationEvidenceSourceKind::PolicyContext,
         crate::config::DestinationEvidenceSourceKind::Cert,

@@ -1,24 +1,24 @@
-use super::transport::{handle_request_with_interim, ReverseConnInfo};
+use super::transport::{ReverseConnInfo, handle_request_with_interim};
 use super::{
-    record_reverse_connection_filter_block, reverse_connection_filter_match, ReloadableReverse,
+    ReloadableReverse, record_reverse_connection_filter_block, reverse_connection_filter_match,
 };
 use crate::connection_filter::ConnectionFilterStage;
 use crate::http::body::Body;
 use crate::http::http1_codec::serve_http1_with_interim;
-use crate::http::interim::{serve_h2_with_interim, sniff_h2_preface, H2_PREFACE};
+use crate::http::interim::{H2_PREFACE, serve_h2_with_interim, sniff_h2_preface};
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use anyhow::Result;
 use http::{Request, Response};
-use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 use qpx_observability::RequestHandler;
+use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio::time::Duration;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use tokio::time::timeout;
-use tokio::time::Duration;
 use tracing::warn;
 
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -559,7 +559,6 @@ async fn handle_tls_connection(
 }
 
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::runtime::Runtime;

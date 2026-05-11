@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Result};
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use anyhow::{Result, anyhow};
 use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use http::header::HeaderName;
 use hyper::HeaderMap;
 use ring::signature;
@@ -295,15 +295,15 @@ pub(super) fn validate_registered_claims(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    if let Some(exp) = json_i64_claim(payload, "exp") {
-        if now >= exp {
-            return Err(anyhow!("JWT is expired"));
-        }
+    if let Some(exp) = json_i64_claim(payload, "exp")
+        && now >= exp
+    {
+        return Err(anyhow!("JWT is expired"));
     }
-    if let Some(nbf) = json_i64_claim(payload, "nbf") {
-        if now < nbf {
-            return Err(anyhow!("JWT is not yet valid"));
-        }
+    if let Some(nbf) = json_i64_claim(payload, "nbf")
+        && now < nbf
+    {
+        return Err(anyhow!("JWT is not yet valid"));
     }
     Ok(())
 }
@@ -342,10 +342,11 @@ pub(super) fn json_list_claim(
         }
         JsonValue::Array(values) => {
             for value in values {
-                if let Some(item) = value.as_str().map(str::trim) {
-                    if !item.is_empty() && !out.iter().any(|existing| existing == item) {
-                        out.push(item.to_string());
-                    }
+                if let Some(item) = value.as_str().map(str::trim)
+                    && !item.is_empty()
+                    && !out.iter().any(|existing| existing == item)
+                {
+                    out.push(item.to_string());
                 }
             }
         }

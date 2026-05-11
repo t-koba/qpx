@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use qpx_core::envsubst::expand_env;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -302,16 +302,16 @@ impl QpxfConfig {
         for (idx, handler) in self.handlers.iter().enumerate() {
             match &handler.backend {
                 BackendConfig::FastCgi(config) => {
-                    validate_persistent_backend(
-                        "fastcgi",
-                        idx,
-                        config.address.as_str(),
-                        config.timeout_ms,
-                        config.pool.max_concurrency,
-                        config.max_stdin_bytes,
-                        config.max_stdout_bytes,
-                        config.max_stderr_bytes,
-                    )?;
+                    validate_persistent_backend(PersistentBackendValidation {
+                        kind: "fastcgi",
+                        handler_idx: idx,
+                        address: config.address.as_str(),
+                        timeout_ms: config.timeout_ms,
+                        max_concurrency: config.pool.max_concurrency,
+                        max_stdin_bytes: config.max_stdin_bytes,
+                        max_stdout_bytes: config.max_stdout_bytes,
+                        max_stderr_bytes: config.max_stderr_bytes,
+                    })?;
                     if config.pool.max_idle == 0 {
                         return Err(anyhow!(
                             "handlers[{idx}] fastcgi pool.max_idle must be >= 1"
@@ -319,16 +319,16 @@ impl QpxfConfig {
                     }
                 }
                 BackendConfig::Scgi(config) => {
-                    validate_persistent_backend(
-                        "scgi",
-                        idx,
-                        config.address.as_str(),
-                        config.timeout_ms,
-                        config.max_concurrency,
-                        config.max_stdin_bytes,
-                        config.max_stdout_bytes,
-                        config.max_stderr_bytes,
-                    )?;
+                    validate_persistent_backend(PersistentBackendValidation {
+                        kind: "scgi",
+                        handler_idx: idx,
+                        address: config.address.as_str(),
+                        timeout_ms: config.timeout_ms,
+                        max_concurrency: config.max_concurrency,
+                        max_stdin_bytes: config.max_stdin_bytes,
+                        max_stdout_bytes: config.max_stdout_bytes,
+                        max_stderr_bytes: config.max_stderr_bytes,
+                    })?;
                 }
                 BackendConfig::Wasm(config) => {
                     if let Some(pool) = config.pool.as_ref() {
@@ -372,17 +372,28 @@ impl QpxfConfig {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn validate_persistent_backend(
-    kind: &str,
+struct PersistentBackendValidation<'a> {
+    kind: &'a str,
     handler_idx: usize,
-    address: &str,
+    address: &'a str,
     timeout_ms: u64,
     max_concurrency: usize,
     max_stdin_bytes: usize,
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
-) -> Result<()> {
+}
+
+fn validate_persistent_backend(input: PersistentBackendValidation<'_>) -> Result<()> {
+    let PersistentBackendValidation {
+        kind,
+        handler_idx,
+        address,
+        timeout_ms,
+        max_concurrency,
+        max_stdin_bytes,
+        max_stdout_bytes,
+        max_stderr_bytes,
+    } = input;
     if address.trim().is_empty() {
         return Err(anyhow!(
             "handlers[{handler_idx}] {kind} address must not be empty"
@@ -475,12 +486,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("qpxf-config-{unique}.yaml"));
         fs::write(
             &path,
-            "listen: \"unix://${QPXF_TEST_RUNTIME_DIR}/qpxf.sock\"\nhandlers: []\n",
+            "listen: \"unix://${QPXF_TEST_RUNTIME_DIR:-/tmp/qpxf-runtime}/qpxf.sock\"\nhandlers: []\n",
         )
         .expect("write config");
-        std::env::set_var("QPXF_TEST_RUNTIME_DIR", "/tmp/qpxf-runtime");
         let cfg = load_config(&path).expect("config");
-        std::env::remove_var("QPXF_TEST_RUNTIME_DIR");
         let _ = fs::remove_file(&path);
         assert_eq!(cfg.listen, "unix:///tmp/qpxf-runtime/qpxf.sock");
     }

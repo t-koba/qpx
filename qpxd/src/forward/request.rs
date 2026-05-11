@@ -1,17 +1,17 @@
 use super::connect;
-use super::policy::{evaluate_forward_policy, ForwardPolicyDecision};
+use super::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 use crate::cache::CacheRequestKey;
 use crate::destination::DestinationInputs;
 use crate::ftp;
 use crate::http::address::format_authority_host_port;
 use crate::http::base_fields::{
-    extract_base_request_fields, BaseRequestContext, BaseRequestFields,
+    BaseRequestContext, BaseRequestFields, extract_base_request_fields,
 };
 use crate::http::body::Body;
 use crate::http::body_size::observed_request_size;
 use crate::http::cache_flow::{
-    clone_request_head_for_revalidation, lookup_with_revalidation,
-    process_upstream_response_for_cache, CacheLookupDecision, CacheWritebackContext,
+    CacheLookupDecision, CacheWritebackContext, clone_request_head_for_revalidation,
+    lookup_with_revalidation, process_upstream_response_for_cache,
 };
 use crate::http::common::{
     bad_request_response as bad_request, blocked_response as blocked,
@@ -25,24 +25,24 @@ use crate::http::l7::{
     prepare_request_with_headers_in_place,
 };
 use crate::http::local_response::build_local_response;
-use crate::http::preflight::{preflight_validate, PreflightOptions, PreflightOutcome};
+use crate::http::preflight::{PreflightOptions, PreflightOutcome, preflight_validate};
 use crate::http::response_policy::{
-    apply_listener_response_policy, ListenerResponsePolicyDecision, ResponseBodyObservationLimits,
+    ListenerResponsePolicyDecision, ResponseBodyObservationLimits, apply_listener_response_policy,
 };
 use crate::http::websocket::is_websocket_upgrade;
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, attach_log_context, emit_audit_log, enforce_ext_authz,
     merge_header_controls, merge_policy_tags, resolve_identity, sanitize_headers_for_policy,
-    strip_untrusted_identity_headers, validate_ext_authz_allow_mode, AuditRecord,
-    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    strip_untrusted_identity_headers, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
 use crate::upstream::http1::{
-    proxy_http1_request, proxy_http1_request_with_interim, proxy_websocket_http1,
-    WebsocketProxyConfig,
+    WebsocketProxyConfig, proxy_http1_request, proxy_http1_request_with_interim,
+    proxy_websocket_http1,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::{Method, Request, Response, StatusCode};
 use qpx_core::config::ActionKind;
 use qpx_core::prefilter::MatchPrefilterContext;

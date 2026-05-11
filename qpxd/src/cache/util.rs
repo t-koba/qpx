@@ -1,4 +1,4 @@
-use super::types::{CacheBackend, ResponseDirectives, VariantIndex, MAX_VARIANTS_PER_PRIMARY};
+use super::types::{CacheBackend, MAX_VARIANTS_PER_PRIMARY, ResponseDirectives, VariantIndex};
 use super::vary::index_storage_key;
 use anyhow::Result;
 #[cfg(test)]

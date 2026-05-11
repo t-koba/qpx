@@ -5,8 +5,8 @@ use super::entry::{
 };
 use super::freshness::{conditional_not_modified, current_age_secs, precondition_failed};
 use super::types::{
-    CacheBackend, CacheEntryDisposition, CacheRequestKey, CachedResponseEnvelope, LookupOutcome,
-    RequestDirectives, ResponseDirectives, RevalidationState, CACHE_HEADER,
+    CACHE_HEADER, CacheBackend, CacheEntryDisposition, CacheRequestKey, CachedResponseEnvelope,
+    LookupOutcome, RequestDirectives, ResponseDirectives, RevalidationState,
 };
 use super::util::{cache_namespace, header_value, load_variant_index, now_millis};
 use super::vary::matches_vary;
@@ -201,17 +201,17 @@ pub fn attach_revalidation_headers(
     let last_modified = header_value(&state.envelope.headers, LAST_MODIFIED.as_str());
     let mut attached = false;
 
-    if let Some(v) = etag {
-        if let Ok(hv) = http::HeaderValue::from_str(v.as_str()) {
-            request_headers.insert(IF_NONE_MATCH, hv);
-            attached = true;
-        }
+    if let Some(v) = etag
+        && let Ok(hv) = http::HeaderValue::from_str(v.as_str())
+    {
+        request_headers.insert(IF_NONE_MATCH, hv);
+        attached = true;
     }
-    if let Some(v) = last_modified {
-        if let Ok(hv) = http::HeaderValue::from_str(v.as_str()) {
-            request_headers.insert(IF_MODIFIED_SINCE, hv);
-            attached = true;
-        }
+    if let Some(v) = last_modified
+        && let Ok(hv) = http::HeaderValue::from_str(v.as_str())
+    {
+        request_headers.insert(IF_MODIFIED_SINCE, hv);
+        attached = true;
     }
     attached
 }
@@ -280,18 +280,18 @@ pub(super) fn classify_for_request(
             return CacheEntryDisposition::ServeStale;
         }
 
-        if staleness > 0 {
-            if let Some(swr) = resp.stale_while_revalidate {
-                if !req.no_cache && staleness <= swr {
-                    // RFC 5861: allow serving stale for SWR window. For only-if-cached, do not
-                    // trigger background network activity.
-                    return if req.only_if_cached {
-                        CacheEntryDisposition::ServeStale
-                    } else {
-                        CacheEntryDisposition::ServeStaleWhileRevalidate
-                    };
-                }
-            }
+        if staleness > 0
+            && let Some(swr) = resp.stale_while_revalidate
+            && !req.no_cache
+            && staleness <= swr
+        {
+            // RFC 5861: allow serving stale for SWR window. For only-if-cached, do not
+            // trigger background network activity.
+            return if req.only_if_cached {
+                CacheEntryDisposition::ServeStale
+            } else {
+                CacheEntryDisposition::ServeStaleWhileRevalidate
+            };
         }
     }
 

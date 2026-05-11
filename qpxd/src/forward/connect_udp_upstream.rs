@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Result};
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use anyhow::{Result, anyhow};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use qpx_core::uri_template::UriTemplate;
 use url::Url;
 
@@ -26,7 +26,7 @@ pub(super) fn build_upstream_connect_udp_uri(
             _ => {
                 return Err(anyhow!(
                     "CONNECT-UDP upstream URI template requires https/h3 scheme"
-                ))
+                ));
             }
         }
         let (connect_host, connect_port) =
@@ -53,7 +53,7 @@ pub(super) fn build_upstream_connect_udp_uri(
             _ => {
                 return Err(anyhow!(
                     "CONNECT-UDP upstream chain requires https/h3 proxy URL"
-                ))
+                ));
             }
         }
         if parsed.path() != "/" || parsed.query().is_some() {
@@ -100,7 +100,7 @@ pub(super) fn parse_connect_udp_upstream(upstream: &str) -> Result<(String, u16)
             _ => {
                 return Err(anyhow!(
                     "CONNECT-UDP upstream chain requires https/h3 proxy URL"
-                ))
+                ));
             }
         }
         return crate::http::address::parse_authority_host_port(authority, 443)
@@ -113,7 +113,7 @@ pub(super) fn parse_connect_udp_upstream(upstream: &str) -> Result<(String, u16)
             _ => {
                 return Err(anyhow!(
                     "CONNECT-UDP upstream chain requires https/h3 proxy URL"
-                ))
+                ));
             }
         }
         let host = parsed

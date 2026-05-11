@@ -8,10 +8,10 @@ use http::{Request, Response};
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use std::future::poll_fn;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::AsyncReadExt;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -142,14 +142,14 @@ pub(crate) fn take_interim_response_heads(
 
 #[cfg(test)]
 mod tests {
-    use super::{serve_h2_with_interim, H2_PREFACE};
+    use super::{H2_PREFACE, serve_h2_with_interim};
     use crate::http::body::Body;
     use http::{Request, Response};
     use qpx_observability::handler_fn;
     use std::convert::Infallible;
-    use tokio::io::duplex;
     use tokio::io::AsyncWriteExt;
-    use tokio::time::{sleep, Duration};
+    use tokio::io::duplex;
+    use tokio::time::{Duration, sleep};
 
     #[tokio::test(flavor = "current_thread")]
     async fn h2_server_advertises_extended_connect_when_enabled() {

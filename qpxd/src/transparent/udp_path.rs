@@ -2,8 +2,9 @@ use super::destination::ConnectTarget;
 use super::quic::{extract_quic_client_hello_info, looks_like_quic_initial};
 use crate::destination::DestinationInputs;
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    validate_ext_authz_allow_mode, AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 use crate::runtime::Runtime;
@@ -13,7 +14,7 @@ use crate::udp_session_handoff::{
     UdpSessionRestoreState,
 };
 use crate::udp_socket_handoff::duplicate_tokio_udp_socket;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use metrics::{counter, histogram};
 use qpx_core::config::{ActionKind, IngressEdgeConfig};
 use qpx_core::rules::RuleMatchContext;
@@ -22,7 +23,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
-use tokio::time::{timeout, Duration, MissedTickBehavior};
+use tokio::time::{Duration, MissedTickBehavior, timeout};
 use tracing::{info, warn};
 
 #[path = "udp_session.rs"]
@@ -175,11 +176,10 @@ pub(super) async fn run_transparent_udp_listener(
                                 client_addr,
                                 target_key.as_deref(),
                                 &packet,
-                            ) {
-                                if let Some(session) = guard.remove_session(session_id) {
+                            )
+                                && let Some(session) = guard.remove_session(session_id) {
                                     let _ = session.close_tx.send(true);
                                 }
-                            }
                             "error"
                         } else {
                             let session_id = {

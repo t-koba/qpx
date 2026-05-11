@@ -1,8 +1,8 @@
 use super::*;
 use crate::http::observation::RequestObservationPlan;
 use crate::http::rule_context::{
-    attach_destination_trace, build_request_rule_match_context, build_response_rule_match_context,
-    RequestRuleContextInput, ResponseRuleContextInput,
+    RequestRuleContextInput, ResponseRuleContextInput, attach_destination_trace,
+    build_request_rule_match_context, build_response_rule_match_context,
 };
 
 pub(super) async fn dispatch_forward_request(
@@ -135,40 +135,40 @@ pub(super) async fn dispatch_forward_request(
         },
         compiled_edge.default_plan.destination_resolution.as_ref(),
     );
-    if let Some(profile) = http_guard {
-        if let Some(reject) = profile.evaluate_request(&req)? {
-            let mut log_context = identity.to_log_context(None, None, None);
-            attach_destination_trace(&mut log_context, &destination);
-            let mut response = finalize_response_for_request(
-                req.method(),
-                req.version(),
-                proxy_name,
-                Response::builder()
-                    .status(reject.status)
-                    .body(Body::from(reject.body))?,
-                false,
-            );
-            attach_log_context(&mut response, &log_context);
-            emit_audit_log(
-                &state,
-                AuditRecord {
-                    kind: "forward",
-                    name: listener_name,
-                    remote_ip: remote_addr.ip(),
-                    host: Some(host.host.as_str()),
-                    sni: None,
-                    method: Some(req.method().as_str()),
-                    path,
-                    outcome: "http_guard_reject",
-                    status: Some(response.status().as_u16()),
-                    matched_rule: None,
-                    matched_route: None,
-                    ext_authz_policy_id: None,
-                },
-                &log_context,
-            );
-            return Ok(response);
-        }
+    if let Some(profile) = http_guard
+        && let Some(reject) = profile.evaluate_request(&req)?
+    {
+        let mut log_context = identity.to_log_context(None, None, None);
+        attach_destination_trace(&mut log_context, &destination);
+        let mut response = finalize_response_for_request(
+            req.method(),
+            req.version(),
+            proxy_name,
+            Response::builder()
+                .status(reject.status)
+                .body(Body::from(reject.body))?,
+            false,
+        );
+        attach_log_context(&mut response, &log_context);
+        emit_audit_log(
+            &state,
+            AuditRecord {
+                kind: "forward",
+                name: listener_name,
+                remote_ip: remote_addr.ip(),
+                host: Some(host.host.as_str()),
+                sni: None,
+                method: Some(req.method().as_str()),
+                path,
+                outcome: "http_guard_reject",
+                status: Some(response.status().as_u16()),
+                matched_rule: None,
+                matched_route: None,
+                ext_authz_policy_id: None,
+            },
+            &log_context,
+        );
+        return Ok(response);
     }
     let request_rpc = observation_plan
         .needs_rpc
@@ -674,69 +674,64 @@ pub(super) async fn dispatch_forward_request(
                 return Ok(hit);
             }
             CacheLookupDecision::StaleWhileRevalidate(mut hit, state) => {
-                if request_method == Method::GET {
-                    if let (Some(policy), Some(snapshot), Some(lookup_key), Some(target_key)) = (
+                if request_method == Method::GET
+                    && let (Some(policy), Some(snapshot), Some(lookup_key), Some(target_key)) = (
                         cache_policy.as_ref(),
                         request_headers_snapshot.as_ref(),
                         cache_lookup_key.as_ref(),
                         cache_target_key.as_ref(),
-                    ) {
-                        if let Some(guard) = crate::cache::try_begin_background_revalidation(&state)
-                        {
-                            let runtime = runtime.clone();
-                            let action = action.clone();
-                            let listener_name = listener_name.to_string();
-                            let http_authority = http_authority.clone();
-                            let policy = (*policy).clone();
-                            let snapshot = (*snapshot).clone();
-                            let lookup_key = (*lookup_key).clone();
-                            let target_key = (*target_key).clone();
-                            let bg_req = clone_request_head_for_revalidation(&req);
-                            tokio::spawn(async move {
-                                let _guard = guard;
-                                let started = std::time::Instant::now();
-                                let runtime_state = runtime.state();
-                                let upstream = resolve_upstream(
-                                    &action,
-                                    &runtime_state,
-                                    listener_name.as_str(),
-                                )
+                    )
+                    && let Some(guard) = crate::cache::try_begin_background_revalidation(&state)
+                {
+                    let runtime = runtime.clone();
+                    let action = action.clone();
+                    let listener_name = listener_name.to_string();
+                    let http_authority = http_authority.clone();
+                    let policy = (*policy).clone();
+                    let snapshot = (*snapshot).clone();
+                    let lookup_key = (*lookup_key).clone();
+                    let target_key = (*target_key).clone();
+                    let bg_req = clone_request_head_for_revalidation(&req);
+                    tokio::spawn(async move {
+                        let _guard = guard;
+                        let started = std::time::Instant::now();
+                        let runtime_state = runtime.state();
+                        let upstream =
+                            resolve_upstream(&action, &runtime_state, listener_name.as_str())
                                 .ok()
                                 .flatten();
-                                let Ok(resp) = proxy_http1_request(
-                                    bg_req,
-                                    upstream.as_ref(),
-                                    http_authority.as_str(),
-                                    upstream_timeout,
-                                )
-                                .await
-                                else {
-                                    return;
-                                };
-                                let response_delay_secs = started.elapsed().as_secs();
-                                let state_ref = runtime.state();
-                                let backends = &state_ref.cache.backends;
-                                let method = Method::GET;
-                                let _ = process_upstream_response_for_cache(
-                                    resp,
-                                    CacheWritebackContext {
-                                        request_method: &method,
-                                        response_delay_secs,
-                                        cache_target_key: Some(&target_key),
-                                        cache_lookup_key: Some(&lookup_key),
-                                        cache_policy: Some(&policy),
-                                        request_headers_snapshot: &snapshot,
-                                        revalidation_state: Some(state),
-                                        body_read_timeout: std::time::Duration::from_millis(
-                                            state_ref.plan.limits.upstream_http_timeout_ms.max(1),
-                                        ),
-                                        backends,
-                                    },
-                                )
-                                .await;
-                            });
-                        }
-                    }
+                        let Ok(resp) = proxy_http1_request(
+                            bg_req,
+                            upstream.as_ref(),
+                            http_authority.as_str(),
+                            upstream_timeout,
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                        let response_delay_secs = started.elapsed().as_secs();
+                        let state_ref = runtime.state();
+                        let backends = &state_ref.cache.backends;
+                        let method = Method::GET;
+                        let _ = process_upstream_response_for_cache(
+                            resp,
+                            CacheWritebackContext {
+                                request_method: &method,
+                                response_delay_secs,
+                                cache_target_key: Some(&target_key),
+                                cache_lookup_key: Some(&lookup_key),
+                                cache_policy: Some(&policy),
+                                request_headers_snapshot: &snapshot,
+                                revalidation_state: Some(state),
+                                body_read_timeout: std::time::Duration::from_millis(
+                                    state_ref.plan.limits.upstream_http_timeout_ms.max(1),
+                                ),
+                                backends,
+                            },
+                        )
+                        .await;
+                    });
                 }
                 hit = http_modules.prepare_downstream_response(hit).await?;
                 let hit_version = hit.version();
@@ -771,83 +766,82 @@ pub(super) async fn dispatch_forward_request(
     }
 
     let mut _cache_collapse_guard = None;
-    if request_method == Method::GET {
-        if let (Some(snapshot), Some(policy), Some(lookup_key)) = (
+    if request_method == Method::GET
+        && let (Some(snapshot), Some(policy), Some(lookup_key)) = (
             request_headers_snapshot.as_ref(),
             cache_policy.as_ref(),
             cache_lookup_key.as_ref(),
-        ) {
-            match crate::cache::begin_request_collapse(lookup_key) {
-                crate::cache::RequestCollapseJoin::Leader(guard) => {
-                    _cache_collapse_guard = Some(guard);
-                }
-                crate::cache::RequestCollapseJoin::Follower(waiter) => {
-                    if waiter.wait(upstream_timeout).await {
-                        let (lookup_decision, lookup_revalidation_state) =
-                            lookup_with_revalidation(
-                                &mut req,
-                                snapshot,
-                                cache_lookup_key.as_ref(),
-                                Some(policy),
-                                &state.cache.backends,
-                                state.messages.cache_miss.as_str(),
-                            )
-                            .await?;
-                        revalidation_state = lookup_revalidation_state;
-                        let cache_hit = matches!(
-                            lookup_decision,
-                            CacheLookupDecision::Hit(_)
-                                | CacheLookupDecision::StaleWhileRevalidate(_, _)
-                        );
-                        http_modules.on_cache_lookup(cache_hit).await?;
-                        match lookup_decision {
-                            CacheLookupDecision::Hit(mut hit) => {
-                                hit = http_modules.prepare_downstream_response(hit).await?;
-                                let hit_version = hit.version();
-                                finalize_response_with_headers_in_place(
-                                    &request_method,
-                                    hit_version,
-                                    proxy_name,
-                                    &mut hit,
-                                    headers.as_deref(),
-                                    false,
-                                );
-                                http_modules.on_logging(Some(hit.status()), None).await;
-                                annotate(&mut hit, "cache_collapsed_hit");
-                                return Ok(hit);
-                            }
-                            CacheLookupDecision::StaleWhileRevalidate(mut hit, _) => {
-                                hit = http_modules.prepare_downstream_response(hit).await?;
-                                let hit_version = hit.version();
-                                finalize_response_with_headers_in_place(
-                                    &request_method,
-                                    hit_version,
-                                    proxy_name,
-                                    &mut hit,
-                                    headers.as_deref(),
-                                    false,
-                                );
-                                http_modules.on_logging(Some(hit.status()), None).await;
-                                annotate(&mut hit, "cache_collapsed_stale");
-                                return Ok(hit);
-                            }
-                            CacheLookupDecision::OnlyIfCachedMiss(response) => {
-                                let response =
-                                    http_modules.prepare_downstream_response(response).await?;
-                                let mut response = finalize_response_with_headers(
-                                    &request_method,
-                                    client_version,
-                                    proxy_name,
-                                    response,
-                                    headers.as_deref(),
-                                    false,
-                                );
-                                http_modules.on_logging(Some(response.status()), None).await;
-                                annotate(&mut response, "cache_only_if_cached_miss");
-                                return Ok(response);
-                            }
-                            CacheLookupDecision::Miss => {}
+        )
+    {
+        match crate::cache::begin_request_collapse(lookup_key) {
+            crate::cache::RequestCollapseJoin::Leader(guard) => {
+                _cache_collapse_guard = Some(guard);
+            }
+            crate::cache::RequestCollapseJoin::Follower(waiter) => {
+                if waiter.wait(upstream_timeout).await {
+                    let (lookup_decision, lookup_revalidation_state) = lookup_with_revalidation(
+                        &mut req,
+                        snapshot,
+                        cache_lookup_key.as_ref(),
+                        Some(policy),
+                        &state.cache.backends,
+                        state.messages.cache_miss.as_str(),
+                    )
+                    .await?;
+                    revalidation_state = lookup_revalidation_state;
+                    let cache_hit = matches!(
+                        lookup_decision,
+                        CacheLookupDecision::Hit(_)
+                            | CacheLookupDecision::StaleWhileRevalidate(_, _)
+                    );
+                    http_modules.on_cache_lookup(cache_hit).await?;
+                    match lookup_decision {
+                        CacheLookupDecision::Hit(mut hit) => {
+                            hit = http_modules.prepare_downstream_response(hit).await?;
+                            let hit_version = hit.version();
+                            finalize_response_with_headers_in_place(
+                                &request_method,
+                                hit_version,
+                                proxy_name,
+                                &mut hit,
+                                headers.as_deref(),
+                                false,
+                            );
+                            http_modules.on_logging(Some(hit.status()), None).await;
+                            annotate(&mut hit, "cache_collapsed_hit");
+                            return Ok(hit);
                         }
+                        CacheLookupDecision::StaleWhileRevalidate(mut hit, _) => {
+                            hit = http_modules.prepare_downstream_response(hit).await?;
+                            let hit_version = hit.version();
+                            finalize_response_with_headers_in_place(
+                                &request_method,
+                                hit_version,
+                                proxy_name,
+                                &mut hit,
+                                headers.as_deref(),
+                                false,
+                            );
+                            http_modules.on_logging(Some(hit.status()), None).await;
+                            annotate(&mut hit, "cache_collapsed_stale");
+                            return Ok(hit);
+                        }
+                        CacheLookupDecision::OnlyIfCachedMiss(response) => {
+                            let response =
+                                http_modules.prepare_downstream_response(response).await?;
+                            let mut response = finalize_response_with_headers(
+                                &request_method,
+                                client_version,
+                                proxy_name,
+                                response,
+                                headers.as_deref(),
+                                false,
+                            );
+                            http_modules.on_logging(Some(response.status()), None).await;
+                            annotate(&mut response, "cache_only_if_cached_miss");
+                            return Ok(response);
+                        }
+                        CacheLookupDecision::Miss => {}
                     }
                 }
             }
@@ -976,26 +970,25 @@ pub(super) async fn dispatch_forward_request(
         }
     };
     let response_delay_secs = upstream_started.elapsed().as_secs();
-    if response.status().is_server_error() {
-        if let Some(stale) = revalidation_state
+    if response.status().is_server_error()
+        && let Some(stale) = revalidation_state
             .as_ref()
             .and_then(crate::cache::maybe_build_stale_if_error_response)
-        {
-            let stale = http_modules.prepare_downstream_response(stale).await?;
-            let mut stale = stale;
-            let stale_version = stale.version();
-            finalize_response_with_headers_in_place(
-                &request_method,
-                stale_version,
-                proxy_name,
-                &mut stale,
-                headers.as_deref(),
-                false,
-            );
-            http_modules.on_logging(Some(stale.status()), None).await;
-            annotate(&mut stale, "stale_if_error");
-            return Ok(stale);
-        }
+    {
+        let stale = http_modules.prepare_downstream_response(stale).await?;
+        let mut stale = stale;
+        let stale_version = stale.version();
+        finalize_response_with_headers_in_place(
+            &request_method,
+            stale_version,
+            proxy_name,
+            &mut stale,
+            headers.as_deref(),
+            false,
+        );
+        http_modules.on_logging(Some(stale.status()), None).await;
+        annotate(&mut stale, "stale_if_error");
+        return Ok(stale);
     }
     if let Some(policy) = cache_policy.as_ref() {
         if let Some(snapshot) = request_headers_snapshot.as_ref() {

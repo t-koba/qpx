@@ -5,12 +5,12 @@ use qpx_core::config::{
     HttpResponseRuleConfig, ReverseRouteBackendConfig, UpstreamConfig, UpstreamDiscoveryConfig,
 };
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use tokio::time::Duration;
 
 use crate::reverse::health::{EndpointLifecycleRuntime, UpstreamEndpoint};
-use crate::upstream::origin::{discover_origin_endpoints, OriginEndpoint};
+use crate::upstream::origin::{OriginEndpoint, discover_origin_endpoints};
 
 #[derive(Debug)]
 struct ResolvedRouteUpstream {

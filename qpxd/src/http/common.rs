@@ -1,7 +1,7 @@
 use crate::http::body::Body;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
-use hyper_util::client::legacy::{connect::HttpConnector, Client};
+use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use qpx_core::config::ActionConfig;
 use std::sync::{Arc, OnceLock};

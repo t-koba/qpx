@@ -1,4 +1,4 @@
-use super::policy::{evaluate_forward_policy, ForwardPolicyDecision};
+use super::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 use super::request::proxy_auth_required;
 use crate::http::body::Body;
 use crate::http::common::{
@@ -12,18 +12,18 @@ use crate::http::l7::{
 use crate::http::local_response::build_local_response;
 use crate::http3::codec::{h1_headers_to_http, h3_request_to_hyper, http_headers_to_h1};
 use crate::http3::quinn_socket::{
-    build_server_endpoint, prepare_server_endpoint_socket, NoopQuinnUdpIngressFilter,
-    PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket,
+    NoopQuinnUdpIngressFilter, PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream,
+    QuinnEndpointSocket, build_server_endpoint, prepare_server_endpoint_socket,
 };
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord, ExtAuthzEnforcement,
-    ExtAuthzInput, ExtAuthzMode,
+    sanitize_headers_for_policy, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
 use crate::sidecar_control::SidecarControl;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use hyper::{Response, StatusCode};
 use qpx_core::config::{ActionKind, ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig};
@@ -32,7 +32,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::lookup_host;
 use tokio::sync::watch;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 #[path = "h3_connect_parse.rs"]
@@ -47,16 +47,16 @@ mod h3_qpx_response;
 mod h3_qpx_webtransport;
 
 use self::h3_connect_parse::{
-    parse_connect_authority_required, parse_connect_udp_target, validate_h3_connect_pseudo_headers,
-    H3ConnectProtocol,
+    H3ConnectProtocol, parse_connect_authority_required, parse_connect_udp_target,
+    validate_h3_connect_pseudo_headers,
 };
 use self::h3_qpx_connect::handle_qpx_connect_stream;
 use self::h3_qpx_response::{
-    collect_forward_response, send_qpx_policy_response, send_qpx_response_stream,
-    send_qpx_static_response, QpxPolicyResponseContext,
+    QpxPolicyResponseContext, collect_forward_response, send_qpx_policy_response,
+    send_qpx_response_stream, send_qpx_static_response,
 };
 use self::h3_qpx_webtransport::{
-    relay_qpx_webtransport_session, QpxWebTransportRelayContext, WebTransportFlowLimits,
+    QpxWebTransportRelayContext, WebTransportFlowLimits, relay_qpx_webtransport_session,
 };
 
 pub(crate) fn prepare_http3_listener_socket(

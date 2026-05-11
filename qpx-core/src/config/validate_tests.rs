@@ -18,9 +18,10 @@ fn upstream_tls_trust_rejects_unpaired_client_key() {
         "listener test",
     )
     .expect_err("validation should fail");
-    assert!(err
-        .to_string()
-        .contains("client_cert and client_key must be set together"));
+    assert!(
+        err.to_string()
+            .contains("client_cert and client_key must be set together")
+    );
 }
 
 #[test]
@@ -37,9 +38,10 @@ fn upstream_tls_trust_rejects_invalid_pin() {
         "reverse_edge route",
     )
     .expect_err("validation should fail");
-    assert!(err
-        .to_string()
-        .contains("pin_sha256 entries must be 64 hex characters"));
+    assert!(
+        err.to_string()
+            .contains("pin_sha256 entries must be 64 hex characters")
+    );
 }
 
 #[test]
@@ -67,9 +69,10 @@ fn upstream_trust_profile_ref_rejects_unknown_name() {
         "listener test tls_inspection",
     )
     .expect_err("unknown profile should fail");
-    assert!(err
-        .to_string()
-        .contains("listener test tls_inspection references unknown upstream_trust_profile"));
+    assert!(
+        err.to_string()
+            .contains("listener test tls_inspection references unknown upstream_trust_profile")
+    );
 }
 
 #[test]

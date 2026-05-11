@@ -11,14 +11,14 @@ mod http1_service_shutdown_support;
 #[path = "support/http2_client.rs"]
 mod http2_client_support;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::{Buf, Bytes};
 use collect_body_support::collect_body;
 use empty_body_support::empty_body;
 use full_body_support::full_body;
+use http_body_util::combinators::BoxBody;
 use http1_service_shutdown_support::spawn_http1_service_with_shutdown;
 use http2_client_support::handshake_http2;
-use http_body_util::combinators::BoxBody;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use std::collections::HashMap;
@@ -27,13 +27,13 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Mutex};
-use tokio::time::{timeout, Instant};
+use tokio::sync::{Mutex, oneshot};
+use tokio::time::{Instant, timeout};
 
 type TestBody = BoxBody<Bytes, std::convert::Infallible>;
 

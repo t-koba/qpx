@@ -2,11 +2,11 @@ use super::{
     CacheLookupStatus, CompiledHttpModuleChain, HttpModuleEvent, HttpModuleStage,
     RequestHeadersOutcome, RetryEvent,
 };
-use crate::cache::{purge_cache_key, CacheRequestKey};
+use crate::cache::{CacheRequestKey, purge_cache_key};
 use crate::http::body::Body;
 use crate::runtime::RuntimeState;
-use crate::upstream::origin::{proxy_http, OriginEndpoint};
-use anyhow::{anyhow, Context, Result};
+use crate::upstream::origin::{OriginEndpoint, proxy_http};
+use anyhow::{Context, Result, anyhow};
 use http::header::HOST;
 use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
 use hyper::{Request, Response};

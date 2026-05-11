@@ -1,5 +1,5 @@
 use crate::http::body::Body;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use http::Request;
 use std::future::Future;
 use std::pin::Pin;

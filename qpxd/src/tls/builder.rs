@@ -1,6 +1,6 @@
+use super::cert_info::UpstreamCertificateInfo;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use super::cert_info::extract_upstream_certificate_info;
-use super::cert_info::UpstreamCertificateInfo;
 use super::trust::CompiledUpstreamTlsTrust;
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};

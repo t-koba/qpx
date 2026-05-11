@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use http::Uri;
 use std::collections::HashMap;
 use std::sync::Arc;

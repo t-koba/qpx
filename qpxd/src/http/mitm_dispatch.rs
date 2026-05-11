@@ -1,8 +1,8 @@
 use super::*;
 use crate::http::observation::RequestObservationPlan;
 use crate::http::rule_context::{
-    attach_destination_trace, build_request_rule_match_context, build_response_rule_match_context,
-    RequestRuleContextInput, ResponseRuleContextInput,
+    RequestRuleContextInput, ResponseRuleContextInput, attach_destination_trace,
+    build_request_rule_match_context, build_response_rule_match_context,
 };
 
 pub(super) async fn dispatch_mitm_request(
@@ -125,40 +125,40 @@ pub(super) async fn dispatch_mitm_request(
             .ingress_edge_execution_plan(route.listener_name, None)
             .and_then(|plan| plan.destination_resolution.as_ref()),
     );
-    if let Some(profile) = http_guard {
-        if let Some(reject) = profile.evaluate_request(&req)? {
-            let mut log_context = identity.to_log_context(None, None, None);
-            attach_destination_trace(&mut log_context, &destination);
-            let mut response = finalize_response_for_request(
-                req.method(),
-                req.version(),
-                proxy_name,
-                Response::builder()
-                    .status(reject.status)
-                    .body(Body::from(reject.body))?,
-                false,
-            );
-            attach_log_context(&mut response, &log_context);
-            emit_audit_log(
-                &state,
-                AuditRecord {
-                    kind: "forward",
-                    name: route.listener_name,
-                    remote_ip: route.src_addr.ip(),
-                    host: Some(route.host),
-                    sni: Some(route.sni),
-                    method: Some(req.method().as_str()),
-                    path: Some(path_owned.as_str()),
-                    outcome: "http_guard_reject",
-                    status: Some(response.status().as_u16()),
-                    matched_rule: None,
-                    matched_route: None,
-                    ext_authz_policy_id: None,
-                },
-                &log_context,
-            );
-            return Ok(response);
-        }
+    if let Some(profile) = http_guard
+        && let Some(reject) = profile.evaluate_request(&req)?
+    {
+        let mut log_context = identity.to_log_context(None, None, None);
+        attach_destination_trace(&mut log_context, &destination);
+        let mut response = finalize_response_for_request(
+            req.method(),
+            req.version(),
+            proxy_name,
+            Response::builder()
+                .status(reject.status)
+                .body(Body::from(reject.body))?,
+            false,
+        );
+        attach_log_context(&mut response, &log_context);
+        emit_audit_log(
+            &state,
+            AuditRecord {
+                kind: "forward",
+                name: route.listener_name,
+                remote_ip: route.src_addr.ip(),
+                host: Some(route.host),
+                sni: Some(route.sni),
+                method: Some(req.method().as_str()),
+                path: Some(path_owned.as_str()),
+                outcome: "http_guard_reject",
+                status: Some(response.status().as_u16()),
+                matched_rule: None,
+                matched_route: None,
+                ext_authz_policy_id: None,
+            },
+            &log_context,
+        );
+        return Ok(response);
     }
     let request_rpc = observation_plan
         .needs_rpc
@@ -731,8 +731,9 @@ mod tests {
                 http: None,
                 http_guard_profile: None,
                 destination_resolution: None,
-                http_modules: vec![serde_yaml::from_str(
-                    r#"type: response_compression
+                http_modules: vec![
+                    serde_yaml::from_str(
+                        r#"type: response_compression
 settings:
   min_body_bytes: 1
   max_body_bytes: 65536
@@ -744,8 +745,9 @@ settings:
   gzip_level: 6
   brotli_level: 5
   zstd_level: 3"#,
-                )
-                .expect("http module config")],
+                    )
+                    .expect("http module config"),
+                ],
             })],
             upstreams: Vec::new(),
             caches: Vec::new(),

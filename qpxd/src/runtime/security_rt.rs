@@ -3,7 +3,7 @@ use crate::policy_context::{CompiledExtAuthz, CompiledIdentitySource};
 use anyhow::Result;
 use qpx_core::tls::CaStore;
 #[cfg(feature = "mitm")]
-use qpx_core::tls::{load_or_generate_ca, MitmConfig};
+use qpx_core::tls::{MitmConfig, load_or_generate_ca};
 use std::collections::HashMap;
 use std::ops::Deref;
 #[cfg(feature = "mitm")]
@@ -97,14 +97,14 @@ impl SecurityRuntime {
         #[cfg(feature = "mitm")]
         {
             for listener in config.operational.ingress_edge_configs() {
-                if let Some(tls) = listener.tls_inspection.as_ref() {
-                    if !tls.verify_exceptions.is_empty() {
-                        let mut builder = globset::GlobSetBuilder::new();
-                        for pattern in &tls.verify_exceptions {
-                            builder.add(globset::Glob::new(pattern)?);
-                        }
-                        tls_verify_exception_sets.insert(listener.name.clone(), builder.build()?);
+                if let Some(tls) = listener.tls_inspection.as_ref()
+                    && !tls.verify_exceptions.is_empty()
+                {
+                    let mut builder = globset::GlobSetBuilder::new();
+                    for pattern in &tls.verify_exceptions {
+                        builder.add(globset::Glob::new(pattern)?);
                     }
+                    tls_verify_exception_sets.insert(listener.name.clone(), builder.build()?);
                 }
             }
         }
@@ -172,10 +172,10 @@ fn any_tls_inspection_enabled<'a>(
 
 #[cfg(feature = "mitm")]
 fn expand_tilde(input: &str) -> PathBuf {
-    if let Some(stripped) = input.strip_prefix("~/") {
-        if let Some(home) = dirs_next::home_dir() {
-            return home.join(stripped);
-        }
+    if let Some(stripped) = input.strip_prefix("~/")
+        && let Some(home) = dirs_next::home_dir()
+    {
+        return home.join(stripped);
     }
     PathBuf::from(input)
 }

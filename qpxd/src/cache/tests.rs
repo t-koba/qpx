@@ -1,8 +1,8 @@
 use super::directives::{parse_request_directives, parse_response_directives};
 use super::lookup_ops::classify_for_request;
 use super::types::{
-    CacheEntryDisposition, CachedResponseEnvelope, RequestDirectives, VariantIndex, VarySpec,
-    CACHE_HEADER, MAX_VARIANTS_PER_PRIMARY,
+    CACHE_HEADER, CacheEntryDisposition, CachedResponseEnvelope, MAX_VARIANTS_PER_PRIMARY,
+    RequestDirectives, VariantIndex, VarySpec,
 };
 use super::util::{cacheable_content_length, load_variant_index, upsert_variant_with_cap};
 use super::vary::{index_storage_key, matches_vary, parse_vary, variant_storage_key};
@@ -179,19 +179,23 @@ async fn purge_cache_key_removes_variant_objects_and_index() {
         .expect("purge");
 
     assert!(purged);
-    assert!(backend
-        .get(namespace.as_str(), variant.as_str())
-        .await
-        .expect("get variant")
-        .is_none());
-    assert!(backend
-        .get(
-            namespace.as_str(),
-            index_storage_key(primary.as_str()).as_str(),
-        )
-        .await
-        .expect("get index")
-        .is_none());
+    assert!(
+        backend
+            .get(namespace.as_str(), variant.as_str())
+            .await
+            .expect("get variant")
+            .is_none()
+    );
+    assert!(
+        backend
+            .get(
+                namespace.as_str(),
+                index_storage_key(primary.as_str()).as_str(),
+            )
+            .await
+            .expect("get index")
+            .is_none()
+    );
 }
 
 #[tokio::test]

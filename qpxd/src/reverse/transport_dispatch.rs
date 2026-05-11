@@ -1,7 +1,7 @@
 use super::*;
 use crate::http::observation::RequestObservationPlan;
-use crate::reverse::health::UpstreamEndpoint;
 use crate::reverse::ReloadableReverse;
+use crate::reverse::health::UpstreamEndpoint;
 
 pub(super) async fn dispatch_reverse_request(
     mut req: Request<Body>,
@@ -272,20 +272,20 @@ pub(super) async fn dispatch_reverse_request(
     let annotate = |response: &mut Response<Body>, outcome: &'static str| {
         annotate_with_tags(response, outcome, &[]);
     };
-    if let Some(profile) = route_http_guard {
-        if let Some(reject) = profile.evaluate_request(&req)? {
-            let mut response = finalize_response_for_request(
-                &request_method,
-                req.version(),
-                proxy_name.as_str(),
-                Response::builder()
-                    .status(reject.status)
-                    .body(Body::from(reject.body))?,
-                false,
-            );
-            annotate(&mut response, "http_guard_reject");
-            return Ok(empty_interim_response(response));
-        }
+    if let Some(profile) = route_http_guard
+        && let Some(reject) = profile.evaluate_request(&req)?
+    {
+        let mut response = finalize_response_for_request(
+            &request_method,
+            req.version(),
+            proxy_name.as_str(),
+            Response::builder()
+                .status(reject.status)
+                .body(Body::from(reject.body))?,
+            false,
+        );
+        annotate(&mut response, "http_guard_reject");
+        return Ok(empty_interim_response(response));
     }
     let mut route_headers = route.headers.clone();
     let (
@@ -394,11 +394,13 @@ pub(super) async fn dispatch_reverse_request(
             route_headers.as_deref(),
             false,
         );
-        counter!(state
-            .observability
-            .metric_names
-            .reverse_local_response_total
-            .clone())
+        counter!(
+            state
+                .observability
+                .metric_names
+                .reverse_local_response_total
+                .clone()
+        )
         .increment(1);
         annotate(&mut response, "respond");
         return Ok(empty_interim_response(response));
@@ -541,11 +543,13 @@ pub(super) async fn dispatch_reverse_request(
                         started.elapsed(),
                     );
                 }
-                histogram!(state
-                    .observability
-                    .metric_names
-                    .reverse_upstream_latency_ms
-                    .clone())
+                histogram!(
+                    state
+                        .observability
+                        .metric_names
+                        .reverse_upstream_latency_ms
+                        .clone()
+                )
                 .record(started.elapsed().as_secs_f64() * 1000.0);
                 counter!(
                     state.observability.metric_names.reverse_requests_total.clone(),
@@ -644,83 +648,73 @@ pub(super) async fn dispatch_reverse_request(
                 return Ok(empty_interim_response(hit));
             }
             CacheLookupDecision::StaleWhileRevalidate(mut hit, state) => {
-                if request_method == Method::GET && route.ipc.is_none() {
-                    if let (Some(policy), Some(snapshot), Some(lookup_key), Some(target_key)) = (
+                if request_method == Method::GET
+                    && route.ipc.is_none()
+                    && let (Some(policy), Some(snapshot), Some(lookup_key), Some(target_key)) = (
                         cache_policy,
                         request_headers_snapshot.as_ref(),
                         cache_lookup_key.as_ref(),
                         cache_target_key.as_ref(),
-                    ) {
-                        if let Some(target) = override_upstream
-                            .as_deref()
-                            .map(OriginEndpoint::direct)
-                            .or_else(|| {
-                                route
-                                    .select_upstream(seed, sticky_seed)
-                                    .map(|u| u.origin.clone())
-                            })
-                        {
-                            if !target.upstream.starts_with("ipc://")
-                                && !target.upstream.starts_with("ipc+unix://")
-                            {
-                                if let Some(guard) =
-                                    crate::cache::try_begin_background_revalidation(&state)
-                                {
-                                    let runtime = runtime.clone();
-                                    let proxy_name = proxy_name.clone();
-                                    let timeout_dur = route_timeout;
-                                    let policy = (*policy).clone();
-                                    let snapshot = (*snapshot).clone();
-                                    let lookup_key = (*lookup_key).clone();
-                                    let target_key = (*target_key).clone();
-                                    let upstream_trust = route.upstream_trust.clone();
-                                    let bg_req = clone_request_head_for_revalidation(&req);
-                                    tokio::spawn(async move {
-                                        let _guard = guard;
-                                        let started = Instant::now();
-                                        let resp = timeout(
-                                            timeout_dur,
-                                            proxy_http(
-                                                bg_req,
-                                                &target,
-                                                proxy_name.as_str(),
-                                                upstream_trust.as_deref(),
-                                            ),
-                                        )
-                                        .await;
-                                        let Ok(Ok(resp)) = resp else {
-                                            return;
-                                        };
-                                        let response_delay_secs = started.elapsed().as_secs();
-                                        let state_ref = runtime.state();
-                                        let backends = &state_ref.cache.backends;
-                                        let method = Method::GET;
-                                        let _ = process_upstream_response_for_cache(
-                                            resp,
-                                            CacheWritebackContext {
-                                                request_method: &method,
-                                                response_delay_secs,
-                                                cache_target_key: Some(&target_key),
-                                                cache_lookup_key: Some(&lookup_key),
-                                                cache_policy: Some(&policy),
-                                                request_headers_snapshot: &snapshot,
-                                                revalidation_state: Some(state),
-                                                body_read_timeout: std::time::Duration::from_millis(
-                                                    state_ref
-                                                        .plan
-                                                        .limits
-                                                        .upstream_http_timeout_ms
-                                                        .max(1),
-                                                ),
-                                                backends,
-                                            },
-                                        )
-                                        .await;
-                                    });
-                                }
-                            }
-                        }
-                    }
+                    )
+                    && let Some(target) = override_upstream
+                        .as_deref()
+                        .map(OriginEndpoint::direct)
+                        .or_else(|| {
+                            route
+                                .select_upstream(seed, sticky_seed)
+                                .map(|u| u.origin.clone())
+                        })
+                    && !target.upstream.starts_with("ipc://")
+                    && !target.upstream.starts_with("ipc+unix://")
+                    && let Some(guard) = crate::cache::try_begin_background_revalidation(&state)
+                {
+                    let runtime = runtime.clone();
+                    let proxy_name = proxy_name.clone();
+                    let timeout_dur = route_timeout;
+                    let policy = (*policy).clone();
+                    let snapshot = (*snapshot).clone();
+                    let lookup_key = (*lookup_key).clone();
+                    let target_key = (*target_key).clone();
+                    let upstream_trust = route.upstream_trust.clone();
+                    let bg_req = clone_request_head_for_revalidation(&req);
+                    tokio::spawn(async move {
+                        let _guard = guard;
+                        let started = Instant::now();
+                        let resp = timeout(
+                            timeout_dur,
+                            proxy_http(
+                                bg_req,
+                                &target,
+                                proxy_name.as_str(),
+                                upstream_trust.as_deref(),
+                            ),
+                        )
+                        .await;
+                        let Ok(Ok(resp)) = resp else {
+                            return;
+                        };
+                        let response_delay_secs = started.elapsed().as_secs();
+                        let state_ref = runtime.state();
+                        let backends = &state_ref.cache.backends;
+                        let method = Method::GET;
+                        let _ = process_upstream_response_for_cache(
+                            resp,
+                            CacheWritebackContext {
+                                request_method: &method,
+                                response_delay_secs,
+                                cache_target_key: Some(&target_key),
+                                cache_lookup_key: Some(&lookup_key),
+                                cache_policy: Some(&policy),
+                                request_headers_snapshot: &snapshot,
+                                revalidation_state: Some(state),
+                                body_read_timeout: std::time::Duration::from_millis(
+                                    state_ref.plan.limits.upstream_http_timeout_ms.max(1),
+                                ),
+                                backends,
+                            },
+                        )
+                        .await;
+                    });
                 }
                 hit = http_modules.prepare_downstream_response(hit).await?;
                 let hit_version = hit.version();
@@ -755,83 +749,82 @@ pub(super) async fn dispatch_reverse_request(
     }
 
     let mut _cache_collapse_guard = None;
-    if request_method == Method::GET {
-        if let (Some(snapshot), Some(policy), Some(lookup_key)) = (
+    if request_method == Method::GET
+        && let (Some(snapshot), Some(policy), Some(lookup_key)) = (
             request_headers_snapshot.as_ref(),
             cache_policy,
             cache_lookup_key.as_ref(),
-        ) {
-            match crate::cache::begin_request_collapse(lookup_key) {
-                crate::cache::RequestCollapseJoin::Leader(guard) => {
-                    _cache_collapse_guard = Some(guard);
-                }
-                crate::cache::RequestCollapseJoin::Follower(waiter) => {
-                    if waiter.wait(route_timeout).await {
-                        let (lookup_decision, lookup_revalidation_state) =
-                            lookup_with_revalidation(
-                                &mut req,
-                                snapshot,
-                                cache_lookup_key.as_ref(),
-                                Some(policy),
-                                &runtime.state().cache.backends,
-                                state.messages.cache_miss.as_str(),
-                            )
-                            .await?;
-                        revalidation_state = lookup_revalidation_state;
-                        let cache_hit = matches!(
-                            lookup_decision,
-                            CacheLookupDecision::Hit(_)
-                                | CacheLookupDecision::StaleWhileRevalidate(_, _)
-                        );
-                        http_modules.on_cache_lookup(cache_hit).await?;
-                        match lookup_decision {
-                            CacheLookupDecision::Hit(mut hit) => {
-                                hit = http_modules.prepare_downstream_response(hit).await?;
-                                let hit_version = hit.version();
-                                finalize_response_with_headers_in_place(
-                                    &request_method,
-                                    hit_version,
-                                    proxy_name.as_str(),
-                                    &mut hit,
-                                    route_headers.as_deref(),
-                                    false,
-                                );
-                                http_modules.on_logging(Some(hit.status()), None).await;
-                                annotate(&mut hit, "cache_collapsed_hit");
-                                return Ok(empty_interim_response(hit));
-                            }
-                            CacheLookupDecision::StaleWhileRevalidate(mut hit, _) => {
-                                hit = http_modules.prepare_downstream_response(hit).await?;
-                                let hit_version = hit.version();
-                                finalize_response_with_headers_in_place(
-                                    &request_method,
-                                    hit_version,
-                                    proxy_name.as_str(),
-                                    &mut hit,
-                                    route_headers.as_deref(),
-                                    false,
-                                );
-                                http_modules.on_logging(Some(hit.status()), None).await;
-                                annotate(&mut hit, "cache_collapsed_stale");
-                                return Ok(empty_interim_response(hit));
-                            }
-                            CacheLookupDecision::OnlyIfCachedMiss(response) => {
-                                let response =
-                                    http_modules.prepare_downstream_response(response).await?;
-                                let mut response = finalize_response_with_headers(
-                                    &request_method,
-                                    request_version,
-                                    proxy_name.as_str(),
-                                    response,
-                                    route_headers.as_deref(),
-                                    false,
-                                );
-                                http_modules.on_logging(Some(response.status()), None).await;
-                                annotate(&mut response, "cache_only_if_cached_miss");
-                                return Ok(empty_interim_response(response));
-                            }
-                            CacheLookupDecision::Miss => {}
+        )
+    {
+        match crate::cache::begin_request_collapse(lookup_key) {
+            crate::cache::RequestCollapseJoin::Leader(guard) => {
+                _cache_collapse_guard = Some(guard);
+            }
+            crate::cache::RequestCollapseJoin::Follower(waiter) => {
+                if waiter.wait(route_timeout).await {
+                    let (lookup_decision, lookup_revalidation_state) = lookup_with_revalidation(
+                        &mut req,
+                        snapshot,
+                        cache_lookup_key.as_ref(),
+                        Some(policy),
+                        &runtime.state().cache.backends,
+                        state.messages.cache_miss.as_str(),
+                    )
+                    .await?;
+                    revalidation_state = lookup_revalidation_state;
+                    let cache_hit = matches!(
+                        lookup_decision,
+                        CacheLookupDecision::Hit(_)
+                            | CacheLookupDecision::StaleWhileRevalidate(_, _)
+                    );
+                    http_modules.on_cache_lookup(cache_hit).await?;
+                    match lookup_decision {
+                        CacheLookupDecision::Hit(mut hit) => {
+                            hit = http_modules.prepare_downstream_response(hit).await?;
+                            let hit_version = hit.version();
+                            finalize_response_with_headers_in_place(
+                                &request_method,
+                                hit_version,
+                                proxy_name.as_str(),
+                                &mut hit,
+                                route_headers.as_deref(),
+                                false,
+                            );
+                            http_modules.on_logging(Some(hit.status()), None).await;
+                            annotate(&mut hit, "cache_collapsed_hit");
+                            return Ok(empty_interim_response(hit));
                         }
+                        CacheLookupDecision::StaleWhileRevalidate(mut hit, _) => {
+                            hit = http_modules.prepare_downstream_response(hit).await?;
+                            let hit_version = hit.version();
+                            finalize_response_with_headers_in_place(
+                                &request_method,
+                                hit_version,
+                                proxy_name.as_str(),
+                                &mut hit,
+                                route_headers.as_deref(),
+                                false,
+                            );
+                            http_modules.on_logging(Some(hit.status()), None).await;
+                            annotate(&mut hit, "cache_collapsed_stale");
+                            return Ok(empty_interim_response(hit));
+                        }
+                        CacheLookupDecision::OnlyIfCachedMiss(response) => {
+                            let response =
+                                http_modules.prepare_downstream_response(response).await?;
+                            let mut response = finalize_response_with_headers(
+                                &request_method,
+                                request_version,
+                                proxy_name.as_str(),
+                                response,
+                                route_headers.as_deref(),
+                                false,
+                            );
+                            http_modules.on_logging(Some(response.status()), None).await;
+                            annotate(&mut response, "cache_only_if_cached_miss");
+                            return Ok(empty_interim_response(response));
+                        }
+                        CacheLookupDecision::Miss => {}
                     }
                 }
             }
@@ -885,322 +878,320 @@ pub(super) async fn dispatch_reverse_request(
 
     let mut last_err = None;
 
-    if override_upstream.is_none() {
-        if let Some(ipc) = route.ipc.as_ref() {
-            let _concurrency_permits = match request_limits.acquire_concurrency(&request_limit_ctx)
-            {
-                Some(permits) => permits,
-                None => {
-                    let mut response = finalize_response_for_request(
-                        &request_method,
-                        request_version,
-                        proxy_name.as_str(),
-                        too_many_requests(None),
-                        false,
-                    );
-                    annotate(&mut response, "concurrency_limited");
-                    return Ok(empty_interim_response(response));
-                }
-            };
-            let timeout_dur = std::cmp::min(route_timeout, ipc.timeout());
-            for attempt_idx in 0..attempts {
-                let started = Instant::now();
-                let mut req_for_upstream = if attempt_idx == 0 {
-                    match (&template, first_request.take()) {
-                        (Some(template), _) => template.build()?,
-                        (None, Some(req)) => req,
-                        (None, None) => {
-                            return Err(anyhow!("missing reverse request for first attempt"))
-                        }
-                    }
-                } else {
-                    template
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("reverse retry template missing"))?
-                        .build()?
-                };
-                http_modules
-                    .on_upstream_request(&mut req_for_upstream)
-                    .await?;
-                let export_session = state.export_session_for_plan(
-                    &route.plan,
-                    conn.remote_addr,
-                    ipc.endpoint_label(),
+    if override_upstream.is_none()
+        && let Some(ipc) = route.ipc.as_ref()
+    {
+        let _concurrency_permits = match request_limits.acquire_concurrency(&request_limit_ctx) {
+            Some(permits) => permits,
+            None => {
+                let mut response = finalize_response_for_request(
+                    &request_method,
+                    request_version,
+                    proxy_name.as_str(),
+                    too_many_requests(None),
+                    false,
                 );
-                if let Some(session) = export_session.as_ref() {
-                    let preview = crate::exporter::serialize_request_preview(&req_for_upstream);
-                    session.emit_plaintext(true, &preview);
+                annotate(&mut response, "concurrency_limited");
+                return Ok(empty_interim_response(response));
+            }
+        };
+        let timeout_dur = std::cmp::min(route_timeout, ipc.timeout());
+        for attempt_idx in 0..attempts {
+            let started = Instant::now();
+            let mut req_for_upstream = if attempt_idx == 0 {
+                match (&template, first_request.take()) {
+                    (Some(template), _) => template.build()?,
+                    (None, Some(req)) => req,
+                    (None, None) => {
+                        return Err(anyhow!("missing reverse request for first attempt"));
+                    }
                 }
+            } else {
+                template
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("reverse retry template missing"))?
+                    .build()?
+            };
+            http_modules
+                .on_upstream_request(&mut req_for_upstream)
+                .await?;
+            let export_session =
+                state.export_session_for_plan(&route.plan, conn.remote_addr, ipc.endpoint_label());
+            if let Some(session) = export_session.as_ref() {
+                let preview = crate::exporter::serialize_request_preview(&req_for_upstream);
+                session.emit_plaintext(true, &preview);
+            }
 
-                let response = timeout(
-                    timeout_dur,
-                    proxy_ipc_upstream(
-                        req_for_upstream,
-                        ipc,
-                        proxy_name.as_str(),
-                        ipc_conn,
-                        route_timeout,
-                    ),
-                )
-                .await;
+            let response = timeout(
+                timeout_dur,
+                proxy_ipc_upstream(
+                    req_for_upstream,
+                    ipc,
+                    proxy_name.as_str(),
+                    ipc_conn,
+                    route_timeout,
+                ),
+            )
+            .await;
 
-                match response {
-                    Ok(Ok(resp)) => {
-                        let resp = http_modules.on_upstream_response(resp).await?;
-                        let response_rule = apply_response_rules(ResponseRuleInput {
-                            route,
-                            base: &base,
-                            conn: &conn,
-                            destination: &request_destination,
-                            upstream_cert: None,
-                            identity: &identity,
-                            request_rpc: request_rpc.as_ref(),
-                            route_headers: route_headers.clone(),
-                            response: resp,
-                            max_observed_response_body_bytes: route.plan.body_observation_limit(
-                                state.plan.limits.max_observed_response_body_bytes,
-                            ),
-                            response_body_read_timeout: std::time::Duration::from_millis(
-                                state.plan.limits.upstream_http_timeout_ms.max(1),
-                            ),
-                            force_response_body_observation: route
-                                .plan
-                                .flags
-                                .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
-                        })
-                        .await?;
-                        let (
-                            mut resp,
-                            route_headers_for_response,
-                            response_cache_bypass,
-                            response_policy_tags,
-                            response_mirror,
-                        ) = match response_rule {
-                            ResponseRuleDecision::Continue {
-                                response,
-                                route_headers,
-                                cache_bypass,
-                                policy_tags,
-                                suppress_retry,
-                                mirror,
-                            } => {
-                                if response.status().is_server_error()
-                                    && attempt_idx + 1 < attempts
-                                    && !suppress_retry
-                                {
-                                    let retry_reason =
-                                        format!("upstream returned {}", response.status());
-                                    last_err = Some(anyhow!(retry_reason.clone()));
-                                    if !route.policy.retry_budget.try_consume_retry() {
-                                        counter!(state
+            match response {
+                Ok(Ok(resp)) => {
+                    let resp = http_modules.on_upstream_response(resp).await?;
+                    let response_rule = apply_response_rules(ResponseRuleInput {
+                        route,
+                        base: &base,
+                        conn: &conn,
+                        destination: &request_destination,
+                        upstream_cert: None,
+                        identity: &identity,
+                        request_rpc: request_rpc.as_ref(),
+                        route_headers: route_headers.clone(),
+                        response: resp,
+                        max_observed_response_body_bytes: route.plan.body_observation_limit(
+                            state.plan.limits.max_observed_response_body_bytes,
+                        ),
+                        response_body_read_timeout: std::time::Duration::from_millis(
+                            state.plan.limits.upstream_http_timeout_ms.max(1),
+                        ),
+                        force_response_body_observation: route
+                            .plan
+                            .flags
+                            .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
+                    })
+                    .await?;
+                    let (
+                        mut resp,
+                        route_headers_for_response,
+                        response_cache_bypass,
+                        response_policy_tags,
+                        response_mirror,
+                    ) = match response_rule {
+                        ResponseRuleDecision::Continue {
+                            response,
+                            route_headers,
+                            cache_bypass,
+                            policy_tags,
+                            suppress_retry,
+                            mirror,
+                        } => {
+                            if response.status().is_server_error()
+                                && attempt_idx + 1 < attempts
+                                && !suppress_retry
+                            {
+                                let retry_reason =
+                                    format!("upstream returned {}", response.status());
+                                last_err = Some(anyhow!(retry_reason.clone()));
+                                if !route.policy.retry_budget.try_consume_retry() {
+                                    counter!(
+                                        state
                                             .observability
                                             .metric_names
                                             .reverse_retry_budget_exhausted_total
-                                            .clone())
-                                        .increment(1);
-                                        break;
-                                    }
-                                    http_modules
-                                        .on_retry(attempt_idx + 2, retry_reason.as_str())
-                                        .await?;
-                                    if route.policy.retry_backoff > Duration::ZERO {
-                                        sleep(route.policy.retry_backoff).await;
-                                    }
-                                    continue;
+                                            .clone()
+                                    )
+                                    .increment(1);
+                                    break;
                                 }
-                                (response, route_headers, cache_bypass, policy_tags, mirror)
+                                http_modules
+                                    .on_retry(attempt_idx + 2, retry_reason.as_str())
+                                    .await?;
+                                if route.policy.retry_backoff > Duration::ZERO {
+                                    sleep(route.policy.retry_backoff).await;
+                                }
+                                continue;
                             }
-                            ResponseRuleDecision::LocalResponse {
+                            (response, route_headers, cache_bypass, policy_tags, mirror)
+                        }
+                        ResponseRuleDecision::LocalResponse {
+                            response,
+                            route_headers,
+                            policy_tags,
+                        } => {
+                            let response =
+                                http_modules.prepare_downstream_response(response).await?;
+                            let mut response = finalize_response_with_headers(
+                                &request_method,
+                                request_version,
+                                proxy_name.as_str(),
                                 response,
-                                route_headers,
-                                policy_tags,
-                            } => {
-                                let response =
-                                    http_modules.prepare_downstream_response(response).await?;
-                                let mut response = finalize_response_with_headers(
-                                    &request_method,
-                                    request_version,
-                                    proxy_name.as_str(),
-                                    response,
-                                    route_headers.as_deref(),
-                                    false,
-                                );
-                                http_modules.on_logging(Some(response.status()), None).await;
-                                annotate_with_tags(
-                                    &mut response,
-                                    "response_rule_local_response",
-                                    policy_tags.as_ref(),
-                                );
-                                return Ok(empty_interim_response(response));
-                            }
-                        };
-                        if let Some(session) = export_session.as_ref() {
-                            let preview = crate::exporter::serialize_response_preview(&resp);
-                            session.emit_plaintext(false, &preview);
+                                route_headers.as_deref(),
+                                false,
+                            );
+                            http_modules.on_logging(Some(response.status()), None).await;
+                            annotate_with_tags(
+                                &mut response,
+                                "response_rule_local_response",
+                                policy_tags.as_ref(),
+                            );
+                            return Ok(empty_interim_response(response));
                         }
-                        if resp.status().is_server_error() {
-                            if let Some(stale) = revalidation_state
-                                .as_ref()
-                                .and_then(crate::cache::maybe_build_stale_if_error_response)
-                            {
-                                let stale = http_modules.prepare_downstream_response(stale).await?;
-                                let mut stale = stale;
-                                let stale_version = stale.version();
-                                finalize_response_with_headers_in_place(
-                                    &request_method,
-                                    stale_version,
-                                    proxy_name.as_str(),
-                                    &mut stale,
-                                    route_headers.as_deref(),
-                                    false,
-                                );
-                                http_modules.on_logging(Some(stale.status()), None).await;
-                                annotate(&mut stale, "stale_if_error");
-                                return Ok(empty_interim_response(stale));
-                            }
-                        }
-                        histogram!(state
+                    };
+                    if let Some(session) = export_session.as_ref() {
+                        let preview = crate::exporter::serialize_response_preview(&resp);
+                        session.emit_plaintext(false, &preview);
+                    }
+                    if resp.status().is_server_error()
+                        && let Some(stale) = revalidation_state
+                            .as_ref()
+                            .and_then(crate::cache::maybe_build_stale_if_error_response)
+                    {
+                        let stale = http_modules.prepare_downstream_response(stale).await?;
+                        let mut stale = stale;
+                        let stale_version = stale.version();
+                        finalize_response_with_headers_in_place(
+                            &request_method,
+                            stale_version,
+                            proxy_name.as_str(),
+                            &mut stale,
+                            route_headers.as_deref(),
+                            false,
+                        );
+                        http_modules.on_logging(Some(stale.status()), None).await;
+                        annotate(&mut stale, "stale_if_error");
+                        return Ok(empty_interim_response(stale));
+                    }
+                    histogram!(
+                        state
                             .observability
                             .metric_names
                             .reverse_upstream_latency_ms
-                            .clone())
-                        .record(started.elapsed().as_secs_f64() * 1000.0);
-                        let response_delay_secs = started.elapsed().as_secs();
-                        counter!(
-                            state.observability.metric_names.reverse_requests_total.clone(),
-                            "result" => "ok"
+                            .clone()
+                    )
+                    .record(started.elapsed().as_secs_f64() * 1000.0);
+                    let response_delay_secs = started.elapsed().as_secs();
+                    counter!(
+                        state.observability.metric_names.reverse_requests_total.clone(),
+                        "result" => "ok"
+                    )
+                    .increment(1);
+                    if let (Some(policy), Some(snapshot)) = (
+                        cache_policy.filter(|_| !response_cache_bypass),
+                        request_headers_snapshot.as_ref(),
+                    ) {
+                        resp = process_upstream_response_for_cache(
+                            resp,
+                            CacheWritebackContext {
+                                request_method: &request_method,
+                                response_delay_secs,
+                                cache_target_key: cache_target_key.as_ref(),
+                                cache_lookup_key: cache_lookup_key.as_ref(),
+                                cache_policy: Some(policy),
+                                request_headers_snapshot: snapshot,
+                                revalidation_state: revalidation_state.take(),
+                                body_read_timeout: std::time::Duration::from_millis(
+                                    runtime.state().plan.limits.upstream_http_timeout_ms.max(1),
+                                ),
+                                backends: &runtime.state().cache.backends,
+                            },
                         )
-                        .increment(1);
-                        if let (Some(policy), Some(snapshot)) = (
-                            cache_policy.filter(|_| !response_cache_bypass),
-                            request_headers_snapshot.as_ref(),
-                        ) {
-                            resp = process_upstream_response_for_cache(
-                                resp,
-                                CacheWritebackContext {
-                                    request_method: &request_method,
-                                    response_delay_secs,
-                                    cache_target_key: cache_target_key.as_ref(),
-                                    cache_lookup_key: cache_lookup_key.as_ref(),
-                                    cache_policy: Some(policy),
-                                    request_headers_snapshot: snapshot,
-                                    revalidation_state: revalidation_state.take(),
-                                    body_read_timeout: std::time::Duration::from_millis(
-                                        runtime.state().plan.limits.upstream_http_timeout_ms.max(1),
-                                    ),
-                                    backends: &runtime.state().cache.backends,
-                                },
-                            )
-                            .await?;
-                        } else if let Some(policy) = cache_policy.filter(|_| !response_cache_bypass)
-                        {
-                            crate::cache::maybe_invalidate(
-                                &request_method,
-                                resp.status(),
-                                resp.headers(),
-                                cache_target_key.as_ref(),
-                                policy,
-                                &runtime.state().cache.backends,
-                            )
-                            .await?;
-                        }
-                        resp = http_modules.prepare_downstream_response(resp).await?;
-                        let resp_version = resp.version();
-                        finalize_response_with_headers_in_place(
+                        .await?;
+                    } else if let Some(policy) = cache_policy.filter(|_| !response_cache_bypass) {
+                        crate::cache::maybe_invalidate(
                             &request_method,
-                            resp_version,
+                            resp.status(),
+                            resp.headers(),
+                            cache_target_key.as_ref(),
+                            policy,
+                            &runtime.state().cache.backends,
+                        )
+                        .await?;
+                    }
+                    resp = http_modules.prepare_downstream_response(resp).await?;
+                    let resp_version = resp.version();
+                    finalize_response_with_headers_in_place(
+                        &request_method,
+                        resp_version,
+                        proxy_name.as_str(),
+                        &mut resp,
+                        route_headers_for_response.as_deref(),
+                        false,
+                    );
+                    let should_dispatch_mirrors =
+                        response_mirror.unwrap_or(true) && !mirror_upstreams.is_empty();
+                    if should_dispatch_mirrors && let Some(template) = template.as_ref() {
+                        dispatch_mirrors(
+                            template,
+                            std::mem::take(&mut mirror_upstreams),
+                            route_timeout,
+                            route.policy.health.clone(),
+                            route.policy.lifecycle.clone(),
+                            route.upstream_trust.clone(),
                             proxy_name.as_str(),
-                            &mut resp,
-                            route_headers_for_response.as_deref(),
-                            false,
                         );
-                        let should_dispatch_mirrors =
-                            response_mirror.unwrap_or(true) && !mirror_upstreams.is_empty();
-                        if should_dispatch_mirrors {
-                            if let Some(template) = template.as_ref() {
-                                dispatch_mirrors(
-                                    template,
-                                    std::mem::take(&mut mirror_upstreams),
-                                    route_timeout,
-                                    route.policy.health.clone(),
-                                    route.policy.lifecycle.clone(),
-                                    route.upstream_trust.clone(),
-                                    proxy_name.as_str(),
-                                );
-                            }
-                        }
-                        http_modules.on_logging(Some(resp.status()), None).await;
-                        annotate_with_tags(&mut resp, "allow", response_policy_tags.as_ref());
-                        return Ok(empty_interim_response(resp));
                     }
-                    Ok(Err(err)) => {
-                        http_modules.on_error(&err).await;
-                        counter!(
-                            state.observability.metric_names.reverse_requests_total.clone(),
-                            "result" => "error"
-                        )
-                        .increment(1);
-                        last_err = Some(err);
-                    }
-                    Err(_) => {
-                        let err = anyhow!("upstream timeout");
-                        http_modules.on_error(&err).await;
-                        counter!(
-                            state.observability.metric_names.reverse_requests_total.clone(),
-                            "result" => "timeout"
-                        )
-                        .increment(1);
-                        last_err = Some(err);
-                    }
+                    http_modules.on_logging(Some(resp.status()), None).await;
+                    annotate_with_tags(&mut resp, "allow", response_policy_tags.as_ref());
+                    return Ok(empty_interim_response(resp));
                 }
+                Ok(Err(err)) => {
+                    http_modules.on_error(&err).await;
+                    counter!(
+                        state.observability.metric_names.reverse_requests_total.clone(),
+                        "result" => "error"
+                    )
+                    .increment(1);
+                    last_err = Some(err);
+                }
+                Err(_) => {
+                    let err = anyhow!("upstream timeout");
+                    http_modules.on_error(&err).await;
+                    counter!(
+                        state.observability.metric_names.reverse_requests_total.clone(),
+                        "result" => "timeout"
+                    )
+                    .increment(1);
+                    last_err = Some(err);
+                }
+            }
 
-                if attempt_idx + 1 < attempts {
-                    if !route.policy.retry_budget.try_consume_retry() {
-                        counter!(state
+            if attempt_idx + 1 < attempts {
+                if !route.policy.retry_budget.try_consume_retry() {
+                    counter!(
+                        state
                             .observability
                             .metric_names
                             .reverse_retry_budget_exhausted_total
-                            .clone())
-                        .increment(1);
-                        break;
-                    }
-                    if let Some(err) = last_err.as_ref() {
-                        let retry_reason = err.to_string();
-                        http_modules
-                            .on_retry(attempt_idx + 2, retry_reason.as_str())
-                            .await?;
-                    }
-                    if route.policy.retry_backoff > Duration::ZERO {
-                        sleep(route.policy.retry_backoff).await;
-                    }
+                            .clone()
+                    )
+                    .increment(1);
+                    break;
+                }
+                if let Some(err) = last_err.as_ref() {
+                    let retry_reason = err.to_string();
+                    http_modules
+                        .on_retry(attempt_idx + 2, retry_reason.as_str())
+                        .await?;
+                }
+                if route.policy.retry_backoff > Duration::ZERO {
+                    sleep(route.policy.retry_backoff).await;
                 }
             }
-
-            if let Some(stale) = revalidation_state
-                .as_ref()
-                .and_then(crate::cache::maybe_build_stale_if_error_response)
-            {
-                let stale = http_modules.prepare_downstream_response(stale).await?;
-                let mut stale = stale;
-                let stale_version = stale.version();
-                finalize_response_with_headers_in_place(
-                    &request_method,
-                    stale_version,
-                    proxy_name.as_str(),
-                    &mut stale,
-                    route_headers.as_deref(),
-                    false,
-                );
-                http_modules.on_logging(Some(stale.status()), None).await;
-                annotate(&mut stale, "stale_if_error");
-                return Ok(empty_interim_response(stale));
-            }
-
-            if let Some(err) = last_err.as_ref() {
-                http_modules.on_error(err).await;
-            }
-            return Err(last_err.unwrap_or_else(|| anyhow!("upstream request failed")));
         }
+
+        if let Some(stale) = revalidation_state
+            .as_ref()
+            .and_then(crate::cache::maybe_build_stale_if_error_response)
+        {
+            let stale = http_modules.prepare_downstream_response(stale).await?;
+            let mut stale = stale;
+            let stale_version = stale.version();
+            finalize_response_with_headers_in_place(
+                &request_method,
+                stale_version,
+                proxy_name.as_str(),
+                &mut stale,
+                route_headers.as_deref(),
+                false,
+            );
+            http_modules.on_logging(Some(stale.status()), None).await;
+            annotate(&mut stale, "stale_if_error");
+            return Ok(empty_interim_response(stale));
+        }
+
+        if let Some(err) = last_err.as_ref() {
+            http_modules.on_error(err).await;
+        }
+        return Err(last_err.unwrap_or_else(|| anyhow!("upstream request failed")));
     }
 
     for attempt_idx in 0..attempts {
@@ -1373,11 +1364,13 @@ pub(super) async fn dispatch_reverse_request(
                             let retry_reason = format!("upstream returned {}", response.status());
                             last_err = Some(anyhow!(retry_reason.clone()));
                             if !route.policy.retry_budget.try_consume_retry() {
-                                counter!(state
-                                    .observability
-                                    .metric_names
-                                    .reverse_retry_budget_exhausted_total
-                                    .clone())
+                                counter!(
+                                    state
+                                        .observability
+                                        .metric_names
+                                        .reverse_retry_budget_exhausted_total
+                                        .clone()
+                                )
                                 .increment(1);
                                 break;
                             }
@@ -1418,34 +1411,33 @@ pub(super) async fn dispatch_reverse_request(
                     let preview = crate::exporter::serialize_response_preview(&resp);
                     session.emit_plaintext(false, &preview);
                 }
-                if resp.status().is_server_error() {
-                    if let Some(stale) = revalidation_state
+                if resp.status().is_server_error()
+                    && let Some(stale) = revalidation_state
                         .as_ref()
                         .and_then(crate::cache::maybe_build_stale_if_error_response)
-                    {
-                        if let Some(upstream) = selected_upstream.as_ref() {
-                            record_reverse_upstream_status(
-                                upstream,
-                                &route.policy,
-                                resp.status(),
-                                started.elapsed(),
-                            );
-                        }
-                        let stale = http_modules.prepare_downstream_response(stale).await?;
-                        let mut stale = stale;
-                        let stale_version = stale.version();
-                        finalize_response_with_headers_in_place(
-                            &request_method,
-                            stale_version,
-                            proxy_name.as_str(),
-                            &mut stale,
-                            route_headers.as_deref(),
-                            false,
+                {
+                    if let Some(upstream) = selected_upstream.as_ref() {
+                        record_reverse_upstream_status(
+                            upstream,
+                            &route.policy,
+                            resp.status(),
+                            started.elapsed(),
                         );
-                        http_modules.on_logging(Some(stale.status()), None).await;
-                        annotate(&mut stale, "stale_if_error");
-                        return Ok(empty_interim_response(stale));
                     }
+                    let stale = http_modules.prepare_downstream_response(stale).await?;
+                    let mut stale = stale;
+                    let stale_version = stale.version();
+                    finalize_response_with_headers_in_place(
+                        &request_method,
+                        stale_version,
+                        proxy_name.as_str(),
+                        &mut stale,
+                        route_headers.as_deref(),
+                        false,
+                    );
+                    http_modules.on_logging(Some(stale.status()), None).await;
+                    annotate(&mut stale, "stale_if_error");
+                    return Ok(empty_interim_response(stale));
                 }
                 if let Some(upstream) = selected_upstream.as_ref() {
                     record_reverse_upstream_status(
@@ -1455,11 +1447,13 @@ pub(super) async fn dispatch_reverse_request(
                         started.elapsed(),
                     );
                 }
-                histogram!(state
-                    .observability
-                    .metric_names
-                    .reverse_upstream_latency_ms
-                    .clone())
+                histogram!(
+                    state
+                        .observability
+                        .metric_names
+                        .reverse_upstream_latency_ms
+                        .clone()
+                )
                 .record(started.elapsed().as_secs_f64() * 1000.0);
                 let response_delay_secs = started.elapsed().as_secs();
                 counter!(
@@ -1511,18 +1505,16 @@ pub(super) async fn dispatch_reverse_request(
                 );
                 let should_dispatch_mirrors =
                     response_mirror.unwrap_or(true) && !mirror_upstreams.is_empty();
-                if should_dispatch_mirrors {
-                    if let Some(template) = template.as_ref() {
-                        dispatch_mirrors(
-                            template,
-                            std::mem::take(&mut mirror_upstreams),
-                            route_timeout,
-                            route.policy.health.clone(),
-                            route.policy.lifecycle.clone(),
-                            route.upstream_trust.clone(),
-                            proxy_name.as_str(),
-                        );
-                    }
+                if should_dispatch_mirrors && let Some(template) = template.as_ref() {
+                    dispatch_mirrors(
+                        template,
+                        std::mem::take(&mut mirror_upstreams),
+                        route_timeout,
+                        route.policy.health.clone(),
+                        route.policy.lifecycle.clone(),
+                        route.upstream_trust.clone(),
+                        proxy_name.as_str(),
+                    );
                 }
                 http_modules.on_logging(Some(resp.status()), None).await;
                 annotate_with_tags(&mut resp, "allow", response_policy_tags.as_ref());
@@ -1557,11 +1549,13 @@ pub(super) async fn dispatch_reverse_request(
 
         if attempt_idx + 1 < attempts {
             if !route.policy.retry_budget.try_consume_retry() {
-                counter!(state
-                    .observability
-                    .metric_names
-                    .reverse_retry_budget_exhausted_total
-                    .clone())
+                counter!(
+                    state
+                        .observability
+                        .metric_names
+                        .reverse_retry_budget_exhausted_total
+                        .clone()
+                )
                 .increment(1);
                 break;
             }

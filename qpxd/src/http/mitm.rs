@@ -1,8 +1,8 @@
 use crate::destination::DestinationInputs;
-use crate::forward::{evaluate_forward_policy, proxy_auth_required, ForwardPolicyDecision};
+use crate::forward::{ForwardPolicyDecision, evaluate_forward_policy, proxy_auth_required};
 use crate::http::address::format_authority_host_port;
 use crate::http::base_fields::{
-    extract_base_request_fields, BaseRequestContext, BaseRequestFields,
+    BaseRequestContext, BaseRequestFields, extract_base_request_fields,
 };
 use crate::http::body::Body;
 use crate::http::body_size::observed_request_size;
@@ -15,21 +15,20 @@ use crate::http::l7::{
     handle_max_forwards_in_place, prepare_request_with_headers_in_place,
 };
 use crate::http::local_response::build_local_response;
-use crate::http::preflight::{preflight_validate, PreflightOptions, PreflightOutcome};
+use crate::http::preflight::{PreflightOptions, PreflightOutcome, preflight_validate};
 use crate::http::response_policy::{
-    apply_listener_response_policy, ListenerResponsePolicyDecision, ResponseBodyObservationLimits,
+    ListenerResponsePolicyDecision, ResponseBodyObservationLimits, apply_listener_response_policy,
 };
 use crate::http::websocket::{is_websocket_upgrade, spawn_upgrade_tunnel};
 use crate::policy_context::{
-    attach_log_context, emit_audit_log, enforce_ext_authz, merge_header_controls,
-    merge_policy_tags, resolve_identity, sanitize_headers_for_policy,
-    strip_untrusted_identity_headers, validate_ext_authz_allow_mode, AuditRecord,
-    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, attach_log_context,
+    emit_audit_log, enforce_ext_authz, merge_header_controls, merge_policy_tags, resolve_identity,
+    sanitize_headers_for_policy, strip_untrusted_identity_headers, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
 use crate::tls::UpstreamCertificateInfo;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::client::conn::http1::SendRequest;
 use hyper::{Request, Response};
 use qpx_core::config::ActionKind;
@@ -37,7 +36,7 @@ use qpx_core::prefilter::MatchPrefilterContext;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 #[path = "mitm_dispatch.rs"]
 mod mitm_dispatch;

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use qpx_core::config::ReverseEdgeConfig;
 #[cfg(feature = "tls-rustls")]
 use std::sync::Arc;

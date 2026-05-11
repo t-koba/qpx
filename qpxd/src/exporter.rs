@@ -5,12 +5,12 @@ use anyhow::Result;
 use hyper::{Request, Response};
 use metrics::counter;
 use qpx_core::config::{CaptureRedactionConfig, ExporterConfig};
-use qpx_core::exporter::{unix_timestamp_nanos, CaptureDirection, CaptureEvent, CapturePlane};
+use qpx_core::exporter::{CaptureDirection, CaptureEvent, CapturePlane, unix_timestamp_nanos};
 use qpx_core::shm_ring::ShmRingBuffer;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -195,16 +195,15 @@ impl CaptureRedaction {
                 out.push_str(self.redact_request_line(line).as_str());
                 continue;
             }
-            if let Some((name, _)) = line.split_once(':') {
-                if self
+            if let Some((name, _)) = line.split_once(':')
+                && self
                     .headers
                     .iter()
                     .any(|header| header.eq_ignore_ascii_case(name.trim()))
-                {
-                    out.push_str(name);
-                    out.push_str(": <redacted>\r\n");
-                    continue;
-                }
+            {
+                out.push_str(name);
+                out.push_str(": <redacted>\r\n");
+                continue;
             }
             out.push_str(line);
         }
@@ -595,11 +594,13 @@ mod tests {
         assert!(session.capture_plaintext);
         assert!(!session.capture_encrypted);
         assert_eq!(session.max_plaintext_bytes, Some(4));
-        assert!(session
-            .redaction
-            .headers
-            .iter()
-            .any(|header| header == "x-secret"));
+        assert!(
+            session
+                .redaction
+                .headers
+                .iter()
+                .any(|header| header == "x-secret")
+        );
     }
 
     #[test]

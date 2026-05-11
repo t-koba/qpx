@@ -1,11 +1,11 @@
 use super::RuntimeResources;
-use crate::http::guard::{compile_http_guard_profile, CompiledHttpGuardProfile};
-use crate::http::modules::{compile_http_modules, CompiledHttpModuleChain};
+use crate::http::guard::{CompiledHttpGuardProfile, compile_http_guard_profile};
+use crate::http::modules::{CompiledHttpModuleChain, compile_http_modules};
 use crate::http::response_policy::HttpResponseRuleEngine;
 use crate::policy_context::EffectivePolicyContext;
 use crate::rate_limit::{CompiledRateLimitPlan, RateLimitSet};
 use crate::tls::trust::CompiledUpstreamTlsTrust;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use qpx_core::config::{
     ActionKind, CaptureRedactionConfig, DestinationResolutionOverrideConfig, FtpConfig,
     IngressEdgeConfig, IngressEdgeMode, ReverseRouteConfig, ReverseRouteTargetConfig,
@@ -434,6 +434,17 @@ pub struct PlanCompiler<'a> {
     pub config: &'a RuntimeResources,
 }
 
+struct ExecutionPlanInputs<'a> {
+    policy_context: EffectivePolicyContext,
+    destination_resolution: Option<&'a qpx_core::config::DestinationResolutionOverrideConfig>,
+    http_guard_profile: Option<&'a str>,
+    cache: Option<&'a qpx_core::config::CachePolicyConfig>,
+    capture: Option<&'a qpx_core::config::CapturePolicyConfig>,
+    rate_limit: Option<&'a qpx_core::config::RateLimitConfig>,
+    http: Option<&'a qpx_core::config::HttpPolicyConfig>,
+    http_modules: &'a [qpx_core::config::HttpModuleConfig],
+}
+
 impl<'a> PlanCompiler<'a> {
     pub fn compile(&self) -> Result<RuntimePlan> {
         let mut edges = Vec::new();
@@ -442,14 +453,18 @@ impl<'a> PlanCompiler<'a> {
             let ingress_edge_settings = compile_ingress_edge_settings(listener)?;
             let default_plan = execution_plan_for_forward_action(
                 self.config,
-                EffectivePolicyContext::from_single(listener.policy_context.as_ref()),
-                listener.destination_resolution.as_ref(),
-                listener.http_guard_profile.as_deref(),
-                listener.cache.as_ref(),
-                listener.capture.as_ref(),
-                listener.rate_limit.as_ref(),
-                listener.http.as_ref(),
-                listener.http_modules.as_slice(),
+                ExecutionPlanInputs {
+                    policy_context: EffectivePolicyContext::from_single(
+                        listener.policy_context.as_ref(),
+                    ),
+                    destination_resolution: listener.destination_resolution.as_ref(),
+                    http_guard_profile: listener.http_guard_profile.as_deref(),
+                    cache: listener.cache.as_ref(),
+                    capture: listener.capture.as_ref(),
+                    rate_limit: listener.rate_limit.as_ref(),
+                    http: listener.http.as_ref(),
+                    http_modules: listener.http_modules.as_slice(),
+                },
                 Some(&listener.default_action.kind),
             )?;
             let listener_rate_limits = RateLimitSet::from_config(listener.rate_limit.as_ref());
@@ -466,14 +481,18 @@ impl<'a> PlanCompiler<'a> {
                     let (matcher, _) = CompiledMatch::compile(&match_cfg, &mut interner)?;
                     let mut plan = execution_plan_for_forward_action(
                         self.config,
-                        EffectivePolicyContext::from_single(listener.policy_context.as_ref()),
-                        listener.destination_resolution.as_ref(),
-                        listener.http_guard_profile.as_deref(),
-                        listener.cache.as_ref(),
-                        listener.capture.as_ref(),
-                        rule.rate_limit.as_ref().or(listener.rate_limit.as_ref()),
-                        listener.http.as_ref(),
-                        listener.http_modules.as_slice(),
+                        ExecutionPlanInputs {
+                            policy_context: EffectivePolicyContext::from_single(
+                                listener.policy_context.as_ref(),
+                            ),
+                            destination_resolution: listener.destination_resolution.as_ref(),
+                            http_guard_profile: listener.http_guard_profile.as_deref(),
+                            cache: listener.cache.as_ref(),
+                            capture: listener.capture.as_ref(),
+                            rate_limit: rule.rate_limit.as_ref().or(listener.rate_limit.as_ref()),
+                            http: listener.http.as_ref(),
+                            http_modules: listener.http_modules.as_slice(),
+                        },
                         rule.action.as_ref().map(|a| &a.kind),
                     )?;
                     plan.rate_limits = CompiledRateLimitPlan::from_sets(
@@ -674,21 +693,23 @@ fn execution_plan_for_reverse_route(
 ) -> Result<ExecutionPlan> {
     let mut plan = execution_plan_for_common(
         config,
-        EffectivePolicyContext::merged(
-            reverse_edges.policy_context.as_ref(),
-            route.policy_context.as_ref(),
-        ),
-        merge_destination_resolution_override(
-            reverse_edges.destination_resolution.as_ref(),
-            route.destination_resolution.as_ref(),
-        )
-        .as_ref(),
-        route.http_guard_profile.as_deref(),
-        route.cache.as_ref(),
-        route.capture.as_ref(),
-        route.rate_limit.as_ref(),
-        route.http.as_ref(),
-        route.http_modules.as_slice(),
+        ExecutionPlanInputs {
+            policy_context: EffectivePolicyContext::merged(
+                reverse_edges.policy_context.as_ref(),
+                route.policy_context.as_ref(),
+            ),
+            destination_resolution: merge_destination_resolution_override(
+                reverse_edges.destination_resolution.as_ref(),
+                route.destination_resolution.as_ref(),
+            )
+            .as_ref(),
+            http_guard_profile: route.http_guard_profile.as_deref(),
+            cache: route.cache.as_ref(),
+            capture: route.capture.as_ref(),
+            rate_limit: route.rate_limit.as_ref(),
+            http: route.http.as_ref(),
+            http_modules: route.http_modules.as_slice(),
+        },
     )?;
     plan.rate_limits = CompiledRateLimitPlan::from_sets(
         RateLimitSet::default(),
@@ -711,30 +732,12 @@ fn execution_plan_for_reverse_route(
     Ok(plan)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn execution_plan_for_forward_action(
     config: &RuntimeResources,
-    policy_context: EffectivePolicyContext,
-    destination_resolution: Option<&qpx_core::config::DestinationResolutionOverrideConfig>,
-    http_guard_profile: Option<&str>,
-    cache: Option<&qpx_core::config::CachePolicyConfig>,
-    capture: Option<&qpx_core::config::CapturePolicyConfig>,
-    rate_limit: Option<&qpx_core::config::RateLimitConfig>,
-    http: Option<&qpx_core::config::HttpPolicyConfig>,
-    http_modules: &[qpx_core::config::HttpModuleConfig],
+    inputs: ExecutionPlanInputs<'_>,
     action_kind: Option<&ActionKind>,
 ) -> Result<ExecutionPlan> {
-    let mut plan = execution_plan_for_common(
-        config,
-        policy_context,
-        destination_resolution,
-        http_guard_profile,
-        cache,
-        capture,
-        rate_limit,
-        http,
-        http_modules,
-    )?;
+    let mut plan = execution_plan_for_common(config, inputs)?;
     if matches!(action_kind, Some(ActionKind::Tunnel)) {
         plan.flags.insert(PlanFlags::WEBSOCKET);
     }
@@ -769,34 +772,26 @@ fn compile_ingress_edge_settings(listener: &IngressEdgeConfig) -> Result<Compile
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn execution_plan_for_common(
     config: &RuntimeResources,
-    policy_context: EffectivePolicyContext,
-    destination_resolution: Option<&qpx_core::config::DestinationResolutionOverrideConfig>,
-    http_guard_profile: Option<&str>,
-    cache: Option<&qpx_core::config::CachePolicyConfig>,
-    capture: Option<&qpx_core::config::CapturePolicyConfig>,
-    rate_limit: Option<&qpx_core::config::RateLimitConfig>,
-    http: Option<&qpx_core::config::HttpPolicyConfig>,
-    http_modules: &[qpx_core::config::HttpModuleConfig],
+    inputs: ExecutionPlanInputs<'_>,
 ) -> Result<ExecutionPlan> {
     let mut plan = ExecutionPlan::empty();
-    plan.modules = compile_http_modules(http_modules, config.http_module_registry().as_ref())?;
-    plan.cache = cache.filter(|cache| cache.enabled).cloned();
-    plan.destination_resolution = destination_resolution.cloned();
-    plan.policy_context = policy_context;
+    plan.modules =
+        compile_http_modules(inputs.http_modules, config.http_module_registry().as_ref())?;
+    plan.cache = inputs.cache.filter(|cache| cache.enabled).cloned();
+    plan.destination_resolution = inputs.destination_resolution.cloned();
+    plan.policy_context = inputs.policy_context;
     if let Some(exporter) = config
         .operational
         .telemetry
         .exporter
         .as_ref()
         .filter(|exporter| exporter.enabled)
+        && exporter.capture.encrypted
     {
-        if exporter.capture.encrypted {
-            plan.flags.insert(PlanFlags::CAPTURE_ENCRYPTED);
-            plan.capture.encrypted = true;
-        }
+        plan.flags.insert(PlanFlags::CAPTURE_ENCRYPTED);
+        plan.capture.encrypted = true;
     }
     if !plan.policy_context.identity_sources.is_empty() {
         plan.flags.insert(PlanFlags::IDENTITY_SOURCES);
@@ -807,7 +802,8 @@ fn execution_plan_for_common(
     if plan.destination_resolution.is_some() {
         plan.flags.insert(PlanFlags::DESTINATION_INTEL);
     }
-    plan.guard = http_guard_profile
+    plan.guard = inputs
+        .http_guard_profile
         .map(|name| {
             config
                 .operational
@@ -826,7 +822,7 @@ fn execution_plan_for_common(
         plan.flags.insert(PlanFlags::CACHE_LOOKUP);
         plan.flags.insert(PlanFlags::CACHE_STORE);
     }
-    if let Some(capture) = capture {
+    if let Some(capture) = inputs.capture {
         if capture.encrypted {
             plan.flags.insert(PlanFlags::CAPTURE_ENCRYPTED);
             plan.capture.encrypted = true;
@@ -858,10 +854,16 @@ fn execution_plan_for_common(
             }
         }
     }
-    if rate_limit.as_ref().map(|r| r.enabled).unwrap_or(false) {
+    if inputs
+        .rate_limit
+        .as_ref()
+        .map(|r| r.enabled)
+        .unwrap_or(false)
+    {
         plan.flags.insert(PlanFlags::REQUEST_BODY_OBSERVE);
     }
-    plan.response_rules = http
+    plan.response_rules = inputs
+        .http
         .as_ref()
         .and_then(|http| HttpResponseRuleEngine::new(http.response_rules.as_slice()).transpose())
         .transpose()?

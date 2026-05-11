@@ -396,14 +396,18 @@ async fn response_rule_can_force_local_response_and_merge_headers() {
         } => {
             assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
             let headers = route_headers.expect("merged headers");
-            assert!(headers
-                .response_set()
-                .iter()
-                .any(|(name, value)| name == "x-base" && value == "route"));
-            assert!(headers
-                .response_set()
-                .iter()
-                .any(|(name, value)| name == "x-rule" && value == "local"));
+            assert!(
+                headers
+                    .response_set()
+                    .iter()
+                    .any(|(name, value)| name == "x-base" && value == "route")
+            );
+            assert!(
+                headers
+                    .response_set()
+                    .iter()
+                    .any(|(name, value)| name == "x-rule" && value == "local")
+            );
         }
         ResponseRuleDecision::Continue { .. } => panic!("expected local response"),
     }
@@ -1538,8 +1542,9 @@ async fn reverse_route_http_module_compresses_responses() {
             http_guard_profile: None,
             destination_resolution: None,
             resilience: None,
-            http_modules: vec![serde_yaml::from_str(
-                r#"type: response_compression
+            http_modules: vec![
+                serde_yaml::from_str(
+                    r#"type: response_compression
 settings:
   min_body_bytes: 1
   max_body_bytes: 65536
@@ -1551,8 +1556,9 @@ settings:
   gzip_level: 6
   brotli_level: 5
   zstd_level: 3"#,
-            )
-            .expect("http module config")],
+                )
+                .expect("http module config"),
+            ],
         }],
         tls_passthrough_routes: Vec::new(),
     };
@@ -1679,8 +1685,9 @@ async fn reverse_route_http_module_can_inject_subrequest_headers() {
             http_guard_profile: None,
             destination_resolution: None,
             resilience: None,
-            http_modules: vec![serde_yaml::from_str(&format!(
-                r#"type: subrequest
+            http_modules: vec![
+                serde_yaml::from_str(&format!(
+                    r#"type: subrequest
 settings:
   name: header-inject
   phase: response_headers
@@ -1692,8 +1699,9 @@ settings:
   copy_response_headers_to_response:
     - from: x-decision
       to: x-module-decision"#
-            ))
-            .expect("http module config")],
+                ))
+                .expect("http module config"),
+            ],
         }],
         tls_passthrough_routes: Vec::new(),
     };

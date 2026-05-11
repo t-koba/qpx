@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -321,15 +321,15 @@ impl<'ast> Visit<'ast> for FinalizeVisitor {
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if let Expr::Path(path) = node.func.as_ref() {
-            if let Some(segment) = path.path.segments.last() {
-                let ident = segment.ident.to_string();
-                if ident.starts_with("finalize_response") {
-                    self.calls.push(FinalizeCall {
-                        enclosing_fn: self.current_fn(),
-                        callee: ident,
-                    });
-                }
+        if let Expr::Path(path) = node.func.as_ref()
+            && let Some(segment) = path.path.segments.last()
+        {
+            let ident = segment.ident.to_string();
+            if ident.starts_with("finalize_response") {
+                self.calls.push(FinalizeCall {
+                    enclosing_fn: self.current_fn(),
+                    callee: ident,
+                });
             }
         }
         syn::visit::visit_expr_call(self, node);

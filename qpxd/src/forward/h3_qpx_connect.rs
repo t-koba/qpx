@@ -13,20 +13,20 @@ use crate::http::common::{
 };
 use crate::http::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord, ExtAuthzEnforcement,
-    ExtAuthzInput, ExtAuthzMode,
+    sanitize_headers_for_policy, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::{ActionConfig, ActionKind, ConnectUdpConfig};
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
 use qpx_observability::access_log::RequestLogContext;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::{lookup_host, UdpSocket};
-use tokio::time::{timeout, Duration};
+use tokio::net::{UdpSocket, lookup_host};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 #[derive(Debug)]

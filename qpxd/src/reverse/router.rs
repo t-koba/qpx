@@ -1,6 +1,6 @@
 use super::health::{
-    now_millis, probe_upstream, EndpointLifecycleRuntime, HealthCheckRuntime, PassiveHealthRuntime,
-    UpstreamEndpoint,
+    EndpointLifecycleRuntime, HealthCheckRuntime, PassiveHealthRuntime, UpstreamEndpoint,
+    now_millis, probe_upstream,
 };
 use crate::http::body::Body;
 use crate::http::modules::HttpModuleRegistry;
@@ -23,10 +23,10 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use tokio::sync::watch;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use crate::ipc_client::IpcUpstream;

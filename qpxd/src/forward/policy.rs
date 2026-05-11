@@ -1,6 +1,6 @@
 use crate::auth_runtime::{AuthChallenge, AuthOutcome, AuthenticatedUser};
 use crate::runtime::Runtime;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::HeaderMap;
 use qpx_core::config::ActionConfig;
 use qpx_core::rules::CompiledHeaderControl;
@@ -85,9 +85,11 @@ pub(crate) async fn evaluate_forward_policy(
                         }
                         authenticated_user = Some(user);
                     }
+                    #[cfg(feature = "auth-basic")]
                     AuthOutcome::Challenge(challenge) => {
-                        return Ok(ForwardPolicyDecision::Challenge(challenge))
+                        return Ok(ForwardPolicyDecision::Challenge(challenge));
                     }
+                    #[cfg(feature = "auth-basic")]
                     AuthOutcome::Denied(_) => return Ok(ForwardPolicyDecision::Forbidden),
                 }
             } else if !auth_cfg.groups.is_empty() {
@@ -125,10 +127,10 @@ fn normalized_require_key(require: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::runtime::Runtime;
-    use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
-    use hyper::header::HeaderValue;
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use hyper::HeaderMap;
+    use hyper::header::HeaderValue;
     use qpx_core::config::{
         ActionConfig, ActionKind, AuthConfig, Config, DecisionConfig, HttpGlobalConfig,
         IdentityConfig, IngressEdgeConfig, IngressEdgeMode, LocalUser, MessagesConfig,

@@ -6,11 +6,11 @@ use crate::tls::{
 };
 use crate::{
     connection_filter::{
-        emit_connection_filter_audit, evaluate_connection_filter, ConnectionFilterStage,
+        ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
     },
     runtime::metric_names,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use metrics::{counter, histogram};
 use qpx_core::config::IngressEdgeConfig;
@@ -32,7 +32,7 @@ mod udp_path;
 #[cfg(feature = "http3")]
 pub(crate) mod udp_socket;
 
-use self::destination::{destination_resolver_for_listener, DestinationResolver};
+use self::destination::{DestinationResolver, destination_resolver_for_listener};
 
 pub async fn run_tcp(
     listener: IngressEdgeConfig,
@@ -283,11 +283,13 @@ async fn handle_connection(
                     "result" => outcome.metric_result()
                 )
                 .increment(1);
-                histogram!(state
-                    .observability
-                    .metric_names
-                    .transparent_latency_ms
-                    .clone())
+                histogram!(
+                    state
+                        .observability
+                        .metric_names
+                        .transparent_latency_ms
+                        .clone()
+                )
                 .record(started.elapsed().as_secs_f64() * 1000.0);
                 return Ok(());
             }
@@ -318,11 +320,13 @@ async fn handle_connection(
             "result" => "ok"
         )
         .increment(1);
-        histogram!(state
-            .observability
-            .metric_names
-            .transparent_latency_ms
-            .clone())
+        histogram!(
+            state
+                .observability
+                .metric_names
+                .transparent_latency_ms
+                .clone()
+        )
         .record(started.elapsed().as_secs_f64() * 1000.0);
     } else {
         let state = runtime.state();

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
@@ -413,18 +413,16 @@ fn load_cert_into_store(state: &AcmeRuntime, sni: &str) -> Result<()> {
 }
 
 async fn load_or_create_account(state: &AcmeRuntime) -> Result<Account> {
-    if let Ok(data) = fs::read(&state.account_path) {
-        if !data.is_empty() {
-            let credentials: AccountCredentials =
-                serde_json::from_slice(&data).with_context(|| {
-                    format!("invalid acme account {}", state.account_path.display())
-                })?;
-            let builder = Account::builder().with_context(|| "acme client init failed")?;
-            return builder
-                .from_credentials(credentials)
-                .await
-                .with_context(|| "failed to load acme account credentials");
-        }
+    if let Ok(data) = fs::read(&state.account_path)
+        && !data.is_empty()
+    {
+        let credentials: AccountCredentials = serde_json::from_slice(&data)
+            .with_context(|| format!("invalid acme account {}", state.account_path.display()))?;
+        let builder = Account::builder().with_context(|| "acme client init failed")?;
+        return builder
+            .from_credentials(credentials)
+            .await
+            .with_context(|| "failed to load acme account credentials");
     }
 
     let contact = state
@@ -454,16 +452,17 @@ async fn load_or_create_account(state: &AcmeRuntime) -> Result<Account> {
 
 async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -> Result<()> {
     let (cert_path, key_path) = cert_paths_for_sni(state, sni);
-    if cert_path.exists() && key_path.exists() {
-        if let Ok(not_after) = read_leaf_not_after(&cert_path) {
-            match should_renew(not_after, state.renew_before_days) {
-                Ok(false) => {
-                    let _ = load_cert_into_store(state, sni);
-                    return Ok(());
-                }
-                Ok(true) => {}
-                Err(_) => {}
+    if cert_path.exists()
+        && key_path.exists()
+        && let Ok(not_after) = read_leaf_not_after(&cert_path)
+    {
+        match should_renew(not_after, state.renew_before_days) {
+            Ok(false) => {
+                let _ = load_cert_into_store(state, sni);
+                return Ok(());
             }
+            Ok(true) => {}
+            Err(_) => {}
         }
     }
 
@@ -698,13 +697,13 @@ fn write_bytes_file(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
     #[cfg(not(unix))]
     {
         let _ = mode;
-        if let Ok(meta) = fs::symlink_metadata(path) {
-            if meta.file_type().is_symlink() {
-                return Err(anyhow!(
-                    "refusing to write through symlink path {}",
-                    path.display()
-                ));
-            }
+        if let Ok(meta) = fs::symlink_metadata(path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(anyhow!(
+                "refusing to write through symlink path {}",
+                path.display()
+            ));
         }
         fs::write(path, contents)?;
         Ok(())

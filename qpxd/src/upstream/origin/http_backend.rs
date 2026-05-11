@@ -1,10 +1,10 @@
 use crate::http::body::Body;
 use ::http::{Request as Http1Request, Response as Http1Response};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use hyper::header::{HeaderValue, HOST};
+use hyper::header::{HOST, HeaderValue};
 use hyper::{Request, Response, Uri};
-use std::future::{poll_fn, Future};
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -20,21 +20,21 @@ use crate::http::l7::prepare_request_with_headers_in_place;
 use crate::tls::client::connect_tls_h2_h1_with_info_with_options;
 use crate::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
 use crate::upstream::raw_http1::{
-    send_http1_request_with_interim_reusable, Http1ConnectionRecycler, Http1ResponseWithInterim,
+    Http1ConnectionRecycler, Http1ResponseWithInterim, send_http1_request_with_interim_reusable,
 };
 
-use super::dispatch::{origin_scheme, OriginScheme};
-use super::ipc_backend::proxy_ipc_with_interim;
 use super::OriginEndpoint;
+use super::dispatch::{OriginScheme, origin_scheme};
+use super::ipc_backend::proxy_ipc_with_interim;
 
 #[path = "http_pool.rs"]
 mod http_pool;
 
 pub(crate) use self::http_pool::clear_direct_origin_connection_pools;
 use self::http_pool::{
-    https_origin_pool_key, https_origin_slot, plain_http_origin_pool_key, plain_http_origin_slot,
+    SharedTlsH2OriginConnection, TlsHttp1OriginConnection, https_origin_pool_key,
+    https_origin_slot, plain_http_origin_pool_key, plain_http_origin_slot,
     spawn_origin_h2_connection_task, try_take_ready_h2_sender, wait_for_h2_sender,
-    SharedTlsH2OriginConnection, TlsHttp1OriginConnection,
 };
 
 pub(crate) async fn proxy_http(
@@ -116,100 +116,100 @@ impl SharedReverseHttpsClient {
             return Ok(proxied.response);
         }
 
-        if slot.has_h2_connections() {
-            if let Some(reservation) = slot.try_reserve_h2_connection() {
-                match open_https_origin_stream(authority.as_str(), target.host.as_str(), true, None)
-                    .await
-                {
-                    Ok((tls, negotiated_h2, upstream_cert)) => {
-                        if negotiated_h2 {
-                            let (sender, connection) =
-                                match h2::client::Builder::new().handshake(tls).await {
-                                    Ok(handshake) => handshake,
-                                    Err(err) => return Err(err.into()),
-                                };
-                            spawn_origin_h2_connection_task(connection);
-                            let shared_h2 = Arc::new(SharedTlsH2OriginConnection {
-                                sender: sender.clone(),
-                                upstream_cert: upstream_cert.clone(),
-                                inflight_streams: Arc::new(AtomicUsize::new(0)),
-                            });
-                            reservation.complete(shared_h2.clone());
-                            let req = prepare_internal_h2_request(
-                                req,
-                                target.scheme.as_str(),
-                                authority.as_str(),
-                            )?;
-                            let ready = match sender.ready().await {
-                                Ok(ready) => ready,
-                                Err(err) => {
-                                    slot.remove_h2_connection(&shared_h2);
-                                    return Err(err.into());
-                                }
+        if slot.has_h2_connections()
+            && let Some(reservation) = slot.try_reserve_h2_connection()
+        {
+            match open_https_origin_stream(authority.as_str(), target.host.as_str(), true, None)
+                .await
+            {
+                Ok((tls, negotiated_h2, upstream_cert)) => {
+                    if negotiated_h2 {
+                        let (sender, connection) =
+                            match h2::client::Builder::new().handshake(tls).await {
+                                Ok(handshake) => handshake,
+                                Err(err) => return Err(err.into()),
                             };
-                            let mut proxied = send_h2_request_with_sender(
-                                req,
-                                ready,
-                                Some(upstream_cert),
-                                Some(shared_h2.inflight_streams.clone()),
-                            )
-                            .await?;
-                            if !proxied.interim.is_empty() {
-                                proxied.response.extensions_mut().insert(proxied.interim);
-                            }
-                            return Ok(proxied.response);
-                        }
-                        drop(reservation);
-                        let req = prepare_internal_http1_request(req, authority.as_str())?;
-                        let mut proxied = send_http1_request_with_interim_reusable(
-                            tls,
+                        spawn_origin_h2_connection_task(connection);
+                        let shared_h2 = Arc::new(SharedTlsH2OriginConnection {
+                            sender: sender.clone(),
+                            upstream_cert: upstream_cert.clone(),
+                            inflight_streams: Arc::new(AtomicUsize::new(0)),
+                        });
+                        reservation.complete(shared_h2.clone());
+                        let req = prepare_internal_h2_request(
                             req,
-                            Http1ConnectionRecycler::new({
-                                let idle = slot.http1_idle.clone();
-                                let upstream_cert = upstream_cert.clone();
-                                move |stream| {
-                                    let idle = idle.clone();
-                                    let upstream_cert = upstream_cert.clone();
-                                    async move {
-                                        idle.lock().await.push(TlsHttp1OriginConnection {
-                                            stream,
-                                            upstream_cert,
-                                        });
-                                    }
-                                }
-                            }),
+                            target.scheme.as_str(),
+                            authority.as_str(),
+                        )?;
+                        let ready = match sender.ready().await {
+                            Ok(ready) => ready,
+                            Err(err) => {
+                                slot.remove_h2_connection(&shared_h2);
+                                return Err(err.into());
+                            }
+                        };
+                        let mut proxied = send_h2_request_with_sender(
+                            req,
+                            ready,
+                            Some(upstream_cert),
+                            Some(shared_h2.inflight_streams.clone()),
                         )
                         .await?;
                         if !proxied.interim.is_empty() {
                             proxied.response.extensions_mut().insert(proxied.interim);
                         }
-                        proxied.upstream_cert = Some(upstream_cert);
                         return Ok(proxied.response);
                     }
-                    Err(err) => {
-                        drop(reservation);
-                        if let Some((shared_h2, ready)) =
-                            wait_for_h2_sender(&slot, authority.as_str()).await
-                        {
-                            let req = prepare_internal_h2_request(
-                                req,
-                                target.scheme.as_str(),
-                                authority.as_str(),
-                            )?;
-                            let mut proxied = send_h2_request_with_sender(
-                                req,
-                                ready,
-                                Some(shared_h2.upstream_cert.clone()),
-                                Some(shared_h2.inflight_streams.clone()),
-                            )
-                            .await?;
-                            if !proxied.interim.is_empty() {
-                                proxied.response.extensions_mut().insert(proxied.interim);
+                    drop(reservation);
+                    let req = prepare_internal_http1_request(req, authority.as_str())?;
+                    let mut proxied = send_http1_request_with_interim_reusable(
+                        tls,
+                        req,
+                        Http1ConnectionRecycler::new({
+                            let idle = slot.http1_idle.clone();
+                            let upstream_cert = upstream_cert.clone();
+                            move |stream| {
+                                let idle = idle.clone();
+                                let upstream_cert = upstream_cert.clone();
+                                async move {
+                                    idle.lock().await.push(TlsHttp1OriginConnection {
+                                        stream,
+                                        upstream_cert,
+                                    });
+                                }
                             }
-                            return Ok(proxied.response);
-                        }
-                        return Err(err);
+                        }),
+                    )
+                    .await?;
+                    if !proxied.interim.is_empty() {
+                        proxied.response.extensions_mut().insert(proxied.interim);
                     }
+                    proxied.upstream_cert = Some(upstream_cert);
+                    return Ok(proxied.response);
+                }
+                Err(err) => {
+                    drop(reservation);
+                    if let Some((shared_h2, ready)) =
+                        wait_for_h2_sender(&slot, authority.as_str()).await
+                    {
+                        let req = prepare_internal_h2_request(
+                            req,
+                            target.scheme.as_str(),
+                            authority.as_str(),
+                        )?;
+                        let mut proxied = send_h2_request_with_sender(
+                            req,
+                            ready,
+                            Some(shared_h2.upstream_cert.clone()),
+                            Some(shared_h2.inflight_streams.clone()),
+                        )
+                        .await?;
+                        if !proxied.interim.is_empty() {
+                            proxied.response.extensions_mut().insert(proxied.interim);
+                        }
+                        return Ok(proxied.response);
+                    }
+                    return Err(err);
                 }
             }
         }
@@ -415,105 +415,104 @@ async fn proxy_https_with_options(
         return proxied;
     }
 
-    if slot.has_h2_connections() {
-        if let Some(reservation) = slot.try_reserve_h2_connection() {
-            match open_https_origin_stream(
-                connect_authority.as_str(),
-                server_name.as_str(),
-                verify_upstream_cert,
-                trust,
-            )
-            .await
-            {
-                Ok((tls, negotiated_h2, upstream_cert)) => {
-                    if negotiated_h2 {
-                        let req = prepare_proxy_h2_request(
-                            req,
-                            "https",
-                            host_authority.as_str(),
-                            proxy_name,
-                        )?;
-                        let (sender, connection) =
-                            match h2::client::Builder::new().handshake(tls).await {
-                                Ok(handshake) => handshake,
-                                Err(err) => return Err(err.into()),
-                            };
-                        spawn_origin_h2_connection_task(connection);
-                        let shared_h2 = Arc::new(SharedTlsH2OriginConnection {
-                            sender: sender.clone(),
-                            upstream_cert: upstream_cert.clone(),
-                            inflight_streams: Arc::new(AtomicUsize::new(0)),
-                        });
-                        reservation.complete(shared_h2.clone());
-                        let ready = match sender.ready().await {
-                            Ok(ready) => ready,
-                            Err(err) => {
-                                slot.remove_h2_connection(&shared_h2);
-                                return Err(err.into());
-                            }
-                        };
-                        let proxied = send_h2_request_with_sender(
-                            req,
-                            ready,
-                            Some(upstream_cert),
-                            Some(shared_h2.inflight_streams.clone()),
-                        )
-                        .await;
-                        if proxied.is_err() {
-                            slot.remove_h2_connection(&shared_h2);
-                        }
-                        return proxied;
-                    }
-                    drop(reservation);
-                    let req =
-                        prepare_proxy_http1_request(req, host_authority.as_str(), proxy_name)?;
-                    let mut proxied = send_http1_request_with_interim_reusable(
-                        tls,
+    if slot.has_h2_connections()
+        && let Some(reservation) = slot.try_reserve_h2_connection()
+    {
+        match open_https_origin_stream(
+            connect_authority.as_str(),
+            server_name.as_str(),
+            verify_upstream_cert,
+            trust,
+        )
+        .await
+        {
+            Ok((tls, negotiated_h2, upstream_cert)) => {
+                if negotiated_h2 {
+                    let req = prepare_proxy_h2_request(
                         req,
-                        Http1ConnectionRecycler::new({
-                            let idle = slot.http1_idle.clone();
-                            let upstream_cert = upstream_cert.clone();
-                            move |stream| {
-                                let idle = idle.clone();
-                                let upstream_cert = upstream_cert.clone();
-                                async move {
-                                    idle.lock().await.push(TlsHttp1OriginConnection {
-                                        stream,
-                                        upstream_cert,
-                                    });
-                                }
-                            }
-                        }),
-                    )
-                    .await?;
-                    proxied.upstream_cert = Some(upstream_cert);
-                    return Ok(proxied);
-                }
-                Err(err) => {
-                    drop(reservation);
-                    if let Some((shared_h2, ready)) =
-                        wait_for_h2_sender(&slot, connect_authority.as_str()).await
+                        "https",
+                        host_authority.as_str(),
+                        proxy_name,
+                    )?;
+                    let (sender, connection) = match h2::client::Builder::new().handshake(tls).await
                     {
-                        let req = prepare_proxy_h2_request(
-                            req,
-                            "https",
-                            host_authority.as_str(),
-                            proxy_name,
-                        )?;
-                        let proxied = send_h2_request_with_sender(
-                            req,
-                            ready,
-                            Some(shared_h2.upstream_cert.clone()),
-                            Some(shared_h2.inflight_streams.clone()),
-                        )
-                        .await;
-                        if proxied.is_err() {
+                        Ok(handshake) => handshake,
+                        Err(err) => return Err(err.into()),
+                    };
+                    spawn_origin_h2_connection_task(connection);
+                    let shared_h2 = Arc::new(SharedTlsH2OriginConnection {
+                        sender: sender.clone(),
+                        upstream_cert: upstream_cert.clone(),
+                        inflight_streams: Arc::new(AtomicUsize::new(0)),
+                    });
+                    reservation.complete(shared_h2.clone());
+                    let ready = match sender.ready().await {
+                        Ok(ready) => ready,
+                        Err(err) => {
                             slot.remove_h2_connection(&shared_h2);
+                            return Err(err.into());
                         }
-                        return proxied;
+                    };
+                    let proxied = send_h2_request_with_sender(
+                        req,
+                        ready,
+                        Some(upstream_cert),
+                        Some(shared_h2.inflight_streams.clone()),
+                    )
+                    .await;
+                    if proxied.is_err() {
+                        slot.remove_h2_connection(&shared_h2);
                     }
-                    return Err(err);
+                    return proxied;
                 }
+                drop(reservation);
+                let req = prepare_proxy_http1_request(req, host_authority.as_str(), proxy_name)?;
+                let mut proxied = send_http1_request_with_interim_reusable(
+                    tls,
+                    req,
+                    Http1ConnectionRecycler::new({
+                        let idle = slot.http1_idle.clone();
+                        let upstream_cert = upstream_cert.clone();
+                        move |stream| {
+                            let idle = idle.clone();
+                            let upstream_cert = upstream_cert.clone();
+                            async move {
+                                idle.lock().await.push(TlsHttp1OriginConnection {
+                                    stream,
+                                    upstream_cert,
+                                });
+                            }
+                        }
+                    }),
+                )
+                .await?;
+                proxied.upstream_cert = Some(upstream_cert);
+                return Ok(proxied);
+            }
+            Err(err) => {
+                drop(reservation);
+                if let Some((shared_h2, ready)) =
+                    wait_for_h2_sender(&slot, connect_authority.as_str()).await
+                {
+                    let req = prepare_proxy_h2_request(
+                        req,
+                        "https",
+                        host_authority.as_str(),
+                        proxy_name,
+                    )?;
+                    let proxied = send_h2_request_with_sender(
+                        req,
+                        ready,
+                        Some(shared_h2.upstream_cert.clone()),
+                        Some(shared_h2.inflight_streams.clone()),
+                    )
+                    .await;
+                    if proxied.is_err() {
+                        slot.remove_h2_connection(&shared_h2);
+                    }
+                    return proxied;
+                }
+                return Err(err);
             }
         }
     }
@@ -762,13 +761,13 @@ async fn stream_request_body_to_h2(
         sent_len = sent_len
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| anyhow!("HTTP/2 request body length overflow"))?;
-        if let Some(expected) = declared_length {
-            if sent_len > expected {
-                send_stream.send_reset(h2::Reason::PROTOCOL_ERROR);
-                return Err(anyhow!(
-                    "HTTP/2 request body exceeded declared content-length"
-                ));
-            }
+        if let Some(expected) = declared_length
+            && sent_len > expected
+        {
+            send_stream.send_reset(h2::Reason::PROTOCOL_ERROR);
+            return Err(anyhow!(
+                "HTTP/2 request body exceeded declared content-length"
+            ));
         }
         if !chunk.is_empty() {
             send_stream.send_data(chunk, false)?;
@@ -776,13 +775,13 @@ async fn stream_request_body_to_h2(
     }
 
     let trailers = body.trailers().await?;
-    if let Some(expected) = declared_length {
-        if sent_len != expected {
-            send_stream.send_reset(h2::Reason::PROTOCOL_ERROR);
-            return Err(anyhow!(
-                "HTTP/2 request body ended before declared content-length was satisfied"
-            ));
-        }
+    if let Some(expected) = declared_length
+        && sent_len != expected
+    {
+        send_stream.send_reset(h2::Reason::PROTOCOL_ERROR);
+        return Err(anyhow!(
+            "HTTP/2 request body ended before declared content-length was satisfied"
+        ));
     }
     if let Some(trailers) = trailers {
         crate::http::semantics::validate_request_trailers(&trailers)
@@ -1142,11 +1141,13 @@ mod tests {
             false,
         )
         .await?;
-        assert!(first
-            .upstream_cert
-            .as_ref()
-            .map(|cert| cert.present)
-            .unwrap_or(false));
+        assert!(
+            first
+                .upstream_cert
+                .as_ref()
+                .map(|cert| cert.present)
+                .unwrap_or(false)
+        );
         assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
         yield_now().await;
 
@@ -1160,11 +1161,13 @@ mod tests {
             false,
         )
         .await?;
-        assert!(second
-            .upstream_cert
-            .as_ref()
-            .map(|cert| cert.present)
-            .unwrap_or(false));
+        assert!(
+            second
+                .upstream_cert
+                .as_ref()
+                .map(|cert| cert.present)
+                .unwrap_or(false)
+        );
         assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
 
         assert_eq!(accepts.load(Ordering::SeqCst), 1);
@@ -1186,11 +1189,13 @@ mod tests {
             false,
         )
         .await?;
-        assert!(first
-            .upstream_cert
-            .as_ref()
-            .map(|cert| cert.present)
-            .unwrap_or(false));
+        assert!(
+            first
+                .upstream_cert
+                .as_ref()
+                .map(|cert| cert.present)
+                .unwrap_or(false)
+        );
         assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
 
         let second = proxy_https_with_options(
@@ -1203,11 +1208,13 @@ mod tests {
             false,
         )
         .await?;
-        assert!(second
-            .upstream_cert
-            .as_ref()
-            .map(|cert| cert.present)
-            .unwrap_or(false));
+        assert!(
+            second
+                .upstream_cert
+                .as_ref()
+                .map(|cert| cert.present)
+                .unwrap_or(false)
+        );
         assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
 
         assert_eq!(accepts.load(Ordering::SeqCst), 1);
@@ -1216,8 +1223,8 @@ mod tests {
 
     #[cfg(feature = "tls-rustls")]
     #[tokio::test]
-    async fn proxy_https_h2_opens_additional_direct_origin_connections_under_stream_pressure(
-    ) -> Result<()> {
+    async fn proxy_https_h2_opens_additional_direct_origin_connections_under_stream_pressure()
+    -> Result<()> {
         let (origin, trust, accepts, release_first) = spawn_limited_https_h2_origin().await?;
 
         let first = proxy_https_with_options(
@@ -1230,11 +1237,13 @@ mod tests {
             false,
         )
         .await?;
-        assert!(first
-            .upstream_cert
-            .as_ref()
-            .map(|cert| cert.present)
-            .unwrap_or(false));
+        assert!(
+            first
+                .upstream_cert
+                .as_ref()
+                .map(|cert| cert.present)
+                .unwrap_or(false)
+        );
 
         let second = proxy_https_with_options(
             Request::builder()
@@ -1246,11 +1255,13 @@ mod tests {
             false,
         )
         .await?;
-        assert!(second
-            .upstream_cert
-            .as_ref()
-            .map(|cert| cert.present)
-            .unwrap_or(false));
+        assert!(
+            second
+                .upstream_cert
+                .as_ref()
+                .map(|cert| cert.present)
+                .unwrap_or(false)
+        );
 
         assert_eq!(accepts.load(Ordering::SeqCst), 2);
         release_first.notify_waiters();

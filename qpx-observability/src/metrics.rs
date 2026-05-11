@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 const MAX_METRICS_REQUEST_BYTES: usize = 16 * 1024;
 const METRICS_READ_TIMEOUT: Duration = Duration::from_secs(5);

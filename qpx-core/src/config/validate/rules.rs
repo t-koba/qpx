@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use cidr::IpCidr;
 use std::collections::{HashMap, HashSet};
 
@@ -259,12 +259,12 @@ pub(super) fn validate_resilience_config(
                 }
             }
         }
-        if let Some(success_rate) = outlier.success_rate.as_ref() {
-            if matches!(success_rate.min_requests, Some(0)) {
-                return Err(anyhow!(
-                    "{context} resilience.outlier_detection.success_rate.min_requests must be >= 1"
-                ));
-            }
+        if let Some(success_rate) = outlier.success_rate.as_ref()
+            && matches!(success_rate.min_requests, Some(0))
+        {
+            return Err(anyhow!(
+                "{context} resilience.outlier_detection.success_rate.min_requests must be >= 1"
+            ));
         }
         if let Some(latency) = outlier.latency.as_ref() {
             if matches!(latency.p95_ms, Some(0)) {
@@ -414,10 +414,10 @@ fn validate_subrequest_module(config: &SubrequestModuleConfig, context: &str) ->
     if let Some(method) = config.method.as_deref() {
         validate_http_token(method, format!("{module_context} method").as_str())?;
     }
-    if let Some(timeout_ms) = config.timeout_ms {
-        if timeout_ms == 0 {
-            return Err(anyhow!("{module_context} timeout_ms must be >= 1"));
-        }
+    if let Some(timeout_ms) = config.timeout_ms
+        && timeout_ms == 0
+    {
+        return Err(anyhow!("{module_context} timeout_ms must be >= 1"));
     }
     match config.max_response_bytes {
         Some(max_response_bytes) if max_response_bytes > 0 => {}
@@ -647,24 +647,30 @@ pub(super) fn validate_affinity_config(
         "header" => {
             let header = config.header.as_deref().unwrap_or("").trim();
             if header.is_empty() {
-                return Err(anyhow!("{context} affinity.key=header requires affinity.header"));
+                return Err(anyhow!(
+                    "{context} affinity.key=header requires affinity.header"
+                ));
             }
             validate_header_name(header, &format!("{context} affinity.header"))?;
         }
         "cookie" => {
             if config.cookie.as_deref().unwrap_or("").trim().is_empty() {
-                return Err(anyhow!("{context} affinity.key=cookie requires affinity.cookie"));
+                return Err(anyhow!(
+                    "{context} affinity.key=cookie requires affinity.cookie"
+                ));
             }
         }
         "query" => {
             if config.query.as_deref().unwrap_or("").trim().is_empty() {
-                return Err(anyhow!("{context} affinity.key=query requires affinity.query"));
+                return Err(anyhow!(
+                    "{context} affinity.key=query requires affinity.query"
+                ));
             }
         }
         other => {
             return Err(anyhow!(
                 "{context} affinity.key must be one of: src_ip, host, header, cookie, user, tenant, query (got {other})"
-            ))
+            ));
         }
     }
     Ok(())
@@ -1127,15 +1133,15 @@ fn validate_rpc_local_response_config(raw: &RpcLocalResponseConfig, context: &st
     if let Some(status) = raw.status.as_deref() {
         validate_non_empty_ascii(status, &format!("{context}.status"))?;
     }
-    if let Some(message) = raw.message.as_deref() {
-        if message.trim().is_empty() {
-            return Err(anyhow!("{context}.message must not be empty when set"));
-        }
+    if let Some(message) = raw.message.as_deref()
+        && message.trim().is_empty()
+    {
+        return Err(anyhow!("{context}.message must not be empty when set"));
     }
-    if let Some(http_status) = raw.http_status {
-        if !(100..=599).contains(&http_status) {
-            return Err(anyhow!("{context}.http_status must be in 100..=599"));
-        }
+    if let Some(http_status) = raw.http_status
+        && !(100..=599).contains(&http_status)
+    {
+        return Err(anyhow!("{context}.http_status must be in 100..=599"));
     }
     for (name, value) in &raw.headers {
         validate_header_name(name, &format!("{context}.headers"))?;

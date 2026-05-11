@@ -107,37 +107,36 @@ pub async fn process_upstream_response_for_cache(
 
     if let (Some(policy), Some(_), Some(revalidation)) =
         (cache_policy, cache_lookup_key, revalidation_state)
+        && response.status() == StatusCode::NOT_MODIFIED
     {
-        if response.status() == StatusCode::NOT_MODIFIED {
-            response = cache::revalidate_not_modified(
-                request_method,
-                request_headers_snapshot,
-                policy,
-                response,
-                revalidation,
-                response_delay_secs,
-                backends,
-            )
-            .await?;
-        }
+        response = cache::revalidate_not_modified(
+            request_method,
+            request_headers_snapshot,
+            policy,
+            response,
+            revalidation,
+            response_delay_secs,
+            backends,
+        )
+        .await?;
     }
 
-    if let (Some(policy), Some(key)) = (cache_policy, cache_lookup_key) {
-        if response.status() != StatusCode::NOT_MODIFIED {
-            response = cache::maybe_store(
-                request_method,
-                request_headers_snapshot,
-                key,
-                policy,
-                response,
-                cache::CacheStoreTiming {
-                    response_delay_secs,
-                    body_read_timeout,
-                },
-                backends,
-            )
-            .await?;
-        }
+    if let (Some(policy), Some(key)) = (cache_policy, cache_lookup_key)
+        && response.status() != StatusCode::NOT_MODIFIED
+    {
+        response = cache::maybe_store(
+            request_method,
+            request_headers_snapshot,
+            key,
+            policy,
+            response,
+            cache::CacheStoreTiming {
+                response_delay_secs,
+                body_read_timeout,
+            },
+            backends,
+        )
+        .await?;
     }
 
     Ok(response)

@@ -1,13 +1,13 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use qpx_core::config::{UpstreamDiscoveryConfig, UpstreamDiscoveryKind};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU16, Ordering};
+use tokio::net::UdpSocket;
 #[cfg(feature = "http3")]
 use tokio::net::lookup_host;
-use tokio::net::UdpSocket;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
-use super::{dispatch::default_port_for_scheme, parse_origin_target, OriginEndpoint};
+use super::{OriginEndpoint, dispatch::default_port_for_scheme, parse_origin_target};
 
 pub(super) const DNS_TYPE_A: u16 = 1;
 pub(super) const DNS_TYPE_AAAA: u16 = 28;

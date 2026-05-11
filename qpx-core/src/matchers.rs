@@ -3,11 +3,11 @@ use crate::config::{
     TlsFingerprintMatchConfig, TlsPassthroughMatchConfig,
 };
 use crate::prefilter::{
-    compile_text_patterns, dedup_uppercase_arc, is_ascii_uppercase_token, StringInterner,
-    TextMatchMode, TextPatternMatcher,
+    StringInterner, TextMatchMode, TextPatternMatcher, compile_text_patterns, dedup_uppercase_arc,
+    is_ascii_uppercase_token,
 };
 use crate::rules::RuleMatchContext;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use cidr::IpCidr;
 use regex::Regex;
 use std::collections::HashSet;
@@ -595,48 +595,48 @@ impl CompiledMatch {
             }
         }
 
-        if let Some(identity) = &self.identity {
-            if !identity.matches(ctx) {
-                return false;
-            }
+        if let Some(identity) = &self.identity
+            && !identity.matches(ctx)
+        {
+            return false;
         }
 
-        if let Some(fingerprint) = &self.tls_fingerprint {
-            if !fingerprint.matches(ctx) {
-                return false;
-            }
+        if let Some(fingerprint) = &self.tls_fingerprint
+            && !fingerprint.matches(ctx)
+        {
+            return false;
         }
 
-        if let Some(cert) = &self.client_cert {
-            if !cert.matches(
+        if let Some(cert) = &self.client_cert
+            && !cert.matches(
                 ctx.client_cert_present,
                 ctx.client_cert_subject,
                 ctx.client_cert_issuer,
                 ctx.client_cert_san_dns,
                 ctx.client_cert_san_uri,
                 ctx.client_cert_fingerprint_sha256,
-            ) {
-                return false;
-            }
+            )
+        {
+            return false;
         }
 
-        if let Some(cert) = &self.upstream_cert {
-            if !cert.matches(
+        if let Some(cert) = &self.upstream_cert
+            && !cert.matches(
                 ctx.upstream_cert_present,
                 ctx.upstream_cert_subject,
                 ctx.upstream_cert_issuer,
                 ctx.upstream_cert_san_dns,
                 ctx.upstream_cert_san_uri,
                 ctx.upstream_cert_fingerprint_sha256,
-            ) {
-                return false;
-            }
+            )
+        {
+            return false;
         }
 
-        if let Some(rpc) = &self.rpc {
-            if !rpc.matches(ctx) {
-                return false;
-            }
+        if let Some(rpc) = &self.rpc
+            && !rpc.matches(ctx)
+        {
+            return false;
         }
 
         true
@@ -991,10 +991,10 @@ impl CompiledCertificateMatch {
         san_uri: &[String],
         fingerprint_sha256: Option<&str>,
     ) -> bool {
-        if let Some(expected) = self.present {
-            if present != Some(expected) {
-                return false;
-            }
+        if let Some(expected) = self.present
+            && present != Some(expected)
+        {
+            return false;
         }
         if !match_optional_text(&self.subject, subject) {
             return false;
@@ -1406,10 +1406,12 @@ mod tests {
         let trace = compiled.matches_with_trace(&ctx);
 
         assert!(trace.result);
-        assert!(trace
-            .reasons
-            .iter()
-            .any(|reason| matches!(reason, MatchReason::SrcIp { result: true, .. })));
+        assert!(
+            trace
+                .reasons
+                .iter()
+                .any(|reason| matches!(reason, MatchReason::SrcIp { result: true, .. }))
+        );
         assert!(trace.reasons.iter().any(|reason| matches!(
             reason,
             MatchReason::Host {

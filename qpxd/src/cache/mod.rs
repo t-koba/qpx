@@ -20,11 +20,11 @@ pub use lookup_ops::{
     attach_revalidation_headers, build_only_if_cached_miss_response, lookup,
     maybe_build_stale_if_error_response,
 };
-pub use store::{maybe_store, revalidate_not_modified, CacheStoreTiming};
-pub(crate) use types::{
-    begin_request_collapse, try_begin_background_revalidation, RequestCollapseJoin,
-};
+pub use store::{CacheStoreTiming, maybe_store, revalidate_not_modified};
 pub use types::{CacheBackend, CacheRequestKey, LookupOutcome, RevalidationState};
+pub(crate) use types::{
+    RequestCollapseJoin, begin_request_collapse, try_begin_background_revalidation,
+};
 
 #[cfg(test)]
 mod tests;

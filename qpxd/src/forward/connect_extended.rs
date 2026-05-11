@@ -123,7 +123,7 @@ pub(super) async fn open_upstream_h2_extended_connect_stream(
         Err(_) => {
             return Err(anyhow!(
                 "extended CONNECT upstream request sender timed out"
-            ))
+            ));
         }
     };
     if !sender.is_extended_connect_protocol_enabled() {
@@ -263,15 +263,14 @@ pub(super) fn spawn_h2_extended_connect_relay(
                                     return;
                                 }
                             };
-                            if let Some(expected) = declared_request_length {
-                                if sent_request_len > expected {
+                            if let Some(expected) = declared_request_length
+                                && sent_request_len > expected {
                                     upstream_send.send_reset(H2Reason::PROTOCOL_ERROR);
                                     if let Some(mut sender) = sender.take() {
                                         sender.abort();
                                     }
                                     return;
                                 }
-                            }
                             if !chunk.is_empty() && upstream_send.send_data(chunk, false).is_err() {
                                 if let Some(mut sender) = sender.take() {
                                     sender.abort();
@@ -310,15 +309,14 @@ pub(super) fn spawn_h2_extended_connect_relay(
                                     return;
                                 }
                             };
-                            if let Some(expected) = declared_request_length {
-                                if sent_request_len != expected {
+                            if let Some(expected) = declared_request_length
+                                && sent_request_len != expected {
                                     upstream_send.send_reset(H2Reason::PROTOCOL_ERROR);
                                     if let Some(mut sender) = sender.take() {
                                         sender.abort();
                                     }
                                     return;
                                 }
-                            }
                             match trailers {
                                 Some(trailers) => {
                                     if let Err(err) = crate::http::semantics::validate_request_trailers(&trailers) {
@@ -334,11 +332,10 @@ pub(super) fn spawn_h2_extended_connect_relay(
                                             Ok(trailers) => trailers,
                                             Err(err) => {
                                                 warn!(error = ?err, "invalid HTTP/2 extended CONNECT request trailers");
-                                                if upstream_send.send_data(Bytes::new(), true).is_err() {
-                                                    if let Some(mut sender) = sender.take() {
+                                                if upstream_send.send_data(Bytes::new(), true).is_err()
+                                                    && let Some(mut sender) = sender.take() {
                                                         sender.abort();
                                                     }
-                                                }
                                                 upload_done = true;
                                                 if download_done {
                                                     break;

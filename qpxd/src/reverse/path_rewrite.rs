@@ -11,14 +11,14 @@ pub(super) fn apply_path_rewrite(req: &mut Request<Body>, rewrite: &CompiledPath
     let query = pq.and_then(|pq| pq.query());
 
     let mut new_path = path.to_string();
-    if let Some(prefix) = &rewrite.strip_prefix {
-        if let Some(rest) = new_path.strip_prefix(prefix.as_str()) {
-            new_path = if rest.is_empty() || !rest.starts_with('/') {
-                format!("/{rest}")
-            } else {
-                rest.to_string()
-            };
-        }
+    if let Some(prefix) = &rewrite.strip_prefix
+        && let Some(rest) = new_path.strip_prefix(prefix.as_str())
+    {
+        new_path = if rest.is_empty() || !rest.starts_with('/') {
+            format!("/{rest}")
+        } else {
+            rest.to_string()
+        };
     }
     if let Some(prefix) = &rewrite.add_prefix {
         new_path = format!("{prefix}{new_path}");
@@ -42,9 +42,11 @@ pub(super) fn apply_path_rewrite(req: &mut Request<Body>, rewrite: &CompiledPath
             *req.uri_mut() = new_uri;
         }
         Err(err) => {
-            counter!(crate::runtime::metric_names()
-                .reverse_path_rewrite_invalid_total
-                .clone())
+            counter!(
+                crate::runtime::metric_names()
+                    .reverse_path_rewrite_invalid_total
+                    .clone()
+            )
             .increment(1);
             warn!(
                 error = ?err,

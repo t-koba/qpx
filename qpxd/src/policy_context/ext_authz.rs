@@ -1,6 +1,6 @@
 use crate::http::body::Body;
 use crate::runtime::RuntimeState;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use http::header::HeaderName;
 use hyper::{HeaderMap, Request};
 use qpx_core::config::{
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 use url::Url;
 

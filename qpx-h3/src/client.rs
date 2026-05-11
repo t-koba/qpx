@@ -1,22 +1,22 @@
 use crate::protocol::{
-    decode_settings_frame, read_frame, read_varint, write_frame, write_varint, ConnectionClose,
-    PeerControlState, FRAME_DATA, FRAME_HEADERS, FRAME_SETTINGS, H3_CLOSED_CRITICAL_STREAM,
+    ConnectionClose, FRAME_DATA, FRAME_HEADERS, FRAME_SETTINGS, H3_CLOSED_CRITICAL_STREAM,
     H3_FRAME_UNEXPECTED, H3_ID_ERROR, H3_MESSAGE_ERROR, H3_MISSING_SETTINGS, H3_SETTINGS_ERROR,
-    H3_STREAM_CREATION_ERROR, STREAM_CONTROL, STREAM_PUSH, STREAM_QPACK_DECODER,
-    STREAM_QPACK_ENCODER, STREAM_WEBTRANSPORT_BIDI, STREAM_WEBTRANSPORT_UNI,
+    H3_STREAM_CREATION_ERROR, PeerControlState, STREAM_CONTROL, STREAM_PUSH, STREAM_QPACK_DECODER,
+    STREAM_QPACK_ENCODER, STREAM_WEBTRANSPORT_BIDI, STREAM_WEBTRANSPORT_UNI, decode_settings_frame,
+    read_frame, read_varint, write_frame, write_varint,
 };
-use crate::qpack::{encode_request_head, QpackConnection};
+use crate::qpack::{QpackConnection, encode_request_head};
 use crate::server::{Protocol, Settings};
 use crate::transport::{
     BidiStream, DatagramDispatch, OpenStreams, RequestStream, StreamDatagrams, UniRecvStream,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub struct ExtendedConnectStream {
     pub interim: Vec<http::Response<()>>,
@@ -91,10 +91,10 @@ impl Drop for ClientConnectionUse {
             quinn::VarInt::from_u32(0x100),
             b"qpx-h3 client connection owner dropped",
         );
-        if let Some(active) = ACTIVE_CLIENT_CONNECTIONS.get() {
-            if let Ok(mut guard) = active.lock() {
-                guard.remove(&self.stable_id);
-            }
+        if let Some(active) = ACTIVE_CLIENT_CONNECTIONS.get()
+            && let Ok(mut guard) = active.lock()
+        {
+            guard.remove(&self.stable_id);
         }
     }
 }
@@ -194,19 +194,17 @@ pub async fn open_extended_connect_stream(
         Ok(Ok(streams)) => streams,
         Ok(Err(err)) => return fail_client_setup(&connection, err.into()),
         Err(_) => {
-            return fail_client_setup(&connection, anyhow!("extended CONNECT open_bi timed out"))
+            return fail_client_setup(&connection, anyhow!("extended CONNECT open_bi timed out"));
         }
     };
     let stream_id: u64 = bidi_send.id().into();
-    if let Some(goaway_id) = control_state.goaway_id().await {
-        if stream_id >= goaway_id {
-            return fail_client_setup(
-                &connection,
-                anyhow!(
-                    "peer GOAWAY disallows opening request stream {stream_id} (limit {goaway_id})"
-                ),
-            );
-        }
+    if let Some(goaway_id) = control_state.goaway_id().await
+        && stream_id >= goaway_id
+    {
+        return fail_client_setup(
+            &connection,
+            anyhow!("peer GOAWAY disallows opening request stream {stream_id} (limit {goaway_id})"),
+        );
     }
     let protocol_name = protocol.as_ref().map(Protocol::as_str);
     let payload = match encode_request_head(&request, protocol_name) {

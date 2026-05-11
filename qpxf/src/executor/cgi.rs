@@ -1,6 +1,6 @@
 use super::{CgiRequest, CgiResponse, Execution, Executor};
 use crate::config::CgiBackendConfig;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
 use bytes::BytesMut;
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 /// Maximum number of HTTP_* headers to pass through to CGI environment.

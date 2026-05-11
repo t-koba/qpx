@@ -1,11 +1,11 @@
 use crate::http::body::Body;
 use ::http::{Request as Http1Request, Response as Http1Response};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use http::header::COOKIE;
 use hyper::{Request, Response, Uri};
 use tokio::spawn;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
@@ -15,16 +15,16 @@ pub fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
             .map_err(|e| anyhow!("invalid header name from HTTP/3 message: {e}"))?;
         let value = http::HeaderValue::from_bytes(value.as_bytes())
             .map_err(|e| anyhow!("invalid header value from HTTP/3 message: {e}"))?;
-        if name == COOKIE {
-            if let Some(existing) = headers.get(COOKIE).cloned() {
-                let mut merged =
-                    Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
-                merged.extend_from_slice(existing.as_bytes());
-                merged.extend_from_slice(b"; ");
-                merged.extend_from_slice(value.as_bytes());
-                headers.insert(COOKIE, http::HeaderValue::from_bytes(merged.as_slice())?);
-                continue;
-            }
+        if name == COOKIE
+            && let Some(existing) = headers.get(COOKIE).cloned()
+        {
+            let mut merged =
+                Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
+            merged.extend_from_slice(existing.as_bytes());
+            merged.extend_from_slice(b"; ");
+            merged.extend_from_slice(value.as_bytes());
+            headers.insert(COOKIE, http::HeaderValue::from_bytes(merged.as_slice())?);
+            continue;
         }
         headers.append(name, value);
     }
@@ -344,12 +344,16 @@ mod tests {
         let interim = sanitize_interim_response_for_h3(interim).expect("sanitize");
         assert_eq!(interim.status(), ::http::StatusCode::EARLY_HINTS);
         assert!(interim.headers().contains_key(::http::header::LINK));
-        assert!(!interim
-            .headers()
-            .contains_key(::http::header::CONTENT_LENGTH));
-        assert!(!interim
-            .headers()
-            .contains_key(::http::header::TRANSFER_ENCODING));
+        assert!(
+            !interim
+                .headers()
+                .contains_key(::http::header::CONTENT_LENGTH)
+        );
+        assert!(
+            !interim
+                .headers()
+                .contains_key(::http::header::TRANSFER_ENCODING)
+        );
         assert!(!interim.headers().contains_key(::http::header::TRAILER));
     }
 

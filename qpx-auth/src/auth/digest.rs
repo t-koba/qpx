@@ -1,7 +1,7 @@
 #[cfg(feature = "digest-auth")]
-use base64::engine::general_purpose::STANDARD as BASE64;
-#[cfg(feature = "digest-auth")]
 use base64::Engine;
+#[cfg(feature = "digest-auth")]
+use base64::engine::general_purpose::STANDARD as BASE64;
 #[cfg(feature = "digest-auth")]
 use ring::rand::{SecureRandom, SystemRandom};
 #[cfg(feature = "digest-auth")]

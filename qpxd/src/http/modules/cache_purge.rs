@@ -1,10 +1,10 @@
 use super::{
-    compile_literal_headers, parse_module_settings, HttpModule, HttpModuleCapabilities,
-    HttpModuleContext, HttpModuleEvent, HttpModuleFactory, HttpModuleStage, ModuleStages,
-    RequestHeadersOutcome,
+    HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
+    HttpModuleStage, ModuleStages, RequestHeadersOutcome, compile_literal_headers,
+    parse_module_settings,
 };
 use crate::http::body::Body;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use http::{HeaderName, HeaderValue, Method, StatusCode};
 use hyper::Response;

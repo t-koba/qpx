@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 #[path = "origin/dispatch.rs"]
 mod dispatch;
@@ -28,8 +28,8 @@ pub(crate) use ws_backend::proxy_websocket;
 
 #[cfg(test)]
 use dns::{
-    discover_origin_endpoints_with_nameservers, encode_dns_name, parse_dns_name, DNS_TYPE_A,
-    DNS_TYPE_AAAA, DNS_TYPE_SRV,
+    DNS_TYPE_A, DNS_TYPE_AAAA, DNS_TYPE_SRV, discover_origin_endpoints_with_nameservers,
+    encode_dns_name, parse_dns_name,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -96,11 +96,12 @@ impl OriginEndpoint {
             label.push_str(" host=");
             label.push_str(logical.as_str());
         }
-        if let Ok(server_name) = self.tls_server_name() {
-            if server_name != logical && server_name != connect {
-                label.push_str(" sni=");
-                label.push_str(server_name.as_str());
-            }
+        if let Ok(server_name) = self.tls_server_name()
+            && server_name != logical
+            && server_name != connect
+        {
+            label.push_str(" sni=");
+            label.push_str(server_name.as_str());
         }
         label
     }

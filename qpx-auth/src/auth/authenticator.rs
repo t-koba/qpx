@@ -1,12 +1,12 @@
-#[cfg(any(not(feature = "ldap-auth"), not(feature = "digest-auth")))]
-use anyhow::anyhow;
 #[cfg(feature = "ldap-auth")]
 use anyhow::Context;
 use anyhow::Result;
-#[cfg(feature = "basic-auth")]
-use base64::engine::general_purpose::STANDARD as BASE64;
+#[cfg(any(not(feature = "ldap-auth"), not(feature = "digest-auth")))]
+use anyhow::anyhow;
 #[cfg(feature = "basic-auth")]
 use base64::Engine;
+#[cfg(feature = "basic-auth")]
+use base64::engine::general_purpose::STANDARD as BASE64;
 #[cfg(feature = "ldap-auth")]
 use std::env;
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
@@ -18,21 +18,21 @@ use tracing::Level;
 
 use qpx_core::config::AuthConfig;
 
+use super::Authenticator;
+#[cfg(feature = "ldap-auth")]
+use super::LdapAuthenticator;
 #[cfg(feature = "ldap-auth")]
 use super::cache::LdapCache;
 #[cfg(feature = "digest-auth")]
 use super::digest::sha256_hex;
 #[cfg(feature = "digest-auth")]
-use super::digest::{constant_time_eq_hex_lower, parse_digest, DigestAlgorithm, NonceStore};
+use super::digest::{DigestAlgorithm, NonceStore, constant_time_eq_hex_lower, parse_digest};
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use super::local::LocalUserEntry;
 #[cfg(feature = "basic-auth")]
 use super::util::constant_time_eq_bytes;
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use super::util::escape_quoted_header_value;
-use super::Authenticator;
-#[cfg(feature = "ldap-auth")]
-use super::LdapAuthenticator;
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use super::{AuthChallenge, AuthOutcome, AuthenticatedUser};
 
@@ -186,23 +186,23 @@ impl Authenticator {
         if let Some(digest) = Self::strip_auth_scheme(header, "Digest") {
             #[cfg(feature = "digest-auth")]
             {
-                if required_providers.iter().any(|p| p == "local") {
-                    if let Some(user) = self.verify_digest(digest, method, uri)? {
-                        if tracing::enabled!(target: "audit_log", Level::INFO) {
-                            tracing::info!(
-                                target: "audit_log",
-                                event = "auth",
-                                outcome = "allowed",
-                                src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
-                                method = method,
-                                uri = uri,
-                                username = %user.username,
-                                provider = %user.provider,
-                                required_providers = ?required_providers,
-                            );
-                        }
-                        return Ok(AuthOutcome::Allowed(user));
+                if required_providers.iter().any(|p| p == "local")
+                    && let Some(user) = self.verify_digest(digest, method, uri)?
+                {
+                    if tracing::enabled!(target: "audit_log", Level::INFO) {
+                        tracing::info!(
+                            target: "audit_log",
+                            event = "auth",
+                            outcome = "allowed",
+                            src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                            method = method,
+                            uri = uri,
+                            username = %user.username,
+                            provider = %user.provider,
+                            required_providers = ?required_providers,
+                        );
                     }
+                    return Ok(AuthOutcome::Allowed(user));
                 }
             }
             #[cfg(not(feature = "digest-auth"))]
@@ -255,38 +255,36 @@ impl Authenticator {
         let username = parts.next().unwrap_or("");
         let password = parts.next().unwrap_or("");
 
-        if required_providers.iter().any(|p| p == "local") {
-            if let Some(entry) = self.local.get(username) {
-                if let Some(stored) = &entry.password {
-                    if constant_time_eq_bytes(stored.as_bytes(), password.as_bytes()) {
-                        return Ok(Some(AuthenticatedUser {
-                            username: entry.username.clone(),
-                            groups: Vec::new(),
-                            provider: "local".to_string(),
-                        }));
-                    }
-                }
-            }
+        if required_providers.iter().any(|p| p == "local")
+            && let Some(entry) = self.local.get(username)
+            && let Some(stored) = &entry.password
+            && constant_time_eq_bytes(stored.as_bytes(), password.as_bytes())
+        {
+            return Ok(Some(AuthenticatedUser {
+                username: username.to_string(),
+                groups: Vec::new(),
+                provider: "local".to_string(),
+            }));
         }
 
         #[cfg(feature = "ldap-auth")]
-        if required_providers.iter().any(|p| p == "ldap") {
-            if let Some(ldap) = &self.ldap {
-                if let Some(groups) = self.ldap_cache.get(username, password) {
-                    return Ok(Some(AuthenticatedUser {
-                        username: username.to_string(),
-                        groups,
-                        provider: "ldap".to_string(),
-                    }));
-                }
-                if let Some(groups) = ldap.authenticate(username, password).await? {
-                    self.ldap_cache.put(username, password, groups.clone());
-                    return Ok(Some(AuthenticatedUser {
-                        username: username.to_string(),
-                        groups,
-                        provider: "ldap".to_string(),
-                    }));
-                }
+        if required_providers.iter().any(|p| p == "ldap")
+            && let Some(ldap) = &self.ldap
+        {
+            if let Some(groups) = self.ldap_cache.get(username, password) {
+                return Ok(Some(AuthenticatedUser {
+                    username: username.to_string(),
+                    groups,
+                    provider: "ldap".to_string(),
+                }));
+            }
+            if let Some(groups) = ldap.authenticate(username, password).await? {
+                self.ldap_cache.put(username, password, groups.clone());
+                return Ok(Some(AuthenticatedUser {
+                    username: username.to_string(),
+                    groups,
+                    provider: "ldap".to_string(),
+                }));
             }
         }
         #[cfg(not(feature = "ldap-auth"))]

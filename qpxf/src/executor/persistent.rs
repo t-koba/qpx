@@ -1,6 +1,6 @@
 use super::{CgiRequest, Execution, Executor};
 use crate::config::{FastCgiBackendConfig, ScgiBackendConfig};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use std::collections::{HashMap, HashSet};
@@ -10,8 +10,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
-use tokio::time::{timeout, Duration};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
+use tokio::time::{Duration, timeout};
 
 const FCGI_BEGIN_REQUEST: u8 = 1;
 const FCGI_ABORT_REQUEST: u8 = 2;
@@ -519,7 +519,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::time::{Duration, sleep, timeout};
 
     #[test]
     fn fastcgi_param_lengths_roundtrip_short_and_long() {
@@ -656,9 +656,11 @@ mod tests {
                 .expect("second")
                 .0
         });
-        assert!(timeout(Duration::from_millis(50), &mut second)
-            .await
-            .is_err());
+        assert!(
+            timeout(Duration::from_millis(50), &mut second)
+                .await
+                .is_err()
+        );
         release_tx.send(()).expect("release");
         let first_stdout = first.await.expect("first join");
         assert_eq!(

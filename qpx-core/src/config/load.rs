@@ -1,5 +1,5 @@
 use crate::envsubst::expand_env;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_yaml::{Mapping, Value};
 use std::fmt;
 use std::fs;
@@ -112,17 +112,17 @@ fn load_value(path: &Path, stack: &mut Vec<PathBuf>, sources: &mut Vec<PathBuf>)
         .with_context(|| format!("yaml parse failed for {}", canonical.display()))?;
 
     let mut merged = Value::Mapping(Mapping::new());
-    if let Value::Mapping(map) = &mut value {
-        if let Some(includes) = map.remove(Value::String("include".to_string())) {
-            let include_list = includes.as_sequence().cloned().unwrap_or_default();
-            for inc in include_list {
-                let inc_path = match inc {
-                    Value::String(s) => canonical.parent().unwrap_or(Path::new(".")).join(s),
-                    _ => return Err(anyhow!("include entries must be strings")),
-                };
-                let inc_value = load_value(&inc_path, stack, sources)?;
-                merged = merge_values(merged, inc_value);
-            }
+    if let Value::Mapping(map) = &mut value
+        && let Some(includes) = map.remove(Value::String("include".to_string()))
+    {
+        let include_list = includes.as_sequence().cloned().unwrap_or_default();
+        for inc in include_list {
+            let inc_path = match inc {
+                Value::String(s) => canonical.parent().unwrap_or(Path::new(".")).join(s),
+                _ => return Err(anyhow!("include entries must be strings")),
+            };
+            let inc_value = load_value(&inc_path, stack, sources)?;
+            merged = merge_values(merged, inc_value);
         }
     }
 

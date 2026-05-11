@@ -1,8 +1,8 @@
 use anyhow::Result;
 use bytes::Bytes;
 use metrics::counter;
-use std::collections::{hash_map::DefaultHasher, HashMap};
-use std::future::{poll_fn, Future};
+use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::future::{Future, poll_fn};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
@@ -463,8 +463,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_take_ready_h2_sender_reuses_busy_connection_below_scale_out_threshold(
-    ) -> Result<()> {
+    async fn try_take_ready_h2_sender_reuses_busy_connection_below_scale_out_threshold()
+    -> Result<()> {
         let slot = test_https_origin_slot();
         let shared = Arc::new(SharedTlsH2OriginConnection {
             sender: spawn_test_h2_sender_with_limits(Some(64), Some(64)).await?,
@@ -481,8 +481,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_take_ready_h2_sender_uses_large_peer_budget_without_premature_scale_out(
-    ) -> Result<()> {
+    async fn try_take_ready_h2_sender_uses_large_peer_budget_without_premature_scale_out()
+    -> Result<()> {
         let slot = test_https_origin_slot();
         let shared = Arc::new(SharedTlsH2OriginConnection {
             sender: spawn_test_h2_sender_with_limits(Some(128), Some(128)).await?,
@@ -509,9 +509,11 @@ mod tests {
         slot.add_h2_connection(shared);
 
         assert!(slot.can_open_additional_h2_connection());
-        assert!(try_take_ready_h2_sender(&slot, "test-upstream")
-            .await
-            .is_none());
+        assert!(
+            try_take_ready_h2_sender(&slot, "test-upstream")
+                .await
+                .is_none()
+        );
         Ok(())
     }
 

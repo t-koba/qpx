@@ -1,6 +1,6 @@
 use crate::auth_runtime::AuthenticatedUser;
 use crate::runtime::RuntimeState;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use http::header::HeaderName;
 use hyper::HeaderMap;
 use qpx_core::config::{
@@ -685,30 +685,29 @@ fn extract_mtls_identity(
     let (_, cert) = X509Certificate::from_der(cert).ok()?;
     let mut identity = ResolvedIdentity::default();
 
-    if let Some(prefix) = cfg.user_from_san_uri_prefix.as_deref() {
-        if let Ok(Some(san)) = cert.subject_alternative_name() {
-            for name in &san.value.general_names {
-                if let GeneralName::URI(uri) = name {
-                    if let Some(user) = uri.strip_prefix(prefix) {
-                        if !user.is_empty() {
-                            identity.user = Some(user.to_string());
-                            break;
-                        }
-                    }
-                }
+    if let Some(prefix) = cfg.user_from_san_uri_prefix.as_deref()
+        && let Ok(Some(san)) = cert.subject_alternative_name()
+    {
+        for name in &san.value.general_names {
+            if let GeneralName::URI(uri) = name
+                && let Some(user) = uri.strip_prefix(prefix)
+                && !user.is_empty()
+            {
+                identity.user = Some(user.to_string());
+                break;
             }
         }
     }
 
-    if identity.user.is_none() && cfg.user_from_subject_cn {
-        if let Some(cn) = cert
+    if identity.user.is_none()
+        && cfg.user_from_subject_cn
+        && let Some(cn) = cert
             .subject()
             .iter_common_name()
             .filter_map(|attr| attr.as_str().ok())
             .find(|value| !value.trim().is_empty())
-        {
-            identity.user = Some(cn.trim().to_string());
-        }
+    {
+        identity.user = Some(cn.trim().to_string());
     }
 
     identity.auth_strength = cfg.auth_strength.clone();
@@ -737,8 +736,8 @@ fn extract_mtls_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use http::HeaderValue;
     use qpx_core::config::{AssertionClaimsMapConfig, SignedAssertionConfig};
     use ring::{rand::SystemRandom, signature};
@@ -754,6 +753,21 @@ mod tests {
                 .unwrap_or_default()
                 .as_nanos()
         )
+    }
+
+    fn set_test_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
+        // SAFETY: these tests hold crate::test_env_lock(), use process-unique keys,
+        // and remove the variable before releasing the lock.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+
+    fn remove_test_env(key: impl AsRef<std::ffi::OsStr>) {
+        // SAFETY: these tests hold crate::test_env_lock() and use process-unique keys.
+        unsafe {
+            std::env::remove_var(key);
+        }
     }
 
     fn encode_segment(value: &JsonValue) -> String {
@@ -793,7 +807,7 @@ mod tests {
         let private_key_der = key_pair.serialize_der();
         let public_key_pem = key_pair.public_key_pem();
         let env_name = test_env_name("ASSERTION_PUBLIC_KEY");
-        std::env::set_var(&env_name, public_key_pem);
+        set_test_env(&env_name, public_key_pem);
 
         let config = SignedAssertionConfig {
             header: "x-assertion".to_string(),
@@ -832,7 +846,7 @@ mod tests {
         assert_eq!(identity.tenant.as_deref(), Some("acme"));
         assert_eq!(identity.identity_source.as_deref(), Some("signed-jwt"));
 
-        std::env::remove_var(env_name);
+        remove_test_env(env_name);
     }
 
     #[test]
@@ -843,7 +857,7 @@ mod tests {
         let private_key_der = key_pair.serialize_der();
         let public_key_pem = key_pair.public_key_pem();
         let env_name = test_env_name("ASSERTION_PUBLIC_KEY_DEFAULT");
-        std::env::set_var(&env_name, public_key_pem);
+        set_test_env(&env_name, public_key_pem);
 
         let config = SignedAssertionConfig {
             header: "x-assertion".to_string(),
@@ -874,6 +888,6 @@ mod tests {
 
         assert_eq!(identity.user.as_deref(), Some("alice"));
 
-        std::env::remove_var(env_name);
+        remove_test_env(env_name);
     }
 }

@@ -1,16 +1,16 @@
 use crate::protocol::{
-    decode_settings_frame, read_frame, read_frame_with_limit, read_varint, write_frame,
-    write_varint, ConnectionClose, Frame, PeerControlState, FRAME_DATA, FRAME_HEADERS,
-    FRAME_SETTINGS, H3_CLOSED_CRITICAL_STREAM, H3_FRAME_ERROR, H3_FRAME_UNEXPECTED, H3_ID_ERROR,
-    H3_MESSAGE_ERROR, H3_MISSING_SETTINGS, H3_SETTINGS_ERROR, SETTING_ENABLE_CONNECT_PROTOCOL,
+    ConnectionClose, FRAME_DATA, FRAME_HEADERS, FRAME_SETTINGS, Frame, H3_CLOSED_CRITICAL_STREAM,
+    H3_FRAME_ERROR, H3_FRAME_UNEXPECTED, H3_ID_ERROR, H3_MESSAGE_ERROR, H3_MISSING_SETTINGS,
+    H3_SETTINGS_ERROR, PeerControlState, SETTING_ENABLE_CONNECT_PROTOCOL,
     SETTING_ENABLE_WEBTRANSPORT, SETTING_H3_DATAGRAM, SETTING_MAX_FIELD_SECTION_SIZE,
     SETTING_QPACK_MAX_BLOCKED_STREAMS, SETTING_QPACK_MAX_TABLE_CAPACITY,
     SETTING_WEBTRANSPORT_MAX_SESSIONS, STREAM_CONTROL, STREAM_PUSH, STREAM_QPACK_DECODER,
-    STREAM_QPACK_ENCODER, STREAM_WEBTRANSPORT_BIDI, STREAM_WEBTRANSPORT_UNI,
+    STREAM_QPACK_ENCODER, STREAM_WEBTRANSPORT_BIDI, STREAM_WEBTRANSPORT_UNI, decode_settings_frame,
+    read_frame, read_frame_with_limit, read_varint, write_frame, write_varint,
 };
 use crate::qpack::{
-    encode_response_head, encode_trailers, QpackConnection, DEFAULT_DYNAMIC_TABLE_CAPACITY,
-    DEFAULT_ENCODER_STREAM_BUFFER_BYTES, DEFAULT_MAX_BLOCKED_STREAMS,
+    DEFAULT_DYNAMIC_TABLE_CAPACITY, DEFAULT_ENCODER_STREAM_BUFFER_BYTES,
+    DEFAULT_MAX_BLOCKED_STREAMS, QpackConnection, encode_response_head, encode_trailers,
 };
 use crate::response::{
     parse_content_length, sanitize_interim_response_for_h3, sanitize_response_for_h3,
@@ -19,7 +19,7 @@ use crate::response::{
 use crate::transport::{
     BidiStream, DatagramDispatch, OpenStreams, RequestStream, StreamDatagrams, UniRecvStream,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use http::HeaderMap;
@@ -28,7 +28,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::time::timeout;
 use tracing::warn;
 
@@ -559,20 +559,20 @@ async fn handle_request_stream<H: RequestHandler>(
     };
 
     let protocol = decoded.protocol.as_deref().map(parse_protocol);
-    if decoded.request.method() == http::Method::CONNECT {
-        if let Some(protocol) = protocol.as_ref() {
-            if !ctx.settings.enable_extended_connect {
-                abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
-                return Ok(());
-            }
-            if *protocol == Protocol::WebTransport && !ctx.settings.enable_webtransport {
-                abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
-                return Ok(());
-            }
-            if *protocol == Protocol::ConnectUdp && !ctx.settings.enable_datagram {
-                abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
-                return Ok(());
-            }
+    if decoded.request.method() == http::Method::CONNECT
+        && let Some(protocol) = protocol.as_ref()
+    {
+        if !ctx.settings.enable_extended_connect {
+            abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
+            return Ok(());
+        }
+        if *protocol == Protocol::WebTransport && !ctx.settings.enable_webtransport {
+            abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
+            return Ok(());
+        }
+        if *protocol == Protocol::ConnectUdp && !ctx.settings.enable_datagram {
+            abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
+            return Ok(());
         }
     }
     if decoded.request.method() == http::Method::CONNECT
@@ -634,47 +634,47 @@ async fn handle_request_stream<H: RequestHandler>(
         ctx.session_registry.lock().await.remove(&stream_id);
         return result;
     }
-    if decoded.request.method() == http::Method::CONNECT {
-        if let Some(protocol) = protocol.clone() {
-            if protocol == Protocol::ConnectUdp && !peer_settings.enable_datagram {
-                abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
-                return Ok(());
-            }
-            let datagrams = if ctx.settings.enable_datagram && peer_settings.enable_datagram {
-                let dispatch = ctx
-                    .datagram_dispatch
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("missing datagram dispatch"))?;
-                Some(dispatch.register_stream(stream_id).await)
-            } else {
-                None
-            };
-            let _datagram_registration = if datagrams.is_none() {
-                if let Some(dispatch) = ctx.datagram_dispatch.as_ref() {
-                    Some(dispatch.register_stream_without_datagrams(stream_id).await)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            return handler
-                .handle_connect_stream(
-                    decoded.request,
-                    RequestStream::new_server_response(
-                        send,
-                        recv,
-                        stream_id,
-                        ctx.qpack.clone(),
-                        ctx.settings.read_timeout,
-                        ctx.settings.max_frame_payload_bytes,
-                    ),
-                    ctx.conn_info,
-                    protocol,
-                    datagrams,
-                )
-                .await;
+    if decoded.request.method() == http::Method::CONNECT
+        && let Some(protocol) = protocol.clone()
+    {
+        if protocol == Protocol::ConnectUdp && !peer_settings.enable_datagram {
+            abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
+            return Ok(());
         }
+        let datagrams = if ctx.settings.enable_datagram && peer_settings.enable_datagram {
+            let dispatch = ctx
+                .datagram_dispatch
+                .as_ref()
+                .ok_or_else(|| anyhow!("missing datagram dispatch"))?;
+            Some(dispatch.register_stream(stream_id).await)
+        } else {
+            None
+        };
+        let _datagram_registration = if datagrams.is_none() {
+            if let Some(dispatch) = ctx.datagram_dispatch.as_ref() {
+                Some(dispatch.register_stream_without_datagrams(stream_id).await)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        return handler
+            .handle_connect_stream(
+                decoded.request,
+                RequestStream::new_server_response(
+                    send,
+                    recv,
+                    stream_id,
+                    ctx.qpack.clone(),
+                    ctx.settings.read_timeout,
+                    ctx.settings.max_frame_payload_bytes,
+                ),
+                ctx.conn_info,
+                protocol,
+                datagrams,
+            )
+            .await;
     }
 
     let _datagram_registration = if let Some(dispatch) = ctx.datagram_dispatch.as_ref() {
@@ -771,16 +771,16 @@ async fn handle_request_stream<H: RequestHandler>(
             }
         }
     }
-    if let Some(content_length) = request_content_length {
-        if content_length != body.len() as u64 {
-            warn!(
-                expected = content_length,
-                actual = body.len(),
-                "qpx-h3 rejected Content-Length mismatch"
-            );
-            abort_stream_with_code(&mut send, &mut recv, H3_MESSAGE_ERROR).await?;
-            return Ok(());
-        }
+    if let Some(content_length) = request_content_length
+        && content_length != body.len() as u64
+    {
+        warn!(
+            expected = content_length,
+            actual = body.len(),
+            "qpx-h3 rejected Content-Length mismatch"
+        );
+        abort_stream_with_code(&mut send, &mut recv, H3_MESSAGE_ERROR).await?;
+        return Ok(());
     }
 
     let request_method = decoded.request.method().clone();
@@ -813,13 +813,11 @@ async fn handle_request_stream<H: RequestHandler>(
     if !response_body.is_empty() {
         write_frame(&mut send, FRAME_DATA, response_body.as_ref()).await?;
     }
-    if body_allowed {
-        if let Some(trailers) = response.trailers.as_ref() {
-            let mut trailers = trailers.clone();
-            sanitize_trailers_for_h3(&mut trailers)?;
-            let payload = encode_trailers(&trailers);
-            write_frame(&mut send, FRAME_HEADERS, &payload).await?;
-        }
+    if body_allowed && let Some(trailers) = response.trailers.as_ref() {
+        let mut trailers = trailers.clone();
+        sanitize_trailers_for_h3(&mut trailers)?;
+        let payload = encode_trailers(&trailers);
+        write_frame(&mut send, FRAME_HEADERS, &payload).await?;
     }
     send.finish()?;
     Ok(())
@@ -950,9 +948,11 @@ mod tests {
 
         assert!(!response.headers().contains_key(http::header::CONNECTION));
         assert!(!response.headers().contains_key(http::header::TE));
-        assert!(!response
-            .headers()
-            .contains_key(http::header::TRANSFER_ENCODING));
+        assert!(
+            !response
+                .headers()
+                .contains_key(http::header::TRANSFER_ENCODING)
+        );
         assert_eq!(
             response
                 .headers()
@@ -1100,9 +1100,11 @@ mod tests {
             sanitize_streaming_response_head_for_h3(&mut response).expect("sanitize");
 
         assert_eq!(body_allowed, Some(true));
-        assert!(!response
-            .headers()
-            .contains_key(http::header::CONTENT_LENGTH));
+        assert!(
+            !response
+                .headers()
+                .contains_key(http::header::CONTENT_LENGTH)
+        );
         assert!(!response.headers().contains_key(http::header::TRAILER));
         assert!(!response.headers().contains_key(http::header::TE));
     }

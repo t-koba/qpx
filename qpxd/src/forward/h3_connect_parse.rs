@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use percent_encoding::percent_decode_str;
 use qpx_core::uri_template::UriTemplate;
 

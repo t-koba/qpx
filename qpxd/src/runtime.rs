@@ -1,4 +1,4 @@
-use crate::http::modules::{default_http_module_registry, HttpModuleRegistry};
+use crate::http::modules::{HttpModuleRegistry, default_http_module_registry};
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use qpx_core::config::{Config, ReverseEdgeConfig};
@@ -24,8 +24,8 @@ mod security_rt;
 
 use cache_rt::CacheRuntime;
 use config_rt::{MessageTexts, RuntimeResources};
-pub(crate) use obs_rt::metric_names;
 use obs_rt::ObsRuntime;
+pub(crate) use obs_rt::metric_names;
 #[cfg(test)]
 pub(crate) use plan::CompiledPlaintextCapturePlan;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]

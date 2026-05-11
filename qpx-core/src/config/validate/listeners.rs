@@ -1,8 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 
 use super::super::super::uri_template::UriTemplate;
 use super::super::types::{Config, IngressEdgeMode, OriginalDstSource};
+use super::UPSTREAM_PROXY_URL_SCHEMES;
 use super::observability::validate_capture_policy;
 use super::rules::{
     has_cache_purge_module, validate_action_config, validate_cache_policy,
@@ -16,7 +17,6 @@ use super::security::{
     validate_upstream_trust_profile_ref,
 };
 use super::upstreams::{validate_named_upstream_ref, validate_upstream_tls_trust_config};
-use super::UPSTREAM_PROXY_URL_SCHEMES;
 
 pub(super) fn validate_ingress_edge_configs(
     config: &Config,
@@ -226,12 +226,12 @@ pub(super) fn validate_ingress_edge_configs(
             return Err(anyhow!("edge {} ftp.timeout_ms must be >= 1", edge.name));
         }
         if let Some(http3) = edge.http3.as_ref() {
-            if http3.enabled {
-                if let Some(http3_listen) = http3.listen.as_deref() {
-                    let _: std::net::SocketAddr = http3_listen.parse().map_err(|e| {
-                        anyhow!("edge {} http3.listen is invalid: {}", edge.name, e)
-                    })?;
-                }
+            if http3.enabled
+                && let Some(http3_listen) = http3.listen.as_deref()
+            {
+                let _: std::net::SocketAddr = http3_listen
+                    .parse()
+                    .map_err(|e| anyhow!("edge {} http3.listen is invalid: {}", edge.name, e))?;
             }
             if let Some(connect_udp) = http3.connect_udp.as_ref() {
                 if connect_udp.idle_timeout_secs == 0 {

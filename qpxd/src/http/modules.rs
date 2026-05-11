@@ -6,7 +6,7 @@ mod template;
 
 use crate::http::body::Body;
 use crate::runtime::RuntimeState;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 #[cfg(test)]
 use http::header::HOST;
@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 
 pub use execution::{HttpModuleContext, HttpModuleRequestView};
 pub(crate) use execution::{HttpModuleExecution, HttpModuleSessionInit};
-use template::{compile_template, render_template, CompiledTemplate};
+use template::{CompiledTemplate, compile_template, render_template};
 #[cfg(test)]
 use template::{TemplateModifier, TemplatePart, TemplateVariable};
 
@@ -636,8 +636,8 @@ fn parse_header_name(name: impl AsRef<str>) -> Result<HeaderName> {
 mod tests {
     use super::*;
     use crate::runtime::Runtime;
-    use http::header::LOCATION;
     use http::Method;
+    use http::header::LOCATION;
     use qpx_core::config::{
         AccessLogConfig, AuditLogConfig, AuthConfig, Config, IdentityConfig, MessagesConfig,
         RuntimeConfig, SubrequestModuleConfig, SubrequestPhase, SystemLogConfig,
@@ -701,9 +701,10 @@ mod tests {
         let err = compile_template("http://127.0.0.1/check?path={request.path}")
             .expect_err("implicit raw placeholder should be rejected");
 
-        assert!(err
-            .to_string()
-            .contains("must include an explicit modifier"));
+        assert!(
+            err.to_string()
+                .contains("must include an explicit modifier")
+        );
     }
 
     #[test]
@@ -759,9 +760,11 @@ mod tests {
 
         let modifier = compile_template("http://example.com/{request.path:html}")
             .expect_err("unknown modifier should be rejected");
-        assert!(modifier
-            .to_string()
-            .contains("unknown template placeholder modifier"));
+        assert!(
+            modifier
+                .to_string()
+                .contains("unknown template placeholder modifier")
+        );
 
         let ctx = module_test_context();
         let req = Request::builder()

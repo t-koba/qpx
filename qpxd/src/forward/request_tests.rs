@@ -759,8 +759,9 @@ async fn forward_http_module_compresses_responses() {
             http: None,
             http_guard_profile: None,
             destination_resolution: None,
-            http_modules: vec![serde_yaml::from_str(
-                r#"type: response_compression
+            http_modules: vec![
+                serde_yaml::from_str(
+                    r#"type: response_compression
 settings:
   min_body_bytes: 1
   max_body_bytes: 65536
@@ -772,8 +773,9 @@ settings:
   gzip_level: 6
   brotli_level: 5
   zstd_level: 3"#,
-            )
-            .expect("http module config")],
+                )
+                .expect("http module config"),
+            ],
         })],
         upstreams: Vec::new(),
         caches: Vec::new(),
@@ -867,8 +869,9 @@ async fn forward_http_module_subrequest_can_short_circuit() {
             http: None,
             http_guard_profile: None,
             destination_resolution: None,
-            http_modules: vec![serde_yaml::from_str(&format!(
-                r#"type: subrequest
+            http_modules: vec![
+                serde_yaml::from_str(&format!(
+                    r#"type: subrequest
 settings:
   name: authz
   phase: request_headers
@@ -880,8 +883,9 @@ settings:
   pass_headers:
     - x-test
   response_mode: return_on_error"#
-            ))
-            .expect("http module config")],
+                ))
+                .expect("http module config"),
+            ],
         })],
         upstreams: Vec::new(),
         caches: Vec::new(),
@@ -1029,13 +1033,15 @@ async fn forward_custom_http_module_registry_adds_response_header() {
                 http: None,
                 http_guard_profile: None,
                 destination_resolution: None,
-                http_modules: vec![serde_yaml::from_str(
-                    r#"type: test_response_header
+                http_modules: vec![
+                    serde_yaml::from_str(
+                        r#"type: test_response_header
 settings:
   header_name: x-in-process-module
   header_value: active"#,
-                )
-                .expect("http module config")],
+                    )
+                    .expect("http module config"),
+                ],
             })],
             upstreams: Vec::new(),
             caches: Vec::new(),

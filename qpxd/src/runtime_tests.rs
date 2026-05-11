@@ -182,22 +182,25 @@ fn runtime_rejects_unregistered_custom_http_modules() {
             http: None,
             http_guard_profile: None,
             destination_resolution: None,
-            http_modules: vec![serde_yaml::from_str(
-                r#"type: custom_filter
+            http_modules: vec![
+                serde_yaml::from_str(
+                    r#"type: custom_filter
 id: inject
 settings:
   header_name: x-custom
   header_value: yes"#,
-            )
-            .expect("http module config")],
+                )
+                .expect("http module config"),
+            ],
         }));
 
     let err = Runtime::new(config)
         .err()
         .expect("runtime should reject unknown module");
-    assert!(err
-        .to_string()
-        .contains("unknown http module type custom_filter"));
+    assert!(
+        err.to_string()
+            .contains("unknown http module type custom_filter")
+    );
 }
 
 #[test]
@@ -267,9 +270,11 @@ fn runtime_plan_compiles_route_rate_limits() {
 
     let plan = single_reverse_route_plan(config);
 
-    assert!(!plan
-        .rate_limits
-        .is_empty_for_scope(crate::rate_limit::TransportScope::Request));
+    assert!(
+        !plan
+            .rate_limits
+            .is_empty_for_scope(crate::rate_limit::TransportScope::Request)
+    );
 }
 
 #[test]
@@ -388,9 +393,11 @@ fn export_session_for_plan_is_absent_without_capture_flags() {
         rate_limits: Default::default(),
     };
 
-    assert!(state
-        .export_session_for_plan(&plan, "127.0.0.1:1", "example.com:443")
-        .is_none());
+    assert!(
+        state
+            .export_session_for_plan(&plan, "127.0.0.1:1", "example.com:443")
+            .is_none()
+    );
 }
 
 #[test]

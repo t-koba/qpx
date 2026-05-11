@@ -1,10 +1,10 @@
 use super::{
-    compile_template, parse_header_name, parse_module_settings, render_template, CompiledTemplate,
-    HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
-    HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome,
+    CompiledTemplate, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
+    HttpModuleFactory, HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome,
+    compile_template, parse_header_name, parse_module_settings, render_template,
 };
 use crate::http::body::Body;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use http::header::{CONTENT_LENGTH, LOCATION};
 use http::{HeaderName, HeaderValue, Method};
@@ -15,7 +15,7 @@ use qpx_core::config::{
 };
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::Arc;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub(super) struct SubrequestModuleFactory;
@@ -221,13 +221,12 @@ impl SubrequestModule {
             .get(CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<usize>().ok())
+            && content_length > self.max_response_bytes
         {
-            if content_length > self.max_response_bytes {
-                return Err(anyhow!(
-                    "subrequest {} response exceeds max_response_bytes",
-                    self.name
-                ));
-            }
+            return Err(anyhow!(
+                "subrequest {} response exceeds max_response_bytes",
+                self.name
+            ));
         }
         let max_response_bytes = self.max_response_bytes;
         let name = self.name.clone();

@@ -1,6 +1,6 @@
 use crate::http::body::Body;
 use crate::http::http1_codec::serve_http1_with_interim;
-use crate::http::interim::{serve_h2_with_interim, sniff_h2_preface, H2_PREFACE};
+use crate::http::interim::{H2_PREFACE, serve_h2_with_interim, sniff_h2_preface};
 use crate::http::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
 #[cfg(feature = "http3")]
@@ -8,11 +8,11 @@ use crate::sidecar_control::SidecarControl;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use crate::{
     connection_filter::{
-        emit_connection_filter_audit, evaluate_connection_filter, ConnectionFilterStage,
+        ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
     },
     runtime::metric_names,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hyper::{Request, Response, StatusCode};
 use metrics::{counter, histogram};
 use qpx_core::config::IngressEdgeConfig;
@@ -68,7 +68,7 @@ mod policy;
 mod request;
 
 #[cfg(any(feature = "mitm", all(feature = "http3", feature = "http3-backend-h3")))]
-pub(crate) use policy::{evaluate_forward_policy, ForwardPolicyDecision};
+pub(crate) use policy::{ForwardPolicyDecision, evaluate_forward_policy};
 pub(crate) use request::handle_request_inner;
 #[cfg(feature = "mitm")]
 pub(crate) use request::proxy_auth_required;

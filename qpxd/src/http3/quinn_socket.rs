@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use quinn::{AsyncUdpSocket, UdpPoller};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -219,10 +219,10 @@ impl RouteState {
                 .any(|cid| self.cids.contains(&cid));
         }
         for len in &self.known_server_cid_lens {
-            if let Some(cid) = parse_quic_short_dcid(packet, *len) {
-                if self.cids.contains(&cid) {
-                    return true;
-                }
+            if let Some(cid) = parse_quic_short_dcid(packet, *len)
+                && self.cids.contains(&cid)
+            {
+                return true;
             }
         }
         false
@@ -1094,24 +1094,23 @@ impl AsyncUdpSocket for RemoteBrokerSocket {
     }
 
     fn try_send(&self, transmit: &quinn::udp::Transmit) -> std::io::Result<()> {
-        if self.mode.load(Ordering::SeqCst) == RemoteMode::Brokered as u8 {
-            if let Some(writer) = self
+        if self.mode.load(Ordering::SeqCst) == RemoteMode::Brokered as u8
+            && let Some(writer) = self
                 .outbound_writer
                 .lock()
                 .expect("outbound writer lock")
                 .clone()
-            {
-                writer
-                    .send(BrokerFrame::OutboundTransmit(OwnedTransmit {
-                        destination: transmit.destination,
-                        ecn: transmit.ecn,
-                        contents: transmit.contents.to_vec(),
-                        segment_size: transmit.segment_size,
-                        src_ip: transmit.src_ip,
-                    }))
-                    .map_err(|_| std::io::Error::new(ErrorKind::BrokenPipe, "broker closed"))?;
-                return Ok(());
-            }
+        {
+            writer
+                .send(BrokerFrame::OutboundTransmit(OwnedTransmit {
+                    destination: transmit.destination,
+                    ecn: transmit.ecn,
+                    contents: transmit.contents.to_vec(),
+                    segment_size: transmit.segment_size,
+                    src_ip: transmit.src_ip,
+                }))
+                .map_err(|_| std::io::Error::new(ErrorKind::BrokenPipe, "broker closed"))?;
+            return Ok(());
         }
         self.io.try_io(Interest::WRITABLE, || {
             self.inner.send((&*self.io).into(), transmit)

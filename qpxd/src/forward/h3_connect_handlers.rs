@@ -246,62 +246,61 @@ pub(crate) async fn handle_h3_connect(
                 .ok_or_else(|| anyhow!("listener not found"))?;
             let listener_trust = listener_upstream_trust(listener_cfg)?;
             let mut upstream_connected = Some(upstream_connected);
-            if let Some(client_hello) = client_hello.as_ref() {
-                if listener_requires_upstream_cert_preview(listener_cfg)
-                    && matches!(
-                        action.kind,
-                        ActionKind::Inspect
-                            | ActionKind::Tunnel
-                            | ActionKind::Direct
-                            | ActionKind::Proxy
-                    )
+            if let Some(client_hello) = client_hello.as_ref()
+                && listener_requires_upstream_cert_preview(listener_cfg)
+                && matches!(
+                    action.kind,
+                    ActionKind::Inspect
+                        | ActionKind::Tunnel
+                        | ActionKind::Direct
+                        | ActionKind::Proxy
+                )
+            {
+                let preview_verify = listener_cfg
+                    .tls_inspection
+                    .as_ref()
+                    .map(|cfg| {
+                        cfg.verify_upstream
+                            && !state.tls_verify_exception_matches(
+                                handler.listener_name.as_ref(),
+                                host.as_str(),
+                            )
+                    })
+                    .unwrap_or(true);
+                let preview_server = upstream_connected
+                    .take()
+                    .expect("HTTP/3 CONNECT upstream tunnel must exist before cert preview");
+                match preview_tls_certificate_with_options(
+                    host.as_str(),
+                    preview_server,
+                    preview_verify,
+                    listener_trust.as_deref(),
+                )
+                .await
                 {
-                    let preview_verify = listener_cfg
-                        .tls_inspection
-                        .as_ref()
-                        .map(|cfg| {
-                            cfg.verify_upstream
-                                && !state.tls_verify_exception_matches(
-                                    handler.listener_name.as_ref(),
-                                    host.as_str(),
-                                )
+                    Ok(upstream_cert) => {
+                        action = decide_connect_action_from_tls_metadata(ConnectPolicyInput {
+                            runtime: &handler.runtime,
+                            listener_name: handler.listener_name.as_ref(),
+                            remote_addr: conn.remote_addr,
+                            host: host.as_str(),
+                            port,
+                            authority: authority.as_str(),
+                            sanitized_headers: &sanitized_headers,
+                            identity: &identity,
+                            client_hello,
+                            upstream_cert: Some(&upstream_cert),
                         })
-                        .unwrap_or(true);
-                    let preview_server = upstream_connected
-                        .take()
-                        .expect("HTTP/3 CONNECT upstream tunnel must exist before cert preview");
-                    match preview_tls_certificate_with_options(
-                        host.as_str(),
-                        preview_server,
-                        preview_verify,
-                        listener_trust.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(upstream_cert) => {
-                            action = decide_connect_action_from_tls_metadata(ConnectPolicyInput {
-                                runtime: &handler.runtime,
-                                listener_name: handler.listener_name.as_ref(),
-                                remote_addr: conn.remote_addr,
-                                host: host.as_str(),
-                                port,
-                                authority: authority.as_str(),
-                                sanitized_headers: &sanitized_headers,
-                                identity: &identity,
-                                client_hello,
-                                upstream_cert: Some(&upstream_cert),
-                            })
-                            .await?;
+                        .await?;
+                    }
+                    Err(err) => {
+                        if listener_trust.is_some() {
+                            return Err(err);
                         }
-                        Err(err) => {
-                            if listener_trust.is_some() {
-                                return Err(err);
-                            }
-                            warn!(
-                                error = ?err,
-                                "forward HTTP/3 CONNECT upstream certificate preview failed"
-                            );
-                        }
+                        warn!(
+                            error = ?err,
+                            "forward HTTP/3 CONNECT upstream certificate preview failed"
+                        );
                     }
                 }
             }
@@ -494,59 +493,56 @@ pub(crate) async fn handle_h3_connect(
         .ok_or_else(|| anyhow!("listener not found"))?;
     let listener_trust = listener_upstream_trust(listener_cfg)?;
     let mut server = Some(server);
-    if let Some(client_hello) = client_hello.as_ref() {
-        if listener_requires_upstream_cert_preview(listener_cfg)
-            && matches!(
-                action.kind,
-                ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
-            )
+    if let Some(client_hello) = client_hello.as_ref()
+        && listener_requires_upstream_cert_preview(listener_cfg)
+        && matches!(
+            action.kind,
+            ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
+        )
+    {
+        let preview_verify = listener_cfg
+            .tls_inspection
+            .as_ref()
+            .map(|cfg| {
+                cfg.verify_upstream
+                    && !state
+                        .tls_verify_exception_matches(handler.listener_name.as_ref(), host.as_str())
+            })
+            .unwrap_or(true);
+        let preview_server = server
+            .take()
+            .expect("HTTP/3 CONNECT upstream tunnel must exist before cert preview");
+        match preview_tls_certificate_with_options(
+            host.as_str(),
+            preview_server,
+            preview_verify,
+            listener_trust.as_deref(),
+        )
+        .await
         {
-            let preview_verify = listener_cfg
-                .tls_inspection
-                .as_ref()
-                .map(|cfg| {
-                    cfg.verify_upstream
-                        && !state.tls_verify_exception_matches(
-                            handler.listener_name.as_ref(),
-                            host.as_str(),
-                        )
+            Ok(upstream_cert) => {
+                action = decide_connect_action_from_tls_metadata(ConnectPolicyInput {
+                    runtime: &handler.runtime,
+                    listener_name: handler.listener_name.as_ref(),
+                    remote_addr: conn.remote_addr,
+                    host: host.as_str(),
+                    port,
+                    authority: authority.as_str(),
+                    sanitized_headers: &sanitized_headers,
+                    identity: &identity,
+                    client_hello,
+                    upstream_cert: Some(&upstream_cert),
                 })
-                .unwrap_or(true);
-            let preview_server = server
-                .take()
-                .expect("HTTP/3 CONNECT upstream tunnel must exist before cert preview");
-            match preview_tls_certificate_with_options(
-                host.as_str(),
-                preview_server,
-                preview_verify,
-                listener_trust.as_deref(),
-            )
-            .await
-            {
-                Ok(upstream_cert) => {
-                    action = decide_connect_action_from_tls_metadata(ConnectPolicyInput {
-                        runtime: &handler.runtime,
-                        listener_name: handler.listener_name.as_ref(),
-                        remote_addr: conn.remote_addr,
-                        host: host.as_str(),
-                        port,
-                        authority: authority.as_str(),
-                        sanitized_headers: &sanitized_headers,
-                        identity: &identity,
-                        client_hello,
-                        upstream_cert: Some(&upstream_cert),
-                    })
-                    .await?;
+                .await?;
+            }
+            Err(err) => {
+                if listener_trust.is_some() {
+                    return Err(err);
                 }
-                Err(err) => {
-                    if listener_trust.is_some() {
-                        return Err(err);
-                    }
-                    warn!(
-                        error = ?err,
-                        "forward HTTP/3 CONNECT upstream certificate preview failed"
-                    );
-                }
+                warn!(
+                    error = ?err,
+                    "forward HTTP/3 CONNECT upstream certificate preview failed"
+                );
             }
         }
     }

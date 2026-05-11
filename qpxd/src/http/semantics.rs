@@ -48,10 +48,10 @@ pub fn append_via_for_version(headers: &mut HeaderMap, version: Version, proxy_n
 }
 
 pub fn sync_host_header_from_absolute_target(headers: &mut HeaderMap, target: &http::Uri) {
-    if let Some(authority) = target.authority() {
-        if let Ok(value) = HeaderValue::from_str(authority.as_str()) {
-            headers.insert(HOST, value);
-        }
+    if let Some(authority) = target.authority()
+        && let Ok(value) = HeaderValue::from_str(authority.as_str())
+    {
+        headers.insert(HOST, value);
     }
 }
 
@@ -195,10 +195,10 @@ pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), Reques
         return Err(RequestValidationError::MissingHost);
     }
 
-    if let (Some(host), Some(authority)) = (host, uri_authority) {
-        if !authority_equivalent(host, authority, req.uri().scheme_str()) {
-            return Err(RequestValidationError::HostAuthorityMismatch);
-        }
+    if let (Some(host), Some(authority)) = (host, uri_authority)
+        && !authority_equivalent(host, authority, req.uri().scheme_str())
+    {
+        return Err(RequestValidationError::HostAuthorityMismatch);
     }
 
     Ok(())

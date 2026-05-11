@@ -1,5 +1,5 @@
 use crate::exporter::ExporterSink;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::sync::OnceLock;
 
 use super::RuntimeResources;

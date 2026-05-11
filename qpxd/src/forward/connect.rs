@@ -1,4 +1,4 @@
-use super::policy::{evaluate_forward_policy, ForwardPolicyDecision};
+use super::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 use crate::destination::DestinationInputs;
 use crate::forward::request::{proxy_auth_required, resolve_upstream, resolve_upstream_url};
 use crate::http::address::parse_authority_host_port;
@@ -17,49 +17,49 @@ use crate::http::l7::{
     finalize_response_with_headers, prepare_request_with_headers_in_place,
 };
 use crate::http::local_response::build_local_response;
-use crate::io_copy::{copy_bidirectional_with_export_and_idle, BandwidthThrottle};
+use crate::io_copy::{BandwidthThrottle, copy_bidirectional_with_export_and_idle};
 use crate::io_prefix::PrefixedIo;
 use crate::policy_context::{
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, attach_log_context, emit_audit_log, enforce_ext_authz,
-    resolve_identity, sanitize_headers_for_policy, validate_ext_authz_allow_mode, AuditRecord,
-    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
+    resolve_identity, sanitize_headers_for_policy, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
 use crate::tls::client::preview_tls_certificate_with_options;
-use crate::tls::client::{connect_tls_h2_h1_with_options, BoxTlsStream};
+use crate::tls::client::{BoxTlsStream, connect_tls_h2_h1_with_options};
 use crate::tls::{
-    extract_client_hello_info, looks_like_tls_client_hello, try_read_client_hello_with_timeout,
     CompiledUpstreamTlsTrust, TlsClientHelloInfo, UpstreamCertificateInfo,
+    extract_client_hello_info, looks_like_tls_client_hello, try_read_client_hello_with_timeout,
 };
-use crate::upstream::connect::{connect_tunnel_target, ConnectedTunnel};
+use crate::upstream::connect::{ConnectedTunnel, connect_tunnel_target};
 use ::http::{
     HeaderMap, HeaderMap as Http1HeaderMap, Method, Request, Request as Http1Request, Response,
     Response as Http1Response, StatusCode, Uri,
 };
 #[cfg(feature = "mitm")]
 use anyhow::Context;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use h2::ext::Protocol as H2Protocol;
-use h2::{client as h2_client, Reason as H2Reason, RecvStream as H2RecvStream};
+use h2::{Reason as H2Reason, RecvStream as H2RecvStream, client as h2_client};
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 #[cfg(feature = "mitm")]
 use std::sync::Arc;
 use std::{
-    future::{poll_fn, Future},
+    future::{Future, poll_fn},
     pin::Pin,
     task::Poll,
 };
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::{TcpStream, lookup_host};
 use tokio::task;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 #[cfg(feature = "mitm")]
-use crate::http::mitm::{proxy_mitm_request, MitmRouteContext};
+use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
 #[cfg(feature = "mitm")]
 use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream};
 
@@ -73,15 +73,16 @@ mod connect_inspect;
 mod connect_tunnel;
 
 use self::connect_extended::{
-    default_port_for_scheme, open_upstream_h2_extended_connect_stream,
-    spawn_h2_extended_connect_relay, H2ExtendedConnectUpstream,
+    H2ExtendedConnectUpstream, default_port_for_scheme, open_upstream_h2_extended_connect_stream,
+    spawn_h2_extended_connect_relay,
 };
 use self::connect_h2::handle_h2_extended_connect;
 pub(super) use self::connect_inspect::{
-    decide_connect_action_from_client_hello, decide_connect_action_from_tls_metadata,
-    listener_requires_upstream_cert_preview, listener_upstream_trust, ConnectPolicyInput,
+    ConnectPolicyInput, decide_connect_action_from_client_hello,
+    decide_connect_action_from_tls_metadata, listener_requires_upstream_cert_preview,
+    listener_upstream_trust,
 };
-use self::connect_tunnel::{tunnel_connect, TunnelConnectContext};
+use self::connect_tunnel::{TunnelConnectContext, tunnel_connect};
 
 pub(super) async fn handle_connect(
     req: Request<Body>,

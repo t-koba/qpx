@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use qpx_core::config::{load_configs, load_configs_with_sources, Config as ProxyConfig};
+use qpx_core::config::{Config as ProxyConfig, load_configs, load_configs_with_sources};
 use qpx_observability::{init_logging, start_metrics};
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -75,12 +75,12 @@ mod windows_handoff;
 mod xdp;
 
 pub mod module_api {
-    pub use crate::http::body::{to_bytes, Body, BodyError, Sender};
+    pub use crate::http::body::{Body, BodyError, Sender, to_bytes};
     pub use crate::http::modules::{
-        default_http_module_registry, BodyAccess, CacheLookupStatus, HttpModule,
-        HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
-        HttpModuleRegistry, HttpModuleRegistryBuilder, HttpModuleRequestView, HttpModuleStage,
-        ModuleStages, RequestHeadersOutcome, RetryEvent,
+        BodyAccess, CacheLookupStatus, HttpModule, HttpModuleCapabilities, HttpModuleContext,
+        HttpModuleEvent, HttpModuleFactory, HttpModuleRegistry, HttpModuleRegistryBuilder,
+        HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome, RetryEvent,
+        default_http_module_registry,
     };
 }
 
@@ -144,13 +144,15 @@ impl Daemon {
                 path,
             } => match_config(
                 config,
-                edge,
-                src_ip,
-                dst_port,
-                sni,
-                host,
-                method,
-                path,
+                MatchConfigRequest {
+                    edge,
+                    src_ip,
+                    dst_port,
+                    sni,
+                    host,
+                    method,
+                    path,
+                },
                 self.http_module_registry.clone(),
             ),
             #[cfg(feature = "tls-rustls")]
@@ -405,9 +407,7 @@ fn explain_config(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn match_config(
-    config_paths: Vec<PathBuf>,
+struct MatchConfigRequest {
     edge: String,
     src_ip: Option<IpAddr>,
     dst_port: Option<u16>,
@@ -415,6 +415,11 @@ fn match_config(
     host: Option<String>,
     method: Option<String>,
     path: Option<String>,
+}
+
+fn match_config(
+    config_paths: Vec<PathBuf>,
+    request: MatchConfigRequest,
     http_module_registry: Arc<http::modules::HttpModuleRegistry>,
 ) -> Result<()> {
     let config = load_configs(&config_paths)?;
@@ -424,13 +429,18 @@ fn match_config(
         "{}",
         cli_render::render_match_plan(
             state.plan.as_ref(),
-            &edge,
-            src_ip,
-            dst_port,
-            sni.as_deref(),
-            host.as_deref(),
-            method.as_deref(),
-            path.as_deref(),
+            cli_render::MatchPlanRequest {
+                edge: &request.edge,
+                ctx: qpx_core::rules::RuleMatchContext {
+                    src_ip: request.src_ip,
+                    dst_port: request.dst_port,
+                    sni: request.sni.as_deref(),
+                    host: request.host.as_deref(),
+                    method: request.method.as_deref(),
+                    path: request.path.as_deref(),
+                    ..Default::default()
+                },
+            },
         )?
     );
     Ok(())
@@ -2029,6 +2039,14 @@ mod cli_tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn render_test_match_plan(
+        plan: &runtime::RuntimePlan,
+        edge: &str,
+        ctx: qpx_core::rules::RuleMatchContext<'_>,
+    ) -> Result<String> {
+        render_match_plan(plan, cli_render::MatchPlanRequest { edge, ctx })
+    }
+
     #[test]
     fn init_templates_are_valid_canonical_configs() {
         for template in [
@@ -2074,9 +2092,11 @@ mod cli_tests {
                 .and_then(serde_json::Value::as_bool),
             Some(false)
         );
-        assert!(schema
-            .pointer("/$defs/httpModule/properties/settings")
-            .is_some());
+        assert!(
+            schema
+                .pointer("/$defs/httpModule/properties/settings")
+                .is_some()
+        );
         assert!(schema.pointer("/properties/edges/items/oneOf").is_some());
 
         let json = serde_json::to_string_pretty(&schema).expect("json schema render");
@@ -2111,15 +2131,15 @@ mod cli_tests {
     #[test]
     fn match_renderer_uses_compiled_matchers() {
         let state = runtime_state_from_template(InitTemplate::ReverseBasic);
-        let matched = render_match_plan(
+        let matched = render_test_match_plan(
             state.plan.as_ref(),
             "public-http",
-            None,
-            None,
-            None,
-            Some("localhost"),
-            Some("GET"),
-            Some("/"),
+            qpx_core::rules::RuleMatchContext {
+                host: Some("localhost"),
+                method: Some("GET"),
+                path: Some("/"),
+                ..Default::default()
+            },
         )
         .expect("match render");
         assert!(matched.contains("edge: public-http"));
@@ -2134,15 +2154,15 @@ mod cli_tests {
         assert!(matched.contains("target"));
         assert!(matched.contains("type: upstream"));
 
-        let missed = render_match_plan(
+        let missed = render_test_match_plan(
             state.plan.as_ref(),
             "public-http",
-            None,
-            None,
-            None,
-            Some("example.invalid"),
-            Some("GET"),
-            Some("/"),
+            qpx_core::rules::RuleMatchContext {
+                host: Some("example.invalid"),
+                method: Some("GET"),
+                path: Some("/"),
+                ..Default::default()
+            },
         )
         .expect("match render");
         assert!(missed.contains("route: <no match>"));
@@ -2201,15 +2221,17 @@ edges:
 "#,
         );
 
-        let reverse = render_match_plan(
+        let reverse = render_test_match_plan(
             state.plan.as_ref(),
             "trace-reverse",
-            Some("10.1.2.3".parse().expect("ip")),
-            None,
-            Some("api.example.com"),
-            Some("api.example.com"),
-            Some("GET"),
-            Some("/v2/users"),
+            qpx_core::rules::RuleMatchContext {
+                src_ip: Some("10.1.2.3".parse().expect("ip")),
+                sni: Some("api.example.com"),
+                host: Some("api.example.com"),
+                method: Some("GET"),
+                path: Some("/v2/users"),
+                ..Default::default()
+            },
         )
         .expect("reverse match");
         assert!(reverse.contains("route: api"));
@@ -2222,15 +2244,15 @@ edges:
         assert!(reverse.contains("    mode: glob\n"));
         assert!(reverse.contains("    mode: regex\n"));
 
-        let forward = render_match_plan(
+        let forward = render_test_match_plan(
             state.plan.as_ref(),
             "trace-forward",
-            Some("192.0.2.44".parse().expect("ip")),
-            None,
-            None,
-            None,
-            Some("POST"),
-            Some("/upload/file"),
+            qpx_core::rules::RuleMatchContext {
+                src_ip: Some("192.0.2.44".parse().expect("ip")),
+                method: Some("POST"),
+                path: Some("/upload/file"),
+                ..Default::default()
+            },
         )
         .expect("forward match");
         assert!(forward.contains("kind: forward"));
@@ -2238,15 +2260,16 @@ edges:
         assert!(forward.contains("  src_ip\n"));
         assert!(forward.contains("  path\n"));
 
-        let transparent = render_match_plan(
+        let transparent = render_test_match_plan(
             state.plan.as_ref(),
             "trace-transparent",
-            None,
-            Some(8080),
-            None,
-            Some("internal.example.com"),
-            Some("GET"),
-            Some("/"),
+            qpx_core::rules::RuleMatchContext {
+                dst_port: Some(8080),
+                host: Some("internal.example.com"),
+                method: Some("GET"),
+                path: Some("/"),
+                ..Default::default()
+            },
         )
         .expect("transparent match");
         assert!(transparent.contains("kind: transparent"));
