@@ -110,6 +110,7 @@ pub(super) async fn handle_h2_extended_connect(
             identity.supplement_builtin_auth(allowed.authenticated_user.as_ref());
             (allowed.action, allowed.matched_rule)
         }
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Challenge(chal) => {
             let log_context = identity.to_log_context(None, None, None);
             let response = proxy_auth_required(chal, state.messages.proxy_auth_required.as_str());
@@ -141,6 +142,7 @@ pub(super) async fn handle_h2_extended_connect(
             );
             return Ok(response);
         }
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Forbidden => {
             let log_context = identity.to_log_context(None, None, None);
             let mut response = finalize_response_for_request(

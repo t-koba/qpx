@@ -222,6 +222,7 @@ pub(super) async fn dispatch_mitm_request(
                 )
             }
         }
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Challenge(chal) => {
             let response = proxy_auth_required(chal, state.messages.proxy_auth_required.as_str());
             (
@@ -236,6 +237,7 @@ pub(super) async fn dispatch_mitm_request(
                 )),
             )
         }
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Forbidden => (
             None,
             None,

@@ -4,6 +4,7 @@ use super::connect::{
 };
 use super::h3::ForwardH3Handler;
 use crate::destination::DestinationInputs;
+#[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
 use crate::http::body::Body;
 use crate::http::common::{

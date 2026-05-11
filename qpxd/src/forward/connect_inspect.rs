@@ -120,6 +120,7 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
             },
             _ => allowed.action,
         }),
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Challenge(_) | ForwardPolicyDecision::Forbidden => {
             Ok(ActionConfig {
                 kind: ActionKind::Block,

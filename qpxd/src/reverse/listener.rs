@@ -558,6 +558,127 @@ async fn handle_tls_connection(
     Ok(())
 }
 
+#[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
+async fn handle_tls_connection(
+    stream: crate::io_prefix::PrefixedIo<TcpStream>,
+    remote_addr: std::net::SocketAddr,
+    local_port: u16,
+    ctx: ReverseTlsContext,
+) -> Result<()> {
+    let ReverseTlsContext { reverse } = ctx;
+    let mut stream = stream;
+    let peek_timeout =
+        Duration::from_millis(reverse.runtime.state().plan.limits.tls_peek_timeout_ms);
+    let peek = read_client_hello_with_timeout(&mut stream, peek_timeout).await?;
+    let client_hello = extract_client_hello_info(&peek);
+    let sni = client_hello
+        .as_ref()
+        .and_then(|hello| hello.sni.clone())
+        .map(Arc::<str>::from);
+    if let Some(matched_rule) =
+        reverse_connection_filter_match(&reverse, remote_addr, local_port, client_hello.as_ref())
+    {
+        record_reverse_connection_filter_block(
+            &reverse,
+            remote_addr,
+            local_port,
+            ConnectionFilterStage::ClientHello,
+            matched_rule.as_str(),
+            client_hello.as_ref().and_then(|hello| hello.sni.as_deref()),
+        );
+        return Ok(());
+    }
+    let stream = crate::io_prefix::PrefixedIo::new(stream, Bytes::from(peek));
+
+    let compiled = reverse.compiled().await;
+    if let Some(upstream) = compiled.router.select_tls_passthrough_upstream(
+        remote_addr.ip(),
+        local_port,
+        sni.as_deref(),
+    ) {
+        let addr = upstream.origin.connect_authority(443)?;
+        let upstream_timeout =
+            Duration::from_millis(reverse.runtime.state().plan.limits.upstream_http_timeout_ms);
+        let upstream_stream =
+            tokio::time::timeout(upstream_timeout, TcpStream::connect(&addr)).await??;
+        let _ = upstream_stream.set_nodelay(true);
+        let export = upstream_stream.peer_addr().ok().and_then(|server_addr| {
+            reverse
+                .runtime
+                .state()
+                .export_session(remote_addr, server_addr)
+        });
+        let idle_timeout =
+            Duration::from_millis(reverse.runtime.state().plan.limits.tunnel_idle_timeout_ms);
+        copy_bidirectional_with_export_and_idle(
+            stream,
+            upstream_stream,
+            export,
+            Some(idle_timeout),
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let tls_accept_timeout =
+        Duration::from_millis(reverse.runtime.state().plan.limits.upstream_http_timeout_ms);
+    let acceptor = compiled
+        .tls_acceptor
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("reverse tls acceptor missing"))?
+        .clone();
+    let tls_stream = timeout(tls_accept_timeout, acceptor.accept(stream, sni.as_deref())).await??;
+    let negotiated_h2 = tls_stream
+        .get_ref()
+        .negotiated_alpn()
+        .ok()
+        .flatten()
+        .map(|alpn| alpn == b"h2")
+        .unwrap_or(false);
+    let header_read_timeout = Duration::from_millis(
+        reverse
+            .runtime
+            .state()
+            .plan
+            .limits
+            .http_header_read_timeout_ms,
+    );
+    let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), None);
+    let access_cfg = reverse.runtime.state().resources.access_log.clone();
+    let reverse_name = reverse.name.clone();
+    if negotiated_h2 {
+        let service = AccessLogService::new(
+            ReverseInterimService {
+                reverse: reverse.clone(),
+                conn,
+            },
+            remote_addr,
+            AccessLogContext {
+                kind: "reverse",
+                name: reverse_name.clone(),
+            },
+            &access_cfg,
+        );
+        serve_h2_with_interim(tls_stream, service, false, header_read_timeout).await?;
+    } else {
+        let service = AccessLogService::new(
+            ReverseInterimService {
+                reverse: reverse.clone(),
+                conn,
+            },
+            remote_addr,
+            AccessLogContext {
+                kind: "reverse",
+                name: reverse_name.clone(),
+            },
+            &access_cfg,
+        );
+        serve_http1_with_interim(tls_stream, service, header_read_timeout).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -959,125 +1080,4 @@ mod tests {
         server.read_exact(&mut rest).await.expect("read rest");
         assert_eq!(&rest, extra);
     }
-}
-
-#[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
-async fn handle_tls_connection(
-    stream: crate::io_prefix::PrefixedIo<TcpStream>,
-    remote_addr: std::net::SocketAddr,
-    local_port: u16,
-    ctx: ReverseTlsContext,
-) -> Result<()> {
-    let ReverseTlsContext { reverse } = ctx;
-    let mut stream = stream;
-    let peek_timeout =
-        Duration::from_millis(reverse.runtime.state().plan.limits.tls_peek_timeout_ms);
-    let peek = read_client_hello_with_timeout(&mut stream, peek_timeout).await?;
-    let client_hello = extract_client_hello_info(&peek);
-    let sni = client_hello
-        .as_ref()
-        .and_then(|hello| hello.sni.clone())
-        .map(Arc::<str>::from);
-    if let Some(matched_rule) =
-        reverse_connection_filter_match(&reverse, remote_addr, local_port, client_hello.as_ref())
-    {
-        record_reverse_connection_filter_block(
-            &reverse,
-            remote_addr,
-            local_port,
-            ConnectionFilterStage::ClientHello,
-            matched_rule.as_str(),
-            client_hello.as_ref().and_then(|hello| hello.sni.as_deref()),
-        );
-        return Ok(());
-    }
-    let stream = crate::io_prefix::PrefixedIo::new(stream, Bytes::from(peek));
-
-    let compiled = reverse.compiled().await;
-    if let Some(upstream) = compiled.router.select_tls_passthrough_upstream(
-        remote_addr.ip(),
-        local_port,
-        sni.as_deref(),
-    ) {
-        let addr = upstream.origin.connect_authority(443)?;
-        let upstream_timeout =
-            Duration::from_millis(reverse.runtime.state().plan.limits.upstream_http_timeout_ms);
-        let upstream_stream =
-            tokio::time::timeout(upstream_timeout, TcpStream::connect(&addr)).await??;
-        let _ = upstream_stream.set_nodelay(true);
-        let export = upstream_stream.peer_addr().ok().and_then(|server_addr| {
-            reverse
-                .runtime
-                .state()
-                .export_session(remote_addr, server_addr)
-        });
-        let idle_timeout =
-            Duration::from_millis(reverse.runtime.state().plan.limits.tunnel_idle_timeout_ms);
-        copy_bidirectional_with_export_and_idle(
-            stream,
-            upstream_stream,
-            export,
-            Some(idle_timeout),
-            None,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let tls_accept_timeout =
-        Duration::from_millis(reverse.runtime.state().plan.limits.upstream_http_timeout_ms);
-    let acceptor = compiled
-        .tls_acceptor
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("reverse tls acceptor missing"))?
-        .clone();
-    let tls_stream = timeout(tls_accept_timeout, acceptor.accept(stream, sni.as_deref())).await??;
-    let negotiated_h2 = tls_stream
-        .get_ref()
-        .negotiated_alpn()
-        .ok()
-        .flatten()
-        .map(|alpn| alpn == b"h2")
-        .unwrap_or(false);
-    let header_read_timeout = Duration::from_millis(
-        reverse
-            .runtime
-            .state()
-            .plan
-            .limits
-            .http_header_read_timeout_ms,
-    );
-    let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), None);
-    let access_cfg = reverse.runtime.state().resources.access_log.clone();
-    let reverse_name = reverse.name.clone();
-    if negotiated_h2 {
-        let service = AccessLogService::new(
-            ReverseInterimService {
-                reverse: reverse.clone(),
-                conn,
-            },
-            remote_addr,
-            AccessLogContext {
-                kind: "reverse",
-                name: reverse_name.clone(),
-            },
-            &access_cfg,
-        );
-        serve_h2_with_interim(tls_stream, service, false, header_read_timeout).await?;
-    } else {
-        let service = AccessLogService::new(
-            ReverseInterimService {
-                reverse: reverse.clone(),
-                conn,
-            },
-            remote_addr,
-            AccessLogContext {
-                kind: "reverse",
-                name: reverse_name.clone(),
-            },
-            &access_cfg,
-        );
-        serve_http1_with_interim(tls_stream, service, header_read_timeout).await?;
-    }
-    Ok(())
 }

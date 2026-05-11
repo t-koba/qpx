@@ -929,6 +929,7 @@ async fn prepare_qpx_connect_request(
                 allowed.matched_rule.map(|rule: Arc<str>| rule.to_string()),
             )
         }
+        #[cfg(feature = "auth-basic")]
         Ok(ForwardPolicyDecision::Challenge(challenge)) => {
             let log_context = identity.to_log_context(None, None, None);
             let response = finalize_response_for_request(
@@ -956,6 +957,7 @@ async fn prepare_qpx_connect_request(
             .await?;
             return Ok(QpxConnectPreparation::Responded);
         }
+        #[cfg(feature = "auth-basic")]
         Ok(ForwardPolicyDecision::Forbidden) => {
             let log_context = identity.to_log_context(None, None, None);
             let response = finalize_response_for_request(

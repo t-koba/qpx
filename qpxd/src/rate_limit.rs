@@ -594,6 +594,7 @@ impl RateLimiters {
         })
     }
 
+    #[cfg(feature = "http3")]
     pub(crate) fn collect_plan_with_profile(
         &self,
         plan: &CompiledRateLimitPlan,

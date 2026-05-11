@@ -197,6 +197,7 @@ pub(super) async fn dispatch_forward_request(
             identity.supplement_builtin_auth(allowed.authenticated_user.as_ref());
             (allowed.action, allowed.headers, allowed.matched_rule)
         }
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Challenge(chal) => {
             let mut log_context = identity.to_log_context(None, None, None);
             attach_destination_trace(&mut log_context, &destination);
@@ -229,6 +230,7 @@ pub(super) async fn dispatch_forward_request(
             );
             return Ok(response);
         }
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Forbidden => {
             let mut log_context = identity.to_log_context(None, None, None);
             attach_destination_trace(&mut log_context, &destination);

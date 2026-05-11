@@ -1,5 +1,7 @@
 use crate::destination::DestinationInputs;
-use crate::forward::{ForwardPolicyDecision, evaluate_forward_policy, proxy_auth_required};
+#[cfg(feature = "auth-basic")]
+use crate::forward::proxy_auth_required;
+use crate::forward::{ForwardPolicyDecision, evaluate_forward_policy};
 use crate::http::address::format_authority_host_port;
 use crate::http::base_fields::{
     BaseRequestContext, BaseRequestFields, extract_base_request_fields,

@@ -1,4 +1,6 @@
-use crate::auth_runtime::{AuthChallenge, AuthOutcome, AuthenticatedUser};
+#[cfg(feature = "auth-basic")]
+use crate::auth_runtime::AuthChallenge;
+use crate::auth_runtime::{AuthOutcome, AuthenticatedUser};
 use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
 use hyper::HeaderMap;
@@ -17,7 +19,9 @@ pub(crate) struct AllowedPolicy {
 
 pub(crate) enum ForwardPolicyDecision {
     Allow(Box<AllowedPolicy>),
+    #[cfg(feature = "auth-basic")]
     Challenge(AuthChallenge),
+    #[cfg(feature = "auth-basic")]
     Forbidden,
 }
 

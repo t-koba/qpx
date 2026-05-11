@@ -1,6 +1,8 @@
 use super::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 use crate::destination::DestinationInputs;
-use crate::forward::request::{proxy_auth_required, resolve_upstream, resolve_upstream_url};
+#[cfg(feature = "auth-basic")]
+use crate::forward::request::proxy_auth_required;
+use crate::forward::request::{resolve_upstream, resolve_upstream_url};
 use crate::http::address::parse_authority_host_port;
 use crate::http::body::Body;
 use crate::http::common::{
@@ -175,6 +177,7 @@ pub(super) async fn handle_connect(
             identity.supplement_builtin_auth(allowed.authenticated_user.as_ref());
             (allowed.action, allowed.matched_rule)
         }
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Challenge(chal) => {
             let log_context = identity.to_log_context(None, None, None);
             let response = proxy_auth_required(chal, state.messages.proxy_auth_required.as_str());
@@ -206,6 +209,7 @@ pub(super) async fn handle_connect(
             );
             return Ok(response);
         }
+        #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Forbidden => {
             let log_context = identity.to_log_context(None, None, None);
             let mut response = finalize_response_for_request(

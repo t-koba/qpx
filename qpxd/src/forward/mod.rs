@@ -71,6 +71,7 @@ mod request;
 pub(crate) use policy::{ForwardPolicyDecision, evaluate_forward_policy};
 pub(crate) use request::handle_request_inner;
 #[cfg(feature = "mitm")]
+#[cfg(feature = "auth-basic")]
 pub(crate) use request::proxy_auth_required;
 
 pub async fn run_tcp(

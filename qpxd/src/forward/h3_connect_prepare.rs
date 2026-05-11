@@ -299,6 +299,7 @@ pub(crate) async fn prepare_h3_connect_request(
                 allowed.matched_rule.map(|rule| rule.to_string()),
             )
         }
+        #[cfg(feature = "auth-basic")]
         Ok(crate::forward::ForwardPolicyDecision::Challenge(challenge)) => {
             let log_context = identity.to_log_context(None, None, None);
             let response = finalize_response_for_request(
@@ -311,6 +312,7 @@ pub(crate) async fn prepare_h3_connect_request(
             send_policy!(response, "challenge", None, None, &log_context).await?;
             return Ok(H3ConnectPreparation::Responded);
         }
+        #[cfg(feature = "auth-basic")]
         Ok(crate::forward::ForwardPolicyDecision::Forbidden) => {
             let log_context = identity.to_log_context(None, None, None);
             let response = finalize_response_for_request(

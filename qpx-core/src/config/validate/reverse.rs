@@ -178,13 +178,13 @@ pub(super) fn validate_reverse_edge_configs(
                                 reverse_edge.name
                             ));
                         }
-                        if let Some(env) = cert.pkcs12_password_env.as_deref() {
-                            if env.trim().is_empty() {
-                                return Err(anyhow!(
-                                    "reverse_edge {} tls.certificates[].pkcs12_password_env must not be empty when set",
-                                    reverse_edge.name
-                                ));
-                            }
+                        if let Some(env) = cert.pkcs12_password_env.as_deref()
+                            && env.trim().is_empty()
+                        {
+                            return Err(anyhow!(
+                                "reverse_edge {} tls.certificates[].pkcs12_password_env must not be empty when set",
+                                reverse_edge.name
+                            ));
                         }
                     }
                     let sni = cert.sni.to_ascii_lowercase();

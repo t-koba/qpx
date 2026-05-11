@@ -77,10 +77,10 @@ pub(super) async fn relay_qpx_extended_connect_stream(
                 let Some(payload) = down_payload else {
                     break;
                 };
-                if let Some(datagrams) = upstream_datagrams.as_mut() {
-                    if let Err(err) = datagrams.sender.send_datagram(payload) {
-                        warn!(error = ?err, "forward HTTP/3 qpx-h3 upstream datagram send failed");
-                    }
+                if let Some(datagrams) = upstream_datagrams.as_mut()
+                    && let Err(err) = datagrams.sender.send_datagram(payload)
+                {
+                    warn!(error = ?err, "forward HTTP/3 qpx-h3 upstream datagram send failed");
                 }
                 idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
             }
@@ -94,10 +94,10 @@ pub(super) async fn relay_qpx_extended_connect_stream(
                 let Some(payload) = up_payload else {
                     break;
                 };
-                if let Some(datagrams) = downstream_datagrams.as_mut() {
-                    if let Err(err) = datagrams.sender.send_datagram(payload) {
-                        warn!(error = ?err, "forward HTTP/3 qpx-h3 downstream datagram send failed");
-                    }
+                if let Some(datagrams) = downstream_datagrams.as_mut()
+                    && let Err(err) = datagrams.sender.send_datagram(payload)
+                {
+                    warn!(error = ?err, "forward HTTP/3 qpx-h3 downstream datagram send failed");
                 }
                 idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
             }
@@ -295,10 +295,10 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                 )
                 .await?;
                 let mut sent = false;
-                if let Some(datagrams) = upstream_datagrams.as_mut() {
-                    if datagrams.sender.send_datagram(payload).is_ok() {
-                        sent = true;
-                    }
+                if let Some(datagrams) = upstream_datagrams.as_mut()
+                    && datagrams.sender.send_datagram(payload).is_ok()
+                {
+                    sent = true;
                 }
                 if !sent {
                     let capsule = encode_datagram_capsule_value(fallback.as_ref())?;
@@ -326,10 +326,10 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                 )
                 .await?;
                 let mut sent = false;
-                if let Some(datagrams) = downstream_datagrams.as_mut() {
-                    if datagrams.sender.send_datagram(payload).is_ok() {
-                        sent = true;
-                    }
+                if let Some(datagrams) = downstream_datagrams.as_mut()
+                    && datagrams.sender.send_datagram(payload).is_ok()
+                {
+                    sent = true;
                 }
                 if !sent {
                     let capsule = encode_datagram_capsule_value(fallback.as_ref())?;

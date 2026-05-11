@@ -18,12 +18,6 @@ pub struct AuthenticatedUser {
 
 #[cfg(not(feature = "auth-basic"))]
 #[derive(Debug, Clone)]
-pub struct AuthChallenge {
-    pub header_values: Vec<String>,
-}
-
-#[cfg(not(feature = "auth-basic"))]
-#[derive(Debug, Clone)]
 pub enum AuthOutcome {
     Allowed(AuthenticatedUser),
 }

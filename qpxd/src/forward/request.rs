@@ -90,6 +90,7 @@ pub(crate) async fn handle_request_inner(
     Ok(response)
 }
 
+#[cfg(feature = "auth-basic")]
 pub(crate) fn proxy_auth_required(
     chal: crate::auth_runtime::AuthChallenge,
     message: &str,

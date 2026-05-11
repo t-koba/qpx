@@ -1,4 +1,5 @@
 use super::policy::{ForwardPolicyDecision, evaluate_forward_policy};
+#[cfg(feature = "auth-basic")]
 use super::request::proxy_auth_required;
 use crate::http::body::Body;
 use crate::http::common::{
@@ -543,6 +544,7 @@ impl ForwardQpxHandler {
                     allowed.matched_rule.map(|rule: Arc<str>| rule.to_string()),
                 )
             }
+            #[cfg(feature = "auth-basic")]
             Ok(ForwardPolicyDecision::Challenge(challenge)) => {
                 let log_context = identity.to_log_context(None, None, None);
                 let response = finalize_response_for_request(
@@ -570,6 +572,7 @@ impl ForwardQpxHandler {
                 .await?;
                 return Ok(());
             }
+            #[cfg(feature = "auth-basic")]
             Ok(ForwardPolicyDecision::Forbidden) => {
                 let log_context = identity.to_log_context(None, None, None);
                 let response = finalize_response_for_request(
