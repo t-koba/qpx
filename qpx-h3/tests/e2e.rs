@@ -2,8 +2,8 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
 use qpx_h3::{
-    BidiStream, ConnectionInfo, Protocol, Request, RequestHandler, RequestStream, Response,
-    Settings, StreamDatagrams, UniRecvStream, WebTransportSession,
+    BidiStream, ConnectionInfo, Protocol, Request, RequestHandler, RequestStream, Settings,
+    StreamDatagrams, UniRecvStream, WebTransportSession,
 };
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -42,8 +42,13 @@ impl RequestHandler for ExtendedEchoHandler {
         }
     }
 
-    async fn handle_request(&self, _request: Request, _conn: ConnectionInfo) -> Result<Response> {
-        anyhow::bail!("unexpected buffered request")
+    async fn handle_request(
+        &self,
+        _request: Request,
+        _conn: ConnectionInfo,
+        _stream: &mut RequestStream,
+    ) -> Result<()> {
+        anyhow::bail!("unexpected request")
     }
 
     async fn handle_connect_stream(
@@ -98,8 +103,13 @@ impl RequestHandler for ConnectUdpEchoHandler {
         }
     }
 
-    async fn handle_request(&self, _request: Request, _conn: ConnectionInfo) -> Result<Response> {
-        anyhow::bail!("unexpected buffered request")
+    async fn handle_request(
+        &self,
+        _request: Request,
+        _conn: ConnectionInfo,
+        _stream: &mut RequestStream,
+    ) -> Result<()> {
+        anyhow::bail!("unexpected request")
     }
 
     async fn handle_connect_stream(
@@ -155,8 +165,13 @@ impl RequestHandler for WebTransportEchoHandler {
         }
     }
 
-    async fn handle_request(&self, _request: Request, _conn: ConnectionInfo) -> Result<Response> {
-        anyhow::bail!("unexpected buffered request")
+    async fn handle_request(
+        &self,
+        _request: Request,
+        _conn: ConnectionInfo,
+        _stream: &mut RequestStream,
+    ) -> Result<()> {
+        anyhow::bail!("unexpected request")
     }
 
     async fn handle_webtransport_connect(
@@ -254,8 +269,13 @@ impl RequestHandler for WebTransportZeroSessionHandler {
         }
     }
 
-    async fn handle_request(&self, _request: Request, _conn: ConnectionInfo) -> Result<Response> {
-        anyhow::bail!("unexpected buffered request")
+    async fn handle_request(
+        &self,
+        _request: Request,
+        _conn: ConnectionInfo,
+        _stream: &mut RequestStream,
+    ) -> Result<()> {
+        anyhow::bail!("unexpected request")
     }
 
     async fn handle_webtransport_connect(
@@ -282,8 +302,13 @@ impl RequestHandler for WebTransportRejectHandler {
         }
     }
 
-    async fn handle_request(&self, _request: Request, _conn: ConnectionInfo) -> Result<Response> {
-        anyhow::bail!("unexpected buffered request")
+    async fn handle_request(
+        &self,
+        _request: Request,
+        _conn: ConnectionInfo,
+        _stream: &mut RequestStream,
+    ) -> Result<()> {
+        anyhow::bail!("unexpected request")
     }
 
     async fn handle_webtransport_connect(
@@ -316,7 +341,12 @@ impl RequestHandler for DynamicHeaderHandler {
         }
     }
 
-    async fn handle_request(&self, request: Request, _conn: ConnectionInfo) -> Result<Response> {
+    async fn handle_request(
+        &self,
+        request: Request,
+        _conn: ConnectionInfo,
+        stream: &mut RequestStream,
+    ) -> Result<()> {
         let value = request
             .head
             .headers()
@@ -327,11 +357,49 @@ impl RequestHandler for DynamicHeaderHandler {
         if let Some(tx) = self.seen.lock().await.take() {
             let _ = tx.send(value);
         }
-        Ok(Response::final_only(
-            http::Response::builder()
-                .status(http::StatusCode::NO_CONTENT)
-                .body(Bytes::new())?,
-        ))
+        let response = http::Response::builder()
+            .status(http::StatusCode::NO_CONTENT)
+            .body(())?;
+        stream.send_response_head(&response).await?;
+        stream.finish().await
+    }
+}
+
+#[derive(Clone, Default)]
+struct HeadBodyAttemptHandler;
+
+#[async_trait]
+impl RequestHandler for HeadBodyAttemptHandler {
+    fn settings(&self) -> Settings {
+        Settings {
+            read_timeout: TEST_TIMEOUT,
+            ..Default::default()
+        }
+    }
+
+    async fn handle_request(
+        &self,
+        request: Request,
+        _conn: ConnectionInfo,
+        stream: &mut RequestStream,
+    ) -> Result<()> {
+        if request.head.method() != http::Method::HEAD {
+            return Err(anyhow!("expected HEAD request"));
+        }
+        let response = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header(http::header::CONTENT_LENGTH, "5")
+            .body(())?;
+        stream.send_response_head(&response).await?;
+        let err = stream
+            .send_data(Bytes::from_static(b"hello"))
+            .await
+            .expect_err("HEAD response DATA must be rejected");
+        assert!(
+            err.to_string().contains("DATA is not allowed"),
+            "unexpected DATA rejection: {err}"
+        );
+        stream.finish().await
     }
 }
 
@@ -347,8 +415,13 @@ impl RequestHandler for ExtendedConnectDisabledHandler {
         }
     }
 
-    async fn handle_request(&self, _request: Request, _conn: ConnectionInfo) -> Result<Response> {
-        anyhow::bail!("unexpected buffered request")
+    async fn handle_request(
+        &self,
+        _request: Request,
+        _conn: ConnectionInfo,
+        _stream: &mut RequestStream,
+    ) -> Result<()> {
+        anyhow::bail!("unexpected request")
     }
 
     async fn handle_connect_stream(
@@ -737,6 +810,40 @@ async fn dynamic_qpack_request_reaches_handler() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn head_response_data_is_rejected_by_server_stream() -> Result<()> {
+    let (addr, client_config, server_task) = start_server(HeadBodyAttemptHandler).await?;
+    let (_client_endpoint, connection) = connect_client(addr, client_config).await?;
+    open_client_control_stream(&connection).await?;
+    let (mut send, mut recv) = connection.open_bi().await?;
+
+    let headers = build_head_request_headers(&format!("localhost:{}", addr.port()));
+    write_frame_raw(&mut send, FRAME_HEADERS, &headers).await?;
+    send.finish()?;
+
+    let first = timeout(TEST_TIMEOUT, recv.read_chunk(4096, true))
+        .await
+        .map_err(|_| anyhow!("timed out waiting for HEAD response"))??
+        .ok_or_else(|| anyhow!("missing HEAD response"))?;
+    let bytes = first.bytes;
+    let (frame_type, used_type) = read_varint(bytes.as_ref())?;
+    let (frame_len, used_len) = read_varint(&bytes[used_type..])?;
+    assert_eq!(frame_type, FRAME_HEADERS);
+    assert!(used_type + used_len + frame_len as usize <= bytes.len());
+
+    let next = timeout(TEST_TIMEOUT, recv.read_chunk(4096, true))
+        .await
+        .map_err(|_| anyhow!("timed out waiting for HEAD response end"))??;
+    if let Some(chunk) = next {
+        let (frame_type, _) = read_varint(chunk.bytes.as_ref())?;
+        assert_ne!(frame_type, FRAME_DATA, "HEAD response must not send DATA");
+    }
+
+    server_task.abort();
+    let _ = server_task.await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn malformed_request_stream_resets_with_h3_frame_unexpected() -> Result<()> {
     let (addr, client_config, server_task) = start_server(ExtendedEchoHandler).await?;
     let (_client_endpoint, connection) = connect_client(addr, client_config).await?;
@@ -1105,6 +1212,18 @@ fn build_dynamic_request_headers(authority: &str) -> Vec<u8> {
     encode_string(&mut out, 8, 0, authority.as_bytes());
     encode_prefixed_int(&mut out, 6, 0b11, 1);
     encode_prefixed_int(&mut out, 6, 0b10, 0);
+    out
+}
+
+fn build_head_request_headers(authority: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_prefixed_int(&mut out, 8, 0, 0);
+    encode_prefixed_int(&mut out, 7, 0, 0);
+    encode_prefixed_int(&mut out, 6, 0b11, 18);
+    encode_prefixed_int(&mut out, 6, 0b11, 23);
+    encode_prefixed_int(&mut out, 4, 0b0101, 0);
+    encode_string(&mut out, 8, 0, authority.as_bytes());
+    encode_prefixed_int(&mut out, 6, 0b11, 1);
     out
 }
 

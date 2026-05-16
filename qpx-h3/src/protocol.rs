@@ -38,6 +38,7 @@ pub(crate) const H3_FRAME_ERROR: u64 = 0x106;
 pub(crate) const H3_ID_ERROR: u64 = 0x108;
 pub(crate) const H3_SETTINGS_ERROR: u64 = 0x109;
 pub(crate) const H3_MISSING_SETTINGS: u64 = 0x10a;
+pub(crate) const H3_REQUEST_CANCELLED: u64 = 0x10c;
 pub(crate) const H3_MESSAGE_ERROR: u64 = 0x10e;
 pub(crate) const QPACK_DECOMPRESSION_FAILED: u64 = 0x200;
 pub(crate) const QPACK_ENCODER_STREAM_ERROR: u64 = 0x201;

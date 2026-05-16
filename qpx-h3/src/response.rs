@@ -1,65 +1,4 @@
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
-
-pub(crate) fn sanitize_response_for_h3(
-    head: &mut http::Response<()>,
-    body: &mut Bytes,
-    request_method: &http::Method,
-) -> Result<bool> {
-    let status = head.status();
-    if status.is_informational() {
-        return Err(anyhow!(
-            "final HTTP/3 response status must not be informational: {}",
-            status
-        ));
-    }
-    let status_forbids_body =
-        status == http::StatusCode::NO_CONTENT || status == http::StatusCode::RESET_CONTENT;
-    let preserve_head_content_length =
-        *request_method == http::Method::HEAD || status == http::StatusCode::NOT_MODIFIED;
-    let body_allowed = *request_method != http::Method::HEAD
-        && !status_forbids_body
-        && status != http::StatusCode::NOT_MODIFIED;
-    if !body_allowed {
-        *body = Bytes::new();
-    }
-
-    let headers = head.headers_mut();
-    sanitize_h3_regular_headers(headers);
-
-    let parsed_content_length = parse_content_length(headers);
-    headers.remove(http::header::CONTENT_LENGTH);
-    match parsed_content_length {
-        Ok(Some(length)) if preserve_head_content_length => {
-            headers.insert(
-                http::header::CONTENT_LENGTH,
-                http::HeaderValue::from_str(&length.to_string())?,
-            );
-        }
-        Ok(Some(length)) if body_allowed && length == body.len() as u64 => {
-            headers.insert(
-                http::header::CONTENT_LENGTH,
-                http::HeaderValue::from_str(&length.to_string())?,
-            );
-        }
-        Ok(Some(_)) if body_allowed => {
-            headers.insert(
-                http::header::CONTENT_LENGTH,
-                http::HeaderValue::from_str(&body.len().to_string())?,
-            );
-        }
-        Ok(None) if body_allowed && !body.is_empty() => {
-            headers.insert(
-                http::header::CONTENT_LENGTH,
-                http::HeaderValue::from_str(&body.len().to_string())?,
-            );
-        }
-        Ok(Some(_)) | Ok(None) | Err(_) => {}
-    }
-
-    validate_h3_regular_headers(headers)?;
-    Ok(body_allowed)
-}
 
 pub(crate) fn sanitize_interim_response_for_h3(head: &mut http::Response<()>) -> Result<()> {
     if !head.status().is_informational() {
@@ -108,7 +47,9 @@ pub(crate) fn sanitize_streaming_response_head_for_h3(
         return Ok(Some(false));
     }
     sanitize_h3_regular_headers(head.headers_mut());
-    head.headers_mut().remove(http::header::CONTENT_LENGTH);
+    if parse_content_length(head.headers()).is_err() {
+        head.headers_mut().remove(http::header::CONTENT_LENGTH);
+    }
     validate_h3_regular_headers(head.headers())?;
     Ok(Some(true))
 }

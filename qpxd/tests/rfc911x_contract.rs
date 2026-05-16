@@ -341,7 +341,8 @@ async fn websocket_upgrade_contract(forward_port: u16) -> Result<()> {
         .await
         .context("connect to forward proxy timed out")??;
 
-    // Minimal WS upgrade request (RFC 6455); we intentionally do not validate Sec-WebSocket-Accept.
+    // Minimal WS transparent relay request. The proxy preserves the RFC 6455 upgrade tunnel but
+    // does not terminate the handshake or validate Sec-WebSocket-Accept.
     let req = format!(
         "GET ws://{backend}/ws HTTP/1.1\r\n\
 Host: {backend}\r\n\

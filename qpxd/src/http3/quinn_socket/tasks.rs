@@ -29,13 +29,13 @@ async fn send_actual(sender: &SendActual, transmit: &OwnedTransmit) -> std::io::
 }
 
 pub(super) struct LocalBrokerView {
-    pub(super) remote_writer: Arc<Mutex<Option<mpsc::UnboundedSender<BrokerFrame>>>>,
+    pub(super) remote_writer: Arc<Mutex<Option<mpsc::Sender<BrokerFrame>>>>,
     pub(super) remote_route: Arc<Mutex<RouteState>>,
 }
 
 pub(super) async fn broker_writer_loop<S>(
     mut write_half: WriteHalf<S>,
-    mut frames: mpsc::UnboundedReceiver<BrokerFrame>,
+    mut frames: mpsc::Receiver<BrokerFrame>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -85,7 +85,7 @@ pub(super) async fn remote_broker_reader_loop<S>(
     loop {
         match read_frame(&mut read_half).await {
             Ok(Some(BrokerFrame::InboundDatagram(packet))) => {
-                let _ = socket.recv_tx.send(packet);
+                socket.enqueue_injected_packet(packet, "broker_stream");
             }
             Ok(Some(BrokerFrame::OutboundTransmit(_))) => {}
             Ok(None) | Err(_) => {

@@ -17,90 +17,64 @@ pub(super) async fn relay_qpx_extended_connect_stream(
     mut upstream_datagrams: Option<qpx_h3::StreamDatagrams>,
     idle_timeout: Duration,
 ) -> Result<()> {
-    let (mut downstream_send, mut downstream_recv) = downstream.split();
-    let (mut upstream_send, mut upstream_recv) = upstream.split();
-    let idle_deadline = tokio::time::sleep(idle_timeout);
-    tokio::pin!(idle_deadline);
-    let mut downstream_eof = false;
-    let mut upstream_eof = false;
-
-    loop {
-        tokio::select! {
-            _ = &mut idle_deadline => {
-                return Err(anyhow!("forward HTTP/3 qpx-h3 extended CONNECT tunnel idle timeout"));
-            }
-            recv = downstream_recv.recv_data(), if !downstream_eof => {
-                match recv? {
-                    Some(chunk) => {
-                        timeout(idle_timeout, upstream_send.send_data(chunk))
-                            .await
-                            .map_err(|_| anyhow!("qpx-h3 upstream DATA send timed out"))??;
-                        idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
+    let (downstream_send, downstream_recv) = downstream.split();
+    let (upstream_send, upstream_recv) = upstream.split();
+    let activity = crate::tunnel::TunnelActivity::new();
+    let stream_relay = crate::tunnel::relay_tunnel(
+        downstream_recv,
+        downstream_send,
+        upstream_recv,
+        upstream_send,
+        crate::tunnel::TunnelPolicy::h3(Some(idle_timeout), "qpx_extended_connect", "unknown")
+            .with_activity(activity.clone()),
+    );
+    let datagram_relay = async {
+        loop {
+            tokio::select! {
+                down_payload = async {
+                    if let Some(datagrams) = downstream_datagrams.as_mut() {
+                        datagrams.receiver.recv().await
+                    } else {
+                        std::future::pending::<Option<Bytes>>().await
                     }
-                    None => {
-                        downstream_eof = true;
-                        timeout(idle_timeout, upstream_send.finish())
-                            .await
-                            .map_err(|_| anyhow!("qpx-h3 upstream finish timed out"))??;
-                        if upstream_eof {
-                            break;
-                        }
+                } => {
+                    let Some(payload) = down_payload else {
+                        break;
+                    };
+                    if let Some(datagrams) = upstream_datagrams.as_mut()
+                        && let Err(err) = datagrams.sender.send_datagram(payload)
+                    {
+                        warn!(error = ?err, "forward HTTP/3 qpx-h3 upstream datagram send failed");
                     }
+                    activity.touch().await;
                 }
-            }
-            recv = upstream_recv.recv_data(), if !upstream_eof => {
-                match recv? {
-                    Some(chunk) => {
-                        timeout(idle_timeout, downstream_send.send_data(chunk))
-                            .await
-                            .map_err(|_| anyhow!("qpx-h3 downstream DATA send timed out"))??;
-                        idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
+                up_payload = async {
+                    if let Some(datagrams) = upstream_datagrams.as_mut() {
+                        datagrams.receiver.recv().await
+                    } else {
+                        std::future::pending::<Option<Bytes>>().await
                     }
-                    None => {
-                        upstream_eof = true;
-                        timeout(idle_timeout, downstream_send.finish())
-                            .await
-                            .map_err(|_| anyhow!("qpx-h3 downstream finish timed out"))??;
-                        if downstream_eof {
-                            break;
-                        }
+                } => {
+                    let Some(payload) = up_payload else {
+                        break;
+                    };
+                    if let Some(datagrams) = downstream_datagrams.as_mut()
+                        && let Err(err) = datagrams.sender.send_datagram(payload)
+                    {
+                        warn!(error = ?err, "forward HTTP/3 qpx-h3 downstream datagram send failed");
                     }
+                    activity.touch().await;
                 }
             }
-            down_payload = async {
-                if let Some(datagrams) = downstream_datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
-                let Some(payload) = down_payload else {
-                    break;
-                };
-                if let Some(datagrams) = upstream_datagrams.as_mut()
-                    && let Err(err) = datagrams.sender.send_datagram(payload)
-                {
-                    warn!(error = ?err, "forward HTTP/3 qpx-h3 upstream datagram send failed");
-                }
-                idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
-            }
-            up_payload = async {
-                if let Some(datagrams) = upstream_datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
-                let Some(payload) = up_payload else {
-                    break;
-                };
-                if let Some(datagrams) = downstream_datagrams.as_mut()
-                    && let Err(err) = datagrams.sender.send_datagram(payload)
-                {
-                    warn!(error = ?err, "forward HTTP/3 qpx-h3 downstream datagram send failed");
-                }
-                idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
-            }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::select! {
+        result = stream_relay => {
+            let _stats = result?;
+        }
+        result = datagram_relay => {
+            result?;
         }
     }
     Ok(())

@@ -163,6 +163,7 @@ pub(super) async fn handle_h3_connect_udp(
                 })
                 .unwrap_or(true),
             upstream_timeout,
+            state.plan.limits.datagram_channel_capacity,
         )
         .await
         {
@@ -419,6 +420,7 @@ async fn open_upstream_connect_udp_stream(
     proxy_name: &str,
     verify_upstream: bool,
     timeout_dur: Duration,
+    datagram_channel_capacity: usize,
 ) -> Result<UpstreamConnectUdpStream> {
     let (upstream_host, upstream_port, uri) =
         crate::forward::connect_udp_upstream::build_upstream_connect_udp_uri(
@@ -452,7 +454,7 @@ async fn open_upstream_connect_udp_stream(
     let h3_build = builder.build::<_, _, Bytes>(h3_quinn::Connection::new(connection));
     let (mut h3_conn, mut sender) = timeout(timeout_dur, h3_build).await??;
     use h3_datagram::datagram_handler::HandleDatagramsExt as _;
-    let datagram_dispatch = Arc::new(H3DatagramDispatch::new(64));
+    let datagram_dispatch = Arc::new(H3DatagramDispatch::new(datagram_channel_capacity));
     let reader = h3_conn.get_datagram_reader();
     let datagram_task = {
         let dispatch = datagram_dispatch.clone();

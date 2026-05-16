@@ -2,46 +2,11 @@ use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 
-struct WebTransportActivity {
-    last_activity: Mutex<Instant>,
-    notify: Notify,
-}
-
-impl WebTransportActivity {
-    fn new() -> Self {
-        Self {
-            last_activity: Mutex::new(Instant::now()),
-            notify: Notify::new(),
-        }
-    }
-
-    async fn touch(&self) {
-        *self.last_activity.lock().await = Instant::now();
-        self.notify.notify_waiters();
-    }
-
-    async fn wait_for_idle(&self, idle_timeout: Duration) {
-        loop {
-            let deadline = {
-                let last = *self.last_activity.lock().await;
-                last + idle_timeout
-            };
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => {
-                    let last = *self.last_activity.lock().await;
-                    if Instant::now().duration_since(last) >= idle_timeout {
-                        return;
-                    }
-                }
-                _ = self.notify.notified() => {}
-            }
-        }
-    }
-}
+type WebTransportActivity = crate::tunnel::TunnelActivity;
 
 #[derive(Debug, Clone, Copy)]
 enum WebTransportDirection {
@@ -116,72 +81,63 @@ async fn relay_bidi_pair(
         request_limits,
         flow_limits,
     } = shared;
-    let (mut left_send, mut left_recv) = left.split();
-    let (mut right_send, mut right_recv) = right.split();
-    let mut left_eof = false;
-    let mut right_eof = false;
-
-    loop {
-        tokio::select! {
-            recv = left_recv.recv_chunk(), if !left_eof => {
-                match recv? {
-                    Some(chunk) => {
-                        let directional_limits = flow_limits.bidi_limits(left_to_right_direction);
-                        apply_webtransport_bandwidth_controls(
-                            &rate_limit_ctx,
-                            &request_limits,
-                            &directional_limits,
-                            chunk.len(),
-                        )
-                        .await?;
-                        tokio::time::timeout(idle_timeout, right_send.send_chunk(chunk))
-                            .await
-                            .map_err(|_| anyhow!("forward HTTP/3 WebTransport stream send timeout"))??;
-                        activity.touch().await;
-                    }
-                    None => {
-                        left_eof = true;
-                        tokio::time::timeout(idle_timeout, right_send.finish())
-                            .await
-                            .map_err(|_| anyhow!("forward HTTP/3 WebTransport stream finish timeout"))??;
-                        if right_eof {
-                            break;
-                        }
-                    }
-                }
-            }
-            recv = right_recv.recv_chunk(), if !right_eof => {
-                match recv? {
-                    Some(chunk) => {
-                        let directional_limits =
-                            flow_limits.bidi_limits(left_to_right_direction.opposite());
-                        apply_webtransport_bandwidth_controls(
-                            &rate_limit_ctx,
-                            &request_limits,
-                            &directional_limits,
-                            chunk.len(),
-                        )
-                        .await?;
-                        tokio::time::timeout(idle_timeout, left_send.send_chunk(chunk))
-                            .await
-                            .map_err(|_| anyhow!("forward HTTP/3 WebTransport stream send timeout"))??;
-                        activity.touch().await;
-                    }
-                    None => {
-                        right_eof = true;
-                        tokio::time::timeout(idle_timeout, left_send.finish())
-                            .await
-                            .map_err(|_| anyhow!("forward HTTP/3 WebTransport stream finish timeout"))??;
-                        if left_eof {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    let (left_send, left_recv) = left.split();
+    let (right_send, right_recv) = right.split();
+    let left_recv = WebTransportBidiRecv {
+        inner: left_recv,
+        direction: left_to_right_direction,
+        rate_limit_ctx: rate_limit_ctx.clone(),
+        request_limits: request_limits.clone(),
+        flow_limits: flow_limits.clone(),
+    };
+    let right_recv = WebTransportBidiRecv {
+        inner: right_recv,
+        direction: left_to_right_direction.opposite(),
+        rate_limit_ctx,
+        request_limits,
+        flow_limits,
+    };
+    let _stats = crate::tunnel::relay_tunnel(
+        left_recv,
+        left_send,
+        right_recv,
+        right_send,
+        crate::tunnel::TunnelPolicy::h3(Some(idle_timeout), "webtransport_bidi", "unknown")
+            .with_activity((*activity).clone()),
+    )
+    .await?;
     Ok(())
+}
+
+struct WebTransportBidiRecv {
+    inner: qpx_h3::StreamRecv,
+    direction: WebTransportDirection,
+    rate_limit_ctx: RateLimitContext,
+    request_limits: AppliedRateLimits,
+    flow_limits: WebTransportFlowLimits,
+}
+
+#[async_trait::async_trait]
+impl crate::tunnel::TunnelHalf for WebTransportBidiRecv {
+    async fn recv(&mut self) -> std::io::Result<Option<Bytes>> {
+        let Some(chunk) = self.inner.recv_chunk().await.map_err(io_other)? else {
+            return Ok(None);
+        };
+        let directional_limits = self.flow_limits.bidi_limits(self.direction);
+        apply_webtransport_bandwidth_controls(
+            &self.rate_limit_ctx,
+            &self.request_limits,
+            &directional_limits,
+            chunk.len(),
+        )
+        .await
+        .map_err(io_other)?;
+        Ok(Some(chunk))
+    }
+}
+
+fn io_other(err: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(err.to_string())
 }
 
 async fn relay_uni_stream(
@@ -370,13 +326,13 @@ pub(super) struct QpxWebTransportRelayContext {
     pub(super) downstream_request: qpx_h3::RequestStream,
     pub(super) downstream_datagrams: Option<qpx_h3::StreamDatagrams>,
     pub(super) downstream_opener: qpx_h3::OpenStreams,
-    pub(super) downstream_bidi_streams: mpsc::UnboundedReceiver<qpx_h3::BidiStream>,
-    pub(super) downstream_uni_streams: mpsc::UnboundedReceiver<qpx_h3::UniRecvStream>,
+    pub(super) downstream_bidi_streams: mpsc::Receiver<qpx_h3::BidiStream>,
+    pub(super) downstream_uni_streams: mpsc::Receiver<qpx_h3::UniRecvStream>,
     pub(super) upstream_request: qpx_h3::RequestStream,
     pub(super) upstream_datagrams: Option<qpx_h3::StreamDatagrams>,
     pub(super) upstream_opener: qpx_h3::OpenStreams,
-    pub(super) upstream_bidi_streams: mpsc::UnboundedReceiver<qpx_h3::BidiStream>,
-    pub(super) upstream_uni_streams: mpsc::UnboundedReceiver<qpx_h3::UniRecvStream>,
+    pub(super) upstream_bidi_streams: mpsc::Receiver<qpx_h3::BidiStream>,
+    pub(super) upstream_uni_streams: mpsc::Receiver<qpx_h3::UniRecvStream>,
     pub(super) session_id: u64,
     pub(super) idle_timeout: Duration,
     pub(super) rate_limit_ctx: RateLimitContext,
@@ -466,8 +422,12 @@ pub(super) async fn relay_qpx_webtransport_session(ctx: QpxWebTransportRelayCont
 
         match event {
             WebTransportSessionEvent::DownstreamBidi(stream) => {
-                let upstream =
-                    downstream_to_upstream_bidi(&mut upstream_opener, session_id).await?;
+                let upstream = open_webtransport_bidi_with_timeout(
+                    &mut upstream_opener,
+                    session_id,
+                    idle_timeout,
+                )
+                .await?;
                 relays.spawn(relay_bidi_pair(
                     stream,
                     upstream,
@@ -476,7 +436,12 @@ pub(super) async fn relay_qpx_webtransport_session(ctx: QpxWebTransportRelayCont
                 ));
             }
             WebTransportSessionEvent::DownstreamUni(stream) => {
-                let upstream = upstream_opener.open_webtransport_uni(session_id).await?;
+                let upstream = open_webtransport_uni_with_timeout(
+                    &mut upstream_opener,
+                    session_id,
+                    idle_timeout,
+                )
+                .await?;
                 relays.spawn(relay_uni_stream(
                     stream,
                     upstream,
@@ -485,8 +450,12 @@ pub(super) async fn relay_qpx_webtransport_session(ctx: QpxWebTransportRelayCont
                 ));
             }
             WebTransportSessionEvent::UpstreamBidi(stream) => {
-                let downstream =
-                    downstream_to_upstream_bidi(&mut downstream_opener, session_id).await?;
+                let downstream = open_webtransport_bidi_with_timeout(
+                    &mut downstream_opener,
+                    session_id,
+                    idle_timeout,
+                )
+                .await?;
                 relays.spawn(relay_bidi_pair(
                     stream,
                     downstream,
@@ -495,7 +464,12 @@ pub(super) async fn relay_qpx_webtransport_session(ctx: QpxWebTransportRelayCont
                 ));
             }
             WebTransportSessionEvent::UpstreamUni(stream) => {
-                let downstream = downstream_opener.open_webtransport_uni(session_id).await?;
+                let downstream = open_webtransport_uni_with_timeout(
+                    &mut downstream_opener,
+                    session_id,
+                    idle_timeout,
+                )
+                .await?;
                 relays.spawn(relay_uni_stream(
                     stream,
                     downstream,
@@ -523,11 +497,24 @@ pub(super) async fn relay_qpx_webtransport_session(ctx: QpxWebTransportRelayCont
     Ok(())
 }
 
-async fn downstream_to_upstream_bidi(
+async fn open_webtransport_bidi_with_timeout(
     opener: &mut qpx_h3::OpenStreams,
     session_id: u64,
+    idle_timeout: Duration,
 ) -> Result<qpx_h3::BidiStream> {
-    opener.open_webtransport_bidi(session_id).await
+    tokio::time::timeout(idle_timeout, opener.open_webtransport_bidi(session_id))
+        .await
+        .map_err(|_| anyhow!("forward HTTP/3 WebTransport bidi open timeout"))?
+}
+
+async fn open_webtransport_uni_with_timeout(
+    opener: &mut qpx_h3::OpenStreams,
+    session_id: u64,
+    idle_timeout: Duration,
+) -> Result<qpx_h3::UniSendStream> {
+    tokio::time::timeout(idle_timeout, opener.open_webtransport_uni(session_id))
+        .await
+        .map_err(|_| anyhow!("forward HTTP/3 WebTransport uni open timeout"))?
 }
 
 async fn apply_webtransport_bandwidth_controls(

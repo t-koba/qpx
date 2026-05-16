@@ -467,7 +467,8 @@ fn wrap_body_validating_request_trailers(request: &mut Request<Body>) {
         };
         if let Some(trailers) = trailers {
             if let Err(err) = crate::http::semantics::validate_request_trailers(&trailers) {
-                warn!(error = ?err, "dropping forbidden request trailers");
+                warn!(error = ?err, "rejecting forbidden request trailers");
+                sender.abort();
                 return;
             }
             let _ = sender.send_trailers(trailers).await;

@@ -10,7 +10,7 @@ use qpx_core::rules::CompiledHeaderControl;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::lookup_host;
-use tokio::time::{Duration, Instant, timeout};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub(super) struct UpstreamExtendedConnectStream {
@@ -31,6 +31,7 @@ pub(super) struct OpenUpstreamExtendedConnectInput<'a> {
     pub(super) verify_upstream: bool,
     pub(super) protocol: ::h3::ext::Protocol,
     pub(super) enable_datagram: bool,
+    pub(super) datagram_channel_capacity: usize,
     pub(super) timeout_dur: Duration,
 }
 
@@ -172,7 +173,7 @@ pub(super) async fn open_upstream_extended_connect_stream(
     )
     .await?;
     let (datagrams, datagram_task) = if input.enable_datagram && response.status().is_success() {
-        let dispatch = Arc::new(H3DatagramDispatch::new(64));
+        let dispatch = Arc::new(H3DatagramDispatch::new(input.datagram_channel_capacity));
         let (reader, sender) = datagram_handles
             .take()
             .ok_or_else(|| anyhow!("missing HTTP/3 datagram handles"))?;
@@ -336,93 +337,62 @@ pub(super) async fn relay_h3_extended_connect_stream(
     mut upstream_datagrams: Option<H3StreamDatagrams>,
     idle_timeout: Duration,
 ) -> Result<()> {
-    let (mut downstream_send, mut downstream_recv) = downstream.split();
-    let (mut upstream_send, mut upstream_recv) = upstream.split();
-
-    let idle_deadline = tokio::time::sleep(idle_timeout);
-    tokio::pin!(idle_deadline);
-    let mut downstream_eof = false;
-    let mut upstream_eof = false;
-
-    loop {
-        tokio::select! {
-            _ = &mut idle_deadline => {
-                return Err(anyhow!("forward HTTP/3 extended CONNECT tunnel idle timeout"));
-            }
-            recv = downstream_recv.recv_data(), if !downstream_eof => {
-                match recv? {
-                    Some(chunk) => {
-                        let mut chunk = chunk;
-                        let bytes = chunk.copy_to_bytes(chunk.remaining());
-                        tokio::time::timeout(idle_timeout, upstream_send.send_data(bytes))
-                            .await
-                            .map_err(|_| anyhow!("forward HTTP/3 extended CONNECT send timeout"))??;
-                        idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
+    let (downstream_send, downstream_recv) = downstream.split();
+    let (upstream_send, upstream_recv) = upstream.split();
+    let activity = crate::tunnel::TunnelActivity::new();
+    let stream_relay = crate::tunnel::relay_tunnel(
+        downstream_recv,
+        downstream_send,
+        upstream_recv,
+        upstream_send,
+        crate::tunnel::TunnelPolicy::h3(Some(idle_timeout), "h3_extended_connect", "unknown")
+            .with_activity(activity.clone()),
+    );
+    let datagram_relay = async {
+        loop {
+            tokio::select! {
+                down_payload = async {
+                    if let Some(datagrams) = downstream_datagrams.as_mut() {
+                        datagrams.receiver.recv().await
+                    } else {
+                        std::future::pending::<Option<Bytes>>().await
                     }
-                    None => {
-                        downstream_eof = true;
-                        tokio::time::timeout(idle_timeout, upstream_send.finish())
-                            .await
-                            .map_err(|_| anyhow!("forward HTTP/3 extended CONNECT finish timeout"))??;
-                        if upstream_eof {
-                            break;
+                } => {
+                    let Some(payload) = down_payload else {
+                        break;
+                    };
+                    if let Some(datagrams) = upstream_datagrams.as_mut()
+                        && let Err(err) = datagrams.sender.send_datagram(payload) {
+                            warn!(error = ?err, "forward HTTP/3 extended CONNECT upstream datagram send failed");
                         }
-                    }
+                    activity.touch().await;
                 }
-            }
-            recv = upstream_recv.recv_data(), if !upstream_eof => {
-                match recv? {
-                    Some(chunk) => {
-                        let mut chunk = chunk;
-                        let bytes = chunk.copy_to_bytes(chunk.remaining());
-                        tokio::time::timeout(idle_timeout, downstream_send.send_data(bytes))
-                            .await
-                            .map_err(|_| anyhow!("forward HTTP/3 extended CONNECT send timeout"))??;
-                        idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
+                up_payload = async {
+                    if let Some(datagrams) = upstream_datagrams.as_mut() {
+                        datagrams.receiver.recv().await
+                    } else {
+                        std::future::pending::<Option<Bytes>>().await
                     }
-                    None => {
-                        upstream_eof = true;
-                        tokio::time::timeout(idle_timeout, downstream_send.finish())
-                            .await
-                            .map_err(|_| anyhow!("forward HTTP/3 extended CONNECT finish timeout"))??;
-                        if downstream_eof {
-                            break;
+                } => {
+                    let Some(payload) = up_payload else {
+                        break;
+                    };
+                    if let Some(datagrams) = downstream_datagrams.as_mut()
+                        && let Err(err) = datagrams.sender.send_datagram(payload) {
+                            warn!(error = ?err, "forward HTTP/3 extended CONNECT downstream datagram send failed");
                         }
-                    }
+                    activity.touch().await;
                 }
             }
-            down_payload = async {
-                if let Some(datagrams) = downstream_datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
-                let Some(payload) = down_payload else {
-                    break;
-                };
-                if let Some(datagrams) = upstream_datagrams.as_mut()
-                    && let Err(err) = datagrams.sender.send_datagram(payload) {
-                        warn!(error = ?err, "forward HTTP/3 extended CONNECT upstream datagram send failed");
-                    }
-                idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
-            }
-            up_payload = async {
-                if let Some(datagrams) = upstream_datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
-                let Some(payload) = up_payload else {
-                    break;
-                };
-                if let Some(datagrams) = downstream_datagrams.as_mut()
-                    && let Err(err) = datagrams.sender.send_datagram(payload) {
-                        warn!(error = ?err, "forward HTTP/3 extended CONNECT downstream datagram send failed");
-                    }
-                idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
-            }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::select! {
+        result = stream_relay => {
+            let _stats = result?;
+        }
+        result = datagram_relay => {
+            result?;
         }
     }
     Ok(())

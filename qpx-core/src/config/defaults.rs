@@ -299,6 +299,26 @@ pub(super) fn default_runtime_h3_read_timeout_ms() -> u64 {
     10_000
 }
 
+pub(super) fn default_runtime_datagram_channel_capacity() -> usize {
+    64
+}
+
+pub(super) fn default_runtime_webtransport_datagram_channel_capacity() -> usize {
+    64
+}
+
+pub(super) fn default_runtime_webtransport_stream_channel_capacity() -> usize {
+    64
+}
+
+pub(super) fn default_runtime_max_grpc_message_bytes() -> u64 {
+    4 * 1024 * 1024
+}
+
+pub(super) fn default_runtime_max_grpc_stream_duration_ms() -> u64 {
+    300_000
+}
+
 pub(super) fn default_identity_proxy_name() -> String {
     "qpx".to_string()
 }

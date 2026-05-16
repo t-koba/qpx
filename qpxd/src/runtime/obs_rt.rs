@@ -44,6 +44,19 @@ pub struct MetricNames {
     pub reverse_upstreams_unhealthy: String,
     pub transparent_requests_total: String,
     pub transparent_latency_ms: String,
+    pub datagram_received_total: String,
+    pub datagram_received_bytes_total: String,
+    pub datagram_sent_total: String,
+    pub datagram_sent_bytes_total: String,
+    pub datagram_dropped_total: String,
+    pub datagram_channel_utilization: String,
+    pub grpc_messages_total: String,
+    pub grpc_message_bytes_total: String,
+    pub grpc_status_total: String,
+    pub grpc_stream_duration_seconds: String,
+    pub tunnel_bytes_total: String,
+    pub tunnel_duration_seconds: String,
+    pub tunnel_close_total: String,
 }
 
 impl MetricNames {
@@ -86,6 +99,19 @@ impl MetricNames {
             reverse_upstreams_unhealthy: format!("{}_reverse_upstreams_unhealthy", prefix),
             transparent_requests_total: format!("{}_transparent_requests_total", prefix),
             transparent_latency_ms: format!("{}_transparent_latency_ms", prefix),
+            datagram_received_total: format!("{}_datagram_received_total", prefix),
+            datagram_received_bytes_total: format!("{}_datagram_received_bytes_total", prefix),
+            datagram_sent_total: format!("{}_datagram_sent_total", prefix),
+            datagram_sent_bytes_total: format!("{}_datagram_sent_bytes_total", prefix),
+            datagram_dropped_total: format!("{}_datagram_dropped_total", prefix),
+            datagram_channel_utilization: format!("{}_datagram_channel_utilization", prefix),
+            grpc_messages_total: format!("{}_grpc_messages_total", prefix),
+            grpc_message_bytes_total: format!("{}_grpc_message_bytes_total", prefix),
+            grpc_status_total: format!("{}_grpc_status_total", prefix),
+            grpc_stream_duration_seconds: format!("{}_grpc_stream_duration_seconds", prefix),
+            tunnel_bytes_total: format!("{}_tunnel_bytes_total", prefix),
+            tunnel_duration_seconds: format!("{}_tunnel_duration_seconds", prefix),
+            tunnel_close_total: format!("{}_tunnel_close_total", prefix),
         }
     }
 }

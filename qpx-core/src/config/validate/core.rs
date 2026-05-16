@@ -164,6 +164,25 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
     if runtime.h3_read_timeout_ms == 0 {
         return Err(anyhow!("runtime.h3_read_timeout_ms must be >= 1"));
     }
+    if runtime.datagram_channel_capacity == 0 {
+        return Err(anyhow!("runtime.datagram_channel_capacity must be >= 1"));
+    }
+    if runtime.webtransport_datagram_channel_capacity == 0 {
+        return Err(anyhow!(
+            "runtime.webtransport_datagram_channel_capacity must be >= 1"
+        ));
+    }
+    if runtime.webtransport_stream_channel_capacity == 0 {
+        return Err(anyhow!(
+            "runtime.webtransport_stream_channel_capacity must be >= 1"
+        ));
+    }
+    if runtime.max_grpc_message_bytes == 0 {
+        return Err(anyhow!("runtime.max_grpc_message_bytes must be >= 1"));
+    }
+    if runtime.max_grpc_stream_duration_ms == 0 {
+        return Err(anyhow!("runtime.max_grpc_stream_duration_ms must be >= 1"));
+    }
     if let Some(worker_threads) = runtime.worker_threads
         && worker_threads == 0
     {

@@ -3,8 +3,8 @@ use crate::http::body_size::set_observed_request_size;
 use crate::http3::codec::{h3_request_to_hyper, sanitize_interim_response_for_h3};
 use crate::http3::datagram::{DatagramRegistration, H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::server::{
-    H3ReadBodyError, H3ServerRequestStream, read_h3_request_body, send_h3_response,
-    send_h3_static_response,
+    H3RequestBodyRelayOptions, H3ResponseSendOptions, H3ServerRequestStream, H3ServerSendStream,
+    relay_h3_request_body_observed, send_h3_response_observed, send_h3_static_response,
 };
 use crate::sidecar_control::SidecarControl;
 use anyhow::Result;
@@ -14,14 +14,18 @@ use hyper::{Request, Response};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Semaphore, watch};
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub(crate) struct H3Limits {
+    pub(crate) listener_name: Arc<str>,
     pub(crate) max_request_body_bytes: usize,
     pub(crate) max_response_body_bytes: usize,
     pub(crate) max_concurrent_streams_per_connection: usize,
+    pub(crate) datagram_channel_capacity: usize,
+    pub(crate) max_grpc_message_bytes: u64,
+    pub(crate) max_grpc_stream_duration_ms: u64,
     pub(crate) read_timeout: Duration,
     pub(crate) proxy_name: Arc<str>,
     pub(crate) error_body: Arc<str>,
@@ -59,6 +63,10 @@ fn reject_malformed_h3_request(req_stream: &mut H3ServerRequestStream) {
     let code = ::h3::error::Code::H3_MESSAGE_ERROR;
     req_stream.stop_stream(code);
     req_stream.stop_sending(code);
+}
+
+fn reject_malformed_h3_response_stream(req_stream: &mut H3ServerSendStream) {
+    req_stream.stop_stream(::h3::error::Code::H3_MESSAGE_ERROR);
 }
 
 impl H3HttpResponse {
@@ -199,7 +207,7 @@ async fn serve_connection<H: H3RequestHandler>(
     let datagram_dispatch = if handler.enable_datagram() {
         use h3_datagram::datagram_handler::HandleDatagramsExt as _;
 
-        let dispatch = Arc::new(H3DatagramDispatch::new(64));
+        let dispatch = Arc::new(H3DatagramDispatch::new(limits.datagram_channel_capacity));
         let reader = h3_conn.get_datagram_reader();
         let dispatch_task = dispatch.clone();
         tokio::spawn(async move {
@@ -342,73 +350,94 @@ async fn handle_stream<H: H3RequestHandler>(
         }
     }
 
-    let (req_body, req_trailers) = match read_h3_request_body(
-        &mut req_stream,
-        limits.read_timeout,
-        limits.max_request_body_bytes,
-    )
-    .await
-    {
-        Ok(parts) => parts,
-        Err(H3ReadBodyError::TimedOut) => {
-            if let Err(err) = send_h3_static_response(
-                &mut req_stream,
-                ::http::StatusCode::REQUEST_TIMEOUT,
-                b"request read timed out",
-                &request_method,
-                limits.proxy_name.as_ref(),
-                limits.max_response_body_bytes,
-            )
-            .await
-            {
-                warn!(error = ?err, "failed to send HTTP/3 request-timeout response");
-            }
-            return;
-        }
-        Err(H3ReadBodyError::TooLarge) => {
-            if let Err(err) = send_h3_static_response(
-                &mut req_stream,
-                ::http::StatusCode::PAYLOAD_TOO_LARGE,
-                b"request payload too large",
-                &request_method,
-                limits.proxy_name.as_ref(),
-                limits.max_response_body_bytes,
-            )
-            .await
-            {
-                warn!(error = ?err, "failed to send HTTP/3 payload-too-large response");
-            }
-            return;
-        }
-        Err(H3ReadBodyError::Stream(err)) => {
-            warn!(error = ?err, "HTTP/3 request stream failed");
-            return;
-        }
-    };
-
-    let req_body_len = req_body.len();
     if let Some(content_length) = declared_content_length
-        && content_length != req_body_len as u64
+        && content_length > limits.max_request_body_bytes as u64
     {
         warn!(
-            expected = content_length,
-            actual = req_body_len,
-            "HTTP/3 request content-length mismatch"
+            content_length,
+            limit = limits.max_request_body_bytes,
+            "HTTP/3 request content-length exceeds configured limit"
         );
-        reject_malformed_h3_request(&mut req_stream);
+        if let Err(err) = send_h3_static_response(
+            &mut req_stream,
+            ::http::StatusCode::PAYLOAD_TOO_LARGE,
+            b"request payload too large",
+            &request_method,
+            limits.proxy_name.as_ref(),
+            limits.max_response_body_bytes,
+        )
+        .await
+        {
+            warn!(error = ?err, "failed to send HTTP/3 payload-too-large response");
+        }
         return;
     }
-    let mut req = match h3_request_to_hyper(req_head, req_body, req_trailers) {
+
+    let request_headers = req_head.headers().clone();
+    let grpc_protocol = crate::http::rpc::streaming_grpc_protocol(&request_headers, None);
+    let grpc_started = Instant::now();
+    let grpc_deadline = grpc_protocol
+        .as_ref()
+        .map(|_| grpc_started + Duration::from_millis(limits.max_grpc_stream_duration_ms));
+
+    let (mut send_stream, recv_stream) = req_stream.split();
+    let (sender, body) = Body::channel();
+    let mut req = match h3_request_to_hyper(req_head, body) {
         Ok(req) => req,
         Err(err) => {
             warn!(error = ?err, "invalid HTTP/3 request");
-            reject_malformed_h3_request(&mut req_stream);
+            reject_malformed_h3_response_stream(&mut send_stream);
             return;
         }
     };
-    set_observed_request_size(&mut req, req_body_len as u64);
+    if let Some(content_length) = declared_content_length {
+        set_observed_request_size(&mut req, content_length);
+    }
+    let request_read_timeout = limits.read_timeout;
+    let max_request_body_bytes = limits.max_request_body_bytes;
+    let listener_name = limits.listener_name.clone();
+    let max_grpc_message_bytes = limits.max_grpc_message_bytes;
+    let request_relay = tokio::spawn(async move {
+        relay_h3_request_body_observed(
+            recv_stream,
+            sender,
+            H3RequestBodyRelayOptions {
+                read_timeout: request_read_timeout,
+                max_body_bytes: max_request_body_bytes,
+                declared_content_length,
+                request_headers,
+                listener_name,
+                max_grpc_message_bytes: Some(max_grpc_message_bytes),
+                grpc_stream_deadline: grpc_deadline,
+            },
+        )
+        .await
+    });
 
-    let response = handler.handle_http_with_interim(req, conn_info).await;
+    let response = if let Some(deadline) = grpc_deadline {
+        match tokio::time::timeout_at(deadline, handler.handle_http_with_interim(req, conn_info))
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => {
+                request_relay.abort();
+                let _ = request_relay.await;
+                warn!("HTTP/3 gRPC stream duration exceeded configured limit");
+                let _ = send_h3_static_response(
+                    &mut send_stream,
+                    ::http::StatusCode::GATEWAY_TIMEOUT,
+                    limits.error_body.as_bytes(),
+                    &request_method,
+                    limits.proxy_name.as_ref(),
+                    limits.max_response_body_bytes,
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        handler.handle_http_with_interim(req, conn_info).await
+    };
     for interim in response.interim {
         let interim = match sanitize_interim_response_for_h3(interim) {
             Ok(interim) => interim,
@@ -418,7 +447,7 @@ async fn handle_stream<H: H3RequestHandler>(
             }
         };
         if let Err(err) =
-            tokio::time::timeout(limits.read_timeout, req_stream.send_response(interim))
+            tokio::time::timeout(limits.read_timeout, send_stream.send_response(interim))
                 .await
                 .map_err(|_| anyhow::anyhow!("HTTP/3 interim response send timed out"))
                 .and_then(|result| result.map_err(Into::into))
@@ -427,25 +456,63 @@ async fn handle_stream<H: H3RequestHandler>(
             return;
         }
     }
-    if let Err(err) = send_h3_response(
+    let response_result = send_h3_response_observed(
         response.response,
         &request_method,
-        &mut req_stream,
-        limits.max_response_body_bytes,
-        limits.read_timeout,
+        &mut send_stream,
+        H3ResponseSendOptions {
+            max_body_bytes: limits.max_response_body_bytes,
+            body_read_timeout: limits.read_timeout,
+            listener_name: Some(limits.listener_name.as_ref()),
+            fallback_grpc_protocol: grpc_protocol.as_deref(),
+            max_grpc_message_bytes: Some(limits.max_grpc_message_bytes),
+            grpc_stream_deadline: grpc_deadline,
+        },
     )
-    .await
-    {
-        warn!(error = ?err, "HTTP/3 response stream failed");
-        let _ = send_h3_static_response(
-            &mut req_stream,
-            ::http::StatusCode::BAD_GATEWAY,
-            limits.error_body.as_bytes(),
-            &request_method,
-            limits.proxy_name.as_ref(),
-            limits.max_response_body_bytes,
-        )
-        .await;
+    .await;
+    let request_summary = match request_relay.await {
+        Ok(Ok((_bytes, summary))) => summary,
+        Ok(Err(err)) => {
+            warn!(error = ?err, "HTTP/3 request body relay failed");
+            None
+        }
+        Err(err) => {
+            warn!(error = ?err, "HTTP/3 request body relay task failed");
+            None
+        }
+    };
+    match response_result {
+        Ok(response_summary) => {
+            if let Some(protocol) = grpc_protocol.as_deref() {
+                let streaming = crate::http::rpc::grpc_streaming_label(
+                    protocol,
+                    request_summary
+                        .as_ref()
+                        .map(|summary| summary.message_count()),
+                    response_summary
+                        .as_ref()
+                        .map(|summary| summary.message_count()),
+                );
+                crate::http::rpc::emit_grpc_stream_duration_metric(
+                    limits.listener_name.as_ref(),
+                    protocol,
+                    streaming,
+                    grpc_started.elapsed(),
+                );
+            }
+        }
+        Err(err) => {
+            warn!(error = ?err, "HTTP/3 response stream failed");
+            let _ = send_h3_static_response(
+                &mut send_stream,
+                ::http::StatusCode::BAD_GATEWAY,
+                limits.error_body.as_bytes(),
+                &request_method,
+                limits.proxy_name.as_ref(),
+                limits.max_response_body_bytes,
+            )
+            .await;
+        }
     }
 }
 

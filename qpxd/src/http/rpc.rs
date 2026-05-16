@@ -8,9 +8,14 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use http::{HeaderMap, Request, Response, StatusCode};
+use metrics::counter;
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+use metrics::histogram;
 use percent_encoding::percent_decode_str;
 use qpx_core::config::RpcLocalResponseConfig;
 use serde_json::json;
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+use std::time::Duration;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RpcMatchContext {
@@ -23,13 +28,362 @@ pub(crate) struct RpcMatchContext {
     pub(crate) message: Option<String>,
     pub(crate) trailers: Option<HeaderMap>,
     pub(crate) request_message_count: Option<usize>,
+    pub(crate) response_message_count: Option<usize>,
+    pub(crate) request_message_bytes: Option<u64>,
+    pub(crate) response_message_bytes: Option<u64>,
+    pub(crate) stream_duration_ms: Option<u64>,
+}
+
+impl RpcMatchContext {
+    pub(crate) fn to_log_context(&self) -> qpx_observability::access_log::RpcLogContext {
+        qpx_observability::access_log::RpcLogContext {
+            protocol: self.protocol.clone(),
+            service: self.service.clone(),
+            method: self.method.clone(),
+            streaming: self.streaming.clone(),
+            status: self.status.clone(),
+            message_size: self.message_size,
+            message: self.message.clone(),
+            request_message_count: self.request_message_count,
+            response_message_count: self.response_message_count,
+            request_message_bytes: self.request_message_bytes,
+            response_message_bytes: self.response_message_bytes,
+            stream_duration_ms: self.stream_duration_ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
-struct FramedBodySummary {
+pub(crate) struct FramedBodySummary {
     message_count: usize,
     message_bytes: u64,
     trailers: Option<HeaderMap>,
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+impl FramedBodySummary {
+    pub(crate) fn message_count(&self) -> usize {
+        self.message_count
+    }
+
+    pub(crate) fn trailers(&self) -> Option<&HeaderMap> {
+        self.trailers.as_ref()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum GrpcFrameError {
+    Invalid(anyhow::Error),
+    MessageTooLarge { len: u64, max: u64 },
+}
+
+impl std::fmt::Display for GrpcFrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(err) => write!(f, "{err}"),
+            Self::MessageTooLarge { len, max } => {
+                write!(f, "grpc message length {len} exceeds limit {max}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GrpcFrameError {}
+
+impl From<anyhow::Error> for GrpcFrameError {
+    fn from(value: anyhow::Error) -> Self {
+        Self::Invalid(value)
+    }
+}
+
+#[derive(Debug)]
+enum FrameParseState {
+    Header {
+        buf: [u8; 5],
+        pos: usize,
+    },
+    Payload {
+        remaining: usize,
+        flags: u8,
+        trailer: Option<Vec<u8>>,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct GrpcFrameObserver {
+    state: FrameParseState,
+    summary: FramedBodySummary,
+    max_message_bytes: Option<u64>,
+    grpc_web: bool,
+    grpc_web_text: bool,
+    grpc_web_text_done: bool,
+    text_buf: Vec<u8>,
+}
+
+impl GrpcFrameObserver {
+    pub(crate) fn new(max_message_bytes: Option<u64>) -> Self {
+        Self::for_protocol(false, false, max_message_bytes)
+    }
+
+    pub(crate) fn grpc_web(text: bool, max_message_bytes: Option<u64>) -> Self {
+        Self::for_protocol(true, text, max_message_bytes)
+    }
+
+    fn for_protocol(grpc_web: bool, grpc_web_text: bool, max_message_bytes: Option<u64>) -> Self {
+        Self {
+            state: FrameParseState::Header {
+                buf: [0; 5],
+                pos: 0,
+            },
+            summary: FramedBodySummary::default(),
+            max_message_bytes,
+            grpc_web,
+            grpc_web_text,
+            grpc_web_text_done: false,
+            text_buf: Vec::new(),
+        }
+    }
+
+    pub(crate) fn feed(&mut self, chunk: &[u8]) -> Result<(), GrpcFrameError> {
+        if self.grpc_web_text {
+            return self.feed_grpc_web_text(chunk);
+        }
+        self.feed_binary(chunk)
+    }
+
+    fn feed_grpc_web_text(&mut self, chunk: &[u8]) -> Result<(), GrpcFrameError> {
+        for byte in chunk
+            .iter()
+            .copied()
+            .filter(|byte| !byte.is_ascii_whitespace())
+        {
+            if self.grpc_web_text_done {
+                return Err(anyhow!("grpc-web-text data found after base64 padding").into());
+            }
+            self.text_buf.push(byte);
+        }
+
+        while self.text_buf.len() >= 4 {
+            let quantum = [
+                self.text_buf[0],
+                self.text_buf[1],
+                self.text_buf[2],
+                self.text_buf[3],
+            ];
+            let padded = quantum.contains(&b'=');
+            if padded && self.text_buf.len() > 4 {
+                return Err(anyhow!("grpc-web-text data found after base64 padding").into());
+            }
+            let decoded = BASE64.decode(quantum).map_err(|err| anyhow!(err))?;
+            self.feed_binary(&decoded)?;
+            self.text_buf.drain(..4);
+            if padded {
+                self.grpc_web_text_done = true;
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn feed_binary(&mut self, mut chunk: &[u8]) -> Result<(), GrpcFrameError> {
+        while !chunk.is_empty() {
+            match &mut self.state {
+                FrameParseState::Header { buf, pos } => {
+                    let take = (5 - *pos).min(chunk.len());
+                    buf[*pos..*pos + take].copy_from_slice(&chunk[..take]);
+                    *pos += take;
+                    chunk = &chunk[take..];
+                    if *pos == 5 {
+                        let flags = buf[0];
+                        let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as u64;
+                        if let Some(max) = self.max_message_bytes
+                            && len > max
+                        {
+                            return Err(GrpcFrameError::MessageTooLarge { len, max });
+                        }
+                        let is_trailer = self.grpc_web && (flags & 0x80) != 0;
+                        if is_trailer {
+                            self.state = FrameParseState::Payload {
+                                remaining: len as usize,
+                                flags,
+                                trailer: Some(Vec::with_capacity(len as usize)),
+                            };
+                        } else {
+                            self.summary.message_count += 1;
+                            self.summary.message_bytes =
+                                self.summary.message_bytes.saturating_add(len);
+                            self.state = FrameParseState::Payload {
+                                remaining: len as usize,
+                                flags,
+                                trailer: None,
+                            };
+                        }
+                    }
+                }
+                FrameParseState::Payload {
+                    remaining,
+                    flags,
+                    trailer,
+                } => {
+                    let take = (*remaining).min(chunk.len());
+                    if let Some(trailer) = trailer {
+                        trailer.extend_from_slice(&chunk[..take]);
+                    }
+                    *remaining -= take;
+                    chunk = &chunk[take..];
+                    if *remaining == 0 {
+                        let completed_trailer =
+                            ((*flags & 0x80) != 0).then(|| trailer.take()).flatten();
+                        self.state = FrameParseState::Header {
+                            buf: [0; 5],
+                            pos: 0,
+                        };
+                        if let Some(trailer) = completed_trailer {
+                            self.summary.trailers = Some(parse_grpc_web_trailer_block(&trailer)?);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<FramedBodySummary, GrpcFrameError> {
+        if self.grpc_web_text {
+            if !self.text_buf.is_empty() {
+                let decoded = BASE64
+                    .decode(std::mem::take(&mut self.text_buf))
+                    .map_err(|err| anyhow!(err))?;
+                self.feed_binary(&decoded)?;
+            }
+            self.grpc_web_text = false;
+        }
+        match self.state {
+            FrameParseState::Header { pos: 0, .. } => Ok(self.summary),
+            _ => Err(anyhow!("grpc body ended mid-frame").into()),
+        }
+    }
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[derive(Debug)]
+pub(crate) struct StreamingGrpcObserver {
+    protocol: String,
+    inner: GrpcFrameObserver,
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+impl StreamingGrpcObserver {
+    pub(crate) fn protocol(&self) -> &str {
+        self.protocol.as_str()
+    }
+
+    pub(crate) fn feed(&mut self, chunk: &[u8]) -> Result<(), GrpcFrameError> {
+        self.inner.feed(chunk)
+    }
+
+    pub(crate) fn finish(self) -> Result<FramedBodySummary, GrpcFrameError> {
+        self.inner.finish()
+    }
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn streaming_grpc_protocol(
+    headers: &HeaderMap,
+    fallback: Option<&str>,
+) -> Option<String> {
+    detect_rpc_protocol(headers, fallback)
+        .filter(|protocol| matches!(protocol.as_str(), "grpc" | "grpc_web"))
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn streaming_grpc_observer(
+    headers: &HeaderMap,
+    fallback: Option<&str>,
+    max_message_bytes: Option<u64>,
+) -> Option<StreamingGrpcObserver> {
+    let protocol = streaming_grpc_protocol(headers, fallback)?;
+    let inner = match protocol.as_str() {
+        "grpc" => GrpcFrameObserver::new(max_message_bytes),
+        "grpc_web" => GrpcFrameObserver::grpc_web(
+            response_content_type(headers)
+                .as_deref()
+                .map(|value| value.starts_with("application/grpc-web-text"))
+                .unwrap_or(false),
+            max_message_bytes,
+        ),
+        _ => return None,
+    };
+    Some(StreamingGrpcObserver { protocol, inner })
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn emit_grpc_body_metrics(
+    direction: &'static str,
+    listener: &str,
+    protocol: &str,
+    summary: &FramedBodySummary,
+) {
+    counter!(
+        "qpx_grpc_messages_total",
+        "direction" => direction,
+        "listener" => listener.to_string(),
+        "protocol" => protocol.to_string()
+    )
+    .increment(summary.message_count as u64);
+    counter!(
+        "qpx_grpc_message_bytes_total",
+        "direction" => direction,
+        "listener" => listener.to_string(),
+        "protocol" => protocol.to_string()
+    )
+    .increment(summary.message_bytes);
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn emit_grpc_status_metric(
+    listener: &str,
+    protocol: &str,
+    headers: &HeaderMap,
+    trailers: Option<&HeaderMap>,
+) {
+    let (status, _) = extract_grpc_status_and_message(headers, trailers);
+    if let Some(status) = status {
+        counter!(
+            "qpx_grpc_status_total",
+            "listener" => listener.to_string(),
+            "protocol" => protocol.to_string(),
+            "status" => status
+        )
+        .increment(1);
+    }
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn grpc_streaming_label(
+    protocol: &str,
+    request_messages: Option<usize>,
+    response_messages: Option<usize>,
+) -> &'static str {
+    infer_response_streaming(Some(protocol), request_messages, response_messages)
+        .or_else(|| infer_request_streaming(Some(protocol), "POST", request_messages))
+        .unwrap_or("unknown")
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn emit_grpc_stream_duration_metric(
+    listener: &str,
+    protocol: &str,
+    streaming: &str,
+    duration: Duration,
+) {
+    histogram!(
+        "qpx_grpc_stream_duration_seconds",
+        "listener" => listener.to_string(),
+        "protocol" => protocol.to_string(),
+        "streaming" => streaming.to_string()
+    )
+    .record(duration.as_secs_f64());
 }
 
 pub(crate) fn inspect_request(req: &Request<Body>) -> RpcMatchContext {
@@ -38,13 +392,37 @@ pub(crate) fn inspect_request(req: &Request<Body>) -> RpcMatchContext {
         .map(|(service, method)| (Some(service.to_string()), Some(method.to_string())))
         .unwrap_or((None, None));
     let message_size = observed_request_bytes(req)
-        .and_then(|body| request_body_summary(protocol.as_deref(), req.headers(), body).ok())
+        .and_then(|body| summarize_request_body(protocol.as_deref(), req.headers(), body).ok())
         .map(|summary| summary.message_bytes)
         .filter(|size| *size > 0)
         .or_else(|| observed_request_size(req));
-    let request_message_count = observed_request_bytes(req)
-        .and_then(|body| request_body_summary(protocol.as_deref(), req.headers(), body).ok())
+    let request_summary = observed_request_bytes(req)
+        .and_then(|body| summarize_request_body(protocol.as_deref(), req.headers(), body).ok())
+        .filter(|summary| summary.message_count > 0 || summary.message_bytes > 0);
+    let request_message_count = request_summary
+        .as_ref()
         .map(|summary| summary.message_count);
+    let request_message_bytes = request_summary
+        .as_ref()
+        .map(|summary| summary.message_bytes);
+    if let (Some(protocol), Some(summary)) = (protocol.as_deref(), request_summary.as_ref())
+        && matches!(protocol, "grpc" | "grpc_web")
+    {
+        counter!(
+            "qpx_grpc_messages_total",
+            "direction" => "request",
+            "listener" => "unknown",
+            "protocol" => protocol.to_string()
+        )
+        .increment(summary.message_count as u64);
+        counter!(
+            "qpx_grpc_message_bytes_total",
+            "direction" => "request",
+            "listener" => "unknown",
+            "protocol" => protocol.to_string()
+        )
+        .increment(summary.message_bytes);
+    }
     let streaming = infer_request_streaming(
         protocol.as_deref(),
         req.method().as_str(),
@@ -59,6 +437,7 @@ pub(crate) fn inspect_request(req: &Request<Body>) -> RpcMatchContext {
         message_size,
         trailers: observed_request_trailers(req).cloned(),
         request_message_count,
+        request_message_bytes,
         ..Default::default()
     }
 }
@@ -71,7 +450,7 @@ pub(crate) fn inspect_response(
         .or_else(|| request.protocol.clone());
     let content_type = response_content_type(response.headers());
     let body_summary = observed_response_bytes(response).and_then(|body| {
-        response_body_summary(protocol.as_deref(), content_type.as_deref(), body).ok()
+        summarize_response_body(protocol.as_deref(), content_type.as_deref(), body).ok()
     });
     let trailers = observed_response_trailers(response).cloned().or_else(|| {
         body_summary
@@ -97,6 +476,37 @@ pub(crate) fn inspect_response(
         .map(|summary| summary.message_bytes)
         .filter(|size| *size > 0)
         .or_else(|| observed_response_size(response));
+    let response_message_count = body_summary.as_ref().map(|summary| summary.message_count);
+    let response_message_bytes = body_summary.as_ref().map(|summary| summary.message_bytes);
+    if let (Some(protocol), Some(summary)) = (protocol.as_deref(), body_summary.as_ref())
+        && matches!(protocol, "grpc" | "grpc_web")
+    {
+        counter!(
+            "qpx_grpc_messages_total",
+            "direction" => "response",
+            "listener" => "unknown",
+            "protocol" => protocol.to_string()
+        )
+        .increment(summary.message_count as u64);
+        counter!(
+            "qpx_grpc_message_bytes_total",
+            "direction" => "response",
+            "listener" => "unknown",
+            "protocol" => protocol.to_string()
+        )
+        .increment(summary.message_bytes);
+    }
+    if let (Some(protocol), Some(status)) = (protocol.as_deref(), status.as_deref())
+        && matches!(protocol, "grpc" | "grpc_web")
+    {
+        counter!(
+            "qpx_grpc_status_total",
+            "listener" => "unknown",
+            "protocol" => protocol.to_string(),
+            "status" => status.to_string()
+        )
+        .increment(1);
+    }
 
     RpcMatchContext {
         protocol,
@@ -108,6 +518,10 @@ pub(crate) fn inspect_response(
         message,
         trailers,
         request_message_count: request.request_message_count,
+        response_message_count,
+        request_message_bytes: request.request_message_bytes,
+        response_message_bytes,
+        stream_duration_ms: request.stream_duration_ms,
     }
 }
 
@@ -279,19 +693,22 @@ fn extract_service_and_method(path: &str) -> Option<(&str, &str)> {
     Some((service, method))
 }
 
-fn request_body_summary(
+fn summarize_request_body(
     protocol: Option<&str>,
     headers: &HeaderMap,
     body: &Bytes,
 ) -> Result<FramedBodySummary> {
     match protocol {
-        Some("grpc") => parse_grpc_frames(body),
-        Some("grpc_web") => parse_grpc_web_frames(
+        Some("grpc") => observe_grpc_body(body, GrpcFrameObserver::new(None)),
+        Some("grpc_web") => observe_grpc_body(
             body,
-            response_content_type(headers)
-                .as_deref()
-                .map(|value| value.starts_with("application/grpc-web-text"))
-                .unwrap_or(false),
+            GrpcFrameObserver::grpc_web(
+                response_content_type(headers)
+                    .as_deref()
+                    .map(|value| value.starts_with("application/grpc-web-text"))
+                    .unwrap_or(false),
+                None,
+            ),
         ),
         _ => Ok(FramedBodySummary {
             message_count: usize::from(!body.is_empty()),
@@ -301,18 +718,21 @@ fn request_body_summary(
     }
 }
 
-fn response_body_summary(
+fn summarize_response_body(
     protocol: Option<&str>,
     content_type: Option<&str>,
     body: &Bytes,
 ) -> Result<FramedBodySummary> {
     match protocol {
-        Some("grpc") => parse_grpc_frames(body),
-        Some("grpc_web") => parse_grpc_web_frames(
+        Some("grpc") => observe_grpc_body(body, GrpcFrameObserver::new(None)),
+        Some("grpc_web") => observe_grpc_body(
             body,
-            content_type
-                .map(|value| value.starts_with("application/grpc-web-text"))
-                .unwrap_or(false),
+            GrpcFrameObserver::grpc_web(
+                content_type
+                    .map(|value| value.starts_with("application/grpc-web-text"))
+                    .unwrap_or(false),
+                None,
+            ),
         ),
         Some("connect") => Ok(FramedBodySummary {
             message_count: usize::from(!body.is_empty()),
@@ -327,68 +747,9 @@ fn response_body_summary(
     }
 }
 
-fn parse_grpc_frames(body: &Bytes) -> Result<FramedBodySummary> {
-    let mut cursor = 0usize;
-    let mut summary = FramedBodySummary::default();
-    while cursor + 5 <= body.len() {
-        let frame_len = u32::from_be_bytes([
-            body[cursor + 1],
-            body[cursor + 2],
-            body[cursor + 3],
-            body[cursor + 4],
-        ]) as usize;
-        cursor += 5;
-        if cursor + frame_len > body.len() {
-            return Err(anyhow!("grpc frame length exceeds body length"));
-        }
-        summary.message_count += 1;
-        summary.message_bytes += frame_len as u64;
-        cursor += frame_len;
-    }
-    if cursor != body.len() {
-        return Err(anyhow!("grpc body ended mid-frame"));
-    }
-    Ok(summary)
-}
-
-fn parse_grpc_web_frames(body: &Bytes, text: bool) -> Result<FramedBodySummary> {
-    let decoded = if text {
-        let filtered = body
-            .iter()
-            .copied()
-            .filter(|byte| !byte.is_ascii_whitespace())
-            .collect::<Vec<_>>();
-        Bytes::from(BASE64.decode(filtered)?)
-    } else {
-        body.clone()
-    };
-    let mut cursor = 0usize;
-    let mut summary = FramedBodySummary::default();
-    while cursor + 5 <= decoded.len() {
-        let flags = decoded[cursor];
-        let frame_len = u32::from_be_bytes([
-            decoded[cursor + 1],
-            decoded[cursor + 2],
-            decoded[cursor + 3],
-            decoded[cursor + 4],
-        ]) as usize;
-        cursor += 5;
-        if cursor + frame_len > decoded.len() {
-            return Err(anyhow!("grpc-web frame length exceeds body length"));
-        }
-        let payload = &decoded[cursor..cursor + frame_len];
-        if (flags & 0x80) != 0 {
-            summary.trailers = Some(parse_grpc_web_trailer_block(payload)?);
-        } else {
-            summary.message_count += 1;
-            summary.message_bytes += frame_len as u64;
-        }
-        cursor += frame_len;
-    }
-    if cursor != decoded.len() {
-        return Err(anyhow!("grpc-web body ended mid-frame"));
-    }
-    Ok(summary)
+fn observe_grpc_body(body: &Bytes, mut observer: GrpcFrameObserver) -> Result<FramedBodySummary> {
+    observer.feed(body.as_ref())?;
+    observer.finish().map_err(Into::into)
 }
 
 fn parse_grpc_web_trailer_block(raw: &[u8]) -> Result<HeaderMap> {
@@ -513,7 +874,9 @@ mod tests {
         let body = Bytes::from(frame_grpc_web_trailers(
             b"grpc-status: 7\r\ngrpc-message: denied\r\n",
         ));
-        let summary = parse_grpc_web_frames(&body, false).expect("summary");
+        let mut observer = GrpcFrameObserver::grpc_web(false, None);
+        observer.feed(&body).expect("feed");
+        let summary = observer.finish().expect("summary");
         let trailers = summary.trailers.expect("trailers");
         assert_eq!(
             trailers
@@ -522,6 +885,66 @@ mod tests {
             Some("7")
         );
         assert_eq!(summary.message_count, 0);
+    }
+
+    #[test]
+    fn parses_grpc_frame_across_chunk_boundaries() {
+        let body = frame_grpc_message(Bytes::from_static(b"hello"));
+        let mut observer = GrpcFrameObserver::new(None);
+        for chunk in body.chunks(2) {
+            observer.feed(chunk).expect("feed");
+        }
+        let summary = observer.finish().expect("summary");
+        assert_eq!(summary.message_count, 1);
+        assert_eq!(summary.message_bytes, 5);
+    }
+
+    #[test]
+    fn grpc_observer_rejects_messages_over_limit() {
+        let body = frame_grpc_message(Bytes::from_static(b"hello"));
+        let mut observer = GrpcFrameObserver::new(Some(4));
+        let err = observer.feed(&body[..5]).expect_err("too large");
+        assert!(matches!(
+            err,
+            GrpcFrameError::MessageTooLarge { len: 5, max: 4 }
+        ));
+    }
+
+    #[test]
+    fn grpc_web_text_observer_decodes_incrementally() {
+        let encoded = BASE64.encode(frame_grpc_message(Bytes::from_static(b"hello")));
+        let mut observer = GrpcFrameObserver::grpc_web(true, None);
+        for chunk in encoded.as_bytes().chunks(3) {
+            observer.feed(chunk).expect("feed");
+        }
+        let summary = observer.finish().expect("summary");
+        assert_eq!(summary.message_count, 1);
+        assert_eq!(summary.message_bytes, 5);
+    }
+
+    #[test]
+    fn grpc_web_text_observer_rejects_oversized_message_before_finish() {
+        let encoded = BASE64.encode(frame_grpc_message(Bytes::from_static(b"hello")));
+        let mut observer = GrpcFrameObserver::grpc_web(true, Some(4));
+        observer
+            .feed(&encoded.as_bytes()[..4])
+            .expect("partial header");
+        let err = observer
+            .feed(&encoded.as_bytes()[4..8])
+            .expect_err("frame header should reveal oversized message");
+        assert!(matches!(
+            err,
+            GrpcFrameError::MessageTooLarge { len: 5, max: 4 }
+        ));
+    }
+
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    #[test]
+    fn streaming_observer_uses_response_fallback_protocol() {
+        let headers = HeaderMap::new();
+        let observer =
+            streaming_grpc_observer(&headers, Some("grpc"), Some(1024)).expect("fallback observer");
+        assert_eq!(observer.protocol(), "grpc");
     }
 
     #[test]
@@ -576,7 +999,9 @@ mod tests {
         let bytes = crate::http::body::to_bytes(response.into_body())
             .await
             .expect("body");
-        let summary = parse_grpc_web_frames(&bytes, false).expect("summary");
+        let mut observer = GrpcFrameObserver::grpc_web(false, None);
+        observer.feed(&bytes).expect("feed");
+        let summary = observer.finish().expect("summary");
         assert_eq!(summary.message_count, 0);
         let trailers = summary.trailers.expect("trailers");
         assert_eq!(

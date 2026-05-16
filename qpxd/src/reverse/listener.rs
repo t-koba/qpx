@@ -22,8 +22,6 @@ use tokio::time::timeout;
 use tracing::warn;
 
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
-use crate::io_copy::copy_bidirectional_with_export_and_idle;
-#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use crate::tls::{extract_client_hello_info, read_client_hello_with_timeout};
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use bytes::Bytes;
@@ -476,12 +474,10 @@ async fn handle_tls_connection(
         });
         let idle_timeout =
             Duration::from_millis(reverse.runtime.state().plan.limits.tunnel_idle_timeout_ms);
-        copy_bidirectional_with_export_and_idle(
+        crate::tunnel::relay_tcp_tunnel(
             stream,
             upstream_stream,
-            export,
-            Some(idle_timeout),
-            None,
+            crate::tunnel::TunnelPolicy::tcp(Some(idle_timeout), None, export),
         )
         .await?;
         return Ok(());
@@ -604,12 +600,10 @@ async fn handle_tls_connection(
         });
         let idle_timeout =
             Duration::from_millis(reverse.runtime.state().plan.limits.tunnel_idle_timeout_ms);
-        copy_bidirectional_with_export_and_idle(
+        crate::tunnel::relay_tcp_tunnel(
             stream,
             upstream_stream,
-            export,
-            Some(idle_timeout),
-            None,
+            crate::tunnel::TunnelPolicy::tcp(Some(idle_timeout), None, export),
         )
         .await?;
         return Ok(());

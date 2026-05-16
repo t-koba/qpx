@@ -2,6 +2,7 @@ use super::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
 use super::request::proxy_auth_required;
 use crate::http::body::Body;
+use crate::http::body_size::set_observed_request_size;
 use crate::http::common::{
     blocked_response as blocked, forbidden_response as forbidden, http_version_label,
     too_many_requests_response as too_many_requests,
@@ -28,7 +29,7 @@ use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::watch;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout};
 use tracing::{info, warn};
 
 #[path = "h3_connect_parse.rs"]
@@ -56,8 +57,8 @@ use self::h3_qpx_connect_upstream::{
     validate_qpx_connect_head,
 };
 use self::h3_qpx_response::{
-    QpxPolicyResponseContext, collect_forward_response, finalize_qpx_connect_head_response,
-    send_qpx_policy_response, send_qpx_response_stream, send_qpx_static_response,
+    QpxPolicyResponseContext, finalize_qpx_connect_head_response, send_qpx_policy_response,
+    send_qpx_response_stream, send_qpx_static_response,
     upstream_qpx_extended_connect_error_response,
 };
 use self::h3_qpx_webtransport_dispatch::handle_qpx_webtransport_connect as dispatch_qpx_webtransport_connect;
@@ -215,6 +216,9 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
             max_request_body_bytes: limits.max_h3_request_body_bytes,
             max_concurrent_streams_per_connection: limits.max_h3_streams_per_connection,
             read_timeout: Duration::from_millis(limits.h3_read_timeout_ms),
+            datagram_channel_capacity: limits.datagram_channel_capacity,
+            webtransport_datagram_channel_capacity: limits.webtransport_datagram_channel_capacity,
+            webtransport_stream_channel_capacity: limits.webtransport_stream_channel_capacity,
             ..Default::default()
         }
     }
@@ -223,27 +227,16 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
         &self,
         request: qpx_h3::Request,
         conn: qpx_h3::ConnectionInfo,
-    ) -> Result<qpx_h3::Response> {
+        req_stream: &mut qpx_h3::RequestStream,
+    ) -> Result<()> {
         if request.head.method() == http::Method::CONNECT {
-            return self.handle_connect(request, conn.remote_addr).await;
+            return self
+                .handle_connect(request, conn.remote_addr, req_stream)
+                .await;
         }
 
-        let req = h3_request_to_hyper(request.head, request.body, request.trailers)?;
-        let request_method = req.method().clone();
-        let response = crate::forward::request::handle_request_inner(
-            req,
-            self.runtime.clone(),
-            self.listener_name.as_ref(),
-            conn.remote_addr,
-        )
-        .await?;
-        collect_forward_response(
-            response,
-            &request_method,
-            self.runtime.state().plan.limits.max_h3_response_body_bytes,
-            h3_body_read_timeout(&self.runtime),
-        )
-        .await
+        self.handle_http_request(request, conn.remote_addr, req_stream)
+            .await
     }
 
     async fn handle_webtransport_connect(
@@ -270,15 +263,128 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
 }
 
 impl ForwardQpxHandler {
+    async fn handle_http_request(
+        &self,
+        request: qpx_h3::Request,
+        remote_addr: std::net::SocketAddr,
+        req_stream: &mut qpx_h3::RequestStream,
+    ) -> Result<()> {
+        let request_headers = request.head.headers().clone();
+        let grpc_protocol = crate::http::rpc::streaming_grpc_protocol(&request_headers, None);
+        let grpc_started = Instant::now();
+        let grpc_deadline = grpc_protocol.as_ref().map(|_| {
+            grpc_started
+                + Duration::from_millis(
+                    self.runtime.state().plan.limits.max_grpc_stream_duration_ms,
+                )
+        });
+        let declared_content_length =
+            crate::http3::codec::parse_content_length_fields(request.head.headers())?;
+        if let Some(content_length) = declared_content_length
+            && content_length > self.runtime.state().plan.limits.max_h3_request_body_bytes as u64
+        {
+            return send_qpx_static_response(
+                req_stream,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                b"request payload too large",
+            )
+            .await;
+        }
+
+        let (sender, body) = Body::channel();
+        let mut req = h3_request_to_hyper(request.head, body)?;
+        if let Some(content_length) = declared_content_length {
+            set_observed_request_size(&mut req, content_length);
+        }
+        let request_method = req.method().clone();
+        let response_fut = async {
+            let fut = crate::forward::request::handle_request_inner(
+                req,
+                self.runtime.clone(),
+                self.listener_name.as_ref(),
+                remote_addr,
+            );
+            if let Some(deadline) = grpc_deadline {
+                tokio::time::timeout_at(deadline, fut)
+                    .await
+                    .map_err(|_| anyhow!("qpx-h3 gRPC stream duration exceeded configured limit"))?
+            } else {
+                fut.await
+            }
+        };
+        let relay_fut = crate::http3::qpx_stream::relay_qpx_request_body_observed(
+            req_stream,
+            sender,
+            crate::http3::qpx_stream::QpxRequestBodyRelayOptions {
+                read_timeout: h3_body_read_timeout(&self.runtime),
+                max_body_bytes: self.runtime.state().plan.limits.max_h3_request_body_bytes,
+                declared_content_length,
+                request_headers: &request_headers,
+                listener_name: Some(self.listener_name.as_ref()),
+                max_grpc_message_bytes: Some(
+                    self.runtime.state().plan.limits.max_grpc_message_bytes,
+                ),
+                grpc_stream_deadline: grpc_deadline,
+            },
+        );
+        let (relay_result, response) = tokio::join!(relay_fut, response_fut);
+        let request_summary = match relay_result {
+            Ok((_bytes, summary)) => summary,
+            Err(err) => {
+                warn!(error = ?err, "forward qpx-h3 request body relay failed");
+                None
+            }
+        };
+        let response = response?;
+        let response_summary = crate::http3::qpx_stream::send_qpx_response_stream_observed(
+            req_stream,
+            response,
+            &request_method,
+            crate::http3::qpx_stream::QpxResponseSendOptions {
+                max_body_bytes: self.runtime.state().plan.limits.max_h3_response_body_bytes,
+                body_read_timeout: h3_body_read_timeout(&self.runtime),
+                listener_name: Some(self.listener_name.as_ref()),
+                fallback_grpc_protocol: grpc_protocol.as_deref(),
+                max_grpc_message_bytes: Some(
+                    self.runtime.state().plan.limits.max_grpc_message_bytes,
+                ),
+                grpc_stream_deadline: grpc_deadline,
+            },
+        )
+        .await?;
+        if let Some(protocol) = grpc_protocol.as_deref() {
+            let streaming = crate::http::rpc::grpc_streaming_label(
+                protocol,
+                request_summary
+                    .as_ref()
+                    .map(|summary| summary.message_count()),
+                response_summary
+                    .as_ref()
+                    .map(|summary| summary.message_count()),
+            );
+            crate::http::rpc::emit_grpc_stream_duration_metric(
+                self.listener_name.as_ref(),
+                protocol,
+                streaming,
+                grpc_started.elapsed(),
+            );
+        }
+        Ok(())
+    }
+
     async fn handle_connect(
         &self,
         request: qpx_h3::Request,
         remote_addr: std::net::SocketAddr,
-    ) -> Result<qpx_h3::Response> {
+        req_stream: &mut qpx_h3::RequestStream,
+    ) -> Result<()> {
         match request.protocol {
-            Some(qpx_h3::Protocol::ConnectUdp) => self.handle_connect_udp(request).await,
+            Some(qpx_h3::Protocol::ConnectUdp) => {
+                self.handle_connect_udp(request, req_stream).await
+            }
             Some(_) => {
                 self.static_response(
+                    req_stream,
                     http::Method::CONNECT,
                     StatusCode::NOT_IMPLEMENTED,
                     self.runtime.state().messages.proxy_error.clone(),
@@ -286,34 +392,21 @@ impl ForwardQpxHandler {
                 .await
             }
             None => {
-                let req = crate::http3::codec::h3_request_to_hyper(
-                    request.head,
-                    request.body,
-                    request.trailers,
-                )?;
-                let request_method = req.method().clone();
-                let response = crate::forward::request::handle_request_inner(
-                    req,
-                    self.runtime.clone(),
-                    self.listener_name.as_ref(),
-                    remote_addr,
-                )
-                .await?;
-                collect_forward_response(
-                    response,
-                    &request_method,
-                    self.runtime.state().plan.limits.max_h3_response_body_bytes,
-                    h3_body_read_timeout(&self.runtime),
-                )
-                .await
+                self.handle_http_request(request, remote_addr, req_stream)
+                    .await
             }
         }
     }
 
-    async fn handle_connect_udp(&self, request: qpx_h3::Request) -> Result<qpx_h3::Response> {
+    async fn handle_connect_udp(
+        &self,
+        request: qpx_h3::Request,
+        req_stream: &mut qpx_h3::RequestStream,
+    ) -> Result<()> {
         if !self.connect_udp.enabled {
             return self
                 .static_response(
+                    req_stream,
                     http::Method::CONNECT,
                     StatusCode::NOT_IMPLEMENTED,
                     self.runtime.state().messages.proxy_error.clone(),
@@ -337,6 +430,7 @@ impl ForwardQpxHandler {
         if capsule != Some("?1") {
             return self
                 .static_response(
+                    req_stream,
                     http::Method::CONNECT,
                     StatusCode::BAD_REQUEST,
                     "CONNECT-UDP requires Capsule-Protocol: ?1".to_string(),
@@ -359,7 +453,8 @@ impl ForwardQpxHandler {
             response,
             false,
         );
-        collect_forward_response(
+        send_qpx_response_stream(
+            req_stream,
             response,
             &http::Method::CONNECT,
             self.runtime.state().plan.limits.max_h3_response_body_bytes,
@@ -370,10 +465,11 @@ impl ForwardQpxHandler {
 
     async fn static_response(
         &self,
+        req_stream: &mut qpx_h3::RequestStream,
         method: http::Method,
         status: StatusCode,
         body: String,
-    ) -> Result<qpx_h3::Response> {
+    ) -> Result<()> {
         let response = crate::http::l7::finalize_response_for_request(
             &method,
             http::Version::HTTP_3,
@@ -383,7 +479,8 @@ impl ForwardQpxHandler {
                 .body(crate::http::body::Body::from(body))?,
             false,
         );
-        collect_forward_response(
+        send_qpx_response_stream(
+            req_stream,
             response,
             &method,
             self.runtime.state().plan.limits.max_h3_response_body_bytes,

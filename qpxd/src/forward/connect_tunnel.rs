@@ -237,12 +237,10 @@ pub(super) async fn tunnel_connect(
                 state.export_session_for_plan(selected_plan, remote_addr, server_addr)
             });
             let idle_timeout = Duration::from_millis(state.plan.limits.tunnel_idle_timeout_ms);
-            copy_bidirectional_with_export_and_idle(
+            let _stats = crate::tunnel::relay_tcp_tunnel(
                 client_io,
                 server.io,
-                export,
-                Some(idle_timeout),
-                throttle,
+                crate::tunnel::TunnelPolicy::tcp(Some(idle_timeout), throttle, export),
             )
             .await?;
             Ok(())

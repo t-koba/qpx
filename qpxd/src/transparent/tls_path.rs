@@ -506,12 +506,10 @@ where
         request_limits.byte_limiters.clone(),
         request_limits.byte_quota_limiters.clone(),
     );
-    crate::io_copy::copy_bidirectional_with_export_and_idle(
+    crate::tunnel::relay_tcp_tunnel(
         stream,
         upstream_connected.io,
-        export,
-        Some(idle_timeout),
-        throttle,
+        crate::tunnel::TunnelPolicy::tcp(Some(idle_timeout), throttle, export),
     )
     .await?;
     emit_audit_log(

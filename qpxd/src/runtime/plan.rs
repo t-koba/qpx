@@ -47,6 +47,11 @@ pub struct CompiledRuntimeLimits {
     pub upgrade_wait_timeout_ms: u64,
     pub tunnel_idle_timeout_ms: u64,
     pub h3_read_timeout_ms: u64,
+    pub datagram_channel_capacity: usize,
+    pub webtransport_datagram_channel_capacity: usize,
+    pub webtransport_stream_channel_capacity: usize,
+    pub max_grpc_message_bytes: u64,
+    pub max_grpc_stream_duration_ms: u64,
 }
 
 impl RuntimePlan {
@@ -221,10 +226,7 @@ pub struct CompiledTlsPassthroughRoute {
     pub id: Arc<str>,
     pub name: Arc<str>,
     pub matcher: CompiledMatch,
-    #[cfg_attr(
-        not(any(feature = "tls-rustls", feature = "tls-native")),
-        allow(dead_code)
-    )]
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub(crate) hint: MatchPrefilterHint,
     pub target: CompiledReverseRouteTarget,
 }
@@ -599,13 +601,16 @@ impl<'a> PlanCompiler<'a> {
                 .iter()
                 .enumerate()
                 .map(|(idx, route)| {
-                    let (matcher, hint) =
+                    let (matcher, tls_passthrough_hint) =
                         CompiledMatch::compile_tls_passthrough(&route.r#match, &mut interner)?;
+                    #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+                    let _ = tls_passthrough_hint;
                     Ok(CompiledTlsPassthroughRoute {
                         id: Arc::from(format!("tls_passthrough[{idx}]")),
                         name: Arc::from(format!("tls_passthrough[{idx}]")),
                         matcher,
-                        hint,
+                        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+                        hint: tls_passthrough_hint,
                         target: CompiledReverseRouteTarget::TlsPassthrough {
                             upstreams: route
                                 .upstreams
@@ -692,6 +697,27 @@ impl<'a> PlanCompiler<'a> {
                 upgrade_wait_timeout_ms: self.config.operational.runtime.upgrade_wait_timeout_ms,
                 tunnel_idle_timeout_ms: self.config.operational.runtime.tunnel_idle_timeout_ms,
                 h3_read_timeout_ms: self.config.operational.runtime.h3_read_timeout_ms,
+                datagram_channel_capacity: self
+                    .config
+                    .operational
+                    .runtime
+                    .datagram_channel_capacity,
+                webtransport_datagram_channel_capacity: self
+                    .config
+                    .operational
+                    .runtime
+                    .webtransport_datagram_channel_capacity,
+                webtransport_stream_channel_capacity: self
+                    .config
+                    .operational
+                    .runtime
+                    .webtransport_stream_channel_capacity,
+                max_grpc_message_bytes: self.config.operational.runtime.max_grpc_message_bytes,
+                max_grpc_stream_duration_ms: self
+                    .config
+                    .operational
+                    .runtime
+                    .max_grpc_stream_duration_ms,
             },
         })
     }

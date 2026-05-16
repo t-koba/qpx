@@ -206,11 +206,7 @@ impl CompiledIdentitySource {
                     .as_ref()
                     .ok_or_else(|| anyhow!("signed_assertion source requires assertion"))?;
                 CompiledIdentitySourceKind::SignedAssertion(Box::new(
-                    CompiledSignedAssertion::from_config(
-                        &config.name,
-                        assertion,
-                        config.strip_from_untrusted,
-                    )?,
+                    CompiledSignedAssertion::from_config(&config.name, assertion)?,
                 ))
             }
         };
@@ -297,11 +293,7 @@ pub(crate) fn strip_untrusted_identity_headers(
                     }
                 }
             }
-            CompiledIdentitySourceKind::SignedAssertion(cfg) => {
-                if cfg.strip_from_untrusted {
-                    untrusted_names.insert(cfg.header.clone());
-                }
-            }
+            CompiledIdentitySourceKind::SignedAssertion(_) => {}
             CompiledIdentitySourceKind::MtlsSubject(_) => {}
         }
     }
@@ -338,9 +330,10 @@ pub(crate) fn resolve_identity(
             CompiledIdentitySourceKind::MtlsSubject(cfg) => {
                 extract_mtls_identity(cfg, peer_certificates).unwrap_or_default()
             }
-            CompiledIdentitySourceKind::SignedAssertion(cfg) => headers
-                .map(|headers| cfg.extract(headers))
-                .unwrap_or_default(),
+            CompiledIdentitySourceKind::SignedAssertion(cfg) => match headers {
+                Some(headers) => cfg.extract(headers)?,
+                None => ResolvedIdentity::default(),
+            },
         };
         resolved.merge(extracted);
     }

@@ -533,7 +533,8 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
         &self,
         _request: qpx_h3::Request,
         _conn: qpx_h3::ConnectionInfo,
-    ) -> Result<qpx_h3::Response> {
+        _stream: &mut qpx_h3::RequestStream,
+    ) -> Result<()> {
         anyhow::bail!("unexpected buffered request")
     }
 
@@ -597,7 +598,8 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
         &self,
         _request: qpx_h3::Request,
         _conn: qpx_h3::ConnectionInfo,
-    ) -> Result<qpx_h3::Response> {
+        _stream: &mut qpx_h3::RequestStream,
+    ) -> Result<()> {
         anyhow::bail!("unexpected buffered request")
     }
 

@@ -1,3 +1,5 @@
+#[cfg(feature = "digest-auth")]
+use super::digest;
 use super::*;
 #[cfg(any(feature = "digest-auth", feature = "ldap-auth"))]
 use std::time::Duration;
@@ -22,6 +24,37 @@ fn nonce_store_rejects_replayed_nc() {
     let nc2 = store.parse_digest_nc(&nonce, "00000002").expect("nc2");
     assert!(store.mark_digest_nc_used(&nonce, nc2));
     assert!(!store.mark_digest_nc_used(&nonce, nc2.saturating_sub(1)));
+}
+
+#[cfg(feature = "digest-auth")]
+#[test]
+fn nonce_store_binds_opaque_to_nonce() {
+    let store = NonceStore::new(Duration::from_secs(60));
+    let challenge = store.issue_digest_challenge();
+    assert_eq!(
+        store.validate_digest_nonce(&challenge.nonce, &challenge.opaque, "00000001"),
+        digest::NonceCheck::Valid(1)
+    );
+    assert_eq!(
+        store.validate_digest_nonce(&challenge.nonce, "wrong", "00000001"),
+        digest::NonceCheck::Invalid
+    );
+    assert_eq!(
+        store.validate_digest_nonce(&challenge.nonce, "", "00000001"),
+        digest::NonceCheck::Invalid
+    );
+}
+
+#[cfg(feature = "digest-auth")]
+#[test]
+fn nonce_store_reports_stale_nonce() {
+    let store = NonceStore::new(Duration::from_millis(1));
+    let challenge = store.issue_digest_challenge();
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(
+        store.validate_digest_nonce(&challenge.nonce, &challenge.opaque, "00000001"),
+        digest::NonceCheck::Stale
+    );
 }
 
 #[cfg(feature = "digest-auth")]

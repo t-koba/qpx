@@ -85,9 +85,9 @@ where
         if size == 0 {
             let trailers =
                 read_trailer_headers(&mut read_half, &mut read_buf, read_timeout).await?;
-            if let Some(trailers) = trailers
-                && validate_request_trailers(&trailers).is_ok()
-            {
+            if let Some(trailers) = trailers {
+                validate_request_trailers(&trailers)
+                    .map_err(|err| anyhow!("invalid HTTP/1 request trailers: {err:?}"))?;
                 let _ = if deliver {
                     sender.send_trailers(trailers).await
                 } else {

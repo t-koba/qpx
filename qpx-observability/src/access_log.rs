@@ -32,6 +32,22 @@ pub struct RequestLogContext {
     pub destination_trace: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RpcLogContext {
+    pub protocol: Option<String>,
+    pub service: Option<String>,
+    pub method: Option<String>,
+    pub streaming: Option<String>,
+    pub status: Option<String>,
+    pub message_size: Option<u64>,
+    pub message: Option<String>,
+    pub request_message_count: Option<usize>,
+    pub response_message_count: Option<usize>,
+    pub request_message_bytes: Option<u64>,
+    pub response_message_bytes: Option<u64>,
+    pub stream_duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AccessLogService<S> {
     inner: S,
@@ -150,8 +166,30 @@ where
                     (this.start.take(), this.snapshot.take(), &result)
                 {
                     let req_ctx = resp.extensions().get::<RequestLogContext>().cloned();
+                    let rpc_ctx = resp.extensions().get::<RpcLogContext>().cloned();
                     let elapsed = start.elapsed();
                     let latency_ms = (elapsed.as_micros() as f64) / 1000.0;
+                    let rpc_stream_duration_ms = rpc_ctx
+                        .as_ref()
+                        .and_then(|ctx| ctx.stream_duration_ms)
+                        .unwrap_or(elapsed.as_millis() as u64);
+                    if let Some(rpc) = rpc_ctx.as_ref()
+                        && matches!(
+                            rpc.protocol.as_deref(),
+                            Some("grpc" | "grpc_web" | "connect")
+                        )
+                    {
+                        metrics::histogram!(
+                            "qpx_grpc_stream_duration_seconds",
+                            "listener" => snapshot.name.to_string(),
+                            "protocol" => rpc.protocol.clone().unwrap_or_default(),
+                            "streaming" => rpc
+                                .streaming
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string())
+                        )
+                        .record(elapsed.as_secs_f64());
+                    }
                     let bytes_out = resp
                         .headers()
                         .get(http::header::CONTENT_LENGTH)
@@ -223,6 +261,51 @@ where
                             .as_ref()
                             .and_then(|ctx| ctx.destination_trace.as_deref())
                             .unwrap_or(""),
+                        rpc_protocol = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.protocol.as_deref())
+                            .unwrap_or(""),
+                        rpc_service = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.service.as_deref())
+                            .unwrap_or(""),
+                        rpc_method = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.method.as_deref())
+                            .unwrap_or(""),
+                        rpc_streaming = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.streaming.as_deref())
+                            .unwrap_or(""),
+                        rpc_status = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.status.as_deref())
+                            .unwrap_or(""),
+                        rpc_message_size = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.message_size)
+                            .unwrap_or(0),
+                        rpc_message = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.message.as_deref())
+                            .unwrap_or(""),
+                        rpc_request_message_count = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.request_message_count)
+                            .unwrap_or(0),
+                        rpc_response_message_count = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.response_message_count)
+                            .unwrap_or(0),
+                        rpc_request_message_bytes = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.request_message_bytes)
+                            .unwrap_or(0),
+                        rpc_response_message_bytes = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.response_message_bytes)
+                            .unwrap_or(0),
+                        rpc_stream_duration_ms = rpc_stream_duration_ms,
                     );
                 }
                 Poll::Ready(result)

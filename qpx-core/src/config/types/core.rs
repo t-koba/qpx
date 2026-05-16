@@ -68,6 +68,13 @@ impl Default for MessagesConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DatagramOverflowStrategyConfig {
+    #[default]
+    DropNewest,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RuntimeConfig {
     #[serde(default)]
@@ -114,6 +121,18 @@ pub struct RuntimeConfig {
     pub tunnel_idle_timeout_ms: u64,
     #[serde(default = "default_runtime_h3_read_timeout_ms")]
     pub h3_read_timeout_ms: u64,
+    #[serde(default = "default_runtime_datagram_channel_capacity")]
+    pub datagram_channel_capacity: usize,
+    #[serde(default = "default_runtime_webtransport_datagram_channel_capacity")]
+    pub webtransport_datagram_channel_capacity: usize,
+    #[serde(default = "default_runtime_webtransport_stream_channel_capacity")]
+    pub webtransport_stream_channel_capacity: usize,
+    #[serde(default)]
+    pub datagram_overflow_strategy: DatagramOverflowStrategyConfig,
+    #[serde(default = "default_runtime_max_grpc_message_bytes")]
+    pub max_grpc_message_bytes: u64,
+    #[serde(default = "default_runtime_max_grpc_stream_duration_ms")]
+    pub max_grpc_stream_duration_ms: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -143,6 +162,14 @@ impl Default for RuntimeConfig {
             upgrade_wait_timeout_ms: default_runtime_upgrade_wait_timeout_ms(),
             tunnel_idle_timeout_ms: default_runtime_tunnel_idle_timeout_ms(),
             h3_read_timeout_ms: default_runtime_h3_read_timeout_ms(),
+            datagram_channel_capacity: default_runtime_datagram_channel_capacity(),
+            webtransport_datagram_channel_capacity:
+                default_runtime_webtransport_datagram_channel_capacity(),
+            webtransport_stream_channel_capacity:
+                default_runtime_webtransport_stream_channel_capacity(),
+            datagram_overflow_strategy: DatagramOverflowStrategyConfig::default(),
+            max_grpc_message_bytes: default_runtime_max_grpc_message_bytes(),
+            max_grpc_stream_duration_ms: default_runtime_max_grpc_stream_duration_ms(),
         }
     }
 }

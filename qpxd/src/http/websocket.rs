@@ -5,23 +5,21 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 pub fn is_websocket_upgrade(headers: &http::HeaderMap) -> bool {
-    let upgrade = headers
-        .get(http::header::UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false);
-    if !upgrade {
-        return false;
-    }
+    header_values_contain_token(headers, http::header::UPGRADE, "websocket")
+        && header_values_contain_token(headers, http::header::CONNECTION, "upgrade")
+}
 
+fn header_values_contain_token(
+    headers: &http::HeaderMap,
+    name: http::header::HeaderName,
+    token: &str,
+) -> bool {
     headers
-        .get(http::header::CONNECTION)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| {
-            v.split(',')
-                .any(|part| part.trim().eq_ignore_ascii_case("upgrade"))
-        })
-        .unwrap_or(false)
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|raw| raw.split(','))
+        .any(|part| part.trim().eq_ignore_ascii_case(token))
 }
 
 pub fn spawn_upgrade_tunnel<F, I, E>(
@@ -46,12 +44,10 @@ pub fn spawn_upgrade_tunnel<F, I, E>(
             (Ok(Ok(client)), Ok(Ok(server))) => {
                 let mut client = client;
                 let mut server = TokioIo::new(server);
-                if let Err(err) = crate::io_copy::copy_bidirectional_with_export_and_idle(
+                if let Err(err) = crate::tunnel::relay_tcp_tunnel(
                     &mut client,
                     &mut server,
-                    None,
-                    Some(idle_timeout),
-                    None,
+                    crate::tunnel::TunnelPolicy::tcp(Some(idle_timeout), None, None),
                 )
                 .await
                 {
@@ -70,4 +66,20 @@ pub fn spawn_upgrade_tunnel<F, I, E>(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_websocket_upgrade;
+    use http::HeaderMap;
+
+    #[test]
+    fn websocket_upgrade_accepts_list_and_repeated_connection_fields() {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::UPGRADE, "h2c, websocket".parse().unwrap());
+        headers.append(http::header::CONNECTION, "keep-alive".parse().unwrap());
+        headers.append(http::header::CONNECTION, "Upgrade".parse().unwrap());
+
+        assert!(is_websocket_upgrade(&headers));
+    }
 }

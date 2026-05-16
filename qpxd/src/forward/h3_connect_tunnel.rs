@@ -12,7 +12,7 @@ use crate::tls::CompiledUpstreamTlsTrust;
 use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream};
 use crate::tls::{TlsClientHelloInfo, extract_client_hello_info, looks_like_tls_client_hello};
 use crate::upstream::connect::TunnelIo;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use bytes::{Buf, Bytes};
 #[cfg(feature = "mitm")]
 use hyper::Request;
@@ -26,7 +26,6 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 #[cfg(feature = "mitm")]
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Duration, Instant};
 
 const MAX_H3_CONNECT_PEEK_BYTES: usize = 64 * 1024;
@@ -66,74 +65,17 @@ pub(super) async fn relay_h3_connect_stream(
     server: TunnelIo,
     idle_timeout: Duration,
 ) -> Result<()> {
-    let (mut req_send, mut req_recv) = req_stream.split();
-    let (mut server_read, mut server_write) = tokio::io::split(server);
-
-    let idle_deadline = tokio::time::sleep(idle_timeout);
-    tokio::pin!(idle_deadline);
-
-    let mut client_eof = false;
-    let mut server_eof = false;
-    let mut buf = [0u8; 16 * 1024];
-
-    if !client_prefetch.is_empty() {
-        timeout_write_all(&mut server_write, client_prefetch.as_ref(), idle_timeout).await?;
-        idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
-    }
-
-    loop {
-        tokio::select! {
-            _ = &mut idle_deadline => {
-                return Err(anyhow!("forward HTTP/3 CONNECT tunnel idle timeout"));
-            }
-            recv = req_recv.recv_data(), if !client_eof => {
-                match recv? {
-                    Some(chunk) => {
-                        let mut chunk = chunk;
-                        let bytes = chunk.copy_to_bytes(chunk.remaining());
-                        timeout_write_all(&mut server_write, &bytes, idle_timeout).await?;
-                        idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
-                    }
-                    None => {
-                        client_eof = true;
-                        // Half-close upstream; the other direction may still drain.
-                        let _ = server_write.shutdown().await;
-                        if server_eof {
-                            break;
-                        }
-                    }
-                }
-            }
-            n = server_read.read(&mut buf), if !server_eof => {
-                let n = n?;
-                if n == 0 {
-                    server_eof = true;
-                    let _ = tokio::time::timeout(idle_timeout, req_send.finish()).await;
-                    if client_eof {
-                        break;
-                    }
-                } else {
-                    tokio::time::timeout(
-                        idle_timeout,
-                        req_send.send_data(Bytes::copy_from_slice(&buf[..n])),
-                    )
-                    .await
-                    .map_err(|_| anyhow!("forward HTTP/3 CONNECT downstream send timed out"))??;
-                    idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn timeout_write_all<W>(writer: &mut W, bytes: &[u8], idle_timeout: Duration) -> Result<()>
-where
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    tokio::time::timeout(idle_timeout, writer.write_all(bytes))
-        .await
-        .map_err(|_| anyhow!("forward HTTP/3 CONNECT tunnel write timed out"))??;
+    let (req_send, req_recv) = req_stream.split();
+    let (server_read, server_write) = tokio::io::split(server);
+    let req_recv = crate::tunnel::stream::PrefixedTunnelHalf::new(req_recv, client_prefetch);
+    let _stats = crate::tunnel::relay_tunnel(
+        req_recv,
+        req_send,
+        server_read,
+        server_write,
+        crate::tunnel::TunnelPolicy::h3(Some(idle_timeout), "h3_connect", "unknown"),
+    )
+    .await?;
     Ok(())
 }
 
@@ -315,57 +257,15 @@ async fn relay_h3_connect_stream_to_io(
     io: tokio::io::DuplexStream,
     idle_timeout: Duration,
 ) -> Result<()> {
-    let (mut req_send, mut req_recv) = req_stream.split();
-    let (mut io_read, mut io_write) = tokio::io::split(io);
-
-    let idle_deadline = tokio::time::sleep(idle_timeout);
-    tokio::pin!(idle_deadline);
-
-    let mut client_eof = false;
-    let mut io_eof = false;
-    let mut buf = [0u8; 16 * 1024];
-
-    loop {
-        tokio::select! {
-            _ = &mut idle_deadline => {
-                return Err(anyhow!("forward HTTP/3 CONNECT tunnel idle timeout"));
-            }
-            recv = req_recv.recv_data(), if !client_eof => {
-                match recv? {
-                    Some(chunk) => {
-                        let mut chunk = chunk;
-                        let bytes = chunk.copy_to_bytes(chunk.remaining());
-                        timeout_write_all(&mut io_write, &bytes, idle_timeout).await?;
-                        idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
-                    }
-                    None => {
-                        client_eof = true;
-                        let _ = io_write.shutdown().await;
-                        if io_eof {
-                            break;
-                        }
-                    }
-                }
-            }
-            n = io_read.read(&mut buf), if !io_eof => {
-                let n = n?;
-                if n == 0 {
-                    io_eof = true;
-                    let _ = tokio::time::timeout(idle_timeout, req_send.finish()).await;
-                    if client_eof {
-                        break;
-                    }
-                } else {
-                    tokio::time::timeout(
-                        idle_timeout,
-                        req_send.send_data(Bytes::copy_from_slice(&buf[..n])),
-                    )
-                    .await
-                    .map_err(|_| anyhow!("forward HTTP/3 CONNECT downstream send timeout"))??;
-                    idle_deadline.as_mut().reset(Instant::now() + idle_timeout);
-                }
-            }
-        }
-    }
+    let (req_send, req_recv) = req_stream.split();
+    let (io_read, io_write) = tokio::io::split(io);
+    let _stats = crate::tunnel::relay_tunnel(
+        req_recv,
+        req_send,
+        io_read,
+        io_write,
+        crate::tunnel::TunnelPolicy::h3(Some(idle_timeout), "h3_connect_mitm_bridge", "unknown"),
+    )
+    .await?;
     Ok(())
 }

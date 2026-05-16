@@ -7,10 +7,12 @@ use super::util::{
 use anyhow::{Result, anyhow};
 use http::header::HeaderName;
 use hyper::HeaderMap;
+use metrics::counter;
 use qpx_core::config::{AssertionClaimsMapConfig, SignedAssertionConfig};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledSignedAssertion {
@@ -23,7 +25,6 @@ pub(super) struct CompiledSignedAssertion {
     hmac_secret: Option<Arc<[u8]>>,
     public_key: Option<Arc<[u8]>>,
     claims: CompiledAssertionClaims,
-    pub(super) strip_from_untrusted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -44,11 +45,7 @@ struct JwtHeader {
     alg: String,
 }
 impl CompiledSignedAssertion {
-    pub(super) fn from_config(
-        name: &str,
-        config: &SignedAssertionConfig,
-        strip_from_untrusted: bool,
-    ) -> Result<Self> {
+    pub(super) fn from_config(name: &str, config: &SignedAssertionConfig) -> Result<Self> {
         let header = HeaderName::from_bytes(config.header.as_bytes())?;
         let hmac_secret = config
             .secret_env
@@ -77,16 +74,31 @@ impl CompiledSignedAssertion {
             hmac_secret,
             public_key,
             claims: CompiledAssertionClaims::from_config(&config.claims),
-            strip_from_untrusted,
         })
     }
 
-    pub(super) fn extract(&self, headers: &HeaderMap) -> ResolvedIdentity {
+    pub(super) fn extract(&self, headers: &HeaderMap) -> Result<ResolvedIdentity> {
         let Some(token) = extract_assertion_token(headers, &self.header, self.prefix.as_deref())
         else {
-            return ResolvedIdentity::default();
+            return Ok(ResolvedIdentity::default());
         };
-        self.verify_and_extract(token).unwrap_or_default()
+        match self.verify_and_extract(token) {
+            Ok(identity) => Ok(identity),
+            Err(err) => {
+                warn!(
+                    source = %self.name,
+                    header = %self.header,
+                    error = ?err,
+                    "signed assertion verification failed"
+                );
+                counter!(
+                    "qpx_signed_assertion_verification_failed_total",
+                    "source" => self.name.clone(),
+                )
+                .increment(1);
+                Err(anyhow!("invalid signed assertion {}: {err}", self.name))
+            }
+        }
     }
 
     fn verify_and_extract(&self, token: &str) -> Result<ResolvedIdentity> {
@@ -299,7 +311,6 @@ mod tests {
                 user_from_sub: true,
                 ..Default::default()
             }),
-            strip_from_untrusted: false,
         }
     }
 
@@ -376,7 +387,7 @@ mod tests {
             ..Default::default()
         };
         let compiled =
-            CompiledSignedAssertion::from_config("signed-jwt", &config, false).expect("compile");
+            CompiledSignedAssertion::from_config("signed-jwt", &config).expect("compile");
         let token = sign_es256_jwt(
             private_key_der.as_slice(),
             json!({
@@ -392,7 +403,7 @@ mod tests {
             "x-assertion",
             HeaderValue::from_str(token.as_str()).expect("header value"),
         );
-        let identity = compiled.extract(&headers);
+        let identity = compiled.extract(&headers).expect("valid assertion");
 
         assert_eq!(identity.user.as_deref(), Some("alice"));
         assert_eq!(identity.groups, vec!["eng".to_string(), "ops".to_string()]);
@@ -423,7 +434,7 @@ mod tests {
             ..Default::default()
         };
         let compiled =
-            CompiledSignedAssertion::from_config("signed-jwt", &config, false).expect("compile");
+            CompiledSignedAssertion::from_config("signed-jwt", &config).expect("compile");
         let token = sign_es256_jwt(
             private_key_der.as_slice(),
             json!({
@@ -437,10 +448,18 @@ mod tests {
             "x-assertion",
             HeaderValue::from_str(token.as_str()).expect("header value"),
         );
-        let identity = compiled.extract(&headers);
+        let identity = compiled.extract(&headers).expect("valid assertion");
 
         assert_eq!(identity.user.as_deref(), Some("alice"));
 
         remove_test_env(env_name);
+    }
+
+    #[test]
+    fn signed_assertion_rejects_invalid_present_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-assertion", HeaderValue::from_static("not-a-jwt"));
+
+        assert!(compiled_hs256().extract(&headers).is_err());
     }
 }

@@ -64,6 +64,7 @@ mod tcp_bindings;
 mod test_util;
 mod tls;
 mod transparent;
+mod tunnel;
 mod udp_bindings;
 mod udp_session_handoff;
 mod udp_socket_handoff;

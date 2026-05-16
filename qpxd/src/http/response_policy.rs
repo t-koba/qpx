@@ -242,6 +242,9 @@ pub(crate) async fn apply_listener_response_policy(
             ctx.rpc_streaming = request_rpc.streaming.as_deref();
         }
     }
+    if let Some(rpc) = response_rpc.as_ref().or(request_rpc) {
+        response.extensions_mut().insert(rpc.to_log_context());
+    }
     ctx.response_status = Some(response.status().as_u16());
     ctx.response_size = observed_response_size(&response);
     ctx.headers = Some(response.headers());

@@ -25,7 +25,23 @@ pub(super) struct NonceStore {
 #[derive(Debug, Clone)]
 struct NonceState {
     created: Instant,
+    opaque: String,
     last_nc: u32,
+}
+
+#[cfg(feature = "digest-auth")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DigestChallengeNonce {
+    pub(super) nonce: String,
+    pub(super) opaque: String,
+}
+
+#[cfg(feature = "digest-auth")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NonceCheck {
+    Valid(u32),
+    Stale,
+    Invalid,
 }
 
 #[cfg(feature = "digest-auth")]
@@ -73,8 +89,14 @@ impl NonceStore {
         Self::random_token()
     }
 
+    #[cfg(test)]
     pub(super) fn issue_digest_nonce(&self) -> String {
+        self.issue_digest_challenge().nonce
+    }
+
+    pub(super) fn issue_digest_challenge(&self) -> DigestChallengeNonce {
         let nonce = Self::random_token();
+        let opaque = Self::issue_opaque();
         let mut guard = self.inner.lock().expect("nonce mutex");
         Self::cleanup_expired_locked(&mut guard, self.ttl);
         while guard.len() >= self.max_entries {
@@ -91,27 +113,55 @@ impl NonceStore {
             nonce.clone(),
             NonceState {
                 created: Instant::now(),
+                opaque: opaque.clone(),
                 last_nc: 0,
             },
         );
-        nonce
+        DigestChallengeNonce { nonce, opaque }
     }
 
+    #[cfg(test)]
     pub(super) fn parse_digest_nc(&self, nonce: &str, nc_hex: &str) -> Option<u32> {
-        let mut guard = self.inner.lock().expect("nonce mutex");
-        Self::cleanup_expired_locked(&mut guard, self.ttl);
+        match self.check_digest_nonce(nonce, None, nc_hex) {
+            NonceCheck::Valid(nc) => Some(nc),
+            NonceCheck::Stale | NonceCheck::Invalid => None,
+        }
+    }
 
-        let state = guard.get(nonce)?;
-        if nc_hex.len() != 8 {
-            return None;
+    pub(super) fn validate_digest_nonce(
+        &self,
+        nonce: &str,
+        opaque: &str,
+        nc_hex: &str,
+    ) -> NonceCheck {
+        if opaque.is_empty() {
+            return NonceCheck::Invalid;
         }
-        let Ok(nc) = u32::from_str_radix(nc_hex, 16) else {
-            return None;
+        self.check_digest_nonce(nonce, Some(opaque), nc_hex)
+    }
+
+    fn check_digest_nonce(&self, nonce: &str, opaque: Option<&str>, nc_hex: &str) -> NonceCheck {
+        let Some(nc) = parse_nc(nc_hex) else {
+            return NonceCheck::Invalid;
         };
-        if nc == 0 || nc <= state.last_nc {
-            return None;
+        let mut guard = self.inner.lock().expect("nonce mutex");
+        let Some(state) = guard.get(nonce) else {
+            Self::cleanup_expired_locked(&mut guard, self.ttl);
+            return NonceCheck::Invalid;
+        };
+        if Instant::now().duration_since(state.created) >= self.ttl {
+            guard.remove(nonce);
+            return NonceCheck::Stale;
         }
-        Some(nc)
+        if let Some(opaque) = opaque
+            && state.opaque != opaque
+        {
+            return NonceCheck::Invalid;
+        }
+        if nc == 0 || nc <= state.last_nc {
+            return NonceCheck::Invalid;
+        }
+        NonceCheck::Valid(nc)
     }
 
     pub(super) fn mark_digest_nc_used(&self, nonce: &str, nc: u32) -> bool {
@@ -137,6 +187,14 @@ impl NonceStore {
     pub(super) fn len(&self) -> usize {
         self.inner.lock().expect("nonce mutex").len()
     }
+}
+
+#[cfg(feature = "digest-auth")]
+fn parse_nc(nc_hex: &str) -> Option<u32> {
+    if nc_hex.len() != 8 {
+        return None;
+    }
+    u32::from_str_radix(nc_hex, 16).ok()
 }
 
 #[cfg(feature = "digest-auth")]

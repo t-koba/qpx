@@ -14,7 +14,7 @@ use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Duration, timeout};
 
@@ -24,8 +24,8 @@ pub struct ExtendedConnectStream {
     pub request_stream: RequestStream,
     pub datagrams: Option<StreamDatagrams>,
     pub opener: Option<OpenStreams>,
-    pub associated_bidi: Option<mpsc::UnboundedReceiver<BidiStream>>,
-    pub associated_uni: Option<mpsc::UnboundedReceiver<UniRecvStream>>,
+    pub associated_bidi: Option<mpsc::Receiver<BidiStream>>,
+    pub associated_uni: Option<mpsc::Receiver<UniRecvStream>>,
     pub _critical_streams: Option<(quinn::SendStream, quinn::SendStream)>,
     pub _endpoint: quinn::Endpoint,
     pub driver: JoinHandle<()>,
@@ -35,13 +35,20 @@ pub struct ExtendedConnectStream {
 }
 
 struct SessionIngress {
-    bidi_tx: mpsc::UnboundedSender<BidiStream>,
-    uni_tx: mpsc::UnboundedSender<UniRecvStream>,
+    bidi_tx: mpsc::Sender<BidiStream>,
+    uni_tx: mpsc::Sender<UniRecvStream>,
 }
 
 type SessionRegistry = Arc<Mutex<HashMap<u64, SessionIngress>>>;
 
 static ACTIVE_CLIENT_CONNECTIONS: OnceLock<StdMutex<HashSet<usize>>> = OnceLock::new();
+
+#[derive(Clone, Copy)]
+struct ClientDriverLimits {
+    read_timeout: Duration,
+    max_control_frame_payload_bytes: usize,
+    max_concurrent_streams_per_connection: usize,
+}
 
 #[doc(hidden)]
 pub struct ClientConnectionUse {
@@ -125,7 +132,7 @@ pub async fn open_extended_connect_stream(
     let registry: SessionRegistry = Arc::new(Mutex::new(HashMap::new()));
     let datagram_dispatch = settings
         .enable_datagram
-        .then(|| DatagramDispatch::new(connection.clone(), 64));
+        .then(|| DatagramDispatch::new(connection.clone(), settings.datagram_channel_capacity));
     let datagram_task = datagram_dispatch.as_ref().map(|dispatch| {
         let dispatch = dispatch.clone();
         tokio::spawn(async move { dispatch.run().await })
@@ -136,16 +143,16 @@ pub async fn open_extended_connect_stream(
         let registry = registry.clone();
         let qpack = qpack.clone();
         let control_state = control_state.clone();
-        let max_control_frame_payload_bytes = settings.max_control_frame_payload_bytes;
+        let limits = ClientDriverLimits {
+            read_timeout: settings.read_timeout,
+            max_control_frame_payload_bytes: settings.max_control_frame_payload_bytes,
+            max_concurrent_streams_per_connection: settings
+                .max_concurrent_streams_per_connection
+                .max(1),
+        };
         tokio::spawn(async move {
-            if let Err(err) = drive_connection(
-                connection.clone(),
-                registry,
-                qpack,
-                control_state,
-                max_control_frame_payload_bytes,
-            )
-            .await
+            if let Err(err) =
+                drive_connection(connection.clone(), registry, qpack, control_state, limits).await
             {
                 tracing::warn!(error = ?err, "qpx-h3 client driver stopped");
             }
@@ -228,8 +235,9 @@ pub async fn open_extended_connect_stream(
         _ => None,
     };
     let (mut associated_bidi, mut associated_uni) = if webtransport_session_id.is_some() {
-        let (bidi_tx, bidi_rx) = mpsc::unbounded_channel();
-        let (uni_tx, uni_rx) = mpsc::unbounded_channel();
+        let stream_channel_capacity = settings.webtransport_stream_channel_capacity.max(1);
+        let (bidi_tx, bidi_rx) = mpsc::channel(stream_channel_capacity);
+        let (uni_tx, uni_rx) = mpsc::channel(stream_channel_capacity);
         registry
             .lock()
             .await
@@ -365,12 +373,13 @@ async fn drive_connection(
     registry: SessionRegistry,
     qpack: QpackConnection,
     control_state: PeerControlState,
-    max_control_frame_payload_bytes: usize,
+    limits: ClientDriverLimits,
 ) -> Result<()> {
+    let stream_semaphore = Arc::new(Semaphore::new(limits.max_concurrent_streams_per_connection));
     loop {
         tokio::select! {
             accepted = connection.accept_uni() => {
-                let recv = match accepted {
+                let mut recv = match accepted {
                     Ok(recv) => recv,
                     Err(quinn::ConnectionError::ApplicationClosed(_))
                     | Err(quinn::ConnectionError::LocallyClosed)
@@ -379,17 +388,26 @@ async fn drive_connection(
                     | Err(quinn::ConnectionError::Reset) => break,
                     Err(err) => return Err(err.into()),
                 };
+                let permit = match stream_semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {
+                        stop_recv_with_code(&mut recv, H3_STREAM_CREATION_ERROR);
+                        continue;
+                    }
+                    Err(tokio::sync::TryAcquireError::Closed) => break,
+                };
                 let registry = registry.clone();
                 let qpack = qpack.clone();
                 let control_state = control_state.clone();
                 let conn = connection.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(err) = route_uni_stream(
                         recv,
                         registry,
                         qpack,
                         control_state,
-                        max_control_frame_payload_bytes,
+                        limits,
                     )
                     .await
                     {
@@ -398,7 +416,7 @@ async fn drive_connection(
                 });
             }
             accepted = connection.accept_bi() => {
-                let (send, recv) = match accepted {
+                let (mut send, mut recv) = match accepted {
                     Ok(stream) => stream,
                     Err(quinn::ConnectionError::ApplicationClosed(_))
                     | Err(quinn::ConnectionError::LocallyClosed)
@@ -407,10 +425,19 @@ async fn drive_connection(
                     | Err(quinn::ConnectionError::Reset) => break,
                     Err(err) => return Err(err.into()),
                 };
+                let permit = match stream_semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {
+                        abort_bidi_with_code(&mut send, &mut recv, H3_STREAM_CREATION_ERROR);
+                        continue;
+                    }
+                    Err(tokio::sync::TryAcquireError::Closed) => break,
+                };
                 let registry = registry.clone();
                 let conn = connection.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = route_bidi_stream(send, recv, registry).await {
+                    let _permit = permit;
+                    if let Err(err) = route_bidi_stream(send, recv, registry, limits.read_timeout).await {
                         close_connection(&conn, err);
                     }
                 });
@@ -425,22 +452,22 @@ async fn route_uni_stream(
     registry: SessionRegistry,
     qpack: QpackConnection,
     control_state: PeerControlState,
-    max_control_frame_payload_bytes: usize,
+    limits: ClientDriverLimits,
 ) -> std::result::Result<(), ConnectionClose> {
-    let Some(stream_type) = read_varint(&mut recv)
-        .await
-        .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
+    let Some(stream_type) =
+        read_varint_with_timeout(&mut recv, limits.read_timeout, "unidirectional stream type")
+            .await?
     else {
         return Ok(());
     };
     match stream_type {
         STREAM_WEBTRANSPORT_UNI => {
-            let session_id = read_varint(&mut recv)
-                .await
-                .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
-                .ok_or_else(|| {
-                    ConnectionClose::new(H3_MESSAGE_ERROR, "missing WebTransport session id")
-                })?;
+            let session_id =
+                read_varint_with_timeout(&mut recv, limits.read_timeout, "WebTransport session id")
+                    .await?
+                    .ok_or_else(|| {
+                        ConnectionClose::new(H3_MESSAGE_ERROR, "missing WebTransport session id")
+                    })?;
             if !is_client_initiated_bidi_stream_id(session_id) {
                 return Err(ConnectionClose::new(
                     H3_ID_ERROR,
@@ -455,7 +482,13 @@ async fn route_uni_stream(
                     .map(|entry| entry.uni_tx.clone())
             };
             if let Some(tx) = tx {
-                let _ = tx.send(UniRecvStream::new(recv));
+                match tx.try_send(UniRecvStream::new(recv)) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(stream))
+                    | Err(mpsc::error::TrySendError::Closed(stream)) => {
+                        stream.stop_with_code(H3_STREAM_CREATION_ERROR);
+                    }
+                }
             } else {
                 return Err(ConnectionClose::new(
                     H3_ID_ERROR,
@@ -467,9 +500,15 @@ async fn route_uni_stream(
             control_state.register_control_stream().await?;
             let mut saw_settings = false;
             loop {
-                let Some(frame) = read_frame(&mut recv, max_control_frame_payload_bytes)
-                    .await
-                    .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
+                let Some(frame) = timeout(
+                    limits.read_timeout,
+                    read_frame(&mut recv, limits.max_control_frame_payload_bytes),
+                )
+                .await
+                .map_err(|_| {
+                    ConnectionClose::new(H3_CLOSED_CRITICAL_STREAM, "control stream timed out")
+                })?
+                .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
                 else {
                     return Err(ConnectionClose::new(
                         if saw_settings {
@@ -514,10 +553,14 @@ async fn route_uni_stream(
         }
         STREAM_QPACK_DECODER => {
             control_state.register_decoder_stream().await?;
-            let mut sink = tokio::io::sink();
-            tokio::io::copy(&mut recv, &mut sink)
-                .await
-                .map_err(|err| ConnectionClose::new(H3_CLOSED_CRITICAL_STREAM, err.to_string()))?;
+            discard_uni_stream(
+                &mut recv,
+                limits.max_control_frame_payload_bytes,
+                limits.read_timeout,
+                H3_CLOSED_CRITICAL_STREAM,
+                "QPACK decoder stream",
+            )
+            .await?;
             return Err(ConnectionClose::new(
                 H3_CLOSED_CRITICAL_STREAM,
                 "peer closed QPACK decoder stream",
@@ -529,12 +572,7 @@ async fn route_uni_stream(
                 "HTTP/3 push streams were not negotiated",
             ));
         }
-        _ => {
-            let mut sink = tokio::io::sink();
-            tokio::io::copy(&mut recv, &mut sink)
-                .await
-                .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?;
-        }
+        _ => {}
     }
     Ok(())
 }
@@ -543,10 +581,14 @@ async fn route_bidi_stream(
     send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     registry: SessionRegistry,
+    read_timeout: Duration,
 ) -> std::result::Result<(), ConnectionClose> {
-    let Some(first) = read_varint(&mut recv)
-        .await
-        .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
+    let Some(first) = read_varint_with_timeout(
+        &mut recv,
+        read_timeout,
+        "server-initiated bidirectional stream type",
+    )
+    .await?
     else {
         return Err(ConnectionClose::new(
             H3_STREAM_CREATION_ERROR,
@@ -559,9 +601,8 @@ async fn route_bidi_stream(
             format!("server-initiated bidirectional stream type {first:#x} is not supported"),
         ));
     }
-    let session_id = read_varint(&mut recv)
-        .await
-        .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
+    let session_id = read_varint_with_timeout(&mut recv, read_timeout, "WebTransport session id")
+        .await?
         .ok_or_else(|| ConnectionClose::new(H3_MESSAGE_ERROR, "missing WebTransport session id"))?;
     if !is_client_initiated_bidi_stream_id(session_id) {
         return Err(ConnectionClose::new(
@@ -577,7 +618,13 @@ async fn route_bidi_stream(
             .map(|entry| entry.bidi_tx.clone())
     };
     if let Some(tx) = tx {
-        let _ = tx.send(BidiStream::new(send, recv));
+        match tx.try_send(BidiStream::new(send, recv)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(stream))
+            | Err(mpsc::error::TrySendError::Closed(stream)) => {
+                stream.abort_with_code(H3_STREAM_CREATION_ERROR);
+            }
+        }
     } else {
         return Err(ConnectionClose::new(
             H3_ID_ERROR,
@@ -585,6 +632,57 @@ async fn route_bidi_stream(
         ));
     }
     Ok(())
+}
+
+async fn read_varint_with_timeout(
+    recv: &mut quinn::RecvStream,
+    read_timeout: Duration,
+    label: &'static str,
+) -> std::result::Result<Option<u64>, ConnectionClose> {
+    timeout(read_timeout, read_varint(recv))
+        .await
+        .map_err(|_| ConnectionClose::new(H3_MESSAGE_ERROR, format!("{label} timed out")))?
+        .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))
+}
+
+async fn discard_uni_stream(
+    recv: &mut quinn::RecvStream,
+    max_bytes: usize,
+    read_timeout: Duration,
+    error_code: u64,
+    label: &'static str,
+) -> std::result::Result<(), ConnectionClose> {
+    let mut discarded = 0usize;
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = timeout(read_timeout, recv.read(&mut buf))
+            .await
+            .map_err(|_| ConnectionClose::new(error_code, format!("{label} timed out")))?
+            .map_err(|err| ConnectionClose::new(error_code, err.to_string()))?;
+        let Some(n) = n else {
+            return Ok(());
+        };
+        discarded = discarded.saturating_add(n);
+        if discarded > max_bytes {
+            return Err(ConnectionClose::new(
+                error_code,
+                format!("{label} exceeded discard limit"),
+            ));
+        }
+    }
+}
+
+fn stop_recv_with_code(recv: &mut quinn::RecvStream, code: u64) {
+    if let Ok(code) = quinn::VarInt::from_u64(code) {
+        let _ = recv.stop(code);
+    }
+}
+
+fn abort_bidi_with_code(send: &mut quinn::SendStream, recv: &mut quinn::RecvStream, code: u64) {
+    stop_recv_with_code(recv, code);
+    if let Ok(code) = quinn::VarInt::from_u64(code) {
+        let _ = send.reset(code);
+    }
 }
 
 fn is_client_initiated_bidi_stream_id(stream_id: u64) -> bool {

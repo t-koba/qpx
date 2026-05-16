@@ -1,3 +1,5 @@
+use crate::http::body::Body;
+use crate::http::body_size::set_observed_request_size;
 use crate::http3::quinn_socket::{
     PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket,
     QuinnUdpIngressFilter, build_server_endpoint, prepare_server_endpoint_socket,
@@ -13,7 +15,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::watch;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 use tracing::warn;
 
 pub(crate) fn prepare_reverse_terminate_socket(
@@ -247,6 +249,8 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
             max_request_body_bytes: limits.max_h3_request_body_bytes,
             max_concurrent_streams_per_connection: limits.max_h3_streams_per_connection,
             read_timeout: Duration::from_millis(limits.h3_read_timeout_ms),
+            datagram_channel_capacity: limits.datagram_channel_capacity,
+            webtransport_stream_channel_capacity: limits.webtransport_stream_channel_capacity,
             ..Default::default()
         }
     }
@@ -255,7 +259,8 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
         &self,
         request: qpx_h3::Request,
         conn: qpx_h3::ConnectionInfo,
-    ) -> Result<qpx_h3::Response> {
+        req_stream: &mut qpx_h3::RequestStream,
+    ) -> Result<()> {
         let response_body_limit = self
             .reverse
             .runtime
@@ -281,8 +286,8 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
                     ))?,
                 false,
             );
-            return collect_reverse_response(
-                Vec::new(),
+            return crate::http3::qpx_stream::send_qpx_response_stream(
+                req_stream,
                 response,
                 request.head.method(),
                 response_body_limit,
@@ -299,98 +304,183 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
             .await;
         }
 
+        let request_headers = request.head.headers().clone();
+        let grpc_protocol = crate::http::rpc::streaming_grpc_protocol(&request_headers, None);
+        let grpc_started = Instant::now();
+        let grpc_deadline = grpc_protocol.as_ref().map(|_| {
+            grpc_started
+                + Duration::from_millis(
+                    self.reverse
+                        .runtime
+                        .state()
+                        .plan
+                        .limits
+                        .max_grpc_stream_duration_ms,
+                )
+        });
         let request_method = request.head.method().clone();
-        let req =
-            crate::http3::codec::h3_request_to_hyper(request.head, request.body, request.trailers)?;
+        let declared_content_length =
+            crate::http3::codec::parse_content_length_fields(request.head.headers())?;
+        if let Some(content_length) = declared_content_length
+            && content_length
+                > self
+                    .reverse
+                    .runtime
+                    .state()
+                    .plan
+                    .limits
+                    .max_h3_request_body_bytes as u64
+        {
+            let response = crate::http::l7::finalize_response_for_request(
+                &request_method,
+                http::Version::HTTP_3,
+                self.reverse
+                    .runtime
+                    .state()
+                    .plan
+                    .identity
+                    .proxy_name
+                    .as_ref(),
+                Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .body(Body::from("request payload too large"))?,
+                false,
+            );
+            return crate::http3::qpx_stream::send_qpx_response_stream(
+                req_stream,
+                response,
+                &request_method,
+                response_body_limit,
+                Duration::from_millis(
+                    self.reverse
+                        .runtime
+                        .state()
+                        .plan
+                        .limits
+                        .h3_read_timeout_ms
+                        .max(1),
+                ),
+            )
+            .await;
+        }
+
+        let (sender, body) = Body::channel();
+        let mut req = crate::http3::codec::h3_request_to_hyper(request.head, body)?;
+        if let Some(content_length) = declared_content_length {
+            set_observed_request_size(&mut req, content_length);
+        }
         let reverse_conn = super::transport::ReverseConnInfo::terminated(
             conn.remote_addr,
             conn.dst_port,
             conn.tls_sni.clone(),
             conn.peer_certificates.clone(),
         );
-        let (interim, response) =
-            super::transport::handle_request_with_interim(req, self.reverse.clone(), reverse_conn)
-                .await
-                .unwrap_or_else(|impossible| match impossible {});
-        collect_reverse_response(
-            interim,
+        let read_timeout = Duration::from_millis(
+            self.reverse
+                .runtime
+                .state()
+                .plan
+                .limits
+                .h3_read_timeout_ms
+                .max(1),
+        );
+        let request_limit = self
+            .reverse
+            .runtime
+            .state()
+            .plan
+            .limits
+            .max_h3_request_body_bytes;
+        let response_fut = async {
+            let fut = super::transport::handle_request_with_interim(
+                req,
+                self.reverse.clone(),
+                reverse_conn,
+            );
+            let result = if let Some(deadline) = grpc_deadline {
+                tokio::time::timeout_at(deadline, fut).await.map_err(|_| {
+                    anyhow!("reverse qpx-h3 gRPC stream duration exceeded configured limit")
+                })?
+            } else {
+                fut.await
+            };
+            Ok::<_, anyhow::Error>(result.unwrap_or_else(|impossible| match impossible {}))
+        };
+        let relay_fut = crate::http3::qpx_stream::relay_qpx_request_body_observed(
+            req_stream,
+            sender,
+            crate::http3::qpx_stream::QpxRequestBodyRelayOptions {
+                read_timeout,
+                max_body_bytes: request_limit,
+                declared_content_length,
+                request_headers: &request_headers,
+                listener_name: Some(self.reverse.name.as_ref()),
+                max_grpc_message_bytes: Some(
+                    self.reverse
+                        .runtime
+                        .state()
+                        .plan
+                        .limits
+                        .max_grpc_message_bytes,
+                ),
+                grpc_stream_deadline: grpc_deadline,
+            },
+        );
+        let (relay_result, response_result) = tokio::join!(relay_fut, response_fut);
+        let request_summary = match relay_result {
+            Ok((_bytes, summary)) => summary,
+            Err(err) => {
+                warn!(error = ?err, "reverse qpx-h3 request body relay failed");
+                None
+            }
+        };
+        let (interim, response) = response_result?;
+
+        for head in interim {
+            let mut interim = http::Response::builder().status(head.status).body(())?;
+            *interim.headers_mut() = head.headers;
+            crate::http3::qpx_stream::send_qpx_interim_response(req_stream, interim, read_timeout)
+                .await?;
+        }
+
+        let response_summary = crate::http3::qpx_stream::send_qpx_response_stream_observed(
+            req_stream,
             response,
             &request_method,
-            response_body_limit,
-            Duration::from_millis(
-                self.reverse
-                    .runtime
-                    .state()
-                    .plan
-                    .limits
-                    .h3_read_timeout_ms
-                    .max(1),
-            ),
-        )
-        .await
-    }
-}
-
-async fn collect_reverse_response(
-    interim: Vec<crate::upstream::raw_http1::InterimResponseHead>,
-    response: Response<crate::http::body::Body>,
-    request_method: &http::Method,
-    response_body_limit: usize,
-    body_read_timeout: Duration,
-) -> Result<qpx_h3::Response> {
-    let interim = interim
-        .into_iter()
-        .filter_map(|head| {
-            let mut response = http::Response::builder()
-                .status(head.status)
-                .body(())
-                .ok()?;
-            *response.headers_mut() = head.headers;
-            Some(response)
-        })
-        .collect();
-    let (head, body, trailers): (http::Response<()>, bytes::Bytes, Option<http::HeaderMap>) =
-        crate::http3::codec::hyper_response_to_h3(
-            response,
-            request_method,
-            response_body_limit,
-            body_read_timeout,
+            crate::http3::qpx_stream::QpxResponseSendOptions {
+                max_body_bytes: response_body_limit,
+                body_read_timeout: read_timeout,
+                listener_name: Some(self.reverse.name.as_ref()),
+                fallback_grpc_protocol: grpc_protocol.as_deref(),
+                max_grpc_message_bytes: Some(
+                    self.reverse
+                        .runtime
+                        .state()
+                        .plan
+                        .limits
+                        .max_grpc_message_bytes,
+                ),
+                grpc_stream_deadline: grpc_deadline,
+            },
         )
         .await?;
-    Ok(qpx_h3::Response {
-        interim,
-        response: head.map(|_| body),
-        trailers,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::collect_reverse_response;
-    use crate::http::body::Body;
-    use tokio::time::Duration;
-
-    #[tokio::test]
-    async fn reverse_qpx_h3_response_body_limit_is_enforced() {
-        let response = http::Response::builder()
-            .status(http::StatusCode::OK)
-            .body(Body::from(vec![b'x'; 4]))
-            .expect("response");
-
-        let err = collect_reverse_response(
-            Vec::new(),
-            response,
-            &http::Method::GET,
-            3,
-            Duration::from_secs(1),
-        )
-        .await
-        .expect_err("body larger than configured limit must fail");
-
-        assert!(
-            err.to_string()
-                .contains("HTTP/3 response body exceeds configured limit"),
-            "{err}"
-        );
+        if let Some(protocol) = grpc_protocol.as_deref() {
+            let streaming = crate::http::rpc::grpc_streaming_label(
+                protocol,
+                request_summary
+                    .as_ref()
+                    .map(|summary| summary.message_count()),
+                response_summary
+                    .as_ref()
+                    .map(|summary| summary.message_count()),
+            );
+            crate::http::rpc::emit_grpc_stream_duration_metric(
+                self.reverse.name.as_ref(),
+                protocol,
+                streaming,
+                grpc_started.elapsed(),
+            );
+        }
+        Ok(())
     }
 }

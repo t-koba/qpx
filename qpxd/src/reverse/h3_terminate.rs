@@ -302,9 +302,13 @@ impl H3RequestHandler for ReverseH3Handler {
         let state = self.reverse.runtime.state();
         let limits = state.plan.limits;
         H3Limits {
+            listener_name: Arc::<str>::from(self.reverse.name.as_ref()),
             max_request_body_bytes: limits.max_h3_request_body_bytes,
             max_response_body_bytes: limits.max_h3_response_body_bytes,
             max_concurrent_streams_per_connection: limits.max_h3_streams_per_connection,
+            datagram_channel_capacity: limits.datagram_channel_capacity,
+            max_grpc_message_bytes: limits.max_grpc_message_bytes,
+            max_grpc_stream_duration_ms: limits.max_grpc_stream_duration_ms,
             read_timeout: Duration::from_millis(limits.h3_read_timeout_ms),
             proxy_name: Arc::<str>::from(state.plan.identity.proxy_name.as_ref()),
             error_body: Arc::<str>::from(state.messages.reverse_error.as_str()),

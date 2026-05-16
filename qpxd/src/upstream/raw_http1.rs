@@ -1,6 +1,7 @@
 use crate::http::body::Body;
 use crate::http::http1_common::{
-    find_crlf, has_connection_token, parse_header_map, parse_version, serialize_headers,
+    find_crlf, has_connection_token, has_only_chunked_transfer_encoding, parse_header_map,
+    parse_version, serialize_headers,
 };
 use crate::tls::UpstreamCertificateInfo;
 use anyhow::{Result, anyhow};
@@ -274,10 +275,14 @@ where
         None => body.trailers().await?,
     };
     stream.write_all(b"0\r\n").await?;
-    if let Some(trailers) = trailers
-        && allow_trailers
-        && crate::http::semantics::validate_request_trailers(&trailers).is_ok()
-    {
+    if let Some(trailers) = trailers {
+        if !allow_trailers {
+            return Err(anyhow!(
+                "request trailers require Trailer metadata before forwarding"
+            ));
+        }
+        crate::http::semantics::validate_request_trailers(&trailers)
+            .map_err(|err| anyhow!("invalid HTTP/1 request trailers: {err:?}"))?;
         let mut trailer_block = Vec::with_capacity(256);
         serialize_headers(&trailers, &mut trailer_block)?;
         stream.write_all(&trailer_block).await?;
@@ -750,32 +755,7 @@ fn determine_response_body_kind(
 }
 
 fn has_chunked_transfer_encoding(headers: &HeaderMap) -> Result<bool> {
-    let mut saw_transfer_encoding = false;
-    let mut last = None::<String>;
-    for value in headers.get_all(TRANSFER_ENCODING).iter() {
-        let raw = value
-            .to_str()
-            .map_err(|_| anyhow!("invalid transfer-encoding header"))?;
-        for token in raw.split(',') {
-            let token = token.trim();
-            if token.is_empty() {
-                continue;
-            }
-            saw_transfer_encoding = true;
-            last = Some(token.to_ascii_lowercase());
-        }
-    }
-    if !saw_transfer_encoding {
-        return Ok(false);
-    }
-    match last.as_deref() {
-        Some("chunked") => Ok(true),
-        Some(other) => Err(anyhow!(
-            "unsupported upstream transfer-encoding final coding: {}",
-            other
-        )),
-        None => Ok(false),
-    }
+    has_only_chunked_transfer_encoding(headers)
 }
 
 fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {

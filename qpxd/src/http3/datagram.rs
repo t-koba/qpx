@@ -4,6 +4,7 @@ use h3::error::Code;
 use h3::error::connection_error_creators::CloseStream;
 use h3::error::internal_error::InternalConnectionError;
 use h3::quic::StreamId;
+use metrics::{counter, histogram};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -82,9 +83,43 @@ impl H3DatagramDispatch {
                     let route = { self.streams.lock().await.get(&stream_id).cloned() };
                     match route {
                         Some(DatagramRoute::Enabled(tx)) => {
-                            let _ = tx.try_send(bytes);
+                            let len = bytes.len() as u64;
+                            record_datagram_channel_utilization(&tx);
+                            match tx.try_send(bytes) {
+                                Ok(()) => {
+                                    counter!(
+                                        "qpx_datagram_received_total",
+                                        "transport" => "h3",
+                                        "listener" => "unknown"
+                                    )
+                                    .increment(1);
+                                    counter!(
+                                        "qpx_datagram_received_bytes_total",
+                                        "transport" => "h3",
+                                        "listener" => "unknown"
+                                    )
+                                    .increment(len);
+                                }
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    counter!(
+                                        "qpx_datagram_dropped_total",
+                                        "transport" => "h3",
+                                        "listener" => "unknown",
+                                        "reason" => "channel_full"
+                                    )
+                                    .increment(1);
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {}
+                            }
                         }
                         Some(DatagramRoute::Disabled) => {
+                            counter!(
+                                "qpx_datagram_dropped_total",
+                                "transport" => "h3",
+                                "listener" => "unknown",
+                                "reason" => "disabled"
+                            )
+                            .increment(1);
                             let _ = reader.handle_connection_error_on_stream(
                                 InternalConnectionError::new(
                                     Code::H3_DATAGRAM_ERROR,
@@ -94,7 +129,15 @@ impl H3DatagramDispatch {
                             );
                             break;
                         }
-                        None => {}
+                        None => {
+                            counter!(
+                                "qpx_datagram_dropped_total",
+                                "transport" => "h3",
+                                "listener" => "unknown",
+                                "reason" => "unknown_stream"
+                            )
+                            .increment(1);
+                        }
                     }
                 }
                 Err(err) => {
@@ -104,6 +147,20 @@ impl H3DatagramDispatch {
             }
         }
     }
+}
+
+fn record_datagram_channel_utilization(tx: &mpsc::Sender<Bytes>) {
+    let max = tx.max_capacity();
+    if max == 0 {
+        return;
+    }
+    let used = max.saturating_sub(tx.capacity());
+    histogram!(
+        "qpx_datagram_channel_utilization",
+        "transport" => "h3",
+        "listener" => "unknown"
+    )
+    .record(used as f64 / max as f64);
 }
 
 pub(crate) struct H3StreamDatagrams {

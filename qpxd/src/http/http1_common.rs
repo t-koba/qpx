@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use bytes::BytesMut;
 use hyper::Version;
-use hyper::header::{CONNECTION, HeaderMap, HeaderName, HeaderValue};
+use hyper::header::{CONNECTION, HeaderMap, HeaderName, HeaderValue, TRANSFER_ENCODING};
 
 pub(crate) const MAX_HEADER_BYTES: usize = 128 * 1024;
 
@@ -19,6 +19,28 @@ pub(crate) fn has_connection_token(headers: &HeaderMap, token: &str) -> bool {
         .filter_map(|value| value.to_str().ok())
         .flat_map(|raw| raw.split(','))
         .any(|part| part.trim().eq_ignore_ascii_case(token))
+}
+
+pub(crate) fn has_only_chunked_transfer_encoding(headers: &HeaderMap) -> Result<bool> {
+    let mut tokens = Vec::new();
+    for value in headers.get_all(TRANSFER_ENCODING).iter() {
+        let raw = value
+            .to_str()
+            .map_err(|_| anyhow!("invalid transfer-encoding header"))?;
+        for token in raw.split(',') {
+            let token = token.trim();
+            if !token.is_empty() {
+                tokens.push(token);
+            }
+        }
+    }
+    match tokens.as_slice() {
+        [] => Ok(false),
+        [token] if token.eq_ignore_ascii_case("chunked") => Ok(true),
+        _ => Err(anyhow!(
+            "unsupported transfer-encoding: only a single chunked coding is supported"
+        )),
+    }
 }
 
 pub(crate) fn serialize_headers(headers: &HeaderMap, out: &mut Vec<u8>) -> Result<()> {

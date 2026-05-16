@@ -1,7 +1,7 @@
 use crate::http::body::Body;
 use crate::http::http1_common::{
-    MAX_HEADER_BYTES, has_connection_token, parse_header_map, parse_version, request_keep_alive,
-    serialize_headers,
+    MAX_HEADER_BYTES, has_connection_token, has_only_chunked_transfer_encoding, parse_header_map,
+    parse_version, request_keep_alive, serialize_headers,
 };
 use crate::http::http1_request_body::{
     forward_chunked_request_body, forward_content_length_request_body,
@@ -755,32 +755,7 @@ fn determine_request_body_kind(headers: &HeaderMap) -> Result<RequestBodyKind> {
 }
 
 fn has_chunked_transfer_encoding(headers: &HeaderMap) -> Result<bool> {
-    let mut saw_transfer_encoding = false;
-    let mut last = None::<String>;
-    for value in headers.get_all(TRANSFER_ENCODING).iter() {
-        let raw = value
-            .to_str()
-            .map_err(|_| anyhow!("invalid transfer-encoding header"))?;
-        for token in raw.split(',') {
-            let token = token.trim();
-            if token.is_empty() {
-                continue;
-            }
-            saw_transfer_encoding = true;
-            last = Some(token.to_ascii_lowercase());
-        }
-    }
-    if !saw_transfer_encoding {
-        return Ok(false);
-    }
-    match last.as_deref() {
-        Some("chunked") => Ok(true),
-        Some(other) => Err(anyhow!(
-            "unsupported transfer-encoding final coding: {}",
-            other
-        )),
-        None => Ok(false),
-    }
+    has_only_chunked_transfer_encoding(headers)
 }
 
 fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {
@@ -1008,5 +983,18 @@ mod tests {
         assert!(!text.contains("Content-Length:"));
         assert!(!text.contains("Trailer:"));
         assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn request_transfer_encoding_allows_only_chunked_singleton() {
+        let mut headers = HeaderMap::new();
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        assert_eq!(
+            determine_request_body_kind(&headers).expect("chunked"),
+            RequestBodyKind::Chunked
+        );
+
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("gzip, chunked"));
+        assert!(determine_request_body_kind(&headers).is_err());
     }
 }

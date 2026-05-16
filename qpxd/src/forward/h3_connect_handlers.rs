@@ -859,6 +859,7 @@ pub(crate) async fn handle_h3_extended_connect(
         verify_upstream,
         protocol,
         enable_datagram: datagrams.is_some(),
+        datagram_channel_capacity: state.plan.limits.datagram_channel_capacity,
         timeout_dur: upstream_timeout,
     })
     .await

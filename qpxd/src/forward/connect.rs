@@ -20,7 +20,7 @@ use crate::http::l7::{
     finalize_response_with_headers, prepare_request_with_headers_in_place,
 };
 use crate::http::local_response::build_local_response;
-use crate::io_copy::{BandwidthThrottle, copy_bidirectional_with_export_and_idle};
+use crate::io_copy::BandwidthThrottle;
 use crate::io_prefix::PrefixedIo;
 use crate::policy_context::{
     AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,

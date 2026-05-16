@@ -2367,6 +2367,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "http",
+ "metrics",
  "quinn",
  "rcgen",
  "tokio",

@@ -21,6 +21,17 @@ const FCGI_STDIN: u8 = 5;
 const FCGI_STDOUT: u8 = 6;
 const FCGI_STDERR: u8 = 7;
 const FCGI_RESPONDER: u16 = 1;
+const FCGI_REQUEST_ID: u16 = 1;
+const FCGI_REQUEST_COMPLETE: u8 = 0;
+const FCGI_CANT_MPX_CONN: u8 = 1;
+const FCGI_OVERLOADED: u8 = 2;
+const FCGI_UNKNOWN_ROLE: u8 = 3;
+
+struct FastCgiRecord {
+    record_type: u8,
+    request_id: u16,
+    content: Bytes,
+}
 
 trait AsyncIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AsyncIo for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -328,15 +339,28 @@ async fn run_fastcgi_on_stream(
     let mut stdout = BytesMut::new();
     let mut stderr = BytesMut::new();
     loop {
-        let Some((record_type, content)) = read_fastcgi_record(stream).await? else {
+        let Some(record) = read_fastcgi_record(stream).await? else {
             return Err(anyhow!(
                 "fastcgi backend closed connection before end request"
             ));
         };
-        match record_type {
-            FCGI_STDOUT => append_limited(&mut stdout, &content, max_stdout_bytes, "stdout")?,
-            FCGI_STDERR => append_limited(&mut stderr, &content, max_stderr_bytes, "stderr")?,
-            FCGI_END_REQUEST => break,
+        if record.request_id != FCGI_REQUEST_ID {
+            return Err(anyhow!(
+                "fastcgi backend returned record for unexpected request id {}",
+                record.request_id
+            ));
+        }
+        match record.record_type {
+            FCGI_STDOUT => {
+                append_limited(&mut stdout, &record.content, max_stdout_bytes, "stdout")?
+            }
+            FCGI_STDERR => {
+                append_limited(&mut stderr, &record.content, max_stderr_bytes, "stderr")?
+            }
+            FCGI_END_REQUEST => {
+                validate_fastcgi_end_request(&record.content)?;
+                break;
+            }
             FCGI_ABORT_REQUEST => return Err(anyhow!("fastcgi backend aborted request")),
             _ => {}
         }
@@ -372,7 +396,7 @@ async fn write_fastcgi_record(stream: &mut BoxedIo, record_type: u8, content: &[
     Ok(())
 }
 
-async fn read_fastcgi_record(stream: &mut BoxedIo) -> Result<Option<(u8, Bytes)>> {
+async fn read_fastcgi_record(stream: &mut BoxedIo) -> Result<Option<FastCgiRecord>> {
     let mut header = [0u8; 8];
     match stream.read_exact(&mut header).await {
         Ok(_) => {}
@@ -380,6 +404,7 @@ async fn read_fastcgi_record(stream: &mut BoxedIo) -> Result<Option<(u8, Bytes)>
         Err(err) => return Err(err.into()),
     }
     let record_type = header[1];
+    let request_id = u16::from_be_bytes([header[2], header[3]]);
     let content_len = u16::from_be_bytes([header[4], header[5]]) as usize;
     let padding_len = header[6] as usize;
     let mut content = vec![0u8; content_len];
@@ -388,7 +413,37 @@ async fn read_fastcgi_record(stream: &mut BoxedIo) -> Result<Option<(u8, Bytes)>
         let mut padding = vec![0u8; padding_len];
         stream.read_exact(&mut padding).await?;
     }
-    Ok(Some((record_type, Bytes::from(content))))
+    Ok(Some(FastCgiRecord {
+        record_type,
+        request_id,
+        content: Bytes::from(content),
+    }))
+}
+
+fn validate_fastcgi_end_request(content: &[u8]) -> Result<()> {
+    if content.len() != 8 {
+        return Err(anyhow!(
+            "fastcgi END_REQUEST body length must be 8, got {}",
+            content.len()
+        ));
+    }
+    let app_status = u32::from_be_bytes([content[0], content[1], content[2], content[3]]);
+    let protocol_status = content[4];
+    match protocol_status {
+        FCGI_REQUEST_COMPLETE => Ok(()),
+        FCGI_CANT_MPX_CONN => Err(anyhow!(
+            "fastcgi backend cannot multiplex connections (app_status={app_status})"
+        )),
+        FCGI_OVERLOADED => Err(anyhow!(
+            "fastcgi backend overloaded (app_status={app_status})"
+        )),
+        FCGI_UNKNOWN_ROLE => Err(anyhow!(
+            "fastcgi backend does not support responder role (app_status={app_status})"
+        )),
+        other => Err(anyhow!(
+            "fastcgi backend returned unknown protocol status {other} (app_status={app_status})"
+        )),
+    }
 }
 
 fn encode_fastcgi_params(env: Vec<(String, String)>) -> Result<Bytes> {
@@ -740,6 +795,18 @@ mod tests {
         }
         execution.done.await.expect("join").expect("done");
         stdout.freeze()
+    }
+
+    #[test]
+    fn fastcgi_end_request_rejects_protocol_error() {
+        let mut body = [0u8; 8];
+        body[4] = FCGI_OVERLOADED;
+        assert!(validate_fastcgi_end_request(&body).is_err());
+    }
+
+    #[test]
+    fn fastcgi_end_request_accepts_request_complete() {
+        assert!(validate_fastcgi_end_request(&[0u8; 8]).is_ok());
     }
 
     fn test_cgi_request() -> CgiRequest {

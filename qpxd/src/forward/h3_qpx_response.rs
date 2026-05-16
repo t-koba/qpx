@@ -12,38 +12,6 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::warn;
 
-pub(super) async fn collect_forward_response(
-    mut response: Response<crate::http::body::Body>,
-    request_method: &http::Method,
-    max_body_bytes: usize,
-    body_read_timeout: Duration,
-) -> Result<qpx_h3::Response> {
-    let interim = crate::http::interim::take_interim_response_heads(&mut response)
-        .into_iter()
-        .filter_map(|head| {
-            let mut response = http::Response::builder()
-                .status(head.status)
-                .body(())
-                .ok()?;
-            *response.headers_mut() = head.headers;
-            Some(response)
-        })
-        .collect();
-    let (head, body, trailers): (http::Response<()>, bytes::Bytes, Option<http::HeaderMap>) =
-        crate::http3::codec::hyper_response_to_h3(
-            response,
-            request_method,
-            max_body_bytes,
-            body_read_timeout,
-        )
-        .await?;
-    Ok(qpx_h3::Response {
-        interim,
-        response: head.map(|_| body),
-        trailers,
-    })
-}
-
 pub(super) async fn send_qpx_static_response(
     req_stream: &mut qpx_h3::RequestStream,
     status: StatusCode,
@@ -81,30 +49,14 @@ pub(super) async fn send_qpx_response_stream(
     max_body_bytes: usize,
     body_read_timeout: Duration,
 ) -> Result<()> {
-    let (head, body, trailers): (http::Response<()>, Bytes, Option<http::HeaderMap>) =
-        crate::http3::codec::hyper_response_to_h3(
-            response,
-            request_method,
-            max_body_bytes,
-            body_read_timeout,
-        )
-        .await?;
-    tokio::time::timeout(body_read_timeout, req_stream.send_response_head(&head))
-        .await
-        .map_err(|_| anyhow!("forward qpx-h3 response send timeout"))??;
-    if !body.is_empty() {
-        tokio::time::timeout(body_read_timeout, req_stream.send_data(body))
-            .await
-            .map_err(|_| anyhow!("forward qpx-h3 response body send timeout"))??;
-    }
-    if let Some(trailers) = trailers.as_ref() {
-        tokio::time::timeout(body_read_timeout, req_stream.send_trailers(trailers))
-            .await
-            .map_err(|_| anyhow!("forward qpx-h3 response trailer send timeout"))??;
-    }
-    tokio::time::timeout(body_read_timeout, req_stream.finish())
-        .await
-        .map_err(|_| anyhow!("forward qpx-h3 response finish timeout"))?
+    crate::http3::qpx_stream::send_qpx_response_stream(
+        req_stream,
+        response,
+        request_method,
+        max_body_bytes,
+        body_read_timeout,
+    )
+    .await
 }
 
 pub(super) async fn send_qpx_policy_response(

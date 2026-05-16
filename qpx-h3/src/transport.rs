@@ -1,10 +1,12 @@
 use crate::protocol::{
-    FRAME_DATA, FRAME_HEADERS, H3_DATAGRAM_ERROR, H3_FRAME_UNEXPECTED, encode_varint,
-    read_varint_slice, validate_message_stream_frame, write_frame,
+    FRAME_DATA, FRAME_HEADERS, H3_DATAGRAM_ERROR, H3_FRAME_UNEXPECTED, H3_MESSAGE_ERROR,
+    H3_REQUEST_CANCELLED, encode_varint, read_varint_slice, validate_message_stream_frame,
+    write_frame,
 };
 use crate::qpack::{HeaderDecodeError, QpackConnection, encode_response_head, encode_trailers};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
+use metrics::{counter, histogram};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +19,7 @@ struct ResponseSendState {
     response_started: bool,
     final_sent: bool,
     body_allowed: bool,
+    head_request: bool,
 }
 
 #[derive(Debug)]
@@ -61,6 +64,7 @@ impl RequestStream {
         qpack: QpackConnection,
         read_timeout: Duration,
         max_frame_payload_bytes: usize,
+        request_method: http::Method,
     ) -> Self {
         Self {
             send,
@@ -75,6 +79,7 @@ impl RequestStream {
                 response_started: false,
                 final_sent: false,
                 body_allowed: true,
+                head_request: request_method == http::Method::HEAD,
             }),
         }
     }
@@ -101,10 +106,26 @@ impl RequestStream {
         state.response_started = true;
         if let Some(body_allowed) = body_allowed {
             state.final_sent = true;
-            state.body_allowed = body_allowed;
+            state.body_allowed = body_allowed && !state.head_request;
         }
         let payload = encode_response_head(&response);
         self.send_headers(&payload).await
+    }
+
+    pub async fn send_full_response(
+        &mut self,
+        head: &http::Response<()>,
+        body: &[u8],
+        trailers: Option<&http::HeaderMap>,
+    ) -> Result<()> {
+        self.send_response_head(head).await?;
+        if !body.is_empty() {
+            self.send_data(Bytes::copy_from_slice(body)).await?;
+        }
+        if let Some(trailers) = trailers {
+            self.send_trailers(trailers).await?;
+        }
+        self.finish().await
     }
 
     pub async fn send_trailers(&mut self, trailers: &http::HeaderMap) -> Result<()> {
@@ -225,6 +246,16 @@ impl RequestStream {
 
     pub(crate) fn abort_with_code(&mut self, code: u64) {
         abort_bidi_stream(&mut self.send, &mut self.recv, code);
+    }
+
+    pub fn stop_receiving_request_body(&mut self) {
+        stop_recv_stream(&mut self.recv, H3_REQUEST_CANCELLED);
+        self.closed = true;
+    }
+
+    pub fn abort_message_stream(&mut self) {
+        abort_bidi_stream(&mut self.send, &mut self.recv, H3_MESSAGE_ERROR);
+        self.closed = true;
     }
 
     pub(crate) async fn decode_response_head(
@@ -396,6 +427,10 @@ impl BidiStream {
         Self { send, recv }
     }
 
+    pub(crate) fn abort_with_code(mut self, code: u64) {
+        abort_bidi_stream(&mut self.send, &mut self.recv, code);
+    }
+
     pub fn split(self) -> (StreamSend, StreamRecv) {
         (
             StreamSend { send: self.send },
@@ -444,6 +479,10 @@ pub struct UniRecvStream {
 impl UniRecvStream {
     pub(crate) fn new(recv: quinn::RecvStream) -> Self {
         Self { recv }
+    }
+
+    pub(crate) fn stop_with_code(mut self, code: u64) {
+        stop_recv_stream(&mut self.recv, code);
     }
 
     pub async fn recv_chunk(&mut self) -> Result<Option<Bytes>> {
@@ -524,6 +563,18 @@ impl DatagramSender {
         self.conn
             .send_datagram(Bytes::from(out))
             .map_err(|err| anyhow!("failed to send QUIC datagram: {err}"))?;
+        counter!(
+            "qpx_datagram_sent_total",
+            "transport" => "qpx_h3",
+            "listener" => "unknown"
+        )
+        .increment(1);
+        counter!(
+            "qpx_datagram_sent_bytes_total",
+            "transport" => "qpx_h3",
+            "listener" => "unknown"
+        )
+        .increment(payload.len() as u64);
         Ok(())
     }
 }
@@ -556,7 +607,16 @@ impl DatagramDispatch {
     }
 
     pub(crate) async fn register_stream(self: &Arc<Self>, stream_id: u64) -> StreamDatagrams {
-        let (tx, rx) = mpsc::channel(self.channel_capacity.max(1));
+        self.register_stream_with_capacity(stream_id, self.channel_capacity)
+            .await
+    }
+
+    pub(crate) async fn register_stream_with_capacity(
+        self: &Arc<Self>,
+        stream_id: u64,
+        channel_capacity: usize,
+    ) -> StreamDatagrams {
+        let (tx, rx) = mpsc::channel(channel_capacity.max(1));
         {
             let mut guard = self.streams.lock().await;
             guard.insert(stream_id, DatagramRoute::Enabled(tx));
@@ -617,19 +677,75 @@ impl DatagramDispatch {
             let route = { self.streams.lock().await.get(&stream_id).cloned() };
             match route {
                 Some(DatagramRoute::Enabled(tx)) => {
-                    let _ = tx.try_send(payload);
+                    let len = payload.len() as u64;
+                    record_datagram_channel_utilization(&tx);
+                    match tx.try_send(payload) {
+                        Ok(()) => {
+                            counter!(
+                                "qpx_datagram_received_total",
+                                "transport" => "qpx_h3",
+                                "listener" => "unknown"
+                            )
+                            .increment(1);
+                            counter!(
+                                "qpx_datagram_received_bytes_total",
+                                "transport" => "qpx_h3",
+                                "listener" => "unknown"
+                            )
+                            .increment(len);
+                        }
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            counter!(
+                                "qpx_datagram_dropped_total",
+                                "transport" => "qpx_h3",
+                                "listener" => "unknown",
+                                "reason" => "channel_full"
+                            )
+                            .increment(1);
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {}
+                    }
                 }
                 Some(DatagramRoute::Disabled) => {
+                    counter!(
+                        "qpx_datagram_dropped_total",
+                        "transport" => "qpx_h3",
+                        "listener" => "unknown",
+                        "reason" => "disabled"
+                    )
+                    .increment(1);
                     close_datagram_connection(
                         &self.conn,
                         "datagram received for stream without datagram semantics",
                     );
                     break;
                 }
-                None => {}
+                None => {
+                    counter!(
+                        "qpx_datagram_dropped_total",
+                        "transport" => "qpx_h3",
+                        "listener" => "unknown",
+                        "reason" => "unknown_stream"
+                    )
+                    .increment(1);
+                }
             }
         }
     }
+}
+
+fn record_datagram_channel_utilization(tx: &mpsc::Sender<Bytes>) {
+    let max = tx.max_capacity();
+    if max == 0 {
+        return;
+    }
+    let used = max.saturating_sub(tx.capacity());
+    histogram!(
+        "qpx_datagram_channel_utilization",
+        "transport" => "qpx_h3",
+        "listener" => "unknown"
+    )
+    .record(used as f64 / max as f64);
 }
 
 pub(crate) struct DatagramRegistration {

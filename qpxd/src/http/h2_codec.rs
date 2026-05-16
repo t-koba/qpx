@@ -445,7 +445,7 @@ fn body_from_h2_stream(mut body: RecvStream) -> Body {
             }
         };
         if let Err(err) = crate::http::semantics::validate_request_trailers(&trailers) {
-            warn!(error = ?err, "dropping forbidden HTTP/2 request trailers");
+            warn!(error = ?err, "rejecting forbidden HTTP/2 request trailers");
             sender.abort();
             return;
         }
