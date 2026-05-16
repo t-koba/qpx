@@ -1,6 +1,7 @@
+use super::headers::parse_module_settings;
 use super::{
     BodyAccess, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
-    HttpModuleFactory, HttpModuleRequestView, HttpModuleStage, ModuleStages, parse_module_settings,
+    HttpModuleFactory, HttpModuleRequestView, HttpModuleStage, ModuleStages,
 };
 use crate::http::body::Body;
 use anyhow::{Result, anyhow};
@@ -232,10 +233,12 @@ impl CompressionPool {
             .clamp(1, 8);
         for idx in 0..workers {
             let receiver = receiver.clone();
-            std::thread::Builder::new()
+            if let Err(err) = std::thread::Builder::new()
                 .name(format!("qpx-compress-{idx}"))
                 .spawn(move || compression_pool_worker(receiver))
-                .expect("compression worker thread spawn must succeed");
+            {
+                warn!(error = ?err, "response compression worker thread spawn failed");
+            }
         }
         Self { sender }
     }

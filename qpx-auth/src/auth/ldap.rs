@@ -25,25 +25,10 @@ impl LdapAuthenticator {
     ) -> Result<Option<Vec<String>>> {
         let ldap_timeout = Duration::from_millis(self.config.timeout_ms.max(1));
         let settings = if self.config.require_starttls && self.config.url.starts_with("ldap://") {
-            #[cfg(any(feature = "ldap-auth-rustls", feature = "ldap-auth-native"))]
-            {
-                LdapConnSettings::new().set_starttls(true)
-            }
-            #[cfg(not(any(feature = "ldap-auth-rustls", feature = "ldap-auth-native")))]
-            {
-                return Err(anyhow::anyhow!(
-                    "ldap auth requires LDAP TLS support in this build"
-                ));
-            }
+            LdapConnSettings::new().set_starttls(true)
         } else {
             LdapConnSettings::new()
         };
-        #[cfg(not(any(feature = "ldap-auth-rustls", feature = "ldap-auth-native")))]
-        if self.config.url.starts_with("ldaps://") {
-            return Err(anyhow::anyhow!(
-                "ldap auth requires LDAP TLS support in this build"
-            ));
-        }
         let (conn, mut ldap) = timeout(
             ldap_timeout,
             LdapConnAsync::with_settings(settings, &self.config.url),

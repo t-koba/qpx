@@ -96,6 +96,19 @@ impl qpx_acme::ConfigProvider for Runtime {
 }
 
 impl RuntimeState {
+    pub fn compile_plan(config: Config) -> Result<RuntimePlan> {
+        Self::compile_plan_with_http_module_registry(config, default_http_module_registry())
+    }
+
+    pub fn compile_plan_with_http_module_registry(
+        config: Config,
+        http_module_registry: Arc<HttpModuleRegistry>,
+    ) -> Result<RuntimePlan> {
+        let resources =
+            RuntimeResources::build_with_http_module_registry(config, http_module_registry)?;
+        PlanCompiler { config: &resources }.compile()
+    }
+
     pub fn build(config: Config) -> Result<Self> {
         Self::build_with_http_module_registry(config, default_http_module_registry())
     }

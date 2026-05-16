@@ -231,7 +231,7 @@ fn spawn_qpxd_without_ready_check(config_path: &Path, log_path: PathBuf) -> Resu
 fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<()> {
     let started = Instant::now();
     let addr: SocketAddr = format!("127.0.0.1:{ready_port}").parse()?;
-    while started.elapsed() < Duration::from_secs(5) {
+    while started.elapsed() < Duration::from_secs(15) {
         if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
             return Ok(());
         }

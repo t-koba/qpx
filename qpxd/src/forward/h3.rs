@@ -171,7 +171,7 @@ impl H3RequestHandler for ForwardH3Handler {
                     Response::builder()
                         .status(StatusCode::BAD_GATEWAY)
                         .body(Body::from(state.messages.proxy_error.clone()))
-                        .unwrap(),
+                        .unwrap_or_else(|_| Response::new(Body::empty())),
                     false,
                 )
             }
@@ -217,7 +217,7 @@ impl H3RequestHandler for ForwardH3Handler {
                     Response::builder()
                         .status(StatusCode::BAD_GATEWAY)
                         .body(Body::from(state.messages.proxy_error.clone()))
-                        .unwrap(),
+                        .unwrap_or_else(|_| Response::new(Body::empty())),
                     false,
                 ))
             }

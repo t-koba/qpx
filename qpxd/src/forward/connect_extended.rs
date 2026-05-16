@@ -371,16 +371,15 @@ pub(super) fn spawn_h2_extended_connect_relay(
                     match next {
                         Some(Ok(chunk)) => {
                             let len = chunk.len();
-                            if !chunk.is_empty()
-                                && sender
-                                    .as_mut()
-                                    .expect("response body sender")
-                                    .send_data(chunk)
-                                    .await
-                                    .is_err()
-                            {
-                                let _ = upstream_flow.release_capacity(len);
-                                return;
+                            if !chunk.is_empty() {
+                                let Some(sender) = sender.as_mut() else {
+                                    let _ = upstream_flow.release_capacity(len);
+                                    return;
+                                };
+                                if sender.send_data(chunk).await.is_err() {
+                                    let _ = upstream_flow.release_capacity(len);
+                                    return;
+                                }
                             }
                             if let Err(err) = upstream_flow.release_capacity(len) {
                                 warn!(error = ?err, "HTTP/2 extended CONNECT upstream flow control release failed");
@@ -433,11 +432,9 @@ pub(super) fn spawn_h2_extended_connect_relay(
                                 if removed > 0 {
                                     warn!(removed, "dropping forbidden HTTP/2 extended CONNECT response trailers");
                                 }
-                                let _ = sender
-                                    .as_mut()
-                                    .expect("response body sender")
-                                    .send_trailers(trailers)
-                                    .await;
+                                if let Some(sender) = sender.as_mut() {
+                                    let _ = sender.send_trailers(trailers).await;
+                                }
                             }
                             download_done = true;
                             if upload_done {

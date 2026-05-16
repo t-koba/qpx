@@ -18,7 +18,7 @@ exclude = ["fuzz"]
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.3.0"
+version = "0.3.1"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -36,7 +36,7 @@ httpdate = "1"
 bytes = "1"
 brotli = "8"
 flate2 = "1"
-zstd = "0.13"
+zstd = { version = "0.13", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
@@ -64,7 +64,7 @@ x509-parser = { version = "0.18", default-features = false }
 instant-acme = { version = "0.8.4", default-features = false }
 
 # HTTP
-hyper = { version = "1", features = ["full"] }
+hyper = { version = "1", default-features = false, features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
 tower-service = "0.3"
 http = "1"
@@ -79,8 +79,12 @@ h3-quinn = { version = "0.0.10", features = ["datagram"] }
 h3-datagram = "0.0.2"
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "process", "signal"] }
 socket2 = { version = "0.5", features = ["all"] }
+memmap2 = "0.9.10"
+tempfile = "3.25.0"
+uuid = { version = "1.21.0", default-features = false, features = ["std", "v4"] }
+windows-sys = "0.61"
 
 # Auth/LDAP
 ldap3 = { version = "0.12", default-features = false }
@@ -100,9 +104,10 @@ wasmtime = { version = "43.0.2", default-features = false, features = ["async", 
 wasmtime-wasi = { version = "43.0.2", default-features = false, features = ["p1"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 syn = { version = "2", features = ["full", "visit"] }
 toml = "0.8"
+byteorder_slice = "3"
 
 [profile.release]
 # Release defaults are already optimized; these settings mainly reduce size while keeping perf.

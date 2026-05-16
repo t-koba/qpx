@@ -11,7 +11,7 @@ default = [
   "mitm",
   "acme",
   "auth-digest",
-  "auth-ldap-rustls",
+  "auth-ldap",
 ]
 
 tls-rustls = [
@@ -36,8 +36,7 @@ acme = ["dep:qpx-acme", "tls-rustls", "qpx-acme/http3"]
 
 auth-basic = ["dep:qpx-auth", "qpx-auth/basic-auth"]
 auth-digest = ["auth-basic", "qpx-auth/digest-auth"]
-auth-ldap-rustls = ["auth-basic", "tls-rustls", "qpx-auth/ldap-auth-rustls"]
-auth-ldap-native = ["auth-basic", "tls-native", "qpx-auth/ldap-auth-native"]
+auth-ldap = ["auth-basic", "qpx-auth/ldap-auth"]
 
 [dependencies]
 qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
@@ -101,10 +100,10 @@ sha2.workspace = true
 
 # CLI
 clap.workspace = true
-uuid = { version = "1.21.0", features = ["v4"] }
+uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Networking_WinSock",
   "Win32_Security",

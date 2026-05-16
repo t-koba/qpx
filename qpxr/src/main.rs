@@ -36,9 +36,6 @@ use tracing::{info, warn};
 
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[cfg(all(feature = "tls-rustls", feature = "tls-native"))]
-compile_error!("qpxr: features tls-rustls and tls-native are mutually exclusive");
-
 #[cfg(feature = "tls-rustls")]
 use qpx_core::tls::{load_cert_chain, load_private_key};
 #[cfg(feature = "tls-rustls")]

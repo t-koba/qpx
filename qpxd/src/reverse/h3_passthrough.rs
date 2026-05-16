@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use qpx_core::config::ReverseHttp3Config;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Mutex as StdMutex, RwLock};
 use tokio::net::UdpSocket;
@@ -17,6 +17,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 
 const MAX_CIDS_PER_SESSION: usize = 32;
+const UNSPECIFIED_V4: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+const UNSPECIFIED_V6: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
 
 pub(crate) struct Http3PassthroughRuntime {
     pub(crate) reverse: super::ReloadableReverse,
@@ -159,11 +161,17 @@ impl PassthroughSession {
     }
 
     fn current_client_addr(&self) -> SocketAddr {
-        *self.client_addr.lock().expect("client addr lock")
+        *self
+            .client_addr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn update_client_addr(&self, client_addr: SocketAddr) -> Option<SocketAddr> {
-        let mut guard = self.client_addr.lock().expect("client addr lock");
+        let mut guard = self
+            .client_addr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *guard == client_addr {
             return None;
         }
@@ -248,18 +256,24 @@ impl PassthroughSession {
     fn snapshot_cids(&self) -> Vec<QuicConnectionId> {
         self.cids
             .lock()
-            .expect("session cids lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .copied()
             .collect()
     }
 
     fn attach_relay_task(&self, task: JoinHandle<()>) {
-        *self.relay_task.lock().expect("relay task lock") = Some(task);
+        *self
+            .relay_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
     }
 
     fn take_relay_task(&self) -> Option<JoinHandle<()>> {
-        self.relay_task.lock().expect("relay task lock").take()
+        self.relay_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 }
 
@@ -298,7 +312,7 @@ impl SessionIndex {
         let cids = session
             .cids
             .lock()
-            .expect("session cids lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .copied()
             .collect::<Vec<_>>();
@@ -340,7 +354,10 @@ impl SessionIndex {
         let Some(session) = self.sessions.get(&session_id) else {
             return;
         };
-        let mut session_cids = session.cids.lock().expect("session cids lock");
+        let mut session_cids = session
+            .cids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for cid in cids {
             if session_cids.contains(&cid) {
                 continue;
@@ -686,168 +703,252 @@ pub(crate) async fn run_http3_passthrough(
                 }
             },
             _ = cleanup.tick() => {
-                let now_ms = instant_to_millis(run_started, Instant::now());
-                let expired = {
-                    let mut guard = sessions.write().expect("session index write lock");
-                    drain_session_touches(&mut guard, &mut touch_rx);
-                    guard.evict_expired(now_ms, idle_timeout_ms)
-                };
-                for session in expired {
-                    let _ = session.close_tx.send(true);
-                }
+                cleanup_sessions(sessions.clone(), &mut touch_rx, run_started, idle_timeout_ms)?;
             },
             recv = listener.recv_from(&mut buf) => {
                 let (n, client_addr) = recv?;
-                let payload = buf[..n].to_vec();
-                if let Some((stage, matched_rule, sni)) =
-                    super::reverse_quic_connection_filter_match(
-                        &reverse,
-                        client_addr,
-                        listen_addr.port(),
-                        payload.as_slice(),
-                    )
-                {
-                    super::record_reverse_connection_filter_block(
-                        &reverse,
-                        client_addr,
-                        listen_addr.port(),
-                        stage,
-                        matched_rule.as_str(),
-                        sni.as_deref(),
-                    );
-                    continue;
-                }
-                let now = Instant::now();
-                let now_ms = instant_to_millis(run_started, now);
-
-                let mut upstream_socket: Option<Arc<UdpSocket>> = None;
-                let mut session_id: Option<u64> = None;
-                let mut needs_index_update = false;
-
-                {
-                    let guard = sessions.read().expect("session index read lock");
-                    if let Some(id) = guard.find_session_for_client_packet(client_addr, &payload)
-                        && let Some(session) = guard.session(id) {
-                            session.mark_client_seen(now_ms, payload.len() as u64);
-                            let _ = touch_tx.send(SessionTouch {
-                                seen_ms: now_ms,
-                                session_id: id,
-                            });
-                            upstream_socket = Some(session.socket.clone());
-                            session_id = Some(id);
-                            needs_index_update = client_packet_needs_index_update(
-                                &guard,
-                                id,
-                                session.as_ref(),
-                                client_addr,
-                                &payload,
-                            );
-                        }
-                }
-
-                if let Some(id) = session_id.filter(|_| needs_index_update) {
-                    let mut guard = sessions.write().expect("session index write lock");
-                    guard.update_client_address(id, client_addr);
-                    guard.observe_client_packet(id, &payload);
-                }
-
-        let upstream_socket = if let Some(socket) = upstream_socket {
-            socket
-        } else {
-            if payload.len() < min_client_bytes {
-                continue;
-            }
-            if now.duration_since(new_window_start) >= Duration::from_secs(1) {
-                new_window_start = now;
-                new_sessions_in_window = 0;
-            }
-            if new_sessions_in_window >= max_new_per_sec {
-                continue;
-            }
-            let idx = rr_counter.fetch_add(1, Ordering::Relaxed);
-            let upstream_addr = upstream_addrs[idx % upstream_addrs.len()];
-            let bind_addr: SocketAddr = if upstream_addr.is_ipv4() {
-                "0.0.0.0:0".parse().unwrap()
-            } else {
-                "[::]:0".parse().unwrap()
-            };
-            let socket: Arc<UdpSocket> = Arc::new(UdpSocket::bind(bind_addr).await?);
-            socket.connect(upstream_addr).await?;
-            let (close_tx, _close_rx) = watch::channel(false);
-            let (client_addr_tx, client_addr_rx) = watch::channel(client_addr);
-            let session_id = next_session_id;
-            next_session_id = next_session_id.wrapping_add(1);
-
-            let mut created = false;
-            let socket = {
-                let mut guard = sessions.write().expect("session index write lock");
-                drain_session_touches(&mut guard, &mut touch_rx);
-                while guard.sessions.len() >= max_sessions {
-                    let Some(evicted) = guard.evict_oldest() else {
-                        break;
-                    };
-                    let _ = evicted.close_tx.send(true);
-                }
-                if let Some(existing_id) = guard.by_addr.get(&client_addr).copied() {
-                    guard
-                        .session(existing_id)
-                        .map(|s| s.socket.clone())
-                        .unwrap_or(socket.clone())
-                } else {
-                    guard.by_addr.insert(client_addr, session_id);
-                    guard.sessions.insert(
-                        session_id,
-                        Arc::new(PassthroughSession::new(
-                            socket.clone(),
-                            close_tx,
-                            client_addr,
-                            client_addr_tx,
-                            now_ms,
-                            payload.len() as u64,
-                            0,
-                        )),
-                    );
-                    created = true;
-                    guard.record_touch(session_id, now_ms);
-                    guard.observe_client_packet(session_id, &payload);
-                    socket
-                }
-            };
-
-            if created {
-                new_sessions_in_window = new_sessions_in_window.saturating_add(1);
-                let listener_out = listener.clone();
-                let sessions_out = sessions.clone();
-                let upstream_out = socket.clone();
-                let touch_tx_out = touch_tx.clone();
-                if let Some(session) = {
-                    let guard = sessions.read().expect("session index read lock");
-                    guard.session(session_id)
-                } {
-                    let relay_task = spawn_passthrough_upstream_relay(PassthroughRelayContext {
-                        listener: listener_out,
-                        sessions: sessions_out,
-                        session_id,
-                        session: session.clone(),
-                        upstream: upstream_out,
-                        client_addr_rx,
-                        touch_tx: touch_tx_out,
-                        idle_timeout,
-                        run_started,
-                        max_amplification,
-                    });
-                    session.attach_relay_task(relay_task);
-                }
-            }
-
-            socket
-        };
-
-        upstream_socket.send(&payload).await?;
+                handle_client_packet(PassthroughPacketContext {
+                    reverse: &reverse,
+                    listen_addr,
+                    listener: listener.clone(),
+                    sessions: sessions.clone(),
+                    touch_tx: touch_tx.clone(),
+                    touch_rx: &mut touch_rx,
+                    upstream_addrs: upstream_addrs.as_slice(),
+                    rr_counter: rr_counter.clone(),
+                    max_sessions,
+                    idle_timeout,
+                    max_new_per_sec,
+                    min_client_bytes,
+                    max_amplification,
+                    run_started,
+                    new_window_start: &mut new_window_start,
+                    new_sessions_in_window: &mut new_sessions_in_window,
+                    next_session_id: &mut next_session_id,
+                }, client_addr, buf[..n].to_vec()).await?;
             },
         }
     }
     Ok(())
+}
+
+fn cleanup_sessions(
+    sessions: Arc<RwLock<SessionIndex>>,
+    touch_rx: &mut mpsc::UnboundedReceiver<SessionTouch>,
+    run_started: Instant,
+    idle_timeout_ms: u64,
+) -> Result<()> {
+    let now_ms = instant_to_millis(run_started, Instant::now());
+    let expired = {
+        let mut guard = sessions
+            .write()
+            .map_err(|_| anyhow!("session index write lock poisoned"))?;
+        drain_session_touches(&mut guard, touch_rx);
+        guard.evict_expired(now_ms, idle_timeout_ms)
+    };
+    for session in expired {
+        let _ = session.close_tx.send(true);
+    }
+    Ok(())
+}
+
+struct PassthroughPacketContext<'a> {
+    reverse: &'a super::ReloadableReverse,
+    listen_addr: SocketAddr,
+    listener: Arc<UdpSocket>,
+    sessions: Arc<RwLock<SessionIndex>>,
+    touch_tx: mpsc::UnboundedSender<SessionTouch>,
+    touch_rx: &'a mut mpsc::UnboundedReceiver<SessionTouch>,
+    upstream_addrs: &'a [SocketAddr],
+    rr_counter: Arc<AtomicUsize>,
+    max_sessions: usize,
+    idle_timeout: Duration,
+    max_new_per_sec: u64,
+    min_client_bytes: usize,
+    max_amplification: u64,
+    run_started: Instant,
+    new_window_start: &'a mut Instant,
+    new_sessions_in_window: &'a mut u64,
+    next_session_id: &'a mut u64,
+}
+
+async fn handle_client_packet(
+    mut ctx: PassthroughPacketContext<'_>,
+    client_addr: SocketAddr,
+    payload: Vec<u8>,
+) -> Result<()> {
+    if let Some((stage, matched_rule, sni)) = super::reverse_quic_connection_filter_match(
+        ctx.reverse,
+        client_addr,
+        ctx.listen_addr.port(),
+        payload.as_slice(),
+    ) {
+        super::record_reverse_connection_filter_block(
+            ctx.reverse,
+            client_addr,
+            ctx.listen_addr.port(),
+            stage,
+            matched_rule.as_str(),
+            sni.as_deref(),
+        );
+        return Ok(());
+    }
+
+    let now = Instant::now();
+    let now_ms = instant_to_millis(ctx.run_started, now);
+    if let Some(socket) = existing_passthrough_session_socket(&ctx, client_addr, &payload, now_ms)?
+    {
+        socket.send(&payload).await?;
+        return Ok(());
+    }
+    if let Some(socket) =
+        create_passthrough_session(&mut ctx, client_addr, &payload, now, now_ms).await?
+    {
+        socket.send(&payload).await?;
+    }
+    Ok(())
+}
+
+fn existing_passthrough_session_socket(
+    ctx: &PassthroughPacketContext<'_>,
+    client_addr: SocketAddr,
+    payload: &[u8],
+    now_ms: u64,
+) -> Result<Option<Arc<UdpSocket>>> {
+    let mut upstream_socket = None;
+    let mut session_id = None;
+    let mut needs_index_update = false;
+    {
+        let guard = ctx
+            .sessions
+            .read()
+            .map_err(|_| anyhow!("session index read lock poisoned"))?;
+        if let Some(id) = guard.find_session_for_client_packet(client_addr, payload)
+            && let Some(session) = guard.session(id)
+        {
+            session.mark_client_seen(now_ms, payload.len() as u64);
+            let _ = ctx.touch_tx.send(SessionTouch {
+                seen_ms: now_ms,
+                session_id: id,
+            });
+            upstream_socket = Some(session.socket.clone());
+            session_id = Some(id);
+            needs_index_update = client_packet_needs_index_update(
+                &guard,
+                id,
+                session.as_ref(),
+                client_addr,
+                payload,
+            );
+        }
+    }
+    if let Some(id) = session_id.filter(|_| needs_index_update) {
+        let mut guard = ctx
+            .sessions
+            .write()
+            .map_err(|_| anyhow!("session index write lock poisoned"))?;
+        guard.update_client_address(id, client_addr);
+        guard.observe_client_packet(id, payload);
+    }
+    Ok(upstream_socket)
+}
+
+async fn create_passthrough_session(
+    ctx: &mut PassthroughPacketContext<'_>,
+    client_addr: SocketAddr,
+    payload: &[u8],
+    now: Instant,
+    now_ms: u64,
+) -> Result<Option<Arc<UdpSocket>>> {
+    if payload.len() < ctx.min_client_bytes {
+        return Ok(None);
+    }
+    if now.duration_since(*ctx.new_window_start) >= Duration::from_secs(1) {
+        *ctx.new_window_start = now;
+        *ctx.new_sessions_in_window = 0;
+    }
+    if *ctx.new_sessions_in_window >= ctx.max_new_per_sec {
+        return Ok(None);
+    }
+
+    let idx = ctx.rr_counter.fetch_add(1, Ordering::Relaxed);
+    let upstream_addr = ctx.upstream_addrs[idx % ctx.upstream_addrs.len()];
+    let bind_addr = if upstream_addr.is_ipv4() {
+        UNSPECIFIED_V4
+    } else {
+        UNSPECIFIED_V6
+    };
+    let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
+    socket.connect(upstream_addr).await?;
+    let (close_tx, _close_rx) = watch::channel(false);
+    let (client_addr_tx, client_addr_rx) = watch::channel(client_addr);
+    let session_id = *ctx.next_session_id;
+    *ctx.next_session_id = ctx.next_session_id.wrapping_add(1);
+
+    let mut created = false;
+    let socket = {
+        let mut guard = ctx
+            .sessions
+            .write()
+            .map_err(|_| anyhow!("session index write lock poisoned"))?;
+        drain_session_touches(&mut guard, ctx.touch_rx);
+        while guard.sessions.len() >= ctx.max_sessions {
+            let Some(evicted) = guard.evict_oldest() else {
+                break;
+            };
+            let _ = evicted.close_tx.send(true);
+        }
+        if let Some(existing_id) = guard.by_addr.get(&client_addr).copied() {
+            guard
+                .session(existing_id)
+                .map(|s| s.socket.clone())
+                .unwrap_or(socket.clone())
+        } else {
+            guard.by_addr.insert(client_addr, session_id);
+            guard.sessions.insert(
+                session_id,
+                Arc::new(PassthroughSession::new(
+                    socket.clone(),
+                    close_tx,
+                    client_addr,
+                    client_addr_tx,
+                    now_ms,
+                    payload.len() as u64,
+                    0,
+                )),
+            );
+            created = true;
+            guard.record_touch(session_id, now_ms);
+            guard.observe_client_packet(session_id, payload);
+            socket
+        }
+    };
+
+    if created {
+        *ctx.new_sessions_in_window = ctx.new_sessions_in_window.saturating_add(1);
+        if let Some(session) = {
+            let guard = ctx
+                .sessions
+                .read()
+                .map_err(|_| anyhow!("session index read lock poisoned"))?;
+            guard.session(session_id)
+        } {
+            let relay_task = spawn_passthrough_upstream_relay(PassthroughRelayContext {
+                listener: ctx.listener.clone(),
+                sessions: ctx.sessions.clone(),
+                session_id,
+                session: session.clone(),
+                upstream: socket.clone(),
+                client_addr_rx,
+                touch_tx: ctx.touch_tx.clone(),
+                idle_timeout: ctx.idle_timeout,
+                run_started: ctx.run_started,
+                max_amplification: ctx.max_amplification,
+            });
+            session.attach_relay_task(relay_task);
+        }
+    }
+    Ok(Some(socket))
 }
 
 fn run_started_from_exported_elapsed(exported_elapsed_ms: u64) -> Instant {
@@ -865,7 +966,9 @@ async fn drain_passthrough_sessions(
     export_sink: &Mutex<UdpSessionRestoreState>,
 ) -> Result<()> {
     let drained = {
-        let mut guard = sessions.write().expect("session index write lock");
+        let mut guard = sessions
+            .write()
+            .map_err(|_| anyhow!("session index write lock poisoned"))?;
         guard.drain_all()
     };
     for (_, session) in &drained {
@@ -911,7 +1014,7 @@ async fn drain_passthrough_sessions(
         }
         export_sink
             .lock()
-            .expect("reverse passthrough export lock")
+            .map_err(|_| anyhow!("reverse passthrough export lock poisoned"))?
             .insert_reverse_passthrough(
                 reverse_name.to_string(),
                 ReversePassthroughListenerRestore {
@@ -964,7 +1067,9 @@ async fn restore_passthrough_sessions(
             })
             .collect::<Vec<_>>();
         {
-            let mut guard = sessions.write().expect("session index write lock");
+            let mut guard = sessions
+                .write()
+                .map_err(|_| anyhow!("session index write lock poisoned"))?;
             guard.insert_restored(restored.session_id, session.clone(), cids);
         }
         let relay_task = spawn_passthrough_upstream_relay(PassthroughRelayContext {
@@ -1019,7 +1124,9 @@ fn spawn_passthrough_upstream_relay(ctx: PassthroughRelayContext) -> JoinHandle<
             };
             let now_ms = instant_to_millis(run_started, Instant::now());
             let (allowed, needs_index_update) = {
-                let guard = sessions.read().expect("session index read lock");
+                let Ok(guard) = sessions.read() else {
+                    break;
+                };
                 match guard.session(session_id) {
                     Some(session) => {
                         session.mark_upstream_seen(now_ms);
@@ -1045,7 +1152,9 @@ fn spawn_passthrough_upstream_relay(ctx: PassthroughRelayContext) -> JoinHandle<
                 continue;
             }
             if needs_index_update {
-                let mut guard = sessions.write().expect("session index write lock");
+                let Ok(mut guard) = sessions.write() else {
+                    break;
+                };
                 guard.observe_upstream_packet(session_id, &recv_buf[..n]);
             }
             let client_addr = *client_addr_rx.borrow();
@@ -1053,8 +1162,9 @@ fn spawn_passthrough_upstream_relay(ctx: PassthroughRelayContext) -> JoinHandle<
                 break;
             }
         }
-        let mut guard = sessions.write().expect("session index write lock");
-        let _ = guard.remove_session(session_id);
+        if let Ok(mut guard) = sessions.write() {
+            let _ = guard.remove_session(session_id);
+        }
     })
 }
 

@@ -11,13 +11,31 @@ use super::super::types::{
     RpcLocalResponseConfig, RpcMatchConfig, RuleConfig, SubrequestModuleConfig, XdpConfig,
 };
 
+pub(super) trait Validate {
+    fn validate(&self, context: &str) -> Result<()>;
+}
+
+fn validate_optional<T: Validate>(value: Option<&T>, context: &str) -> Result<()> {
+    match value {
+        Some(value) => value.validate(context),
+        None => Ok(()),
+    }
+}
+
+impl Validate for RateLimitConfig {
+    fn validate(&self, context: &str) -> Result<()> {
+        validate_rate_limit_fields(self, context)
+    }
+}
+
 pub(super) fn validate_rate_limit_config(
     rate: Option<&RateLimitConfig>,
     context: &str,
 ) -> Result<()> {
-    let Some(rate) = rate else {
-        return Ok(());
-    };
+    validate_optional(rate, context)
+}
+
+fn validate_rate_limit_fields(rate: &RateLimitConfig, context: &str) -> Result<()> {
     let key = rate.key.trim().to_ascii_lowercase();
     if key.is_empty() {
         return Err(anyhow!("{context} rate_limit.key must not be empty"));
@@ -215,13 +233,20 @@ pub(super) fn validate_lb_config(lb: &str, context: &str) -> Result<()> {
     }
 }
 
+impl Validate for ResilienceConfig {
+    fn validate(&self, context: &str) -> Result<()> {
+        validate_resilience_fields(self, context)
+    }
+}
+
 pub(super) fn validate_resilience_config(
     resilience: Option<&ResilienceConfig>,
     context: &str,
 ) -> Result<()> {
-    let Some(resilience) = resilience else {
-        return Ok(());
-    };
+    validate_optional(resilience, context)
+}
+
+fn validate_resilience_fields(resilience: &ResilienceConfig, context: &str) -> Result<()> {
     if let Some(retry) = resilience.retry.as_ref() {
         if retry.attempts == 0 {
             return Err(anyhow!("{context} resilience.retry.attempts must be >= 1"));
@@ -752,10 +777,17 @@ pub(super) fn validate_policy_context_refs(
     Ok(())
 }
 
+impl Validate for MatchConfig {
+    fn validate(&self, context: &str) -> Result<()> {
+        validate_match_fields(self, context)
+    }
+}
+
 pub(super) fn validate_match_config(raw: Option<&MatchConfig>, context: &str) -> Result<()> {
-    let Some(raw) = raw else {
-        return Ok(());
-    };
+    validate_optional(raw, context)
+}
+
+fn validate_match_fields(raw: &MatchConfig, context: &str) -> Result<()> {
     validate_pattern_list(raw.query.as_slice(), &format!("{context} match.query"))?;
     validate_pattern_list(
         raw.authority.as_slice(),
@@ -1015,7 +1047,17 @@ pub(super) fn validate_identity_match_config(
     Ok(())
 }
 
+impl Validate for ActionConfig {
+    fn validate(&self, context: &str) -> Result<()> {
+        validate_action_fields(self, context)
+    }
+}
+
 pub(super) fn validate_action_config(action: &ActionConfig, context: &str) -> Result<()> {
+    action.validate(context)
+}
+
+fn validate_action_fields(action: &ActionConfig, context: &str) -> Result<()> {
     let has_local = action.local_response.is_some();
     match action.kind {
         ActionKind::Respond => {
@@ -1181,7 +1223,17 @@ pub(super) fn validate_header_name(name: &str, context: &str) -> Result<()> {
     Ok(())
 }
 
+impl Validate for HeaderControl {
+    fn validate(&self, context: &str) -> Result<()> {
+        validate_header_control_fields(self, context)
+    }
+}
+
 pub(super) fn validate_header_control(control: &HeaderControl, context: &str) -> Result<()> {
+    control.validate(context)
+}
+
+fn validate_header_control_fields(control: &HeaderControl, context: &str) -> Result<()> {
     validate_header_map(&control.request_set, &format!("{} request_set", context))?;
     validate_header_map(&control.request_add, &format!("{} request_add", context))?;
     validate_header_remove(

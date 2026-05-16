@@ -23,7 +23,8 @@ pub use lookup_ops::{
 pub use store::{CacheStoreTiming, maybe_store, revalidate_not_modified};
 pub use types::{CacheBackend, CacheRequestKey, LookupOutcome, RevalidationState};
 pub(crate) use types::{
-    RequestCollapseJoin, begin_request_collapse, try_begin_background_revalidation,
+    RequestCollapseGuard, RequestCollapseJoin, begin_request_collapse,
+    try_begin_background_revalidation,
 };
 
 #[cfg(test)]

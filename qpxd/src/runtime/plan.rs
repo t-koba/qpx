@@ -7,8 +7,9 @@ use crate::rate_limit::{CompiledRateLimitPlan, RateLimitSet};
 use crate::tls::trust::CompiledUpstreamTlsTrust;
 use anyhow::{Result, anyhow};
 use qpx_core::config::{
-    ActionKind, CaptureRedactionConfig, DestinationResolutionOverrideConfig, FtpConfig,
-    IngressEdgeConfig, IngressEdgeMode, ReverseRouteConfig, ReverseRouteTargetConfig,
+    ActionConfig, ActionKind, CaptureRedactionConfig, DestinationResolutionOverrideConfig,
+    FtpConfig, IngressEdgeConfig, IngressEdgeMode, LocalResponseConfig, ReverseRouteConfig,
+    ReverseRouteTargetConfig,
 };
 use qpx_core::matchers::CompiledMatch;
 use qpx_core::prefilter::{MatchPrefilterHint, StringInterner};
@@ -109,6 +110,7 @@ pub struct CompiledForwardEdge {
     pub name: Arc<str>,
     pub listener: CompiledListenerSettings,
     pub flags: PlanFlags,
+    pub default_action_kind: ActionKind,
     pub default_plan: ExecutionPlan,
     pub rules: Arc<[CompiledForwardRule]>,
 }
@@ -118,6 +120,7 @@ pub struct CompiledTransparentEdge {
     pub name: Arc<str>,
     pub listener: CompiledListenerSettings,
     pub flags: PlanFlags,
+    pub default_action_kind: ActionKind,
     pub default_plan: ExecutionPlan,
     pub rules: Arc<[CompiledTransparentRule]>,
 }
@@ -149,6 +152,7 @@ pub struct CompiledReverseEdge {
 pub struct CompiledForwardRule {
     pub name: Arc<str>,
     pub matcher: CompiledMatch,
+    pub action_kind: ActionKind,
     pub plan: ExecutionPlan,
 }
 
@@ -156,6 +160,7 @@ pub struct CompiledForwardRule {
 pub struct CompiledTransparentRule {
     pub name: Arc<str>,
     pub matcher: CompiledMatch,
+    pub action_kind: ActionKind,
     pub plan: ExecutionPlan,
 }
 
@@ -376,6 +381,7 @@ impl PlanFlags {
 pub struct ExecutionPlan {
     pub flags: PlanFlags,
     pub capture: CompiledCapturePlan,
+    pub local_response: Option<CompiledLocalResponsePlan>,
     pub(crate) modules: Arc<CompiledHttpModuleChain>,
     pub(crate) cache: Option<qpx_core::config::CachePolicyConfig>,
     pub(crate) response_rules: Option<Arc<HttpResponseRuleEngine>>,
@@ -383,6 +389,17 @@ pub struct ExecutionPlan {
     pub(crate) destination_resolution: Option<DestinationResolutionOverrideConfig>,
     pub(crate) policy_context: EffectivePolicyContext,
     pub(crate) rate_limits: CompiledRateLimitPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledLocalResponsePlan {
+    pub status: u16,
+    pub content_type: Option<Arc<str>>,
+    pub header_count: usize,
+    pub body_bytes: usize,
+    pub rpc_protocol: Option<Arc<str>>,
+    pub rpc_status: Option<Arc<str>>,
+    pub rpc_http_status: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -405,6 +422,7 @@ impl ExecutionPlan {
         Self {
             flags: PlanFlags::empty(),
             capture: CompiledCapturePlan::default(),
+            local_response: None,
             modules: Arc::new(CompiledHttpModuleChain::default()),
             cache: None,
             response_rules: None,
@@ -451,6 +469,7 @@ impl<'a> PlanCompiler<'a> {
         let mut interner = StringInterner::default();
         for listener in self.config.operational.ingress_edge_configs() {
             let ingress_edge_settings = compile_ingress_edge_settings(listener)?;
+            let default_action_kind = listener.default_action.kind.clone();
             let default_plan = execution_plan_for_forward_action(
                 self.config,
                 ExecutionPlanInputs {
@@ -465,7 +484,7 @@ impl<'a> PlanCompiler<'a> {
                     http: listener.http.as_ref(),
                     http_modules: listener.http_modules.as_slice(),
                 },
-                Some(&listener.default_action.kind),
+                Some(&listener.default_action),
             )?;
             let listener_rate_limits = RateLimitSet::from_config(listener.rate_limit.as_ref());
             let mut default_plan = default_plan;
@@ -479,6 +498,8 @@ impl<'a> PlanCompiler<'a> {
                 .map(|rule| {
                     let match_cfg = rule.r#match.clone().unwrap_or_default();
                     let (matcher, _) = CompiledMatch::compile(&match_cfg, &mut interner)?;
+                    let action = rule.action.as_ref().unwrap_or(&listener.default_action);
+                    let action_kind = action.kind.clone();
                     let mut plan = execution_plan_for_forward_action(
                         self.config,
                         ExecutionPlanInputs {
@@ -493,7 +514,7 @@ impl<'a> PlanCompiler<'a> {
                             http: listener.http.as_ref(),
                             http_modules: listener.http_modules.as_slice(),
                         },
-                        rule.action.as_ref().map(|a| &a.kind),
+                        Some(action),
                     )?;
                     plan.rate_limits = CompiledRateLimitPlan::from_sets(
                         listener_rate_limits.clone(),
@@ -511,6 +532,7 @@ impl<'a> PlanCompiler<'a> {
                     Ok(CompiledForwardRule {
                         name: Arc::from(rule.name.as_str()),
                         matcher,
+                        action_kind,
                         plan,
                     })
                 })
@@ -524,6 +546,7 @@ impl<'a> PlanCompiler<'a> {
                         name: Arc::from(listener.name.as_str()),
                         listener: ingress_edge_settings,
                         flags,
+                        default_action_kind,
                         default_plan,
                         rules: rules.into_iter().collect::<Vec<_>>().into(),
                     }))
@@ -533,12 +556,14 @@ impl<'a> PlanCompiler<'a> {
                         name: Arc::from(listener.name.as_str()),
                         listener: ingress_edge_settings,
                         flags,
+                        default_action_kind,
                         default_plan,
                         rules: rules
                             .into_iter()
                             .map(|rule| CompiledTransparentRule {
                                 name: rule.name,
                                 matcher: rule.matcher,
+                                action_kind: rule.action_kind,
                                 plan: rule.plan,
                             })
                             .collect::<Vec<_>>()
@@ -735,13 +760,37 @@ fn execution_plan_for_reverse_route(
 fn execution_plan_for_forward_action(
     config: &RuntimeResources,
     inputs: ExecutionPlanInputs<'_>,
-    action_kind: Option<&ActionKind>,
+    action: Option<&ActionConfig>,
 ) -> Result<ExecutionPlan> {
     let mut plan = execution_plan_for_common(config, inputs)?;
-    if matches!(action_kind, Some(ActionKind::Tunnel)) {
+    if action
+        .map(|action| matches!(&action.kind, ActionKind::Tunnel))
+        .unwrap_or(false)
+    {
         plan.flags.insert(PlanFlags::WEBSOCKET);
     }
+    if let Some(local_response) = action.and_then(|action| action.local_response.as_ref()) {
+        plan.local_response = Some(compile_local_response_plan(local_response));
+    }
     Ok(plan)
+}
+
+fn compile_local_response_plan(local: &LocalResponseConfig) -> CompiledLocalResponsePlan {
+    CompiledLocalResponsePlan {
+        status: local.status,
+        content_type: local.content_type.as_deref().map(Arc::<str>::from),
+        header_count: local.headers.len(),
+        body_bytes: local.body.len(),
+        rpc_protocol: local
+            .rpc
+            .as_ref()
+            .map(|rpc| Arc::<str>::from(rpc.protocol.as_str())),
+        rpc_status: local
+            .rpc
+            .as_ref()
+            .and_then(|rpc| rpc.status.as_deref().map(Arc::<str>::from)),
+        rpc_http_status: local.rpc.as_ref().and_then(|rpc| rpc.http_status),
+    }
 }
 
 fn compile_ingress_edge_settings(listener: &IngressEdgeConfig) -> Result<CompiledListenerSettings> {

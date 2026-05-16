@@ -13,6 +13,7 @@ use tracing::warn;
 
 use crate::tls::CompiledUpstreamTlsTrust;
 use crate::tls::UpstreamCertificateInfo;
+use crate::tls::client::{BoxTlsStream, connect_tls_h2_h1_with_info_with_options};
 
 pub(super) type SharedOriginH2Sender = h2::client::SendRequest<Bytes>;
 const DIRECT_ORIGIN_POOL_SHARDS: usize = 32;
@@ -50,6 +51,14 @@ pub(super) struct SharedTlsH2OriginConnection {
     pub(super) sender: SharedOriginH2Sender,
     pub(super) upstream_cert: UpstreamCertificateInfo,
     pub(super) inflight_streams: Arc<AtomicUsize>,
+}
+
+pub(super) enum HttpsConnectionAcquisition {
+    H2Ready {
+        shared: Arc<SharedTlsH2OriginConnection>,
+        ready: SharedOriginH2Sender,
+    },
+    H1(TlsHttp1OriginConnection),
 }
 
 #[derive(Default)]
@@ -381,6 +390,105 @@ pub(super) async fn wait_for_h2_sender(
             }
         }
     }
+}
+
+pub(super) async fn open_https_origin_stream(
+    connect_authority: &str,
+    server_name: &str,
+    verify_upstream_cert: bool,
+    trust: Option<&CompiledUpstreamTlsTrust>,
+) -> Result<(BoxTlsStream, bool, UpstreamCertificateInfo)> {
+    let tcp = TcpStream::connect(connect_authority).await?;
+    let _ = tcp.set_nodelay(true);
+    connect_tls_h2_h1_with_info_with_options(server_name, tcp, verify_upstream_cert, trust).await
+}
+
+pub(super) async fn acquire_https_connection(
+    slot: &HttpsOriginSlot,
+    connect_authority: &str,
+    server_name: &str,
+    verify_upstream_cert: bool,
+    trust: Option<&CompiledUpstreamTlsTrust>,
+) -> Result<HttpsConnectionAcquisition> {
+    if let Some((shared, ready)) = try_take_ready_h2_sender(slot, connect_authority).await {
+        return Ok(HttpsConnectionAcquisition::H2Ready { shared, ready });
+    }
+
+    if slot.has_h2_connections()
+        && let Some(reservation) = slot.try_reserve_h2_connection()
+    {
+        match open_https_origin_stream(connect_authority, server_name, verify_upstream_cert, trust)
+            .await
+        {
+            Ok((tls, negotiated_h2, upstream_cert)) => {
+                if negotiated_h2 {
+                    let (sender, connection) = h2::client::Builder::new().handshake(tls).await?;
+                    spawn_origin_h2_connection_task(connection);
+                    let shared = Arc::new(SharedTlsH2OriginConnection {
+                        sender: sender.clone(),
+                        upstream_cert: upstream_cert.clone(),
+                        inflight_streams: Arc::new(AtomicUsize::new(0)),
+                    });
+                    reservation.complete(shared.clone());
+                    let ready = match sender.ready().await {
+                        Ok(ready) => ready,
+                        Err(err) => {
+                            slot.remove_h2_connection(&shared);
+                            return Err(err.into());
+                        }
+                    };
+                    return Ok(HttpsConnectionAcquisition::H2Ready { shared, ready });
+                }
+                drop(reservation);
+                return Ok(HttpsConnectionAcquisition::H1(TlsHttp1OriginConnection {
+                    stream: tls,
+                    upstream_cert,
+                }));
+            }
+            Err(err) => {
+                drop(reservation);
+                if let Some((shared, ready)) = wait_for_h2_sender(slot, connect_authority).await {
+                    return Ok(HttpsConnectionAcquisition::H2Ready { shared, ready });
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    if let Some((shared, ready)) = wait_for_h2_sender(slot, connect_authority).await {
+        return Ok(HttpsConnectionAcquisition::H2Ready { shared, ready });
+    }
+
+    if let Some(entry) = { slot.http1_idle.lock().await.pop() } {
+        return Ok(HttpsConnectionAcquisition::H1(entry));
+    }
+
+    let (tls, negotiated_h2, upstream_cert) =
+        open_https_origin_stream(connect_authority, server_name, verify_upstream_cert, trust)
+            .await?;
+    if negotiated_h2 {
+        let (sender, connection) = h2::client::Builder::new().handshake(tls).await?;
+        spawn_origin_h2_connection_task(connection);
+        let shared = Arc::new(SharedTlsH2OriginConnection {
+            sender: sender.clone(),
+            upstream_cert: upstream_cert.clone(),
+            inflight_streams: Arc::new(AtomicUsize::new(0)),
+        });
+        slot.add_h2_connection(shared.clone());
+        let ready = match sender.ready().await {
+            Ok(ready) => ready,
+            Err(err) => {
+                slot.remove_h2_connection(&shared);
+                return Err(err.into());
+            }
+        };
+        return Ok(HttpsConnectionAcquisition::H2Ready { shared, ready });
+    }
+
+    Ok(HttpsConnectionAcquisition::H1(TlsHttp1OriginConnection {
+        stream: tls,
+        upstream_cert,
+    }))
 }
 
 #[cfg(test)]

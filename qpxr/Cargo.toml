@@ -27,4 +27,4 @@ tokio-rustls = { workspace = true, optional = true }
 native-tls = { workspace = true, optional = true }
 tokio-native-tls = { workspace = true, optional = true }
 libc.workspace = true
-byteorder_slice = "3"
+byteorder_slice.workspace = true

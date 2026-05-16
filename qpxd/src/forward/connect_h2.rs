@@ -1,4 +1,5 @@
 use super::*;
+use qpx_core::rules::RuleMatchContext;
 
 pub(super) async fn handle_h2_extended_connect(
     req: Request<Body>,
@@ -38,8 +39,13 @@ pub(super) async fn handle_h2_extended_connect(
     let (host, port) =
         parse_authority_host_port(authority.as_str(), default_port_for_scheme(&scheme))
             .ok_or_else(|| anyhow!("invalid extended CONNECT authority"))?;
-    let sanitized_headers =
-        sanitize_headers_for_policy(&state, &effective_policy, remote_addr.ip(), req.headers())?;
+    let mut sanitized_headers = req.headers().clone();
+    sanitize_headers_for_policy(
+        &state,
+        &effective_policy,
+        remote_addr.ip(),
+        &mut sanitized_headers,
+    )?;
     let mut identity = resolve_identity(
         &state,
         &effective_policy,
@@ -125,14 +131,14 @@ pub(super) async fn handle_h2_extended_connect(
             emit_audit_log(
                 &state,
                 AuditRecord {
-                    kind: "forward",
+                    kind: crate::http::dispatch::ProxyKind::Forward,
                     name: listener_name,
                     remote_ip: remote_addr.ip(),
                     host: Some(host.as_str()),
                     sni: Some(host.as_str()),
                     method: Some("CONNECT"),
                     path: Some(path.as_str()),
-                    outcome: "challenge",
+                    outcome: crate::http::dispatch::DispatchOutcome::Challenge,
                     status: Some(response.status().as_u16()),
                     matched_rule: None,
                     matched_route: None,
@@ -156,14 +162,14 @@ pub(super) async fn handle_h2_extended_connect(
             emit_audit_log(
                 &state,
                 AuditRecord {
-                    kind: "forward",
+                    kind: crate::http::dispatch::ProxyKind::Forward,
                     name: listener_name,
                     remote_ip: remote_addr.ip(),
                     host: Some(host.as_str()),
                     sni: Some(host.as_str()),
                     method: Some("CONNECT"),
                     path: Some(path.as_str()),
-                    outcome: "forbidden",
+                    outcome: crate::http::dispatch::DispatchOutcome::Forbidden,
                     status: Some(response.status().as_u16()),
                     matched_rule: None,
                     matched_route: None,
@@ -203,7 +209,7 @@ pub(super) async fn handle_h2_extended_connect(
         &state,
         &effective_policy,
         ExtAuthzInput {
-            proxy_kind: "forward",
+            proxy_kind: crate::http::dispatch::ProxyKind::Forward,
             proxy_name,
             scope_name: listener_name,
             remote_ip: remote_addr.ip(),
@@ -235,12 +241,13 @@ pub(super) async fn handle_h2_extended_connect(
         ext_authz_policy_id.as_deref(),
     );
     log_context.policy_tags = ext_authz_policy_tags;
-    let annotate = |response: &mut Response<Body>, outcome: &'static str| {
+    let annotate = |response: &mut Response<Body>,
+                    outcome: crate::http::dispatch::DispatchOutcome| {
         attach_log_context(response, &log_context);
         emit_audit_log(
             &state,
             AuditRecord {
-                kind: "forward",
+                kind: crate::http::dispatch::ProxyKind::Forward,
                 name: listener_name,
                 remote_ip: remote_addr.ip(),
                 host: Some(host.as_str()),
@@ -300,9 +307,9 @@ pub(super) async fn handle_h2_extended_connect(
             annotate(
                 &mut response,
                 if deny.local_response.is_some() {
-                    "ext_authz_local_response"
+                    crate::http::dispatch::DispatchOutcome::ExtAuthzLocalResponse
                 } else {
-                    "ext_authz_deny"
+                    crate::http::dispatch::DispatchOutcome::ExtAuthzDeny
                 },
             );
             return Ok(response);
@@ -319,7 +326,7 @@ pub(super) async fn handle_h2_extended_connect(
                 response_headers.as_deref(),
                 false,
             );
-            annotate(&mut response, "block");
+            annotate(&mut response, crate::http::dispatch::DispatchOutcome::Block);
             return Ok(response);
         }
         ActionKind::Respond => {
@@ -335,7 +342,10 @@ pub(super) async fn handle_h2_extended_connect(
                 response_headers.as_deref(),
                 false,
             );
-            annotate(&mut response, "respond");
+            annotate(
+                &mut response,
+                crate::http::dispatch::DispatchOutcome::Respond,
+            );
             return Ok(response);
         }
         ActionKind::Inspect => {
@@ -347,7 +357,7 @@ pub(super) async fn handle_h2_extended_connect(
                 response_headers.as_deref(),
                 false,
             );
-            annotate(&mut response, "block");
+            annotate(&mut response, crate::http::dispatch::DispatchOutcome::Block);
             return Ok(response);
         }
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {}
@@ -371,7 +381,10 @@ pub(super) async fn handle_h2_extended_connect(
                 response_headers.as_deref(),
                 false,
             );
-            annotate(&mut response, "concurrency_limited");
+            annotate(
+                &mut response,
+                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
+            );
             return Ok(response);
         }
     };
@@ -404,7 +417,7 @@ pub(super) async fn handle_h2_extended_connect(
                 response_headers.as_deref(),
                 false,
             );
-            annotate(&mut response, "error");
+            annotate(&mut response, crate::http::dispatch::DispatchOutcome::Error);
             return Ok(response);
         }
     };
@@ -427,7 +440,7 @@ pub(super) async fn handle_h2_extended_connect(
         if !interim.is_empty() {
             response.extensions_mut().insert(interim);
         }
-        annotate(&mut response, "allow");
+        annotate(&mut response, crate::http::dispatch::DispatchOutcome::Allow);
         return Ok(response);
     }
 
@@ -453,6 +466,6 @@ pub(super) async fn handle_h2_extended_connect(
     if !interim.is_empty() {
         response.extensions_mut().insert(interim);
     }
-    annotate(&mut response, "allow");
+    annotate(&mut response, crate::http::dispatch::DispatchOutcome::Allow);
     Ok(response)
 }

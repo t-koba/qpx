@@ -1,45 +1,17 @@
-use anyhow::Result;
-use cidr::IpCidr;
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use qpx_core::config::{
-    Config, DestinationConflictMode, DestinationEvidenceSourceKind, DestinationMergeMode,
+    DestinationConflictMode, DestinationEvidenceSourceKind, DestinationMergeMode,
     DestinationResolutionOverrideConfig, DestinationResolutionPolicyConfig, NamedSetKind,
 };
-use regex::Regex;
-use std::collections::HashSet;
-use std::fs;
 use std::net::IpAddr;
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct DestinationMetadata {
-    pub(crate) category: Option<String>,
-    pub(crate) category_source: Option<String>,
-    pub(crate) category_confidence: Option<u8>,
-    pub(crate) reputation: Option<String>,
-    pub(crate) reputation_source: Option<String>,
-    pub(crate) reputation_confidence: Option<u8>,
-    pub(crate) application: Option<String>,
-    pub(crate) application_source: Option<String>,
-    pub(crate) application_confidence: Option<u8>,
-    pub(crate) category_trace: Option<String>,
-    pub(crate) reputation_trace: Option<String>,
-    pub(crate) application_trace: Option<String>,
-}
+use super::compile::{DestinationClassifier, LabeledPatternSet};
+use super::{DestinationInputs, DestinationMetadata};
 
-impl DestinationMetadata {
-    pub(crate) fn decision_trace(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if let Some(trace) = self.category_trace.as_deref() {
-            parts.push(trace.to_string());
-        }
-        if let Some(trace) = self.reputation_trace.as_deref() {
-            parts.push(trace.to_string());
-        }
-        if let Some(trace) = self.application_trace.as_deref() {
-            parts.push(trace.to_string());
-        }
-        (!parts.is_empty()).then(|| parts.join(" | "))
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DestinationEvidenceKind {
+    Category,
+    Reputation,
+    Application,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,98 +35,7 @@ struct DestinationMinConfidence {
     application: Option<u8>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct DestinationInputs<'a> {
-    pub(crate) host: Option<&'a str>,
-    pub(crate) ip: Option<IpAddr>,
-    pub(crate) sni: Option<&'a str>,
-    pub(crate) scheme: Option<&'a str>,
-    pub(crate) port: Option<u16>,
-    pub(crate) alpn: Option<&'a str>,
-    pub(crate) ja3: Option<&'a str>,
-    pub(crate) ja4: Option<&'a str>,
-    pub(crate) cert_subject: Option<&'a str>,
-    pub(crate) cert_issuer: Option<&'a str>,
-    pub(crate) cert_san_dns: &'a [String],
-    pub(crate) cert_san_uri: &'a [String],
-    pub(crate) cert_fingerprint_sha256: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct DestinationClassifier {
-    category: Vec<LabeledPatternSet>,
-    reputation: Vec<LabeledPatternSet>,
-    application: Vec<LabeledPatternSet>,
-}
-
-#[derive(Debug, Clone)]
-struct LabeledPatternSet {
-    label: String,
-    kind: NamedSetKind,
-    patterns: PatternSet,
-}
-
-#[derive(Debug, Clone, Default)]
-struct PatternSet {
-    exact: HashSet<String>,
-    suffix: Vec<String>,
-    glob: Option<GlobSet>,
-    regex: Vec<Regex>,
-    cidr: Vec<IpCidr>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DestinationEvidenceKind {
-    Category,
-    Reputation,
-    Application,
-}
-
 impl DestinationClassifier {
-    pub(crate) fn from_config(config: &Config) -> Result<Self> {
-        let mut classifier = Self::default();
-        for set in &config.security.named_sets {
-            let Some((kind, label)) = parse_destination_set_name(set.name.as_str()) else {
-                continue;
-            };
-            if !matches!(
-                set.kind,
-                NamedSetKind::Cidr
-                    | NamedSetKind::Domain
-                    | NamedSetKind::String
-                    | NamedSetKind::Regex
-            ) {
-                continue;
-            }
-            let mut values = set.values.clone();
-            if let Some(path) = set.file.as_deref() {
-                let content = fs::read_to_string(path)?;
-                values.extend(
-                    content
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                        .map(str::to_string),
-                );
-            }
-            let patterns = PatternSet::compile(&values, &set.kind)?;
-            if patterns.is_empty() {
-                continue;
-            }
-            let entry = LabeledPatternSet {
-                label,
-                kind: set.kind.clone(),
-                patterns,
-            };
-            match kind {
-                DestinationSetKind::Category => classifier.category.push(entry),
-                DestinationSetKind::Reputation => classifier.reputation.push(entry),
-                DestinationSetKind::Application => classifier.application.push(entry),
-            }
-        }
-        Ok(classifier)
-    }
-
     pub(crate) fn classify(
         &self,
         inputs: &DestinationInputs<'_>,
@@ -239,126 +120,6 @@ impl DestinationClassifier {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DestinationSetKind {
-    Category,
-    Reputation,
-    Application,
-}
-
-fn parse_destination_set_name(name: &str) -> Option<(DestinationSetKind, String)> {
-    for (prefix, kind) in [
-        ("category:", DestinationSetKind::Category),
-        ("category/", DestinationSetKind::Category),
-        ("reputation:", DestinationSetKind::Reputation),
-        ("reputation/", DestinationSetKind::Reputation),
-        ("application:", DestinationSetKind::Application),
-        ("application/", DestinationSetKind::Application),
-    ] {
-        if let Some(label) = name.strip_prefix(prefix) {
-            let label = label.trim();
-            if !label.is_empty() {
-                return Some((kind, label.to_string()));
-            }
-        }
-    }
-    None
-}
-
-impl PatternSet {
-    fn compile(values: &[String], kind: &NamedSetKind) -> Result<Self> {
-        let mut exact = HashSet::new();
-        let mut suffix = Vec::new();
-        let mut glob_values = Vec::new();
-        let mut regex = Vec::new();
-        let mut cidr = Vec::new();
-
-        for value in values {
-            let value = value.trim();
-            if value.is_empty() {
-                continue;
-            }
-            match kind {
-                NamedSetKind::Regex => {
-                    regex.push(Regex::new(normalize_regex_pattern(value))?);
-                }
-                NamedSetKind::Cidr => {
-                    cidr.push(value.parse()?);
-                }
-                NamedSetKind::Domain => {
-                    let normalized = value.trim_end_matches('.').to_ascii_lowercase();
-                    if let Some(rest) = normalized.strip_prefix("*.")
-                        && !rest.is_empty()
-                        && is_exact_pattern(rest)
-                    {
-                        suffix.push(rest.to_string());
-                        continue;
-                    }
-                    if is_exact_pattern(normalized.as_str()) {
-                        exact.insert(normalized);
-                    } else if let Some(pattern) = extract_regex_pattern(normalized.as_str()) {
-                        regex.push(Regex::new(pattern)?);
-                    } else {
-                        glob_values.push(normalized);
-                    }
-                }
-                _ => {
-                    let normalized = value.to_ascii_lowercase();
-                    if let Some(pattern) = extract_regex_pattern(normalized.as_str()) {
-                        regex.push(Regex::new(pattern)?);
-                    } else if is_exact_pattern(normalized.as_str()) {
-                        exact.insert(normalized);
-                    } else {
-                        glob_values.push(normalized);
-                    }
-                }
-            }
-        }
-
-        Ok(Self {
-            exact,
-            suffix,
-            glob: build_globset(&glob_values)?,
-            regex,
-            cidr,
-        })
-    }
-
-    fn is_empty(&self) -> bool {
-        self.exact.is_empty()
-            && self.suffix.is_empty()
-            && self.glob.is_none()
-            && self.regex.is_empty()
-            && self.cidr.is_empty()
-    }
-
-    fn matches_text(&self, value: &str) -> bool {
-        if self.exact.contains(value) {
-            return true;
-        }
-        if self
-            .suffix
-            .iter()
-            .any(|suffix| host_matches_suffix(value, suffix.as_str()))
-        {
-            return true;
-        }
-        if self
-            .glob
-            .as_ref()
-            .map(|glob| glob.is_match(value))
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        self.regex.iter().any(|pattern| pattern.is_match(value))
-    }
-
-    fn matches_ip(&self, ip: &IpAddr) -> bool {
-        self.cidr.iter().any(|cidr| cidr.contains(ip))
-    }
-}
-
 fn collect_candidates(
     entries: &[LabeledPatternSet],
     evidence_kind: DestinationEvidenceKind,
@@ -433,7 +194,7 @@ impl LabeledPatternSet {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum DestinationEvidenceClass {
+pub(super) enum DestinationEvidenceClass {
     PolicyContext,
     Cert,
     Sni,
@@ -444,7 +205,7 @@ enum DestinationEvidenceClass {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DestinationCandidate {
+pub(super) struct DestinationCandidate {
     label: String,
     confidence: u8,
     source: DestinationEvidenceSource,
@@ -452,7 +213,7 @@ struct DestinationCandidate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DestinationEvidenceSource {
+pub(super) enum DestinationEvidenceSource {
     Host,
     Sni,
     Ip,
@@ -657,7 +418,10 @@ fn precedence_rank(
         .unwrap_or(policy.precedence.len())
 }
 
-fn score_for_source(kind: DestinationEvidenceKind, source: DestinationEvidenceSource) -> u8 {
+pub(super) fn score_for_source(
+    kind: DestinationEvidenceKind,
+    source: DestinationEvidenceSource,
+) -> u8 {
     match kind {
         DestinationEvidenceKind::Category | DestinationEvidenceKind::Reputation => match source {
             DestinationEvidenceSource::Host => 100,
@@ -695,7 +459,9 @@ fn normalized_text(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_ascii_lowercase())
 }
 
-fn domain_evidence(inputs: &DestinationInputs<'_>) -> Vec<(String, DestinationEvidenceSource)> {
+pub(super) fn domain_evidence(
+    inputs: &DestinationInputs<'_>,
+) -> Vec<(String, DestinationEvidenceSource)> {
     let mut out = Vec::new();
     if let Some(value) = inputs.host.and_then(normalized_text) {
         out.push((value, DestinationEvidenceSource::Host));
@@ -711,7 +477,7 @@ fn domain_evidence(inputs: &DestinationInputs<'_>) -> Vec<(String, DestinationEv
     out
 }
 
-fn string_evidence(
+pub(super) fn string_evidence(
     inputs: &DestinationInputs<'_>,
     evidence_kind: DestinationEvidenceKind,
 ) -> Vec<(String, DestinationEvidenceSource)> {
@@ -744,7 +510,7 @@ fn string_evidence(
     out
 }
 
-fn destination_ip(inputs: &DestinationInputs<'_>) -> Option<IpAddr> {
+pub(super) fn destination_ip(inputs: &DestinationInputs<'_>) -> Option<IpAddr> {
     inputs.ip.or_else(|| {
         inputs
             .host
@@ -824,18 +590,18 @@ fn format_resolution_trace(
     format!("{dimension}({selected}; {considered})")
 }
 
-fn normalize_regex_pattern(value: &str) -> &str {
+pub(super) fn normalize_regex_pattern(value: &str) -> &str {
     extract_regex_pattern(value).unwrap_or(value)
 }
 
-fn extract_regex_pattern(item: &str) -> Option<&str> {
+pub(super) fn extract_regex_pattern(item: &str) -> Option<&str> {
     item.strip_prefix("re:")
         .or_else(|| item.strip_prefix("regex:"))
         .map(str::trim)
         .filter(|pattern| !pattern.is_empty())
 }
 
-fn is_exact_pattern(item: &str) -> bool {
+pub(super) fn is_exact_pattern(item: &str) -> bool {
     !item.contains('*')
         && !item.contains('?')
         && !item.contains('[')
@@ -844,237 +610,10 @@ fn is_exact_pattern(item: &str) -> bool {
         && !item.contains('}')
 }
 
-fn host_matches_suffix(host: &str, suffix: &str) -> bool {
+pub(super) fn host_matches_suffix(host: &str, suffix: &str) -> bool {
     if host.len() <= suffix.len() || !host.ends_with(suffix) {
         return false;
     }
     let boundary = host.len() - suffix.len();
     host.as_bytes().get(boundary.wrapping_sub(1)).copied() == Some(b'.')
-}
-
-fn build_globset(items: &[String]) -> Result<Option<GlobSet>> {
-    if items.is_empty() {
-        return Ok(None);
-    }
-
-    let mut builder = GlobSetBuilder::new();
-    for item in items {
-        builder.add(Glob::new(item)?);
-    }
-    Ok(Some(builder.build()?))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use qpx_core::config::{Config, NamedSetConfig};
-    use std::net::{IpAddr, Ipv4Addr};
-
-    fn base_config() -> Config {
-        Config {
-            state_dir: None,
-            identity: Default::default(),
-            messages: Default::default(),
-            runtime: Default::default(),
-            telemetry: qpx_core::config::TelemetryConfig {
-                system_log: Default::default(),
-                access_log: Default::default(),
-                audit_log: Default::default(),
-                metrics: None,
-                otel: None,
-                exporter: None,
-            },
-            security: qpx_core::config::SecurityConfig {
-                auth: Default::default(),
-                identity_sources: Vec::new(),
-                decisions: qpx_core::config::DecisionConfig {
-                    ext_authz: Vec::new(),
-                },
-                destination: Default::default(),
-                named_sets: Vec::new(),
-                upstream_trust_profiles: Vec::new(),
-            },
-            http: qpx_core::config::HttpGlobalConfig::default(),
-            traffic: qpx_core::config::TrafficConfig::default(),
-            acme: None,
-            edges: Vec::new(),
-            upstreams: Vec::new(),
-            caches: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn classifier_uses_prefixed_named_sets_and_application_heuristics() {
-        let mut config = base_config();
-        config.security.named_sets = vec![
-            NamedSetConfig {
-                name: "category:ai".to_string(),
-                kind: NamedSetKind::Domain,
-                values: vec!["*.openai.com".to_string()],
-                file: None,
-            },
-            NamedSetConfig {
-                name: "reputation/high".to_string(),
-                kind: NamedSetKind::Regex,
-                values: vec![r"(^|\.)malware\.example$".to_string()],
-                file: None,
-            },
-            NamedSetConfig {
-                name: "application:slack".to_string(),
-                kind: NamedSetKind::String,
-                values: vec!["*.slack.com".to_string()],
-                file: None,
-            },
-        ];
-
-        let classifier = DestinationClassifier::from_config(&config).expect("classifier");
-        let policy = CompiledDestinationResolutionPolicy::default();
-        let openai = classifier.classify(
-            &DestinationInputs {
-                host: Some("api.openai.com"),
-                scheme: Some("https"),
-                port: Some(443),
-                ..Default::default()
-            },
-            &policy,
-        );
-        assert_eq!(openai.category.as_deref(), Some("ai"));
-        assert_eq!(openai.category_source.as_deref(), Some("host"));
-        assert_eq!(openai.category_confidence, Some(100));
-        assert_eq!(openai.application.as_deref(), Some("https"));
-        assert_eq!(openai.application_source.as_deref(), Some("heuristic"));
-        assert_eq!(openai.application_confidence, Some(40));
-
-        let malware = classifier.classify(
-            &DestinationInputs {
-                host: Some("malware.example"),
-                port: Some(443),
-                ..Default::default()
-            },
-            &policy,
-        );
-        assert_eq!(malware.reputation.as_deref(), Some("high"));
-        assert_eq!(malware.reputation_source.as_deref(), Some("host"));
-        assert_eq!(malware.reputation_confidence, Some(100));
-
-        let slack = classifier.classify(
-            &DestinationInputs {
-                host: Some("app.slack.com"),
-                port: Some(443),
-                alpn: Some("h2"),
-                ..Default::default()
-            },
-            &policy,
-        );
-        assert_eq!(slack.application.as_deref(), Some("slack"));
-        assert_eq!(slack.application_source.as_deref(), Some("host"));
-        assert_eq!(slack.application_confidence, Some(92));
-
-        let dns = classifier.classify(
-            &DestinationInputs {
-                port: Some(853),
-                ..Default::default()
-            },
-            &policy,
-        );
-        assert_eq!(dns.application.as_deref(), Some("dns"));
-        assert_eq!(dns.application_source.as_deref(), Some("heuristic"));
-        assert_eq!(dns.application_confidence, Some(40));
-    }
-
-    #[test]
-    fn classifier_uses_ip_sni_cert_and_fingerprint_precedence() {
-        let mut config = base_config();
-        config.security.named_sets = vec![
-            NamedSetConfig {
-                name: "category:corp".to_string(),
-                kind: NamedSetKind::String,
-                values: vec!["corp issuer".to_string()],
-                file: None,
-            },
-            NamedSetConfig {
-                name: "category:web".to_string(),
-                kind: NamedSetKind::Domain,
-                values: vec!["api.example.com".to_string()],
-                file: None,
-            },
-            NamedSetConfig {
-                name: "reputation:suspicious".to_string(),
-                kind: NamedSetKind::Cidr,
-                values: vec!["203.0.113.0/24".to_string()],
-                file: None,
-            },
-            NamedSetConfig {
-                name: "application:chrome".to_string(),
-                kind: NamedSetKind::String,
-                values: vec!["ja4-chrome".to_string()],
-                file: None,
-            },
-        ];
-        let classifier = DestinationClassifier::from_config(&config).expect("classifier");
-        let policy = CompiledDestinationResolutionPolicy::default();
-        let cert_san_dns = vec!["download.example.com".to_string()];
-        let destination = classifier.classify(
-            &DestinationInputs {
-                host: Some("api.example.com"),
-                ip: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
-                sni: Some("download.example.com"),
-                ja4: Some("ja4-chrome"),
-                cert_issuer: Some("Corp Issuer"),
-                cert_san_dns: cert_san_dns.as_slice(),
-                ..Default::default()
-            },
-            &policy,
-        );
-        assert_eq!(destination.category.as_deref(), Some("web"));
-        assert_eq!(destination.category_source.as_deref(), Some("host"));
-        assert_eq!(destination.category_confidence, Some(100));
-        assert_eq!(destination.reputation.as_deref(), Some("suspicious"));
-        assert_eq!(destination.reputation_source.as_deref(), Some("ip"));
-        assert_eq!(destination.reputation_confidence, Some(94));
-        assert_eq!(destination.application.as_deref(), Some("chrome"));
-        assert_eq!(destination.application_source.as_deref(), Some("ja4"));
-        assert_eq!(destination.application_confidence, Some(100));
-    }
-
-    #[test]
-    fn resolution_override_can_prefer_certificate_evidence() {
-        let mut config = base_config();
-        config.security.named_sets = vec![
-            NamedSetConfig {
-                name: "category:host".to_string(),
-                kind: NamedSetKind::Domain,
-                values: vec!["api.example.com".to_string()],
-                file: None,
-            },
-            NamedSetConfig {
-                name: "category:cert".to_string(),
-                kind: NamedSetKind::String,
-                values: vec!["corp issuer".to_string()],
-                file: None,
-            },
-        ];
-        let classifier = DestinationClassifier::from_config(&config).expect("classifier");
-        let override_policy = CompiledDestinationResolutionPolicy::default().with_override(Some(
-            &qpx_core::config::DestinationResolutionOverrideConfig {
-                precedence: Some(vec![
-                    qpx_core::config::DestinationEvidenceSourceKind::Cert,
-                    qpx_core::config::DestinationEvidenceSourceKind::Host,
-                ]),
-                conflict_mode: Some(qpx_core::config::DestinationConflictMode::PreferPrecedence),
-                merge_mode: None,
-                min_confidence: None,
-            },
-        ));
-        let destination = classifier.classify(
-            &DestinationInputs {
-                host: Some("api.example.com"),
-                cert_issuer: Some("Corp Issuer"),
-                ..Default::default()
-            },
-            &override_policy,
-        );
-        assert_eq!(destination.category.as_deref(), Some("cert"));
-        assert_eq!(destination.category_source.as_deref(), Some("cert_issuer"));
-    }
 }

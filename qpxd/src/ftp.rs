@@ -894,7 +894,7 @@ fn ftp_error(err: anyhow::Error) -> Response<Body> {
     Response::builder()
         .status(status)
         .body(Body::from(body))
-        .unwrap()
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 #[cfg(test)]

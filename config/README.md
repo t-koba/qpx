@@ -69,7 +69,7 @@ HTTP/3 backend selection is a build-time `qpxd` feature choice. YAML does not se
 ### 02-secure-egress (`config/usecases/02-secure-egress`)
 - `forward-upstream-chain.yaml`: forward proxy chained to upstream proxy.
 - `forward-local-auth-basic-digest.yaml`: optional built-in multi-user local auth (Basic/Digest) baseline for tests, local development, or small deployments; requires `qpxd` `auth-basic` / `auth-digest` features and shows both cleartext `password` and precomputed Digest `ha1`.
-- `forward-ldap-group-policy.yaml`: optional direct LDAP bind/group policy when `qpx` itself terminates the auth hop; requires `auth-ldap-rustls` or `auth-ldap-native` and includes `user_filter`, `group_filter`, and `group_attr` overrides for non-default directory schemas.
+- `forward-ldap-group-policy.yaml`: optional direct LDAP bind/group policy when `qpx` itself terminates the auth hop; requires `auth-ldap` and includes `user_filter`, `group_filter`, and `group_attr` overrides for non-default directory schemas.
 - `forward-trusted-identity-ext-authz.yaml`: trusted identity ingestion + external authz policy callout.
 - `forward-signed-assertion-policy.yaml`: locally verified signed identity assertions (`signed_assertion`) + external authz, including `user_from_sub`.
 - `forward-tls-inspection-selective.yaml`: selective TLS inspection/tunnel/block.
@@ -168,14 +168,16 @@ Use these only through `include` composition samples.
 
 ## Validation
 
-`qpxd` and `qpxf` use different config schemas. The default sample check validates all `tls-rustls` samples plus the repo-local `qpxf` examples. `*-native-*` samples are for manual `tls-native` validation.
+`qpxd` and `qpxf` use different config schemas. The default sample check validates all `tls-rustls` samples plus the repo-local `qpxf` examples. On Linux CI it also builds a `tls-native` `qpxd` and validates the `*-native-*` PKCS#12 sample with a generated test identity. On Darwin, that runtime PKCS#12 check is skipped because `native-tls` uses the platform identity importer.
 
 ```bash
 cargo build -p qpxd -p qpxf --locked
 ./scripts/check-config-samples.sh
+./scripts/audit-config-usecases.sh
+./scripts/audit-config-behavior.sh
 ```
 
-Manual check for the `tls-native` PKCS#12 sample:
+Manual check for the `tls-native` PKCS#12 sample on platforms where the generated identity format is not accepted by the native importer:
 
 ```bash
 export QPX_TLS_PKCS12=/path/to/server.p12

@@ -26,22 +26,18 @@ use crate::http::l7::{
 };
 use crate::http::local_response::build_local_response;
 use crate::http::preflight::{PreflightOptions, PreflightOutcome, preflight_validate};
-use crate::http::response_policy::{
-    ListenerResponsePolicyDecision, ResponseBodyObservationLimits, apply_listener_response_policy,
-};
+use crate::http::response_policy::ResponseBodyObservationLimits;
 use crate::http::websocket::is_websocket_upgrade;
+#[cfg(feature = "auth-basic")]
+use crate::policy_context::{AuditRecord, attach_log_context, emit_audit_log};
 use crate::policy_context::{
-    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
-    apply_ext_authz_action_overrides, attach_log_context, emit_audit_log, enforce_ext_authz,
-    merge_header_controls, merge_policy_tags, resolve_identity, sanitize_headers_for_policy,
-    strip_untrusted_identity_headers, validate_ext_authz_allow_mode,
+    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, apply_ext_authz_action_overrides,
+    enforce_ext_authz, merge_header_controls, strip_untrusted_identity_headers,
+    validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
-use crate::upstream::http1::{
-    WebsocketProxyConfig, proxy_http1_request, proxy_http1_request_with_interim,
-    proxy_websocket_http1,
-};
+use crate::upstream::http1::{proxy_http1_request, proxy_http1_request_with_interim};
 use anyhow::{Result, anyhow};
 use hyper::{Method, Request, Response, StatusCode};
 use qpx_core::config::ActionKind;
@@ -85,7 +81,10 @@ pub(crate) async fn handle_request_inner(
     );
     let interim = Vec::new();
     let mut response =
-        dispatch_forward_request(req, base, runtime, listener_name, remote_addr).await?;
+        match dispatch_forward_request(req, base, runtime, listener_name, remote_addr).await {
+            Ok(response) => response,
+            Err(err) => err.into_response_result()?,
+        };
     attach_interim_response_heads(&mut response, interim);
     Ok(response)
 }
@@ -99,7 +98,9 @@ pub(crate) fn proxy_auth_required(
     for header in chal.header_values {
         builder = builder.header("Proxy-Authenticate", header);
     }
-    builder.body(Body::from(message.to_owned())).unwrap()
+    builder
+        .body(Body::from(message.to_owned()))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 pub(crate) fn resolve_upstream(

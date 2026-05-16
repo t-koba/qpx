@@ -25,7 +25,7 @@ qpx supports two TLS backends, selectable at build time:
 - `tls-rustls` (default backend): required for HTTP/3 (`http3`) and TLS inspection (`mitm`).
 - `tls-native`: uses `native-tls`/`tokio-native-tls` (HTTP/3 and TLS inspection are unavailable).
 
-`qpxd` default features are `tls-rustls`, `http3-backend-h3`, `mitm`, `acme`, `auth-digest`, and `auth-ldap-rustls`, which includes local Basic/Digest auth and LDAP-over-rustls support. Use `--no-default-features` with `auth-basic`, `auth-digest`, `auth-ldap-rustls`, or `auth-ldap-native` when you need a smaller or native-TLS-specific authentication build. TLS backend selection does not enable LDAP by itself outside the default feature set. `http3` is an internal umbrella feature that must be activated by exactly one backend selector: `http3-backend-h3` (default) or `http3-backend-qpx`. `acme` is isolated in `qpx-acme`, can be disabled independently, and still requires `tls-rustls` when enabled.
+`qpxd` default features are `tls-rustls`, `http3-backend-h3`, `mitm`, `acme`, `auth-digest`, and `auth-ldap`, which includes local Basic/Digest auth and LDAP TLS support. Use `--no-default-features` with `auth-basic`, `auth-digest`, or `auth-ldap` when you need a smaller authentication build. TLS backend selection does not enable LDAP by itself outside the default feature set. `http3` is an internal umbrella feature activated by `http3-backend-h3` (default) or `http3-backend-qpx`; when both are enabled by aggregate builds, the QPX backend is the active backend. `acme` is isolated in `qpx-acme`, can be disabled independently, and still requires `tls-rustls` when enabled.
 
 Choose the HTTP/3 backend by required behavior, not by listener YAML. Backend choice is build-time only.
 
@@ -536,6 +536,14 @@ Notes:
 - `scripts/e2e-control-plane.sh` exercises the Unix `qpxd upgrade --pid <parent-pid>` handoff path end-to-end on CI Linux.
 - `scripts/e2e-control-plane.ps1` exercises the Windows `qpxd upgrade --pid <parent-pid>` handoff path end-to-end on CI.
 - `scripts/e2e-control-plane-soak.sh` verifies that live loopback traffic survives reload/restart/upgrade sequencing without failed requests.
+
+### Code Quality And Safety
+
+qpx treats parser, TLS sniffing, shared-memory capture, and policy matching code
+as security-sensitive components. CI gates formatting, typos, sensitive artifact
+checks, documentation warnings, unused dependency checks, sample configuration
+validation, e2e tests, multi-platform builds, feature-matrix clippy, RustSec
+audit, CodeQL, AddressSanitizer smoke tests, and fuzz smoke tests.
 
 ### Continuous Security QA
 

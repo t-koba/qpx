@@ -7,9 +7,6 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 
-#[cfg(all(feature = "tls-rustls", feature = "tls-native"))]
-compile_error!("qpxc: features tls-rustls and tls-native are mutually exclusive");
-
 #[cfg(feature = "tls-rustls")]
 use qpx_core::tls::{build_client_config, load_cert_chain, load_private_key};
 #[cfg(feature = "tls-rustls")]

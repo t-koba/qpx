@@ -458,7 +458,9 @@ mod imp {
         fn new(ca: CaStore) -> Self {
             Self {
                 ca,
-                cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
+                cache: Arc::new(Mutex::new(LruCache::new(
+                    NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),
+                ))),
             }
         }
 

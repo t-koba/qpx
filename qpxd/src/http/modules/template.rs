@@ -1,4 +1,5 @@
-use super::{HttpModuleContext, HttpModuleRequestView, parse_header_name};
+use super::headers::parse_header_name;
+use super::{HttpModuleContext, HttpModuleRequestView};
 use anyhow::{Context, Result, anyhow};
 use http::{HeaderName, HeaderValue};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -152,15 +153,15 @@ fn parse_template_placeholder(placeholder: &str) -> Result<(TemplateVariable, Te
         "identity.user" => TemplateVariable::IdentityUser,
         "response.status" => TemplateVariable::ResponseStatus,
         _ if variable.starts_with("request.header.") => {
-            let name = variable
-                .strip_prefix("request.header.")
-                .expect("prefix checked");
+            let Some(name) = variable.strip_prefix("request.header.") else {
+                return Err(anyhow!("request.header placeholder prefix mismatch"));
+            };
             TemplateVariable::RequestHeader(parse_header_name(name)?)
         }
         _ if variable.starts_with("request.query.") => {
-            let name = variable
-                .strip_prefix("request.query.")
-                .expect("prefix checked");
+            let Some(name) = variable.strip_prefix("request.query.") else {
+                return Err(anyhow!("request.query placeholder prefix mismatch"));
+            };
             if name.is_empty() {
                 return Err(anyhow!("request.query placeholder key must not be empty"));
             }

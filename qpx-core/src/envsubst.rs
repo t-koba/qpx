@@ -15,7 +15,10 @@ fn expand_env_with(input: &str, mut lookup: impl FnMut(&str) -> Option<String>) 
             .get(0)
             .ok_or_else(|| anyhow!("envsubst capture error"))?;
         out.push_str(&input[last..m.start()]);
-        let key = caps.get(1).unwrap().as_str();
+        let key = caps
+            .get(1)
+            .ok_or_else(|| anyhow!("envsubst variable capture missing"))?
+            .as_str();
         let default = caps.get(2).map(|m| m.as_str());
         let value = match lookup(key) {
             Some(v) => v,

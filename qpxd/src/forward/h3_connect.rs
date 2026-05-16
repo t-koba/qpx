@@ -12,6 +12,9 @@ use crate::http::common::{
     forbidden_response as forbidden, http_version_label,
     too_many_requests_response as too_many_requests,
 };
+use crate::http::dispatch::{
+    DispatchConnectRuleContextInput, DispatchOutcome, build_dispatch_connect_rule_context,
+};
 use crate::http::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::http::local_response::build_local_response;
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
@@ -30,7 +33,7 @@ use crate::upstream::connect::connect_tunnel_target;
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::{ActionConfig, ActionKind, ConnectUdpConfig};
-use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
+use qpx_core::rules::CompiledHeaderControl;
 use qpx_observability::access_log::RequestLogContext;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -95,7 +98,7 @@ pub(super) struct H3PolicyResponseContext<'a> {
     pub(super) conn: &'a H3ConnInfo,
     pub(super) host: &'a str,
     pub(super) path: Option<&'a str>,
-    pub(super) outcome: &'static str,
+    pub(super) outcome: DispatchOutcome,
     pub(super) matched_rule: Option<&'a str>,
     pub(super) ext_authz_policy_id: Option<&'a str>,
     pub(super) log_context: &'a RequestLogContext,
@@ -148,7 +151,7 @@ pub(super) async fn send_h3_policy_response(
     emit_audit_log(
         state,
         AuditRecord {
-            kind: "forward",
+            kind: crate::http::dispatch::ProxyKind::Forward,
             name: listener_name,
             remote_ip: conn.remote_addr.ip(),
             host: Some(host),

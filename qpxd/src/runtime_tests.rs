@@ -384,6 +384,7 @@ fn export_session_for_plan_is_absent_without_capture_flags() {
     let plan = ExecutionPlan {
         flags: PlanFlags::empty(),
         capture: Default::default(),
+        local_response: None,
         modules: std::sync::Arc::new(crate::http::modules::CompiledHttpModuleChain::default()),
         cache: None,
         response_rules: None,

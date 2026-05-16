@@ -4,6 +4,7 @@ use super::{
 };
 use crate::cache::{CacheRequestKey, purge_cache_key};
 use crate::http::body::Body;
+use crate::http::dispatch::ProxyKind;
 use crate::runtime::RuntimeState;
 use crate::upstream::origin::{OriginEndpoint, proxy_http};
 use anyhow::{Context, Result, anyhow};
@@ -16,16 +17,16 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use tracing::warn;
 
-pub(crate) struct HttpModuleSessionInit {
-    pub(crate) proxy_kind: &'static str,
-    pub(crate) proxy_name: String,
-    pub(crate) scope_name: String,
-    pub(crate) route_name: Option<String>,
+pub(crate) struct HttpModuleSessionInit<'a> {
+    pub(crate) proxy_kind: ProxyKind,
+    pub(crate) proxy_name: &'a str,
+    pub(crate) scope_name: &'a str,
+    pub(crate) route_name: Option<&'a str>,
     pub(crate) remote_ip: IpAddr,
-    pub(crate) sni: Option<String>,
-    pub(crate) identity_user: Option<String>,
+    pub(crate) sni: Option<&'a str>,
+    pub(crate) identity_user: Option<&'a str>,
     pub(crate) cache_policy: Option<CachePolicyConfig>,
-    pub(crate) cache_default_scheme: Option<String>,
+    pub(crate) cache_default_scheme: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -181,7 +182,7 @@ impl<'a> HttpModuleRequestView<'a> {
 
 #[derive(Debug)]
 struct HttpModuleSession {
-    proxy_kind: &'static str,
+    proxy_kind: ProxyKind,
     proxy_name: String,
     scope_name: String,
     route_name: Option<String>,
@@ -197,19 +198,19 @@ struct HttpModuleSession {
 }
 
 impl HttpModuleSession {
-    fn new(init: HttpModuleSessionInit) -> Self {
+    fn new(init: HttpModuleSessionInit<'_>) -> Self {
         Self {
             proxy_kind: init.proxy_kind,
-            proxy_name: init.proxy_name,
-            scope_name: init.scope_name,
-            route_name: init.route_name,
+            proxy_name: init.proxy_name.to_string(),
+            scope_name: init.scope_name.to_string(),
+            route_name: init.route_name.map(str::to_string),
             remote_ip: init.remote_ip,
-            sni: init.sni,
-            identity_user: init.identity_user,
+            sni: init.sni.map(str::to_string),
+            identity_user: init.identity_user.map(str::to_string),
             request: None,
             response_status: None,
             cache_policy: init.cache_policy,
-            cache_default_scheme: init.cache_default_scheme,
+            cache_default_scheme: init.cache_default_scheme.map(str::to_string),
             pending_response_headers: Vec::new(),
             extensions: Extensions::new(),
         }
@@ -222,7 +223,7 @@ pub struct HttpModuleContext {
 }
 
 impl HttpModuleContext {
-    pub(super) fn new(runtime: Arc<RuntimeState>, init: HttpModuleSessionInit) -> Self {
+    pub(super) fn new(runtime: Arc<RuntimeState>, init: HttpModuleSessionInit<'_>) -> Self {
         Self {
             runtime,
             session: HttpModuleSession::new(init),
@@ -262,7 +263,7 @@ impl HttpModuleContext {
     }
 
     pub fn proxy_kind(&self) -> &'static str {
-        self.session.proxy_kind
+        self.session.proxy_kind.as_str()
     }
 
     pub fn proxy_name(&self) -> &str {

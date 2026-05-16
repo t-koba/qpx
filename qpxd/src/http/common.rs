@@ -12,28 +12,28 @@ pub fn blocked_response(message: &str) -> Response<Body> {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
         .body(Body::from(message.to_owned()))
-        .expect("static response")
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 pub fn forbidden_response(message: &str) -> Response<Body> {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
         .body(Body::from(message.to_owned()))
-        .expect("static response")
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 pub fn bad_request_response(message: impl Into<String>) -> Response<Body> {
     Response::builder()
         .status(StatusCode::BAD_REQUEST)
         .body(Body::from(message.into()))
-        .expect("static response")
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 pub fn connect_established_response() -> Response<Body> {
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .body(Body::empty())
-        .expect("static response");
+        .unwrap_or_else(|_| Response::new(Body::empty()));
     crate::http::semantics::strip_message_body_headers(response.headers_mut());
     response
 }
@@ -48,7 +48,7 @@ pub fn too_many_requests_response(retry_after: Option<Duration>) -> Response<Bod
     }
     builder
         .body(Body::from("too many requests"))
-        .expect("static response")
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 pub fn http_version_label(version: http::Version) -> &'static str {

@@ -119,9 +119,9 @@ impl SecurityRuntime {
 
         #[cfg(feature = "mitm")]
         let (ca, mitm) = if any_tls_inspection_enabled(config.operational.ingress_edges()) {
-            let ca = Some(load_or_generate_ca(&state_dir)?);
-            let mitm = Some(ca.as_ref().expect("ca").mitm_config()?);
-            (ca, mitm)
+            let ca = load_or_generate_ca(&state_dir)?;
+            let mitm = Some(ca.mitm_config()?);
+            (Some(ca), mitm)
         } else {
             (None, None)
         };

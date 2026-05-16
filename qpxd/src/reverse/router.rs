@@ -6,7 +6,7 @@ use crate::http::body::Body;
 use crate::http::modules::HttpModuleRegistry;
 use crate::http::response_policy::HttpResponseRuleEngine;
 use crate::runtime::{CompiledReverseEdge, CompiledReverseRouteTarget, ExecutionPlan};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
 use hyper::Request;
 use metrics::gauge;
@@ -244,7 +244,7 @@ impl ReverseRouter {
             let compiled_route = compiled_edge
                 .routes
                 .get(idx)
-                .expect("route count checked above");
+                .ok_or_else(|| anyhow!("compiled reverse route missing at index {}", idx))?;
             let expected_id = route
                 .name
                 .as_deref()
@@ -299,10 +299,13 @@ impl ReverseRouter {
             let mut tls_routes = Vec::with_capacity(config.tls_passthrough_routes.len());
             let mut tls_hints = Vec::with_capacity(config.tls_passthrough_routes.len());
             for (idx, route) in config.tls_passthrough_routes.into_iter().enumerate() {
-                let compiled_route = compiled_edge
-                    .tls_passthrough_routes
-                    .get(idx)
-                    .expect("TLS passthrough route count checked above");
+                let compiled_route =
+                    compiled_edge
+                        .tls_passthrough_routes
+                        .get(idx)
+                        .ok_or_else(|| {
+                            anyhow!("compiled TLS passthrough route missing at index {}", idx)
+                        })?;
                 if compiled_route.target.kind() != "tls_passthrough" {
                     anyhow::bail!(
                         "reverse {} TLS passthrough target kind mismatch at index {}: plan={}",

@@ -36,18 +36,14 @@ mod connect_udp_upstream;
     not(feature = "http3-backend-qpx")
 ))]
 pub(crate) mod h3;
-#[cfg(all(
-    feature = "http3",
-    feature = "http3-backend-qpx",
-    not(feature = "http3-backend-h3")
-))]
+#[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
 #[path = "h3_qpx.rs"]
 pub(crate) mod h3;
 #[cfg(all(
     feature = "http3",
     not(any(
         all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")),
-        all(feature = "http3-backend-qpx", not(feature = "http3-backend-h3"))
+        feature = "http3-backend-qpx"
     ))
 ))]
 #[path = "h3_invalid.rs"]
@@ -153,10 +149,9 @@ async fn run_forward_acceptor(
             }
             permit = semaphore.clone().acquire_owned() => Some(permit?),
         };
-        if permit.is_none() {
+        let Some(permit) = permit else {
             break;
-        }
-        let permit = permit.expect("checked permit");
+        };
         let accepted = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -173,10 +168,9 @@ async fn run_forward_acceptor(
                 }
             }
         };
-        if accepted.is_none() {
+        let Some((stream, remote_addr)) = accepted else {
             break;
-        }
-        let (stream, remote_addr) = accepted.expect("checked accept");
+        };
         let _ = stream.set_nodelay(true);
         let local_port = match stream.local_addr() {
             Ok(addr) => addr.port(),
@@ -259,7 +253,7 @@ async fn run_forward_acceptor(
                 service,
                 effective_remote_addr,
                 AccessLogContext {
-                    kind: "forward",
+                    kind: crate::http::dispatch::ProxyKind::Forward.as_str(),
                     name: access_name,
                 },
                 &access_cfg,
@@ -307,7 +301,7 @@ async fn handle_request(
                 Response::builder()
                     .status(StatusCode::BAD_GATEWAY)
                     .body(Body::from(state.messages.proxy_error.clone()))
-                    .unwrap(),
+                    .unwrap_or_else(|_| Response::new(Body::empty())),
                 false,
             ))
         }

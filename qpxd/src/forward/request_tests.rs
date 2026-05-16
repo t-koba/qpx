@@ -1,6 +1,7 @@
 use super::*;
 use crate::http::body::to_bytes;
 use crate::runtime::Runtime;
+use crate::test_util::{decode_gzip, spawn_static_http_server};
 use qpx_core::config::{
     AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config, ExtAuthzConfig,
     ExtAuthzSendConfig, HttpModuleConfig, HttpPolicyConfig, HttpResponseEffectsConfig,
@@ -9,7 +10,6 @@ use qpx_core::config::{
     RuleConfig, RuntimeConfig, SystemLogConfig,
 };
 use std::collections::HashMap;
-use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -275,77 +275,6 @@ async fn spawn_ext_authz_server(response_body: &str) -> SocketAddr {
     addr
 }
 
-async fn spawn_static_http_server(
-    status_line: &'static str,
-    headers: Vec<(&'static str, String)>,
-    body: String,
-    accepts: usize,
-) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind static http server");
-    let addr = listener.local_addr().expect("server addr");
-    tokio::spawn(async move {
-        for _ in 0..accepts {
-            let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 1024];
-            loop {
-                let n = stream.read(&mut buf).await.expect("read request");
-                if n == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buf[..n]);
-                if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            if let Some(header_end) = raw
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .map(|idx| idx + 4)
-            {
-                let headers = String::from_utf8_lossy(&raw[..header_end]);
-                let content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.split_once(':').and_then(|(name, value)| {
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().ok())
-                                .flatten()
-                        })
-                    })
-                    .unwrap_or(0);
-                let mut received_body = raw.len().saturating_sub(header_end);
-                while received_body < content_length {
-                    let n = stream.read(&mut buf).await.expect("read request body");
-                    if n == 0 {
-                        break;
-                    }
-                    received_body = received_body.saturating_add(n);
-                }
-            }
-            let mut response = format!(
-                "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n",
-                body.len()
-            );
-            for (name, value) in &headers {
-                response.push_str(name);
-                response.push_str(": ");
-                response.push_str(value);
-                response.push_str("\r\n");
-            }
-            response.push_str("\r\n");
-            response.push_str(body.as_str());
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .expect("write response");
-        }
-    });
-    addr
-}
-
 #[tokio::test]
 async fn forward_response_rule_matches_request_derived_rpc_fields() {
     let upstream_addr = spawn_static_http_server(
@@ -600,13 +529,6 @@ fn grpc_test_frame(payload: &[u8]) -> Vec<u8> {
     out.push(0);
     out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     out.extend_from_slice(payload);
-    out
-}
-
-fn decode_gzip(bytes: &[u8]) -> String {
-    let mut decoder = flate2::read::GzDecoder::new(bytes);
-    let mut out = String::new();
-    decoder.read_to_string(&mut out).expect("decode gzip");
     out
 }
 

@@ -4,6 +4,7 @@ use crate::destination::DestinationMetadata;
 use crate::http::base_fields::BaseRequestFields;
 use crate::http::body::to_bytes;
 use crate::runtime::Runtime;
+use crate::test_util::{decode_gzip, spawn_static_http_server};
 use crate::tls::UpstreamCertificateInfo;
 use http::header::CONTENT_LENGTH;
 use qpx_core::config::{
@@ -19,7 +20,6 @@ use qpx_core::config::{
 use rcgen::generate_simple_self_signed;
 use regex::Regex;
 use std::collections::HashMap;
-use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc as StdArc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -102,57 +102,6 @@ async fn spawn_ext_authz_server(response_body: String, accepts: usize) -> Socket
         }
     });
     addr
-}
-
-async fn spawn_static_http_server(
-    status_line: &'static str,
-    headers: Vec<(&'static str, String)>,
-    body: String,
-    accepts: usize,
-) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        for _ in 0..accepts {
-            let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 1024];
-            loop {
-                let n = stream.read(&mut buf).await.expect("read request");
-                if n == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buf[..n]);
-                if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let mut response = format!(
-                "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n",
-                body.len()
-            );
-            for (name, value) in &headers {
-                response.push_str(name);
-                response.push_str(": ");
-                response.push_str(value);
-                response.push_str("\r\n");
-            }
-            response.push_str("\r\n");
-            response.push_str(body.as_str());
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .expect("write response");
-        }
-    });
-    addr
-}
-
-fn decode_gzip(bytes: &[u8]) -> String {
-    let mut decoder = flate2::read::GzDecoder::new(bytes);
-    let mut out = String::new();
-    decoder.read_to_string(&mut out).expect("decode gzip");
-    out
 }
 
 fn build_router(response_rules: Vec<HttpResponseRuleConfig>) -> ReverseRouter {

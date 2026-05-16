@@ -15,21 +15,16 @@ use crate::http::l7::{
 };
 use crate::http::policy::{ListenerPolicyDecision, evaluate_listener_policy};
 use crate::http::preflight::{PreflightOptions, PreflightOutcome, preflight_validate};
-use crate::http::response_policy::{
-    ListenerResponsePolicyDecision, ResponseBodyObservationLimits, apply_listener_response_policy,
-};
+use crate::http::response_policy::ResponseBodyObservationLimits;
 use crate::http::websocket::is_websocket_upgrade;
 use crate::policy_context::{
-    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
-    apply_ext_authz_action_overrides, attach_log_context, emit_audit_log, enforce_ext_authz,
-    merge_header_controls, merge_policy_tags, resolve_identity, sanitize_headers_for_policy,
-    strip_untrusted_identity_headers, validate_ext_authz_allow_mode,
+    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, apply_ext_authz_action_overrides,
+    enforce_ext_authz, merge_header_controls, strip_untrusted_identity_headers,
+    validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
-use crate::upstream::http1::{
-    WebsocketProxyConfig, proxy_http1_request_with_interim, proxy_websocket_http1,
-};
+use crate::upstream::http1::proxy_http1_request_with_interim;
 use anyhow::{Context, Result, anyhow};
 use hyper::{Request, StatusCode};
 use qpx_core::prefilter::MatchPrefilterContext;
@@ -102,7 +97,7 @@ where
         service,
         remote_addr,
         AccessLogContext {
-            kind: "transparent",
+            kind: crate::http::dispatch::ProxyKind::Transparent.as_str(),
             name: access_name,
         },
         &access_cfg,

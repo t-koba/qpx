@@ -114,12 +114,12 @@ impl CaptureEvent {
 
         let plane = plane_from_u8(buf[5])?;
         let direction = direction_from_u8(buf[6])?;
-        let timestamp_unix_nanos = u64::from_le_bytes(buf[8..16].try_into().expect("ts bytes"));
+        let timestamp_unix_nanos = u64::from_le_bytes(read_array::<8>(&buf, 8)?);
 
-        let session_len = u32::from_le_bytes(buf[16..20].try_into().expect("session_len")) as usize;
-        let client_len = u32::from_le_bytes(buf[20..24].try_into().expect("client_len")) as usize;
-        let server_len = u32::from_le_bytes(buf[24..28].try_into().expect("server_len")) as usize;
-        let payload_len = u32::from_le_bytes(buf[28..32].try_into().expect("payload_len")) as usize;
+        let session_len = u32::from_le_bytes(read_array::<4>(&buf, 16)?) as usize;
+        let client_len = u32::from_le_bytes(read_array::<4>(&buf, 20)?) as usize;
+        let server_len = u32::from_le_bytes(read_array::<4>(&buf, 24)?) as usize;
+        let payload_len = u32::from_le_bytes(read_array::<4>(&buf, 28)?) as usize;
 
         let total_len =
             CAPTURE_WIRE_HEADER_LEN + session_len + client_len + server_len + payload_len;
@@ -161,6 +161,18 @@ impl CaptureEvent {
             payload: buf.slice(payload_start..payload_end),
         })
     }
+}
+
+fn read_array<const N: usize>(buf: &Bytes, offset: usize) -> Result<[u8; N]> {
+    let end = offset
+        .checked_add(N)
+        .ok_or_else(|| anyhow!("capture event field offset overflow"))?;
+    let bytes = buf
+        .get(offset..end)
+        .ok_or_else(|| anyhow!("capture event fixed field truncated"))?;
+    let mut out = [0u8; N];
+    out.copy_from_slice(bytes);
+    Ok(out)
 }
 
 fn plane_to_u8(plane: &CapturePlane) -> u8 {

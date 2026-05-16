@@ -5,14 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["ldap-auth-rustls", "digest-auth"]
+default = ["ldap-auth", "digest-auth"]
 
 auth-core = ["dep:base64", "dep:ring"]
 basic-auth = ["auth-core"]
 digest-auth = ["auth-core", "dep:sha2"]
-ldap-auth = ["basic-auth", "dep:ldap3", "dep:tokio"]
-ldap-auth-rustls = ["ldap-auth", "ldap3/tls-rustls-ring"]
-ldap-auth-native = ["ldap-auth", "ldap3/tls-native"]
+ldap-auth = ["basic-auth", "dep:ldap3", "dep:tokio", "ldap3/tls-rustls-ring"]
 
 [dependencies]
 qpx-core = { path = "../qpx-core", default-features = false }

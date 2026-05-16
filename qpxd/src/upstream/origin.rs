@@ -16,7 +16,7 @@ pub(crate) use dns::discover_origin_endpoints;
     feature = "http3",
     any(
         all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")),
-        all(feature = "http3-backend-qpx", not(feature = "http3-backend-h3"))
+        feature = "http3-backend-qpx"
     )
 ))]
 pub(crate) use dns::resolve_upstream_socket_addr;

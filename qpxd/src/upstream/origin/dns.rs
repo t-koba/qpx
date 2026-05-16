@@ -199,7 +199,7 @@ async fn query_raw_dns(name: &str, qtype: u16, nameservers: &[SocketAddr]) -> Re
     request.extend_from_slice(&qtype.to_be_bytes());
     request.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
 
-    let bind_addr: SocketAddr = "0.0.0.0:0".parse().expect("socket addr");
+    let bind_addr = SocketAddr::from(([0, 0, 0, 0], 0));
     let socket = UdpSocket::bind(bind_addr).await?;
     let mut buf = [0u8; 2048];
     for nameserver in nameservers {

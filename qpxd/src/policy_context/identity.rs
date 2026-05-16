@@ -4,17 +4,12 @@ use anyhow::{Result, anyhow};
 use http::header::HeaderName;
 use hyper::HeaderMap;
 use qpx_core::config::{
-    AssertionClaimsMapConfig, IdentitySourceConfig, IdentitySourceHeadersConfig,
-    IdentitySourceKind, MtlsIdentityMapConfig, PolicyContextConfig, SignedAssertionConfig,
+    IdentitySourceConfig, IdentitySourceHeadersConfig, IdentitySourceKind, MtlsIdentityMapConfig,
+    PolicyContextConfig,
 };
 use qpx_observability::access_log::RequestLogContext;
-use ring::signature;
-use serde::Deserialize;
-use serde_json::Value as JsonValue;
-use sha2::{Sha256, Sha384, Sha512};
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::Arc;
 
 #[cfg(feature = "tls-rustls")]
 use x509_parser::certificate::X509Certificate;
@@ -23,11 +18,10 @@ use x509_parser::extensions::GeneralName;
 #[cfg(feature = "tls-rustls")]
 use x509_parser::prelude::FromDer;
 
+use super::signed_assertion::CompiledSignedAssertion;
 use super::util::{
-    compile_optional_header_name, decode_jwt_segment, extend_unique, extract_assertion_token,
-    extract_first_header, extract_list_header, json_list_claim, json_string_claim,
-    load_hmac_secret_from_env, load_public_key_from_env, merge_identity_source_labels,
-    peer_matches, validate_registered_claims, verify_hmac_signature, verify_public_key_signature,
+    compile_optional_header_name, extend_unique, extract_first_header, extract_list_header,
+    merge_identity_source_labels, peer_matches,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -176,50 +170,6 @@ struct CompiledMtlsIdentityMap {
     idp: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct CompiledSignedAssertion {
-    name: String,
-    header: HeaderName,
-    prefix: Option<String>,
-    algorithms: Vec<JwtAlgorithm>,
-    issuer: Option<String>,
-    audience: Option<String>,
-    hmac_secret: Option<Arc<[u8]>>,
-    public_key: Option<Arc<[u8]>>,
-    claims: CompiledAssertionClaims,
-    strip_from_untrusted: bool,
-}
-
-#[derive(Debug, Clone)]
-struct CompiledAssertionClaims {
-    user: Option<String>,
-    groups: Option<String>,
-    device_id: Option<String>,
-    posture: Option<String>,
-    tenant: Option<String>,
-    auth_strength: Option<String>,
-    idp: Option<String>,
-    user_from_sub: bool,
-    groups_separator: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JwtAlgorithm {
-    Hs256,
-    Hs384,
-    Hs512,
-    Rs256,
-    Rs384,
-    Rs512,
-    Es256,
-    Es384,
-}
-
-#[derive(Debug, Deserialize)]
-struct JwtHeader {
-    alg: String,
-}
-
 impl CompiledIdentitySource {
     pub(crate) fn from_config(config: &IdentitySourceConfig) -> Result<Self> {
         let kind = match config.kind {
@@ -310,265 +260,13 @@ impl CompiledMtlsIdentityMap {
     }
 }
 
-impl CompiledSignedAssertion {
-    fn from_config(
-        name: &str,
-        config: &SignedAssertionConfig,
-        strip_from_untrusted: bool,
-    ) -> Result<Self> {
-        let header = HeaderName::from_bytes(config.header.as_bytes())?;
-        let hmac_secret = config
-            .secret_env
-            .as_deref()
-            .filter(|env| !env.trim().is_empty())
-            .map(load_hmac_secret_from_env)
-            .transpose()?;
-        let public_key = config
-            .public_key_env
-            .as_deref()
-            .filter(|env| !env.trim().is_empty())
-            .map(load_public_key_from_env)
-            .transpose()?;
-        let algorithms = default_signed_assertion_algorithms(
-            config,
-            hmac_secret.is_some(),
-            public_key.is_some(),
-        )?;
-        Ok(Self {
-            name: name.to_string(),
-            header,
-            prefix: config.prefix.clone(),
-            algorithms,
-            issuer: config.issuer.clone(),
-            audience: config.audience.clone(),
-            hmac_secret,
-            public_key,
-            claims: CompiledAssertionClaims::from_config(&config.claims),
-            strip_from_untrusted,
-        })
-    }
-
-    fn extract(&self, headers: &HeaderMap) -> ResolvedIdentity {
-        let Some(token) = extract_assertion_token(headers, &self.header, self.prefix.as_deref())
-        else {
-            return ResolvedIdentity::default();
-        };
-        self.verify_and_extract(token).unwrap_or_default()
-    }
-
-    fn verify_and_extract(&self, token: &str) -> Result<ResolvedIdentity> {
-        let mut parts = token.split('.');
-        let header_segment = parts.next().ok_or_else(|| anyhow!("missing JWT header"))?;
-        let payload_segment = parts.next().ok_or_else(|| anyhow!("missing JWT payload"))?;
-        let signature_segment = parts
-            .next()
-            .ok_or_else(|| anyhow!("missing JWT signature"))?;
-        if parts.next().is_some() {
-            return Err(anyhow!("JWT must contain exactly 3 segments"));
-        }
-
-        let header: JwtHeader = serde_json::from_slice(&decode_jwt_segment(header_segment)?)?;
-        let algorithm = self
-            .algorithms
-            .iter()
-            .copied()
-            .find(|alg| alg.header_name() == header.alg.trim().to_ascii_uppercase())
-            .ok_or_else(|| anyhow!("JWT algorithm {} is not allowed", header.alg))?;
-        let signed = format!("{header_segment}.{payload_segment}");
-        let signature = decode_jwt_segment(signature_segment)?;
-        algorithm.verify(
-            self.hmac_secret.as_deref(),
-            self.public_key.as_deref(),
-            signed.as_bytes(),
-            signature.as_slice(),
-        )?;
-
-        let payload: JsonValue = serde_json::from_slice(&decode_jwt_segment(payload_segment)?)?;
-        validate_registered_claims(&payload, self.issuer.as_deref(), self.audience.as_deref())?;
-        self.claims.extract(self.name.as_str(), &payload)
-    }
-}
-
-fn default_signed_assertion_algorithms(
-    config: &SignedAssertionConfig,
-    has_hmac_secret: bool,
-    has_public_key: bool,
-) -> Result<Vec<JwtAlgorithm>> {
-    if !config.algorithms.is_empty() {
-        return config
-            .algorithms
-            .iter()
-            .map(|alg| JwtAlgorithm::parse(alg))
-            .collect::<Result<Vec<_>>>();
-    }
-
-    let mut algorithms = Vec::new();
-    if has_hmac_secret {
-        algorithms.push(JwtAlgorithm::Hs256);
-    }
-    if has_public_key {
-        algorithms.extend([
-            JwtAlgorithm::Rs256,
-            JwtAlgorithm::Rs384,
-            JwtAlgorithm::Rs512,
-            JwtAlgorithm::Es256,
-            JwtAlgorithm::Es384,
-        ]);
-    }
-    if algorithms.is_empty() {
-        algorithms.push(JwtAlgorithm::Hs256);
-    }
-    Ok(algorithms)
-}
-
-impl CompiledAssertionClaims {
-    fn from_config(config: &AssertionClaimsMapConfig) -> Self {
-        Self {
-            user: config.user.clone(),
-            groups: config.groups.clone(),
-            device_id: config.device_id.clone(),
-            posture: config.posture.clone(),
-            tenant: config.tenant.clone(),
-            auth_strength: config.auth_strength.clone(),
-            idp: config.idp.clone(),
-            user_from_sub: config.user_from_sub,
-            groups_separator: config.groups_separator.clone(),
-        }
-    }
-
-    fn extract(&self, source_name: &str, payload: &JsonValue) -> Result<ResolvedIdentity> {
-        let mut identity = ResolvedIdentity::default();
-        if self.user_from_sub {
-            identity.user = json_string_claim(payload, "sub");
-        }
-        if identity.user.is_none() {
-            identity.user = self
-                .user
-                .as_deref()
-                .and_then(|claim| json_string_claim(payload, claim));
-        }
-        identity.groups = self
-            .groups
-            .as_deref()
-            .map(|claim| json_list_claim(payload, claim, self.groups_separator.as_deref()))
-            .unwrap_or_default();
-        identity.device_id = self
-            .device_id
-            .as_deref()
-            .and_then(|claim| json_string_claim(payload, claim));
-        identity.posture = self
-            .posture
-            .as_deref()
-            .map(|claim| json_list_claim(payload, claim, None))
-            .unwrap_or_default();
-        identity.tenant = self
-            .tenant
-            .as_deref()
-            .and_then(|claim| json_string_claim(payload, claim));
-        identity.auth_strength = self
-            .auth_strength
-            .as_deref()
-            .and_then(|claim| json_string_claim(payload, claim));
-        identity.idp = self
-            .idp
-            .as_deref()
-            .and_then(|claim| json_string_claim(payload, claim));
-        if identity.user.is_some()
-            || !identity.groups.is_empty()
-            || identity.device_id.is_some()
-            || !identity.posture.is_empty()
-            || identity.tenant.is_some()
-            || identity.auth_strength.is_some()
-            || identity.idp.is_some()
-        {
-            identity.identity_source = Some(source_name.to_string());
-        }
-        Ok(identity)
-    }
-}
-
-impl JwtAlgorithm {
-    fn parse(raw: &str) -> Result<Self> {
-        match raw.trim().to_ascii_uppercase().as_str() {
-            "HS256" => Ok(Self::Hs256),
-            "HS384" => Ok(Self::Hs384),
-            "HS512" => Ok(Self::Hs512),
-            "RS256" => Ok(Self::Rs256),
-            "RS384" => Ok(Self::Rs384),
-            "RS512" => Ok(Self::Rs512),
-            "ES256" => Ok(Self::Es256),
-            "ES384" => Ok(Self::Es384),
-            other => Err(anyhow!("unsupported JWT algorithm: {}", other)),
-        }
-    }
-
-    fn header_name(self) -> &'static str {
-        match self {
-            Self::Hs256 => "HS256",
-            Self::Hs384 => "HS384",
-            Self::Hs512 => "HS512",
-            Self::Rs256 => "RS256",
-            Self::Rs384 => "RS384",
-            Self::Rs512 => "RS512",
-            Self::Es256 => "ES256",
-            Self::Es384 => "ES384",
-        }
-    }
-
-    fn verify(
-        self,
-        hmac_secret: Option<&[u8]>,
-        public_key: Option<&[u8]>,
-        data: &[u8],
-        signature_bytes: &[u8],
-    ) -> Result<()> {
-        match self {
-            Self::Hs256 => verify_hmac_signature::<Sha256>(hmac_secret, data, signature_bytes, 64),
-            Self::Hs384 => verify_hmac_signature::<Sha384>(hmac_secret, data, signature_bytes, 128),
-            Self::Hs512 => verify_hmac_signature::<Sha512>(hmac_secret, data, signature_bytes, 128),
-            Self::Rs256 => verify_public_key_signature(
-                &signature::RSA_PKCS1_2048_8192_SHA256,
-                public_key,
-                data,
-                signature_bytes,
-            ),
-            Self::Rs384 => verify_public_key_signature(
-                &signature::RSA_PKCS1_2048_8192_SHA384,
-                public_key,
-                data,
-                signature_bytes,
-            ),
-            Self::Rs512 => verify_public_key_signature(
-                &signature::RSA_PKCS1_2048_8192_SHA512,
-                public_key,
-                data,
-                signature_bytes,
-            ),
-            Self::Es256 => verify_public_key_signature(
-                &signature::ECDSA_P256_SHA256_FIXED,
-                public_key,
-                data,
-                signature_bytes,
-            ),
-            Self::Es384 => verify_public_key_signature(
-                &signature::ECDSA_P384_SHA384_FIXED,
-                public_key,
-                data,
-                signature_bytes,
-            ),
-        }
-    }
-}
-
 pub(crate) fn sanitize_headers_for_policy(
     state: &RuntimeState,
     policy: &EffectivePolicyContext,
     peer_ip: IpAddr,
-    headers: &HeaderMap,
-) -> Result<HeaderMap> {
-    let mut sanitized = headers.clone();
-    strip_untrusted_identity_headers(state, policy, peer_ip, &mut sanitized)?;
-    Ok(sanitized)
+    headers: &mut HeaderMap,
+) -> Result<()> {
+    strip_untrusted_identity_headers(state, policy, peer_ip, headers)
 }
 
 pub(crate) fn strip_untrusted_identity_headers(
@@ -733,161 +431,198 @@ fn extract_mtls_identity(
     );
     None
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use http::HeaderValue;
-    use qpx_core::config::{AssertionClaimsMapConfig, SignedAssertionConfig};
-    use ring::{rand::SystemRandom, signature};
-    use serde_json::json;
+    use crate::runtime::RuntimeState;
+    use qpx_core::config::{
+        AccessLogConfig, AuditLogConfig, AuthConfig, Config, DecisionConfig, HttpGlobalConfig,
+        IdentityConfig, MessagesConfig, RuntimeConfig, SecurityConfig, SystemLogConfig,
+        TelemetryConfig, TrafficConfig,
+    };
+    use std::net::{IpAddr, Ipv4Addr};
 
-    fn test_env_name(label: &str) -> String {
-        format!(
-            "QPX_TEST_{}_{}_{}",
-            label,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        )
-    }
-
-    fn set_test_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
-        // SAFETY: these tests hold crate::test_env_lock(), use process-unique keys,
-        // and remove the variable before releasing the lock.
-        unsafe {
-            std::env::set_var(key, value);
+    fn trusted_headers_source(name: &str, trusted_peers: Vec<&str>) -> IdentitySourceConfig {
+        IdentitySourceConfig {
+            name: name.to_string(),
+            kind: IdentitySourceKind::TrustedHeaders,
+            from: qpx_core::config::IdentitySourceFromConfig {
+                trusted_peers: trusted_peers.into_iter().map(str::to_string).collect(),
+                client_ca: None,
+            },
+            headers: Some(IdentitySourceHeadersConfig {
+                user: Some("x-user".to_string()),
+                groups: Some("x-groups".to_string()),
+                device_id: Some("x-device".to_string()),
+                posture: Some("x-posture".to_string()),
+                tenant: Some("x-tenant".to_string()),
+                auth_strength: Some("x-strength".to_string()),
+                idp: Some("x-idp".to_string()),
+            }),
+            map: None,
+            assertion: None,
+            strip_from_untrusted: true,
         }
     }
 
-    fn remove_test_env(key: impl AsRef<std::ffi::OsStr>) {
-        // SAFETY: these tests hold crate::test_env_lock() and use process-unique keys.
-        unsafe {
-            std::env::remove_var(key);
-        }
-    }
-
-    fn encode_segment(value: &JsonValue) -> String {
-        URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).expect("segment json"))
-    }
-
-    fn sign_es256_jwt(private_key_der: &[u8], payload: JsonValue) -> String {
-        let header = json!({
-            "alg": "ES256",
-            "typ": "JWT"
-        });
-        let header_segment = encode_segment(&header);
-        let payload_segment = encode_segment(&payload);
-        let signing_input = format!("{header_segment}.{payload_segment}");
-        let rng = SystemRandom::new();
-        let key_pair = signature::EcdsaKeyPair::from_pkcs8(
-            &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-            private_key_der,
-            &rng,
-        )
-        .expect("ecdsa keypair");
-        let signature = key_pair
-            .sign(&rng, signing_input.as_bytes())
-            .expect("ecdsa sign");
-        format!(
-            "{}.{}",
-            signing_input,
-            URL_SAFE_NO_PAD.encode(signature.as_ref())
-        )
+    fn runtime_with_sources(sources: Vec<IdentitySourceConfig>) -> RuntimeState {
+        let config = Config {
+            state_dir: None,
+            identity: IdentityConfig::default(),
+            messages: MessagesConfig::default(),
+            runtime: RuntimeConfig::default(),
+            telemetry: TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: SecurityConfig {
+                auth: AuthConfig::default(),
+                identity_sources: sources,
+                decisions: DecisionConfig::default(),
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: HttpGlobalConfig::default(),
+            traffic: TrafficConfig::default(),
+            acme: None,
+            edges: Vec::new(),
+            upstreams: Vec::new(),
+            caches: Vec::new(),
+        };
+        RuntimeState::build(config).expect("runtime")
     }
 
     #[test]
-    fn signed_assertion_accepts_es256_public_key_tokens() {
-        let _guard = crate::test_env_lock().lock().expect("env lock");
-        let key_pair =
-            rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
-        let private_key_der = key_pair.serialize_der();
-        let public_key_pem = key_pair.public_key_pem();
-        let env_name = test_env_name("ASSERTION_PUBLIC_KEY");
-        set_test_env(&env_name, public_key_pem);
-
-        let config = SignedAssertionConfig {
-            header: "x-assertion".to_string(),
-            algorithms: vec!["ES256".to_string()],
-            public_key_env: Some(env_name.clone()),
-            claims: AssertionClaimsMapConfig {
-                user_from_sub: true,
-                groups: Some("groups".to_string()),
-                groups_separator: Some(",".to_string()),
-                tenant: Some("tenant".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
+    fn merged_deduplicates_sources() {
+        let base = PolicyContextConfig {
+            identity_sources: vec!["a".into(), "b".into()],
+            ext_authz: None,
         };
-        let compiled =
-            CompiledSignedAssertion::from_config("signed-jwt", &config, false).expect("compile");
-        let token = sign_es256_jwt(
-            private_key_der.as_slice(),
-            json!({
-                "sub": "alice",
-                "groups": ["eng", "ops"],
-                "tenant": "acme",
-                "exp": i64::MAX,
-            }),
-        );
+        let overlay = PolicyContextConfig {
+            identity_sources: vec!["b".into(), "c".into()],
+            ext_authz: None,
+        };
+        let merged = EffectivePolicyContext::merged(Some(&base), Some(&overlay));
+        assert_eq!(merged.identity_sources, vec!["a", "b", "c"]);
+    }
 
+    #[test]
+    fn merged_overlay_ext_authz() {
+        let base = PolicyContextConfig {
+            identity_sources: Vec::new(),
+            ext_authz: Some("base".into()),
+        };
+        let overlay = PolicyContextConfig {
+            identity_sources: Vec::new(),
+            ext_authz: Some("overlay".into()),
+        };
+        assert_eq!(
+            EffectivePolicyContext::merged(Some(&base), Some(&overlay))
+                .ext_authz
+                .as_deref(),
+            Some("overlay")
+        );
+    }
+
+    #[test]
+    fn from_single_none() {
+        let policy = EffectivePolicyContext::from_single(None);
+        assert!(policy.identity_sources.is_empty());
+        assert!(policy.ext_authz.is_none());
+    }
+
+    #[test]
+    fn sanitize_strips_untrusted_headers() {
+        let state =
+            runtime_with_sources(vec![trusted_headers_source("headers", vec!["10.0.0.0/8"])]);
+        let policy = EffectivePolicyContext {
+            identity_sources: vec!["headers".into()],
+            ext_authz: None,
+        };
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-assertion",
-            HeaderValue::from_str(token.as_str()).expect("header value"),
-        );
-        let identity = compiled.extract(&headers);
+        headers.insert("x-user", "alice".parse().unwrap());
+        sanitize_headers_for_policy(
+            &state,
+            &policy,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            &mut headers,
+        )
+        .unwrap();
+        assert!(!headers.contains_key("x-user"));
+    }
 
+    #[test]
+    fn sanitize_preserves_trusted_headers() {
+        let state = runtime_with_sources(vec![trusted_headers_source(
+            "headers",
+            vec!["127.0.0.1/32"],
+        )]);
+        let policy = EffectivePolicyContext {
+            identity_sources: vec!["headers".into()],
+            ext_authz: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-user", "alice".parse().unwrap());
+        sanitize_headers_for_policy(
+            &state,
+            &policy,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &mut headers,
+        )
+        .unwrap();
+        assert_eq!(headers.get("x-user").unwrap(), "alice");
+    }
+
+    #[test]
+    fn sanitize_empty_headers() {
+        let state = runtime_with_sources(vec![trusted_headers_source(
+            "headers",
+            vec!["127.0.0.1/32"],
+        )]);
+        let policy = EffectivePolicyContext {
+            identity_sources: vec!["headers".into()],
+            ext_authz: None,
+        };
+        let mut headers = HeaderMap::new();
+        sanitize_headers_for_policy(
+            &state,
+            &policy,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &mut headers,
+        )
+        .unwrap();
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn resolve_identity_extracts_trusted_headers() {
+        let state = runtime_with_sources(vec![trusted_headers_source(
+            "headers",
+            vec!["127.0.0.1/32"],
+        )]);
+        let policy = EffectivePolicyContext {
+            identity_sources: vec!["headers".into()],
+            ext_authz: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-user", "alice".parse().unwrap());
+        headers.insert("x-groups", "eng, ops, eng".parse().unwrap());
+        let identity = resolve_identity(
+            &state,
+            &policy,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Some(&headers),
+            None,
+        )
+        .unwrap();
         assert_eq!(identity.user.as_deref(), Some("alice"));
         assert_eq!(identity.groups, vec!["eng".to_string(), "ops".to_string()]);
-        assert_eq!(identity.tenant.as_deref(), Some("acme"));
-        assert_eq!(identity.identity_source.as_deref(), Some("signed-jwt"));
-
-        remove_test_env(env_name);
-    }
-
-    #[test]
-    fn signed_assertion_defaults_to_public_key_algorithms() {
-        let _guard = crate::test_env_lock().lock().expect("env lock");
-        let key_pair =
-            rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
-        let private_key_der = key_pair.serialize_der();
-        let public_key_pem = key_pair.public_key_pem();
-        let env_name = test_env_name("ASSERTION_PUBLIC_KEY_DEFAULT");
-        set_test_env(&env_name, public_key_pem);
-
-        let config = SignedAssertionConfig {
-            header: "x-assertion".to_string(),
-            algorithms: Vec::new(),
-            public_key_env: Some(env_name.clone()),
-            claims: AssertionClaimsMapConfig {
-                user_from_sub: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let compiled =
-            CompiledSignedAssertion::from_config("signed-jwt", &config, false).expect("compile");
-        let token = sign_es256_jwt(
-            private_key_der.as_slice(),
-            json!({
-                "sub": "alice",
-                "exp": i64::MAX,
-            }),
-        );
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-assertion",
-            HeaderValue::from_str(token.as_str()).expect("header value"),
-        );
-        let identity = compiled.extract(&headers);
-
-        assert_eq!(identity.user.as_deref(), Some("alice"));
-
-        remove_test_env(env_name);
+        assert_eq!(identity.identity_source.as_deref(), Some("headers"));
     }
 }

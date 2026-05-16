@@ -122,10 +122,9 @@ pub(crate) async fn serve_endpoint<H: H3RequestHandler>(
             }
             connecting = endpoint.accept() => connecting
         };
-        if connecting.is_none() {
+        let Some(connecting) = connecting else {
             break;
-        }
-        let connecting = connecting.expect("checked connecting");
+        };
         let handler = handler.clone();
         let label = label.to_string();
         let permit = tokio::select! {
@@ -138,10 +137,9 @@ pub(crate) async fn serve_endpoint<H: H3RequestHandler>(
             }
             permit = connection_semaphore.clone().acquire_owned() => Some(permit?),
         };
-        if permit.is_none() {
+        let Some(permit) = permit else {
             break;
-        }
-        let permit = permit.expect("checked permit");
+        };
         tokio::spawn(async move {
             let _permit = permit;
             if let Err(err) = serve_connection(connecting, dst_port, handler).await {

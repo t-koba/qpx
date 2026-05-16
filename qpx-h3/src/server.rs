@@ -878,7 +878,7 @@ async fn send_simple_response(
         .status(status)
         .header(http::header::CONTENT_LENGTH, body.len().to_string())
         .body(())
-        .expect("static response");
+        .unwrap_or_else(|_| http::Response::new(()));
     let head = encode_response_head(&response);
     write_frame(send, FRAME_HEADERS, &head).await?;
     if !body.is_empty() {
