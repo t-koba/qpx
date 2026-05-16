@@ -1,11 +1,7 @@
 use std::io::Read;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
-
-use crate::http::body::Body;
+use tokio::net::TcpListener;
 
 pub(crate) fn decode_gzip(bytes: &[u8]) -> String {
     let mut decoder = flate2::read::GzDecoder::new(bytes);
@@ -61,9 +57,12 @@ pub(crate) async fn spawn_static_http_server(
     addr
 }
 
+#[cfg(feature = "mitm")]
 pub(crate) async fn spawn_http1_send_request(
     body: &str,
-) -> Arc<Mutex<hyper::client::conn::http1::SendRequest<Body>>> {
+) -> std::sync::Arc<
+    tokio::sync::Mutex<hyper::client::conn::http1::SendRequest<crate::http::body::Body>>,
+> {
     let addr = spawn_static_http_server(
         "200 OK",
         vec![("Content-Type", "text/plain".to_string())],
@@ -71,14 +70,14 @@ pub(crate) async fn spawn_http1_send_request(
         1,
     )
     .await;
-    let stream = TcpStream::connect(addr).await.expect("connect");
+    let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let (sender, connection) = crate::http::common::handshake_http1(stream)
         .await
         .expect("handshake");
     tokio::spawn(async move {
         let _ = connection.await;
     });
-    Arc::new(Mutex::new(sender))
+    std::sync::Arc::new(tokio::sync::Mutex::new(sender))
 }
 
 async fn drain_declared_request_body(

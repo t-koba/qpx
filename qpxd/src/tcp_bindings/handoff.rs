@@ -297,7 +297,7 @@ pub(super) fn adopt_tcp_listener(fd: i32) -> Result<TcpListener> {
 }
 
 #[cfg(windows)]
-fn adopt_tcp_listener_windows(socket: &[u8]) -> Result<TcpListener> {
+pub(super) fn adopt_tcp_listener_windows(socket: &[u8]) -> Result<TcpListener> {
     crate::windows_handoff::adopt_tcp_listener(socket)
 }
 

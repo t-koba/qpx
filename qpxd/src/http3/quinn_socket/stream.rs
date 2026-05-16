@@ -86,6 +86,7 @@ impl AsyncWrite for TokioQuinnBrokerStream {
     }
 }
 
+#[cfg(unix)]
 pub(super) fn unix_stream_into_owned_fd(stream: QuinnBrokerStream) -> OwnedFd {
     let raw = stream.into_raw_fd();
     // SAFETY: into_raw_fd transfers ownership from the stream, so constructing OwnedFd
@@ -119,7 +120,7 @@ pub(super) fn connect_windows_broker(addr: &str, token: &str) -> Result<QuinnBro
                     .context("failed to set inherited QUIC broker tcp stream nonblocking")?;
                 return Ok(stream);
             }
-            Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused => {
+            Err(err) if err.kind() == ErrorKind::ConnectionRefused => {
                 if std::time::Instant::now() >= deadline {
                     return Err(err)
                         .with_context(|| format!("timed out connecting QUIC broker {addr}"));
@@ -176,7 +177,7 @@ pub(super) async fn read_broker_token(stream: &mut TokioTcpStream, expected: &st
         .await
         .context("failed to read broker token length")? as usize;
     if len == 0 || len > MAX_BROKER_TOKEN_LEN {
-        return Err(anyhow!("invalid broker token length {len}"));
+        return Err(anyhow::anyhow!("invalid broker token length {len}"));
     }
     let mut buf = vec![0u8; len];
     stream
@@ -184,7 +185,7 @@ pub(super) async fn read_broker_token(stream: &mut TokioTcpStream, expected: &st
         .await
         .context("failed to read broker token")?;
     if buf != expected.as_bytes() {
-        return Err(anyhow!("broker token mismatch"));
+        return Err(anyhow::anyhow!("broker token mismatch"));
     }
     Ok(())
 }
@@ -194,5 +195,5 @@ pub(super) fn remaining_handoff_wait(deadline: std::time::Instant) -> Result<std
     deadline
         .checked_duration_since(std::time::Instant::now())
         .filter(|duration| !duration.is_zero())
-        .ok_or_else(|| anyhow!("timed out waiting for broker handoff"))
+        .ok_or_else(|| anyhow::anyhow!("timed out waiting for broker handoff"))
 }

@@ -417,6 +417,21 @@ fn extract_mtls_identity(
     None
 }
 
+#[cfg(not(feature = "tls-rustls"))]
+fn extract_mtls_identity(
+    cfg: &CompiledMtlsIdentityMap,
+    _peer_certificates: Option<&[Vec<u8>]>,
+) -> Option<ResolvedIdentity> {
+    let _ = (
+        &cfg.name,
+        &cfg.user_from_san_uri_prefix,
+        cfg.user_from_subject_cn,
+        &cfg.auth_strength,
+        &cfg.idp,
+    );
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,19 +625,4 @@ mod tests {
         assert_eq!(identity.groups, vec!["eng".to_string(), "ops".to_string()]);
         assert_eq!(identity.identity_source.as_deref(), Some("headers"));
     }
-}
-
-#[cfg(not(feature = "tls-rustls"))]
-fn extract_mtls_identity(
-    cfg: &CompiledMtlsIdentityMap,
-    _peer_certificates: Option<&[Vec<u8>]>,
-) -> Option<ResolvedIdentity> {
-    let _ = (
-        &cfg.name,
-        &cfg.user_from_san_uri_prefix,
-        cfg.user_from_subject_cn,
-        &cfg.auth_strength,
-        &cfg.idp,
-    );
-    None
 }

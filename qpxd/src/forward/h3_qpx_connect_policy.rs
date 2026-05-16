@@ -8,6 +8,7 @@ pub(super) async fn evaluate_connect_policy(
     let handler = input.handler;
     let conn = input.conn;
     let state = handler.runtime.state();
+    #[cfg(feature = "auth-basic")]
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let ctx = build_dispatch_connect_rule_context(DispatchConnectRuleContextInput {
         remote_ip: conn.remote_addr.ip(),

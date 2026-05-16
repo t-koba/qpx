@@ -13,6 +13,8 @@ mod handoff;
 use handoff::adopt_tcp_group;
 #[cfg(unix)]
 use handoff::adopt_tcp_listener;
+#[cfg(windows)]
+use handoff::adopt_tcp_listener_windows;
 
 pub(crate) struct TcpBindings {
     listener_tcp: HashMap<String, Vec<TcpListener>>,
