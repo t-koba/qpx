@@ -116,7 +116,7 @@ pub(super) async fn handle_h3_connect_udp(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(response, "error").await?;
+            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
             return Ok(());
         }
     };
@@ -136,7 +136,11 @@ pub(super) async fn handle_h3_connect_udp(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(response, "concurrency_limited").await?;
+            send_policy!(
+                response,
+                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -186,7 +190,7 @@ pub(super) async fn handle_h3_connect_udp(
                     response_headers.as_deref(),
                     false,
                 );
-                send_policy!(response, "error").await?;
+                send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
                 return Ok(());
             }
         };
@@ -210,14 +214,14 @@ pub(super) async fn handle_h3_connect_udp(
         emit_audit_log(
             &state,
             AuditRecord {
-                kind: "forward",
+                kind: crate::http::dispatch::ProxyKind::Forward,
                 name: handler.listener_name.as_ref(),
                 remote_ip: conn.remote_addr.ip(),
                 host: Some(host.as_str()),
                 sni: Some(host.as_str()),
                 method: Some("CONNECT"),
                 path: audit_path.as_deref(),
-                outcome: "allow",
+                outcome: crate::http::dispatch::DispatchOutcome::Allow,
                 status: Some(StatusCode::OK.as_u16()),
                 matched_rule: matched_rule.as_deref(),
                 matched_route: None,
@@ -262,7 +266,7 @@ pub(super) async fn handle_h3_connect_udp(
                     response_headers.as_deref(),
                     false,
                 );
-                send_policy!(response, "error").await?;
+                send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
                 return Ok(());
             }
         },
@@ -278,7 +282,7 @@ pub(super) async fn handle_h3_connect_udp(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(response, "error").await?;
+            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
             return Ok(());
         }
         Err(_) => {
@@ -293,15 +297,15 @@ pub(super) async fn handle_h3_connect_udp(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(response, "error").await?;
+            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
             return Ok(());
         }
     };
 
     let bind_addr: SocketAddr = if target.is_ipv4() {
-        "0.0.0.0:0".parse().unwrap()
+        SocketAddr::from(([0, 0, 0, 0], 0))
     } else {
-        "[::]:0".parse().unwrap()
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
     };
     let udp = match UdpSocket::bind(bind_addr).await {
         Ok(udp) => udp,
@@ -317,7 +321,7 @@ pub(super) async fn handle_h3_connect_udp(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(response, "error").await?;
+            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
             return Ok(());
         }
     };
@@ -335,7 +339,7 @@ pub(super) async fn handle_h3_connect_udp(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(response, "error").await?;
+            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
             return Ok(());
         }
         Err(_) => {
@@ -350,7 +354,7 @@ pub(super) async fn handle_h3_connect_udp(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(response, "error").await?;
+            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
             return Ok(());
         }
     }
@@ -364,14 +368,14 @@ pub(super) async fn handle_h3_connect_udp(
     emit_audit_log(
         &state,
         AuditRecord {
-            kind: "forward",
+            kind: crate::http::dispatch::ProxyKind::Forward,
             name: handler.listener_name.as_ref(),
             remote_ip: conn.remote_addr.ip(),
             host: Some(host.as_str()),
             sni: Some(host.as_str()),
             method: Some("CONNECT"),
             path: audit_path.as_deref(),
-            outcome: "allow",
+            outcome: crate::http::dispatch::DispatchOutcome::Allow,
             status: Some(StatusCode::OK.as_u16()),
             matched_rule: matched_rule.as_deref(),
             matched_route: None,
@@ -431,9 +435,9 @@ async fn open_upstream_connect_udp_stream(
     .ok_or_else(|| anyhow!("failed to resolve CONNECT-UDP upstream proxy"))?;
 
     let bind_addr: SocketAddr = if upstream_addr.is_ipv4() {
-        "0.0.0.0:0".parse().unwrap()
+        SocketAddr::from(([0, 0, 0, 0], 0))
     } else {
-        "[::]:0".parse().unwrap()
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
     };
     let mut endpoint = quinn::Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(build_h3_client_config(verify_upstream)?);

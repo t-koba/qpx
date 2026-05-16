@@ -80,10 +80,9 @@ pub(super) async fn run_reverse_tls_acceptor(
             }
             permit = semaphore.clone().acquire_owned() => Some(permit?),
         };
-        if permit.is_none() {
+        let Some(permit) = permit else {
             break;
-        }
-        let permit = permit.expect("checked permit");
+        };
         let accepted = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -100,10 +99,9 @@ pub(super) async fn run_reverse_tls_acceptor(
                 }
             }
         };
-        if accepted.is_none() {
+        let Some((stream, remote_addr)) = accepted else {
             break;
-        }
-        let (stream, remote_addr) = accepted.expect("checked accept");
+        };
         let _ = stream.set_nodelay(true);
         let local_port = match stream.local_addr() {
             Ok(addr) => addr.port(),
@@ -195,10 +193,9 @@ pub(super) async fn run_reverse_tls_acceptor(
             }
             permit = semaphore.clone().acquire_owned() => Some(permit?),
         };
-        if permit.is_none() {
+        let Some(permit) = permit else {
             break;
-        }
-        let permit = permit.expect("checked permit");
+        };
         let accepted = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -215,10 +212,9 @@ pub(super) async fn run_reverse_tls_acceptor(
                 }
             }
         };
-        if accepted.is_none() {
+        let Some((stream, remote_addr)) = accepted else {
             break;
-        }
-        let (stream, remote_addr) = accepted.expect("checked accept");
+        };
         let _ = stream.set_nodelay(true);
         let local_port = match stream.local_addr() {
             Ok(addr) => addr.port(),
@@ -304,10 +300,9 @@ pub(super) async fn run_reverse_http_acceptor(
             }
             permit = semaphore.clone().acquire_owned() => Some(permit?),
         };
-        if permit.is_none() {
+        let Some(permit) = permit else {
             break;
-        }
-        let permit = permit.expect("checked permit");
+        };
         let accepted = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -324,10 +319,9 @@ pub(super) async fn run_reverse_http_acceptor(
                 }
             }
         };
-        if accepted.is_none() {
+        let Some((stream, remote_addr)) = accepted else {
             break;
-        }
-        let (stream, remote_addr) = accepted.expect("checked accept");
+        };
         let _ = stream.set_nodelay(true);
         let local_port = match stream.local_addr() {
             Ok(addr) => addr.port(),
@@ -395,7 +389,7 @@ pub(super) async fn run_reverse_http_acceptor(
                     },
                     remote_addr,
                     AccessLogContext {
-                        kind: "reverse",
+                        kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
                         name: reverse_name,
                     },
                     &access_cfg,
@@ -414,7 +408,7 @@ pub(super) async fn run_reverse_http_acceptor(
                     },
                     remote_addr,
                     AccessLogContext {
-                        kind: "reverse",
+                        kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
                         name: reverse_name,
                     },
                     &access_cfg,
@@ -534,7 +528,7 @@ async fn handle_tls_connection(
             },
             remote_addr,
             AccessLogContext {
-                kind: "reverse",
+                kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
                 name: reverse_name.clone(),
             },
             &access_cfg,
@@ -548,7 +542,7 @@ async fn handle_tls_connection(
             },
             remote_addr,
             AccessLogContext {
-                kind: "reverse",
+                kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
                 name: reverse_name.clone(),
             },
             &access_cfg,
@@ -655,7 +649,7 @@ async fn handle_tls_connection(
             },
             remote_addr,
             AccessLogContext {
-                kind: "reverse",
+                kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
                 name: reverse_name.clone(),
             },
             &access_cfg,
@@ -669,7 +663,7 @@ async fn handle_tls_connection(
             },
             remote_addr,
             AccessLogContext {
-                kind: "reverse",
+                kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
                 name: reverse_name.clone(),
             },
             &access_cfg,
@@ -936,7 +930,7 @@ mod tests {
             },
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
             AccessLogContext {
-                kind: "reverse",
+                kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
                 name: Arc::<str>::from("test"),
             },
             &access_cfg,

@@ -106,9 +106,9 @@ pub(super) async fn open_upstream_extended_connect_stream(
     };
 
     let bind_addr: SocketAddr = if upstream_addr.is_ipv4() {
-        "0.0.0.0:0".parse().unwrap()
+        SocketAddr::from(([0, 0, 0, 0], 0))
     } else {
-        "[::]:0".parse().unwrap()
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
     };
     let mut endpoint = quinn::Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(build_h3_client_config(input.verify_upstream)?);

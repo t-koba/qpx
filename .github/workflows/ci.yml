@@ -126,6 +126,12 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
         run: bash ./scripts/check-config-samples.sh
+      - name: audit qpxd sample use-case intent
+        run: bash ./scripts/audit-config-usecases.sh
+      - name: audit qpxd compiled sample behavior
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: bash ./scripts/audit-config-behavior.sh
 
   build_test:
     name: build/test (${{ matrix.name }})

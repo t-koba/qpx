@@ -1,7 +1,7 @@
+use super::headers::{compile_literal_headers, parse_module_settings};
 use super::{
     HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
-    HttpModuleStage, ModuleStages, RequestHeadersOutcome, compile_literal_headers,
-    parse_module_settings,
+    HttpModuleStage, ModuleStages, RequestHeadersOutcome,
 };
 use crate::http::body::Body;
 use anyhow::{Context, Result, anyhow};
@@ -53,10 +53,13 @@ impl CachePurgeModule {
     }
 
     fn build_response(&self) -> Response<Body> {
-        let mut response = Response::builder()
+        let mut response = match Response::builder()
             .status(self.response_status)
             .body(Body::from(self.response_body.clone()))
-            .expect("static cache purge response");
+        {
+            Ok(response) => response,
+            Err(_) => Response::new(Body::from(self.response_body.clone())),
+        };
         for (name, value) in &self.response_headers {
             response.headers_mut().insert(name.clone(), value.clone());
         }

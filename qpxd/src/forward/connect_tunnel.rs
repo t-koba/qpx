@@ -70,7 +70,7 @@ pub(super) async fn tunnel_connect(
             .unwrap_or(true);
         let preview_server = server
             .take()
-            .expect("CONNECT upstream tunnel must exist before cert preview");
+            .ok_or_else(|| anyhow!("CONNECT upstream tunnel missing before cert preview"))?;
         match preview_tls_certificate_with_options(
             host.as_str(),
             preview_server.io,
@@ -152,8 +152,10 @@ pub(super) async fn tunnel_connect(
                     .clone()
                     .ok_or_else(|| anyhow!("mitm not available"))?;
                 let client_tls = accept_mitm_client(client_io, &mitm, upstream_timeout).await?;
+                let server =
+                    server.ok_or_else(|| anyhow!("reconnected server missing for CONNECT MITM"))?;
                 let (sender, upstream_cert) = connect_mitm_upstream(
-                    server.expect("reconnected server for CONNECT MITM").io,
+                    server.io,
                     host.as_str(),
                     verify_upstream,
                     listener_upstream_trust.as_deref(),
@@ -208,7 +210,7 @@ pub(super) async fn tunnel_connect(
                     service,
                     remote_addr,
                     AccessLogContext {
-                        kind: "forward",
+                        kind: crate::http::dispatch::ProxyKind::Forward.as_str(),
                         name: access_name,
                     },
                     &access_cfg,
@@ -225,7 +227,8 @@ pub(super) async fn tunnel_connect(
             }
         }
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {
-            let server = server.expect("reconnected server for CONNECT tunnel");
+            let server =
+                server.ok_or_else(|| anyhow!("reconnected server missing for CONNECT tunnel"))?;
             let selected_plan = state
                 .plan
                 .ingress_edge_execution_plan(listener_name.as_str(), matched_rule.as_deref())

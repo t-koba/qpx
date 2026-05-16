@@ -86,7 +86,12 @@ pub(crate) async fn handle_h3_connect(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(&mut req_stream, response, "block").await?;
+            send_policy!(
+                &mut req_stream,
+                response,
+                crate::http::dispatch::DispatchOutcome::Block
+            )
+            .await?;
             return Ok(());
         }
     }
@@ -101,7 +106,12 @@ pub(crate) async fn handle_h3_connect(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(&mut req_stream, response, "block").await?;
+            send_policy!(
+                &mut req_stream,
+                response,
+                crate::http::dispatch::DispatchOutcome::Block
+            )
+            .await?;
             return Ok(());
         }
 
@@ -119,7 +129,12 @@ pub(crate) async fn handle_h3_connect(
                     response_headers.as_deref(),
                     false,
                 );
-                send_policy!(&mut req_stream, response, "block").await?;
+                send_policy!(
+                    &mut req_stream,
+                    response,
+                    crate::http::dispatch::DispatchOutcome::Block
+                )
+                .await?;
                 return Ok(());
             }
             let verify_upstream = tls_inspection
@@ -140,7 +155,12 @@ pub(crate) async fn handle_h3_connect(
                         response_headers.as_deref(),
                         false,
                     );
-                    send_policy!(&mut req_stream, response, "block").await?;
+                    send_policy!(
+                        &mut req_stream,
+                        response,
+                        crate::http::dispatch::DispatchOutcome::Block
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
@@ -163,7 +183,12 @@ pub(crate) async fn handle_h3_connect(
                         response_headers.as_deref(),
                         false,
                     );
-                    send_policy!(&mut req_stream, response, "error").await?;
+                    send_policy!(
+                        &mut req_stream,
+                        response,
+                        crate::http::dispatch::DispatchOutcome::Error
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
@@ -181,7 +206,12 @@ pub(crate) async fn handle_h3_connect(
                         response_headers.as_deref(),
                         false,
                     );
-                    send_policy!(&mut req_stream, response, "concurrency_limited").await?;
+                    send_policy!(
+                        &mut req_stream,
+                        response,
+                        crate::http::dispatch::DispatchOutcome::ConcurrencyLimited
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
@@ -211,7 +241,12 @@ pub(crate) async fn handle_h3_connect(
                         response_headers.as_deref(),
                         false,
                     );
-                    send_policy!(&mut req_stream, response, "error").await?;
+                    send_policy!(
+                        &mut req_stream,
+                        response,
+                        crate::http::dispatch::DispatchOutcome::Error
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
@@ -267,9 +302,9 @@ pub(crate) async fn handle_h3_connect(
                             )
                     })
                     .unwrap_or(true);
-                let preview_server = upstream_connected
-                    .take()
-                    .expect("HTTP/3 CONNECT upstream tunnel must exist before cert preview");
+                let preview_server = upstream_connected.take().ok_or_else(|| {
+                    anyhow!("HTTP/3 CONNECT upstream tunnel missing before cert preview")
+                })?;
                 match preview_tls_certificate_with_options(
                     host.as_str(),
                     preview_server,
@@ -333,14 +368,14 @@ pub(crate) async fn handle_h3_connect(
             emit_audit_log(
                 &state,
                 AuditRecord {
-                    kind: "forward",
+                    kind: crate::http::dispatch::ProxyKind::Forward,
                     name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),
                     host: Some(host.as_str()),
                     sni: Some(host.as_str()),
                     method: Some("CONNECT"),
                     path: audit_path.as_deref(),
-                    outcome: "allow",
+                    outcome: crate::http::dispatch::DispatchOutcome::Allow,
                     status: Some(StatusCode::OK.as_u16()),
                     matched_rule: matched_rule.as_deref(),
                     matched_route: None,
@@ -358,7 +393,8 @@ pub(crate) async fn handle_h3_connect(
                     if let Err(err) = relay_h3_connect_stream(
                         req_stream,
                         client_prefetch,
-                        upstream_connected.expect("HTTP/3 CONNECT tunnel upstream"),
+                        upstream_connected
+                            .ok_or_else(|| anyhow!("HTTP/3 CONNECT tunnel upstream missing"))?,
                         tunnel_idle_timeout,
                     )
                     .await
@@ -368,10 +404,12 @@ pub(crate) async fn handle_h3_connect(
                     return Ok(());
                 }
             }
+            let upstream_tcp = upstream_connected
+                .ok_or_else(|| anyhow!("HTTP/3 CONNECT MITM upstream missing"))?;
             if let Err(err) = mitm_h3_connect_stream(MitmH3ConnectInput {
                 req_stream,
                 client_prefetch,
-                upstream_tcp: upstream_connected.expect("HTTP/3 CONNECT MITM upstream"),
+                upstream_tcp,
                 runtime: handler.runtime.clone(),
                 listener_name: handler.listener_name.clone(),
                 remote_addr: conn.remote_addr,
@@ -412,7 +450,12 @@ pub(crate) async fn handle_h3_connect(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(&mut req_stream, response, "error").await?;
+            send_policy!(
+                &mut req_stream,
+                response,
+                crate::http::dispatch::DispatchOutcome::Error
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -428,7 +471,12 @@ pub(crate) async fn handle_h3_connect(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(&mut req_stream, response, "concurrency_limited").await?;
+            send_policy!(
+                &mut req_stream,
+                response,
+                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -458,7 +506,12 @@ pub(crate) async fn handle_h3_connect(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(&mut req_stream, response, "error").await?;
+            send_policy!(
+                &mut req_stream,
+                response,
+                crate::http::dispatch::DispatchOutcome::Error
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -511,7 +564,7 @@ pub(crate) async fn handle_h3_connect(
             .unwrap_or(true);
         let preview_server = server
             .take()
-            .expect("HTTP/3 CONNECT upstream tunnel must exist before cert preview");
+            .ok_or_else(|| anyhow!("HTTP/3 CONNECT upstream tunnel missing before cert preview"))?;
         match preview_tls_certificate_with_options(
             host.as_str(),
             preview_server,
@@ -572,14 +625,14 @@ pub(crate) async fn handle_h3_connect(
     emit_audit_log(
         &state,
         AuditRecord {
-            kind: "forward",
+            kind: crate::http::dispatch::ProxyKind::Forward,
             name: handler.listener_name.as_ref(),
             remote_ip: conn.remote_addr.ip(),
             host: Some(host.as_str()),
             sni: Some(host.as_str()),
             method: Some("CONNECT"),
             path: audit_path.as_deref(),
-            outcome: "allow",
+            outcome: crate::http::dispatch::DispatchOutcome::Allow,
             status: Some(StatusCode::OK.as_u16()),
             matched_rule: matched_rule.as_deref(),
             matched_route: None,
@@ -615,10 +668,12 @@ pub(crate) async fn handle_h3_connect(
                 let Some(mitm) = state.security.destination.tls.mitm.clone() else {
                     return Ok(());
                 };
+                let upstream_tcp =
+                    server.ok_or_else(|| anyhow!("HTTP/3 CONNECT MITM upstream missing"))?;
                 if let Err(err) = mitm_h3_connect_stream(MitmH3ConnectInput {
                     req_stream,
                     client_prefetch,
-                    upstream_tcp: server.expect("HTTP/3 CONNECT MITM upstream"),
+                    upstream_tcp,
                     runtime: handler.runtime.clone(),
                     listener_name: handler.listener_name.clone(),
                     remote_addr: conn.remote_addr,
@@ -645,7 +700,7 @@ pub(crate) async fn handle_h3_connect(
     if let Err(err) = relay_h3_connect_stream(
         req_stream,
         client_prefetch,
-        server.expect("HTTP/3 CONNECT tunnel upstream"),
+        server.ok_or_else(|| anyhow!("HTTP/3 CONNECT tunnel upstream missing"))?,
         tunnel_idle_timeout,
     )
     .await
@@ -756,7 +811,12 @@ pub(crate) async fn handle_h3_extended_connect(
             response_headers.as_deref(),
             false,
         );
-        send_policy!(&mut req_stream, response, "block").await?;
+        send_policy!(
+            &mut req_stream,
+            response,
+            crate::http::dispatch::DispatchOutcome::Block
+        )
+        .await?;
         return Ok(());
     }
 
@@ -771,7 +831,12 @@ pub(crate) async fn handle_h3_extended_connect(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(&mut req_stream, response, "concurrency_limited").await?;
+            send_policy!(
+                &mut req_stream,
+                response,
+                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -811,7 +876,12 @@ pub(crate) async fn handle_h3_extended_connect(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(&mut req_stream, response, "error").await?;
+            send_policy!(
+                &mut req_stream,
+                response,
+                crate::http::dispatch::DispatchOutcome::Error
+            )
+            .await?;
             return Ok(());
         }
     };

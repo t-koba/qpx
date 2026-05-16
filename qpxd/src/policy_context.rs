@@ -1,6 +1,8 @@
 mod audit;
+mod crypto;
 mod ext_authz;
 mod identity;
+mod signed_assertion;
 mod util;
 
 pub(crate) use audit::{AuditRecord, emit_audit_log};

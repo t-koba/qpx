@@ -76,9 +76,9 @@ pub(super) fn select_upstream_inner(
 fn secure_random_index(len: usize) -> usize {
     debug_assert!(len > 0);
     let mut bytes = [0u8; 8];
-    SystemRandom::new()
-        .fill(&mut bytes)
-        .expect("secure random upstream selection");
+    if SystemRandom::new().fill(&mut bytes).is_err() {
+        return 0;
+    }
     (u64::from_ne_bytes(bytes) as usize) % len
 }
 

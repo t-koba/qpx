@@ -295,7 +295,7 @@ pub(super) async fn mitm_h3_connect_stream(input: MitmH3ConnectInput) -> Result<
             service,
             remote_addr,
             AccessLogContext {
-                kind: "forward",
+                kind: crate::http::dispatch::ProxyKind::Forward.as_str(),
                 name: listener_name,
             },
             &access_cfg,

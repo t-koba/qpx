@@ -1,4 +1,5 @@
 use crate::http::body::Body;
+use crate::http::dispatch::ProxyKind;
 use crate::runtime::RuntimeState;
 use anyhow::{Context, Result, anyhow};
 use http::header::HeaderName;
@@ -72,7 +73,7 @@ pub(crate) enum ExtAuthzEnforcement {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExtAuthzInput<'a> {
-    pub(crate) proxy_kind: &'static str,
+    pub(crate) proxy_kind: ProxyKind,
     pub(crate) proxy_name: &'a str,
     pub(crate) scope_name: &'a str,
     pub(crate) remote_ip: IpAddr,
@@ -199,7 +200,7 @@ struct ExtAuthzRequestBody {
 
 #[derive(Debug, Serialize)]
 struct ExtAuthzProxyBody {
-    kind: &'static str,
+    kind: ProxyKind,
     proxy_name: String,
     scope_name: String,
     matched_rule: Option<String>,

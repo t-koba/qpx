@@ -1,4 +1,5 @@
 use super::*;
+use qpx_core::rules::RuleMatchContext;
 
 pub(in crate::forward) struct ConnectPolicyInput<'a> {
     pub runtime: &'a Runtime,

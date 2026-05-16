@@ -17,12 +17,18 @@ pub(crate) fn render_explain_plan(
                 output.push_str(&format!("edge {}\n", edge.name));
                 output.push_str("  kind: forward\n");
                 append_plan_flags(&mut output, "  aggregate_execution_plan", edge.flags);
-                append_execution_plan(&mut output, "  default_action", &edge.default_plan);
+                append_ingress_execution_plan(
+                    &mut output,
+                    "  default_action",
+                    &edge.default_action_kind,
+                    &edge.default_plan,
+                );
                 for rule in edge.rules.iter() {
                     if route_filter_matches(route_filter, &rule.name) {
-                        append_execution_plan(
+                        append_ingress_execution_plan(
                             &mut output,
                             &format!("  rule {}", rule.name),
+                            &rule.action_kind,
                             &rule.plan,
                         );
                     }
@@ -35,12 +41,18 @@ pub(crate) fn render_explain_plan(
                 output.push_str(&format!("edge {}\n", edge.name));
                 output.push_str("  kind: transparent\n");
                 append_plan_flags(&mut output, "  aggregate_execution_plan", edge.flags);
-                append_execution_plan(&mut output, "  default_action", &edge.default_plan);
+                append_ingress_execution_plan(
+                    &mut output,
+                    "  default_action",
+                    &edge.default_action_kind,
+                    &edge.default_plan,
+                );
                 for rule in edge.rules.iter() {
                     if route_filter_matches(route_filter, &rule.name) {
-                        append_execution_plan(
+                        append_ingress_execution_plan(
                             &mut output,
                             &format!("  rule {}", rule.name),
+                            &rule.action_kind,
                             &rule.plan,
                         );
                     }
@@ -105,7 +117,44 @@ fn append_execution_plan(output: &mut String, label: &str, plan: &runtime::Execu
     append_execution_details(output, plan);
 }
 
+fn append_ingress_execution_plan(
+    output: &mut String,
+    label: &str,
+    action_kind: &qpx_core::config::ActionKind,
+    plan: &runtime::ExecutionPlan,
+) {
+    output.push_str(label);
+    output.push('\n');
+    output.push_str(&format!("    action: {}\n", action_kind_label(action_kind)));
+    append_plan_flag_entries(output, plan.flags);
+    append_execution_details(output, plan);
+}
+
 fn append_execution_details(output: &mut String, plan: &runtime::ExecutionPlan) {
+    if let Some(local_response) = plan.local_response.as_ref() {
+        output.push_str("    local_response\n");
+        output.push_str(&format!("      status: {}\n", local_response.status));
+        if let Some(content_type) = local_response.content_type.as_ref() {
+            output.push_str(&format!("      content_type: {content_type}\n"));
+        }
+        output.push_str(&format!(
+            "      body_bytes: {}\n",
+            local_response.body_bytes
+        ));
+        output.push_str(&format!(
+            "      header_count: {}\n",
+            local_response.header_count
+        ));
+        if let Some(protocol) = local_response.rpc_protocol.as_ref() {
+            output.push_str(&format!("      rpc_protocol: {protocol}\n"));
+        }
+        if let Some(status) = local_response.rpc_status.as_ref() {
+            output.push_str(&format!("      rpc_status: {status}\n"));
+        }
+        if let Some(status) = local_response.rpc_http_status {
+            output.push_str(&format!("      rpc_http_status: {status}\n"));
+        }
+    }
     if let Some(cache) = plan.cache.as_ref() {
         output.push_str("    cache\n");
         output.push_str(&format!("      backend: {}\n", cache.backend));
@@ -243,6 +292,10 @@ fn append_list<'a>(output: &mut String, label: &str, values: impl Iterator<Item 
 fn append_plan_flags(output: &mut String, label: &str, flags: runtime::PlanFlags) {
     output.push_str(label);
     output.push('\n');
+    append_plan_flag_entries(output, flags);
+}
+
+fn append_plan_flag_entries(output: &mut String, flags: runtime::PlanFlags) {
     append_flag(output, "auth", flags.contains(runtime::PlanFlags::AUTH));
     append_flag(
         output,
@@ -309,6 +362,17 @@ fn append_plan_flags(output: &mut String, label: &str, flags: runtime::PlanFlags
         "retry_body_buffer",
         flags.contains(runtime::PlanFlags::RETRY_BODY_BUFFER),
     );
+}
+
+fn action_kind_label(action_kind: &qpx_core::config::ActionKind) -> &'static str {
+    match action_kind {
+        qpx_core::config::ActionKind::Inspect => "inspect",
+        qpx_core::config::ActionKind::Tunnel => "tunnel",
+        qpx_core::config::ActionKind::Block => "block",
+        qpx_core::config::ActionKind::Direct => "direct",
+        qpx_core::config::ActionKind::Proxy => "proxy",
+        qpx_core::config::ActionKind::Respond => "respond",
+    }
 }
 
 fn append_flag(output: &mut String, label: &str, value: bool) {
@@ -422,14 +486,24 @@ pub(crate) fn render_match_plan(
                             &mut output,
                             &rule.matcher.matches_with_trace(&request.ctx),
                         );
-                        append_execution_plan(&mut output, "execution_plan", &rule.plan);
+                        append_ingress_execution_plan(
+                            &mut output,
+                            "execution_plan",
+                            &rule.action_kind,
+                            &rule.plan,
+                        );
                         return Ok(output);
                     }
                 }
                 output.push_str(&format!("edge: {}\n", forward.name));
                 output.push_str("kind: forward\n");
                 output.push_str("rule: <default>\n");
-                append_execution_plan(&mut output, "execution_plan", &forward.default_plan);
+                append_ingress_execution_plan(
+                    &mut output,
+                    "execution_plan",
+                    &forward.default_action_kind,
+                    &forward.default_plan,
+                );
                 return Ok(output);
             }
             runtime::CompiledEdge::Transparent(transparent)
@@ -444,14 +518,24 @@ pub(crate) fn render_match_plan(
                             &mut output,
                             &rule.matcher.matches_with_trace(&request.ctx),
                         );
-                        append_execution_plan(&mut output, "execution_plan", &rule.plan);
+                        append_ingress_execution_plan(
+                            &mut output,
+                            "execution_plan",
+                            &rule.action_kind,
+                            &rule.plan,
+                        );
                         return Ok(output);
                     }
                 }
                 output.push_str(&format!("edge: {}\n", transparent.name));
                 output.push_str("kind: transparent\n");
                 output.push_str("rule: <default>\n");
-                append_execution_plan(&mut output, "execution_plan", &transparent.default_plan);
+                append_ingress_execution_plan(
+                    &mut output,
+                    "execution_plan",
+                    &transparent.default_action_kind,
+                    &transparent.default_plan,
+                );
                 return Ok(output);
             }
             _ => {}

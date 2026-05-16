@@ -1,3 +1,4 @@
+use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::runtime::RuntimeState;
 use qpx_core::config::AuditIncludeField;
 use qpx_observability::access_log::RequestLogContext;
@@ -5,14 +6,14 @@ use std::net::IpAddr;
 use tracing::Level;
 
 pub(crate) struct AuditRecord<'a> {
-    pub(crate) kind: &'static str,
+    pub(crate) kind: ProxyKind,
     pub(crate) name: &'a str,
     pub(crate) remote_ip: IpAddr,
     pub(crate) host: Option<&'a str>,
     pub(crate) sni: Option<&'a str>,
     pub(crate) method: Option<&'a str>,
     pub(crate) path: Option<&'a str>,
-    pub(crate) outcome: &'a str,
+    pub(crate) outcome: DispatchOutcome,
     pub(crate) status: Option<u16>,
     pub(crate) matched_rule: Option<&'a str>,
     pub(crate) matched_route: Option<&'a str>,
@@ -47,14 +48,14 @@ pub(crate) fn emit_audit_log(
     tracing::info!(
         target: "audit_log",
         event = "policy",
-        kind = record.kind,
+        kind = record.kind.as_str(),
         name = record.name,
         remote = %record.remote_ip,
         host = record.host.unwrap_or(""),
         sni = record.sni.unwrap_or(""),
         method = record.method.unwrap_or(""),
         path = record.path.unwrap_or(""),
-        outcome = record.outcome,
+        outcome = record.outcome.as_str(),
         status = record.status.unwrap_or(0),
         subject = if include(AuditIncludeField::Subject) {
             context.subject.as_deref().unwrap_or("")

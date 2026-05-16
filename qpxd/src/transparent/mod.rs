@@ -119,10 +119,9 @@ async fn run_transparent_acceptor(
             }
             permit = semaphore.clone().acquire_owned() => Some(permit?),
         };
-        if permit.is_none() {
+        let Some(permit) = permit else {
             break;
-        }
-        let permit = permit.expect("checked permit");
+        };
         let accepted = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -139,10 +138,9 @@ async fn run_transparent_acceptor(
                 }
             }
         };
-        if accepted.is_none() {
+        let Some((stream, remote_addr)) = accepted else {
             break;
-        }
-        let (stream, remote_addr) = accepted.expect("checked accept");
+        };
         let local_port = match stream.local_addr() {
             Ok(addr) => addr.port(),
             Err(err) => {

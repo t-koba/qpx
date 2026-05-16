@@ -10,6 +10,7 @@ use crate::http::common::{
     forbidden_response as forbidden, http_version_label,
     too_many_requests_response as too_many_requests,
 };
+use crate::http::dispatch::{DispatchConnectRuleContextInput, build_dispatch_connect_rule_context};
 use crate::http::h2_codec::{
     h1_headers_to_http, h2_response_to_hyper, http_headers_to_h1,
     parse_declared_content_length as parse_h2_content_length,
@@ -46,7 +47,6 @@ use bytes::Bytes;
 use h2::ext::Protocol as H2Protocol;
 use h2::{Reason as H2Reason, RecvStream as H2RecvStream, client as h2_client};
 use qpx_core::config::{ActionConfig, ActionKind};
-use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 #[cfg(feature = "mitm")]
 use std::sync::Arc;
@@ -113,8 +113,13 @@ pub(super) async fn handle_connect(
     let (host, port) = parse_authority_host_port(&authority, 443)
         .ok_or_else(|| anyhow!("invalid connect authority"))?;
     let audit_host = host.clone();
-    let sanitized_headers =
-        sanitize_headers_for_policy(&state, &effective_policy, remote_addr.ip(), req.headers())?;
+    let mut sanitized_headers = req.headers().clone();
+    sanitize_headers_for_policy(
+        &state,
+        &effective_policy,
+        remote_addr.ip(),
+        &mut sanitized_headers,
+    )?;
     let mut identity = resolve_identity(
         &state,
         &effective_policy,
@@ -134,34 +139,18 @@ pub(super) async fn handle_connect(
         base_plan.destination_resolution.as_ref(),
     );
 
-    let ctx = RuleMatchContext {
-        src_ip: Some(remote_addr.ip()),
-        dst_port: Some(port),
-        host: Some(host.as_str()),
-        sni: Some(host.as_str()),
-        method: Some("CONNECT"),
+    let ctx = build_dispatch_connect_rule_context(DispatchConnectRuleContextInput {
+        remote_ip: remote_addr.ip(),
+        port,
+        host: host.as_str(),
         path: None,
-        authority: Some(authority.as_str()),
-        http_version: Some(http_version_label(req_version)),
-        destination_category: destination.category.as_deref(),
-        destination_category_source: destination.category_source.as_deref(),
-        destination_category_confidence: destination.category_confidence.map(u64::from),
-        destination_reputation: destination.reputation.as_deref(),
-        destination_reputation_source: destination.reputation_source.as_deref(),
-        destination_reputation_confidence: destination.reputation_confidence.map(u64::from),
-        destination_application: destination.application.as_deref(),
-        destination_application_source: destination.application_source.as_deref(),
-        destination_application_confidence: destination.application_confidence.map(u64::from),
-        headers: Some(&sanitized_headers),
-        user: identity.user.as_deref(),
-        user_groups: &identity.groups,
-        device_id: identity.device_id.as_deref(),
-        posture: &identity.posture,
-        tenant: identity.tenant.as_deref(),
-        auth_strength: identity.auth_strength.as_deref(),
-        idp: identity.idp.as_deref(),
-        ..Default::default()
-    };
+        authority: authority.as_str(),
+        http_version: http_version_label(req_version),
+        alpn: None,
+        destination: &destination,
+        headers: &sanitized_headers,
+        identity: &identity,
+    });
 
     let (mut action, matched_rule) = match evaluate_forward_policy(
         &runtime,
@@ -192,14 +181,14 @@ pub(super) async fn handle_connect(
             emit_audit_log(
                 &state,
                 AuditRecord {
-                    kind: "forward",
+                    kind: crate::http::dispatch::ProxyKind::Forward,
                     name: listener_name,
                     remote_ip: remote_addr.ip(),
                     host: Some(host.as_str()),
                     sni: Some(host.as_str()),
                     method: Some("CONNECT"),
                     path: None,
-                    outcome: "challenge",
+                    outcome: crate::http::dispatch::DispatchOutcome::Challenge,
                     status: Some(response.status().as_u16()),
                     matched_rule: None,
                     matched_route: None,
@@ -223,14 +212,14 @@ pub(super) async fn handle_connect(
             emit_audit_log(
                 &state,
                 AuditRecord {
-                    kind: "forward",
+                    kind: crate::http::dispatch::ProxyKind::Forward,
                     name: listener_name,
                     remote_ip: remote_addr.ip(),
                     host: Some(host.as_str()),
                     sni: Some(host.as_str()),
                     method: Some("CONNECT"),
                     path: None,
-                    outcome: "forbidden",
+                    outcome: crate::http::dispatch::DispatchOutcome::Forbidden,
                     status: Some(response.status().as_u16()),
                     matched_rule: None,
                     matched_route: None,
@@ -270,7 +259,7 @@ pub(super) async fn handle_connect(
         &state,
         &effective_policy,
         ExtAuthzInput {
-            proxy_kind: "forward",
+            proxy_kind: crate::http::dispatch::ProxyKind::Forward,
             proxy_name,
             scope_name: listener_name,
             remote_ip: remote_addr.ip(),
@@ -302,12 +291,13 @@ pub(super) async fn handle_connect(
         ext_authz_policy_id.as_deref(),
     );
     log_context.policy_tags = ext_authz_policy_tags;
-    let annotate = |response: &mut Response<Body>, outcome: &'static str| {
+    let annotate = |response: &mut Response<Body>,
+                    outcome: crate::http::dispatch::DispatchOutcome| {
         attach_log_context(response, &log_context);
         emit_audit_log(
             &state,
             AuditRecord {
-                kind: "forward",
+                kind: crate::http::dispatch::ProxyKind::Forward,
                 name: listener_name,
                 remote_ip: remote_addr.ip(),
                 host: Some(audit_host.as_str()),
@@ -367,9 +357,9 @@ pub(super) async fn handle_connect(
             annotate(
                 &mut response,
                 if deny.local_response.is_some() {
-                    "ext_authz_local_response"
+                    crate::http::dispatch::DispatchOutcome::ExtAuthzLocalResponse
                 } else {
-                    "ext_authz_deny"
+                    crate::http::dispatch::DispatchOutcome::ExtAuthzDeny
                 },
             );
             return Ok(response);
@@ -388,7 +378,7 @@ pub(super) async fn handle_connect(
                 response_headers.as_deref(),
                 false,
             );
-            annotate(&mut response, "block");
+            annotate(&mut response, crate::http::dispatch::DispatchOutcome::Block);
             Ok(response)
         }
         ActionKind::Respond => {
@@ -404,7 +394,10 @@ pub(super) async fn handle_connect(
                 response_headers.as_deref(),
                 false,
             );
-            annotate(&mut response, "respond");
+            annotate(
+                &mut response,
+                crate::http::dispatch::DispatchOutcome::Respond,
+            );
             Ok(response)
         }
         ActionKind::Inspect => {
@@ -418,7 +411,7 @@ pub(super) async fn handle_connect(
                     response_headers.as_deref(),
                     false,
                 );
-                annotate(&mut response, "block");
+                annotate(&mut response, crate::http::dispatch::DispatchOutcome::Block);
                 Ok(response)
             }
 
@@ -437,7 +430,7 @@ pub(super) async fn handle_connect(
                         response_headers.as_deref(),
                         false,
                     );
-                    annotate(&mut response, "block");
+                    annotate(&mut response, crate::http::dispatch::DispatchOutcome::Block);
                     return Ok(response);
                 }
                 let verify = tls_inspection
@@ -465,7 +458,10 @@ pub(super) async fn handle_connect(
                             response_headers.as_deref(),
                             false,
                         );
-                        annotate(&mut response, "concurrency_limited");
+                        annotate(
+                            &mut response,
+                            crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
+                        );
                         return Ok(response);
                     }
                 };
@@ -487,11 +483,11 @@ pub(super) async fn handle_connect(
                             Response::builder()
                                 .status(StatusCode::BAD_GATEWAY)
                                 .body(Body::from(state.messages.proxy_error.clone()))
-                                .unwrap(),
+                                .unwrap_or_else(|_| Response::new(Body::empty())),
                             response_headers.as_deref(),
                             false,
                         );
-                        annotate(&mut response, "error");
+                        annotate(&mut response, crate::http::dispatch::DispatchOutcome::Error);
                         return Ok(response);
                     }
                 };
@@ -535,7 +531,7 @@ pub(super) async fn handle_connect(
                     response_headers.as_deref(),
                     false,
                 );
-                annotate(&mut response, "allow");
+                annotate(&mut response, crate::http::dispatch::DispatchOutcome::Allow);
                 Ok(response)
             }
         }
@@ -558,7 +554,10 @@ pub(super) async fn handle_connect(
                         response_headers.as_deref(),
                         false,
                     );
-                    annotate(&mut response, "concurrency_limited");
+                    annotate(
+                        &mut response,
+                        crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
+                    );
                     return Ok(response);
                 }
             };
@@ -580,11 +579,11 @@ pub(super) async fn handle_connect(
                         Response::builder()
                             .status(StatusCode::BAD_GATEWAY)
                             .body(Body::from(state.messages.proxy_error.clone()))
-                            .unwrap(),
+                            .unwrap_or_else(|_| Response::new(Body::empty())),
                         response_headers.as_deref(),
                         false,
                     );
-                    annotate(&mut response, "error");
+                    annotate(&mut response, crate::http::dispatch::DispatchOutcome::Error);
                     return Ok(response);
                 }
             };
@@ -633,7 +632,7 @@ pub(super) async fn handle_connect(
                 response_headers.as_deref(),
                 false,
             );
-            annotate(&mut response, "allow");
+            annotate(&mut response, crate::http::dispatch::DispatchOutcome::Allow);
             Ok(response)
         }
     }

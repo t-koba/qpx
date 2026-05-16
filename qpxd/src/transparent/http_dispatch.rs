@@ -1,5 +1,12 @@
 use super::*;
-use crate::http::observation::RequestObservationPlan;
+use crate::http::dispatch::{
+    DispatchAuditContext, DispatchGuardInput, DispatchRateLimitInput, DispatchRequestPrepareInput,
+    DispatchResponsePolicyInput, DispatchResponsePolicyOutcome, DispatchWebsocketProxyInput,
+    ExtAuthzDenyResponseInput, PreparedDispatchRequest, annotate_dispatch_response,
+    apply_dispatch_response_policy, emit_dispatch_websocket_response_preview, evaluate_http_guard,
+    ext_authz_deny_response, prepare_dispatch_request, proxy_dispatch_websocket_http1,
+    rate_limit_response, record_upstream_request_duration,
+};
 use crate::http::policy::EvaluatedAction;
 use crate::http::rule_context::{
     RequestRuleContextInput, ResponseRuleContextInput, attach_destination_trace,
@@ -50,32 +57,7 @@ enum TransparentAccessOutcome {
 struct TransparentAccess {
     policy: Box<EvaluatedAction>,
     timeout_override: Option<Duration>,
-    audit: TransparentAuditContext,
-}
-
-struct TransparentAuditContext {
-    state: Arc<crate::runtime::RuntimeState>,
-    listener_name: String,
-    remote_addr: SocketAddr,
-    host_for_match: Option<String>,
-    request_method: hyper::Method,
-    path: Option<String>,
-    matched_rule: Option<String>,
-    ext_authz_policy_id: Option<String>,
-    log_context: qpx_observability::access_log::RequestLogContext,
-}
-
-struct TransparentGuardInput<'a> {
-    state: &'a crate::runtime::RuntimeState,
-    http_guard: Option<&'a crate::http::guard::CompiledHttpGuardProfile>,
-    req: &'a Request<Body>,
-    identity: &'a crate::policy_context::ResolvedIdentity,
-    destination: &'a crate::destination::DestinationMetadata,
-    proxy_name: &'a str,
-    listener_name: &'a str,
-    remote_addr: SocketAddr,
-    host: Option<&'a str>,
-    path: Option<&'a str>,
+    audit: DispatchAuditContext,
 }
 
 struct TransparentPolicyInput<'a> {
@@ -90,20 +72,6 @@ struct TransparentPolicyInput<'a> {
     forbidden_message: &'a str,
 }
 
-struct TransparentRateLimitResponseInput<'a> {
-    state: &'a crate::runtime::RuntimeState,
-    req: &'a Request<Body>,
-    identity: &'a crate::policy_context::ResolvedIdentity,
-    destination: &'a crate::destination::DestinationMetadata,
-    proxy_name: &'a str,
-    listener_name: &'a str,
-    remote_addr: SocketAddr,
-    host: Option<&'a str>,
-    path: Option<&'a str>,
-    matched_rule: Option<&'a str>,
-    retry_after: Duration,
-}
-
 struct TransparentWebsocketInput<'a> {
     req: Request<Body>,
     upstream: Option<&'a crate::upstream::pool::ResolvedUpstreamProxy>,
@@ -116,9 +84,13 @@ struct TransparentWebsocketInput<'a> {
     request_method: &'a hyper::Method,
     proxy_name: &'a str,
     policy_headers: Option<&'a qpx_core::rules::CompiledHeaderControl>,
-    audit: &'a TransparentAuditContext,
+    audit: &'a DispatchAuditContext,
 }
 
+#[tracing::instrument(
+    skip_all,
+    fields(kind = "transparent", host = tracing::field::Empty, method = %req.method())
+)]
 pub(super) async fn dispatch_transparent_request(
     req: Request<Body>,
     runtime: Runtime,
@@ -202,48 +174,46 @@ async fn prepare_transparent_request(
         .as_deref()
         .map(|engine| engine.candidate_profile(prefilter_ctx.clone()))
         .unwrap_or_default();
-    let mut observation_plan = RequestObservationPlan::from_policy_candidates(
-        engine,
-        &response_candidates_for_request,
-        prefilter_ctx.clone(),
-    );
-    observation_plan.include_body(
-        compiled_edge
-            .flags
-            .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
-    );
-    let guard_requires_buffering =
-        http_guard.is_some_and(|profile| profile.requires_request_body_buffering(&req));
-    observation_plan.include_body(guard_requires_buffering);
     let max_observed_request_body_bytes = http_guard
         .and_then(|profile| profile.request_body_observation_cap())
         .map(|cap| cap.min(state.plan.limits.max_observed_request_body_bytes))
         .unwrap_or(state.plan.limits.max_observed_request_body_bytes);
     let max_observed_request_body_bytes =
         compiled_edge.body_observation_limit(max_observed_request_body_bytes);
-    req = match observe_transparent_request(
+    let request_version_for_observation = req.version();
+    let PreparedDispatchRequest {
+        req: prepared_req,
+        observation_plan: _observation_plan,
+        sanitized_headers,
+        identity,
+        request_rpc,
+    } = match prepare_dispatch_request(DispatchRequestPrepareInput {
         req,
-        observation_plan,
+        rule_engine: engine,
+        response_candidates: &response_candidates_for_request,
+        prefilter_ctx,
+        http_guard,
+        capture_body: compiled_edge
+            .flags
+            .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
         max_observed_request_body_bytes,
-        std::time::Duration::from_millis(state.plan.limits.http_header_read_timeout_ms.max(1)),
-        &base.method,
+        read_timeout: std::time::Duration::from_millis(
+            state.plan.limits.http_header_read_timeout_ms.max(1),
+        ),
+        request_method: &base.method,
+        request_version: request_version_for_observation,
         proxy_name,
-    )
+        state: &state,
+        effective_policy: &effective_policy,
+        remote_ip: remote_addr.ip(),
+    })
     .await?
     {
-        Ok(req) => req,
+        Ok(prepared) => prepared,
         Err(response) => return Ok(TransparentPrepareOutcome::Response(Box::new(response))),
     };
+    req = prepared_req;
     let path = base.path.as_deref();
-    let sanitized_headers =
-        sanitize_headers_for_policy(&state, &effective_policy, remote_addr.ip(), req.headers())?;
-    let identity = resolve_identity(
-        &state,
-        &effective_policy,
-        remote_addr.ip(),
-        Some(&sanitized_headers),
-        None,
-    )?;
     let destination = state.classify_destination(
         &DestinationInputs {
             host: host_for_match.as_deref(),
@@ -256,17 +226,21 @@ async fn prepare_transparent_request(
         },
         compiled_edge.default_plan.destination_resolution.as_ref(),
     );
-    if let Some(response) = transparent_http_guard_response(TransparentGuardInput {
-        state: &state,
-        http_guard,
+    if let Some(response) = evaluate_http_guard(DispatchGuardInput {
+        profile: http_guard,
         req: &req,
-        identity: &identity,
         destination: &destination,
         proxy_name,
-        listener_name,
-        remote_addr,
-        host: host_for_match.as_deref(),
-        path,
+        audit: DispatchAuditContext::new(
+            state.clone(),
+            crate::http::dispatch::ProxyKind::Transparent,
+            listener_name,
+            remote_addr,
+            req.method().clone(),
+            path.map(str::to_string),
+            identity.to_log_context(None, None, None),
+        )
+        .with_host(host_for_match.clone()),
     })? {
         return Ok(TransparentPrepareOutcome::Response(Box::new(response)));
     }
@@ -277,7 +251,7 @@ async fn prepare_transparent_request(
         sanitized_headers: &sanitized_headers,
         destination: &destination,
         identity: &identity,
-        needs_rpc: observation_plan.needs_rpc,
+        needs_rpc: request_rpc.is_some(),
         proxy_name,
         forbidden_message: state.messages.forbidden.as_str(),
     })?;
@@ -304,18 +278,21 @@ async fn prepare_transparent_request(
     )?;
     if let Some(retry_after) = retry_after {
         return Ok(TransparentPrepareOutcome::Response(Box::new(
-            transparent_rate_limit_response(TransparentRateLimitResponseInput {
-                state: &state,
+            rate_limit_response(DispatchRateLimitInput {
                 req: &req,
-                identity: &identity,
-                destination: &destination,
                 proxy_name,
-                listener_name,
-                remote_addr,
-                host: host_for_match.as_deref(),
-                path,
-                matched_rule: matched_rule.as_deref(),
-                retry_after,
+                retry_after: Some(retry_after),
+                audit: build_transparent_prepare_audit_context(TransparentPrepareAuditInput {
+                    state: &state,
+                    identity: &identity,
+                    destination: &destination,
+                    listener_name,
+                    remote_addr,
+                    host: host_for_match.clone(),
+                    request_method: req.method(),
+                    path,
+                    matched_rule: matched_rule.as_deref(),
+                }),
             }),
         )));
     }
@@ -346,60 +323,6 @@ async fn prepare_transparent_request(
     )))
 }
 
-fn transparent_http_guard_response(
-    input: TransparentGuardInput<'_>,
-) -> Result<Option<hyper::Response<Body>>> {
-    let TransparentGuardInput {
-        state,
-        http_guard,
-        req,
-        identity,
-        destination,
-        proxy_name,
-        listener_name,
-        remote_addr,
-        host,
-        path,
-    } = input;
-    let Some(profile) = http_guard else {
-        return Ok(None);
-    };
-    let Some(reject) = profile.evaluate_request(req)? else {
-        return Ok(None);
-    };
-    let mut log_context = identity.to_log_context(None, None, None);
-    attach_destination_trace(&mut log_context, destination);
-    let mut response = finalize_response_for_request(
-        req.method(),
-        req.version(),
-        proxy_name,
-        hyper::Response::builder()
-            .status(reject.status)
-            .body(Body::from(reject.body))?,
-        false,
-    );
-    attach_log_context(&mut response, &log_context);
-    emit_audit_log(
-        state,
-        AuditRecord {
-            kind: "transparent",
-            name: listener_name,
-            remote_ip: remote_addr.ip(),
-            host,
-            sni: None,
-            method: Some(req.method().as_str()),
-            path,
-            outcome: "http_guard_reject",
-            status: Some(response.status().as_u16()),
-            matched_rule: None,
-            matched_route: None,
-            ext_authz_policy_id: None,
-        },
-        &log_context,
-    );
-    Ok(Some(response))
-}
-
 fn transparent_prefilter_context<'a>(
     base: &'a crate::http::base_fields::BaseRequestFields,
     connect_target: &ConnectTarget,
@@ -413,35 +336,6 @@ fn transparent_prefilter_context<'a>(
         host: host_for_match.as_deref(),
         sni: None,
         path: base.path.as_deref(),
-    }
-}
-
-async fn observe_transparent_request(
-    req: Request<Body>,
-    observation_plan: RequestObservationPlan,
-    max_observed_request_body_bytes: usize,
-    read_timeout: Duration,
-    method: &hyper::Method,
-    proxy_name: &str,
-) -> Result<std::result::Result<Request<Body>, hyper::Response<Body>>> {
-    let request_version = req.version();
-    match observation_plan
-        .observe_request(req, max_observed_request_body_bytes, read_timeout)
-        .await
-    {
-        Ok(req) => Ok(Ok(req)),
-        Err(err) if crate::http::body_size::is_observed_body_limit_exceeded(&err) => {
-            Ok(Err(finalize_response_for_request(
-                method,
-                request_version,
-                proxy_name,
-                hyper::Response::builder()
-                    .status(StatusCode::PAYLOAD_TOO_LARGE)
-                    .body(Body::from("request body too large"))?,
-                false,
-            )))
-        }
-        Err(err) => Err(err),
     }
 }
 
@@ -496,51 +390,36 @@ fn evaluate_transparent_policy(
     })
 }
 
-fn transparent_rate_limit_response(
-    input: TransparentRateLimitResponseInput<'_>,
-) -> hyper::Response<Body> {
-    let TransparentRateLimitResponseInput {
-        state,
-        req,
-        identity,
-        destination,
-        proxy_name,
-        listener_name,
-        remote_addr,
-        host,
-        path,
-        matched_rule,
-        retry_after,
-    } = input;
-    let mut log_context = identity.to_log_context(matched_rule, None, None);
-    attach_destination_trace(&mut log_context, destination);
-    let mut response = finalize_response_for_request(
-        req.method(),
-        req.version(),
-        proxy_name,
-        too_many_requests(Some(retry_after)),
-        false,
-    );
-    attach_log_context(&mut response, &log_context);
-    emit_audit_log(
-        state,
-        AuditRecord {
-            kind: "transparent",
-            name: listener_name,
-            remote_ip: remote_addr.ip(),
-            host,
-            sni: None,
-            method: Some(req.method().as_str()),
-            path,
-            outcome: "rate_limited",
-            status: Some(response.status().as_u16()),
-            matched_rule,
-            matched_route: None,
-            ext_authz_policy_id: None,
-        },
-        &log_context,
-    );
-    response
+struct TransparentPrepareAuditInput<'a> {
+    state: &'a Arc<crate::runtime::RuntimeState>,
+    identity: &'a crate::policy_context::ResolvedIdentity,
+    destination: &'a crate::destination::DestinationMetadata,
+    listener_name: &'a str,
+    remote_addr: SocketAddr,
+    host: Option<String>,
+    request_method: &'a hyper::Method,
+    path: Option<&'a str>,
+    matched_rule: Option<&'a str>,
+}
+
+fn build_transparent_prepare_audit_context(
+    input: TransparentPrepareAuditInput<'_>,
+) -> DispatchAuditContext {
+    let mut log_context = input
+        .identity
+        .to_log_context(input.matched_rule, None, None);
+    attach_destination_trace(&mut log_context, input.destination);
+    DispatchAuditContext::new(
+        input.state.clone(),
+        crate::http::dispatch::ProxyKind::Transparent,
+        input.listener_name,
+        input.remote_addr,
+        input.request_method.clone(),
+        input.path.map(str::to_string),
+        log_context,
+    )
+    .with_host(input.host)
+    .with_matched_rule(input.matched_rule.map(str::to_string))
 }
 
 struct TransparentAccessInput<'a> {
@@ -574,7 +453,7 @@ async fn enforce_transparent_access_control(
                 &input.state,
                 input.effective_policy,
                 ExtAuthzInput {
-                    proxy_kind: "transparent",
+                    proxy_kind: crate::http::dispatch::ProxyKind::Transparent,
                     proxy_name: input.proxy_name,
                     scope_name: input.listener_name,
                     remote_ip: input.remote_addr.ip(),
@@ -598,7 +477,12 @@ async fn enforce_transparent_access_control(
     };
     let audit = build_transparent_audit_context(&input, ext_authz.as_ref());
     if let Some(mut response) = input.early_response {
-        annotate_transparent_response(&mut response, &audit, "early_response", &[]);
+        annotate_dispatch_response(
+            &mut response,
+            &audit,
+            crate::http::dispatch::DispatchOutcome::EarlyResponse,
+            &[],
+        );
         return Ok(TransparentAccessOutcome::Response(response));
     }
     let Some(mut policy) = input.policy else {
@@ -625,7 +509,12 @@ async fn enforce_transparent_access_control(
                         too_many_requests(Some(retry_after)),
                         false,
                     );
-                    annotate_transparent_response(&mut response, &audit, "rate_limited", &[]);
+                    annotate_dispatch_response(
+                        &mut response,
+                        &audit,
+                        crate::http::dispatch::DispatchOutcome::RateLimited,
+                        &[],
+                    );
                     return Ok(TransparentAccessOutcome::Response(Box::new(response)));
                 }
                 apply_ext_authz_action_overrides(&mut policy.action, &allow);
@@ -638,36 +527,15 @@ async fn enforce_transparent_access_control(
                 )));
             }
             ExtAuthzEnforcement::Deny(deny) => {
-                let merged_headers = merge_header_controls(policy.headers.clone(), deny.headers);
-                let mut response = if let Some(local) = deny.local_response.as_ref() {
-                    crate::http::l7::finalize_response_with_headers(
-                        &input.request_method,
-                        input.request_version,
-                        input.proxy_name,
-                        crate::http::local_response::build_local_response(local)?,
-                        merged_headers.as_deref(),
-                        false,
-                    )
-                } else {
-                    crate::http::l7::finalize_response_with_headers(
-                        &input.request_method,
-                        input.request_version,
-                        input.proxy_name,
-                        forbidden(input.state.messages.forbidden.as_str()),
-                        merged_headers.as_deref(),
-                        false,
-                    )
-                };
-                annotate_transparent_response(
-                    &mut response,
-                    &audit,
-                    if deny.local_response.is_some() {
-                        "ext_authz_local_response"
-                    } else {
-                        "ext_authz_deny"
-                    },
-                    &[],
-                );
+                let response = ext_authz_deny_response(ExtAuthzDenyResponseInput {
+                    ext_authz: ExtAuthzEnforcement::Deny(deny),
+                    base_headers: policy.headers.clone(),
+                    request_method: &input.request_method,
+                    request_version: input.request_version,
+                    proxy_name: input.proxy_name,
+                    default_response: forbidden(input.state.messages.forbidden.as_str()),
+                    audit: &audit,
+                })?;
                 return Ok(TransparentAccessOutcome::Response(Box::new(response)));
             }
         }
@@ -684,7 +552,7 @@ async fn enforce_transparent_access_control(
 fn build_transparent_audit_context(
     input: &TransparentAccessInput<'_>,
     ext_authz: Option<&ExtAuthzEnforcement>,
-) -> TransparentAuditContext {
+) -> DispatchAuditContext {
     let ext_authz_policy_id = ext_authz.and_then(|decision| match decision {
         ExtAuthzEnforcement::Continue(allow) => allow.policy_id.clone(),
         ExtAuthzEnforcement::Deny(deny) => deny.policy_id.clone(),
@@ -702,46 +570,18 @@ fn build_transparent_audit_context(
     );
     attach_destination_trace(&mut log_context, input.destination);
     log_context.policy_tags = ext_authz_policy_tags;
-    TransparentAuditContext {
-        state: input.state.clone(),
-        listener_name: input.listener_name.to_string(),
-        remote_addr: input.remote_addr,
-        host_for_match: input.host_for_match.clone(),
-        request_method: input.request_method.clone(),
-        path: input.base.path.clone(),
-        matched_rule: input.matched_rule.clone(),
-        ext_authz_policy_id,
+    DispatchAuditContext::new(
+        input.state.clone(),
+        crate::http::dispatch::ProxyKind::Transparent,
+        input.listener_name,
+        input.remote_addr,
+        input.request_method.clone(),
+        input.base.path.clone(),
         log_context,
-    }
-}
-
-fn annotate_transparent_response(
-    response: &mut hyper::Response<Body>,
-    audit: &TransparentAuditContext,
-    outcome: &'static str,
-    extra_policy_tags: &[String],
-) {
-    let mut annotated_context = audit.log_context.clone();
-    merge_policy_tags(&mut annotated_context.policy_tags, extra_policy_tags);
-    attach_log_context(response, &annotated_context);
-    emit_audit_log(
-        &audit.state,
-        AuditRecord {
-            kind: "transparent",
-            name: audit.listener_name.as_str(),
-            remote_ip: audit.remote_addr.ip(),
-            host: audit.host_for_match.as_deref(),
-            sni: None,
-            method: Some(audit.request_method.as_str()),
-            path: audit.path.as_deref(),
-            outcome,
-            status: Some(response.status().as_u16()),
-            matched_rule: audit.matched_rule.as_deref(),
-            matched_route: None,
-            ext_authz_policy_id: audit.ext_authz_policy_id.as_deref(),
-        },
-        &annotated_context,
-    );
+    )
+    .with_host(input.host_for_match.clone())
+    .with_matched_rule(input.matched_rule.clone())
+    .with_ext_authz_policy_id(ext_authz_policy_id)
 }
 
 async fn complete_transparent_request(
@@ -814,7 +654,12 @@ async fn complete_transparent_request(
     .await
     {
         let mut response = response;
-        annotate_transparent_response(&mut response, &audit, "max_forwards", &[]);
+        annotate_dispatch_response(
+            &mut response,
+            &audit,
+            crate::http::dispatch::DispatchOutcome::MaxForwards,
+            &[],
+        );
         return Ok(response);
     }
     strip_untrusted_identity_headers(
@@ -833,13 +678,13 @@ async fn complete_transparent_request(
     let mut http_modules = selected_plan.modules.start(
         state.clone(),
         crate::http::modules::HttpModuleSessionInit {
-            proxy_kind: "transparent",
-            proxy_name: proxy_name.to_string(),
-            scope_name: listener_name.to_string(),
+            proxy_kind: crate::http::dispatch::ProxyKind::Transparent,
+            proxy_name,
+            scope_name: listener_name,
             route_name: None,
             remote_ip: remote_addr.ip(),
             sni: None,
-            identity_user: identity.user.clone(),
+            identity_user: identity.user.as_deref(),
             cache_policy: None,
             cache_default_scheme: None,
         },
@@ -858,7 +703,12 @@ async fn complete_transparent_request(
                 false,
             );
             http_modules.on_logging(Some(response.status()), None).await;
-            annotate_transparent_response(&mut response, &audit, "http_module_local_response", &[]);
+            annotate_dispatch_response(
+                &mut response,
+                &audit,
+                crate::http::dispatch::DispatchOutcome::HttpModuleLocalResponse,
+                &[],
+            );
             return Ok(response);
         }
     }
@@ -880,7 +730,12 @@ async fn complete_transparent_request(
                 too_many_requests(None),
                 false,
             );
-            annotate_transparent_response(&mut response, &audit, "concurrency_limited", &[]);
+            annotate_dispatch_response(
+                &mut response,
+                &audit,
+                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
+                &[],
+            );
             return Ok(response);
         }
     };
@@ -953,31 +808,23 @@ async fn proxy_transparent_websocket(
         policy_headers,
         audit,
     } = input;
-    if let Some(session) = export_session {
-        let preview = crate::exporter::serialize_request_preview(&req);
-        session.emit_plaintext(true, &preview);
-    }
-    let mut response = proxy_websocket_http1(
+    let mut response = proxy_dispatch_websocket_http1(DispatchWebsocketProxyInput {
         req,
-        WebsocketProxyConfig {
-            upstream_proxy: upstream,
-            direct_connect_authority: authority,
-            direct_host_header: authority,
-            timeout_dur: upstream_timeout,
-            upgrade_wait_timeout,
-            tunnel_idle_timeout,
-            tunnel_label: "transparent",
-            upstream_context: "transparent websocket upstream proxy",
-            direct_context: "transparent websocket direct",
-        },
-    )
+        upstream_proxy: upstream,
+        direct_connect_authority: authority,
+        direct_host_header: authority,
+        timeout_dur: upstream_timeout,
+        upgrade_wait_timeout,
+        tunnel_idle_timeout,
+        tunnel_label: "transparent",
+        upstream_context: "transparent websocket upstream proxy",
+        direct_context: "transparent websocket direct",
+        export_session,
+    })
     .await?;
     response = http_modules.on_upstream_response(response).await?;
     response = http_modules.prepare_downstream_response(response).await?;
-    if let Some(session) = export_session {
-        let preview = crate::exporter::serialize_response_preview(&response);
-        session.emit_plaintext(false, &preview);
-    }
+    emit_dispatch_websocket_response_preview(export_session, &response);
     let keep_upgrade = response.status() == StatusCode::SWITCHING_PROTOCOLS;
     let response_version = response.version();
     finalize_response_with_headers_in_place(
@@ -989,7 +836,12 @@ async fn proxy_transparent_websocket(
         keep_upgrade,
     );
     http_modules.on_logging(Some(response.status()), None).await;
-    annotate_transparent_response(&mut response, audit, "allow", &[]);
+    annotate_dispatch_response(
+        &mut response,
+        audit,
+        crate::http::dispatch::DispatchOutcome::Allow,
+        &[],
+    );
     Ok(response)
 }
 
@@ -1007,7 +859,7 @@ struct TransparentResponsePolicyInput<'a> {
     proxy_name: &'a str,
     request_rpc: Option<&'a crate::http::rpc::RpcMatchContext>,
     headers: &'a mut Option<Arc<qpx_core::rules::CompiledHeaderControl>>,
-    audit: &'a TransparentAuditContext,
+    audit: &'a DispatchAuditContext,
 }
 
 async fn proxy_transparent_http1(
@@ -1019,19 +871,22 @@ async fn proxy_transparent_http1(
     export_session: Option<&crate::exporter::ExportSession>,
     input: TransparentResponsePolicyInput<'_>,
 ) -> Result<hyper::Response<Body>> {
+    let upstream_started = std::time::Instant::now();
     http_modules.on_upstream_request(&mut req).await?;
     if let Some(session) = export_session {
         let preview = crate::exporter::serialize_request_preview(&req);
         session.emit_plaintext(true, &preview);
     }
-    let proxied =
-        match proxy_http1_request_with_interim(req, upstream, authority, upstream_timeout).await {
-            Ok(proxied) => proxied,
-            Err(err) => {
-                http_modules.on_error(&err).await;
-                return Err(err);
-            }
-        };
+    let proxied_result =
+        proxy_http1_request_with_interim(req, upstream, authority, upstream_timeout).await;
+    record_upstream_request_duration(input.audit.kind, upstream_started.elapsed());
+    let proxied = match proxied_result {
+        Ok(proxied) => proxied,
+        Err(err) => {
+            http_modules.on_error(&err).await;
+            return Err(err);
+        }
+    };
     let mut response = proxied.response;
     if !proxied.interim.is_empty() {
         response.extensions_mut().insert(proxied.interim);
@@ -1052,10 +907,11 @@ async fn proxy_transparent_http1(
         .unwrap_or_default();
     let response_status = response.status().as_u16();
     let response_headers = response.headers().clone();
-    let response_policy_tags = match apply_listener_response_policy(
-        input.response_engine,
-        response_candidates,
-        build_response_rule_match_context(ResponseRuleContextInput {
+    let response_policy_tags = match apply_dispatch_response_policy(DispatchResponsePolicyInput {
+        response,
+        engine: input.response_engine,
+        candidates: response_candidates,
+        rule_context: build_response_rule_match_context(ResponseRuleContextInput {
             base: input.base,
             headers: &response_headers,
             destination: input.destination,
@@ -1066,10 +922,9 @@ async fn proxy_transparent_http1(
             client_cert: None,
             upstream_cert: None,
         }),
-        response,
-        input.headers.as_ref().cloned(),
-        input.request_rpc,
-        ResponseBodyObservationLimits {
+        headers: input.headers.as_ref().cloned(),
+        request_rpc: input.request_rpc,
+        body_observation: ResponseBodyObservationLimits {
             max_body_bytes: input
                 .selected_plan
                 .body_observation_limit(input.state.plan.limits.max_observed_response_body_bytes),
@@ -1081,10 +936,16 @@ async fn proxy_transparent_http1(
                 .flags
                 .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
         },
-    )
+        http_modules,
+        audit: input.audit,
+        request_method: input.request_method,
+        request_version: input.request_version,
+        proxy_name: input.proxy_name,
+        pre_finalize_local_response: true,
+    })
     .await?
     {
-        ListenerResponsePolicyDecision::Continue {
+        DispatchResponsePolicyOutcome::Continue {
             response: updated,
             headers: updated_headers,
             cache_bypass: _cache_bypass,
@@ -1096,36 +957,7 @@ async fn proxy_transparent_http1(
             *input.headers = updated_headers;
             policy_tags
         }
-        ListenerResponsePolicyDecision::LocalResponse {
-            response: local,
-            headers: updated_headers,
-            policy_tags,
-        } => {
-            let response = http_modules.prepare_downstream_response(local).await?;
-            let mut response = finalize_response_for_request(
-                input.request_method,
-                input.request_version,
-                input.proxy_name,
-                response,
-                false,
-            );
-            finalize_response_with_headers_in_place(
-                input.request_method,
-                input.request_version,
-                input.proxy_name,
-                &mut response,
-                updated_headers.as_deref(),
-                false,
-            );
-            http_modules.on_logging(Some(response.status()), None).await;
-            annotate_transparent_response(
-                &mut response,
-                input.audit,
-                "response_local_response",
-                &policy_tags,
-            );
-            return Ok(response);
-        }
+        DispatchResponsePolicyOutcome::Response(response) => return Ok(response),
     };
     response = http_modules.prepare_downstream_response(response).await?;
     if let Some(session) = export_session.as_ref() {
@@ -1142,7 +974,12 @@ async fn proxy_transparent_http1(
         false,
     );
     http_modules.on_logging(Some(response.status()), None).await;
-    annotate_transparent_response(&mut response, input.audit, "allow", &response_policy_tags);
+    annotate_dispatch_response(
+        &mut response,
+        input.audit,
+        crate::http::dispatch::DispatchOutcome::Allow,
+        &response_policy_tags,
+    );
     Ok(response)
 }
 
@@ -1150,54 +987,23 @@ async fn proxy_transparent_http1(
 mod tests {
     use super::*;
     use crate::http::body::to_bytes;
+    use crate::test_util::{decode_gzip, spawn_static_http_server};
     use qpx_core::config::{
         AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
         IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MessagesConfig, RuntimeConfig,
         SystemLogConfig,
     };
-    use std::io::Read;
     use std::net::{IpAddr, Ipv4Addr};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    async fn spawn_static_http_server(body: &str) -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let body = body.to_string();
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 1024];
-            loop {
-                let n = stream.read(&mut buf).await.expect("read");
-                if n == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buf[..n]);
-                if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).await.expect("write");
-        });
-        addr
-    }
-
-    fn decode_gzip(bytes: &[u8]) -> String {
-        let mut decoder = flate2::read::GzDecoder::new(bytes);
-        let mut out = String::new();
-        decoder.read_to_string(&mut out).expect("decode");
-        out
-    }
 
     #[tokio::test]
     async fn transparent_http_modules_can_compress_responses() {
-        let upstream_addr = spawn_static_http_server("transparent compression").await;
+        let upstream_addr = spawn_static_http_server(
+            "200 OK",
+            vec![("Content-Type", "text/plain".to_string())],
+            "transparent compression".to_string(),
+            1,
+        )
+        .await;
         let runtime = Runtime::new(Config {
             state_dir: None,
             identity: IdentityConfig::default(),

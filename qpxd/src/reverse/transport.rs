@@ -23,9 +23,8 @@ use crate::http::preflight::{
 use crate::http::websocket::is_websocket_upgrade;
 use crate::ipc_client::{ClientConnInfo, proxy_ipc, proxy_ipc_upstream};
 use crate::policy_context::{
-    AuditRecord, EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
-    attach_log_context, emit_audit_log, enforce_ext_authz, merge_header_controls,
-    merge_policy_tags, resolve_identity, sanitize_headers_for_policy,
+    EffectivePolicyContext, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, enforce_ext_authz,
+    merge_header_controls, resolve_identity, sanitize_headers_for_policy,
     strip_untrusted_identity_headers, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;

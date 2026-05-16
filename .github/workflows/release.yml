@@ -65,7 +65,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          case ${{ matrix.target }} in
+          case "${{ matrix.target }}" in
             *-pc-windows-*) EXT=".exe" ;;
             *) EXT="" ;;
           esac
@@ -94,16 +94,19 @@ jobs:
           cp -r config "$RELEASE_NAME/"
 
           # Create archive
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            7z a "${RELEASE_NAME}.zip" "${RELEASE_NAME}"
-            echo "ASSET=${RELEASE_NAME}.zip" >> $GITHUB_ENV
-          else
-            tar czvf "${RELEASE_NAME}.tar.gz" "${RELEASE_NAME}"
-            echo "ASSET=${RELEASE_NAME}.tar.gz" >> $GITHUB_ENV
-          fi
+          case "${{ matrix.target }}" in
+            *-pc-windows-*)
+              7z a "${RELEASE_NAME}.zip" "${RELEASE_NAME}"
+              echo "ASSET=${RELEASE_NAME}.zip" >> "$GITHUB_ENV"
+              ;;
+            *)
+              tar czvf "${RELEASE_NAME}.tar.gz" "${RELEASE_NAME}"
+              echo "ASSET=${RELEASE_NAME}.tar.gz" >> "$GITHUB_ENV"
+              ;;
+          esac
 
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: ${{ env.ASSET }}

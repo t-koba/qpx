@@ -58,7 +58,7 @@ listener accept (mode-specific: forward/ reverse/ transparent/)
   │   ├─ function executor (IPC)         (ipc_client.rs → qpxf)
   │   ├─ CONNECT tunnel                  (forward/connect.rs)
   │   ├─ cache lookup + store            (cache/, http/cache_flow.rs)
-  │   ├─ HTTP modules                    (http/modules.rs)
+  │   ├─ HTTP modules                    (http/modules/)
   │   ├─ local response                  (http/local_response.rs)
   │   ├─ FTP gateway                     (ftp.rs)
   │   └─ WebSocket upgrade               (http/websocket.rs)
@@ -68,7 +68,7 @@ listener accept (mode-specific: forward/ reverse/ transparent/)
   └─ Capture export                      (exporter.rs → SHM ring → qpxr)
 ```
 
-The key boundary rule is: mode directories (`forward/`, `reverse/`, `transparent/`) own **only** mode-specific control flow. Shared protocol mechanics live in `http/`, `http3/`, `upstream/`, `tls/`, and `cache/`. New features must not duplicate parsing, response building, or tunnel logic across modes.
+The key boundary rule is: mode directories (`forward/`, `reverse/`, `transparent/`) own **only** mode-specific control flow. Shared protocol mechanics live in `http/`, `http3/`, `upstream/`, `tls/`, and `cache/`. Shared HTTP dispatch stages live in `http/dispatch/`. New features must not duplicate parsing, response building, or tunnel logic across modes.
 
 ### Capture pipeline boundary
 
@@ -91,7 +91,7 @@ Shared building blocks that `qpxd`, `qpxr`, and `qpxc` all depend on. This crate
 - `envsubst.rs`: `${VAR:-default}` environment variable substitution.
 - `rules.rs`: rule engine — compiles listener rules into a matchable form (`CompiledRule`) and evaluates incoming requests against them.
 - `prefilter.rs`: bitset/trie-based prefilter index. Narrows candidate rules before full evaluation to avoid O(n) scans on large rulesets.
-- `matchers.rs`: low-level match primitives (CIDR, glob, regex, header value matchers) used by the rule engine.
+- `matchers/`: compiled policy matcher implementation. `mod.rs` owns the compact `CompiledMatch` shape, while `compile.rs`, `eval.rs`, `trace.rs`, `headers.rs`, `rpc.rs`, `identity.rs`, `destination.rs`, and `numeric.rs` keep compilation, evaluation, trace reporting, and domain-specific matchers separated.
 - `tls.rs`: TLS helpers: CA management and MITM certificate generation (feature `tls-rustls`); stub implementation when `tls-rustls` is disabled.
 - `exporter.rs`: capture event schema — shared between `qpxd` (producer) and `qpxr` (consumer) for serialization compatibility.
 - `shm_ring.rs`: shared-memory ring buffer (`ShmRingBuffer`) backed by a memory-mapped file (`memmap2`). Used by `qpxd` to produce capture events and by `qpxr` to consume them. Also used by QPX-IPC for shared-memory request/response body transfer between `qpxd` and `qpxf` (bodies are copied into/out of the ring).
@@ -155,14 +155,14 @@ Clean-room HTTP/3 backend crate for `qpxd`.
 ### Entry point and runtime
 
 - `main.rs`: small binary entrypoint that calls the daemon library.
-- `lib.rs`: CLI command dispatch, config loading, listener startup orchestration, config watch setup, and the process supervisor for in-place server-set restarts plus cross-platform binary-upgrade handoff.
+- `lib.rs`: CLI command dispatch, config loading, config watch setup, and the top-level process supervisor. Listener/sidecar server-set execution lives in `server_sets.rs`, while proxy/admin task lifecycle and binary-upgrade sidecar preparation live in `server_tasks.rs`.
 - `cli_render.rs`: rendering for `qpxd explain` and `qpxd match`; it consumes compiled runtime plans and match traces without owning config loading or listener startup.
 - `runtime.rs`: shared runtime state container — holds the config snapshot, compiled rules, auth providers, TLS state, metrics handles, exporter sessions, and the hot-reload watcher. Passed as `Arc` to all request handlers. Also implements `qpx_acme::ConfigProvider` so the isolated ACME runtime can observe the latest config snapshot.
 - `sidecar_control.rs`: control-plane enum for UDP/HTTP3 sidecars — distinguishes normal running, graceful stop, and export-for-upgrade shutdown so sidecars can snapshot live session state before exit.
 - `tcp_bindings.rs`: process-handoff listener inventory — binds or adopts inherited TCP listeners for forward/transparent listeners, reverse TCP listeners, metrics, and ACME HTTP-01; serializes the inheritance manifest for child startup.
 - `udp_bindings.rs`: process-handoff UDP listener inventory — binds or adopts inherited forward HTTP/3, reverse HTTP/3, and transparent UDP/QUIC sockets so the child can resume those listeners without rebinding ports.
 - `udp_session_handoff.rs`: UDP session export/restore manifest — serializes transparent UDP and reverse HTTP/3 passthrough session metadata plus inherited connected upstream sockets so a replacement process can resume those flows.
-- `http3/quinn_socket.rs`: Quinn upgrade broker — wraps the UDP socket used by forward HTTP/3 and reverse HTTP/3 terminate, tracks active QUIC routing by address/CID, and brokers new handshakes to the replacement process during binary upgrade until the parent drains and exits. Unix uses socketpairs; Windows uses loopback TCP rendezvous.
+- `http3/quinn_socket/`: Quinn upgrade broker — wraps the UDP socket used by forward HTTP/3 and reverse HTTP/3 terminate, tracks active QUIC routing by address/CID, and brokers new handshakes to the replacement process during binary upgrade until the parent drains and exits. The directory is split into routing, broker-frame codec, platform stream adoption, endpoint preparation, handoff manifest handling, and async broker task loops. Unix uses socketpairs; Windows uses loopback TCP rendezvous.
 - `upgrade.rs`: binary-upgrade handoff helpers — installs the platform trigger (`SIGUSR2` on Unix, named event + `upgrade --pid` on Windows), prepares TCP/UDP/session manifests, spawns the replacement process, hands off QUIC broker control streams, and waits for the child readiness handshake before the parent drains its TCP and old-generation QUIC accepts.
 
 ### Forward proxy (`forward/`)
@@ -171,10 +171,10 @@ Handles explicit HTTP proxy requests (client sets proxy address).
 
 - `mod.rs`: listener startup, TCP accept loop, HTTP/1.1 and HTTP/2 serve wiring, XDP metadata resolution per connection.
 - `request.rs`: request dispatch — evaluates rules, resolves upstream, routes to proxy/direct/FTP/cache/MITM/respond paths. This is the main request handler.
-- `request_dispatch.rs`: forward HTTP dispatch internals — cache flow, upstream dispatch, and listener-level HTTP module execution.
+- `request_dispatch.rs`: forward HTTP dispatch coordinator — request preparation, policy/access control, local/FTP/WebSocket branches, and cache/upstream orchestration. Cache lookup/collapse/revalidation helpers live in `request_dispatch_cache.rs`; upstream forwarding, response-policy evaluation, stale-if-error, cache writeback, and final downstream response preparation live in `request_dispatch_upstream.rs`.
 - `connect.rs`: CONNECT method handling — tunnel establishment, bidirectional relay, and TLS interception when policy selects inspect.
 - `policy.rs`: forward-mode policy evaluation — auth verification, group-based rule matching, auth cache lookup.
-- `h3.rs` / `h3_qpx.rs`: build-time selected HTTP/3 forward backend entrypoints. `h3.rs` is the upstream-`h3` backend for baseline HTTP/3, MASQUE, and generic extended CONNECT. `h3_qpx.rs` is the clean-room adapter that routes buffered request/response handling, CONNECT-UDP / MASQUE relay, generic extended CONNECT, and WebTransport relay through `qpx-h3`; response collection, static responses, and policy-response audit emission live in `h3_qpx_response.rs`.
+- `h3.rs` / `h3_qpx.rs`: build-time selected HTTP/3 forward backend entrypoints. `h3.rs` is the upstream-`h3` backend for baseline HTTP/3, MASQUE, and generic extended CONNECT. `h3_qpx.rs` is the clean-room listener/handler entrypoint for the `qpx-h3` backend; response collection, static responses, CONNECT response conversion, and policy-response audit emission live in `h3_qpx_response.rs`, CONNECT relay loops in `h3_qpx_relay.rs`, upstream CONNECT opening/validation helpers in `h3_qpx_connect_upstream.rs`, CONNECT request validation/context construction in `h3_qpx_connect_prepare.rs`, CONNECT policy/rate-limit preparation in `h3_qpx_connect_policy.rs`, WebTransport relay state in `h3_qpx_webtransport.rs`, and WebTransport request dispatch/policy/upstream setup in `h3_qpx_webtransport_dispatch.rs`.
 - `h3_connect.rs`: default `h3` backend HTTP/3 CONNECT tunnel — policy check + bidirectional stream relay.
 - `h3_connect_udp.rs`: default `h3` backend HTTP/3 CONNECT-UDP — MASQUE capsule handling, datagram relay, upstream proxy chaining.
 
@@ -186,12 +186,12 @@ Routes inbound traffic to backend upstreams based on Host/SNI/path/src_ip matchi
 - `listener.rs`: TCP/TLS accept loops — TLS handshake, SNI peek for passthrough routing, XDP metadata.
 - `router.rs`: route compilation and matching — builds a prefilter index over routes, selects upstream set, handles TLS passthrough by SNI.
 - `transport.rs`: HTTP request handling after route match — upstream forwarding, WebSocket proxy, retry with body buffering, cache flow, header pipeline.
-- `transport_dispatch.rs`: reverse HTTP dispatch internals — response rules, retry/failover, cache flow, and route-level HTTP module execution.
+- `transport_dispatch.rs`: reverse HTTP dispatch coordinator — access control, module preparation, retry helpers, and final request preparation. HTTP retry/success paths live in `transport_dispatch_http.rs`, IPC and WebSocket upgrade paths in `transport_dispatch_ipc.rs`, and cache lookup/collapse flow in `transport_dispatch_cache.rs`.
 - `request_template.rs`: request template for retry — buffers the body and checks retryability before re-dispatching.
 - `health.rs`: upstream health probes — periodic active checks, health state tracking.
 - `security.rs`: TLS host anti-fronting — enforces that TLS SNI matches the HTTP Host/authority header, with configurable exception globs.
 - `h3_terminate.rs` / `h3_terminate_qpx.rs`: build-time selected HTTP/3 terminate backends. `h3_terminate.rs` is the default upstream-`h3` implementation; `h3_terminate_qpx.rs` is the clean-room backend adapter surface.
-- `h3_passthrough.rs`: HTTP/3 UDP passthrough runtime — round-robin forwarding of raw UDP datagrams to configured upstreams, with a session index keyed by QUIC connection IDs, amplification guardrails, and the same pre-handshake reverse `connection_filter` before a new UDP/QUIC session is established. This path stays in `qpxd` because it is raw UDP/QUIC session routing rather than HTTP/3 framing logic.
+- `h3_passthrough.rs`: HTTP/3 UDP passthrough runtime — round-robin forwarding of raw UDP datagrams to configured upstreams, with a session index keyed by QUIC connection IDs, amplification guardrails, and the same pre-handshake reverse `connection_filter` before a new UDP/QUIC session is established. The main loop delegates client packet handling and new-session creation to isolated helpers so shutdown/cleanup orchestration stays separate from per-packet routing.
 
 ### Transparent proxy (`transparent/`)
 
@@ -200,21 +200,30 @@ Intercepts traffic without client configuration (Linux `SO_ORIGINAL_DST` or prot
 - `mod.rs`: listener startup, TLS/HTTP protocol detection on accepted connections.
 - `destination.rs`: original destination recovery — Linux `SO_ORIGINAL_DST`, SNI/Host fallback on non-Linux, PROXY metadata. Also provides target connection helpers.
 - `http_path.rs`: plain HTTP handling — rule evaluation, upstream dispatch, header/cache pipeline. Structurally parallel to `forward/request.rs`.
-- `http_dispatch.rs`: transparent HTTP dispatch internals — listener policy, upstream dispatch, response policy, and listener-level HTTP module execution.
+- `http_dispatch.rs`: transparent HTTP dispatch internals — listener policy, upstream dispatch, WebSocket dispatch through shared `http/dispatch/websocket.rs`, response policy, and listener-level HTTP module execution.
 - `tls_path.rs`: TLS connection handling — decides tunnel/block/MITM based on rule outcome and SNI.
+
+### Destination classifier (`destination/`)
+
+Classifies destination category, reputation, and application from host/SNI/IP/TLS evidence.
+
+- `mod.rs`: public facade with `DestinationMetadata` and `DestinationInputs`, plus re-exports for the classifier and compiled resolution policy.
+- `compile.rs`: named-set parsing and pattern compilation for category/reputation/application sets.
+- `resolve.rs`: evidence collection, precedence/conflict resolution, confidence scoring, application heuristics, and trace formatting.
 
 ### HTTP protocol (`http/`)
 
 Shared HTTP processing used by all three modes. Nothing in this directory is mode-specific.
 
-- `semantics.rs`: RFC 9110/9112 message mechanics — hop-by-hop stripping, Via append, Host/authority validation, no-body response normalization, Transfer-Encoding/Content-Length conflict detection.
+- `semantics.rs`: RFC 9110/9112 message mechanics — hop-by-hop stripping, Via append, Host/authority validation, no-body response normalization, Transfer-Encoding/Content-Length conflict detection. Shared low-level HTTP/1 header parsing/serialization helpers used by both downstream and upstream codecs live in `http1_common.rs`; downstream HTTP/1 request body forwarding lives in `http1_request_body.rs`.
 - `l7.rs`: request/response finalization pipeline — calls `semantics.rs`, then applies header control, Date, Max-Forwards decrement, TRACE handling.
 - `header_control.rs`: request/response header mutation engine — set/add/remove/regex-replace per rule configuration.
 - `policy.rs`: shared policy evaluation for transparent and MITM paths — block/respond/proceed decision.
 - `mitm.rs`: MITM intercepted request handler — re-evaluates rules after TLS decryption, dispatches to upstream, supports WebSocket upgrade.
 - `mitm_dispatch.rs`: MITM HTTP dispatch internals — decrypted forward-mode policy, upstream dispatch, and listener-level HTTP module execution.
-- `modules.rs`: public in-process HTTP module/filter API — registry/factory surface for external Rust modules, capability declarations, per-request `HttpModuleContext`, borrowed/in-place request hooks, frozen request view for response-phase filters, and stage-indexed compiled chains for request-header, cache, upstream, retry, response, error, and logging hooks. Built-ins are registered through the same API as third-party modules; larger built-ins and template mechanics live in `http/modules/`.
-- `websocket.rs`: WebSocket upgrade detection and bidirectional upgraded-stream relay.
+- `dispatch/`: shared HTTP dispatch stages used by forward, reverse, transparent, and MITM dispatchers. It owns canonical `ProxyKind` and `DispatchOutcome` identifiers, the `DispatchAuditContext` factory/annotation path, request observation/sanitization/identity preparation, HTTP guard rejection response, rate-limit response, ext_authz deny response construction, cache flow helpers, CONNECT policy rule-context construction, shared response-policy application, shared forward/transparent WebSocket proxy setup, and dispatch-level metrics. This module must not import mode directories.
+- `modules/`: public in-process HTTP module/filter API — registry/factory surface for external Rust modules, capability declarations, per-request `HttpModuleContext`, borrowed/in-place request hooks, borrowed `HttpModuleSessionInit` construction for hot dispatch paths, frozen request view for response-phase filters, and stage-indexed compiled chains for request-header, cache, upstream, retry, response, error, and logging hooks. Built-ins are registered through the same API as third-party modules.
+- `websocket.rs`: WebSocket upgrade detection and bidirectional upgraded-stream relay. Dispatch-level forward/transparent WebSocket proxy setup lives in `dispatch/websocket.rs`.
 - `upgrade.rs`: downstream HTTP/1 upgrade handoff — qpx-native `CONNECT` / `101 Switching Protocols` token that transfers the raw socket to tunnel handlers without routing through hyper's server adapter.
 - `local_response.rs`: policy response builder — constructs status/body/content-type/headers responses without upstream forwarding.
 - `rpc.rs`: shared RPC protocol inspection and local-response framing — extracts `match.rpc.*` context for `gRPC` / `Connect` / `gRPC-Web` and emits protocol-correct local responses.
@@ -223,11 +232,20 @@ Shared HTTP processing used by all three modes. Nothing in this directory is mod
 - `cache_flow.rs`: cache orchestration — lookup, conditional revalidation (If-None-Match/If-Modified-Since), response writeback.
 - `mod.rs`: module re-exports.
 
+### Upstream origins (`upstream/origin/`)
+
+Origin backend implementations for direct reverse/forward upstream traffic.
+
+- `http_backend.rs`: origin HTTP entrypoint, plain HTTP/1 dispatch, HTTPS proxy dispatch, and HTTP/1 proxy request preparation.
+- `http_backend_h2.rs`: HTTP/2 request preparation, body streaming, interim/final response receiving, and H2 inflight reservation accounting.
+- `http_backend_shared.rs`: shared direct-origin reverse HTTP/HTTPS client surfaces and absolute-URI internal request preparation.
+- `http_pool.rs`: reusable HTTP/1 and HTTP/2 origin connection pool state, including the unified HTTPS connection acquisition sequence used by proxy and shared-client paths.
+
 ### HTTP/3 protocol (`http3/`)
 
 Shared QUIC/HTTP/3 support code used by the backend-selected HTTP/3 runtime.
 
-- `quinn_socket.rs`: backend-neutral QUIC socket wrapper, broker handoff, and endpoint-socket preparation shared by both HTTP/3 backends.
+- `quinn_socket/`: backend-neutral QUIC socket wrapper, broker handoff, and endpoint-socket preparation shared by both HTTP/3 backends. `mod.rs` is only the facade; implementation lives in `routing.rs`, `frame.rs`, `stream.rs`, `broker.rs`, `tasks.rs`, `handoff.rs`, and `endpoint.rs`.
 - `capsule.rs`: CONNECT-UDP capsule encoding/decoding and QUIC variable-length integer helpers shared by the HTTP/3 backends; varint decode remains shared with transparent QUIC session code.
 - `codec.rs`, `listener.rs`, `server.rs`, `quic.rs`, `datagram.rs`: current `http3-backend-h3` protocol driver surface. These modules are compiled only for the default `h3` backend.
 - `mod.rs`: backend-sensitive module exports.
@@ -248,7 +266,7 @@ Outbound connection handling — how `qpxd` talks to origins and chained proxies
 - `pool.rs`: pooled connections to upstream proxies for forward-proxy chaining.
 - `connect.rs`: CONNECT-to-upstream helper — establishes a CONNECT tunnel through a chained proxy before forwarding.
 - `http1.rs`: HTTP/1.1 upstream proxy dispatch — absolute-form URI, WebSocket proxy, upstream endpoint parsing, Proxy-Authorization forwarding.
-- `origin.rs`: direct upstream dispatch (reverse/transparent) — dispatches `http://`, `https://`, `ws://`, and `wss://` upstreams plus the internal IPC URL path used by reverse transport. `origin/http_backend.rs` owns request preparation and HTTP/1/HTTP/2 execution; `origin/http_pool.rs` owns direct-origin pool keys, idle HTTP/1 slots, shared HTTP/2 senders, reservations, and eviction. Routes `ipc`/`ipc+unix` targets to `ipc_client::proxy_ipc()`; selects h2-aware hyper sender for HTTP/HTTPS and the WebSocket upgrade path for WS/WSS; handles request URI rewriting. User-facing YAML expresses the IPC leg as `edges[kind=reverse].routes[].target.type: ipc`.
+- `origin.rs`: direct upstream dispatch (reverse/transparent) — dispatches `http://`, `https://`, `ws://`, and `wss://` upstreams plus the internal IPC URL path used by reverse transport. `origin/http_backend.rs` owns proxy request preparation and HTTP/1/HTTP/2 execution; `origin/http_backend_shared.rs` owns shared direct-origin client surfaces and absolute-URI internal request preparation; `origin/http_pool.rs` owns direct-origin pool keys, idle HTTP/1 slots, shared HTTP/2 senders, reservations, eviction, and HTTPS acquisition. Routes `ipc`/`ipc+unix` targets to `ipc_client::proxy_ipc()`; selects h2-aware hyper sender for HTTP/HTTPS and the WebSocket upgrade path for WS/WSS; handles request URI rewriting. User-facing YAML expresses the IPC leg as `edges[kind=reverse].routes[].target.type: ipc`.
 - `mod.rs`: module re-exports.
 
 ### Cache (`cache/`)
@@ -298,6 +316,18 @@ Single-file crate. Connects to `qpxr` and relays the PCAPNG stream to Wireshark 
 
 - `main.rs`: supports `live`/`history`/`follow` modes, Wireshark extcap option negotiation, raw passthrough.
 
+## Structure Rules
+
+Every Rust file with 600 or more measured Code LOC must have an explicit `cargo xtask structure` LOC budget. Budgets are intentionally attached to concrete files so new large modules are visible during review instead of becoming untracked complexity.
+
+`cargo xtask structure` is also a source-quality gate. It enforces the measured LOC budgets, production `unwrap()` policy, production `panic!` / `todo!` / `unimplemented!` policy, HTTP response finalization entrypoints, `http/dispatch` dependency direction, and the qpx-core TLS dependency baseline. It also emits advisory warnings for production functions over 200 physical lines; this warning does not fail the build, but new long functions should be split unless a concrete hot-path or protocol-boundary reason exists.
+
+Production proxy code must not use `panic!`, `todo!`, or `unimplemented!`. Startup/configuration initialization may reject invalid process state by returning errors or by using an explicitly documented initialization-only exception, but request-path and parser code must stay recoverable. Test files and inline `#[cfg(test)]` modules are excluded from this rule so regression tests can continue to assert impossible states directly.
+
+Security-critical modules need boundary-focused tests before their behavior is treated as stable. At minimum, policy-context identity extraction and header stripping, signed-assertion parsing/claim validation, signature algorithm parsing/verification, proxy protocol parsing, TLS ClientHello sniffing, QPACK decoding, and SHM ring validation should cover malformed input, missing trust material, untrusted peers, expiry, duplicate or ambiguous data, and successful minimal cases.
+
+Operational dispatch failures should be represented with typed errors at mode boundaries. `DispatchError` is the forward HTTP prototype: rate-limit rejection, policy denial, auth challenge, ext-authz denial, and upstream availability failures are distinguishable from internal `anyhow::Error` failures, while preserving the already-finalized local response and audit metadata. New dispatcher refactors should extend this pattern instead of adding ad hoc stringly-typed error routing.
+
 ## Refactor Baseline
 
 Measured with `scripts/measure-structure.sh`, which strips inline `#[cfg(test)] mod tests` blocks before counting non-comment Rust lines.
@@ -317,28 +347,113 @@ Measured with `scripts/measure-structure.sh`, which strips inline `#[cfg(test)] 
 
 ## Current Structure Budget
 
-Measured on 2026-04-19 with `scripts/measure-structure.sh` after the phase 2-5 splits.
+Measured on 2026-05-13 with `scripts/measure-structure.sh` after the Phase 8 complexity split.
 
 | File | Code LOC | Budget |
 |---|---:|---:|
-| `qpxd/src/forward/h3_connect.rs` | 160 | 600 |
-| `qpxd/src/reverse/transport.rs` | 234 | 600 |
-| `qpxd/src/forward/connect.rs` | 608 | 800 |
-| `qpxd/src/reverse/router.rs` | 419 | 600 |
-| `qpxd/src/transparent/udp_path.rs` | 569 | 600 |
-| `qpxd/src/forward/request.rs` | 185 | 600 |
-| `qpxd/src/forward/request_dispatch.rs` | 882 | 900 |
-| `qpx-core/src/config/validate.rs` | 90 | 600 |
-| `qpx-core/src/config/types/mod.rs` | 65 | 600 |
-| `qpxd/src/runtime.rs` | 102 | 600 |
-| `qpxd/src/upstream/origin.rs` | 173 | 600 |
-| `qpxd/src/transparent/http_path.rs` | 118 | 250 |
-| `qpxd/src/http/mitm.rs` | 120 | 250 |
-| `qpxd/src/reverse/transport_dispatch.rs` | 1276 | 1300 |
-| `qpxd/src/transparent/http_dispatch.rs` | 487 | 500 |
-| `qpxd/src/http/mitm_dispatch.rs` | 499 | 500 |
+| `qpxd/src/forward/h3_connect.rs` | 170 | 600 |
+| `qpxd/src/reverse/transport.rs` | 221 | 600 |
+| `qpxd/src/forward/connect.rs` | 617 | 800 |
+| `qpxd/src/reverse/router.rs` | 551 | 600 |
+| `qpxd/src/transparent/udp_path.rs` | 447 | 500 |
+| `qpxd/src/transparent/udp_dispatch.rs` | 391 | 450 |
+| `qpxd/src/forward/request.rs` | 156 | 600 |
+| `qpxd/src/forward/request_dispatch.rs` | 1309 | 1450 |
+| `qpxd/src/forward/request_dispatch_cache.rs` | 302 | 500 |
+| `qpxd/src/forward/request_dispatch_upstream.rs` | 284 | 400 |
+| `qpx-core/src/config/validate.rs` | 89 | 600 |
+| `qpx-core/src/config/types/mod.rs` | 92 | 600 |
+| `qpxd/src/runtime.rs` | 188 | 600 |
+| `qpxd/src/upstream/origin.rs` | 182 | 600 |
+| `qpxd/src/transparent/http_path.rs` | 112 | 250 |
+| `qpxd/src/http/mitm.rs` | 81 | 250 |
+| `qpxd/src/reverse/transport_dispatch.rs` | 1552 | 1750 |
+| `qpxd/src/reverse/transport_dispatch_http.rs` | 353 | 450 |
+| `qpxd/src/reverse/transport_dispatch_ipc.rs` | 446 | 550 |
+| `qpxd/src/reverse/transport_dispatch_cache.rs` | 476 | 600 |
+| `qpxd/src/transparent/http_dispatch.rs` | 1108 | 1250 |
+| `qpxd/src/http/mitm_dispatch.rs` | 717 | 850 |
+| `qpxd/src/lib.rs` | 1080 | 1300 |
+| `qpxd/src/server_sets.rs` | 489 | 650 |
+| `qpxd/src/server_tasks.rs` | 518 | 650 |
+| `qpxd/src/forward/h3_qpx.rs` | 381 | 500 |
+| `qpxd/src/forward/h3_qpx_webtransport.rs` | 525 | 650 |
+| `qpxd/src/forward/h3_qpx_webtransport_dispatch.rs` | 732 | 850 |
+| `qpxd/src/forward/h3_qpx_response.rs` | 256 | 320 |
+| `qpxd/src/forward/h3_qpx_connect.rs` | 734 | 1000 |
+| `qpxd/src/forward/h3_qpx_connect_prepare.rs` | 296 | 450 |
+| `qpxd/src/forward/h3_qpx_connect_policy.rs` | 381 | 450 |
+| `qpxd/src/forward/h3_qpx_connect_upstream.rs` | 254 | 320 |
+| `qpxd/src/forward/h3_qpx_relay.rs` | 352 | 400 |
+| `qpxd/src/http/modules/mod.rs` | 18 | 80 |
+| `qpxd/src/http/modules/execution.rs` | 555 | 650 |
+| `qpxd/src/http/modules/response_compression.rs` | 537 | 600 |
+| `qpxd/src/http/dispatch/mod.rs` | 66 | 90 |
+| `qpxd/src/http/dispatch/access.rs` | 55 | 80 |
+| `qpxd/src/http/dispatch/audit.rs` | 109 | 140 |
+| `qpxd/src/http/dispatch/guard.rs` | 41 | 60 |
+| `qpxd/src/http/dispatch/metrics.rs` | 38 | 60 |
+| `qpxd/src/http/dispatch/outcome.rs` | 65 | 90 |
+| `qpxd/src/http/dispatch/rate_limit.rs` | 28 | 45 |
+| `qpxd/src/http/dispatch/cache.rs` | 158 | 200 |
+| `qpxd/src/http/dispatch/connect_policy.rs` | 59 | 80 |
+| `qpxd/src/http/dispatch/prepare.rs` | 99 | 120 |
+| `qpxd/src/http/dispatch/response_policy.rs` | 111 | 140 |
+| `qpxd/src/http/dispatch/websocket.rs` | 63 | 90 |
+| `qpxd/src/http/http1_codec.rs` | 765 | 1100 |
+| `qpxd/src/http/http1_request_body.rs` | 259 | 300 |
+| `qpxd/src/http/http1_common.rs` | 47 | 100 |
+| `qpxd/src/reverse/h3_passthrough.rs` | 1093 | 1200 |
+| `qpxd/src/udp_session_handoff.rs` | 893 | 1050 |
+| `qpxd/src/runtime/plan.rs` | 889 | 1050 |
+| `qpxd/src/transparent/tls_path.rs` | 741 | 900 |
+| `qpxd/src/forward/h3_connect_handlers.rs` | 875 | 1050 |
+| `qpxd/src/upstream/pool.rs` | 706 | 850 |
+| `qpxd/src/ipc_client.rs` | 691 | 850 |
+| `qpxd/src/ftp.rs` | 837 | 1000 |
+| `qpxd/src/rate_limit.rs` | 827 | 950 |
+| `qpxd/src/upstream/origin/http_backend.rs` | 170 | 550 |
+| `qpxd/src/upstream/origin/http_backend_shared.rs` | 121 | 300 |
+| `qpxd/src/upstream/origin/http_backend_h2.rs` | 187 | 400 |
+| `qpxd/src/upstream/origin/http_pool.rs` | 448 | 600 |
+| `qpxd/src/destination/mod.rs` | 51 | 100 |
+| `qpxd/src/destination/compile.rs` | 198 | 300 |
+| `qpxd/src/destination/resolve.rs` | 589 | 650 |
+| `qpxd/src/upstream/raw_http1.rs` | 767 | 950 |
+| `qpxd/src/forward/h3_connect_udp.rs` | 767 | 900 |
+| `qpxd/src/reverse/listener.rs` | 659 | 800 |
+| `qpx-core/src/config/validate/rules.rs` | 1306 | 1550 |
+| `qpx-core/src/config/validate/reverse.rs` | 635 | 800 |
+| `qpx-core/src/config/validate/security.rs` | 633 | 800 |
+| `qpx-core/src/config/types/canonical.rs` | 690 | 850 |
+| `qpx-core/src/prefilter.rs` | 744 | 900 |
+| `qpx-core/src/shm_ring.rs` | 759 | 900 |
+| `qpx-core/src/config/tests.rs` | 1072 | 1250 |
+| `qpx-h3/src/server.rs` | 880 | 1000 |
+| `qpxf/src/server.rs` | 700 | 850 |
+| `qpx-acme/src/lib.rs` | 650 | 800 |
+| `qpxd/src/cache/tests.rs` | 1252 | 1450 |
+| `qpxd/src/runtime_tests.rs` | 885 | 1050 |
+| `qpxd/src/reverse/transport_tests.rs` | 1948 | 2300 |
+| `qpxd/src/forward/request_tests.rs` | 959 | 1150 |
+| `qpxd/tests/perf_smoke.rs` | 1059 | 1250 |
+| `qpxd/tests/rfc911x_contract.rs` | 1200 | 1400 |
+| `qpxd/tests/forward_e2e.rs` | 1091 | 1300 |
+| `qpxd/tests/advanced_transport_perf.rs` | 789 | 950 |
+| `qpx-h3/tests/e2e.rs` | 1018 | 1200 |
+| `qpxd/src/http3/quinn_socket/mod.rs` | 18 | 30 |
+| `qpxd/src/http3/quinn_socket/broker.rs` | 533 | 600 |
+| `qpxd/src/http3/quinn_socket/endpoint.rs` | 66 | 100 |
+| `qpxd/src/http3/quinn_socket/frame.rs` | 200 | 260 |
+| `qpxd/src/http3/quinn_socket/handoff.rs` | 330 | 400 |
+| `qpxd/src/http3/quinn_socket/routing.rs` | 129 | 170 |
+| `qpxd/src/http3/quinn_socket/stream.rs` | 177 | 230 |
+| `qpxd/src/http3/quinn_socket/tasks.rs` | 123 | 160 |
+| `qpx-h3/src/qpack/mod.rs` | 303 | 350 |
+| `qpx-h3/src/response.rs` | 197 | 220 |
+| `qpx-h3/src/qpack_fields.rs` | 130 | 160 |
 
-`qpxd/src/forward/connect.rs` keeps a relaxed 800 LOC cap because the HTTP/1 CONNECT, HTTP/2 extended CONNECT, and MITM/tunnel entry orchestration still intentionally meet at that boundary. `cargo xtask structure` now enforces both the thin entrypoint modules (`forward/request.rs`, `reverse/transport.rs`, `transparent/http_path.rs`, `http/mitm.rs`) and the moved dispatcher implementation files that hold the hot-path HTTP policy/dispatch logic.
+`qpxd/src/forward/connect.rs` keeps a relaxed 800 LOC cap because the HTTP/1 CONNECT, HTTP/2 extended CONNECT, and MITM/tunnel entry orchestration still intentionally meet at that boundary. `cargo xtask structure` now enforces both the thin entrypoint modules (`forward/request.rs`, `reverse/transport.rs`, `transparent/http_path.rs`, `http/mitm.rs`) and the moved dispatcher implementation files that hold the hot-path HTTP policy/dispatch logic. New and modified functions should target 200 lines or less; longer functions need a concrete reason and should usually be split before they reach a file budget boundary.
 
 ---
 
@@ -377,6 +492,7 @@ QPX-IPC server that executes CGI scripts, dispatches optional WASM execution thr
 2. Shared protocol mechanics live in `http/`, `http3/`, `upstream/`, `xdp/`, or `tls/`.
 3. New features must not duplicate parsing, response building, or tunnel logic across mode files.
 4. `qpxd` never generates PCAP/PCAPNG. `qpxr` is the sole capture generator. `qpxc` is passthrough only.
-5. `qpxf` is the sole CGI/WASM execution environment. `qpxd` communicates with `qpxf` only via the QPX-IPC protocol (`ipc_client.rs` → `qpxf/server.rs`).
-6. `qpx-acme` owns ACME protocol state, renewal logic, and ACME-managed certificate stores. `qpxd` only wires that runtime into listener startup and certificate selection.
-7. `qpx-wasm` owns the `wasmtime` / WASI runtime. `qpxf` remains the IPC server, router, and CGI process supervisor.
+5. Shared HTTP dispatch stages must live under `http/dispatch/`; that module must not import mode directories (`forward/`, `reverse/`, `transparent/`).
+6. `qpxf` is the sole CGI/WASM execution environment. `qpxd` communicates with `qpxf` only via the QPX-IPC protocol (`ipc_client.rs` → `qpxf/server.rs`).
+7. `qpx-acme` owns ACME protocol state, renewal logic, and ACME-managed certificate stores. `qpxd` only wires that runtime into listener startup and certificate selection.
+8. `qpx-wasm` owns the `wasmtime` / WASI runtime. `qpxf` remains the IPC server, router, and CGI process supervisor.

@@ -1,7 +1,8 @@
+use super::headers::{parse_header_name, parse_module_settings};
+use super::template::{CompiledTemplate, compile_template, render_template};
 use super::{
-    CompiledTemplate, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
-    HttpModuleFactory, HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome,
-    compile_template, parse_header_name, parse_module_settings, render_template,
+    HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
+    HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome,
 };
 use crate::http::body::Body;
 use anyhow::{Context, Result, anyhow};

@@ -1,10 +1,17 @@
 use super::*;
-use crate::http::observation::RequestObservationPlan;
+use crate::http::dispatch::{
+    DispatchAuditContext, DispatchGuardInput, DispatchRequestPrepareInput,
+    DispatchResponsePolicyInput, DispatchResponsePolicyOutcome, ExtAuthzDenyResponseInput,
+    PreparedDispatchRequest, annotate_dispatch_response, apply_dispatch_response_policy,
+    evaluate_http_guard, ext_authz_deny_response, prepare_dispatch_request,
+    record_upstream_request_duration,
+};
 use crate::http::rule_context::{
     RequestRuleContextInput, ResponseRuleContextInput, attach_destination_trace,
     build_request_rule_match_context, build_response_rule_match_context,
 };
 
+#[tracing::instrument(skip_all, fields(kind = "mitm", host = %route.host, method = %base.method))]
 pub(super) async fn dispatch_mitm_request(
     mut req: Request<Body>,
     base: BaseRequestFields,
@@ -41,19 +48,6 @@ pub(super) async fn dispatch_mitm_request(
     let response_candidates_for_request = response_engine
         .map(|engine| engine.candidate_profile(prefilter_ctx.clone()))
         .unwrap_or_default();
-    let mut observation_plan = RequestObservationPlan::from_policy_candidates(
-        engine,
-        &response_candidates_for_request,
-        prefilter_ctx.clone(),
-    );
-    let guard_requires_buffering =
-        http_guard.is_some_and(|profile| profile.requires_request_body_buffering(&req));
-    observation_plan.include_body(guard_requires_buffering);
-    observation_plan.include_body(
-        base_plan
-            .flags
-            .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
-    );
     let max_observed_request_body_bytes = http_guard
         .and_then(|profile| profile.request_body_observation_cap())
         .map(|cap| cap.min(state.plan.limits.max_observed_request_body_bytes))
@@ -61,45 +55,43 @@ pub(super) async fn dispatch_mitm_request(
     let max_observed_request_body_bytes =
         base_plan.body_observation_limit(max_observed_request_body_bytes);
     let request_version_for_observation = req.version();
-    req = match observation_plan
-        .observe_request(
-            req,
-            max_observed_request_body_bytes,
-            std::time::Duration::from_millis(state.plan.limits.http_header_read_timeout_ms.max(1)),
-        )
-        .await
+    let PreparedDispatchRequest {
+        req: prepared_req,
+        observation_plan: _observation_plan,
+        sanitized_headers,
+        identity,
+        request_rpc,
+    } = match prepare_dispatch_request(DispatchRequestPrepareInput {
+        req,
+        rule_engine: engine,
+        response_candidates: &response_candidates_for_request,
+        prefilter_ctx,
+        http_guard,
+        capture_body: base_plan
+            .flags
+            .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
+        max_observed_request_body_bytes,
+        read_timeout: std::time::Duration::from_millis(
+            state.plan.limits.http_header_read_timeout_ms.max(1),
+        ),
+        request_method: &base.method,
+        request_version: request_version_for_observation,
+        proxy_name,
+        state: &state,
+        effective_policy: &effective_policy,
+        remote_ip: route.src_addr.ip(),
+    })
+    .await?
     {
-        Ok(req) => req,
-        Err(err) if crate::http::body_size::is_observed_body_limit_exceeded(&err) => {
-            return Ok(finalize_response_for_request(
-                &base.method,
-                request_version_for_observation,
-                proxy_name,
-                Response::builder()
-                    .status(hyper::StatusCode::PAYLOAD_TOO_LARGE)
-                    .body(Body::from("request body too large"))?,
-                false,
-            ));
-        }
-        Err(err) => return Err(err),
+        Ok(prepared) => prepared,
+        Err(response) => return Ok(response),
     };
+    req = prepared_req;
     let path = path_owned.as_str();
     let request_uri = base.request_uri.as_str();
     let req_method = req.method().clone();
     let req_version = req.version();
-    let sanitized_headers = sanitize_headers_for_policy(
-        &state,
-        &effective_policy,
-        route.src_addr.ip(),
-        req.headers(),
-    )?;
-    let mut identity = resolve_identity(
-        &state,
-        &effective_policy,
-        route.src_addr.ip(),
-        Some(&sanitized_headers),
-        None,
-    )?;
+    let mut identity = identity;
     let upstream_cert = route.upstream_cert.as_deref();
     let destination = state.classify_destination(
         &DestinationInputs {
@@ -125,44 +117,25 @@ pub(super) async fn dispatch_mitm_request(
             .ingress_edge_execution_plan(route.listener_name, None)
             .and_then(|plan| plan.destination_resolution.as_ref()),
     );
-    if let Some(profile) = http_guard
-        && let Some(reject) = profile.evaluate_request(&req)?
-    {
-        let mut log_context = identity.to_log_context(None, None, None);
-        attach_destination_trace(&mut log_context, &destination);
-        let mut response = finalize_response_for_request(
-            req.method(),
-            req.version(),
-            proxy_name,
-            Response::builder()
-                .status(reject.status)
-                .body(Body::from(reject.body))?,
-            false,
-        );
-        attach_log_context(&mut response, &log_context);
-        emit_audit_log(
-            &state,
-            AuditRecord {
-                kind: "forward",
-                name: route.listener_name,
-                remote_ip: route.src_addr.ip(),
-                host: Some(route.host),
-                sni: Some(route.sni),
-                method: Some(req.method().as_str()),
-                path: Some(path_owned.as_str()),
-                outcome: "http_guard_reject",
-                status: Some(response.status().as_u16()),
-                matched_rule: None,
-                matched_route: None,
-                ext_authz_policy_id: None,
-            },
-            &log_context,
-        );
+    if let Some(response) = evaluate_http_guard(DispatchGuardInput {
+        profile: http_guard,
+        req: &req,
+        destination: &destination,
+        proxy_name,
+        audit: DispatchAuditContext::new(
+            state.clone(),
+            crate::http::dispatch::ProxyKind::Mitm,
+            route.listener_name,
+            route.src_addr,
+            req.method().clone(),
+            Some(path_owned.clone()),
+            identity.to_log_context(None, None, None),
+        )
+        .with_host(Some(route.host.to_string()))
+        .with_sni(Some(route.sni.to_string())),
+    })? {
         return Ok(response);
     }
-    let request_rpc = observation_plan
-        .needs_rpc
-        .then(|| crate::http::rpc::inspect_request(&req));
     let ctx = build_request_rule_match_context(RequestRuleContextInput {
         base: &base,
         headers: &sanitized_headers,
@@ -182,7 +155,7 @@ pub(super) async fn dispatch_mitm_request(
         request_uri,
     )
     .await?;
-    let (mut headers, matched_rule, mut early_response) = match decision {
+    let (mut headers, matched_rule, early_response) = match decision {
         ForwardPolicyDecision::Allow(allowed) => {
             identity.supplement_builtin_auth(allowed.authenticated_user.as_ref());
             if matches!(allowed.action.kind, ActionKind::Block) {
@@ -276,7 +249,7 @@ pub(super) async fn dispatch_mitm_request(
                 &state,
                 &effective_policy,
                 ExtAuthzInput {
-                    proxy_kind: "forward",
+                    proxy_kind: crate::http::dispatch::ProxyKind::Forward,
                     proxy_name,
                     scope_name: route.listener_name,
                     remote_ip: route.src_addr.ip(),
@@ -316,31 +289,26 @@ pub(super) async fn dispatch_mitm_request(
     );
     attach_destination_trace(&mut log_context, &destination);
     log_context.policy_tags = ext_authz_policy_tags;
-    let annotate_with_tags =
-        |response: &mut Response<Body>, outcome: &'static str, extra_policy_tags: &[String]| {
-            let mut annotated_context = log_context.clone();
-            merge_policy_tags(&mut annotated_context.policy_tags, extra_policy_tags);
-            attach_log_context(response, &annotated_context);
-            emit_audit_log(
-                &state,
-                AuditRecord {
-                    kind: "forward",
-                    name: route.listener_name,
-                    remote_ip: route.src_addr.ip(),
-                    host: Some(route.host),
-                    sni: Some(route.sni),
-                    method: Some(req_method.as_str()),
-                    path: Some(path_owned.as_str()),
-                    outcome,
-                    status: Some(response.status().as_u16()),
-                    matched_rule: matched_rule.as_deref(),
-                    matched_route: None,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
-                },
-                &annotated_context,
-            );
-        };
-    let annotate = |response: &mut Response<Body>, outcome: &'static str| {
+    let audit = DispatchAuditContext::new(
+        state.clone(),
+        crate::http::dispatch::ProxyKind::Mitm,
+        route.listener_name,
+        route.src_addr,
+        req_method.clone(),
+        Some(path_owned.clone()),
+        log_context,
+    )
+    .with_host(Some(route.host.to_string()))
+    .with_sni(Some(route.sni.to_string()))
+    .with_matched_rule(matched_rule.clone())
+    .with_ext_authz_policy_id(ext_authz_policy_id.clone());
+    let annotate_with_tags = |response: &mut Response<Body>,
+                              outcome: crate::http::dispatch::DispatchOutcome,
+                              extra_policy_tags: &[String]| {
+        annotate_dispatch_response(response, &audit, outcome, extra_policy_tags);
+    };
+    let annotate = |response: &mut Response<Body>,
+                    outcome: crate::http::dispatch::DispatchOutcome| {
         annotate_with_tags(response, outcome, &[]);
     };
     let mut timeout_override = None;
@@ -364,27 +332,22 @@ pub(super) async fn dispatch_mitm_request(
                         too_many_requests(Some(retry_after)),
                         false,
                     );
-                    annotate(&mut response, "rate_limited");
+                    annotate(
+                        &mut response,
+                        crate::http::dispatch::DispatchOutcome::RateLimited,
+                    );
                     return Ok(response);
                 }
             }
             ExtAuthzEnforcement::Deny(deny) => {
-                early_response = Some(if let Some(local) = deny.local_response.as_ref() {
-                    finalize_response_for_request(
-                        req.method(),
-                        req.version(),
-                        proxy_name,
-                        build_local_response(local)?,
-                        false,
-                    )
-                } else {
-                    finalize_response_for_request(
-                        req.method(),
-                        req.version(),
-                        proxy_name,
-                        forbidden(state.messages.forbidden.as_str()),
-                        false,
-                    )
+                return ext_authz_deny_response(ExtAuthzDenyResponseInput {
+                    ext_authz: ExtAuthzEnforcement::Deny(deny),
+                    base_headers: headers.clone(),
+                    request_method: req.method(),
+                    request_version: req.version(),
+                    proxy_name,
+                    default_response: forbidden(state.messages.forbidden.as_str()),
+                    audit: &audit,
                 });
             }
         }
@@ -397,12 +360,18 @@ pub(super) async fn dispatch_mitm_request(
             too_many_requests(Some(retry_after)),
             false,
         );
-        annotate(&mut response, "rate_limited");
+        annotate(
+            &mut response,
+            crate::http::dispatch::DispatchOutcome::RateLimited,
+        );
         return Ok(response);
     }
     if let Some(response) = early_response {
         let mut response = response;
-        annotate(&mut response, "early_response");
+        annotate(
+            &mut response,
+            crate::http::dispatch::DispatchOutcome::EarlyResponse,
+        );
         return Ok(response);
     }
 
@@ -423,7 +392,10 @@ pub(super) async fn dispatch_mitm_request(
                     too_many_requests(None),
                     false,
                 );
-                annotate(&mut response, "concurrency_limited");
+                annotate(
+                    &mut response,
+                    crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
+                );
                 return Ok(response);
             }
         };
@@ -439,7 +411,10 @@ pub(super) async fn dispatch_mitm_request(
     .await
     {
         let mut response = response;
-        annotate(&mut response, "max_forwards");
+        annotate(
+            &mut response,
+            crate::http::dispatch::DispatchOutcome::MaxForwards,
+        );
         return Ok(response);
     }
     strip_untrusted_identity_headers(
@@ -458,13 +433,13 @@ pub(super) async fn dispatch_mitm_request(
     let mut http_modules = selected_plan.modules.start(
         state.clone(),
         crate::http::modules::HttpModuleSessionInit {
-            proxy_kind: "mitm",
-            proxy_name: proxy_name.to_string(),
-            scope_name: route.listener_name.to_string(),
+            proxy_kind: crate::http::dispatch::ProxyKind::Mitm,
+            proxy_name,
+            scope_name: route.listener_name,
             route_name: None,
             remote_ip: route.src_addr.ip(),
-            sni: Some(route.host.to_string()),
-            identity_user: identity.user.clone(),
+            sni: Some(route.host),
+            identity_user: identity.user.as_deref(),
             cache_policy: None,
             cache_default_scheme: None,
         },
@@ -483,19 +458,25 @@ pub(super) async fn dispatch_mitm_request(
                 false,
             );
             http_modules.on_logging(Some(response.status()), None).await;
-            annotate(&mut response, "http_module_local_response");
+            annotate(
+                &mut response,
+                crate::http::dispatch::DispatchOutcome::HttpModuleLocalResponse,
+            );
             return Ok(response);
         }
     }
     let upstream_timeout = timeout_override
         .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
+    let upstream_started = std::time::Instant::now();
     http_modules.on_upstream_request(&mut req).await?;
     if let Some(session) = export_session.as_ref() {
         let preview = crate::exporter::serialize_request_preview(&req);
         session.emit_plaintext(true, &preview);
     }
     let mut guard = sender.lock().await;
-    let mut response = match timeout(upstream_timeout, guard.send_request(req)).await {
+    let upstream_result = timeout(upstream_timeout, guard.send_request(req)).await;
+    record_upstream_request_duration(audit.kind, upstream_started.elapsed());
+    let mut response = match upstream_result {
         Ok(Ok(response)) => response.map(Body::from),
         Ok(Err(err)) => {
             let err = err.into();
@@ -523,10 +504,11 @@ pub(super) async fn dispatch_mitm_request(
         .unwrap_or_default();
     let response_status = response.status().as_u16();
     let response_headers = response.headers().clone();
-    let response_policy_tags = match apply_listener_response_policy(
-        response_engine,
-        response_candidates,
-        build_response_rule_match_context(ResponseRuleContextInput {
+    let response_policy_tags = match apply_dispatch_response_policy(DispatchResponsePolicyInput {
+        response,
+        engine: response_engine,
+        candidates: response_candidates,
+        rule_context: build_response_rule_match_context(ResponseRuleContextInput {
             base: &base,
             headers: &response_headers,
             destination: &destination,
@@ -537,10 +519,9 @@ pub(super) async fn dispatch_mitm_request(
             client_cert: None,
             upstream_cert,
         }),
-        response,
-        headers.clone(),
-        request_rpc.as_ref(),
-        ResponseBodyObservationLimits {
+        headers: headers.clone(),
+        request_rpc: request_rpc.as_ref(),
+        body_observation: ResponseBodyObservationLimits {
             max_body_bytes: selected_plan
                 .body_observation_limit(state.plan.limits.max_observed_response_body_bytes),
             read_timeout: std::time::Duration::from_millis(
@@ -550,10 +531,16 @@ pub(super) async fn dispatch_mitm_request(
                 .flags
                 .contains(crate::runtime::PlanFlags::CAPTURE_BODY),
         },
-    )
+        http_modules: &mut http_modules,
+        audit: &audit,
+        request_method: &req_method,
+        request_version: req_version,
+        proxy_name,
+        pre_finalize_local_response: true,
+    })
     .await?
     {
-        ListenerResponsePolicyDecision::Continue {
+        DispatchResponsePolicyOutcome::Continue {
             response: updated,
             headers: updated_headers,
             cache_bypass: _cache_bypass,
@@ -565,31 +552,7 @@ pub(super) async fn dispatch_mitm_request(
             headers = updated_headers;
             policy_tags
         }
-        ListenerResponsePolicyDecision::LocalResponse {
-            response: local,
-            headers: updated_headers,
-            policy_tags,
-        } => {
-            let response = http_modules.prepare_downstream_response(local).await?;
-            let mut response = finalize_response_for_request(
-                &req_method,
-                req_version,
-                proxy_name,
-                response,
-                false,
-            );
-            finalize_response_with_headers_in_place(
-                &req_method,
-                req_version,
-                proxy_name,
-                &mut response,
-                updated_headers.as_deref(),
-                false,
-            );
-            http_modules.on_logging(Some(response.status()), None).await;
-            annotate_with_tags(&mut response, "response_local_response", &policy_tags);
-            return Ok(response);
-        }
+        DispatchResponsePolicyOutcome::Response(response) => return Ok(response),
     };
     response = http_modules.prepare_downstream_response(response).await?;
     if let Some(session) = export_session.as_ref() {
@@ -620,7 +583,11 @@ pub(super) async fn dispatch_mitm_request(
         keep_upgrade,
     );
     http_modules.on_logging(Some(response.status()), None).await;
-    annotate_with_tags(&mut response, "allow", &response_policy_tags);
+    annotate_with_tags(
+        &mut response,
+        crate::http::dispatch::DispatchOutcome::Allow,
+        &response_policy_tags,
+    );
     Ok(response)
 }
 
@@ -629,57 +596,13 @@ mod tests {
     use super::*;
     use crate::http::body::to_bytes;
     use crate::http::mitm::proxy_mitm_request;
+    use crate::test_util::{decode_gzip, spawn_http1_send_request};
     use qpx_core::config::{
         AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
         IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MessagesConfig, RuntimeConfig,
         SystemLogConfig,
     };
-    use std::io::Read;
     use std::net::{IpAddr, Ipv4Addr};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
-
-    async fn spawn_send_request(body: &str) -> Arc<Mutex<SendRequest<Body>>> {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let body = body.to_string();
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 1024];
-            loop {
-                let n = stream.read(&mut buf).await.expect("read");
-                if n == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buf[..n]);
-                if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).await.expect("write");
-        });
-        let stream = TcpStream::connect(addr).await.expect("connect");
-        let (sender, connection) = crate::http::common::handshake_http1(stream)
-            .await
-            .expect("handshake");
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        Arc::new(Mutex::new(sender))
-    }
-
-    fn decode_gzip(bytes: &[u8]) -> String {
-        let mut decoder = flate2::read::GzDecoder::new(bytes);
-        let mut out = String::new();
-        decoder.read_to_string(&mut out).expect("decode");
-        out
-    }
 
     #[tokio::test]
     async fn mitm_http_modules_can_compress_responses() {
@@ -755,7 +678,7 @@ settings:
             caches: Vec::new(),
         })
         .expect("runtime");
-        let sender = spawn_send_request("mitm compression").await;
+        let sender = spawn_http1_send_request("mitm compression").await;
         let request = Request::builder()
             .method(http::Method::GET)
             .uri("/asset")

@@ -168,14 +168,16 @@ Use these only through `include` composition samples.
 
 ## Validation
 
-`qpxd` and `qpxf` use different config schemas. The default sample check validates all `tls-rustls` samples plus the repo-local `qpxf` examples. `*-native-*` samples are for manual `tls-native` validation.
+`qpxd` and `qpxf` use different config schemas. The default sample check validates all `tls-rustls` samples plus the repo-local `qpxf` examples. On Linux CI it also builds a `tls-native` `qpxd` and validates the `*-native-*` PKCS#12 sample with a generated test identity. On Darwin, that runtime PKCS#12 check is skipped because `native-tls` uses the platform identity importer.
 
 ```bash
 cargo build -p qpxd -p qpxf --locked
 ./scripts/check-config-samples.sh
+./scripts/audit-config-usecases.sh
+./scripts/audit-config-behavior.sh
 ```
 
-Manual check for the `tls-native` PKCS#12 sample:
+Manual check for the `tls-native` PKCS#12 sample on platforms where the generated identity format is not accepted by the native importer:
 
 ```bash
 export QPX_TLS_PKCS12=/path/to/server.p12

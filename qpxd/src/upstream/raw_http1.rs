@@ -1,4 +1,7 @@
 use crate::http::body::Body;
+use crate::http::http1_common::{
+    find_crlf, has_connection_token, parse_header_map, parse_version, serialize_headers,
+};
 use crate::tls::UpstreamCertificateInfo;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
@@ -202,16 +205,6 @@ where
     Ok(())
 }
 
-fn serialize_headers(headers: &HeaderMap, out: &mut Vec<u8>) -> Result<()> {
-    for (name, value) in headers {
-        out.extend_from_slice(name.as_str().as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(value.as_bytes());
-        out.extend_from_slice(b"\r\n");
-    }
-    Ok(())
-}
-
 async fn poll_body_data_now(body: &mut Body) -> Result<Option<Bytes>> {
     tokio::select! {
         biased;
@@ -340,7 +333,7 @@ where
             let mut response = httparse::Response::new(&mut headers);
             match response.parse(&buf)? {
                 httparse::Status::Complete(consumed) => {
-                    let version = parse_version(response.version)?;
+                    let version = parse_version(response.version, "missing upstream HTTP version")?;
                     let status = StatusCode::from_u16(
                         response
                             .code
@@ -416,7 +409,7 @@ where
     let mut response = Response::builder()
         .status(head.status)
         .body(body)
-        .expect("build response");
+        .unwrap_or_else(|_| Response::new(Body::empty()));
     *response.version_mut() = head.version;
     *response.headers_mut() = head.headers;
     response
@@ -729,29 +722,6 @@ where
         .map_err(Into::into)
 }
 
-fn find_crlf(buf: &BytesMut) -> Option<usize> {
-    buf.windows(2).position(|window| window == b"\r\n")
-}
-
-fn parse_header_map(headers: &[httparse::Header<'_>]) -> Result<HeaderMap> {
-    let mut out = HeaderMap::new();
-    for header in headers {
-        let name = HeaderName::from_bytes(header.name.as_bytes())?;
-        let value = HeaderValue::from_bytes(header.value)?;
-        out.append(name, value);
-    }
-    Ok(out)
-}
-
-fn parse_version(version: Option<u8>) -> Result<Version> {
-    match version {
-        Some(0) => Ok(Version::HTTP_10),
-        Some(1) => Ok(Version::HTTP_11),
-        Some(other) => Err(anyhow!("unsupported HTTP version: 1.{}", other)),
-        None => Err(anyhow!("missing upstream HTTP version")),
-    }
-}
-
 fn determine_response_body_kind(
     request_method: &Method,
     status: StatusCode,
@@ -840,15 +810,6 @@ fn response_keep_alive(version: Version, headers: &HeaderMap) -> bool {
         Version::HTTP_10 => has_connection_token(headers, "keep-alive"),
         _ => !has_connection_token(headers, "close"),
     }
-}
-
-fn has_connection_token(headers: &HeaderMap, token: &str) -> bool {
-    headers
-        .get_all(CONNECTION)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|raw| raw.split(','))
-        .any(|part| part.trim().eq_ignore_ascii_case(token))
 }
 
 #[cfg(test)]

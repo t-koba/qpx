@@ -18,14 +18,11 @@ use crate::http::l7::{
 };
 use crate::http::local_response::build_local_response;
 use crate::http::preflight::{PreflightOptions, PreflightOutcome, preflight_validate};
-use crate::http::response_policy::{
-    ListenerResponsePolicyDecision, ResponseBodyObservationLimits, apply_listener_response_policy,
-};
+use crate::http::response_policy::ResponseBodyObservationLimits;
 use crate::http::websocket::{is_websocket_upgrade, spawn_upgrade_tunnel};
 use crate::policy_context::{
-    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, attach_log_context,
-    emit_audit_log, enforce_ext_authz, merge_header_controls, merge_policy_tags, resolve_identity,
-    sanitize_headers_for_policy, strip_untrusted_identity_headers, validate_ext_authz_allow_mode,
+    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, enforce_ext_authz, merge_header_controls,
+    strip_untrusted_identity_headers, validate_ext_authz_allow_mode,
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;

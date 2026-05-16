@@ -31,8 +31,9 @@ const SHM_VERSION: u32 = 2;
 // - every mapping is exactly HEADER_SIZE + capacity bytes;
 // - header offsets stay aligned for AtomicUsize / AtomicU32 on supported targets;
 // - init_or_validate_header gates all typed atomic references into the mmap;
-// - only this module creates typed references or slices from the mapping;
-// - the payload area is always addressed modulo the validated capacity.
+// - only this module creates typed references from the mapping;
+// - atomic typed access goes through atomic_usize_at / atomic_u32_at;
+// - the payload area is always addressed through normal slices modulo the validated capacity.
 
 /// Prevent pathological allocations if the ring gets corrupted or incorrectly sized.
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024; // 1 MiB
@@ -116,35 +117,27 @@ impl ShmRingBuffer {
     }
 
     fn read_idx(&self) -> &AtomicUsize {
-        // SAFETY: `create_or_open` maps at least `HEADER_SIZE + capacity` bytes and
-        // `init_or_validate_header` validates the header layout before any instance is returned.
-        // The offset is usize-aligned by construction.
-        unsafe { &*(self.mmap.as_ptr().add(READ_IDX_OFFSET) as *const AtomicUsize) }
+        atomic_usize_at(&self.mmap, READ_IDX_OFFSET)
     }
 
     fn write_idx(&self) -> &AtomicUsize {
-        // SAFETY: same header layout invariant as `read_idx`; the offset is usize-aligned.
-        unsafe { &*(self.mmap.as_ptr().add(WRITE_IDX_OFFSET) as *const AtomicUsize) }
+        atomic_usize_at(&self.mmap, WRITE_IDX_OFFSET)
     }
 
     fn max_msg_bytes(&self) -> &AtomicUsize {
-        // SAFETY: same header layout invariant as `read_idx`; the offset is usize-aligned.
-        unsafe { &*(self.mmap.as_ptr().add(MAX_MSG_BYTES_OFFSET) as *const AtomicUsize) }
+        atomic_usize_at(&self.mmap, MAX_MSG_BYTES_OFFSET)
     }
 
     fn consumer_waiting(&self) -> &AtomicU32 {
-        // SAFETY: same header layout invariant as `read_idx`; the offset is u32-aligned.
-        unsafe { &*(self.mmap.as_ptr().add(CONSUMER_WAITING_OFFSET) as *const AtomicU32) }
+        atomic_u32_at(&self.mmap, CONSUMER_WAITING_OFFSET)
     }
 
     fn producer_waiting(&self) -> &AtomicU32 {
-        // SAFETY: same header layout invariant as `read_idx`; the offset is u32-aligned.
-        unsafe { &*(self.mmap.as_ptr().add(PRODUCER_WAITING_OFFSET) as *const AtomicU32) }
+        atomic_u32_at(&self.mmap, PRODUCER_WAITING_OFFSET)
     }
 
     fn producer_need_bytes(&self) -> &AtomicUsize {
-        // SAFETY: same header layout invariant as `read_idx`; the offset is usize-aligned.
-        unsafe { &*(self.mmap.as_ptr().add(PRODUCER_NEED_BYTES_OFFSET) as *const AtomicUsize) }
+        atomic_usize_at(&self.mmap, PRODUCER_NEED_BYTES_OFFSET)
     }
 
     /// Try to write data to the ring buffer. Returns Ok(true) if successful, Ok(false) if full.
@@ -333,11 +326,7 @@ impl ShmRingBuffer {
 
     fn write_bytes_at(&mut self, offset: usize, data: &[u8]) {
         let end_idx = offset + data.len();
-        // SAFETY: the payload area starts immediately after the fixed header and has exactly
-        // `self.capacity` bytes. Callers compute `offset` from ring indices modulo capacity; the
-        // copy logic below handles wrapping without indexing outside the payload slice.
-        let payload_ptr = unsafe { self.mmap.as_mut_ptr().add(HEADER_SIZE) };
-        let payload_slice = unsafe { std::slice::from_raw_parts_mut(payload_ptr, self.capacity) };
+        let payload_slice = &mut self.mmap[HEADER_SIZE..HEADER_SIZE + self.capacity];
 
         if end_idx <= self.capacity {
             // Contiguous write
@@ -352,10 +341,7 @@ impl ShmRingBuffer {
 
     fn read_bytes_at(&self, offset: usize, out_buf: &mut [u8]) {
         let end_idx = offset + out_buf.len();
-        // SAFETY: the payload slice is the same validated `self.capacity` range used by writes.
-        // Reads are bounded by ring indices and split explicitly when the requested range wraps.
-        let payload_ptr = unsafe { self.mmap.as_ptr().add(HEADER_SIZE) };
-        let payload_slice = unsafe { std::slice::from_raw_parts(payload_ptr, self.capacity) };
+        let payload_slice = &self.mmap[HEADER_SIZE..HEADER_SIZE + self.capacity];
 
         if end_idx <= self.capacity {
             // Contiguous read
@@ -378,6 +364,30 @@ fn available_space(capacity: usize, r: usize, w: usize) -> usize {
     } else {
         r - w - 1
     }
+}
+
+fn atomic_usize_at(mmap: &[u8], offset: usize) -> &AtomicUsize {
+    debug_assert!(offset + std::mem::size_of::<AtomicUsize>() <= HEADER_SIZE);
+    debug_assert_eq!(
+        (mmap.as_ptr() as usize + offset) % std::mem::align_of::<AtomicUsize>(),
+        0
+    );
+    // SAFETY: all callers use fixed header offsets covered by the shared-memory layout
+    // invariants. mmap allocations are page-aligned, usize offsets are aligned by construction,
+    // and AtomicUsize has no invalid bit pattern for persisted header bytes.
+    unsafe { &*(mmap.as_ptr().add(offset) as *const AtomicUsize) }
+}
+
+fn atomic_u32_at(mmap: &[u8], offset: usize) -> &AtomicU32 {
+    debug_assert!(offset + std::mem::size_of::<AtomicU32>() <= HEADER_SIZE);
+    debug_assert_eq!(
+        (mmap.as_ptr() as usize + offset) % std::mem::align_of::<AtomicU32>(),
+        0
+    );
+    // SAFETY: all callers use fixed header offsets covered by the shared-memory layout
+    // invariants. mmap allocations are page-aligned, u32 offsets are aligned by construction,
+    // and AtomicU32 has no invalid bit pattern for persisted header bytes.
+    unsafe { &*(mmap.as_ptr().add(offset) as *const AtomicU32) }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -650,19 +660,16 @@ fn open_shm_file(path: &Path) -> Result<File> {
 }
 
 fn init_or_validate_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
-    // SAFETY: callers pass the mapping created from a file sized to `HEADER_SIZE + capacity`;
-    // `INIT_STATE_OFFSET` is within the fixed header and aligned for `AtomicU32`.
-    let init_state = unsafe { &*(mmap.as_ptr().add(INIT_STATE_OFFSET) as *const AtomicU32) };
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        match init_state.load(Ordering::Acquire) {
+        match atomic_u32_at(mmap, INIT_STATE_OFFSET).load(Ordering::Acquire) {
             INIT_STATE_READY => {
                 if validate_header(mmap, capacity).is_ok() {
                     return Ok(());
                 }
                 // Upgrade/recovery path: if the header does not match (e.g. binary upgraded),
                 // re-initialize the ring buffer header and drop any existing data.
-                if init_state
+                if atomic_u32_at(mmap, INIT_STATE_OFFSET)
                     .compare_exchange(
                         INIT_STATE_READY,
                         INIT_STATE_INITING,
@@ -672,12 +679,13 @@ fn init_or_validate_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
                     .is_ok()
                 {
                     init_header(mmap, capacity)?;
-                    init_state.store(INIT_STATE_READY, Ordering::Release);
+                    atomic_u32_at(mmap, INIT_STATE_OFFSET)
+                        .store(INIT_STATE_READY, Ordering::Release);
                     return Ok(());
                 }
             }
             INIT_STATE_UNINIT => {
-                if init_state
+                if atomic_u32_at(mmap, INIT_STATE_OFFSET)
                     .compare_exchange(
                         INIT_STATE_UNINIT,
                         INIT_STATE_INITING,
@@ -687,7 +695,8 @@ fn init_or_validate_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
                     .is_ok()
                 {
                     init_header(mmap, capacity)?;
-                    init_state.store(INIT_STATE_READY, Ordering::Release);
+                    atomic_u32_at(mmap, INIT_STATE_OFFSET)
+                        .store(INIT_STATE_READY, Ordering::Release);
                     return Ok(());
                 }
             }
@@ -697,13 +706,13 @@ fn init_or_validate_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
 
         if Instant::now() >= deadline {
             // Crash recovery: if the initializer died while holding INITING, reset and retry.
-            let _ = init_state.compare_exchange(
+            let _ = atomic_u32_at(mmap, INIT_STATE_OFFSET).compare_exchange(
                 INIT_STATE_INITING,
                 INIT_STATE_UNINIT,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             );
-            if init_state.load(Ordering::Acquire) == INIT_STATE_UNINIT {
+            if atomic_u32_at(mmap, INIT_STATE_OFFSET).load(Ordering::Acquire) == INIT_STATE_UNINIT {
                 continue;
             }
             return Err(anyhow!(
@@ -716,30 +725,16 @@ fn init_or_validate_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
 }
 
 fn init_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
-    // SAFETY: the mapping is at least `HEADER_SIZE + capacity` bytes, and every pointer below is
-    // within the fixed header at an offset aligned for the target atomic type. This module is the
-    // sole creator of typed atomic references into the mapping.
-    unsafe {
-        let read_idx_ptr = mmap.as_mut_ptr().add(READ_IDX_OFFSET) as *mut AtomicUsize;
-        let write_idx_ptr = mmap.as_mut_ptr().add(WRITE_IDX_OFFSET) as *mut AtomicUsize;
-        let size_ptr = mmap.as_mut_ptr().add(QUEUE_SIZE_OFFSET) as *mut AtomicUsize;
-        let max_msg_ptr = mmap.as_mut_ptr().add(MAX_MSG_BYTES_OFFSET) as *mut AtomicUsize;
-        let consumer_wait_ptr = mmap.as_mut_ptr().add(CONSUMER_WAITING_OFFSET) as *mut AtomicU32;
-        let producer_wait_ptr = mmap.as_mut_ptr().add(PRODUCER_WAITING_OFFSET) as *mut AtomicU32;
-        let producer_need_ptr =
-            mmap.as_mut_ptr().add(PRODUCER_NEED_BYTES_OFFSET) as *mut AtomicUsize;
-
-        (*read_idx_ptr).store(0, Ordering::Relaxed);
-        (*write_idx_ptr).store(0, Ordering::Relaxed);
-        (*size_ptr).store(capacity, Ordering::Relaxed);
-        (*max_msg_ptr).store(
-            MAX_MESSAGE_BYTES.min(capacity.saturating_sub(4)),
-            Ordering::Relaxed,
-        );
-        (*consumer_wait_ptr).store(0, Ordering::Relaxed);
-        (*producer_wait_ptr).store(0, Ordering::Relaxed);
-        (*producer_need_ptr).store(0, Ordering::Relaxed);
-    }
+    atomic_usize_at(mmap, READ_IDX_OFFSET).store(0, Ordering::Relaxed);
+    atomic_usize_at(mmap, WRITE_IDX_OFFSET).store(0, Ordering::Relaxed);
+    atomic_usize_at(mmap, QUEUE_SIZE_OFFSET).store(capacity, Ordering::Relaxed);
+    atomic_usize_at(mmap, MAX_MSG_BYTES_OFFSET).store(
+        MAX_MESSAGE_BYTES.min(capacity.saturating_sub(4)),
+        Ordering::Relaxed,
+    );
+    atomic_u32_at(mmap, CONSUMER_WAITING_OFFSET).store(0, Ordering::Relaxed);
+    atomic_u32_at(mmap, PRODUCER_WAITING_OFFSET).store(0, Ordering::Relaxed);
+    atomic_usize_at(mmap, PRODUCER_NEED_BYTES_OFFSET).store(0, Ordering::Relaxed);
 
     mmap[MAGIC_OFFSET..MAGIC_OFFSET + SHM_MAGIC.len()].copy_from_slice(&SHM_MAGIC);
     mmap[VERSION_OFFSET..VERSION_OFFSET + 4].copy_from_slice(&SHM_VERSION.to_le_bytes());
@@ -749,11 +744,7 @@ fn init_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
 }
 
 fn validate_header(mmap: &MmapMut, expected_capacity: usize) -> Result<()> {
-    // SAFETY: `QUEUE_SIZE_OFFSET` is inside the fixed header and aligned for `AtomicUsize`.
-    let stored_capacity = unsafe {
-        let size_ptr = mmap.as_ptr().add(QUEUE_SIZE_OFFSET) as *const AtomicUsize;
-        (*size_ptr).load(Ordering::Acquire)
-    };
+    let stored_capacity = atomic_usize_at(mmap, QUEUE_SIZE_OFFSET).load(Ordering::Acquire);
     if stored_capacity != expected_capacity {
         return Err(anyhow!(
             "Shared memory capacity mismatch. Expected {}, found {}",
@@ -766,11 +757,9 @@ fn validate_header(mmap: &MmapMut, expected_capacity: usize) -> Result<()> {
         return Err(anyhow!("Shared memory ring magic mismatch"));
     }
 
-    let version = u32::from_le_bytes(
-        mmap[VERSION_OFFSET..VERSION_OFFSET + 4]
-            .try_into()
-            .expect("version bytes"),
-    );
+    let mut version_bytes = [0u8; 4];
+    version_bytes.copy_from_slice(&mmap[VERSION_OFFSET..VERSION_OFFSET + 4]);
+    let version = u32::from_le_bytes(version_bytes);
     if version != SHM_VERSION {
         return Err(anyhow!(
             "Unsupported shared memory ring version {} (expected {})",
@@ -778,11 +767,9 @@ fn validate_header(mmap: &MmapMut, expected_capacity: usize) -> Result<()> {
             SHM_VERSION
         ));
     }
-    let header_len = u32::from_le_bytes(
-        mmap[HEADER_LEN_OFFSET..HEADER_LEN_OFFSET + 4]
-            .try_into()
-            .expect("header_len bytes"),
-    ) as usize;
+    let mut header_len_bytes = [0u8; 4];
+    header_len_bytes.copy_from_slice(&mmap[HEADER_LEN_OFFSET..HEADER_LEN_OFFSET + 4]);
+    let header_len = u32::from_le_bytes(header_len_bytes) as usize;
     if header_len != HEADER_SIZE {
         return Err(anyhow!(
             "Unsupported shared memory ring header size {} (expected {})",

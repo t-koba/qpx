@@ -385,8 +385,10 @@ pub(crate) fn encode_varint(value: u64) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn push_varint(buf: &mut Vec<u8>, value: u64) {
-    let encoded = encode_varint(value).expect("valid varint");
-    buf.extend_from_slice(&encoded);
+    match encode_varint(value) {
+        Ok(encoded) => buf.extend_from_slice(&encoded),
+        Err(_) => debug_assert!(false, "value exceeds QUIC varint range"),
+    }
 }
 
 pub(crate) async fn read_frame<R: AsyncRead + Unpin>(

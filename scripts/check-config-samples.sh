@@ -4,10 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-config-check.XXXXXX")"
 RUSTLS_TARGET_DIR="${QPX_CONFIG_CHECK_TARGET_DIR:-$TMP_DIR/target-rustls}"
-QPXD_BIN="$RUSTLS_TARGET_DIR/debug/qpxd"
-QPXF_BIN="$RUSTLS_TARGET_DIR/debug/qpxf"
+NATIVE_TARGET_DIR="${QPX_CONFIG_CHECK_NATIVE_TARGET_DIR:-$TMP_DIR/target-native}"
+QPXD_BUILD_BIN="$RUSTLS_TARGET_DIR/debug/qpxd"
+QPXF_BUILD_BIN="$RUSTLS_TARGET_DIR/debug/qpxf"
+QPXD_BIN="$TMP_DIR/qpxd-rustls"
+QPXD_NATIVE_BIN="$NATIVE_TARGET_DIR/debug/qpxd"
+QPXF_BIN="$TMP_DIR/qpxf-rustls"
 CERT_FILE="$TMP_DIR/sample.crt"
 KEY_FILE="$TMP_DIR/sample.key"
+PKCS12_FILE="$TMP_DIR/sample.p12"
 RUNTIME_DIR="$TMP_DIR/runtime"
 STATE_DIR="$TMP_DIR/state"
 QPXF_SAMPLE_CGI_ROOT="$ROOT_DIR/config/usecases/12-ipc-gateway/assets/cgi"
@@ -31,6 +36,11 @@ generate_sample_cert() {
     -out "$CERT_FILE" \
     -days 1 \
     -subj "/CN=example.com" >/dev/null 2>&1
+  openssl pkcs12 -export \
+    -out "$PKCS12_FILE" \
+    -inkey "$KEY_FILE" \
+    -in "$CERT_FILE" \
+    -password pass:sample-pkcs12-password >/dev/null 2>&1
 }
 
 run_check() {
@@ -62,6 +72,17 @@ run_qpxf_check() {
     "$QPXF_BIN" check --config "$config_file"
 }
 
+run_native_check() {
+  local config_file="$1"
+  echo "==> $config_file"
+  env \
+    XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+    QPX_STATE_DIR="$STATE_DIR" \
+    QPX_TLS_PKCS12="$PKCS12_FILE" \
+    QPX_TLS_PKCS12_PASSWORD="sample-pkcs12-password" \
+    "$QPXD_NATIVE_BIN" check --config "$config_file"
+}
+
 main() {
   require_cmd cargo
   require_cmd find
@@ -70,8 +91,25 @@ main() {
   echo "[CONFIG] building qpxd and qpxf"
   cargo build -q -p qpxd -p qpxf --locked --features qpxd/auth-digest,qpxd/auth-ldap --target-dir "$RUSTLS_TARGET_DIR"
 
+  if [ ! -x "$QPXD_BUILD_BIN" ]; then
+    echo "missing built qpxd binary: $QPXD_BUILD_BIN" >&2
+    exit 1
+  fi
+  if [ ! -x "$QPXF_BUILD_BIN" ]; then
+    echo "missing built qpxf binary: $QPXF_BUILD_BIN" >&2
+    exit 1
+  fi
+  cp "$QPXD_BUILD_BIN" "$QPXD_BIN"
+  cp "$QPXF_BUILD_BIN" "$QPXF_BIN"
+
+  cargo build -q -p qpxd --locked --no-default-features --features tls-native --target-dir "$NATIVE_TARGET_DIR"
+
   if [ ! -x "$QPXD_BIN" ]; then
     echo "missing built qpxd binary: $QPXD_BIN" >&2
+    exit 1
+  fi
+  if [ ! -x "$QPXD_NATIVE_BIN" ]; then
+    echo "missing built native qpxd binary: $QPXD_NATIVE_BIN" >&2
     exit 1
   fi
   if [ ! -x "$QPXF_BIN" ]; then
@@ -92,7 +130,13 @@ main() {
   run_qpxf_check "$ROOT_DIR/config/usecases/12-ipc-gateway/qpxf-tcp.yaml"
   run_qpxf_check "$ROOT_DIR/config/usecases/12-ipc-gateway/qpxf-fastcgi.yaml"
 
-  echo "[CONFIG] all qpxd/qpxf sample configs validated"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    echo "==> skipping tls-native PKCS#12 runtime check on Darwin; CI validates it on Ubuntu"
+  else
+    run_native_check "$ROOT_DIR/config/usecases/03-service-publishing/reverse-tls-termination-native-pkcs12.yaml"
+  fi
+
+  echo "[CONFIG] all qpxd/qpxf sample configs validated for this platform"
 }
 
 main "$@"
