@@ -7,7 +7,9 @@ pub mod exporter;
 pub mod ipc;
 pub mod matchers;
 pub mod prefilter;
+pub mod redaction;
 pub mod rules;
+pub mod secure_file;
 #[cfg(feature = "ipc-support")]
 pub mod shm_ring;
 

@@ -1,5 +1,5 @@
-use crate::http::address::format_authority_host_port;
-use crate::http::semantics::append_via_for_version;
+use crate::http::protocol::address::format_authority_host_port;
+use crate::http::protocol::semantics::append_via_for_version;
 use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::http1::UpstreamProxyScheme;
 use crate::upstream::pool::ResolvedUpstreamProxy;
@@ -48,7 +48,7 @@ fn build_upstream_connect_request(
     Ok(request)
 }
 
-pub async fn connect_via_upstream(
+pub(crate) async fn connect_via_upstream(
     upstream: &ResolvedUpstreamProxy,
     host: &str,
     port: u16,
@@ -160,10 +160,9 @@ pub async fn connect_via_upstream(
             continue;
         }
         if !(200..300).contains(&status) {
-            if let Ok(status) = StatusCode::from_u16(status) {
-                upstream.mark_http_response(status, started.elapsed());
-            } else {
-                upstream.mark_reset();
+            match validated_upstream_connect_failure_status(status) {
+                Some(status) => upstream.mark_http_response(status, started.elapsed()),
+                None => upstream.mark_reset(),
             }
             return Err(anyhow!("upstream CONNECT failed with status {}", status));
         }
@@ -176,7 +175,16 @@ pub async fn connect_via_upstream(
     })
 }
 
-pub async fn connect_tunnel_target(
+fn validated_upstream_connect_failure_status(status: u16) -> Option<StatusCode> {
+    let status = StatusCode::from_u16(status).ok()?;
+    crate::http::protocol::semantics::validate_http_status_class(
+        status,
+        "upstream CONNECT response",
+    )
+    .ok()
+}
+
+pub(crate) async fn connect_tunnel_target(
     host: &str,
     port: u16,
     upstream: Option<&ResolvedUpstreamProxy>,
@@ -208,7 +216,7 @@ pub async fn connect_tunnel_target(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::upstream::connect::*;
 
     #[test]
     fn build_upstream_connect_request_adds_via_and_trace_context() {
@@ -217,5 +225,15 @@ mod tests {
         assert!(request.starts_with("CONNECT example.com:443 HTTP/1.1\r\n"));
         assert!(request.contains("host: example.com:443\r\n"));
         assert!(request.contains("via: 1.1 qpx\r\n"));
+    }
+
+    #[test]
+    fn upstream_connect_failure_status_rejects_non_http_status_class() {
+        assert_eq!(
+            validated_upstream_connect_failure_status(599),
+            Some(StatusCode::from_u16(599).expect("599"))
+        );
+        assert_eq!(validated_upstream_connect_failure_status(600), None);
+        assert_eq!(validated_upstream_connect_failure_status(999), None);
     }
 }

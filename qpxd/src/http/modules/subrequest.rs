@@ -14,10 +14,16 @@ use qpx_core::config::{
     HeaderCaptureConfig, HttpModuleConfig, SubrequestModuleConfig, SubrequestPhase,
     SubrequestResponseMode,
 };
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
+
+mod ssrf;
+
+use self::ssrf::{
+    host_is_non_global_ip, redirect_host_resolves_to_private_ip, resolve_public_subrequest_addr,
+};
 
 pub(super) struct SubrequestModuleFactory;
 
@@ -203,10 +209,27 @@ impl SubrequestModule {
         ctx: &HttpModuleContext,
         req: Request<Body>,
     ) -> Result<Response<Body>> {
-        let future = ctx.send_absolute_request(req);
         let timeout_dur = self.timeout.unwrap_or_else(|| {
-            Duration::from_millis(ctx.runtime_state().plan.limits.upstream_http_timeout_ms)
+            Duration::from_millis(
+                ctx.runtime_state()
+                    .plan
+                    .limits
+                    .timeouts
+                    .upstream_http_timeout_ms,
+            )
         });
+        let pinned_addr = if self.deny_private_ip_redirects {
+            self.resolve_public_target_addr(req.uri(), timeout_dur)
+                .await?
+        } else {
+            None
+        };
+        let future = async {
+            match pinned_addr {
+                Some(addr) => ctx.send_absolute_request_to_addr(req, addr).await,
+                None => ctx.send_absolute_request(req).await,
+            }
+        };
         let response = timeout(timeout_dur, future)
             .await
             .with_context(|| format!("subrequest {} timed out", self.name))?
@@ -215,7 +238,8 @@ impl SubrequestModule {
             return Err(anyhow!("subrequest {} received a redirect", self.name));
         }
         if self.deny_private_ip_redirects && response.status().is_redirection() {
-            self.validate_redirect_location(response.headers().get(LOCATION))?;
+            self.validate_redirect_location(response.headers().get(LOCATION), timeout_dur)
+                .await?;
         }
         if let Some(content_length) = response
             .headers()
@@ -236,7 +260,11 @@ impl SubrequestModule {
         }))
     }
 
-    pub(super) fn validate_redirect_location(&self, location: Option<&HeaderValue>) -> Result<()> {
+    pub(super) async fn validate_redirect_location(
+        &self,
+        location: Option<&HeaderValue>,
+        timeout_dur: Duration,
+    ) -> Result<()> {
         let Some(location) = location else {
             return Ok(());
         };
@@ -253,14 +281,14 @@ impl SubrequestModule {
         let Some(host) = uri.host() else {
             return Ok(());
         };
-        if redirect_host_is_private_ip(host) {
+        if host_is_non_global_ip(host) {
             return Err(anyhow!(
                 "subrequest {} redirect Location points to a private IP: {}",
                 self.name,
                 host
             ));
         }
-        if redirect_host_resolves_to_private_ip(&uri, host) {
+        if redirect_host_resolves_to_private_ip(&uri, host, timeout_dur).await? {
             return Err(anyhow!(
                 "subrequest {} redirect Location resolves to a private IP: {}",
                 self.name,
@@ -268,6 +296,31 @@ impl SubrequestModule {
             ));
         }
         Ok(())
+    }
+
+    async fn resolve_public_target_addr(
+        &self,
+        uri: &http::Uri,
+        timeout_dur: Duration,
+    ) -> Result<Option<SocketAddr>> {
+        let Some(host) = uri.host() else {
+            return Ok(None);
+        };
+        if host_is_non_global_ip(host) {
+            return Err(anyhow!(
+                "subrequest {} URL points to a private IP: {}",
+                self.name,
+                host
+            ));
+        }
+        resolve_public_subrequest_addr(uri, host, timeout_dur)
+            .await
+            .with_context(|| {
+                format!(
+                    "subrequest {} URL target validation failed: {host}",
+                    self.name
+                )
+            })
     }
 
     fn should_return_response(&self, response: &Response<Body>) -> bool {
@@ -413,7 +466,7 @@ fn limit_subrequest_response_body(
     body_read_timeout: Duration,
     name: Arc<str>,
 ) -> Body {
-    let (mut sender, out) = Body::channel();
+    let (mut sender, out) = Body::channel_with_capacity(16);
     tokio::spawn(async move {
         let result: Result<()> = async {
             let mut seen = 0usize;
@@ -468,68 +521,17 @@ fn limit_subrequest_response_body(
 }
 
 fn allowed_host_matches(pattern: &str, host: &str) -> bool {
-    pattern.eq_ignore_ascii_case(host)
-        || pattern == "*"
-        || pattern
-            .strip_prefix("*.")
-            .map(|suffix| host.ends_with(suffix))
-            .unwrap_or(false)
-}
-
-fn redirect_host_is_private_ip(host: &str) -> bool {
-    let host = host.trim_matches(['[', ']']);
-    match host.parse::<IpAddr>() {
-        Ok(IpAddr::V4(ip)) => {
-            ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.octets()[0] == 0
-        }
-        Ok(IpAddr::V6(ip)) => {
-            ip.is_loopback()
-                || ip.is_unique_local()
-                || ip.is_unicast_link_local()
-                || ip.is_unspecified()
-        }
-        Err(_) => false,
+    if pattern == "*" || pattern.eq_ignore_ascii_case(host) {
+        return true;
     }
-}
-
-fn redirect_host_resolves_to_private_ip(uri: &http::Uri, host: &str) -> bool {
-    if host.parse::<IpAddr>().is_ok() {
+    let Some(suffix) = pattern.strip_prefix("*.") else {
         return false;
-    }
-    let port = uri
-        .port_u16()
-        .or_else(|| match uri.scheme_str() {
-            Some("https") => Some(443),
-            Some("http") => Some(80),
-            _ => None,
-        })
-        .unwrap_or(80);
-    (host, port)
-        .to_socket_addrs()
-        .map(|mut addrs| addrs.any(|addr| redirect_ip_is_private(addr.ip())))
-        .unwrap_or(false)
-}
-
-fn redirect_ip_is_private(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.octets()[0] == 0
-        }
-        IpAddr::V6(ip) => {
-            ip.is_loopback()
-                || ip.is_unique_local()
-                || ip.is_unicast_link_local()
-                || ip.is_unspecified()
-        }
-    }
+    };
+    host.len() > suffix.len()
+        && host
+            .get(..host.len() - suffix.len())
+            .is_some_and(|prefix| prefix.ends_with('.'))
+        && host[host.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 fn compile_header_captures(
@@ -545,3 +547,6 @@ fn compile_header_captures(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests;

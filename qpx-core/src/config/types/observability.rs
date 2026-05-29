@@ -53,6 +53,8 @@ pub struct AccessLogConfig {
     pub output: LogOutputConfig,
     #[serde(default)]
     pub exclude: Vec<String>,
+    #[serde(default)]
+    pub redact: CaptureRedactionConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -128,6 +130,8 @@ pub struct OtelConfig {
     pub headers: HashMap<String, String>,
     #[serde(default)]
     pub service_name: Option<String>,
+    #[serde(default)]
+    pub redact: CaptureRedactionConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -169,7 +173,7 @@ impl Default for ExporterCaptureConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct CaptureRedactionConfig {
     #[serde(default = "default_capture_redact_headers")]
     pub headers: Vec<String>,
@@ -177,6 +181,16 @@ pub struct CaptureRedactionConfig {
     pub query_keys: Vec<String>,
     #[serde(default)]
     pub json_paths: Vec<String>,
+}
+
+impl Default for CaptureRedactionConfig {
+    fn default() -> Self {
+        Self {
+            headers: default_capture_redact_headers(),
+            query_keys: default_capture_redact_query_keys(),
+            json_paths: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -196,13 +210,46 @@ pub struct CapturePlaintextPolicyConfig {
     #[serde(default)]
     pub headers: bool,
     #[serde(default)]
-    pub body: bool,
+    pub body: CaptureBodyMode,
+    #[serde(default)]
+    pub body_sample_bytes: Option<usize>,
     #[serde(default)]
     pub sample_percent: Option<u32>,
     #[serde(default)]
     pub max_body_bytes: Option<usize>,
     #[serde(default)]
     pub redact: CaptureRedactionConfig,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureBodyMode {
+    #[default]
+    Disabled,
+    Full,
+    StreamSample,
+}
+
+impl CaptureBodyMode {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    pub fn is_full(self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    pub fn is_stream_sample(self) -> bool {
+        matches!(self, Self::StreamSample)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Full => "full",
+            Self::StreamSample => "stream_sample",
+        }
+    }
 }
 
 fn default_capture_redact_headers() -> Vec<String> {
@@ -218,8 +265,18 @@ fn default_capture_redact_headers() -> Vec<String> {
 }
 
 fn default_capture_redact_query_keys() -> Vec<String> {
-    ["token", "password", "session", "access_token"]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    [
+        "token",
+        "password",
+        "session",
+        "access_token",
+        "code",
+        "id_token",
+        "refresh_token",
+        "client_secret",
+        "client_assertion",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }

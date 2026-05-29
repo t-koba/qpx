@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use http::header::COOKIE;
 use hyper::{Request, Uri};
 
-pub fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
+pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
     let mut headers = http::HeaderMap::new();
     for (name, value) in src {
         let name = http::header::HeaderName::from_bytes(name.as_str().as_bytes())
@@ -27,7 +27,7 @@ pub fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
     Ok(headers)
 }
 
-pub fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {
+pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {
     let mut headers = ::http::HeaderMap::new();
     for (name, value) in src {
         let name = ::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
@@ -39,7 +39,7 @@ pub fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {
     Ok(headers)
 }
 
-pub fn sanitize_interim_response_for_h3(
+pub(crate) fn sanitize_interim_response_for_h3(
     mut response: Http1Response<()>,
 ) -> Result<Http1Response<()>> {
     if !response.status().is_informational() {
@@ -51,11 +51,11 @@ pub fn sanitize_interim_response_for_h3(
     if response.status() == http::StatusCode::SWITCHING_PROTOCOLS {
         return Err(anyhow!("HTTP/3 interim responses must not use 101"));
     }
-    crate::http::semantics::sanitize_interim_response_headers(response.headers_mut());
+    crate::http::protocol::semantics::sanitize_interim_response_headers(response.headers_mut());
     Ok(response)
 }
 
-pub fn h3_request_to_hyper(req: Http1Request<()>, body: Body) -> Result<Request<Body>> {
+pub(crate) fn h3_request_to_hyper(req: Http1Request<()>, body: Body) -> Result<Request<Body>> {
     let (parts, _) = req.into_parts();
     let method = parts
         .method
@@ -93,8 +93,10 @@ pub(crate) fn prepare_h3_response_head(
     parts: &http::response::Parts,
     request_method: &http::Method,
 ) -> Result<PreparedH3ResponseHead> {
-    let status = ::http::StatusCode::from_u16(parts.status.as_u16())
-        .map_err(|e| anyhow!("invalid response status for HTTP/3: {e}"))?;
+    let status = crate::http::protocol::semantics::validate_http_status_class(
+        parts.status,
+        "HTTP/3 response",
+    )?;
     let mut headers = parts.headers.clone();
     let no_body = *request_method == http::Method::HEAD
         || parts.status.is_informational()
@@ -103,12 +105,12 @@ pub(crate) fn prepare_h3_response_head(
         || parts.status == http::StatusCode::RESET_CONTENT;
     let content_length = if no_body {
         if *request_method == http::Method::HEAD {
-            crate::http::semantics::strip_message_body_framing_headers(&mut headers);
+            crate::http::protocol::semantics::strip_message_body_framing_headers(&mut headers);
             if parse_content_length_fields(&headers).is_err() {
                 headers.remove(http::header::CONTENT_LENGTH);
             }
         } else {
-            crate::http::semantics::strip_message_body_headers(&mut headers);
+            crate::http::protocol::semantics::strip_message_body_headers(&mut headers);
         }
         parse_content_length_fields(&headers).ok().flatten()
     } else {

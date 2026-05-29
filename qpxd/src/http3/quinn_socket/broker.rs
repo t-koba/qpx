@@ -1,15 +1,27 @@
+mod packet_pool;
+mod poller;
+mod queue;
+mod rate_limiter;
+
 use super::endpoint::{QuinnEndpointSocket, QuinnUdpIngressFilter};
 use super::frame::{BrokerFrame, InjectedPacket, OwnedTransmit, datagrams_for_transmit};
-use super::routing::{RouteState, is_quic_long_header};
+use super::routing::{SharedRouteState, is_quic_long_header};
 use super::stream::{QuinnBrokerStream, TokioQuinnBrokerStream, tokio_broker_stream_from_std};
 use super::tasks::{
     LocalBrokerView, SendActual, broker_writer_loop, local_remote_reader_loop,
     remote_broker_reader_loop,
 };
 use anyhow::{Context, Result, anyhow};
-use metrics::counter;
+use arc_swap::ArcSwapOption;
+use bytes::Bytes;
+use packet_pool::{PacketBufferPool, pooled_bytes_from_slice, pooled_bytes_from_vec};
+use poller::{SocketPoller, poll_injected_packets};
+use queue::{
+    EnqueueFailure, allow_source_datagram, enqueue_broker_frame, enqueue_injected_packet,
+    packet_from_bytes, record_broker_drop,
+};
 use quinn::{AsyncUdpSocket, UdpPoller};
-use std::collections::HashMap;
+use rate_limiter::ShardedDatagramRateLimiter;
 use std::fmt;
 use std::io::{ErrorKind, IoSliceMut};
 use std::net::SocketAddr;
@@ -17,16 +29,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
-use std::time::{Duration, Instant};
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 const BROKER_RECV_QUEUE_CAPACITY: usize = 4096;
 const BROKER_FRAME_QUEUE_CAPACITY: usize = 4096;
-const BROKER_SOURCE_RATE_WINDOW: Duration = Duration::from_secs(1);
-const BROKER_SOURCE_DATAGRAMS_PER_WINDOW: usize = 512;
-const BROKER_SOURCE_RATE_TABLE_CAPACITY: usize = 8192;
+const BROKER_SOURCE_RATE_SHARDS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QuinnBrokerKind {
@@ -97,11 +106,12 @@ pub(super) struct LocalBrokerSocket {
     inner: quinn::udp::UdpSocketState,
     recv_tx: mpsc::Sender<InjectedPacket>,
     recv_rx: Mutex<mpsc::Receiver<InjectedPacket>>,
-    source_limiter: Mutex<DatagramRateLimiter>,
+    source_limiter: ShardedDatagramRateLimiter,
+    packet_pool: Arc<PacketBufferPool>,
     filter: Arc<dyn QuinnUdpIngressFilter>,
-    local_route: Mutex<RouteState>,
-    remote_route: Arc<Mutex<RouteState>>,
-    remote_writer: Arc<Mutex<Option<mpsc::Sender<BrokerFrame>>>>,
+    local_route: SharedRouteState,
+    remote_route: Arc<SharedRouteState>,
+    remote_writer: Arc<ArcSwapOption<mpsc::Sender<BrokerFrame>>>,
 }
 
 impl fmt::Debug for LocalBrokerSocket {
@@ -123,76 +133,67 @@ impl LocalBrokerSocket {
             inner,
             recv_tx,
             recv_rx: Mutex::new(recv_rx),
-            source_limiter: Mutex::new(DatagramRateLimiter::default()),
+            source_limiter: ShardedDatagramRateLimiter::new(BROKER_SOURCE_RATE_SHARDS),
+            packet_pool: Arc::new(PacketBufferPool::new(512)),
             filter,
-            local_route: Mutex::new(RouteState::default()),
-            remote_route: Arc::new(Mutex::new(RouteState::default())),
-            remote_writer: Arc::new(Mutex::new(None)),
+            local_route: SharedRouteState::default(),
+            remote_route: Arc::new(SharedRouteState::default()),
+            remote_writer: Arc::new(ArcSwapOption::from(None)),
         })
     }
 
     fn start_recv_loop(self: &Arc<Self>) {
         let this = self.clone();
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 65_535];
             loop {
-                let recv = this.io.recv_from(buf.as_mut_slice()).await;
+                let mut buf = this.packet_pool.take(65_535);
+                buf.resize(65_535, 0);
+                let recv = this.io.recv_from(buf.as_mut()).await;
                 let (n, addr) = match recv {
                     Ok(value) => value,
                     Err(_) => break,
                 };
-                let payload = &buf[..n];
-                if !this.filter.allow(addr, payload) {
+                let payload = pooled_bytes_from_vec(this.packet_pool.clone(), buf, n);
+                if !this.filter.allow(addr, payload.as_ref()) {
                     continue;
                 }
                 if !this.allow_source_datagram(addr, "local") {
                     continue;
                 }
-                match this.route_inbound(addr, payload) {
+                match this.route_inbound(addr, payload.as_ref()) {
                     RouteDecision::Local => {
-                        this.local_route
-                            .lock()
-                            .expect("local route lock")
-                            .observe_inbound(addr, payload);
-                        this.enqueue_payload(addr, payload, "local_endpoint");
+                        this.observe_local_inbound(addr, payload.as_ref());
+                        this.enqueue_packet(packet_from_bytes(addr, payload), "local_endpoint");
                     }
                     RouteDecision::Remote => {
-                        this.remote_route
-                            .lock()
-                            .expect("remote route lock")
-                            .observe_inbound(addr, payload);
-                        if let Some(writer) = this
-                            .remote_writer
-                            .lock()
-                            .expect("remote writer lock")
-                            .clone()
-                        {
+                        this.observe_remote_inbound(addr, payload.as_ref());
+                        if let Some(writer) = this.remote_writer.load_full() {
                             if writer.capacity() == 0 {
                                 record_broker_drop("remote_broker", "queue_full");
                                 continue;
                             }
                             match enqueue_broker_frame(
                                 &writer,
-                                BrokerFrame::InboundDatagram(packet_from_payload(addr, payload)),
+                                BrokerFrame::InboundDatagram(packet_from_bytes(
+                                    addr,
+                                    payload.clone(),
+                                )),
                                 "remote_broker",
                             ) {
                                 Ok(()) => {}
                                 Err(EnqueueFailure::Full) => {}
                                 Err(EnqueueFailure::Closed) => {
                                     this.detach_remote();
-                                    this.local_route
-                                        .lock()
-                                        .expect("local route lock")
-                                        .observe_inbound(addr, payload);
-                                    this.enqueue_payload(addr, payload, "local_endpoint");
+                                    this.observe_local_inbound(addr, payload.as_ref());
+                                    this.enqueue_packet(
+                                        packet_from_bytes(addr, payload),
+                                        "local_endpoint",
+                                    );
                                 }
                             }
                         } else {
-                            this.local_route
-                                .lock()
-                                .expect("local route lock")
-                                .observe_inbound(addr, payload);
-                            this.enqueue_payload(addr, payload, "local_endpoint");
+                            this.observe_local_inbound(addr, payload.as_ref());
+                            this.enqueue_packet(packet_from_bytes(addr, payload), "local_endpoint");
                         }
                     }
                     RouteDecision::Drop => {}
@@ -202,54 +203,36 @@ impl LocalBrokerSocket {
     }
 
     fn route_inbound(&self, addr: SocketAddr, packet: &[u8]) -> RouteDecision {
-        let remote_active = self
-            .remote_writer
-            .lock()
-            .expect("remote writer lock")
-            .is_some();
+        let remote_active = self.remote_writer.load().is_some();
         if !remote_active {
             return RouteDecision::Local;
         }
 
-        if self
-            .local_route
-            .lock()
-            .expect("local route lock")
-            .matches_cid(packet)
-        {
+        if self.local_route.matches_addr_or_cid(addr, packet) {
             return RouteDecision::Local;
         }
-        if self
-            .remote_route
-            .lock()
-            .expect("remote route lock")
-            .matches_cid(packet)
-        {
+        if self.remote_route.matches_addr_or_cid(addr, packet) {
             return RouteDecision::Remote;
         }
         if crate::transparent::quic::looks_like_quic_initial(packet) || is_quic_long_header(packet)
         {
             return RouteDecision::Remote;
         }
-        if self
-            .local_route
-            .lock()
-            .expect("local route lock")
-            .addrs
-            .contains(&addr)
-        {
-            return RouteDecision::Local;
-        }
-        if self
-            .remote_route
-            .lock()
-            .expect("remote route lock")
-            .addrs
-            .contains(&addr)
-        {
-            return RouteDecision::Remote;
-        }
         RouteDecision::Drop
+    }
+
+    fn observe_local_inbound(&self, addr: SocketAddr, packet: &[u8]) {
+        if !self.local_route.inbound_update_needed(addr, packet) {
+            return;
+        }
+        self.local_route.observe_inbound(addr, packet);
+    }
+
+    fn observe_remote_inbound(&self, addr: SocketAddr, packet: &[u8]) {
+        if !self.remote_route.inbound_update_needed(addr, packet) {
+            return;
+        }
+        self.remote_route.observe_inbound(addr, packet);
     }
 
     #[cfg(unix)]
@@ -262,13 +245,12 @@ impl LocalBrokerSocket {
         let (read_half, write_half) = tokio::io::split(tokio_stream);
         let (write_tx, write_rx) = mpsc::channel(BROKER_FRAME_QUEUE_CAPACITY);
         {
-            let mut writer = self.remote_writer.lock().expect("remote writer lock");
-            if writer.is_some() {
+            if self.remote_writer.load().is_some() {
                 return Err(anyhow!("QUIC broker remote is already attached"));
             }
-            *writer = Some(write_tx);
+            self.remote_writer.store(Some(Arc::new(write_tx)));
         }
-        *self.remote_route.lock().expect("remote route lock") = RouteState::default();
+        self.remote_route.reset();
         let send_owner = Arc::new(SendActual {
             io: self.io.clone(),
             inner: quinn::udp::UdpSocketState::new((&*self.io).into())
@@ -288,8 +270,8 @@ impl LocalBrokerSocket {
     }
 
     pub(super) fn detach_remote(&self) {
-        *self.remote_writer.lock().expect("remote writer lock") = None;
-        *self.remote_route.lock().expect("remote route lock") = RouteState::default();
+        self.remote_writer.store(None);
+        self.remote_route.reset();
     }
 }
 
@@ -298,10 +280,11 @@ pub(super) struct RemoteBrokerSocket {
     inner: quinn::udp::UdpSocketState,
     recv_tx: mpsc::Sender<InjectedPacket>,
     recv_rx: Mutex<mpsc::Receiver<InjectedPacket>>,
-    source_limiter: Mutex<DatagramRateLimiter>,
+    source_limiter: ShardedDatagramRateLimiter,
+    packet_pool: Arc<PacketBufferPool>,
     filter: Arc<dyn QuinnUdpIngressFilter>,
     mode: AtomicU8,
-    outbound_writer: Mutex<Option<mpsc::Sender<BrokerFrame>>>,
+    outbound_writer: ArcSwapOption<mpsc::Sender<BrokerFrame>>,
     inbound_stream: Mutex<Option<QuinnBrokerStream>>,
 }
 
@@ -325,10 +308,11 @@ impl RemoteBrokerSocket {
             inner,
             recv_tx,
             recv_rx: Mutex::new(recv_rx),
-            source_limiter: Mutex::new(DatagramRateLimiter::default()),
+            source_limiter: ShardedDatagramRateLimiter::new(BROKER_SOURCE_RATE_SHARDS),
+            packet_pool: Arc::new(PacketBufferPool::new(512)),
             filter,
             mode: AtomicU8::new(RemoteMode::Brokered as u8),
-            outbound_writer: Mutex::new(None),
+            outbound_writer: ArcSwapOption::from(None),
             inbound_stream: Mutex::new(Some(inherited_stream)),
         })
     }
@@ -337,7 +321,7 @@ impl RemoteBrokerSocket {
         let Some(stream) = self
             .inbound_stream
             .lock()
-            .expect("inbound stream lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
         else {
             return;
@@ -351,7 +335,7 @@ impl RemoteBrokerSocket {
         };
         let (read_half, write_half) = tokio::io::split(tokio_stream);
         let (write_tx, write_rx) = mpsc::channel(BROKER_FRAME_QUEUE_CAPACITY);
-        *self.outbound_writer.lock().expect("outbound writer lock") = Some(write_tx);
+        self.outbound_writer.store(Some(Arc::new(write_tx)));
         tokio::spawn(async move {
             broker_writer_loop(write_half, write_rx).await;
         });
@@ -374,24 +358,25 @@ impl RemoteBrokerSocket {
         {
             return;
         }
-        *self.outbound_writer.lock().expect("outbound writer lock") = None;
+        self.outbound_writer.store(None);
         let this = self.clone();
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 65_535];
             loop {
-                let recv = this.io.recv_from(buf.as_mut_slice()).await;
+                let mut buf = this.packet_pool.take(65_535);
+                buf.resize(65_535, 0);
+                let recv = this.io.recv_from(buf.as_mut()).await;
                 let (n, addr) = match recv {
                     Ok(value) => value,
                     Err(_) => break,
                 };
-                let payload = &buf[..n];
-                if !this.filter.allow(addr, payload) {
+                let payload = pooled_bytes_from_vec(this.packet_pool.clone(), buf, n);
+                if !this.filter.allow(addr, payload.as_ref()) {
                     continue;
                 }
                 if !this.allow_source_datagram(addr, "remote_direct") {
                     continue;
                 }
-                this.enqueue_payload(addr, payload, "remote_endpoint");
+                this.enqueue_payload_bytes(addr, payload, "remote_endpoint");
             }
         });
     }
@@ -421,10 +406,13 @@ impl AsyncUdpSocket for LocalBrokerSocket {
 
     fn try_send(&self, transmit: &quinn::udp::Transmit) -> std::io::Result<()> {
         for packet in datagrams_for_transmit(transmit) {
-            self.local_route
-                .lock()
-                .expect("local route lock")
-                .observe_outbound(transmit.destination, packet);
+            if self
+                .local_route
+                .outbound_update_needed(transmit.destination, packet)
+            {
+                self.local_route
+                    .observe_outbound(transmit.destination, packet);
+            }
         }
         self.io.try_io(Interest::WRITABLE, || {
             self.inner.send((&*self.io).into(), transmit)
@@ -465,11 +453,7 @@ impl AsyncUdpSocket for RemoteBrokerSocket {
 
     fn try_send(&self, transmit: &quinn::udp::Transmit) -> std::io::Result<()> {
         if self.mode.load(Ordering::SeqCst) == RemoteMode::Brokered as u8
-            && let Some(writer) = self
-                .outbound_writer
-                .lock()
-                .expect("outbound writer lock")
-                .clone()
+            && let Some(writer) = self.outbound_writer.load_full()
         {
             if writer.capacity() == 0 {
                 record_broker_drop("outbound_broker", "queue_full");
@@ -483,7 +467,7 @@ impl AsyncUdpSocket for RemoteBrokerSocket {
                 BrokerFrame::OutboundTransmit(OwnedTransmit {
                     destination: transmit.destination,
                     ecn: transmit.ecn,
-                    contents: transmit.contents.to_vec(),
+                    contents: self.owned_transmit_contents(transmit.contents),
                     segment_size: transmit.segment_size,
                     src_ip: transmit.src_ip,
                 }),
@@ -530,84 +514,17 @@ impl AsyncUdpSocket for RemoteBrokerSocket {
     }
 }
 
-struct SocketPoller {
-    io: Arc<UdpSocket>,
-    immediate: bool,
-}
-
-impl fmt::Debug for SocketPoller {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SocketPoller")
-            .field("immediate", &self.immediate)
-            .finish()
-    }
-}
-
-impl SocketPoller {
-    fn new(io: Arc<UdpSocket>, immediate: bool) -> Self {
-        Self { io, immediate }
-    }
-}
-
-impl UdpPoller for SocketPoller {
-    fn poll_writable(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-        if self.immediate {
-            return Poll::Ready(Ok(()));
-        }
-        self.io.poll_send_ready(cx)
-    }
-}
-
-fn poll_injected_packets(
-    receiver: &Mutex<mpsc::Receiver<InjectedPacket>>,
-    cx: &mut TaskContext<'_>,
-    bufs: &mut [IoSliceMut<'_>],
-    meta: &mut [quinn::udp::RecvMeta],
-) -> Poll<std::io::Result<usize>> {
-    let mut rx = receiver.lock().expect("recv queue lock");
-    let mut count = 0usize;
-    loop {
-        let packet = if count == 0 {
-            match Pin::new(&mut *rx).poll_recv(cx) {
-                Poll::Ready(Some(packet)) => Some(packet),
-                Poll::Ready(None) => return Poll::Ready(Ok(0)),
-                Poll::Pending => return Poll::Pending,
-            }
-        } else {
-            rx.try_recv().ok()
-        };
-        let Some(packet) = packet else {
-            break;
-        };
-        if count >= bufs.len() || count >= meta.len() {
-            break;
-        }
-        let dst = &mut bufs[count];
-        let len = packet.payload.len().min(dst.len());
-        dst[..len].copy_from_slice(&packet.payload[..len]);
-        meta[count] = quinn::udp::RecvMeta {
-            addr: packet.addr,
-            len,
-            stride: len,
-            ecn: packet.ecn,
-            dst_ip: packet.dst_ip,
-        };
-        count += 1;
-    }
-    Poll::Ready(Ok(count))
-}
-
 impl LocalBrokerSocket {
     fn allow_source_datagram(&self, addr: SocketAddr, queue: &'static str) -> bool {
         allow_source_datagram(&self.source_limiter, addr, queue)
     }
 
-    fn enqueue_payload(&self, addr: SocketAddr, payload: &[u8], queue: &'static str) {
+    fn enqueue_packet(&self, packet: InjectedPacket, queue: &'static str) {
         if self.recv_tx.capacity() == 0 {
             record_broker_drop(queue, "queue_full");
             return;
         }
-        enqueue_injected_packet(&self.recv_tx, packet_from_payload(addr, payload), queue);
+        enqueue_injected_packet(&self.recv_tx, packet, queue);
     }
 }
 
@@ -616,147 +533,15 @@ impl RemoteBrokerSocket {
         allow_source_datagram(&self.source_limiter, addr, queue)
     }
 
-    fn enqueue_payload(&self, addr: SocketAddr, payload: &[u8], queue: &'static str) {
+    fn enqueue_payload_bytes(&self, addr: SocketAddr, payload: Bytes, queue: &'static str) {
         if self.recv_tx.capacity() == 0 {
             record_broker_drop(queue, "queue_full");
             return;
         }
-        enqueue_injected_packet(&self.recv_tx, packet_from_payload(addr, payload), queue);
+        enqueue_injected_packet(&self.recv_tx, packet_from_bytes(addr, payload), queue);
     }
-}
 
-fn packet_from_payload(addr: SocketAddr, payload: &[u8]) -> InjectedPacket {
-    InjectedPacket {
-        addr,
-        ecn: None,
-        dst_ip: None,
-        payload: payload.to_vec(),
-    }
-}
-
-fn enqueue_injected_packet(
-    tx: &mpsc::Sender<InjectedPacket>,
-    packet: InjectedPacket,
-    queue: &'static str,
-) {
-    match tx.try_send(packet) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(_)) => record_broker_drop(queue, "queue_full"),
-        Err(mpsc::error::TrySendError::Closed(_)) => record_broker_drop(queue, "queue_closed"),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnqueueFailure {
-    Full,
-    Closed,
-}
-
-fn enqueue_broker_frame(
-    tx: &mpsc::Sender<BrokerFrame>,
-    frame: BrokerFrame,
-    queue: &'static str,
-) -> std::result::Result<(), EnqueueFailure> {
-    match tx.try_send(frame) {
-        Ok(()) => Ok(()),
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            record_broker_drop(queue, "queue_full");
-            Err(EnqueueFailure::Full)
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            record_broker_drop(queue, "queue_closed");
-            Err(EnqueueFailure::Closed)
-        }
-    }
-}
-
-fn allow_source_datagram(
-    limiter: &Mutex<DatagramRateLimiter>,
-    addr: SocketAddr,
-    queue: &'static str,
-) -> bool {
-    let allowed = limiter.lock().expect("source limiter lock").allow(addr);
-    if !allowed {
-        record_broker_drop(queue, "source_rate_limited");
-    }
-    allowed
-}
-
-fn record_broker_drop(queue: &'static str, reason: &'static str) {
-    counter!(
-        "qpx_quic_broker_dropped_datagrams_total",
-        "queue" => queue,
-        "reason" => reason,
-    )
-    .increment(1);
-}
-
-#[derive(Debug)]
-struct DatagramRateLimiter {
-    sources: HashMap<SocketAddr, SourceRateState>,
-    last_cleanup: Instant,
-}
-
-impl Default for DatagramRateLimiter {
-    fn default() -> Self {
-        Self {
-            sources: HashMap::new(),
-            last_cleanup: Instant::now(),
-        }
-    }
-}
-
-impl DatagramRateLimiter {
-    fn allow(&mut self, addr: SocketAddr) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.last_cleanup) >= BROKER_SOURCE_RATE_WINDOW {
-            self.sources
-                .retain(|_, state| now.duration_since(state.last_seen) < BROKER_SOURCE_RATE_WINDOW);
-            self.last_cleanup = now;
-        }
-        if !self.sources.contains_key(&addr)
-            && self.sources.len() >= BROKER_SOURCE_RATE_TABLE_CAPACITY
-        {
-            return false;
-        }
-        let state = self.sources.entry(addr).or_insert(SourceRateState {
-            window_start: now,
-            last_seen: now,
-            count: 0,
-        });
-        state.last_seen = now;
-        if now.duration_since(state.window_start) >= BROKER_SOURCE_RATE_WINDOW {
-            state.window_start = now;
-            state.count = 0;
-        }
-        if state.count >= BROKER_SOURCE_DATAGRAMS_PER_WINDOW {
-            return false;
-        }
-        state.count += 1;
-        true
-    }
-}
-
-#[derive(Debug)]
-struct SourceRateState {
-    window_start: Instant,
-    last_seen: Instant,
-    count: usize,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn datagram_rate_limiter_caps_source_table() {
-        let mut limiter = DatagramRateLimiter::default();
-        for port in 1..=BROKER_SOURCE_RATE_TABLE_CAPACITY {
-            let addr = SocketAddr::from(([198, 51, 100, 1], port as u16));
-            assert!(limiter.allow(addr));
-        }
-
-        let overflow = SocketAddr::from(([198, 51, 100, 2], 1));
-        assert!(!limiter.allow(overflow));
+    fn owned_transmit_contents(&self, payload: &[u8]) -> Bytes {
+        pooled_bytes_from_slice(self.packet_pool.clone(), payload)
     }
 }

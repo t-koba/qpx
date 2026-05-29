@@ -47,13 +47,14 @@ edges:
 - kind: forward
   name: obs-forward
   listen: 127.0.0.1:18089
+  streaming_requirement: preferred
   default_action:
     type: block
   capture:
     plaintext:
       enabled: true
       headers: true
-      body: true
+      body: full
       sample_percent: 100
       max_body_bytes: 16384
       redact:

@@ -1,7 +1,7 @@
 use super::{DispatchAuditContext, DispatchOutcome, annotate_dispatch_response};
 use crate::http::body::Body;
-use crate::http::l7::finalize_response_with_headers;
 use crate::http::local_response::build_local_response;
+use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::policy_context::{ExtAuthzEnforcement, merge_header_controls};
 use anyhow::{Result, anyhow};
 use hyper::{Method, Response};

@@ -1,16 +1,53 @@
 use anyhow::{Context, Result};
 use cidr::IpCidr;
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use qpx_core::config::MetricsConfig;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
-use tokio::time::{Duration, timeout};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::time::{Duration, Instant, timeout};
 
 const MAX_METRICS_REQUEST_BYTES: usize = 16 * 1024;
 const METRICS_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const METRICS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const METRICS_RENDER_CACHE_TTL: Duration = Duration::from_millis(250);
+
+enum MetricsResponseBody {
+    Static(&'static str),
+    Shared(Arc<str>),
+}
+
+impl MetricsResponseBody {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Static(body) => body,
+            Self::Shared(body) => body.as_ref(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct MetricsRenderCache {
+    body: Option<Arc<str>>,
+    generated_at: Option<Instant>,
+}
+
+impl MetricsRenderCache {
+    fn fresh_body(&self, now: Instant) -> Option<Arc<str>> {
+        let generated_at = self.generated_at?;
+        if now.duration_since(generated_at) > METRICS_RENDER_CACHE_TTL {
+            return None;
+        }
+        self.body.clone()
+    }
+
+    fn store(&mut self, body: Arc<str>, now: Instant) {
+        self.body = Some(body);
+        self.generated_at = Some(now);
+    }
+}
 
 pub fn start_metrics(
     config: &MetricsConfig,
@@ -36,6 +73,7 @@ pub fn start_metrics(
     let handle = recorder.handle();
     metrics::set_global_recorder(recorder)
         .map_err(|e| anyhow::anyhow!("metrics recorder install failed: {}", e))?;
+    let render_cache = Arc::new(AsyncMutex::new(MetricsRenderCache::default()));
 
     let runtime = tokio::runtime::Handle::try_current()
         .context("metrics endpoint requires running Tokio runtime")?;
@@ -82,6 +120,7 @@ pub fn start_metrics(
                 }
             };
             let handle = handle.clone();
+            let render_cache = render_cache.clone();
             let path = path.clone();
             let allow = allow.clone();
             tokio::spawn(async move {
@@ -118,30 +157,75 @@ pub fn start_metrics(
                     };
 
                 let (status, body, content_type) = if request_path == "/health" {
-                    ("200 OK", "OK".to_string(), "text/plain; charset=utf-8")
+                    ("200 OK", MetricsResponseBody::Static("OK"), "text/plain; charset=utf-8")
                 } else if request_path == path {
-                    (
-                        "200 OK",
-                        handle.render(),
-                        "text/plain; version=0.0.4; charset=utf-8",
-                    )
+                    match render_metrics_body(handle.clone(), render_cache.clone()).await {
+                        Ok(body) => (
+                            "200 OK",
+                            MetricsResponseBody::Shared(body),
+                            "text/plain; version=0.0.4; charset=utf-8",
+                        ),
+                        Err(err) => {
+                            tracing::warn!(error = ?err, "metrics render task failed");
+                            (
+                                "500 Internal Server Error",
+                                MetricsResponseBody::Static("metrics render failed"),
+                                "text/plain; charset=utf-8",
+                            )
+                        }
+                    }
                 } else {
                     (
                         "404 Not Found",
-                        "not found".to_string(),
+                        MetricsResponseBody::Static("not found"),
                         "text/plain; charset=utf-8",
                     )
                 };
 
-                let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = write_http_response_with_timeout(&mut stream, response.as_bytes()).await;
+                let _ =
+                    write_http_response_parts_with_timeout(
+                        &mut stream,
+                        status,
+                        content_type,
+                        body.as_str(),
+                    )
+                        .await;
             });
         }
     }))
+}
+
+async fn render_metrics_body(
+    handle: PrometheusHandle,
+    cache: Arc<AsyncMutex<MetricsRenderCache>>,
+) -> Result<Arc<str>> {
+    let mut cache = cache.lock().await;
+    let now = Instant::now();
+    if let Some(body) = cache.fresh_body(now) {
+        return Ok(body);
+    }
+    let body = tokio::task::spawn_blocking(move || handle.render())
+        .await
+        .context("metrics render task failed")?;
+    let body = Arc::<str>::from(body);
+    cache.store(body.clone(), Instant::now());
+    Ok(body)
+}
+
+async fn write_http_response_parts_with_timeout(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> Result<()> {
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    timeout(METRICS_WRITE_TIMEOUT, stream.write_all(header.as_bytes())).await??;
+    timeout(METRICS_WRITE_TIMEOUT, stream.write_all(body.as_bytes())).await??;
+    timeout(METRICS_WRITE_TIMEOUT, stream.shutdown()).await??;
+    Ok(())
 }
 
 async fn write_http_response_with_timeout(

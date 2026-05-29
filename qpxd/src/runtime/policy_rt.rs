@@ -1,6 +1,6 @@
-use crate::connection_filter::compile_connection_filter;
 use crate::destination::{CompiledDestinationResolutionPolicy, DestinationClassifier};
 use crate::rate_limit::RateLimiters;
+use crate::tcp_bindings::filter::compile_connection_filter;
 use anyhow::Result;
 use qpx_core::rules::RuleEngine;
 use std::collections::HashMap;

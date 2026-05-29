@@ -1,16 +1,18 @@
 use crate::http::body::Body;
-use crate::http::http1_codec::serve_http1_with_interim;
-use crate::http::interim::{H2_PREFACE, serve_h2_with_interim, sniff_h2_preface};
-use crate::http::l7::finalize_response_for_request;
+use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
+use crate::http::codec::interim::{
+    H2_PREFACE, serve_h2_with_interim_and_capacity, sniff_h2_preface,
+};
+use crate::http::protocol::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
 #[cfg(feature = "http3")]
-use crate::sidecar_control::SidecarControl;
+use crate::server::control::SidecarControl;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use crate::{
-    connection_filter::{
+    runtime::metric_names,
+    tcp_bindings::filter::{
         ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
     },
-    runtime::metric_names,
 };
 use anyhow::{Result, anyhow};
 use hyper::{Request, Response, StatusCode};
@@ -29,48 +31,20 @@ use tracing::{error, info, warn};
 
 mod connect;
 #[cfg(feature = "http3")]
-mod connect_udp_upstream;
-#[cfg(all(
-    feature = "http3",
-    feature = "http3-backend-h3",
-    not(feature = "http3-backend-qpx")
-))]
 pub(crate) mod h3;
-#[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
-#[path = "h3_qpx.rs"]
-pub(crate) mod h3;
-#[cfg(all(
-    feature = "http3",
-    not(any(
-        all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")),
-        feature = "http3-backend-qpx"
-    ))
-))]
-#[path = "h3_invalid.rs"]
-pub(crate) mod h3;
-#[cfg(all(
-    feature = "http3",
-    feature = "http3-backend-h3",
-    not(feature = "http3-backend-qpx")
-))]
-mod h3_connect;
-#[cfg(all(
-    feature = "http3",
-    feature = "http3-backend-h3",
-    not(feature = "http3-backend-qpx")
-))]
-mod h3_connect_udp;
 mod policy;
 mod request;
 
 #[cfg(any(feature = "mitm", all(feature = "http3", feature = "http3-backend-h3")))]
 pub(crate) use policy::{ForwardPolicyDecision, evaluate_forward_policy};
+#[cfg(feature = "mitm")]
+pub(crate) use policy::{ForwardPolicyEvaluation, evaluate_forward_policy_staged};
 pub(crate) use request::handle_request_inner;
 #[cfg(feature = "mitm")]
 #[cfg(feature = "auth-basic")]
 pub(crate) use request::proxy_auth_required;
 
-pub async fn run_tcp(
+pub(crate) async fn run_tcp(
     listener: IngressEdgeConfig,
     runtime: Runtime,
     shutdown: watch::Receiver<bool>,
@@ -114,7 +88,7 @@ pub async fn run_tcp(
 }
 
 #[cfg(feature = "http3")]
-pub async fn run_h3(
+pub(crate) async fn run_h3(
     listener: IngressEdgeConfig,
     runtime: Runtime,
     shutdown: watch::Receiver<SidecarControl>,
@@ -184,8 +158,14 @@ async fn run_forward_acceptor(
         let xdp_cfg = xdp_cfg.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let header_read_timeout =
-                Duration::from_millis(runtime.state().plan.limits.http_header_read_timeout_ms);
+            let header_read_timeout = Duration::from_millis(
+                runtime
+                    .state()
+                    .plan
+                    .limits
+                    .timeouts
+                    .http_header_read_timeout_ms,
+            );
             let metadata_timeout = header_read_timeout;
             let (stream, effective_remote_addr) = match resolve_remote_addr_with_xdp(
                 stream,
@@ -238,13 +218,15 @@ async fn run_forward_acceptor(
                     return;
                 }
             };
-            let stream = crate::io_prefix::PrefixedIo::new(stream, preface.clone());
+            let stream = crate::http::protocol::io_prefix::PrefixedIo::new(stream, preface.clone());
             let access_cfg = runtime.state().resources.access_log.clone();
+            let body_channel_capacity = runtime.state().plan.limits.body.body_channel_capacity;
             let access_name = Arc::<str>::from(listener_name.as_str());
+            let request_runtime = runtime.clone();
             let service = handler_fn(move |req| {
                 handle_request(
                     req,
-                    runtime.clone(),
+                    request_runtime.clone(),
                     listener_name.clone(),
                     effective_remote_addr,
                 )
@@ -259,9 +241,22 @@ async fn run_forward_acceptor(
                 &access_cfg,
             );
             let result = if preface.as_ref() == H2_PREFACE {
-                serve_h2_with_interim(stream, service, true, header_read_timeout).await
+                serve_h2_with_interim_and_capacity(
+                    stream,
+                    service,
+                    true,
+                    header_read_timeout,
+                    body_channel_capacity,
+                )
+                .await
             } else {
-                serve_http1_with_interim(stream, service, header_read_timeout).await
+                serve_http1_with_interim_and_capacity(
+                    stream,
+                    service,
+                    header_read_timeout,
+                    body_channel_capacity,
+                )
+                .await
             };
             if let Err(err) = result {
                 warn!(error = ?err, "forward connection failed");

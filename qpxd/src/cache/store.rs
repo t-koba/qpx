@@ -8,8 +8,9 @@ use super::freshness::{
 };
 use super::invalidate::invalidate_primary;
 use super::types::{
-    CACHE_HEADER, CacheBackend, CacheRequestKey, CachedResponseEnvelope, INDEX_TTL_SECS,
-    MAX_CACHE_OBJECT_BYTES, ResponseDirectives, RevalidationState, VarySpec,
+    CACHE_HEADER, CacheBackend, CacheRequestKey, CachedBody, CachedResponseEnvelope,
+    INDEX_TTL_SECS, MAX_CACHE_OBJECT_BYTES, RequestCollapseGuard, ResponseDirectives,
+    RevalidationState, VarySpec, cache_body_storage_key, encode_cached_response_metadata,
 };
 use super::util::{
     cache_namespace, load_variant_index, now_millis, sanitize_cached_headers_for_storage,
@@ -20,53 +21,29 @@ use super::vary::{
 };
 use crate::http::body::Body;
 use anyhow::Result;
-use base64::Engine;
 use http::header::{AUTHORIZATION, CONTENT_LOCATION, EXPIRES, SET_COOKIE};
 use hyper::{Method, Response, StatusCode};
+use metrics::counter;
 use qpx_core::config::CachePolicyConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::task::JoinSet;
+use tracing::warn;
 
+const CACHE_WRITEBACK_MIRROR_CHANNEL_CAPACITY: usize = 128;
 pub struct CacheStoreTiming {
     pub response_delay_secs: u64,
     pub body_read_timeout: Duration,
+    pub request_collapse_guard: Option<RequestCollapseGuard>,
 }
 
-async fn collect_body_limited(
-    mut body: Body,
-    max_body_bytes: usize,
-    body_read_timeout: Duration,
-) -> Result<bytes::Bytes> {
-    use bytes::BytesMut;
-    let mut out = BytesMut::new();
-    while let Some(chunk) = timeout(body_read_timeout, body.data())
-        .await
-        .map_err(|_| anyhow::anyhow!("cache object body read timed out"))?
-    {
-        let chunk = chunk?;
-        let next = out
-            .len()
-            .checked_add(chunk.len())
-            .ok_or_else(|| anyhow::anyhow!("cache object length overflow"))?;
-        if next > max_body_bytes {
-            return Err(anyhow::anyhow!(
-                "cache object exceeds configured limit: {} bytes",
-                max_body_bytes
-            ));
-        }
-        out.extend_from_slice(&chunk);
-    }
-    Ok(out.freeze())
-}
-
-pub async fn maybe_store(
+pub(crate) async fn maybe_store(
     request_method: &Method,
     request_headers: &http::HeaderMap,
     key: &CacheRequestKey,
     policy: &CachePolicyConfig,
-    response: Response<Body>,
+    mut response: Response<Body>,
     timing: CacheStoreTiming,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
 ) -> Result<Response<Body>> {
@@ -108,11 +85,6 @@ pub async fn maybe_store(
             .insert(CACHE_HEADER, http::HeaderValue::from_static("MISS"));
         return Ok(response);
     }
-    let (parts, body) = response.into_parts();
-    let body_bytes =
-        collect_body_limited(body, max_cacheable_body_bytes, timing.body_read_timeout).await?;
-    let mut response = Response::from_parts(parts, Body::from(body_bytes.clone()));
-
     let vary = parse_vary(response.headers());
     let vary = match vary {
         VarySpec::Any => {
@@ -137,44 +109,44 @@ pub async fn maybe_store(
     let initial_age_secs = initial_age_secs(response.headers(), now, timing.response_delay_secs);
     let vary_values = vary_values_from_request_headers(request_headers, &vary);
     let variant_key = variant_storage_key(storage_primary.as_str(), &vary_values);
-    let envelope = CachedResponseEnvelope {
+    let namespace = cache_namespace(policy, "default");
+    let ttl = object_retention_ttl_secs(freshness_lifetime_secs, &resp_directives);
+    let writeback = CacheWriteback {
+        backend: backend.clone(),
+        namespace,
+        storage_primary,
+        variant_key,
         status: response.status().as_u16(),
         headers: sanitize_cached_headers_for_storage(response.headers(), &resp_directives),
-        body_b64: base64::engine::general_purpose::STANDARD.encode(&body_bytes),
         stored_at_ms: now,
         initial_age_secs,
         response_delay_secs: timing.response_delay_secs,
         freshness_lifetime_secs,
         vary_headers: vary,
         vary_values,
+        ttl,
+        max_cacheable_body_bytes,
+        body_read_timeout: timing.body_read_timeout,
+        _request_collapse_guard: timing.request_collapse_guard,
     };
 
-    let payload = serde_json::to_vec(&envelope)?;
-    let namespace = cache_namespace(policy, "default");
-    let ttl = object_retention_ttl_secs(freshness_lifetime_secs, &resp_directives);
-    let _ = backend
-        .put(namespace.as_str(), variant_key.as_str(), &payload, ttl)
-        .await;
-
-    let mut index = load_variant_index(
-        backend.as_ref(),
-        namespace.as_str(),
-        storage_primary.as_str(),
-    )
-    .await?;
-    let evicted = upsert_variant_with_cap(&mut index, &variant_key);
-    for old in evicted {
-        let _ = backend.delete(namespace.as_str(), old.as_str()).await;
+    let (parts, body) = response.into_parts();
+    let (primary_body, mut mirrors) = crate::http::body::tee::tee_body_lossy_with_metrics(
+        body,
+        vec![Some(max_cacheable_body_bytes)],
+        CACHE_WRITEBACK_MIRROR_CHANNEL_CAPACITY,
+        Some("cache_writeback"),
+    );
+    if let Some(mirror_body) = mirrors.pop() {
+        tokio::spawn(async move {
+            if let Err(err) = writeback.store(mirror_body).await {
+                warn!(error = ?err, "cache writeback failed");
+            }
+        });
+    } else {
+        warn!("cache writeback mirror was not created");
     }
-    let index_payload = serde_json::to_vec(&index)?;
-    let _ = backend
-        .put(
-            namespace.as_str(),
-            index_storage_key(storage_primary.as_str()).as_str(),
-            &index_payload,
-            ttl.max(INDEX_TTL_SECS),
-        )
-        .await;
+    let mut response = Response::from_parts(parts, primary_body);
 
     response
         .headers_mut()
@@ -182,7 +154,110 @@ pub async fn maybe_store(
     Ok(response)
 }
 
-pub async fn revalidate_not_modified(
+struct CacheWriteback {
+    backend: Arc<dyn CacheBackend>,
+    namespace: String,
+    storage_primary: String,
+    variant_key: String,
+    status: u16,
+    headers: Vec<(String, String)>,
+    stored_at_ms: u64,
+    initial_age_secs: u64,
+    response_delay_secs: u64,
+    freshness_lifetime_secs: u64,
+    vary_headers: Vec<String>,
+    vary_values: Vec<(String, String)>,
+    ttl: u64,
+    max_cacheable_body_bytes: usize,
+    body_read_timeout: Duration,
+    _request_collapse_guard: Option<RequestCollapseGuard>,
+}
+
+impl CacheWriteback {
+    async fn store(self, body: Body) -> Result<()> {
+        let body_key = cache_body_storage_key(&self.variant_key);
+        let body_put = self.backend.put_object_stream(
+            self.namespace.as_str(),
+            body_key.as_str(),
+            body,
+            self.max_cacheable_body_bytes,
+            self.body_read_timeout,
+            self.ttl,
+        );
+        let index_load = load_variant_index(
+            self.backend.as_ref(),
+            self.namespace.as_str(),
+            self.storage_primary.as_str(),
+        );
+        let (body_len, mut index) = tokio::try_join!(body_put, index_load)?;
+        record_cache_writeback_body_stream(body_len);
+        let envelope = CachedResponseEnvelope {
+            status: self.status,
+            headers: self.headers,
+            body: CachedBody::default(),
+            body_len,
+            stored_at_ms: self.stored_at_ms,
+            initial_age_secs: self.initial_age_secs,
+            response_delay_secs: self.response_delay_secs,
+            freshness_lifetime_secs: self.freshness_lifetime_secs,
+            vary_headers: self.vary_headers,
+            vary_values: self.vary_values,
+        };
+        let metadata = encode_cached_response_metadata(&envelope)?;
+        self.backend
+            .put(
+                self.namespace.as_str(),
+                self.variant_key.as_str(),
+                &metadata,
+                self.ttl,
+            )
+            .await?;
+        delete_obsolete_variants(
+            self.backend.clone(),
+            self.namespace.clone(),
+            upsert_variant_with_cap(&mut index, &self.variant_key),
+        )
+        .await;
+        let index_payload = serde_json::to_vec(&index)?;
+        self.backend
+            .put(
+                self.namespace.as_str(),
+                index_storage_key(self.storage_primary.as_str()).as_str(),
+                &index_payload,
+                self.ttl.max(INDEX_TTL_SECS),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+fn record_cache_writeback_body_stream(bytes: u64) {
+    counter!("qpx_cache_writeback_body_bytes_total").increment(bytes);
+}
+
+async fn delete_obsolete_variants(
+    backend: Arc<dyn CacheBackend>,
+    namespace: String,
+    variants: Vec<String>,
+) {
+    const DELETE_CONCURRENCY: usize = 16;
+    for chunk in variants.chunks(DELETE_CONCURRENCY) {
+        let mut tasks = JoinSet::new();
+        for variant in chunk {
+            let backend = backend.clone();
+            let namespace = namespace.clone();
+            let variant = variant.clone();
+            tasks.spawn(async move {
+                let _ = backend.delete(namespace.as_str(), variant.as_str()).await;
+                let body_key = cache_body_storage_key(variant.as_str());
+                let _ = backend.delete(namespace.as_str(), body_key.as_str()).await;
+            });
+        }
+        while tasks.join_next().await.is_some() {}
+    }
+}
+
+pub(crate) async fn revalidate_not_modified(
     request_method: &Method,
     request_headers: &http::HeaderMap,
     policy: &CachePolicyConfig,
@@ -208,8 +283,11 @@ pub async fn revalidate_not_modified(
 
     let merged_header_map = header_map_from_vec(&merged_headers);
     let mut storable_response = Response::new(Body::empty());
-    *storable_response.status_mut() =
-        StatusCode::from_u16(state.envelope.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    *storable_response.status_mut() = crate::http::protocol::semantics::validate_http_status_class(
+        StatusCode::from_u16(state.envelope.status)
+            .map_err(|err| anyhow::anyhow!("invalid cached response status: {err}"))?,
+        "cached response revalidation",
+    )?;
     *storable_response.headers_mut() = merged_header_map.clone();
 
     if !is_response_storable(
@@ -232,7 +310,8 @@ pub async fn revalidate_not_modified(
         let volatile = CachedResponseEnvelope {
             status: state.envelope.status,
             headers: merged_headers,
-            body_b64: state.envelope.body_b64,
+            body: state.envelope.body,
+            body_len: state.envelope.body_len,
             stored_at_ms: now,
             initial_age_secs,
             response_delay_secs,
@@ -253,7 +332,8 @@ pub async fn revalidate_not_modified(
     let updated = CachedResponseEnvelope {
         status: state.envelope.status,
         headers: sanitized,
-        body_b64: state.envelope.body_b64,
+        body: state.envelope.body,
+        body_len: state.envelope.body_len,
         stored_at_ms: now,
         initial_age_secs,
         response_delay_secs,
@@ -263,7 +343,7 @@ pub async fn revalidate_not_modified(
     };
 
     let ttl = object_retention_ttl_secs(updated.freshness_lifetime_secs, &directives);
-    let payload = serde_json::to_vec(&updated)?;
+    let payload = encode_cached_response_metadata(&updated)?;
     let _ = backend
         .put(
             state.namespace.as_str(),
@@ -462,108 +542,4 @@ fn cache_understands_status_storage_requirements(status: StatusCode) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use http::header::{CACHE_CONTROL, CONTENT_LENGTH, HOST};
-
-    fn test_policy() -> CachePolicyConfig {
-        CachePolicyConfig {
-            enabled: true,
-            backend: "memory".to_string(),
-            namespace: Some("tests".to_string()),
-            default_ttl_secs: Some(30),
-            max_object_bytes: 1024 * 1024,
-            allow_set_cookie_store: false,
-        }
-    }
-
-    #[test]
-    fn must_understand_allows_storage_when_status_requirements_are_understood() {
-        let request = hyper::Request::builder()
-            .method(Method::GET)
-            .uri("http://example.com/cache")
-            .header(HOST, "example.com")
-            .body(Body::empty())
-            .expect("request");
-        let response = Response::builder()
-            .status(StatusCode::OK)
-            .header(
-                CACHE_CONTROL,
-                "public, no-store, max-age=60, must-understand",
-            )
-            .header(CONTENT_LENGTH, "2")
-            .body(Body::from("ok"))
-            .expect("response");
-        let directives = parse_response_directives(response.headers());
-        assert!(directives.must_understand);
-        assert!(is_response_storable(
-            request.headers(),
-            request.method(),
-            None,
-            &response,
-            &test_policy(),
-            Some(60),
-            &directives,
-        ));
-    }
-
-    #[test]
-    fn must_understand_rejects_statuses_with_unimplemented_storage_requirements() {
-        let request = hyper::Request::builder()
-            .method(Method::GET)
-            .uri("http://example.com/cache")
-            .header(HOST, "example.com")
-            .body(Body::empty())
-            .expect("request");
-        let response = Response::builder()
-            .status(StatusCode::PARTIAL_CONTENT)
-            .header(
-                CACHE_CONTROL,
-                "public, no-store, max-age=60, must-understand",
-            )
-            .header(CONTENT_LENGTH, "2")
-            .body(Body::from("ok"))
-            .expect("response");
-        let directives = parse_response_directives(response.headers());
-        assert!(directives.must_understand);
-        assert!(!is_response_storable(
-            request.headers(),
-            request.method(),
-            None,
-            &response,
-            &test_policy(),
-            Some(60),
-            &directives,
-        ));
-    }
-
-    #[test]
-    fn must_understand_rejects_unknown_final_status_codes() {
-        let request = hyper::Request::builder()
-            .method(Method::GET)
-            .uri("http://example.com/cache")
-            .header(HOST, "example.com")
-            .body(Body::empty())
-            .expect("request");
-        let response = Response::builder()
-            .status(StatusCode::from_u16(299).expect("status"))
-            .header(
-                CACHE_CONTROL,
-                "public, no-store, max-age=60, must-understand",
-            )
-            .header(CONTENT_LENGTH, "2")
-            .body(Body::from("ok"))
-            .expect("response");
-        let directives = parse_response_directives(response.headers());
-        assert!(directives.must_understand);
-        assert!(!is_response_storable(
-            request.headers(),
-            request.method(),
-            None,
-            &response,
-            &test_policy(),
-            Some(60),
-            &directives,
-        ));
-    }
-}
+mod tests;

@@ -23,6 +23,9 @@ impl LdapAuthenticator {
         username: &str,
         password: &str,
     ) -> Result<Option<Vec<String>>> {
+        if username.is_empty() || password.is_empty() {
+            return Ok(None);
+        }
         let ldap_timeout = Duration::from_millis(self.config.timeout_ms.max(1));
         let settings = if self.config.require_starttls && self.config.url.starts_with("ldap://") {
             LdapConnSettings::new().set_starttls(true)

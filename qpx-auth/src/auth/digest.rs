@@ -7,7 +7,9 @@ use ring::rand::{SecureRandom, SystemRandom};
 #[cfg(feature = "digest-auth")]
 use sha2::Digest as _;
 #[cfg(feature = "digest-auth")]
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+#[cfg(feature = "digest-auth")]
+use std::hash::{Hash, Hasher};
 #[cfg(feature = "digest-auth")]
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "digest-auth")]
@@ -17,8 +19,8 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub(super) struct NonceStore {
     ttl: Duration,
-    max_entries: usize,
-    inner: Arc<Mutex<HashMap<String, NonceState>>>,
+    max_entries_per_shard: usize,
+    shards: Arc<[Mutex<NonceStoreInner>]>,
 }
 
 #[cfg(feature = "digest-auth")]
@@ -27,6 +29,15 @@ struct NonceState {
     created: Instant,
     opaque: String,
     last_nc: u32,
+    generation: u64,
+}
+
+#[cfg(feature = "digest-auth")]
+#[derive(Debug)]
+struct NonceStoreInner {
+    nonces: HashMap<String, NonceState>,
+    queue: VecDeque<(String, u64)>,
+    next_generation: u64,
 }
 
 #[cfg(feature = "digest-auth")]
@@ -54,6 +65,7 @@ pub(super) enum DigestAlgorithm {
 #[cfg(feature = "digest-auth")]
 impl NonceStore {
     const DEFAULT_MAX_ENTRIES: usize = 65_536;
+    const SHARDS: usize = 32;
 
     pub(super) fn new(ttl: Duration) -> Self {
         Self::with_max_entries(ttl, Self::DEFAULT_MAX_ENTRIES)
@@ -61,63 +73,65 @@ impl NonceStore {
 
     #[cfg(test)]
     pub(super) fn with_max_entries(ttl: Duration, max_entries: usize) -> Self {
+        let (shard_count, max_entries_per_shard) = shard_layout(max_entries, Self::SHARDS);
         Self {
             ttl,
-            max_entries: max_entries.max(1),
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            max_entries_per_shard,
+            shards: build_nonce_shards(shard_count),
         }
     }
 
     #[cfg(not(test))]
     fn with_max_entries(ttl: Duration, max_entries: usize) -> Self {
+        let (shard_count, max_entries_per_shard) = shard_layout(max_entries, Self::SHARDS);
         Self {
             ttl,
-            max_entries: max_entries.max(1),
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            max_entries_per_shard,
+            shards: build_nonce_shards(shard_count),
         }
     }
 
-    fn random_token() -> String {
+    fn random_token() -> Option<String> {
         let mut buf = [0u8; 16];
-        SystemRandom::new()
-            .fill(&mut buf)
-            .expect("secure random nonce generation");
-        BASE64.encode(buf)
+        if SystemRandom::new().fill(&mut buf).is_err() {
+            return None;
+        }
+        Some(BASE64.encode(buf))
     }
 
-    pub(super) fn issue_opaque() -> String {
+    pub(super) fn issue_opaque() -> Option<String> {
         Self::random_token()
     }
 
     #[cfg(test)]
     pub(super) fn issue_digest_nonce(&self) -> String {
-        self.issue_digest_challenge().nonce
+        self.issue_digest_challenge()
+            .map(|challenge| challenge.nonce)
+            .unwrap_or_default()
     }
 
-    pub(super) fn issue_digest_challenge(&self) -> DigestChallengeNonce {
-        let nonce = Self::random_token();
-        let opaque = Self::issue_opaque();
-        let mut guard = self.inner.lock().expect("nonce mutex");
-        Self::cleanup_expired_locked(&mut guard, self.ttl);
-        while guard.len() >= self.max_entries {
-            let Some(oldest_key) = guard
-                .iter()
-                .min_by_key(|(_, state)| state.created)
-                .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
-            guard.remove(&oldest_key);
-        }
-        guard.insert(
+    pub(super) fn issue_digest_challenge(&self) -> Option<DigestChallengeNonce> {
+        let nonce = Self::random_token()?;
+        let opaque = Self::issue_opaque()?;
+        let now = Instant::now();
+        let mut guard = self.shards[shard_for(&nonce, self.shards.len())]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::cleanup_expired_locked(&mut guard, self.ttl, now);
+        Self::evict_to_capacity_locked(&mut guard, self.max_entries_per_shard.saturating_sub(1));
+        let generation = guard.next_generation;
+        guard.next_generation = guard.next_generation.wrapping_add(1);
+        guard.nonces.insert(
             nonce.clone(),
             NonceState {
-                created: Instant::now(),
+                created: now,
                 opaque: opaque.clone(),
                 last_nc: 0,
+                generation,
             },
         );
-        DigestChallengeNonce { nonce, opaque }
+        guard.queue.push_back((nonce.clone(), generation));
+        Some(DigestChallengeNonce { nonce, opaque })
     }
 
     #[cfg(test)]
@@ -144,13 +158,15 @@ impl NonceStore {
         let Some(nc) = parse_nc(nc_hex) else {
             return NonceCheck::Invalid;
         };
-        let mut guard = self.inner.lock().expect("nonce mutex");
-        let Some(state) = guard.get(nonce) else {
-            Self::cleanup_expired_locked(&mut guard, self.ttl);
+        let mut guard = self.shards[shard_for(nonce, self.shards.len())]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        let Some(state) = guard.nonces.get(nonce) else {
             return NonceCheck::Invalid;
         };
-        if Instant::now().duration_since(state.created) >= self.ttl {
-            guard.remove(nonce);
+        if now.duration_since(state.created) >= self.ttl {
+            guard.nonces.remove(nonce);
             return NonceCheck::Stale;
         }
         if let Some(opaque) = opaque
@@ -165,12 +181,18 @@ impl NonceStore {
     }
 
     pub(super) fn mark_digest_nc_used(&self, nonce: &str, nc: u32) -> bool {
-        let mut guard = self.inner.lock().expect("nonce mutex");
-        Self::cleanup_expired_locked(&mut guard, self.ttl);
+        let mut guard = self.shards[shard_for(nonce, self.shards.len())]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
 
-        let Some(state) = guard.get_mut(nonce) else {
+        let Some(state) = guard.nonces.get_mut(nonce) else {
             return false;
         };
+        if now.duration_since(state.created) >= self.ttl {
+            guard.nonces.remove(nonce);
+            return false;
+        }
         if nc == 0 || nc <= state.last_nc {
             return false;
         }
@@ -178,14 +200,102 @@ impl NonceStore {
         true
     }
 
-    fn cleanup_expired_locked(guard: &mut HashMap<String, NonceState>, ttl: Duration) {
-        let now = Instant::now();
-        guard.retain(|_, state| now.duration_since(state.created) < ttl);
+    fn cleanup_expired_locked(guard: &mut NonceStoreInner, ttl: Duration, now: Instant) {
+        while let Some((nonce, generation)) = guard.queue.front() {
+            let should_pop = match guard.nonces.get(nonce) {
+                Some(state)
+                    if state.generation == *generation
+                        && now.duration_since(state.created) >= ttl =>
+                {
+                    guard.nonces.remove(nonce);
+                    true
+                }
+                Some(state) if state.generation == *generation => false,
+                _ => true,
+            };
+            if !should_pop {
+                break;
+            }
+            guard.queue.pop_front();
+        }
+    }
+
+    fn evict_to_capacity_locked(guard: &mut NonceStoreInner, target_len: usize) {
+        while guard.nonces.len() > target_len {
+            let Some((nonce, generation)) = guard.queue.pop_front() else {
+                break;
+            };
+            if guard
+                .nonces
+                .get(nonce.as_str())
+                .is_some_and(|state| state.generation == generation)
+            {
+                guard.nonces.remove(nonce.as_str());
+            }
+        }
     }
 
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
-        self.inner.lock().expect("nonce mutex").len()
+        self.shards
+            .iter()
+            .map(|shard| {
+                shard
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .nonces
+                    .len()
+            })
+            .sum()
+    }
+
+    #[cfg(test)]
+    pub(super) fn queue_len(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| {
+                shard
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .queue
+                    .len()
+            })
+            .sum()
+    }
+}
+
+#[cfg(feature = "digest-auth")]
+fn shard_layout(max_entries: usize, max_shards: usize) -> (usize, usize) {
+    let max_entries = max_entries.max(1);
+    let shard_count = max_shards.max(1).min(max_entries);
+    let per_shard = (max_entries / shard_count).max(1);
+    (shard_count, per_shard)
+}
+
+#[cfg(feature = "digest-auth")]
+fn build_nonce_shards(count: usize) -> Arc<[Mutex<NonceStoreInner>]> {
+    let mut shards = Vec::with_capacity(count.max(1));
+    for _ in 0..count.max(1) {
+        shards.push(Mutex::new(NonceStoreInner::default()));
+    }
+    shards.into()
+}
+
+#[cfg(feature = "digest-auth")]
+fn shard_for<T: Hash + ?Sized>(value: &T, shards: usize) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    (hasher.finish() as usize) % shards.max(1)
+}
+
+#[cfg(feature = "digest-auth")]
+impl Default for NonceStoreInner {
+    fn default() -> Self {
+        Self {
+            nonces: HashMap::new(),
+            queue: VecDeque::new(),
+            next_generation: 1,
+        }
     }
 }
 
@@ -198,7 +308,7 @@ fn parse_nc(nc_hex: &str) -> Option<u32> {
 }
 
 #[cfg(feature = "digest-auth")]
-pub(super) fn parse_digest(input: &str) -> HashMap<String, String> {
+pub(super) fn parse_digest(input: &str) -> Option<HashMap<String, String>> {
     let mut out = HashMap::new();
     let mut current = String::new();
     let mut in_quotes = false;
@@ -225,46 +335,63 @@ pub(super) fn parse_digest(input: &str) -> HashMap<String, String> {
                 current.push(ch);
             }
             ',' => {
-                insert_digest_param(&mut out, current.as_str());
+                if !insert_digest_param(&mut out, current.as_str()) {
+                    return None;
+                }
                 current.clear();
             }
             _ => current.push(ch),
         }
     }
-    insert_digest_param(&mut out, current.as_str());
-    out
+    if in_quotes || escaped {
+        return None;
+    }
+    if !insert_digest_param(&mut out, current.as_str()) {
+        return None;
+    }
+    Some(out)
 }
 
 #[cfg(feature = "digest-auth")]
-fn insert_digest_param(out: &mut HashMap<String, String>, raw: &str) {
+fn insert_digest_param(out: &mut HashMap<String, String>, raw: &str) -> bool {
     let raw = raw.trim();
     if raw.is_empty() {
-        return;
+        return true;
     }
     let Some((key, value)) = raw.split_once('=') else {
-        return;
+        return false;
     };
     let key = key.trim();
     if key.is_empty() {
-        return;
+        return false;
     }
     let value = value.trim();
     let value = if value.starts_with('"') {
-        unquote_http_quoted_string(value)
+        let Some(value) = unquote_http_quoted_string(value) else {
+            return false;
+        };
+        value
     } else {
+        if value.contains('"') {
+            return false;
+        }
         value.to_string()
     };
-    out.insert(key.to_ascii_lowercase(), value);
+    out.insert(key.to_ascii_lowercase(), value).is_none()
 }
 
 #[cfg(feature = "digest-auth")]
-fn unquote_http_quoted_string(raw: &str) -> String {
+fn unquote_http_quoted_string(raw: &str) -> Option<String> {
     let mut s = raw.trim();
     if let Some(rest) = s.strip_prefix('"') {
         s = rest;
+    } else {
+        return None;
     }
     if let Some(rest) = s.strip_suffix('"') {
         s = rest;
+    } else {
+        return None;
     }
     let mut out = String::with_capacity(s.len());
     let mut escape = false;
@@ -280,7 +407,10 @@ fn unquote_http_quoted_string(raw: &str) -> String {
         }
         out.push(ch);
     }
-    out
+    if escape {
+        return None;
+    }
+    Some(out)
 }
 
 #[cfg(feature = "digest-auth")]

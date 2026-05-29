@@ -1,4 +1,3 @@
-use bytes::Buf;
 use bytes::Bytes;
 use h3::error::Code;
 use h3::error::connection_error_creators::CloseStream;
@@ -6,14 +5,20 @@ use h3::error::internal_error::InternalConnectionError;
 use h3::quic::StreamId;
 use metrics::{counter, histogram};
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::mpsc;
 use tracing::warn;
 
 pub(crate) type H3DatagramSender =
     h3_datagram::datagram_handler::DatagramSender<h3_quinn::datagram::SendDatagramHandler, Bytes>;
 pub(crate) type H3DatagramReader =
     h3_datagram::datagram_handler::DatagramReader<h3_quinn::datagram::RecvDatagramHandler>;
+
+const DATAGRAM_ROUTE_SHARDS: usize = 64;
 
 #[derive(Clone)]
 enum DatagramRoute {
@@ -22,16 +27,33 @@ enum DatagramRoute {
 }
 
 pub(crate) struct H3DatagramDispatch {
-    streams: Mutex<HashMap<StreamId, DatagramRoute>>,
+    streams: Vec<RwLock<HashMap<StreamId, DatagramRoute>>>,
     channel_capacity: usize,
+    utilization_samples: AtomicU64,
 }
 
 impl H3DatagramDispatch {
     pub(crate) fn new(channel_capacity: usize) -> Self {
         Self {
-            streams: Mutex::new(HashMap::new()),
+            streams: (0..DATAGRAM_ROUTE_SHARDS)
+                .map(|_| RwLock::new(HashMap::new()))
+                .collect(),
             channel_capacity,
+            utilization_samples: AtomicU64::new(0),
         }
+    }
+
+    fn shard(&self, stream_id: &StreamId) -> &RwLock<HashMap<StreamId, DatagramRoute>> {
+        let mut hasher = DefaultHasher::new();
+        stream_id.hash(&mut hasher);
+        let idx = (hasher.finish() as usize) % self.streams.len();
+        &self.streams[idx]
+    }
+
+    fn should_record_utilization(&self) -> bool {
+        self.utilization_samples
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(64)
     }
 
     pub(crate) async fn register_stream(
@@ -40,10 +62,10 @@ impl H3DatagramDispatch {
         sender: H3DatagramSender,
     ) -> H3StreamDatagrams {
         let (tx, rx) = mpsc::channel(self.channel_capacity.max(1));
-        {
-            let mut guard = self.streams.lock().await;
-            guard.insert(stream_id, DatagramRoute::Enabled(tx));
-        }
+        self.shard(&stream_id)
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(stream_id, DatagramRoute::Enabled(tx.clone()));
         H3StreamDatagrams {
             sender,
             receiver: rx,
@@ -58,9 +80,9 @@ impl H3DatagramDispatch {
         self: &Arc<Self>,
         stream_id: StreamId,
     ) -> DatagramRegistration {
-        self.streams
-            .lock()
-            .await
+        self.shard(&stream_id)
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(stream_id, DatagramRoute::Disabled);
         DatagramRegistration {
             dispatch: self.clone(),
@@ -69,8 +91,10 @@ impl H3DatagramDispatch {
     }
 
     async fn unregister(&self, stream_id: StreamId) {
-        let mut guard = self.streams.lock().await;
-        guard.remove(&stream_id);
+        self.shard(&stream_id)
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&stream_id);
     }
 
     pub(crate) async fn run(self: Arc<Self>, mut reader: H3DatagramReader) {
@@ -78,14 +102,30 @@ impl H3DatagramDispatch {
             match reader.read_datagram().await {
                 Ok(datagram) => {
                     let stream_id = datagram.stream_id();
-                    let mut payload = datagram.into_payload();
-                    let bytes = payload.copy_to_bytes(payload.remaining());
-                    let route = { self.streams.lock().await.get(&stream_id).cloned() };
+                    let payload = datagram.into_payload();
+                    let route = self
+                        .shard(&stream_id)
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get(&stream_id)
+                        .cloned();
                     match route {
                         Some(DatagramRoute::Enabled(tx)) => {
-                            let len = bytes.len() as u64;
-                            record_datagram_channel_utilization(&tx);
-                            match tx.try_send(bytes) {
+                            let len = payload.len() as u64;
+                            if self.should_record_utilization() {
+                                record_datagram_channel_utilization(&tx);
+                            }
+                            if tx.capacity() == 0 {
+                                counter!(
+                                    "qpx_datagram_dropped_total",
+                                    "transport" => "h3",
+                                    "listener" => "unknown",
+                                    "reason" => "channel_full"
+                                )
+                                .increment(1);
+                                continue;
+                            }
+                            match tx.try_send(payload) {
                                 Ok(()) => {
                                     counter!(
                                         "qpx_datagram_received_total",

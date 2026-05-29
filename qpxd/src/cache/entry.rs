@@ -3,7 +3,6 @@ use super::freshness::current_age_secs;
 use super::types::{ByteRangeSpec, CACHE_HEADER, CachedResponseEnvelope, RequestDirectives};
 use crate::http::body::Body;
 use anyhow::Result;
-use base64::Engine;
 use http::header::{ACCEPT_RANGES, AGE, CONTENT_LENGTH, CONTENT_RANGE};
 use hyper::{Method, Response, StatusCode};
 use std::collections::HashSet;
@@ -32,12 +31,12 @@ pub(super) fn response_from_envelope(
     now_ms: u64,
     cache_state: &'static str,
 ) -> Result<Response<Body>> {
-    let body = base64::engine::general_purpose::STANDARD.decode(&envelope.body_b64)?;
     build_response(BuildResponseParams {
         envelope,
         now_ms,
         cache_state,
-        body,
+        body: envelope.body.to_body(),
+        body_len: envelope.body.len(),
         status_override: None,
         content_length_override: None,
         content_range: None,
@@ -51,17 +50,28 @@ pub(super) fn response_from_envelope_for_request(
     now_ms: u64,
     cache_state: &'static str,
 ) -> Result<Response<Body>> {
-    let body = base64::engine::general_purpose::STANDARD.decode(&envelope.body_b64)?;
-    let full_len = body.len() as u64;
+    let full_len = envelope.body_len;
     let head_response = *request_method == Method::HEAD;
-    let Some(range) = active_range(req, envelope) else {
+    let range = (!head_response)
+        .then(|| active_range(req, envelope))
+        .flatten();
+    let Some(range) = range else {
         let content_length =
             head_response.then(|| stored_content_length(envelope).unwrap_or(full_len));
         return build_response(BuildResponseParams {
             envelope,
             now_ms,
             cache_state,
-            body: if head_response { Vec::new() } else { body },
+            body: if head_response {
+                Body::empty()
+            } else {
+                envelope.body.to_body()
+            },
+            body_len: if head_response {
+                0
+            } else {
+                envelope.body.len()
+            },
             status_override: None,
             content_length_override: content_length,
             content_range: None,
@@ -74,26 +84,59 @@ pub(super) fn response_from_envelope_for_request(
             envelope,
             now_ms,
             cache_state,
-            body: Vec::new(),
+            body: Body::empty(),
+            body_len: 0,
             status_override: Some(StatusCode::RANGE_NOT_SATISFIABLE),
             content_length_override: Some(0),
             content_range: Some(content_range.as_str()),
         });
     };
     let end_inclusive = end.min(len.saturating_sub(1));
-    let start_usize = start as usize;
-    let end_usize = end_inclusive as usize;
-    let partial = body[start_usize..=end_usize].to_vec();
-    let selected_len = partial.len() as u64;
+    let selected_len = end_inclusive.saturating_sub(start).saturating_add(1);
+    let partial = envelope.body.slice_to_body(start, end_inclusive);
     let content_range = format!("bytes {start}-{end_inclusive}/{len}");
     build_response(BuildResponseParams {
         envelope,
         now_ms,
         cache_state,
-        body: if head_response { Vec::new() } else { partial },
+        body: if head_response {
+            Body::empty()
+        } else {
+            partial
+        },
+        body_len: if head_response { 0 } else { selected_len },
         status_override: Some(StatusCode::PARTIAL_CONTENT),
         content_length_override: Some(selected_len),
         content_range: Some(content_range.as_str()),
+    })
+}
+
+pub(super) fn response_from_envelope_for_request_with_body(
+    request_method: &Method,
+    req: &RequestDirectives,
+    envelope: &CachedResponseEnvelope,
+    now_ms: u64,
+    cache_state: &'static str,
+    body: Body,
+    body_len: u64,
+) -> Result<Response<Body>> {
+    let head_response = *request_method == Method::HEAD;
+    debug_assert!(!head_response);
+    let content_length = (!head_response).then_some(body_len);
+    let range = active_range(req, envelope)
+        .and_then(|range| resolve_range(range, envelope.body_len))
+        .map(|(start, end)| (start, end.min(envelope.body_len.saturating_sub(1))));
+    let content_range =
+        range.map(|(start, end)| format!("bytes {start}-{end}/{}", envelope.body_len));
+    build_response(BuildResponseParams {
+        envelope,
+        now_ms,
+        cache_state,
+        body,
+        body_len,
+        status_override: content_range.as_ref().map(|_| StatusCode::PARTIAL_CONTENT),
+        content_length_override: content_length,
+        content_range: content_range.as_deref(),
     })
 }
 
@@ -115,7 +158,7 @@ pub(super) fn not_modified_from_envelope(
 ) -> Result<Response<Body>> {
     let mut response = response_from_envelope(envelope, now_ms, cache_state)?;
     *response.status_mut() = StatusCode::NOT_MODIFIED;
-    crate::http::semantics::normalize_response_for_request(request_method, &mut response);
+    crate::http::protocol::semantics::normalize_response_for_request(request_method, &mut response);
     Ok(response)
 }
 
@@ -128,7 +171,7 @@ pub(super) fn merge_headers_after_304(
     let mut nm = std::collections::HashMap::<String, Vec<String>>::new();
     for (name, value) in not_modified_headers {
         let lower = name.as_str().to_ascii_lowercase();
-        if crate::http::semantics::is_hop_by_hop_header_name(lower.as_str()) {
+        if crate::http::protocol::semantics::is_hop_by_hop_header_name(lower.as_str()) {
             continue;
         }
         if !is_304_mergeable_header(lower.as_str()) {
@@ -146,7 +189,7 @@ pub(super) fn merge_headers_after_304(
 
     for (name, value) in cached_headers {
         let lower = name.to_ascii_lowercase();
-        if crate::http::semantics::is_hop_by_hop_header_name(lower.as_str()) {
+        if crate::http::protocol::semantics::is_hop_by_hop_header_name(lower.as_str()) {
             continue;
         }
         saw.insert(lower.clone());
@@ -193,16 +236,23 @@ struct BuildResponseParams<'a> {
     envelope: &'a CachedResponseEnvelope,
     now_ms: u64,
     cache_state: &'static str,
-    body: Vec<u8>,
+    body: Body,
+    body_len: u64,
     status_override: Option<StatusCode>,
     content_length_override: Option<u64>,
     content_range: Option<&'a str>,
 }
 
 fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
-    let mut builder = Response::builder().status(params.status_override.unwrap_or_else(|| {
-        StatusCode::from_u16(params.envelope.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
-    }));
+    let status = match params.status_override {
+        Some(status) => status,
+        None => crate::http::protocol::semantics::validate_http_status_class(
+            StatusCode::from_u16(params.envelope.status)
+                .map_err(|err| anyhow::anyhow!("invalid cached response status: {err}"))?,
+            "cached response",
+        )?,
+    };
+    let mut builder = Response::builder().status(status);
     for (name, value) in &params.envelope.headers {
         let Ok(header_name) = http::HeaderName::from_bytes(name.as_bytes()) else {
             continue;
@@ -215,7 +265,7 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
         };
         builder = builder.header(header_name, header_value);
     }
-    let mut response = builder.body(Body::from(params.body.clone()))?;
+    let mut response = builder.body(params.body)?;
     let age = current_age_secs(params.envelope, params.now_ms).to_string();
     if let Ok(age_header) = http::HeaderValue::from_str(age.as_str()) {
         response.headers_mut().insert(AGE, age_header);
@@ -224,9 +274,7 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
         CACHE_HEADER,
         http::HeaderValue::from_static(params.cache_state),
     );
-    let content_length = params
-        .content_length_override
-        .unwrap_or(params.body.len() as u64);
+    let content_length = params.content_length_override.unwrap_or(params.body_len);
     if let Ok(length) = http::HeaderValue::from_str(content_length.to_string().as_str()) {
         response.headers_mut().insert(CONTENT_LENGTH, length);
     }
@@ -259,7 +307,7 @@ fn stored_content_length(envelope: &CachedResponseEnvelope) -> Option<u64> {
     parsed
 }
 
-fn resolve_range(range: &ByteRangeSpec, len: u64) -> Option<(u64, u64)> {
+pub(super) fn resolve_range(range: &ByteRangeSpec, len: u64) -> Option<(u64, u64)> {
     if len == 0 {
         return None;
     }

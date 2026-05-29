@@ -295,9 +295,8 @@ pub(super) fn validate_registered_claims(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    if let Some(exp) = json_i64_claim(payload, "exp")
-        && now >= exp
-    {
+    let exp = json_i64_claim(payload, "exp").ok_or_else(|| anyhow!("JWT exp claim is missing"))?;
+    if now >= exp {
         return Err(anyhow!("JWT is expired"));
     }
     if let Some(nbf) = json_i64_claim(payload, "nbf")

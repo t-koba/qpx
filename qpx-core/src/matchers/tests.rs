@@ -226,3 +226,30 @@ fn response_rpc_streaming_requires_request_body_observation() {
     assert!(compiled.requires_response_rpc_context());
     assert!(compiled.requires_response_rpc_observation());
 }
+
+#[test]
+fn known_request_response_rule_match_does_not_evaluate_headers() {
+    let cfg = MatchConfig {
+        headers: vec![HeaderMatch {
+            name: "x-response-mode".to_string(),
+            value: Some("slow".to_string()),
+            regex: None,
+        }],
+        rpc: Some(RpcMatchConfig {
+            streaming: vec!["client".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert("x-response-mode", HeaderValue::from_static("fast"));
+    let ctx = RuleMatchContext {
+        headers: Some(&request_headers),
+        ..Default::default()
+    };
+
+    assert!(!compiled.matches(&ctx));
+    assert!(compiled.matches_known_request_without_body_observation(&ctx));
+}

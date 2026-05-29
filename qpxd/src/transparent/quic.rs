@@ -1,5 +1,5 @@
 use crate::http3::capsule::decode_quic_varint;
-use crate::tls::{TlsClientHelloInfo, extract_client_hello_info_from_handshake};
+use crate::tls::{TlsClientHelloInfo, extract_client_hello_info_from_handshake_with_fingerprints};
 use bytes::BytesMut;
 use rustls::CipherSuite;
 use rustls::Side;
@@ -20,7 +20,15 @@ pub(crate) fn looks_like_quic_initial(packet: &[u8]) -> bool {
     parse_protected_initial_header(packet).is_some()
 }
 
+#[cfg(test)]
 pub(crate) fn extract_quic_client_hello_info(packet: &[u8]) -> Option<TlsClientHelloInfo> {
+    extract_quic_client_hello_info_with_fingerprints(packet, true)
+}
+
+pub(crate) fn extract_quic_client_hello_info_with_fingerprints(
+    packet: &[u8],
+    include_fingerprints: bool,
+) -> Option<TlsClientHelloInfo> {
     let protected = parse_protected_initial_header(packet)?;
     let suite = initial_suite()?;
     let quic = suite.quic?;
@@ -77,7 +85,10 @@ pub(crate) fn extract_quic_client_hello_info(packet: &[u8]) -> Option<TlsClientH
         )
         .ok()?;
     let crypto = collect_crypto_payload(decrypted)?;
-    extract_client_hello_info_from_handshake(crypto.as_ref())
+    extract_client_hello_info_from_handshake_with_fingerprints(
+        crypto.as_ref(),
+        include_fingerprints,
+    )
 }
 
 fn parse_protected_initial_header(packet: &[u8]) -> Option<ProtectedInitialHeader<'_>> {
@@ -214,8 +225,9 @@ fn skip_ack_frame(payload: &[u8], mut cursor: usize, ecn: bool) -> Option<usize>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::http3::capsule::encode_quic_varint;
+    use crate::tls::sniff::extract_client_hello_info_from_handshake;
+    use crate::transparent::quic::*;
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{ClientConfig, DigitallySignedStruct, Error, SignatureScheme};

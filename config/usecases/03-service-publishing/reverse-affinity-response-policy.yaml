@@ -11,6 +11,7 @@ edges:
   listen: 0.0.0.0:19084
   routes:
   - name: store-api
+    streaming_requirement: preferred
     match:
       host:
       - store.example.com

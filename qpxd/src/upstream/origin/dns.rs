@@ -1,41 +1,38 @@
 use anyhow::{Result, anyhow};
 use qpx_core::config::{UpstreamDiscoveryConfig, UpstreamDiscoveryKind};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
-use tokio::net::UdpSocket;
+use ring::rand::{SecureRandom, SystemRandom};
+use std::collections::HashSet;
+use std::net::SocketAddr;
+use std::sync::{Mutex, OnceLock};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "http3")]
 use tokio::net::lookup_host;
-use tokio::time::{Duration, timeout};
+use tokio::net::{TcpStream, UdpSocket};
+use tokio::time::{Duration, Instant, timeout};
 
 use super::{OriginEndpoint, dispatch::default_port_for_scheme, parse_origin_target};
 
 pub(super) const DNS_TYPE_A: u16 = 1;
 pub(super) const DNS_TYPE_AAAA: u16 = 28;
 pub(super) const DNS_TYPE_SRV: u16 = 33;
+pub(super) const DNS_TYPE_HTTPS: u16 = 65;
 const DNS_CLASS_IN: u16 = 1;
 const DNS_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
-static DNS_QUERY_ID: AtomicU16 = AtomicU16::new(1);
+const SYSTEM_NAMESERVER_CACHE_TTL: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone)]
-struct DnsARecord {
-    addr: IpAddr,
-    ttl_secs: u32,
+#[derive(Clone)]
+struct CachedSystemNameservers {
+    loaded_at: Instant,
+    nameservers: Vec<SocketAddr>,
 }
 
-#[derive(Debug, Clone)]
-struct DnsSrvRecord {
-    priority: u16,
-    weight: u16,
-    port: u16,
-    target: String,
-    ttl_secs: u32,
-}
+static SYSTEM_NAMESERVER_CACHE: OnceLock<Mutex<Option<CachedSystemNameservers>>> = OnceLock::new();
 
 pub(crate) async fn discover_origin_endpoints(
     base_upstream: &str,
     config: &UpstreamDiscoveryConfig,
 ) -> Result<(Vec<OriginEndpoint>, Duration)> {
-    let nameservers = system_nameservers()?;
+    let nameservers = system_nameservers().await?;
     discover_origin_endpoints_with_nameservers(base_upstream, config, nameservers.as_slice()).await
 }
 
@@ -57,7 +54,7 @@ pub(super) async fn discover_origin_endpoints_with_nameservers(
     match config.kind {
         UpstreamDiscoveryKind::Dns => {
             let (records, delay) = resolve_host_records(logical_host.as_str(), nameservers).await?;
-            let endpoints = records
+            let mut endpoints = records
                 .into_iter()
                 .map(|record| {
                     OriginEndpoint::discovered(
@@ -70,7 +67,20 @@ pub(super) async fn discover_origin_endpoints_with_nameservers(
                     )
                 })
                 .collect::<Vec<_>>();
-            Ok((endpoints, clamp_refresh_delay(delay, config)))
+            let mut next_delay = delay;
+            if matches!(base.scheme.as_deref(), Some("https" | "h3"))
+                && let Ok((mut h3_endpoints, h3_delay)) = resolve_https_h3_endpoints(
+                    logical_host.as_str(),
+                    logical_port,
+                    config.port,
+                    nameservers,
+                )
+                .await
+            {
+                endpoints.append(&mut h3_endpoints);
+                next_delay = next_delay.min(h3_delay);
+            }
+            Ok((endpoints, clamp_refresh_delay(next_delay, config)))
         }
         UpstreamDiscoveryKind::Srv => {
             let name = config
@@ -81,9 +91,7 @@ pub(super) async fn discover_origin_endpoints_with_nameservers(
             let (srv_records, srv_delay) = query_srv_records(name, nameservers).await?;
             let mut endpoints = Vec::new();
             let mut ttl = Some(srv_delay);
-            let mut ordered = srv_records;
-            ordered.sort_by_key(|record| (record.priority, std::cmp::Reverse(record.weight)));
-            for record in ordered {
+            for record in order_srv_records(srv_records) {
                 let port = config.port.unwrap_or(record.port);
                 let (records, delay) =
                     resolve_host_records(record.target.as_str(), nameservers).await?;
@@ -134,14 +142,67 @@ fn clamp_refresh_delay(delay: Duration, config: &UpstreamDiscoveryConfig) -> Dur
     )
 }
 
+fn order_srv_records(mut records: Vec<DnsSrvRecord>) -> Vec<DnsSrvRecord> {
+    records.sort_by_key(|record| record.priority);
+    let mut ordered = Vec::with_capacity(records.len());
+    let mut offset = 0usize;
+    while offset < records.len() {
+        let priority = records[offset].priority;
+        let mut end = offset + 1;
+        while end < records.len() && records[end].priority == priority {
+            end += 1;
+        }
+        ordered.extend(weighted_srv_priority_group(records[offset..end].to_vec()));
+        offset = end;
+    }
+    ordered
+}
+
+fn weighted_srv_priority_group(mut group: Vec<DnsSrvRecord>) -> Vec<DnsSrvRecord> {
+    let mut ordered = Vec::with_capacity(group.len());
+    while !group.is_empty() {
+        let total = group.iter().map(|record| record.weight as u32).sum::<u32>();
+        let index = if total == 0 {
+            0
+        } else {
+            let mut cursor = random_mod(total);
+            group
+                .iter()
+                .position(|record| {
+                    let weight = record.weight as u32;
+                    if cursor < weight {
+                        true
+                    } else {
+                        cursor = cursor.saturating_sub(weight);
+                        false
+                    }
+                })
+                .unwrap_or(0)
+        };
+        ordered.push(group.remove(index));
+    }
+    ordered
+}
+
+fn random_mod(upper_exclusive: u32) -> u32 {
+    let mut bytes = [0u8; 4];
+    if SystemRandom::new().fill(&mut bytes).is_err() {
+        return 0;
+    }
+    u32::from_be_bytes(bytes) % upper_exclusive.max(1)
+}
+
 async fn resolve_host_records(
     host: &str,
     nameservers: &[SocketAddr],
 ) -> Result<(Vec<DnsARecord>, Duration)> {
     let mut records = Vec::new();
     let mut ttl = None::<Duration>;
-    for qtype in [DNS_TYPE_A, DNS_TYPE_AAAA] {
-        let resolved = query_dns_records(host, qtype, nameservers).await?;
+    let (a_records, aaaa_records) = tokio::try_join!(
+        query_dns_records(host, DNS_TYPE_A, nameservers),
+        query_dns_records(host, DNS_TYPE_AAAA, nameservers)
+    )?;
+    for resolved in [a_records, aaaa_records] {
         for record in resolved {
             ttl = Some(match ttl {
                 Some(current) => current.min(Duration::from_secs(record.ttl_secs as u64)),
@@ -186,205 +247,266 @@ async fn query_dns_srv_records(
     parse_srv_records(response.as_slice())
 }
 
+async fn resolve_https_h3_endpoints(
+    logical_host: &str,
+    logical_port: u16,
+    configured_port: Option<u16>,
+    nameservers: &[SocketAddr],
+) -> Result<(Vec<OriginEndpoint>, Duration)> {
+    let mut records = query_dns_https_records(logical_host, nameservers).await?;
+    let mut alias_ttl = records
+        .iter()
+        .filter(|record| record.priority == 0)
+        .map(|record| Duration::from_secs(record.ttl_secs as u64))
+        .min();
+    let mut followed_aliases = HashSet::new();
+    for _ in 0..4 {
+        let aliases = records
+            .iter()
+            .filter(|record| record.priority == 0)
+            .filter_map(|record| record.target.as_deref())
+            .filter(|target| followed_aliases.insert(normalize_dns_name(target)))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if aliases.is_empty() {
+            break;
+        }
+        for alias in aliases {
+            let alias_records = query_dns_https_records(alias.as_str(), nameservers).await?;
+            for record in &alias_records {
+                if record.priority == 0 {
+                    alias_ttl = Some(match alias_ttl {
+                        Some(current) => current.min(Duration::from_secs(record.ttl_secs as u64)),
+                        None => Duration::from_secs(record.ttl_secs as u64),
+                    });
+                }
+            }
+            records.extend(alias_records);
+        }
+    }
+    let mut endpoints = Vec::new();
+    let mut ttl = alias_ttl;
+    let mut service_records = records
+        .into_iter()
+        .filter(|record| record.priority != 0)
+        .collect::<Vec<_>>();
+    service_records.sort_by_key(|record| record.priority);
+    for record in service_records {
+        if !record
+            .alpn
+            .iter()
+            .any(|alpn| alpn.eq_ignore_ascii_case("h3") || alpn.starts_with("h3-"))
+        {
+            continue;
+        }
+        let connect_port = configured_port.or(record.port).unwrap_or(logical_port);
+        let target = record
+            .target
+            .as_deref()
+            .unwrap_or(record.owner_name.as_str());
+        let h3_upstream = h3_upstream_for_logical_origin(logical_host, logical_port);
+        ttl = Some(match ttl {
+            Some(current) => current.min(Duration::from_secs(record.ttl_secs as u64)),
+            None => Duration::from_secs(record.ttl_secs as u64),
+        });
+        if record.ipv4_hints.is_empty() && record.ipv6_hints.is_empty() {
+            let (addresses, address_delay) = resolve_host_records(target, nameservers).await?;
+            ttl = Some(ttl.unwrap_or(address_delay).min(address_delay));
+            endpoints.extend(addresses.into_iter().map(|address| {
+                OriginEndpoint::discovered(
+                    h3_upstream.as_str(),
+                    address.addr.to_string(),
+                    connect_port,
+                    logical_host.to_string(),
+                    logical_port,
+                    logical_host.to_string(),
+                )
+            }));
+        } else {
+            endpoints.extend(record.ipv4_hints.iter().map(|addr| {
+                OriginEndpoint::discovered(
+                    h3_upstream.as_str(),
+                    addr.to_string(),
+                    connect_port,
+                    logical_host.to_string(),
+                    logical_port,
+                    logical_host.to_string(),
+                )
+            }));
+            endpoints.extend(record.ipv6_hints.iter().map(|addr| {
+                OriginEndpoint::discovered(
+                    h3_upstream.as_str(),
+                    addr.to_string(),
+                    connect_port,
+                    logical_host.to_string(),
+                    logical_port,
+                    logical_host.to_string(),
+                )
+            }));
+        }
+    }
+    Ok((endpoints, ttl.unwrap_or_else(|| Duration::from_secs(30))))
+}
+
+async fn query_dns_https_records(
+    name: &str,
+    nameservers: &[SocketAddr],
+) -> Result<Vec<DnsHttpsRecord>> {
+    let response = query_raw_dns(name, DNS_TYPE_HTTPS, nameservers).await?;
+    parse_https_records(response.as_slice())
+}
+
 async fn query_raw_dns(name: &str, qtype: u16, nameservers: &[SocketAddr]) -> Result<Vec<u8>> {
     let mut request = Vec::with_capacity(256);
-    let id = DNS_QUERY_ID.fetch_add(1, Ordering::Relaxed);
+    let id = random_dns_query_id()?;
     request.extend_from_slice(&id.to_be_bytes());
     request.extend_from_slice(&0x0100u16.to_be_bytes());
     request.extend_from_slice(&1u16.to_be_bytes());
     request.extend_from_slice(&0u16.to_be_bytes());
     request.extend_from_slice(&0u16.to_be_bytes());
     request.extend_from_slice(&0u16.to_be_bytes());
-    encode_dns_name(name, &mut request)?;
+    encode_dns_name_inner(name, &mut request)?;
     request.extend_from_slice(&qtype.to_be_bytes());
     request.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
 
+    if nameservers.is_empty() {
+        return Err(anyhow!("no DNS nameservers configured"));
+    }
     let bind_addr = SocketAddr::from(([0, 0, 0, 0], 0));
     let socket = UdpSocket::bind(bind_addr).await?;
     let mut buf = [0u8; 2048];
-    for nameserver in nameservers {
-        socket.send_to(request.as_slice(), nameserver).await?;
-        let (len, _) = match timeout(DNS_QUERY_TIMEOUT, socket.recv_from(&mut buf)).await {
+    let mut last_rcode = None;
+    let mut pending = HashSet::new();
+    let mut last_send_err = None;
+    for nameserver in nameservers.iter().copied() {
+        match socket.send_to(request.as_slice(), nameserver).await {
+            Ok(_) => {
+                pending.insert(nameserver);
+            }
+            Err(err) => {
+                last_send_err = Some(err);
+            }
+        }
+    }
+    if pending.is_empty() {
+        if let Some(err) = last_send_err {
+            return Err(err.into());
+        }
+        return Err(anyhow!("DNS query timed out for {}", name));
+    }
+
+    let deadline = Instant::now() + DNS_QUERY_TIMEOUT;
+    while !pending.is_empty() {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let (len, peer) = match timeout(remaining, socket.recv_from(&mut buf)).await {
             Ok(result) => result?,
-            Err(_) => continue,
+            Err(_) => break,
         };
-        if len < 12 {
+        if !pending.contains(&peer) {
             continue;
         }
-        if u16::from_be_bytes([buf[0], buf[1]]) != id {
-            continue;
+        if dns_response_is_truncated_match(&buf[..len], id, name, qtype).unwrap_or(false) {
+            return query_raw_dns_tcp(request.as_slice(), id, name, qtype, peer).await;
         }
-        return Ok(buf[..len].to_vec());
+        match dns_response_query_status(&buf[..len], id, name, qtype) {
+            Ok(DnsResponseStatus::Success) => return Ok(buf[..len].to_vec()),
+            Ok(DnsResponseStatus::ErrorRcode(rcode)) => {
+                last_rcode = Some(rcode);
+                pending.remove(&peer);
+            }
+            Ok(DnsResponseStatus::Mismatch) | Err(_) => continue,
+        }
+    }
+    if let Some(rcode) = last_rcode {
+        return Err(anyhow!("DNS query failed for {name} with RCODE {rcode}"));
     }
     Err(anyhow!("DNS query timed out for {}", name))
 }
 
-fn parse_address_records(response: &[u8], qtype: u16) -> Result<Vec<DnsARecord>> {
-    let answers = parse_answer_records(response)?;
-    let mut records = Vec::new();
-    for answer in answers {
-        if answer.qtype != qtype || answer.class != DNS_CLASS_IN {
-            continue;
-        }
-        match qtype {
-            DNS_TYPE_A if answer.rdata.len() == 4 => records.push(DnsARecord {
-                addr: IpAddr::V4(Ipv4Addr::new(
-                    answer.rdata[0],
-                    answer.rdata[1],
-                    answer.rdata[2],
-                    answer.rdata[3],
-                )),
-                ttl_secs: answer.ttl,
-            }),
-            DNS_TYPE_AAAA if answer.rdata.len() == 16 => {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(answer.rdata.as_slice());
-                records.push(DnsARecord {
-                    addr: IpAddr::V6(Ipv6Addr::from(octets)),
-                    ttl_secs: answer.ttl,
-                });
-            }
-            _ => {}
-        }
-    }
-    Ok(records)
-}
-
-fn parse_srv_records(response: &[u8]) -> Result<Vec<DnsSrvRecord>> {
-    let answers = parse_answer_records(response)?;
-    let mut records = Vec::new();
-    for answer in answers {
-        if answer.qtype != DNS_TYPE_SRV || answer.class != DNS_CLASS_IN || answer.rdata.len() < 6 {
-            continue;
-        }
-        let priority = u16::from_be_bytes([answer.rdata[0], answer.rdata[1]]);
-        let weight = u16::from_be_bytes([answer.rdata[2], answer.rdata[3]]);
-        let port = u16::from_be_bytes([answer.rdata[4], answer.rdata[5]]);
-        let (target, _) = parse_dns_name(answer.rdata.as_slice(), 6)?;
-        records.push(DnsSrvRecord {
-            priority,
-            weight,
-            port,
-            target,
-            ttl_secs: answer.ttl,
-        });
-    }
-    Ok(records)
-}
-
-struct AnswerRecord {
+async fn query_raw_dns_tcp(
+    request: &[u8],
+    id: u16,
+    name: &str,
     qtype: u16,
-    class: u16,
-    ttl: u32,
-    rdata: Vec<u8>,
+    nameserver: SocketAddr,
+) -> Result<Vec<u8>> {
+    let mut stream = timeout(DNS_QUERY_TIMEOUT, TcpStream::connect(nameserver)).await??;
+    let len = u16::try_from(request.len()).map_err(|_| anyhow!("DNS request too large"))?;
+    let mut framed = Vec::with_capacity(request.len() + 2);
+    framed.extend_from_slice(&len.to_be_bytes());
+    framed.extend_from_slice(request);
+    timeout(DNS_QUERY_TIMEOUT, stream.write_all(framed.as_slice())).await??;
+
+    let mut len_buf = [0u8; 2];
+    timeout(DNS_QUERY_TIMEOUT, stream.read_exact(&mut len_buf)).await??;
+    let response_len = u16::from_be_bytes(len_buf) as usize;
+    let mut response = vec![0u8; response_len];
+    timeout(
+        DNS_QUERY_TIMEOUT,
+        stream.read_exact(response.as_mut_slice()),
+    )
+    .await??;
+    match dns_response_query_status(response.as_slice(), id, name, qtype)? {
+        DnsResponseStatus::Success => return Ok(response),
+        DnsResponseStatus::ErrorRcode(rcode) => {
+            return Err(anyhow!(
+                "DNS TCP query failed for {name} with RCODE {rcode}"
+            ));
+        }
+        DnsResponseStatus::Mismatch => {}
+    }
+    Err(anyhow!("DNS TCP response did not match query for {}", name))
 }
 
-fn parse_answer_records(response: &[u8]) -> Result<Vec<AnswerRecord>> {
-    if response.len() < 12 {
-        return Err(anyhow!("DNS response too short"));
-    }
-    let qdcount = u16::from_be_bytes([response[4], response[5]]) as usize;
-    let ancount = u16::from_be_bytes([response[6], response[7]]) as usize;
-    let mut offset = 12usize;
-    for _ in 0..qdcount {
-        let (_, next) = parse_dns_name(response, offset)?;
-        if next + 4 > response.len() {
-            return Err(anyhow!("DNS question truncated"));
-        }
-        offset = next + 4;
+fn random_dns_query_id() -> Result<u16> {
+    let mut bytes = [0u8; 2];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| anyhow!("failed to generate DNS query id"))?;
+    Ok(u16::from_be_bytes(bytes))
+}
+
+mod parser;
+use self::parser::{
+    DnsARecord, DnsHttpsRecord, DnsResponseStatus, DnsSrvRecord, dns_response_is_truncated_match,
+    dns_response_query_status, encode_dns_name as encode_dns_name_inner,
+    h3_upstream_for_logical_origin, normalize_dns_name, parse_address_records, parse_https_records,
+    parse_srv_records,
+};
+#[cfg(test)]
+pub(super) use self::parser::{dns_response_matches_query, encode_dns_name, parse_dns_name};
+
+async fn system_nameservers() -> Result<Vec<SocketAddr>> {
+    let now = Instant::now();
+    let cache = SYSTEM_NAMESERVER_CACHE.get_or_init(|| Mutex::new(None));
+    if let Some(cached) = cache
+        .lock()
+        .map_err(|_| anyhow!("system nameserver cache lock poisoned"))?
+        .as_ref()
+        .filter(|cached| now.duration_since(cached.loaded_at) < SYSTEM_NAMESERVER_CACHE_TTL)
+        .cloned()
+    {
+        return Ok(cached.nameservers);
     }
 
-    let mut answers = Vec::with_capacity(ancount);
-    for _ in 0..ancount {
-        let (_, next) = parse_dns_name(response, offset)?;
-        if next + 10 > response.len() {
-            return Err(anyhow!("DNS answer truncated"));
-        }
-        let qtype = u16::from_be_bytes([response[next], response[next + 1]]);
-        let class = u16::from_be_bytes([response[next + 2], response[next + 3]]);
-        let ttl = u32::from_be_bytes([
-            response[next + 4],
-            response[next + 5],
-            response[next + 6],
-            response[next + 7],
-        ]);
-        let rdlength = u16::from_be_bytes([response[next + 8], response[next + 9]]) as usize;
-        let rdata_start = next + 10;
-        let rdata_end = rdata_start + rdlength;
-        if rdata_end > response.len() {
-            return Err(anyhow!("DNS answer rdata truncated"));
-        }
-        answers.push(AnswerRecord {
-            qtype,
-            class,
-            ttl,
-            rdata: response[rdata_start..rdata_end].to_vec(),
+    let nameservers = tokio::task::spawn_blocking(parse_system_nameservers)
+        .await
+        .map_err(|err| anyhow!("system nameserver loader task failed: {err}"))??;
+    *cache
+        .lock()
+        .map_err(|_| anyhow!("system nameserver cache lock poisoned"))? =
+        Some(CachedSystemNameservers {
+            loaded_at: Instant::now(),
+            nameservers: nameservers.clone(),
         });
-        offset = rdata_end;
-    }
-    Ok(answers)
+    Ok(nameservers)
 }
 
-pub(super) fn parse_dns_name(buf: &[u8], offset: usize) -> Result<(String, usize)> {
-    let mut labels = Vec::new();
-    let mut pos = offset;
-    let mut consumed = None::<usize>;
-    let mut jumps = 0usize;
-
-    loop {
-        if pos >= buf.len() {
-            return Err(anyhow!("DNS name out of bounds"));
-        }
-        let len = buf[pos];
-        if len & 0xc0 == 0xc0 {
-            if pos + 1 >= buf.len() {
-                return Err(anyhow!("DNS compression pointer truncated"));
-            }
-            let pointer = (((len as u16 & 0x3f) << 8) | buf[pos + 1] as u16) as usize;
-            if consumed.is_none() {
-                consumed = Some(pos + 2);
-            }
-            pos = pointer;
-            jumps += 1;
-            if jumps > 16 {
-                return Err(anyhow!("DNS compression pointer loop"));
-            }
-            continue;
-        }
-        if len == 0 {
-            let next = consumed.unwrap_or(pos + 1);
-            return Ok((labels.join("."), next));
-        }
-        if len & 0xc0 != 0 {
-            return Err(anyhow!("invalid DNS label length"));
-        }
-        let label_len = len as usize;
-        let start = pos + 1;
-        let end = start + label_len;
-        if end > buf.len() {
-            return Err(anyhow!("DNS label truncated"));
-        }
-        labels.push(std::str::from_utf8(&buf[start..end])?.to_string());
-        pos = end;
-    }
-}
-
-pub(super) fn encode_dns_name(name: &str, out: &mut Vec<u8>) -> Result<()> {
-    for label in name.trim_end_matches('.').split('.') {
-        if label.is_empty() {
-            continue;
-        }
-        if label.len() > 63 {
-            return Err(anyhow!("DNS label too long"));
-        }
-        out.push(label.len() as u8);
-        out.extend_from_slice(label.as_bytes());
-    }
-    out.push(0);
-    Ok(())
-}
-
-fn system_nameservers() -> Result<Vec<SocketAddr>> {
+fn parse_system_nameservers() -> Result<Vec<SocketAddr>> {
     let mut out = Vec::new();
     let resolv = std::fs::read_to_string("/etc/resolv.conf")?;
     for line in resolv.lines() {

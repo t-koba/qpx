@@ -8,6 +8,25 @@ use super::numeric::match_optional_numeric;
 
 impl CompiledMatch {
     pub fn matches(&self, ctx: &RuleMatchContext<'_>) -> bool {
+        self.matches_inner(ctx, ObservationMode::Full)
+    }
+
+    pub fn matches_without_request_body_observation(&self, ctx: &RuleMatchContext<'_>) -> bool {
+        self.matches_inner(ctx, ObservationMode::IgnoreRequestBody)
+    }
+
+    pub fn matches_without_response_body_observation(&self, ctx: &RuleMatchContext<'_>) -> bool {
+        self.matches_inner(ctx, ObservationMode::IgnoreResponseBody)
+    }
+
+    pub fn matches_known_request_without_body_observation(
+        &self,
+        ctx: &RuleMatchContext<'_>,
+    ) -> bool {
+        self.matches_inner(ctx, ObservationMode::KnownRequestWithoutBody)
+    }
+
+    fn matches_inner(&self, ctx: &RuleMatchContext<'_>, observation: ObservationMode) -> bool {
         if !self.src_ip.is_empty() {
             let Some(ip) = ctx.src_ip else {
                 return false;
@@ -78,9 +97,15 @@ impl CompiledMatch {
             || !match_optional_text(&self.http_version, ctx.http_version)
             || !match_optional_text(&self.alpn, ctx.alpn)
             || !match_optional_text(&self.tls_version, ctx.tls_version)
-            || !match_optional_numeric(&self.request_size, ctx.request_size)
-            || !match_optional_numeric(&self.response_status, ctx.response_status.map(u64::from))
-            || !match_optional_numeric(&self.response_size, ctx.response_size)
+            || !(observation.ignores_request_body()
+                || match_optional_numeric(&self.request_size, ctx.request_size))
+            || !(observation.ignores_response_status()
+                || match_optional_numeric(
+                    &self.response_status,
+                    ctx.response_status.map(u64::from),
+                ))
+            || !(observation.ignores_response_body()
+                || match_optional_numeric(&self.response_size, ctx.response_size))
         {
             return false;
         }
@@ -91,8 +116,9 @@ impl CompiledMatch {
             return false;
         }
 
-        if !fast_headers_match(&self.headers_fast, ctx.headers)
-            || !regex_headers_match(&self.headers_regex, ctx.headers)
+        if !observation.ignores_headers()
+            && (!fast_headers_match(&self.headers_fast, ctx.headers)
+                || !regex_headers_match(&self.headers_regex, ctx.headers))
         {
             return false;
         }
@@ -122,7 +148,8 @@ impl CompiledMatch {
             return false;
         }
 
-        if let Some(cert) = &self.upstream_cert
+        if !observation.ignores_upstream_context()
+            && let Some(cert) = &self.upstream_cert
             && !cert.matches(
                 ctx.upstream_cert_present,
                 ctx.upstream_cert_subject,
@@ -136,7 +163,18 @@ impl CompiledMatch {
         }
 
         if let Some(rpc) = &self.rpc
-            && !rpc.matches(ctx)
+            && !match observation {
+                ObservationMode::Full => rpc.matches(ctx),
+                ObservationMode::IgnoreRequestBody => {
+                    rpc.matches_without_request_body_observation(ctx)
+                }
+                ObservationMode::IgnoreResponseBody => {
+                    rpc.matches_without_response_body_observation(ctx)
+                }
+                ObservationMode::KnownRequestWithoutBody => {
+                    rpc.matches_known_request_without_body_observation(ctx)
+                }
+            }
         {
             return false;
         }
@@ -151,6 +189,10 @@ impl CompiledMatch {
                 .as_ref()
                 .map(|rpc| rpc.requires_request_body_observation())
                 .unwrap_or(false)
+    }
+
+    pub fn requires_request_size_matcher(&self) -> bool {
+        self.request_size.is_some()
     }
 
     pub fn requires_request_body_observation(&self) -> bool {
@@ -171,6 +213,10 @@ impl CompiledMatch {
                 .as_ref()
                 .map(|rpc| rpc.requires_response_body_observation())
                 .unwrap_or(false)
+    }
+
+    pub fn requires_response_size_matcher(&self) -> bool {
+        self.response_size.is_some()
     }
 
     pub fn requires_response_body_observation(&self) -> bool {
@@ -216,5 +262,48 @@ impl CompiledMatch {
             .as_ref()
             .map(|rpc| rpc.requires_request_body_observation_for_response_rule())
             .unwrap_or(false)
+    }
+
+    pub fn requires_tls_fingerprint(&self) -> bool {
+        self.tls_fingerprint
+            .as_ref()
+            .map(|fingerprint| fingerprint.requires_tls_fingerprint())
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ObservationMode {
+    Full,
+    IgnoreRequestBody,
+    IgnoreResponseBody,
+    KnownRequestWithoutBody,
+}
+
+impl ObservationMode {
+    fn ignores_request_body(self) -> bool {
+        matches!(
+            self,
+            Self::IgnoreRequestBody | Self::KnownRequestWithoutBody
+        )
+    }
+
+    fn ignores_response_status(self) -> bool {
+        matches!(self, Self::KnownRequestWithoutBody)
+    }
+
+    fn ignores_response_body(self) -> bool {
+        matches!(
+            self,
+            Self::IgnoreResponseBody | Self::KnownRequestWithoutBody
+        )
+    }
+
+    fn ignores_upstream_context(self) -> bool {
+        matches!(self, Self::KnownRequestWithoutBody)
+    }
+
+    fn ignores_headers(self) -> bool {
+        matches!(self, Self::KnownRequestWithoutBody)
     }
 }

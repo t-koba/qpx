@@ -15,7 +15,8 @@ edges:
     - sni: shop.example.com
     - sni: cdn.example.com
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - shop.example.com
     timeout_ms: 20000
@@ -29,7 +30,8 @@ edges:
       - http://10.30.0.21:8080
       - http://10.30.0.22:8080
       lb: round_robin
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - cdn.example.com
     timeout_ms: 10000

@@ -24,7 +24,8 @@ edges:
   name: include-reverse
   listen: "${QPX_REVERSE_LISTEN:-0.0.0.0:19083}"
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - internal-app.example.com
     timeout_ms: 15000

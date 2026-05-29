@@ -12,7 +12,8 @@ edges:
       cert: "${QPX_TLS_CERT_ALT:-/etc/qpx/certs/cdn.example.com.crt}"
       key: "${QPX_TLS_KEY_ALT:-/etc/qpx/certs/cdn.example.com.key}"
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - shop.example.com
     timeout_ms: 20000
@@ -26,7 +27,8 @@ edges:
       - http://10.30.0.21:8080
       - http://10.30.0.22:8080
       lb: round_robin
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - cdn.example.com
     timeout_ms: 10000

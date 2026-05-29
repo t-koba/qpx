@@ -1,7 +1,7 @@
 use super::{DispatchAuditContext, DispatchOutcome, annotate_dispatch_response};
 use crate::http::body::Body;
-use crate::http::common::too_many_requests_response;
-use crate::http::l7::finalize_response_for_request;
+use crate::http::protocol::common::too_many_requests_response;
+use crate::http::protocol::l7::finalize_response_for_request;
 use hyper::{Request, Response};
 use std::time::Duration;
 

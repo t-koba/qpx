@@ -40,6 +40,7 @@ zstd = { version = "0.13", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
+criterion = { version = "0.5", features = ["async_tokio"] }
 metrics = "0.22"
 metrics-exporter-prometheus = { version = "0.13", default-features = false }
 opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
@@ -47,6 +48,7 @@ opentelemetry_sdk = { version = "0.31", default-features = false, features = ["t
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic"] }
 tracing-opentelemetry = { version = "0.32", default-features = false }
 arc-swap = "1"
+crossbeam-channel = "0.5"
 notify = "6"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -79,7 +81,7 @@ h3-quinn = { version = "0.0.10", features = ["datagram"] }
 h3-datagram = "0.0.2"
 
 # Async runtime
-tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "process", "signal"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "process", "signal", "fs"] }
 socket2 = { version = "0.5", features = ["all"] }
 memmap2 = "0.9.10"
 tempfile = "3.25.0"
@@ -100,8 +102,8 @@ pcap-file = "2"
 etherparse = "0.13"
 
 # WASM
-wasmtime = { version = "43.0.2", default-features = false, features = ["async", "cache", "cranelift", "parallel-compilation", "runtime", "std", "wat"] }
-wasmtime-wasi = { version = "43.0.2", default-features = false, features = ["p1"] }
+wasmtime = { version = "44.0.2", default-features = false, features = ["async", "cache", "cranelift", "parallel-compilation", "runtime", "std", "wat"] }
+wasmtime-wasi = { version = "44.0.2", default-features = false, features = ["p1"] }
 
 # CLI
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }

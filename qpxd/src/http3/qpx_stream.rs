@@ -1,29 +1,30 @@
-use crate::http::body::{Body, Sender};
+use crate::http::body::Body;
 use crate::http3::codec::{prepare_h3_response_head, sanitize_interim_response_for_h3};
 use crate::http3::stream_limits::timeout_or_deadline;
 use anyhow::{Result, anyhow};
+use bytes::Bytes;
 use http::HeaderMap;
 use hyper::Response;
 use std::future::Future;
 use tokio::time::{Duration, Instant, timeout};
 
-pub(crate) struct QpxRequestBodyRelayOptions<'a> {
-    pub(crate) read_timeout: Duration,
-    pub(crate) max_body_bytes: usize,
-    pub(crate) declared_content_length: Option<u64>,
-    pub(crate) request_headers: &'a HeaderMap,
-    pub(crate) listener_name: Option<&'a str>,
-    pub(crate) max_grpc_message_bytes: Option<u64>,
-    pub(crate) grpc_stream_deadline: Option<Instant>,
-}
+mod request_body;
+
+pub(crate) use self::request_body::{
+    QpxRequestBodyRelayOptions, relay_qpx_request_body_observed_from_recv,
+};
 
 pub(crate) struct QpxResponseSendOptions<'a> {
     pub(crate) max_body_bytes: usize,
     pub(crate) body_read_timeout: Duration,
+    pub(crate) body_send_timeout: Duration,
     pub(crate) listener_name: Option<&'a str>,
     pub(crate) fallback_grpc_protocol: Option<&'a str>,
     pub(crate) max_grpc_message_bytes: Option<u64>,
+    pub(crate) max_grpc_web_trailer_bytes: Option<u64>,
     pub(crate) grpc_stream_deadline: Option<Instant>,
+    pub(crate) sse_policy: Option<qpx_core::config::SseStreamingPolicy>,
+    pub(crate) observe_grpc_messages: bool,
 }
 
 impl QpxResponseSendOptions<'_> {
@@ -31,156 +32,71 @@ impl QpxResponseSendOptions<'_> {
         Self {
             max_body_bytes,
             body_read_timeout,
+            body_send_timeout: body_read_timeout,
             listener_name: None,
             fallback_grpc_protocol: None,
             max_grpc_message_bytes: None,
+            max_grpc_web_trailer_bytes: None,
             grpc_stream_deadline: None,
+            sse_policy: None,
+            observe_grpc_messages: false,
         }
     }
 }
 
-pub(crate) async fn relay_qpx_request_body_observed(
-    req_stream: &mut qpx_h3::RequestStream,
-    mut sender: Sender,
-    options: QpxRequestBodyRelayOptions<'_>,
-) -> Result<(u64, Option<crate::http::rpc::FramedBodySummary>)> {
-    let mut grpc_observer = crate::http::rpc::streaming_grpc_observer(
-        options.request_headers,
-        None,
-        options.max_grpc_message_bytes,
-    );
-    let mut bytes_read = 0usize;
-    loop {
-        let chunk = tokio::select! {
-            _ = sender.closed() => {
-                req_stream.stop_receiving_request_body();
-                return Ok((bytes_read as u64, None));
-            }
-            chunk = timeout_or_deadline(
-                req_stream.recv_data(),
-                options.read_timeout,
-                options.grpc_stream_deadline,
-                "qpx-h3 request body read timed out",
-                "qpx-h3 gRPC stream duration exceeded configured limit",
-            ) => chunk,
-        };
-        let chunk = match chunk {
-            Ok(chunk) => chunk?,
-            Err(err) => {
-                sender.abort();
-                req_stream.abort_message_stream();
-                return Err(err);
-            }
-        };
-        let Some(chunk) = chunk else {
-            break;
-        };
-        let next = match bytes_read.checked_add(chunk.len()) {
-            Some(next) => next,
-            None => {
-                sender.abort();
-                req_stream.abort_message_stream();
-                return Err(anyhow!("qpx-h3 request body length overflow"));
-            }
-        };
-        if next > options.max_body_bytes {
-            sender.abort();
-            req_stream.abort_message_stream();
-            return Err(anyhow!(
-                "qpx-h3 request body exceeds configured limit: {} bytes",
-                options.max_body_bytes
-            ));
-        }
-        if let Some(content_length) = options.declared_content_length
-            && next as u64 > content_length
-        {
-            sender.abort();
-            req_stream.abort_message_stream();
-            return Err(anyhow!("qpx-h3 request body exceeds Content-Length"));
-        }
-        if let Some(observer) = grpc_observer.as_mut()
-            && let Err(err) = observer.feed(chunk.as_ref())
-        {
-            sender.abort();
-            req_stream.abort_message_stream();
-            return Err(anyhow!(err));
-        }
-        bytes_read = next;
-        if sender.send_data(chunk).await.is_err() {
-            req_stream.stop_receiving_request_body();
-            return Ok((bytes_read as u64, None));
-        }
-    }
-
-    if let Some(content_length) = options.declared_content_length
-        && content_length != bytes_read as u64
-    {
-        sender.abort();
-        req_stream.abort_message_stream();
-        return Err(anyhow!(
-            "qpx-h3 request Content-Length mismatch: expected {content_length}, got {bytes_read}"
-        ));
-    }
-
-    let trailers = tokio::select! {
-        _ = sender.closed() => {
-            req_stream.stop_receiving_request_body();
-            return Ok((bytes_read as u64, None));
-        }
-        trailers = timeout_or_deadline(
-            req_stream.recv_trailers(),
-            options.read_timeout,
-            options.grpc_stream_deadline,
-            "qpx-h3 request trailers read timed out",
-            "qpx-h3 gRPC stream duration exceeded configured limit",
-        ) => trailers,
-    };
-    let trailers = match trailers {
-        Ok(trailers) => trailers?,
-        Err(err) => {
-            sender.abort();
-            req_stream.abort_message_stream();
-            return Err(err);
-        }
-    };
-    if let Some(trailers) = trailers {
-        if let Err(err) = crate::http::semantics::validate_request_trailers(&trailers) {
-            sender.abort();
-            req_stream.abort_message_stream();
-            return Err(anyhow!("invalid qpx-h3 request trailers: {err}"));
-        }
-        if sender.send_trailers(trailers).await.is_err() {
-            req_stream.stop_receiving_request_body();
-            return Ok((bytes_read as u64, None));
-        }
-    }
-    let summary = if let Some(observer) = grpc_observer {
-        let protocol = observer.protocol().to_string();
-        let summary = match observer.finish().map_err(|err| anyhow!(err)) {
-            Ok(summary) => summary,
-            Err(err) => {
-                sender.abort();
-                req_stream.abort_message_stream();
-                return Err(err);
-            }
-        };
-        if let Some(listener) = options.listener_name {
-            crate::http::rpc::emit_grpc_body_metrics(
-                "request",
-                listener,
-                protocol.as_str(),
-                &summary,
-            );
-        }
-        Some(summary)
-    } else {
-        None
-    };
-    Ok((bytes_read as u64, summary))
+pub(crate) async fn send_qpx_interim_response_to_send(
+    req_stream: &mut qpx_h3::RequestSendStream,
+    interim: http::Response<()>,
+    send_timeout: Duration,
+) -> Result<()> {
+    send_qpx_interim_response_inner(QpxResponseWriter::Send(req_stream), interim, send_timeout)
+        .await
 }
 
-pub(crate) async fn send_qpx_interim_response(
-    req_stream: &mut qpx_h3::RequestStream,
+enum QpxResponseWriter<'a> {
+    Full(&'a mut qpx_h3::RequestStream),
+    Send(&'a mut qpx_h3::RequestSendStream),
+}
+
+impl QpxResponseWriter<'_> {
+    async fn send_response_head(&mut self, response: &http::Response<()>) -> Result<()> {
+        match self {
+            Self::Full(stream) => stream.send_response_head(response).await,
+            Self::Send(stream) => stream.send_response_head(response).await,
+        }
+    }
+
+    async fn send_data(&mut self, payload: Bytes) -> Result<()> {
+        match self {
+            Self::Full(stream) => stream.send_data(payload).await,
+            Self::Send(stream) => stream.send_data(payload).await,
+        }
+    }
+
+    async fn send_trailers(&mut self, trailers: &HeaderMap) -> Result<()> {
+        match self {
+            Self::Full(stream) => stream.send_trailers(trailers).await,
+            Self::Send(stream) => stream.send_trailers(trailers).await,
+        }
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        match self {
+            Self::Full(stream) => stream.finish().await,
+            Self::Send(stream) => stream.finish().await,
+        }
+    }
+
+    fn abort_message_stream(&mut self) {
+        match self {
+            Self::Full(stream) => stream.abort_message_stream(),
+            Self::Send(stream) => stream.abort_message_stream(),
+        }
+    }
+}
+
+async fn send_qpx_interim_response_inner(
+    mut req_stream: QpxResponseWriter<'_>,
     interim: http::Response<()>,
     send_timeout: Duration,
 ) -> Result<()> {
@@ -219,20 +135,68 @@ pub(crate) async fn send_qpx_response_stream_observed(
     request_method: &http::Method,
     options: QpxResponseSendOptions<'_>,
 ) -> Result<Option<crate::http::rpc::FramedBodySummary>> {
+    send_qpx_response_stream_observed_inner(
+        QpxResponseWriter::Full(req_stream),
+        response,
+        request_method,
+        options,
+    )
+    .await
+}
+
+pub(crate) async fn send_qpx_response_stream_observed_to_send(
+    req_stream: &mut qpx_h3::RequestSendStream,
+    response: Response<Body>,
+    request_method: &http::Method,
+    options: QpxResponseSendOptions<'_>,
+) -> Result<Option<crate::http::rpc::FramedBodySummary>> {
+    send_qpx_response_stream_observed_inner(
+        QpxResponseWriter::Send(req_stream),
+        response,
+        request_method,
+        options,
+    )
+    .await
+}
+
+async fn send_qpx_response_stream_observed_inner(
+    mut req_stream: QpxResponseWriter<'_>,
+    response: Response<Body>,
+    request_method: &http::Method,
+    options: QpxResponseSendOptions<'_>,
+) -> Result<Option<crate::http::rpc::FramedBodySummary>> {
     let (parts, mut body) = response.into_parts();
-    let mut grpc_observer = crate::http::rpc::streaming_grpc_observer(
-        &parts.headers,
-        options.fallback_grpc_protocol,
-        options.max_grpc_message_bytes,
-    );
+    let mut grpc_observer = options
+        .observe_grpc_messages
+        .then(|| {
+            crate::http::rpc::streaming_rpc_observer(
+                &parts.headers,
+                options.fallback_grpc_protocol,
+                options.max_grpc_message_bytes,
+                options.max_grpc_web_trailer_bytes,
+            )
+        })
+        .flatten();
     let grpc_protocol = grpc_observer
         .as_ref()
         .map(|observer| observer.protocol().to_string());
     let prepared = prepare_h3_response_head(&parts, request_method)?;
+    let (body_read_timeout, body_send_timeout, stream_deadline) = response_stream_timeouts(
+        &parts.headers,
+        options.body_read_timeout,
+        options.body_send_timeout,
+        options.grpc_stream_deadline,
+        options.sse_policy,
+    );
+    let mut sse_observer = options
+        .listener_name
+        .filter(|_| crate::http::modules::is_event_stream_headers(&parts.headers))
+        .map(|_| crate::http::protocol::sse::SseEventObserver::new());
+    let sse_started = Instant::now();
     if let Err(err) = qpx_timeout_result(
         req_stream.send_response_head(&prepared.head),
-        options.body_read_timeout,
-        options.grpc_stream_deadline,
+        body_send_timeout,
+        stream_deadline,
         "qpx-h3 response head send timed out",
         "qpx-h3 gRPC stream duration exceeded configured limit",
     )
@@ -242,14 +206,16 @@ pub(crate) async fn send_qpx_response_stream_observed(
         return Err(err);
     }
     if !prepared.body_allowed {
-        if let (Some(listener), Some(protocol)) = (options.listener_name, grpc_protocol.as_deref())
+        if options.observe_grpc_messages
+            && let (Some(listener), Some(protocol)) =
+                (options.listener_name, grpc_protocol.as_deref())
         {
             crate::http::rpc::emit_grpc_status_metric(listener, protocol, &parts.headers, None);
         }
         if let Err(err) = qpx_timeout_result(
             req_stream.finish(),
-            options.body_read_timeout,
-            options.grpc_stream_deadline,
+            body_send_timeout,
+            stream_deadline,
             "qpx-h3 response finish timed out",
             "qpx-h3 gRPC stream duration exceeded configured limit",
         )
@@ -263,21 +229,35 @@ pub(crate) async fn send_qpx_response_stream_observed(
 
     let mut bytes_sent = 0usize;
     loop {
-        let Some(chunk) = (match timeout_or_deadline(
+        let read_started = Instant::now();
+        let chunk = match timeout_or_deadline(
             body.data(),
-            options.body_read_timeout,
-            options.grpc_stream_deadline,
+            body_read_timeout,
+            stream_deadline,
             "qpx-h3 response body read timed out",
             "qpx-h3 gRPC stream duration exceeded configured limit",
         )
         .await
         {
-            Ok(chunk) => chunk,
+            Ok(chunk) => {
+                if read_started.elapsed() >= body_read_timeout.mul_f64(0.8)
+                    && let Some(listener) = options.listener_name
+                {
+                    crate::http::protocol::sse::emit_slow_upstream_body(listener);
+                }
+                chunk
+            }
             Err(err) => {
+                if sse_observer.is_some()
+                    && let Some(listener) = options.listener_name
+                {
+                    crate::http::protocol::sse::emit_sse_idle_disconnect(listener, "unknown");
+                }
                 req_stream.abort_message_stream();
                 return Err(err);
             }
-        }) else {
+        };
+        let Some(chunk) = chunk else {
             break;
         };
         let chunk = match chunk {
@@ -313,11 +293,14 @@ pub(crate) async fn send_qpx_response_stream_observed(
             req_stream.abort_message_stream();
             return Err(anyhow!(err));
         }
+        if let Some(observer) = sse_observer.as_mut() {
+            observer.feed(chunk.as_ref());
+        }
         bytes_sent = next;
         if let Err(err) = qpx_timeout_result(
             req_stream.send_data(chunk),
-            options.body_read_timeout,
-            options.grpc_stream_deadline,
+            body_send_timeout,
+            stream_deadline,
             "qpx-h3 response body send timed out",
             "qpx-h3 gRPC stream duration exceeded configured limit",
         )
@@ -326,6 +309,15 @@ pub(crate) async fn send_qpx_response_stream_observed(
             req_stream.abort_message_stream();
             return Err(err);
         }
+    }
+
+    if let (Some(listener), Some(observer)) = (options.listener_name, sse_observer.as_ref()) {
+        crate::http::protocol::sse::emit_sse_summary(
+            listener,
+            "unknown",
+            &observer.summary(),
+            sse_started.elapsed(),
+        );
     }
 
     if let Some(content_length) = prepared.content_length
@@ -339,8 +331,8 @@ pub(crate) async fn send_qpx_response_stream_observed(
 
     let trailers = match qpx_timeout_result(
         body.trailers(),
-        options.body_read_timeout,
-        options.grpc_stream_deadline,
+        body_read_timeout,
+        stream_deadline,
         "qpx-h3 response trailers read timed out",
         "qpx-h3 gRPC stream duration exceeded configured limit",
     )
@@ -354,11 +346,11 @@ pub(crate) async fn send_qpx_response_stream_observed(
     };
     let mut trailers_for_status = trailers.clone();
     if let Some(mut trailers) = trailers {
-        crate::http::semantics::sanitize_response_trailers(&mut trailers);
+        crate::http::protocol::semantics::sanitize_response_trailers(&mut trailers);
         if let Err(err) = qpx_timeout_result(
             req_stream.send_trailers(&trailers),
-            options.body_read_timeout,
-            options.grpc_stream_deadline,
+            body_send_timeout,
+            stream_deadline,
             "qpx-h3 response trailers send timed out",
             "qpx-h3 gRPC stream duration exceeded configured limit",
         )
@@ -380,7 +372,9 @@ pub(crate) async fn send_qpx_response_stream_observed(
         if trailers_for_status.is_none() {
             trailers_for_status = summary.trailers().cloned();
         }
-        if let Some(listener) = options.listener_name {
+        if options.observe_grpc_messages
+            && let Some(listener) = options.listener_name
+        {
             crate::http::rpc::emit_grpc_body_metrics(
                 "response",
                 listener,
@@ -400,8 +394,8 @@ pub(crate) async fn send_qpx_response_stream_observed(
     };
     if let Err(err) = qpx_timeout_result(
         req_stream.finish(),
-        options.body_read_timeout,
-        options.grpc_stream_deadline,
+        body_send_timeout,
+        stream_deadline,
         "qpx-h3 response finish timed out",
         "qpx-h3 gRPC stream duration exceeded configured limit",
     )
@@ -411,6 +405,31 @@ pub(crate) async fn send_qpx_response_stream_observed(
         return Err(err);
     }
     Ok(summary)
+}
+
+fn response_stream_timeouts(
+    headers: &HeaderMap,
+    default_timeout: Duration,
+    default_send_timeout: Duration,
+    default_deadline: Option<Instant>,
+    sse_policy: Option<qpx_core::config::SseStreamingPolicy>,
+) -> (Duration, Duration, Option<Instant>) {
+    let Some(policy) = sse_policy else {
+        return (default_timeout, default_send_timeout, default_deadline);
+    };
+    if !crate::http::modules::is_event_stream_headers(headers) {
+        return (default_timeout, default_send_timeout, default_deadline);
+    }
+    let idle = Duration::from_millis(policy.idle_timeout_ms.max(1));
+    let deadline = if policy.max_stream_duration_ms == 0 {
+        None
+    } else {
+        let duration_ms = policy
+            .max_stream_duration_ms
+            .min(qpx_core::config::MAX_SSE_STREAM_DURATION_MS);
+        Instant::now().checked_add(Duration::from_millis(duration_ms))
+    };
+    (idle, default_send_timeout, deadline)
 }
 
 async fn qpx_timeout_result<F, T, E>(

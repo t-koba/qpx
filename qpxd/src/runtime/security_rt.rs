@@ -1,5 +1,5 @@
-use crate::auth_runtime::Authenticator;
 use crate::policy_context::{CompiledExtAuthz, CompiledIdentitySource};
+use crate::runtime::auth::Authenticator;
 use anyhow::Result;
 use qpx_core::tls::CaStore;
 #[cfg(feature = "mitm")]
@@ -85,10 +85,13 @@ impl SecurityRuntime {
             })
             .collect::<Result<HashMap<_, _>>>()?;
 
+        let auth_audit_redact_query_keys = auth_audit_redact_query_keys(config);
+
         let auth = AuthRuntime {
-            authenticator: Arc::new(Authenticator::new(
+            authenticator: Arc::new(Authenticator::new_with_audit_redaction(
                 &config.operational.security.auth,
                 config.operational.identity.auth_realm.as_str(),
+                &auth_audit_redact_query_keys,
             )?),
         };
 
@@ -156,6 +159,10 @@ impl SecurityRuntime {
             .map(|set| set.is_match(host))
             .unwrap_or(false)
     }
+}
+
+fn auth_audit_redact_query_keys(config: &RuntimeResources) -> Vec<String> {
+    config.access_log.redact.query_keys.clone()
 }
 
 #[cfg(feature = "mitm")]

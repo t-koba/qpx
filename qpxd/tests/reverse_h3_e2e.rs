@@ -11,16 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
-struct QpxdHandle {
-    child: Child,
-}
+pub mod common;
 
-impl Drop for QpxdHandle {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
+use common::QpxdHandle;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reverse_http3_passthrough_smoke() -> Result<()> {
@@ -202,7 +195,7 @@ fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Result<
         .stderr(Stdio::from(log_err));
     let mut child = cmd.spawn().context("spawn qpxd")?;
     wait_for_qpxd(&mut child, ready_port, &log_path)?;
-    Ok(QpxdHandle { child })
+    Ok(QpxdHandle::new(child))
 }
 
 fn spawn_qpxd_without_ready_check(config_path: &Path, log_path: PathBuf) -> Result<QpxdHandle> {
@@ -225,7 +218,7 @@ fn spawn_qpxd_without_ready_check(config_path: &Path, log_path: PathBuf) -> Resu
             log_path.display()
         ));
     }
-    Ok(QpxdHandle { child })
+    Ok(QpxdHandle::new(child))
 }
 
 fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<()> {

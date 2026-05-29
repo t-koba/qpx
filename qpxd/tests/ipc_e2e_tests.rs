@@ -1,11 +1,8 @@
 #[cfg(unix)]
-#[path = "support/collect_body.rs"]
 mod collect_body_support;
 #[cfg(unix)]
-#[path = "support/empty_body.rs"]
 mod empty_body_support;
 #[cfg(unix)]
-#[path = "support/test_client.rs"]
 mod test_client_support;
 
 #[cfg(unix)]
@@ -113,6 +110,7 @@ handlers:
                         qpxf::server::ConnectionContext {
                             router,
                             semaphore: sem,
+                            allow_shm_reuse: true,
                             input_idle,
                             conn_idle,
                             max_requests_per_connection,

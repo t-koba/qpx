@@ -1,68 +1,183 @@
 #[cfg(any(test, feature = "http3"))]
 use anyhow::{Result, anyhow};
 #[cfg(any(test, feature = "http3"))]
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
+#[cfg(any(test, feature = "http3"))]
+use std::collections::VecDeque;
 
 #[cfg(any(test, feature = "http3"))]
-pub(crate) fn append_capsule_chunk(
-    buf: &mut BytesMut,
-    bytes: &[u8],
-    max_bytes: usize,
-) -> Result<()> {
-    let new_len = buf
-        .len()
-        .checked_add(bytes.len())
-        .ok_or_else(|| anyhow!("CONNECT-UDP capsule buffer length overflow"))?;
-    if new_len > max_bytes {
-        return Err(anyhow!(
-            "CONNECT-UDP capsule buffer exceeded max_capsule_buffer_bytes={} (current={new_len})",
-            max_bytes
-        ));
+#[derive(Debug, Default)]
+pub(crate) struct CapsuleBuffer {
+    chunks: VecDeque<Bytes>,
+    len: usize,
+}
+
+#[cfg(any(test, feature = "http3"))]
+impl CapsuleBuffer {
+    pub(crate) fn new() -> Self {
+        Self::default()
     }
-    buf.extend_from_slice(bytes);
-    Ok(())
-}
 
-#[cfg(any(test, feature = "http3"))]
-pub(crate) fn take_next_capsule(buf: &mut BytesMut) -> Result<Option<(u64, Bytes)>> {
-    let (capsule_type, type_len) = match decode_quic_varint(buf.as_ref()) {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-    let (capsule_len, len_len) = match decode_quic_varint(&buf[type_len..]) {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-    let capsule_len =
-        usize::try_from(capsule_len).map_err(|_| anyhow!("capsule length exceeds usize"))?;
-    let payload_offset = type_len + len_len;
-    let total = payload_offset
-        .checked_add(capsule_len)
-        .ok_or_else(|| anyhow!("capsule length overflow"))?;
-    if buf.len() < total {
-        return Ok(None);
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
     }
-    let payload = Bytes::copy_from_slice(&buf[payload_offset..total]);
-    buf.advance(total);
-    Ok(Some((capsule_type, payload)))
+
+    pub(crate) fn push(&mut self, bytes: Bytes, max_bytes: usize) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let new_len = self
+            .len
+            .checked_add(bytes.len())
+            .ok_or_else(|| anyhow!("CONNECT-UDP capsule buffer length overflow"))?;
+        if new_len > max_bytes {
+            return Err(anyhow!(
+                "CONNECT-UDP capsule buffer exceeded max_capsule_buffer_bytes={} (current={new_len})",
+                max_bytes
+            ));
+        }
+        self.len = new_len;
+        self.chunks.push_back(bytes);
+        Ok(())
+    }
+
+    pub(crate) fn take_next(&mut self) -> Result<Option<(u64, Bytes)>> {
+        let (capsule_type, type_len) = match self.peek_varint(0) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let (capsule_len, len_len) = match self.peek_varint(type_len) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let capsule_len =
+            usize::try_from(capsule_len).map_err(|_| anyhow!("capsule length exceeds usize"))?;
+        let payload_offset = type_len + len_len;
+        let total = payload_offset
+            .checked_add(capsule_len)
+            .ok_or_else(|| anyhow!("capsule length overflow"))?;
+        if self.len < total {
+            return Ok(None);
+        }
+        self.discard(payload_offset);
+        Ok(Some((capsule_type, self.take_bytes(capsule_len))))
+    }
+
+    fn peek_varint(&self, offset: usize) -> Option<(u64, usize)> {
+        let first = self.peek_byte(offset)?;
+        let prefix = first >> 6;
+        let len = match prefix {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            _ => 8,
+        };
+        if self.len < offset.checked_add(len)? {
+            return None;
+        }
+        let mut value = u64::from(first & 0x3f);
+        for idx in 1..len {
+            value = (value << 8) | u64::from(self.peek_byte(offset + idx)?);
+        }
+        Some((value, len))
+    }
+
+    fn peek_byte(&self, mut offset: usize) -> Option<u8> {
+        if offset >= self.len {
+            return None;
+        }
+        for chunk in &self.chunks {
+            if offset < chunk.len() {
+                return Some(chunk[offset]);
+            }
+            offset -= chunk.len();
+        }
+        None
+    }
+
+    fn discard(&mut self, mut len: usize) {
+        debug_assert!(len <= self.len);
+        self.len -= len;
+        while len > 0 {
+            let front_len = self.chunks.front().map_or(0, Bytes::len);
+            if front_len <= len {
+                self.chunks.pop_front();
+                len -= front_len;
+            } else {
+                if let Some(front) = self.chunks.front_mut() {
+                    *front = front.slice(len..);
+                }
+                break;
+            }
+        }
+    }
+
+    fn take_bytes(&mut self, len: usize) -> Bytes {
+        debug_assert!(len <= self.len);
+        if len == 0 {
+            return Bytes::new();
+        }
+        if let Some(front) = self.chunks.front_mut()
+            && len <= front.len()
+        {
+            let out = front.slice(..len);
+            if len == front.len() {
+                self.chunks.pop_front();
+            } else {
+                *front = front.slice(len..);
+            }
+            self.len -= len;
+            return out;
+        }
+
+        let mut out = BytesMut::with_capacity(len);
+        let mut remaining = len;
+        while remaining > 0 {
+            let Some(front) = self.chunks.pop_front() else {
+                break;
+            };
+            if front.len() <= remaining {
+                out.extend_from_slice(front.as_ref());
+                remaining -= front.len();
+            } else {
+                out.extend_from_slice(&front[..remaining]);
+                self.chunks.push_front(front.slice(remaining..));
+                remaining = 0;
+            }
+        }
+        self.len -= len;
+        out.freeze()
+    }
 }
 
 #[cfg(any(test, feature = "http3"))]
-pub(crate) fn encode_datagram_capsule(payload: &[u8]) -> Result<Bytes> {
-    let mut value = Vec::with_capacity(1 + payload.len());
-    encode_quic_varint(0, &mut value)?; // context id
-    value.extend_from_slice(payload);
-
-    encode_datagram_capsule_value(&value)
-}
-
-#[cfg(any(test, feature = "http3"))]
-pub(crate) fn encode_datagram_capsule_value(value: &[u8]) -> Result<Bytes> {
-    let mut capsule = Vec::with_capacity(2 + value.len());
+pub(crate) fn encode_datagram_capsule_header(value_len: usize) -> Result<Bytes> {
+    let mut capsule = Vec::with_capacity(9);
     encode_quic_varint(0, &mut capsule)?; // DATAGRAM capsule type
-    encode_quic_varint(value.len() as u64, &mut capsule)?;
-    capsule.extend_from_slice(value);
+    encode_quic_varint(value_len as u64, &mut capsule)?;
     Ok(Bytes::from(capsule))
+}
+
+#[cfg(any(test, feature = "http3"))]
+pub(crate) fn encode_datagram_capsule_context_header(payload_len: usize) -> Result<Bytes> {
+    let value_len = payload_len
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("CONNECT-UDP DATAGRAM capsule length overflow"))?;
+    let mut capsule = Vec::with_capacity(10);
+    encode_quic_varint(0, &mut capsule)?; // DATAGRAM capsule type
+    encode_quic_varint(value_len as u64, &mut capsule)?;
+    encode_quic_varint(0, &mut capsule)?; // context id
+    Ok(Bytes::from(capsule))
+}
+
+#[cfg(test)]
+pub(crate) fn encode_datagram_capsule(payload: &[u8]) -> Result<Bytes> {
+    let header = encode_datagram_capsule_context_header(payload.len())?;
+    let mut capsule = BytesMut::with_capacity(header.len() + payload.len());
+    capsule.extend_from_slice(header.as_ref());
+    capsule.extend_from_slice(payload);
+    Ok(capsule.freeze())
 }
 
 pub(crate) fn decode_quic_varint(buf: &[u8]) -> Option<(u64, usize)> {
@@ -118,13 +233,14 @@ pub(crate) fn encode_quic_varint(value: u64, out: &mut Vec<u8>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::http3::capsule::*;
 
     #[test]
     fn capsule_buffer_limit_rejects_growth_past_cap() {
-        let mut buf = BytesMut::new();
-        append_capsule_chunk(&mut buf, &[1, 2, 3], 4).expect("within cap");
-        assert!(append_capsule_chunk(&mut buf, &[4, 5], 4).is_err());
+        let mut buf = CapsuleBuffer::new();
+        buf.push(Bytes::from_static(&[1, 2, 3]), 4)
+            .expect("within cap");
+        assert!(buf.push(Bytes::from_static(&[4, 5]), 4).is_err());
     }
 
     #[test]
@@ -152,12 +268,28 @@ mod tests {
     fn datagram_capsule_encode_decode_roundtrip() {
         let payload = b"hello-udp";
         let capsule = encode_datagram_capsule(payload).expect("capsule");
-        let mut buf = BytesMut::from(capsule.as_ref());
-        let (capsule_type, value) = take_next_capsule(&mut buf).expect("parse").expect("one");
+        let mut buf = CapsuleBuffer::new();
+        buf.push(capsule, 1024).expect("push");
+        let (capsule_type, value) = buf.take_next().expect("parse").expect("one");
         assert_eq!(capsule_type, 0);
         assert!(buf.is_empty());
         let (context_id, offset) = decode_quic_varint(value.as_ref()).expect("context");
         assert_eq!(context_id, 0);
         assert_eq!(&value[offset..], payload);
+    }
+
+    #[test]
+    fn datagram_capsule_split_payload_only_copies_when_needed() {
+        let payload = b"split-payload";
+        let capsule = encode_datagram_capsule(payload).expect("capsule");
+        let split = capsule.len() - 3;
+        let mut buf = CapsuleBuffer::new();
+        buf.push(capsule.slice(..split), 1024).expect("first");
+        assert!(buf.take_next().expect("partial").is_none());
+        buf.push(capsule.slice(split..), 1024).expect("second");
+        let (_, value) = buf.take_next().expect("parse").expect("one");
+        let (_, offset) = decode_quic_varint(value.as_ref()).expect("context");
+        assert_eq!(&value[offset..], payload);
+        assert!(buf.is_empty());
     }
 }

@@ -1,4 +1,4 @@
-use super::codec::{decode_prefixed_int, try_decode_prefixed_int, try_decode_string};
+use super::codec::decode_prefixed_int;
 use super::dynamic_table::{DecoderState, DynamicTable};
 use super::errors::FieldDecodeError;
 use super::static_table::static_field;
@@ -103,81 +103,6 @@ pub(super) fn decode_required_insert_count(
     Ok(decoded)
 }
 
-pub(super) fn parse_encoder_instruction(cursor: &mut &[u8]) -> Result<Option<EncoderInstruction>> {
-    let Some(&first) = cursor.first() else {
-        return Ok(None);
-    };
-    if (first & 0x80) != 0 {
-        let (flags, index) = match try_decode_prefixed_int(cursor, 6)? {
-            Some(result) => result,
-            None => return Ok(None),
-        };
-        if (flags & 0b10) != 0b10 {
-            return Err(anyhow!(
-                "invalid QPACK insert-with-name-reference flags {flags:#b}"
-            ));
-        }
-        let value = match try_decode_string(cursor, 8)? {
-            Some(value) => value,
-            None => return Ok(None),
-        };
-        let instruction = if (flags & 0b01) != 0 {
-            EncoderInstruction::InsertWithStaticName {
-                index: index as usize,
-                value,
-            }
-        } else {
-            EncoderInstruction::InsertWithDynamicName {
-                index: index as usize,
-                value,
-            }
-        };
-        return Ok(Some(instruction));
-    }
-    if (first & 0x40) != 0 {
-        let name = match try_decode_string(cursor, 6)? {
-            Some(name) => name,
-            None => return Ok(None),
-        };
-        let value = match try_decode_string(cursor, 8)? {
-            Some(value) => value,
-            None => return Ok(None),
-        };
-        return Ok(Some(EncoderInstruction::InsertWithoutName {
-            name: String::from_utf8(name)
-                .map_err(|err| anyhow!("invalid utf-8 QPACK name: {err}"))?,
-            value,
-        }));
-    }
-    if (first & 0xe0) == 0x00 {
-        let (flags, index) = match try_decode_prefixed_int(cursor, 5)? {
-            Some(result) => result,
-            None => return Ok(None),
-        };
-        if flags != 0 {
-            return Err(anyhow!("invalid QPACK duplicate flags {flags:#b}"));
-        }
-        return Ok(Some(EncoderInstruction::Duplicate(index as usize)));
-    }
-    if (first & 0x20) != 0 {
-        let (flags, size) = match try_decode_prefixed_int(cursor, 5)? {
-            Some(result) => result,
-            None => return Ok(None),
-        };
-        if flags != 0b001 {
-            return Err(anyhow!(
-                "invalid QPACK dynamic table size-update flags {flags:#b}"
-            ));
-        }
-        return Ok(Some(EncoderInstruction::SetDynamicTableCapacity(
-            size as usize,
-        )));
-    }
-    Err(anyhow!(
-        "unsupported QPACK encoder instruction: 0x{first:02x}"
-    ))
-}
-
 pub(super) fn track_field_section_size(
     total: &mut u64,
     field: &(String, Vec<u8>),
@@ -227,5 +152,7 @@ pub(crate) fn fuzz_qpack_decoder(data: &[u8]) {
         DEFAULT_MAX_BLOCKED_STREAMS,
         u64::MAX,
     );
-    let _ = state.decode_field_lines(data);
+    if let Ok(decoded) = state.decode_field_lines(data) {
+        let _ = (decoded.fields.len(), decoded.dynamic_ref);
+    }
 }

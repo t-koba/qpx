@@ -12,7 +12,7 @@ pub struct TlsClientHelloInfo {
     pub ja4: Option<String>,
 }
 
-pub async fn read_client_hello_with_timeout<R>(
+pub(crate) async fn read_client_hello_with_timeout<R>(
     stream: &mut R,
     timeout_dur: Duration,
 ) -> std::io::Result<Vec<u8>>
@@ -22,7 +22,7 @@ where
     read_client_hello_with_timeout_mode(stream, timeout_dur, true).await
 }
 
-pub async fn try_read_client_hello_with_timeout<R>(
+pub(crate) async fn try_read_client_hello_with_timeout<R>(
     stream: &mut R,
     timeout_dur: Duration,
 ) -> std::io::Result<Vec<u8>>
@@ -40,7 +40,7 @@ async fn read_client_hello_with_timeout_mode<R>(
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let deadline = Instant::now() + timeout_dur;
+    let deadline = crate::runtime::tokio_deadline_after(timeout_dur);
     let mut desired = 5usize;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
@@ -84,22 +84,36 @@ where
     }
 }
 
-pub fn looks_like_tls_client_hello(buf: &[u8]) -> bool {
+pub(crate) fn looks_like_tls_client_hello(buf: &[u8]) -> bool {
     buf.len() >= 6 && buf[0] == 22 && buf[5] == 1
 }
 
 #[cfg(test)]
-pub fn extract_sni(buf: &[u8]) -> Option<String> {
+pub(crate) fn extract_sni(buf: &[u8]) -> Option<String> {
     extract_client_hello_info(buf).and_then(|info| info.sni)
 }
 
-pub fn extract_client_hello_info(buf: &[u8]) -> Option<TlsClientHelloInfo> {
-    let client_hello = reassemble_client_hello_handshake(buf)?;
-    parse_client_hello_info(&client_hello)
+pub(crate) fn extract_client_hello_info(buf: &[u8]) -> Option<TlsClientHelloInfo> {
+    extract_client_hello_info_with_fingerprints(buf, true)
 }
 
-pub fn extract_client_hello_info_from_handshake(buf: &[u8]) -> Option<TlsClientHelloInfo> {
-    parse_client_hello_info(buf)
+pub(crate) fn extract_client_hello_info_with_fingerprints(
+    buf: &[u8],
+    include_fingerprints: bool,
+) -> Option<TlsClientHelloInfo> {
+    let client_hello = reassemble_client_hello_handshake(buf)?;
+    parse_client_hello_info(&client_hello, include_fingerprints)
+}
+
+pub(crate) fn extract_client_hello_info_from_handshake(buf: &[u8]) -> Option<TlsClientHelloInfo> {
+    extract_client_hello_info_from_handshake_with_fingerprints(buf, true)
+}
+
+pub(crate) fn extract_client_hello_info_from_handshake_with_fingerprints(
+    buf: &[u8],
+    include_fingerprints: bool,
+) -> Option<TlsClientHelloInfo> {
+    parse_client_hello_info(buf, include_fingerprints)
 }
 
 pub(crate) fn fuzz_client_hello_parser(buf: &[u8]) {
@@ -205,7 +219,7 @@ fn reassemble_client_hello_handshake(buf: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-fn parse_client_hello_info(buf: &[u8]) -> Option<TlsClientHelloInfo> {
+fn parse_client_hello_info(buf: &[u8], include_fingerprints: bool) -> Option<TlsClientHelloInfo> {
     if buf.len() < 4 || buf.first()? != &1 {
         return None;
     }
@@ -225,10 +239,11 @@ fn parse_client_hello_info(buf: &[u8]) -> Option<TlsClientHelloInfo> {
     pos = skip(buf, pos + 1, session_id_len)?;
 
     let cipher_suites_len = read_u16(buf, pos)? as usize;
-    let cipher_suites = parse_u16_list(buf, pos + 2, cipher_suites_len)?
-        .into_iter()
-        .filter(|value| !is_grease_value(*value))
-        .collect::<Vec<_>>();
+    validate_u16_list(buf, pos + 2, cipher_suites_len)?;
+    let mut cipher_suites = Vec::new();
+    if include_fingerprints {
+        push_non_grease_u16_list(buf, pos + 2, cipher_suites_len, &mut cipher_suites)?;
+    }
     pos = skip(buf, pos + 2, cipher_suites_len)?;
 
     let compression_len = *buf.get(pos)? as usize;
@@ -257,7 +272,7 @@ fn parse_client_hello_info(buf: &[u8]) -> Option<TlsClientHelloInfo> {
         }
 
         let ext = &buf[pos..pos + ext_len];
-        if !is_grease_value(ext_type) {
+        if include_fingerprints && !is_grease_value(ext_type) {
             extensions.push(ext_type);
         }
         match ext_type {
@@ -266,20 +281,22 @@ fn parse_client_hello_info(buf: &[u8]) -> Option<TlsClientHelloInfo> {
             }
             10 => {
                 let groups_len = read_u16(ext, 0)? as usize;
-                supported_groups = parse_u16_list(ext, 2, groups_len)?
-                    .into_iter()
-                    .filter(|value| !is_grease_value(*value))
-                    .collect();
+                validate_u16_list(ext, 2, groups_len)?;
+                if include_fingerprints {
+                    push_non_grease_u16_list(ext, 2, groups_len, &mut supported_groups)?;
+                }
             }
             11 => {
                 let points_len = *ext.first()? as usize;
                 if points_len + 1 > ext.len() {
                     return None;
                 }
-                ec_point_formats = ext[1..1 + points_len]
-                    .iter()
-                    .map(|value| *value as u16)
-                    .collect();
+                if include_fingerprints {
+                    ec_point_formats = ext[1..1 + points_len]
+                        .iter()
+                        .map(|value| *value as u16)
+                        .collect();
+                }
             }
             16 => {
                 alpn = parse_alpn_extension(ext);
@@ -289,10 +306,11 @@ fn parse_client_hello_info(buf: &[u8]) -> Option<TlsClientHelloInfo> {
                 if versions_len + 1 > ext.len() || !versions_len.is_multiple_of(2) {
                     return None;
                 }
-                supported_versions = parse_u16_list(ext, 1, versions_len)?
-                    .into_iter()
-                    .filter(|value| !is_grease_value(*value))
-                    .collect();
+                for_each_u16(ext, 1, versions_len, |value| {
+                    if !is_grease_value(value) {
+                        supported_versions.push(value);
+                    }
+                })?;
             }
             _ => {}
         }
@@ -304,28 +322,35 @@ fn parse_client_hello_info(buf: &[u8]) -> Option<TlsClientHelloInfo> {
         .copied()
         .max()
         .unwrap_or(legacy_version);
-    let ja3 = Some(format!(
-        "{},{},{},{},{}",
-        legacy_version,
-        join_u16_list(&cipher_suites),
-        join_u16_list(&extensions),
-        join_u16_list(&supported_groups),
-        join_u16_list(&ec_point_formats),
-    ));
+    let (ja3, ja4) = if include_fingerprints {
+        (
+            Some(format!(
+                "{},{},{},{},{}",
+                legacy_version,
+                join_u16_list(&cipher_suites),
+                join_u16_list(&extensions),
+                join_u16_list(&supported_groups),
+                join_u16_list(&ec_point_formats),
+            )),
+            Some(build_ja4_fingerprint(
+                negotiated_version,
+                sni.is_some(),
+                alpn.as_deref(),
+                cipher_suites.len(),
+                extensions.len(),
+                supported_groups.len(),
+            )),
+        )
+    } else {
+        (None, None)
+    };
 
     Some(TlsClientHelloInfo {
         sni: sni.clone(),
         alpn: alpn.clone(),
         tls_version: tls_version_label(negotiated_version).map(str::to_string),
         ja3,
-        ja4: Some(build_ja4_fingerprint(
-            negotiated_version,
-            sni.is_some(),
-            alpn.as_deref(),
-            cipher_suites.len(),
-            extensions.len(),
-            supported_groups.len(),
-        )),
+        ja4,
     })
 }
 
@@ -361,21 +386,39 @@ fn read_u16(buf: &[u8], pos: usize) -> Option<u16> {
     Some(u16::from_be_bytes([*buf.get(pos)?, *buf.get(pos + 1)?]))
 }
 
-fn parse_u16_list(buf: &[u8], start: usize, len: usize) -> Option<Vec<u16>> {
+fn validate_u16_list(buf: &[u8], start: usize, len: usize) -> Option<()> {
     if !len.is_multiple_of(2) {
         return None;
     }
     let end = start.checked_add(len)?;
-    if end > buf.len() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(len / 2);
+    (end <= buf.len()).then_some(())
+}
+
+fn for_each_u16<F>(buf: &[u8], start: usize, len: usize, mut f: F) -> Option<()>
+where
+    F: FnMut(u16),
+{
+    validate_u16_list(buf, start, len)?;
+    let end = start.checked_add(len)?;
     let mut pos = start;
     while pos + 1 < end {
-        out.push(read_u16(buf, pos)?);
+        f(read_u16(buf, pos)?);
         pos += 2;
     }
-    Some(out)
+    Some(())
+}
+
+fn push_non_grease_u16_list(
+    buf: &[u8],
+    start: usize,
+    len: usize,
+    out: &mut Vec<u16>,
+) -> Option<()> {
+    for_each_u16(buf, start, len, |value| {
+        if !is_grease_value(value) {
+            out.push(value);
+        }
+    })
 }
 
 fn parse_alpn_extension(ext: &[u8]) -> Option<String> {
@@ -468,98 +511,4 @@ fn skip(buf: &[u8], start: usize, len: usize) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn push_u16(out: &mut Vec<u8>, value: u16) {
-        out.extend_from_slice(&value.to_be_bytes());
-    }
-
-    fn push_u24(out: &mut Vec<u8>, value: usize) {
-        out.push(((value >> 16) & 0xff) as u8);
-        out.push(((value >> 8) & 0xff) as u8);
-        out.push((value & 0xff) as u8);
-    }
-
-    fn push_extension(out: &mut Vec<u8>, kind: u16, data: &[u8]) {
-        push_u16(out, kind);
-        push_u16(out, data.len() as u16);
-        out.extend_from_slice(data);
-    }
-
-    fn build_client_hello() -> Vec<u8> {
-        let mut body = Vec::new();
-        push_u16(&mut body, 0x0303);
-        body.extend_from_slice(&[0u8; 32]);
-        body.push(0);
-
-        push_u16(&mut body, 6);
-        push_u16(&mut body, 0x1301);
-        push_u16(&mut body, 0x1302);
-        push_u16(&mut body, 0x1303);
-
-        body.push(1);
-        body.push(0);
-
-        let mut extensions = Vec::new();
-
-        let host = b"example.com";
-        let mut sni = Vec::new();
-        push_u16(&mut sni, (host.len() + 3) as u16);
-        sni.push(0);
-        push_u16(&mut sni, host.len() as u16);
-        sni.extend_from_slice(host);
-        push_extension(&mut extensions, 0, &sni);
-
-        let mut groups = Vec::new();
-        push_u16(&mut groups, 4);
-        push_u16(&mut groups, 29);
-        push_u16(&mut groups, 23);
-        push_extension(&mut extensions, 10, &groups);
-
-        let point_formats = [1u8, 0u8];
-        push_extension(&mut extensions, 11, &point_formats);
-
-        let alpn = b"h2";
-        let mut alpn_ext = Vec::new();
-        push_u16(&mut alpn_ext, (alpn.len() + 1) as u16);
-        alpn_ext.push(alpn.len() as u8);
-        alpn_ext.extend_from_slice(alpn);
-        push_extension(&mut extensions, 16, &alpn_ext);
-
-        let supported_versions = [4u8, 0x03, 0x04, 0x03, 0x03];
-        push_extension(&mut extensions, 43, &supported_versions);
-
-        push_u16(&mut body, extensions.len() as u16);
-        body.extend_from_slice(&extensions);
-
-        let mut handshake = Vec::new();
-        handshake.push(1);
-        push_u24(&mut handshake, body.len());
-        handshake.extend_from_slice(&body);
-
-        let mut record = Vec::new();
-        record.push(22);
-        push_u16(&mut record, 0x0301);
-        push_u16(&mut record, handshake.len() as u16);
-        record.extend_from_slice(&handshake);
-        record
-    }
-
-    #[test]
-    fn extract_client_hello_info_parses_metadata() {
-        let info = extract_client_hello_info(&build_client_hello()).expect("info");
-        assert_eq!(info.sni.as_deref(), Some("example.com"));
-        assert_eq!(info.alpn.as_deref(), Some("h2"));
-        assert_eq!(info.tls_version.as_deref(), Some("tls1.3"));
-        assert_eq!(
-            info.ja3.as_deref(),
-            Some("771,4865-4866-4867,0-10-11-16-43,29-23,0")
-        );
-        assert_eq!(info.ja4.as_deref(), Some("t13dh2_03_05_02"));
-        assert_eq!(
-            extract_sni(&build_client_hello()).as_deref(),
-            Some("example.com")
-        );
-    }
-}
+mod tests;

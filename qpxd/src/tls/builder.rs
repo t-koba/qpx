@@ -47,7 +47,7 @@ where
 
 #[cfg(feature = "tls-rustls")]
 mod imp {
-    use super::*;
+    use crate::tls::builder::*;
     use std::net::IpAddr;
     use std::sync::Arc;
 
@@ -231,7 +231,7 @@ mod imp {
 
 #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
 mod imp {
-    use super::*;
+    use crate::tls::builder::*;
 
     pub(super) async fn connect_client_http1<S>(
         domain: &str,
@@ -338,7 +338,7 @@ mod imp {
 
 #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
 mod imp {
-    use super::*;
+    use crate::tls::builder::*;
 
     pub(super) async fn connect_client_http1<S>(
         _domain: &str,

@@ -83,7 +83,7 @@ pub(crate) fn extract_upstream_certificate_info(raw_der: Option<&[u8]>) -> Upstr
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::tls::cert_info::*;
     use rcgen::generate_simple_self_signed;
 
     #[test]

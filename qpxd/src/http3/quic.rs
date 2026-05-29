@@ -1,3 +1,7 @@
+use crate::tls::CompiledUpstreamTlsTrust;
+use crate::tls::UpstreamCertificateInfo;
+#[cfg(feature = "tls-rustls")]
+use crate::tls::cert_info::extract_upstream_certificate_info;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "http3")]
 use quinn::crypto::rustls::QuicClientConfig;
@@ -5,13 +9,81 @@ use quinn::crypto::rustls::QuicServerConfig;
 use std::sync::Arc;
 
 #[cfg(feature = "http3")]
-pub(crate) fn build_h3_client_config(verify_upstream: bool) -> Result<quinn::ClientConfig> {
-    let mut tls =
-        (*qpx_core::tls::build_client_config(None, None, None, !verify_upstream)?).clone();
+pub(crate) fn build_h3_client_config(
+    verify_upstream: bool,
+    trust: Option<&CompiledUpstreamTlsTrust>,
+) -> Result<quinn::ClientConfig> {
+    let mut client_cert_chain = None;
+    let mut client_key = None;
+    #[cfg(feature = "tls-rustls")]
+    if let Some(client_auth) = trust.and_then(CompiledUpstreamTlsTrust::client_auth) {
+        client_cert_chain = Some(qpx_core::tls::load_cert_chain(client_auth.cert_path())?);
+        client_key = Some(qpx_core::tls::load_private_key(client_auth.key_path())?);
+    }
+    let mut tls = (*qpx_core::tls::build_client_config(
+        None,
+        client_cert_chain,
+        client_key,
+        !verify_upstream,
+    )?)
+    .clone();
     tls.alpn_protocols = vec![b"h3".to_vec()];
     let quic_crypto = QuicClientConfig::try_from(tls)
         .map_err(|_| anyhow!("failed to build upstream HTTP/3 client crypto"))?;
     Ok(quinn::ClientConfig::new(Arc::new(quic_crypto)))
+}
+
+#[cfg(feature = "http3")]
+pub(crate) fn extract_h3_connection_certificate_info(
+    connection: &quinn::Connection,
+) -> UpstreamCertificateInfo {
+    #[cfg(feature = "tls-rustls")]
+    {
+        connection
+            .peer_identity()
+            .and_then(|identity| {
+                identity
+                    .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+                    .ok()
+            })
+            .and_then(|certs| {
+                certs
+                    .first()
+                    .map(|cert| extract_upstream_certificate_info(Some(cert.as_ref())))
+            })
+            .unwrap_or_default()
+    }
+    #[cfg(not(feature = "tls-rustls"))]
+    {
+        let _ = connection;
+        UpstreamCertificateInfo::default()
+    }
+}
+
+#[cfg(feature = "http3")]
+pub(crate) fn enforce_h3_connection_trust(
+    connection: &quinn::Connection,
+    peer_name: &str,
+    trust: Option<&CompiledUpstreamTlsTrust>,
+) -> Result<()> {
+    let Some(trust) = trust else {
+        return Ok(());
+    };
+    #[cfg(feature = "tls-rustls")]
+    {
+        let cert = extract_h3_connection_certificate_info(connection);
+        trust.validate_certificate(peer_name, &cert)?;
+        Ok(())
+    }
+    #[cfg(not(feature = "tls-rustls"))]
+    {
+        let _ = connection;
+        let _ = peer_name;
+        let _ = trust;
+        Err(anyhow!(
+            "HTTP/3 upstream TLS trust enforcement requires the tls-rustls backend"
+        ))
+    }
 }
 
 pub(crate) fn build_h3_server_config_from_tls(

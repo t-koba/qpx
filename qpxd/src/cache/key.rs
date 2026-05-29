@@ -1,6 +1,6 @@
 use super::types::CacheRequestKey;
-use crate::http::address::format_authority_host_port;
 use crate::http::body::Body;
+use crate::http::protocol::address::format_authority_host_port;
 use anyhow::Result;
 use http::header::HOST;
 use hyper::{Method, Request};

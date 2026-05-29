@@ -1,31 +1,33 @@
 use crate::http::body::Body;
-use crate::http::body_size::set_observed_request_size;
+use crate::http::body::size::set_observed_request_size;
 use crate::http3::codec::{h3_request_to_hyper, sanitize_interim_response_for_h3};
 use crate::http3::datagram::{DatagramRegistration, H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::server::{
-    H3RequestBodyRelayOptions, H3ResponseSendOptions, H3ServerRequestStream, H3ServerSendStream,
-    relay_h3_request_body_observed, send_h3_response_observed, send_h3_static_response,
+    H3IncomingBodyCompletion, H3IncomingBodyOptions, H3ResponseSendOptions, H3ServerRequestStream,
+    H3ServerSendStream, h3_incoming_body, send_h3_response, send_h3_response_observed,
+    send_h3_static_response,
 };
-use crate::sidecar_control::SidecarControl;
+use crate::runtime::ResolvedStreamingLimits;
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::Bytes;
 use hyper::{Request, Response};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{Semaphore, watch};
 use tokio::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::warn;
+
+mod connection;
+mod scheduler;
+
+pub(crate) use self::connection::serve_endpoint;
+use self::scheduler::{ScheduledH3Stream, request_priority, run_priority_scheduler};
 
 #[derive(Debug, Clone)]
 pub(crate) struct H3Limits {
     pub(crate) listener_name: Arc<str>,
-    pub(crate) max_request_body_bytes: usize,
-    pub(crate) max_response_body_bytes: usize,
     pub(crate) max_concurrent_streams_per_connection: usize,
     pub(crate) datagram_channel_capacity: usize,
-    pub(crate) max_grpc_message_bytes: u64,
-    pub(crate) max_grpc_stream_duration_ms: u64,
+    pub(crate) streaming: ResolvedStreamingLimits,
     pub(crate) read_timeout: Duration,
     pub(crate) proxy_name: Arc<str>,
     pub(crate) error_body: Arc<str>,
@@ -59,6 +61,9 @@ pub(crate) struct H3HttpResponse {
     pub(crate) response: Response<Body>,
 }
 
+type H3RequestBodyResult =
+    std::result::Result<Option<crate::http::rpc::FramedBodySummary>, anyhow::Error>;
+
 fn reject_malformed_h3_request(req_stream: &mut H3ServerRequestStream) {
     let code = ::h3::error::Code::H3_MESSAGE_ERROR;
     req_stream.stop_stream(code);
@@ -67,6 +72,40 @@ fn reject_malformed_h3_request(req_stream: &mut H3ServerRequestStream) {
 
 fn reject_malformed_h3_response_stream(req_stream: &mut H3ServerSendStream) {
     req_stream.stop_stream(::h3::error::Code::H3_MESSAGE_ERROR);
+}
+
+async fn finish_h3_request_body(completion: H3IncomingBodyCompletion) -> H3RequestBodyResult {
+    completion.finish().await.map(|(_bytes, summary)| summary)
+}
+
+fn take_finished_h3_request_body(
+    request_body: &mut Option<H3IncomingBodyCompletion>,
+) -> Option<H3RequestBodyResult> {
+    let result = request_body.as_mut()?.try_take_result()?;
+    request_body.take();
+    Some(result.map(|(_bytes, summary)| summary))
+}
+
+async fn finish_h3_request_body_before_response(
+    request_body: &mut Option<H3IncomingBodyCompletion>,
+    request_summary: &mut Option<crate::http::rpc::FramedBodySummary>,
+    send_stream: &mut H3ServerSendStream,
+    message: &'static str,
+) -> bool {
+    let Some(completion) = request_body.take() else {
+        return true;
+    };
+    match finish_h3_request_body(completion).await {
+        Ok(summary) => {
+            *request_summary = summary;
+            true
+        }
+        Err(err) => {
+            warn!(error = ?err, "{message}");
+            reject_malformed_h3_response_stream(send_stream);
+            false
+        }
+    }
 }
 
 impl H3HttpResponse {
@@ -110,163 +149,6 @@ pub(crate) trait H3RequestHandler: Clone + Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-pub(crate) async fn serve_endpoint<H: H3RequestHandler>(
-    endpoint: quinn::Endpoint,
-    dst_port: u16,
-    handler: H,
-    label: &str,
-    connection_semaphore: Arc<Semaphore>,
-    mut shutdown: watch::Receiver<SidecarControl>,
-) -> Result<()> {
-    info!(label = %label, "HTTP/3 listener starting");
-    loop {
-        let connecting = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || shutdown.borrow().should_stop() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            connecting = endpoint.accept() => connecting
-        };
-        let Some(connecting) = connecting else {
-            break;
-        };
-        let handler = handler.clone();
-        let label = label.to_string();
-        let permit = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || shutdown.borrow().should_stop() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            permit = connection_semaphore.clone().acquire_owned() => Some(permit?),
-        };
-        let Some(permit) = permit else {
-            break;
-        };
-        tokio::spawn(async move {
-            let _permit = permit;
-            if let Err(err) = serve_connection(connecting, dst_port, handler).await {
-                warn!(label = %label, error = ?err, "HTTP/3 connection failed");
-            }
-        });
-    }
-    Ok(())
-}
-
-fn extract_tls_sni(conn: &quinn::Connection) -> Option<Arc<str>> {
-    conn.handshake_data()
-        .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
-        .and_then(|hs| hs.server_name.clone())
-        .map(Arc::<str>::from)
-}
-
-#[cfg(feature = "tls-rustls")]
-fn extract_peer_certificates(conn: &quinn::Connection) -> Option<Arc<Vec<Vec<u8>>>> {
-    let identity = conn.peer_identity()?;
-    let certs = identity
-        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
-        .ok()?;
-    Some(Arc::new(
-        certs
-            .iter()
-            .map(|cert| cert.as_ref().to_vec())
-            .collect::<Vec<_>>(),
-    ))
-}
-
-async fn serve_connection<H: H3RequestHandler>(
-    connecting: quinn::Incoming,
-    dst_port: u16,
-    handler: H,
-) -> Result<()> {
-    let limits = handler.limits();
-    let stream_semaphore = Arc::new(Semaphore::new(
-        limits.max_concurrent_streams_per_connection.max(1),
-    ));
-    let connection = connecting.await?;
-    let conn_info = H3ConnInfo {
-        remote_addr: connection.remote_address(),
-        dst_port,
-        tls_sni: extract_tls_sni(&connection),
-        #[cfg(feature = "tls-rustls")]
-        peer_certificates: extract_peer_certificates(&connection),
-    };
-    let mut builder = ::h3::server::builder();
-    builder
-        .enable_extended_connect(handler.enable_extended_connect())
-        .enable_datagram(handler.enable_datagram());
-    let mut h3_conn = builder
-        .build::<_, Bytes>(h3_quinn::Connection::new(connection))
-        .await?;
-
-    let datagram_dispatch = if handler.enable_datagram() {
-        use h3_datagram::datagram_handler::HandleDatagramsExt as _;
-
-        let dispatch = Arc::new(H3DatagramDispatch::new(limits.datagram_channel_capacity));
-        let reader = h3_conn.get_datagram_reader();
-        let dispatch_task = dispatch.clone();
-        tokio::spawn(async move {
-            dispatch_task.run(reader).await;
-        });
-        Some(dispatch)
-    } else {
-        None
-    };
-
-    while let Some(resolver) = h3_conn.accept().await? {
-        let (req_head, req_stream) = resolver.resolve_request().await?;
-        let connect_kind = (req_head.method() == ::http::Method::CONNECT)
-            .then(|| classify_h3_connect_kind(req_head.extensions().get().cloned()));
-        let stream_id = req_stream.id();
-        let (datagrams, disabled_datagram_registration) =
-            match (datagram_dispatch.as_ref(), connect_kind) {
-                (Some(dispatch), Some(H3ConnectKind::ConnectUdp))
-                | (
-                    Some(dispatch),
-                    Some(H3ConnectKind::Extended(::h3::ext::Protocol::WEB_TRANSPORT)),
-                ) => {
-                    use h3_datagram::datagram_handler::HandleDatagramsExt as _;
-                    let sender = h3_conn.get_datagram_sender(stream_id);
-                    (
-                        Some(dispatch.register_stream(stream_id, sender).await),
-                        None,
-                    )
-                }
-                (Some(dispatch), _) => (
-                    None,
-                    Some(dispatch.register_stream_without_datagrams(stream_id).await),
-                ),
-                (None, _) => (None, None),
-            };
-        let permit = match stream_semaphore.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => return Ok(()),
-        };
-        let handler = handler.clone();
-        let conn_info = conn_info.clone();
-        let limits = limits.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            handle_stream(
-                req_head,
-                req_stream,
-                conn_info,
-                handler,
-                limits,
-                datagrams,
-                disabled_datagram_registration,
-            )
-            .await;
-        });
-    }
-    Ok(())
-}
-
 async fn handle_stream<H: H3RequestHandler>(
     req_head: ::http::Request<()>,
     mut req_stream: H3ServerRequestStream,
@@ -283,7 +165,7 @@ async fn handle_stream<H: H3RequestHandler>(
         .parse::<http::Method>()
         .unwrap_or(http::Method::GET);
 
-    if let Err(err) = crate::http::semantics::validate_h2_h3_request_headers(
+    if let Err(err) = crate::http::protocol::semantics::validate_h2_h3_request_headers(
         http::Version::HTTP_3,
         req_head.headers(),
     ) {
@@ -343,7 +225,7 @@ async fn handle_stream<H: H3RequestHandler>(
                 b"expectation failed",
                 &request_method,
                 limits.proxy_name.as_ref(),
-                limits.max_response_body_bytes,
+                limits.streaming.max_response_body_bytes,
             )
             .await;
             return;
@@ -351,11 +233,11 @@ async fn handle_stream<H: H3RequestHandler>(
     }
 
     if let Some(content_length) = declared_content_length
-        && content_length > limits.max_request_body_bytes as u64
+        && content_length > limits.streaming.max_request_body_bytes as u64
     {
         warn!(
             content_length,
-            limit = limits.max_request_body_bytes,
+            limit = limits.streaming.max_request_body_bytes,
             "HTTP/3 request content-length exceeds configured limit"
         );
         if let Err(err) = send_h3_static_response(
@@ -364,7 +246,7 @@ async fn handle_stream<H: H3RequestHandler>(
             b"request payload too large",
             &request_method,
             limits.proxy_name.as_ref(),
-            limits.max_response_body_bytes,
+            limits.streaming.max_response_body_bytes,
         )
         .await
         {
@@ -374,14 +256,41 @@ async fn handle_stream<H: H3RequestHandler>(
     }
 
     let request_headers = req_head.headers().clone();
-    let grpc_protocol = crate::http::rpc::streaming_grpc_protocol(&request_headers, None);
+    if crate::http::protocol::sse::is_sse_reconnect(&request_headers) {
+        crate::http::protocol::sse::emit_sse_reconnect(limits.listener_name.as_ref(), "unknown");
+    }
+    let grpc_protocol = crate::http::rpc::streaming_rpc_protocol(&request_headers, None);
     let grpc_started = Instant::now();
-    let grpc_deadline = grpc_protocol
-        .as_ref()
-        .map(|_| grpc_started + Duration::from_millis(limits.max_grpc_stream_duration_ms));
+    let grpc_deadline = grpc_protocol.as_deref().map(|protocol| {
+        crate::http::rpc::resolve_rpc_deadline(
+            &request_headers,
+            protocol,
+            Duration::from_millis(limits.streaming.max_grpc_stream_duration_ms),
+            grpc_started,
+        )
+    });
 
     let (mut send_stream, recv_stream) = req_stream.split();
-    let (sender, body) = Body::channel();
+    let request_read_timeout = Duration::from_millis(limits.streaming.body_read_timeout_ms);
+    let max_request_body_bytes = limits.streaming.max_request_body_bytes;
+    let listener_name = limits.listener_name.clone();
+    let max_grpc_message_bytes = limits.streaming.max_grpc_message_bytes;
+    let max_grpc_web_trailer_bytes = limits.streaming.max_grpc_web_trailer_bytes;
+    let (body, request_body_completion) = h3_incoming_body(
+        recv_stream,
+        H3IncomingBodyOptions {
+            read_timeout: request_read_timeout,
+            max_body_bytes: max_request_body_bytes,
+            declared_content_length,
+            request_headers,
+            listener_name,
+            max_grpc_message_bytes: Some(max_grpc_message_bytes),
+            max_grpc_web_trailer_bytes: Some(max_grpc_web_trailer_bytes),
+            grpc_stream_deadline: grpc_deadline.map(|deadline| deadline.instant()),
+            observe_grpc_messages: limits.streaming.observe_grpc_messages,
+        },
+    );
+    let mut request_body = Some(request_body_completion);
     let mut req = match h3_request_to_hyper(req_head, body) {
         Ok(req) => req,
         Err(err) => {
@@ -393,52 +302,79 @@ async fn handle_stream<H: H3RequestHandler>(
     if let Some(content_length) = declared_content_length {
         set_observed_request_size(&mut req, content_length);
     }
-    let request_read_timeout = limits.read_timeout;
-    let max_request_body_bytes = limits.max_request_body_bytes;
-    let listener_name = limits.listener_name.clone();
-    let max_grpc_message_bytes = limits.max_grpc_message_bytes;
-    let request_relay = tokio::spawn(async move {
-        relay_h3_request_body_observed(
-            recv_stream,
-            sender,
-            H3RequestBodyRelayOptions {
-                read_timeout: request_read_timeout,
-                max_body_bytes: max_request_body_bytes,
-                declared_content_length,
-                request_headers,
-                listener_name,
-                max_grpc_message_bytes: Some(max_grpc_message_bytes),
-                grpc_stream_deadline: grpc_deadline,
-            },
+    if let Some(deadline) = grpc_deadline {
+        req.extensions_mut().insert(deadline);
+    }
+    if let Some(priority) = req
+        .headers()
+        .get("priority")
+        .and_then(|value| value.to_str().ok())
+        .map(crate::http3::priority::parse_priority)
+    {
+        req.extensions_mut().insert(priority);
+    }
+    let response = if let Some(deadline) = grpc_deadline {
+        match tokio::time::timeout_at(
+            deadline.instant(),
+            handler.handle_http_with_interim(req, conn_info),
         )
         .await
-    });
-
-    let response = if let Some(deadline) = grpc_deadline {
-        match tokio::time::timeout_at(deadline, handler.handle_http_with_interim(req, conn_info))
-            .await
         {
             Ok(response) => response,
             Err(_) => {
-                request_relay.abort();
-                let _ = request_relay.await;
+                drop(request_body.take());
                 warn!("HTTP/3 gRPC stream duration exceeded configured limit");
-                let _ = send_h3_static_response(
-                    &mut send_stream,
-                    ::http::StatusCode::GATEWAY_TIMEOUT,
-                    limits.error_body.as_bytes(),
-                    &request_method,
-                    limits.proxy_name.as_ref(),
-                    limits.max_response_body_bytes,
-                )
-                .await;
+                if let Some(protocol) = grpc_protocol.as_deref() {
+                    crate::http::rpc::emit_grpc_deadline_exceeded_metric(
+                        limits.listener_name.as_ref(),
+                        protocol,
+                    );
+                    match crate::http::rpc::build_grpc_deadline_exceeded_response(protocol) {
+                        Ok(response) => {
+                            if let Err(err) = send_h3_response(
+                                response,
+                                &request_method,
+                                &mut send_stream,
+                                limits.streaming.max_response_body_bytes,
+                                Duration::from_secs(1),
+                            )
+                            .await
+                            {
+                                warn!(error = ?err, "failed to send HTTP/3 gRPC deadline response");
+                            }
+                        }
+                        Err(err) => warn!(error = ?err, "failed to build gRPC deadline response"),
+                    }
+                }
                 return;
             }
         }
     } else {
         handler.handle_http_with_interim(req, conn_info).await
     };
+    let response_streaming = response_streaming_limits(&response.response, &limits);
+    let mut request_summary = None;
+    if let Some(body_result) = take_finished_h3_request_body(&mut request_body) {
+        match body_result {
+            Ok(summary) => request_summary = summary,
+            Err(err) => {
+                warn!(error = ?err, "HTTP/3 request body failed before response");
+                reject_malformed_h3_response_stream(&mut send_stream);
+                return;
+            }
+        }
+    }
     for interim in response.interim {
+        if let Some(body_result) = take_finished_h3_request_body(&mut request_body) {
+            match body_result {
+                Ok(summary) => request_summary = summary,
+                Err(err) => {
+                    warn!(error = ?err, "HTTP/3 request body failed before interim response");
+                    reject_malformed_h3_response_stream(&mut send_stream);
+                    return;
+                }
+            }
+        }
         let interim = match sanitize_interim_response_for_h3(interim) {
             Ok(interim) => interim,
             Err(err) => {
@@ -446,44 +382,62 @@ async fn handle_stream<H: H3RequestHandler>(
                 return;
             }
         };
-        if let Err(err) =
-            tokio::time::timeout(limits.read_timeout, send_stream.send_response(interim))
-                .await
-                .map_err(|_| anyhow::anyhow!("HTTP/3 interim response send timed out"))
-                .and_then(|result| result.map_err(Into::into))
+        if let Err(err) = tokio::time::timeout(
+            Duration::from_millis(response_streaming.body_send_timeout_ms),
+            send_stream.send_response(interim),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("HTTP/3 interim response send timed out"))
+        .and_then(|result| result.map_err(Into::into))
         {
             warn!(error = ?err, "HTTP/3 interim response stream failed");
             return;
         }
+    }
+    if grpc_protocol.is_none()
+        && !finish_h3_request_body_before_response(
+            &mut request_body,
+            &mut request_summary,
+            &mut send_stream,
+            "HTTP/3 request body failed before final response",
+        )
+        .await
+    {
+        return;
     }
     let response_result = send_h3_response_observed(
         response.response,
         &request_method,
         &mut send_stream,
         H3ResponseSendOptions {
-            max_body_bytes: limits.max_response_body_bytes,
-            body_read_timeout: limits.read_timeout,
+            max_body_bytes: response_streaming.max_response_body_bytes,
+            body_read_timeout: Duration::from_millis(response_streaming.body_read_timeout_ms),
+            body_send_timeout: Duration::from_millis(response_streaming.body_send_timeout_ms),
             listener_name: Some(limits.listener_name.as_ref()),
             fallback_grpc_protocol: grpc_protocol.as_deref(),
-            max_grpc_message_bytes: Some(limits.max_grpc_message_bytes),
-            grpc_stream_deadline: grpc_deadline,
+            max_grpc_message_bytes: Some(response_streaming.max_grpc_message_bytes),
+            max_grpc_web_trailer_bytes: Some(response_streaming.max_grpc_web_trailer_bytes),
+            grpc_stream_deadline: grpc_deadline.map(|deadline| deadline.instant()),
+            sse_policy: Some(response_streaming.sse),
+            observe_grpc_messages: response_streaming.observe_grpc_messages,
         },
     )
     .await;
-    let request_summary = match request_relay.await {
-        Ok(Ok((_bytes, summary))) => summary,
-        Ok(Err(err)) => {
-            warn!(error = ?err, "HTTP/3 request body relay failed");
-            None
-        }
-        Err(err) => {
-            warn!(error = ?err, "HTTP/3 request body relay task failed");
-            None
-        }
-    };
+    if !finish_h3_request_body_before_response(
+        &mut request_body,
+        &mut request_summary,
+        &mut send_stream,
+        "HTTP/3 request body failed",
+    )
+    .await
+    {
+        return;
+    }
     match response_result {
         Ok(response_summary) => {
-            if let Some(protocol) = grpc_protocol.as_deref() {
+            if response_streaming.observe_grpc_messages
+                && let Some(protocol) = grpc_protocol.as_deref()
+            {
                 let streaming = crate::http::rpc::grpc_streaming_label(
                     protocol,
                     request_summary
@@ -503,36 +457,34 @@ async fn handle_stream<H: H3RequestHandler>(
         }
         Err(err) => {
             warn!(error = ?err, "HTTP/3 response stream failed");
-            let _ = send_h3_static_response(
-                &mut send_stream,
-                ::http::StatusCode::BAD_GATEWAY,
-                limits.error_body.as_bytes(),
-                &request_method,
-                limits.proxy_name.as_ref(),
-                limits.max_response_body_bytes,
-            )
-            .await;
+            if err.can_send_error_response() {
+                let _ = send_h3_static_response(
+                    &mut send_stream,
+                    ::http::StatusCode::BAD_GATEWAY,
+                    limits.error_body.as_bytes(),
+                    &request_method,
+                    limits.proxy_name.as_ref(),
+                    limits.streaming.max_response_body_bytes,
+                )
+                .await;
+            }
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classify_h3_connect_kind_rejects_unknown_extended_connect_protocols() {
-        assert_eq!(classify_h3_connect_kind(None), H3ConnectKind::Connect);
-        assert_eq!(
-            classify_h3_connect_kind(Some(::h3::ext::Protocol::CONNECT_UDP)),
-            H3ConnectKind::ConnectUdp
-        );
-        assert_eq!(
-            classify_h3_connect_kind(Some(::h3::ext::Protocol::WEB_TRANSPORT)),
-            H3ConnectKind::Extended(::h3::ext::Protocol::WEB_TRANSPORT)
-        );
-    }
+fn response_streaming_limits(
+    response: &Response<Body>,
+    fallback: &H3Limits,
+) -> ResolvedStreamingLimits {
+    response
+        .extensions()
+        .get::<ResolvedStreamingLimits>()
+        .copied()
+        .unwrap_or(fallback.streaming)
 }
+
+#[cfg(test)]
+mod tests;
 
 fn parse_content_length(headers: &http::HeaderMap) -> Result<Option<u64>, String> {
     let mut parsed: Option<u64> = None;

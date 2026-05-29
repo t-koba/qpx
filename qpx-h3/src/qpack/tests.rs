@@ -1,9 +1,10 @@
 use super::{
     DEFAULT_DYNAMIC_TABLE_CAPACITY, DEFAULT_MAX_BLOCKED_STREAMS, DecoderState, FieldDecodeError,
     STATIC_TABLE, append_header, decode_field_section_prefix, decode_request_head_from_fields,
-    decode_required_insert_count, encode_header_prefix, encode_prefixed_int, encode_request_head,
-    encode_response_head, encode_string, encode_trailers, fuzz_qpack_decoder, static_field,
-    validate_h3_regular_field, validate_h3_response_field, validate_h3_trailer_field,
+    decode_required_insert_count, decode_response_status, encode_header_prefix,
+    encode_prefixed_int, encode_request_head, encode_response_head, encode_string, encode_trailers,
+    fuzz_qpack_decoder, static_field, validate_h3_regular_field, validate_h3_response_field,
+    validate_h3_trailer_field,
 };
 use http::HeaderValue;
 
@@ -38,6 +39,18 @@ fn decodes_authority_form_connect() {
 }
 
 #[test]
+fn encode_request_head_rejects_forbidden_h3_fields() {
+    let request = http::Request::builder()
+        .method(http::Method::GET)
+        .uri("https://example.com/")
+        .header("connection", "close")
+        .body(())
+        .unwrap();
+    let err = encode_request_head(&request, None).expect_err("connection is forbidden in H3");
+    assert!(err.to_string().contains("forbids connection-specific"));
+}
+
+#[test]
 fn traditional_connect_rejects_scheme_and_path() {
     let fields = vec![
         (":method".to_string(), b"CONNECT".to_vec()),
@@ -65,6 +78,12 @@ fn response_head_roundtrip() {
             .iter()
             .any(|(name, value)| name == "capsule-protocol" && value.as_slice() == b"?1")
     );
+}
+
+#[test]
+fn response_status_rejects_non_http_status_class() {
+    let err = decode_response_status("700").expect_err("6xx response status must fail");
+    assert!(err.to_string().contains("out of range"));
 }
 
 #[test]

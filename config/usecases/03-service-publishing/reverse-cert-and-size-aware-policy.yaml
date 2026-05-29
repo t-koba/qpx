@@ -1,4 +1,6 @@
 state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+runtime:
+  unknown_length_exact_size: buffer
 edges:
 - kind: reverse
   name: reverse-cert-and-size-aware
@@ -11,6 +13,7 @@ edges:
       key: "${QPX_TLS_KEY:-/etc/qpx/certs/uploads.example.com.key}"
   routes:
   - name: uploads
+    streaming_requirement: preferred
     match:
       host:
       - uploads.example.com

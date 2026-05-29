@@ -1,5 +1,5 @@
 use super::builder;
-pub(crate) use super::builder::{BoxTlsStream, IoStream};
+pub(crate) use super::builder::BoxTlsStream;
 use super::cert_info::UpstreamCertificateInfo;
 #[cfg(test)]
 #[cfg(feature = "tls-rustls")]
@@ -54,7 +54,7 @@ pub(crate) async fn preview_tls_certificate_with_options(
 
 #[cfg(all(test, feature = "tls-rustls"))]
 mod tests {
-    use super::*;
+    use crate::tls::client::*;
     use qpx_core::config::UpstreamTlsTrustConfig;
     use rcgen::generate_simple_self_signed;
     use rustls::crypto::CryptoProvider;

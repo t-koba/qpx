@@ -35,7 +35,7 @@ pub(crate) async fn proxy_dispatch_websocket_http1(
         export_session,
     } = input;
     if let Some(session) = export_session {
-        let preview = crate::exporter::serialize_request_preview(&req);
+        let preview = crate::exporter::serialize_request_preview_async(&req).await;
         session.emit_plaintext(true, &preview);
     }
     proxy_websocket_http1(
@@ -58,9 +58,14 @@ pub(crate) async fn proxy_dispatch_websocket_http1(
 pub(crate) fn emit_dispatch_websocket_response_preview(
     export_session: Option<&crate::exporter::ExportSession>,
     response: &Response<Body>,
-) {
-    if let Some(session) = export_session {
-        let preview = crate::exporter::serialize_response_preview(response);
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let session = export_session.cloned();
+    let preview = crate::exporter::serialize_response_preview_async(response);
+    async move {
+        let Some(session) = session else {
+            return;
+        };
+        let preview = preview.await;
         session.emit_plaintext(false, &preview);
     }
 }

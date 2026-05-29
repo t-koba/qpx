@@ -27,8 +27,8 @@ runtime:
   trace_reflect_all_headers: false
   max_h3_request_body_bytes: 16777216
   max_h3_response_body_bytes: 16777216
-  max_observed_request_body_bytes: 67108864
-  max_observed_response_body_bytes: 67108864
+  max_observed_request_body_bytes: 8388608
+  max_observed_response_body_bytes: 8388608
   max_reverse_retry_template_body_bytes: 8388608
   upstream_http_timeout_ms: 30000
 upstreams:
@@ -307,6 +307,7 @@ edges:
 - kind: forward
   name: forward
   listen: 127.0.0.1:8080
+  streaming_requirement: preferred
   default_action:
     type: block
   destination_resolution:
@@ -419,8 +420,9 @@ edges:
       method:
       - POST
       - PUT
-      request_size:
-      - ">=1M"
+      headers:
+      - name: content-length
+        regex: "^[1-9][0-9]{6,}$"
     action:
       type: respond
       local_response:
@@ -600,6 +602,7 @@ edges:
       type: block
   routes:
   - name: app
+    streaming_requirement: preferred
     match:
       host:
       - example.com
@@ -665,8 +668,8 @@ edges:
           headers:
           - name: content-type
             regex: "^application/json"
-          response_size:
-          - 0-1048576
+          - name: content-length
+            regex: "^[0-9]{1,6}$"
           upstream_cert:
             present: true
             san_dns:

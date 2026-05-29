@@ -5,6 +5,7 @@ edges:
   listen: 0.0.0.0:19083
   routes:
   - name: api-routing
+    streaming_requirement: preferred
     match:
       host:
       - api.example.com

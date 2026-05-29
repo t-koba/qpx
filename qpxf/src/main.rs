@@ -136,6 +136,7 @@ async fn run_server(args: RunArgs) -> Result<()> {
                         qpxf::server::ConnectionContext {
                             router,
                             semaphore: sem,
+                            allow_shm_reuse: true,
                             input_idle,
                             conn_idle,
                             max_requests_per_connection,
@@ -177,6 +178,7 @@ async fn run_server(args: RunArgs) -> Result<()> {
                     qpxf::server::ConnectionContext {
                         router,
                         semaphore: sem,
+                        allow_shm_reuse: false,
                         input_idle,
                         conn_idle,
                         max_requests_per_connection,

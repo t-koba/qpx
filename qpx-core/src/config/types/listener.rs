@@ -1,7 +1,8 @@
 use super::super::defaults::*;
 use super::{
-    ActionConfig, CachePolicyConfig, DestinationResolutionOverrideConfig, HttpModuleConfig,
-    PolicyContextConfig, RateLimitConfig, UpstreamTlsTrustConfig,
+    ActionConfig, CachePolicyConfig, DestinationResolutionOverrideConfig, GrpcConfig,
+    HttpModuleConfig, PolicyContextConfig, RateLimitConfig, SseStreamingPolicy, StreamingConfig,
+    StreamingRequirement, UpstreamTlsTrustConfig,
 };
 use serde::Deserialize;
 
@@ -42,6 +43,14 @@ pub struct IngressEdgeConfig {
     pub http_guard_profile: Option<String>,
     #[serde(default)]
     pub http_modules: Vec<HttpModuleConfig>,
+    #[serde(default)]
+    pub streaming: Option<StreamingConfig>,
+    #[serde(default)]
+    pub grpc: Option<GrpcConfig>,
+    #[serde(default)]
+    pub sse: Option<SseStreamingPolicy>,
+    #[serde(default)]
+    pub streaming_requirement: Option<StreamingRequirement>,
     #[serde(default)]
     pub original_dst: Option<OriginalDstConfig>,
 }

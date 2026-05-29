@@ -43,6 +43,12 @@ generate_sample_cert() {
     -password pass:sample-pkcs12-password >/dev/null 2>&1
 }
 
+link_or_copy() {
+  local src="$1"
+  local dst="$2"
+  ln "$src" "$dst" 2>/dev/null || cp "$src" "$dst"
+}
+
 run_check() {
   local config_file="$1"
   echo "==> $config_file"
@@ -99,8 +105,8 @@ main() {
     echo "missing built qpxf binary: $QPXF_BUILD_BIN" >&2
     exit 1
   fi
-  cp "$QPXD_BUILD_BIN" "$QPXD_BIN"
-  cp "$QPXF_BUILD_BIN" "$QPXF_BIN"
+  link_or_copy "$QPXD_BUILD_BIN" "$QPXD_BIN"
+  link_or_copy "$QPXF_BUILD_BIN" "$QPXF_BIN"
 
   cargo build -q -p qpxd --locked --no-default-features --features tls-native --target-dir "$NATIVE_TARGET_DIR"
 

@@ -13,7 +13,7 @@ use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, V
 use hyper::{Request, Response};
 use qpx_core::config::CachePolicyConfig;
 use std::borrow::Cow;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -328,6 +328,35 @@ impl HttpModuleContext {
     pub async fn send_absolute_request(&self, req: Request<Body>) -> Result<Response<Body>> {
         let url = req.uri().to_string();
         let origin = OriginEndpoint::direct(url.as_str());
+        proxy_http(req, &origin, self.session.proxy_name.as_str(), None).await
+    }
+
+    pub async fn send_absolute_request_to_addr(
+        &self,
+        req: Request<Body>,
+        connect_addr: SocketAddr,
+    ) -> Result<Response<Body>> {
+        let uri = req.uri();
+        let scheme = uri
+            .scheme_str()
+            .ok_or_else(|| anyhow!("subrequest URL missing scheme"))?;
+        let host = uri
+            .host()
+            .ok_or_else(|| anyhow!("subrequest URL missing host"))?;
+        let logical_port = uri.port_u16().unwrap_or(match scheme {
+            "http" => 80,
+            "https" => 443,
+            _ => 443,
+        });
+        let url = uri.to_string();
+        let origin = OriginEndpoint::discovered(
+            url.as_str(),
+            connect_addr.ip().to_string(),
+            connect_addr.port(),
+            host.to_string(),
+            logical_port,
+            host.to_string(),
+        );
         proxy_http(req, &origin, self.session.proxy_name.as_str(), None).await
     }
 

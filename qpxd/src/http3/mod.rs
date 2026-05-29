@@ -13,6 +13,12 @@ pub(crate) mod datagram;
     not(feature = "http3-backend-qpx")
 ))]
 pub(crate) mod listener;
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
+pub(crate) mod priority;
 #[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
 pub(crate) mod qpx_stream;
 #[cfg(feature = "http3")]

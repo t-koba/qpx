@@ -60,7 +60,8 @@ edges:
   name: office-reverse
   listen: 0.0.0.0:19082
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - devportal.example.com
     timeout_ms: 15000

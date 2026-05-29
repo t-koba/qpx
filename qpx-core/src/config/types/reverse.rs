@@ -1,7 +1,8 @@
 use super::super::defaults::*;
 use super::{
-    CachePolicyConfig, DestinationResolutionOverrideConfig, HeaderControl, HttpModuleConfig,
-    LocalResponseConfig, MatchConfig, PolicyContextConfig, RateLimitConfig, UpstreamTlsTrustConfig,
+    CachePolicyConfig, DestinationResolutionOverrideConfig, GrpcConfig, HeaderControl,
+    HttpModuleConfig, LocalResponseConfig, MatchConfig, PolicyContextConfig, RateLimitConfig,
+    SseStreamingPolicy, StreamingConfig, StreamingRequirement, UpstreamTlsTrustConfig,
 };
 use serde::Deserialize;
 
@@ -26,6 +27,12 @@ pub struct ReverseEdgeConfig {
     pub destination_resolution: Option<DestinationResolutionOverrideConfig>,
     #[serde(default)]
     pub connection_filter: Vec<super::RuleConfig>,
+    #[serde(default)]
+    pub streaming: Option<StreamingConfig>,
+    #[serde(default)]
+    pub grpc: Option<GrpcConfig>,
+    #[serde(default)]
+    pub sse: Option<SseStreamingPolicy>,
     #[serde(default)]
     pub routes: Vec<ReverseRouteConfig>,
     #[serde(default)]
@@ -117,6 +124,14 @@ pub struct ReverseRouteConfig {
     pub http_guard_profile: Option<String>,
     #[serde(default)]
     pub http_modules: Vec<HttpModuleConfig>,
+    #[serde(default)]
+    pub streaming: Option<StreamingConfig>,
+    #[serde(default)]
+    pub grpc: Option<GrpcConfig>,
+    #[serde(default)]
+    pub sse: Option<SseStreamingPolicy>,
+    #[serde(default)]
+    pub streaming_requirement: Option<StreamingRequirement>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -205,6 +220,8 @@ pub struct ReverseRouteMirrorConfig {
     pub name: Option<String>,
     #[serde(default = "default_reverse_mirror_percent")]
     pub percent: u32,
+    #[serde(default)]
+    pub max_mirror_body_bytes: Option<usize>,
     #[serde(default)]
     pub upstreams: Vec<String>,
 }
@@ -330,6 +347,8 @@ pub struct ResilienceRetryConfig {
     pub attempts: usize,
     #[serde(default = "default_retry_backoff")]
     pub backoff_ms: u64,
+    #[serde(default = "default_retry_body_threshold_bytes")]
+    pub retry_body_threshold_bytes: usize,
     #[serde(default)]
     pub budget: Option<RetryBudgetConfig>,
 }

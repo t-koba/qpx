@@ -31,6 +31,7 @@ pub(crate) struct UpstreamTlsClientAuth {
 struct PatternSet {
     exact: HashSet<String>,
     suffix: Vec<String>,
+    glob_patterns: Vec<String>,
     glob: Option<GlobSet>,
     regex: Vec<Regex>,
 }
@@ -155,6 +156,24 @@ impl CompiledUpstreamTlsTrust {
                 .map(UpstreamTlsClientAuth::has_empty_paths)
                 .unwrap_or(true)
     }
+
+    pub(crate) fn pool_key(&self) -> String {
+        format!(
+            "pin={}|issuer={}|san_dns={}|san_uri={}|client_cert={}|client_key={}",
+            sorted_join(self.pin_sha256.iter().map(String::as_str)),
+            self.issuer.pool_key(),
+            self.san_dns.pool_key(),
+            self.san_uri.pool_key(),
+            self.client_auth
+                .as_ref()
+                .map(|auth| auth.cert.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            self.client_auth
+                .as_ref()
+                .map(|auth| auth.key.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        )
+    }
 }
 
 impl UpstreamTlsClientAuth {
@@ -198,6 +217,7 @@ impl PatternSet {
         Ok(Self {
             exact,
             suffix: Vec::new(),
+            glob_patterns: glob_values.clone(),
             glob: build_globset(&glob_values)?,
             regex,
         })
@@ -230,6 +250,7 @@ impl PatternSet {
         Ok(Self {
             exact,
             suffix,
+            glob_patterns: glob_values.clone(),
             glob: build_globset(&glob_values)?,
             regex,
         })
@@ -287,9 +308,26 @@ impl PatternSet {
     fn is_empty(&self) -> bool {
         self.exact.is_empty()
             && self.suffix.is_empty()
+            && self.glob_patterns.is_empty()
             && self.glob.is_none()
             && self.regex.is_empty()
     }
+
+    fn pool_key(&self) -> String {
+        format!(
+            "exact={};suffix={};glob={};regex={}",
+            sorted_join(self.exact.iter().map(String::as_str)),
+            sorted_join(self.suffix.iter().map(String::as_str)),
+            sorted_join(self.glob_patterns.iter().map(String::as_str)),
+            sorted_join(self.regex.iter().map(Regex::as_str))
+        )
+    }
+}
+
+fn sorted_join<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    let mut values = values.collect::<Vec<_>>();
+    values.sort_unstable();
+    values.join(",")
 }
 
 fn normalize_text(value: &str) -> Option<String> {
@@ -340,7 +378,7 @@ fn build_globset(items: &[String]) -> Result<Option<GlobSet>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::tls::trust::*;
 
     #[test]
     fn compiled_trust_matches_pin_and_dns() {

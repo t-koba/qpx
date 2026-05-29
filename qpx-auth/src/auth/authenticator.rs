@@ -16,7 +16,9 @@ use std::time::Duration;
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use tracing::Level;
 
-use qpx_core::config::AuthConfig;
+use qpx_core::config::{AuthConfig, CaptureRedactionConfig};
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+use qpx_core::redaction::redact_uri_query_keys;
 
 use super::Authenticator;
 #[cfg(feature = "ldap-auth")]
@@ -47,6 +49,16 @@ enum DigestAuthResult {
 
 impl Authenticator {
     pub fn new(config: &AuthConfig, realm: &str) -> Result<Self> {
+        Self::new_with_audit_redaction(config, realm, &CaptureRedactionConfig::default().query_keys)
+    }
+
+    pub fn new_with_audit_redaction(
+        config: &AuthConfig,
+        realm: &str,
+        audit_redact_query_keys: &[String],
+    ) -> Result<Self> {
+        #[cfg(not(any(feature = "basic-auth", feature = "digest-auth")))]
+        let _ = audit_redact_query_keys;
         #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
         let mut local = std::collections::HashMap::new();
         #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
@@ -86,6 +98,8 @@ impl Authenticator {
 
         Ok(Self {
             realm: realm.to_string(),
+            #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+            audit_redact_query_keys: audit_redact_query_keys.to_vec(),
             #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
             local,
             #[cfg(feature = "ldap-auth")]
@@ -140,6 +154,7 @@ impl Authenticator {
             .get("proxy-authorization")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
+        let audit_uri = self.redact_audit_uri(uri);
 
         if header.is_empty() {
             if tracing::enabled!(target: "audit_log", Level::INFO) {
@@ -150,11 +165,11 @@ impl Authenticator {
                     reason = "missing_proxy_authorization",
                     src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                     method = method,
-                    uri = uri,
+                    uri = audit_uri.as_str(),
                     required_providers = ?required_providers,
                 );
             }
-            return Ok(AuthOutcome::Challenge(self.build_challenge(false)));
+            return Ok(AuthOutcome::Challenge(self.build_challenge(false)?));
         }
 
         #[cfg(feature = "basic-auth")]
@@ -168,7 +183,7 @@ impl Authenticator {
                             outcome = "allowed",
                             src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                             method = method,
-                            uri = uri,
+                            uri = audit_uri.as_str(),
                             username = %user.username,
                             provider = %user.provider,
                             required_providers = ?required_providers,
@@ -184,11 +199,11 @@ impl Authenticator {
                         reason = "invalid_basic_credentials",
                         src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                         method = method,
-                        uri = uri,
+                        uri = audit_uri.as_str(),
                         required_providers = ?required_providers,
                     );
                 }
-                return Ok(AuthOutcome::Challenge(self.build_challenge(false)));
+                return Ok(AuthOutcome::Challenge(self.build_challenge(false)?));
             }
         }
 
@@ -205,7 +220,7 @@ impl Authenticator {
                                     outcome = "allowed",
                                     src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                                     method = method,
-                                    uri = uri,
+                                    uri = audit_uri.as_str(),
                                     username = %user.username,
                                     provider = %user.provider,
                                     required_providers = ?required_providers,
@@ -222,11 +237,11 @@ impl Authenticator {
                                     reason = "stale_digest_nonce",
                                     src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                                     method = method,
-                                    uri = uri,
+                                    uri = audit_uri.as_str(),
                                     required_providers = ?required_providers,
                                 );
                             }
-                            return Ok(AuthOutcome::Challenge(self.build_challenge(true)));
+                            return Ok(AuthOutcome::Challenge(self.build_challenge(true)?));
                         }
                         DigestAuthResult::Invalid => {}
                     }
@@ -242,11 +257,11 @@ impl Authenticator {
                     reason = "invalid_digest_credentials",
                     src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                     method = method,
-                    uri = uri,
+                    uri = audit_uri.as_str(),
                     required_providers = ?required_providers,
                 );
             }
-            return Ok(AuthOutcome::Challenge(self.build_challenge(false)));
+            return Ok(AuthOutcome::Challenge(self.build_challenge(false)?));
         }
 
         if tracing::enabled!(target: "audit_log", Level::INFO) {
@@ -257,11 +272,11 @@ impl Authenticator {
                 reason = "unsupported_proxy_authorization_scheme",
                 src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                 method = method,
-                uri = uri,
+                uri = audit_uri.as_str(),
                 required_providers = ?required_providers,
             );
         }
-        Ok(AuthOutcome::Challenge(self.build_challenge(false)))
+        Ok(AuthOutcome::Challenge(self.build_challenge(false)?))
     }
 
     #[cfg(feature = "basic-auth")]
@@ -278,9 +293,12 @@ impl Authenticator {
             Ok(decoded) => decoded,
             Err(_) => return Ok(None),
         };
-        let mut parts = decoded.splitn(2, ':');
-        let username = parts.next().unwrap_or("");
-        let password = parts.next().unwrap_or("");
+        let Some((username, password)) = decoded.split_once(':') else {
+            return Ok(None);
+        };
+        if username.is_empty() || password.is_empty() {
+            return Ok(None);
+        }
 
         if required_providers.iter().any(|p| p == "local")
             && let Some(entry) = self.local.get(username)
@@ -322,7 +340,9 @@ impl Authenticator {
 
     #[cfg(feature = "digest-auth")]
     fn verify_digest(&self, payload: &str, method: &str, uri: &str) -> Result<DigestAuthResult> {
-        let params = parse_digest(payload);
+        let Some(params) = parse_digest(payload) else {
+            return Ok(DigestAuthResult::Invalid);
+        };
         let username = params.get("username").map(String::as_str).unwrap_or("");
         let realm = params.get("realm").map(String::as_str).unwrap_or("");
         let nonce = params.get("nonce").map(String::as_str).unwrap_or("");
@@ -401,7 +421,7 @@ impl Authenticator {
     }
 
     #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
-    fn build_challenge(&self, stale: bool) -> AuthChallenge {
+    fn build_challenge(&self, stale: bool) -> Result<AuthChallenge> {
         let mut headers = Vec::new();
         let escaped_realm = escape_quoted_header_value(self.realm.as_str());
         #[cfg(feature = "basic-auth")]
@@ -411,16 +431,24 @@ impl Authenticator {
         ));
         #[cfg(feature = "digest-auth")]
         {
-            let challenge = self.nonces.issue_digest_challenge();
+            let challenge = self
+                .nonces
+                .issue_digest_challenge()
+                .ok_or_else(|| anyhow::anyhow!("secure random digest nonce generation failed"))?;
             let stale_param = if stale { ", stale=true" } else { "" };
             headers.push(format!(
                 "Digest realm=\"{}\", qop=\"auth\", nonce=\"{}\", opaque=\"{}\", algorithm=SHA-256{}",
                 escaped_realm, challenge.nonce, challenge.opaque, stale_param
             ));
         }
-        AuthChallenge {
+        Ok(AuthChallenge {
             header_values: headers,
             stale,
-        }
+        })
+    }
+
+    #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+    pub(crate) fn redact_audit_uri(&self, uri: &str) -> String {
+        redact_uri_query_keys(uri, &self.audit_redact_query_keys)
     }
 }

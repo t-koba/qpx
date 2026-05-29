@@ -1,4 +1,12 @@
-use super::*;
+use super::{
+    ENV_INHERITED_TCP_BINDINGS, InheritedSingleTcp, InheritedTcpBindings, InheritedTcpGroup,
+    TcpBindingHandoff, TcpBindings, reverse_requires_tcp,
+};
+#[cfg(windows)]
+use super::{WindowsSingleTcp, WindowsTcpBindingHandoff, WindowsTcpGroup};
+use anyhow::{Context, Result, anyhow};
+use qpx_core::config::Config;
+use std::net::TcpListener;
 
 impl TcpBindings {
     pub(crate) fn prepare_handoff(&self, config: &Config) -> Result<TcpBindingHandoff> {
@@ -362,7 +370,7 @@ fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::*;
+    use crate::tcp_bindings::handoff::*;
     use qpx_core::config::{
         AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
         IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MessagesConfig, RuntimeConfig,
@@ -414,6 +422,10 @@ mod tests {
                 tls_inspection: None,
                 rules: Vec::new(),
                 connection_filter: Vec::new(),
+                streaming: None,
+                grpc: None,
+                sse: None,
+                streaming_requirement: None,
                 upstream_proxy: None,
                 http3: None,
                 ftp: Default::default(),

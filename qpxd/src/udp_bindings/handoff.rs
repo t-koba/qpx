@@ -1,4 +1,16 @@
-use super::*;
+#[cfg(feature = "http3")]
+use super::InheritedUdpSocket;
+use super::{ENV_INHERITED_UDP_BINDINGS, InheritedUdpBindings, UdpBindingHandoff, UdpBindings};
+#[cfg(all(feature = "http3", windows))]
+use super::{WindowsInheritedUdpSocket, WindowsUdpBindingHandoff};
+#[cfg(all(feature = "http3", windows))]
+use crate::udp_socket_handoff::duplicate_std_udp_socket_for_child;
+#[cfg(all(feature = "http3", unix))]
+use crate::udp_socket_handoff::duplicate_std_udp_socket_for_handoff;
+#[cfg(any(feature = "http3", not(any(unix, windows))))]
+use anyhow::anyhow;
+use anyhow::{Context, Result};
+use qpx_core::config::Config;
 
 impl UdpBindings {
     pub(crate) fn prepare_handoff(&self, config: &Config) -> Result<UdpBindingHandoff> {
@@ -250,7 +262,7 @@ impl UdpBindings {
 
 #[cfg(all(test, feature = "http3", unix))]
 mod tests {
-    use super::*;
+    use crate::udp_bindings::handoff::*;
     use qpx_core::config::{
         AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
         Http3IngressEdgeConfig, IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MessagesConfig,
@@ -300,6 +312,10 @@ mod tests {
                 tls_inspection: None,
                 rules: Vec::new(),
                 connection_filter: Vec::new(),
+                streaming: None,
+                grpc: None,
+                sse: None,
+                streaming_requirement: None,
                 upstream_proxy: None,
                 http3: Some(Http3IngressEdgeConfig {
                     enabled: true,

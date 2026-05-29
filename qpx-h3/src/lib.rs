@@ -7,7 +7,8 @@ mod response;
 mod server;
 mod transport;
 
-pub use client::{ExtendedConnectStream, open_extended_connect_stream};
+pub use client::{ClientSession, ExtendedConnectStream, open_extended_connect_stream};
+pub use protocol::{PriorityUpdates, StreamPriority};
 pub use server::{
     ConnectionInfo, Protocol, Request, RequestHandler, Settings, SupportLevel, WebTransportSession,
     serve_connection,

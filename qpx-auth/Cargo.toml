@@ -17,6 +17,7 @@ qpx-core = { path = "../qpx-core", default-features = false }
 anyhow.workspace = true
 tracing.workspace = true
 http.workspace = true
+lru.workspace = true
 ldap3 = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }

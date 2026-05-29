@@ -7,7 +7,7 @@ pub(crate) use relay::{TunnelPolicy, TunnelStats, relay_tunnel};
 pub(crate) use stream::{TunnelHalf, TunnelHalfWrite};
 
 use crate::exporter::ExportSession;
-use crate::io_copy::BandwidthThrottle;
+use crate::upstream::io_copy::BandwidthThrottle;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};

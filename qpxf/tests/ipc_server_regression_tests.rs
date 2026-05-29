@@ -81,6 +81,7 @@ handlers:
                         qpxf::server::ConnectionContext {
                             router,
                             semaphore,
+                            allow_shm_reuse: true,
                             input_idle,
                             conn_idle,
                             max_requests_per_connection,
@@ -105,12 +106,14 @@ handlers:
         IpcRequestMeta {
             method: method.to_string(),
             uri: script_name.to_string(),
+            server_protocol: "HTTP/2".to_string(),
             headers: vec![("Host".to_string(), "localhost".to_string())],
             params,
             req_body_shm_path: None,
             req_body_shm_size_bytes: None,
             res_body_shm_path: None,
             res_body_shm_size_bytes: None,
+            shm_reusable: false,
         }
     }
 

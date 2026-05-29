@@ -1,6 +1,6 @@
 use crate::exporter::ExportSession;
-use crate::io_copy::BandwidthThrottle;
 use crate::tunnel::{TunnelHalf, TunnelHalfWrite};
+use crate::upstream::io_copy::BandwidthThrottle;
 use anyhow::Result;
 use metrics::{counter, histogram};
 use std::io;
@@ -293,7 +293,7 @@ async fn touch_or_reset_idle(
     } else if let (Some(deadline), Some(idle_timeout)) =
         (local_idle_deadline.as_mut().as_pin_mut(), idle_timeout)
     {
-        deadline.reset(Instant::now() + idle_timeout);
+        deadline.reset(crate::runtime::tokio_deadline_after(idle_timeout));
     }
 }
 

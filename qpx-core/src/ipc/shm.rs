@@ -1,9 +1,42 @@
 use crate::shm_ring::ShmRingBuffer;
 use anyhow::{Result, anyhow};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static ACTIVE_IPC_SHM_TOKENS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn active_ipc_shm_tokens() -> &'static Mutex<HashSet<String>> {
+    ACTIVE_IPC_SHM_TOKENS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn register_active_ipc_shm_token(token: &str) {
+    if let Ok(mut active) = active_ipc_shm_tokens().lock() {
+        active.insert(token.to_string());
+    }
+}
+
+fn is_active_ipc_shm_token(token: &str) -> bool {
+    active_ipc_shm_tokens()
+        .lock()
+        .map(|active| active.contains(token))
+        .unwrap_or(false)
+}
+
+pub fn unregister_ipc_shm_token(token: &str) {
+    if let Ok(mut active) = active_ipc_shm_tokens().lock() {
+        active.remove(token);
+    }
+}
+
+pub fn unregister_ipc_shm_path(path: &Path) {
+    if let Some(token) = path.file_name().and_then(|value| value.to_str()) {
+        unregister_ipc_shm_token(token);
+    }
+}
 
 pub fn ensure_secure_dir(dir: &Path) -> Result<()> {
     let mut current = PathBuf::new();
@@ -164,6 +197,7 @@ pub fn create_or_open_ipc_ring(
 ) -> Result<(PathBuf, ShmRingBuffer)> {
     let path = ipc_shm_path(token, expected_prefix)?;
     let ring = ShmRingBuffer::create_or_open(&path, size_bytes)?;
+    register_active_ipc_shm_token(token);
     Ok((path, ring))
 }
 
@@ -195,6 +229,9 @@ pub fn maybe_cleanup_stale_ipc_shm_files(
             continue;
         };
         if !name.starts_with("ipc_req_") && !name.starts_with("ipc_res_") {
+            continue;
+        }
+        if is_active_ipc_shm_token(name) {
             continue;
         }
         if path.extension().and_then(|value| value.to_str()) != Some("shm") {

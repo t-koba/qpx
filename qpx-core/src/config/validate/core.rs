@@ -1,6 +1,10 @@
 use anyhow::{Result, anyhow};
 
-use super::super::types::{Config, IdentityConfig, MessagesConfig, RuntimeConfig};
+use super::super::types::{
+    Config, IdentityConfig, MAX_OBSERVED_BODY_BYTES, MAX_REVERSE_RETRY_TEMPLATE_BODY_BYTES,
+    MessagesConfig, RuntimeConfig,
+};
+use super::rules::validate_sse_policy_fields;
 
 pub(super) fn validate_listener_topology(config: &Config) -> Result<()> {
     if config.edge_count() == 0 {
@@ -120,14 +124,29 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
             "runtime.max_reverse_retry_template_body_bytes must be >= 1"
         ));
     }
+    if runtime.max_reverse_retry_template_body_bytes > MAX_REVERSE_RETRY_TEMPLATE_BODY_BYTES {
+        return Err(anyhow!(
+            "runtime.max_reverse_retry_template_body_bytes must be <= {MAX_REVERSE_RETRY_TEMPLATE_BODY_BYTES}"
+        ));
+    }
     if runtime.max_observed_request_body_bytes == 0 {
         return Err(anyhow!(
             "runtime.max_observed_request_body_bytes must be >= 1"
         ));
     }
+    if runtime.max_observed_request_body_bytes > MAX_OBSERVED_BODY_BYTES {
+        return Err(anyhow!(
+            "runtime.max_observed_request_body_bytes must be <= {MAX_OBSERVED_BODY_BYTES}"
+        ));
+    }
     if runtime.max_observed_response_body_bytes == 0 {
         return Err(anyhow!(
             "runtime.max_observed_response_body_bytes must be >= 1"
+        ));
+    }
+    if runtime.max_observed_response_body_bytes > MAX_OBSERVED_BODY_BYTES {
+        return Err(anyhow!(
+            "runtime.max_observed_response_body_bytes must be <= {MAX_OBSERVED_BODY_BYTES}"
         ));
     }
     if runtime.max_ftp_concurrency == 0 {
@@ -139,6 +158,16 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
     if runtime.max_h3_streams_per_connection == 0 {
         return Err(anyhow!(
             "runtime.max_h3_streams_per_connection must be >= 1"
+        ));
+    }
+    if runtime.h3_origin_pool_max_connections_per_origin == 0 {
+        return Err(anyhow!(
+            "runtime.h3_origin_pool_max_connections_per_origin must be >= 1"
+        ));
+    }
+    if runtime.h3_origin_pool_max_inflight_streams_per_connection == 0 {
+        return Err(anyhow!(
+            "runtime.h3_origin_pool_max_inflight_streams_per_connection must be >= 1"
         ));
     }
     if runtime.upstream_http_timeout_ms == 0 {
@@ -164,6 +193,9 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
     if runtime.h3_read_timeout_ms == 0 {
         return Err(anyhow!("runtime.h3_read_timeout_ms must be >= 1"));
     }
+    if runtime.body_channel_capacity == 0 {
+        return Err(anyhow!("runtime.body_channel_capacity must be >= 1"));
+    }
     if runtime.datagram_channel_capacity == 0 {
         return Err(anyhow!("runtime.datagram_channel_capacity must be >= 1"));
     }
@@ -180,9 +212,25 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
     if runtime.max_grpc_message_bytes == 0 {
         return Err(anyhow!("runtime.max_grpc_message_bytes must be >= 1"));
     }
+    if runtime.max_grpc_web_trailer_bytes == 0 {
+        return Err(anyhow!("runtime.max_grpc_web_trailer_bytes must be >= 1"));
+    }
+    if runtime.max_grpc_web_trailer_bytes > crate::config::MAX_GRPC_WEB_TRAILER_BYTES {
+        return Err(anyhow!(
+            "runtime.max_grpc_web_trailer_bytes must be <= {}",
+            crate::config::MAX_GRPC_WEB_TRAILER_BYTES
+        ));
+    }
     if runtime.max_grpc_stream_duration_ms == 0 {
         return Err(anyhow!("runtime.max_grpc_stream_duration_ms must be >= 1"));
     }
+    if runtime.max_grpc_stream_duration_ms > crate::config::MAX_GRPC_STREAM_DURATION_MS {
+        return Err(anyhow!(
+            "runtime.max_grpc_stream_duration_ms must be <= {}",
+            crate::config::MAX_GRPC_STREAM_DURATION_MS
+        ));
+    }
+    validate_sse_policy_fields(&runtime.sse, "runtime")?;
     if let Some(worker_threads) = runtime.worker_threads
         && worker_threads == 0
     {

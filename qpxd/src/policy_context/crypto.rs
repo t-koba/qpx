@@ -90,7 +90,7 @@ impl JwtAlgorithm {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::policy_context::crypto::*;
     use crate::policy_context::util::hmac_digest;
 
     #[test]

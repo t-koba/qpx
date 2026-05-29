@@ -30,6 +30,7 @@ edges:
   listen: 127.0.0.1:19443
   routes:
   - name: api
+    streaming_requirement: preferred
     match:
       host:
       - api.example.com

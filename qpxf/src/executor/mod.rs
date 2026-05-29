@@ -20,6 +20,7 @@ pub struct CgiRequest {
     pub request_method: String,
     pub content_type: String,
     pub content_length: usize,
+    pub declared_content_length: Option<usize>,
     pub server_protocol: String,
     pub server_name: String,
     pub server_port: u16,
@@ -72,19 +73,15 @@ impl CgiResponse {
 
     /// Parse CGI output (stdout) into a CgiResponse.
     pub fn parse_cgi_output(data: &[u8]) -> Result<Self> {
-        let header_end = find_header_end(data).unwrap_or(data.len());
+        let header_end = find_header_end(data)
+            .ok_or_else(|| anyhow::anyhow!("CGI output missing header terminator"))?;
         let header_section = std::str::from_utf8(&data[..header_end])?;
-        let body_start = if header_end < data.len() {
-            // Skip the \r\n\r\n or \n\n separator.
-            if data[header_end..].starts_with(b"\r\n\r\n") {
-                header_end + 4
-            } else if data[header_end..].starts_with(b"\n\n") {
-                header_end + 2
-            } else {
-                header_end
-            }
+        let body_start = if data[header_end..].starts_with(b"\r\n\r\n") {
+            header_end + 4
+        } else if data[header_end..].starts_with(b"\n\n") {
+            header_end + 2
         } else {
-            data.len()
+            return Err(anyhow::anyhow!("CGI output has invalid header terminator"));
         };
 
         let mut status = 200u16;
@@ -97,13 +94,23 @@ impl CgiResponse {
             if let Some((key, value)) = line.split_once(':') {
                 let key = key.trim();
                 let value = value.trim();
+                if key.is_empty() || http::HeaderName::from_bytes(key.as_bytes()).is_err() {
+                    return Err(anyhow::anyhow!("CGI output contains invalid header name"));
+                }
                 if key.eq_ignore_ascii_case("Status") {
                     if let Some(code) = value.split_whitespace().next() {
-                        status = code.parse().unwrap_or(200);
+                        status = code.parse()?;
+                        if !(100..=599).contains(&status) {
+                            return Err(anyhow::anyhow!("CGI output status is out of range"));
+                        }
+                    } else {
+                        return Err(anyhow::anyhow!("CGI output Status header is empty"));
                     }
                 } else {
                     headers.push((key.to_string(), value.to_string()));
                 }
+            } else {
+                return Err(anyhow::anyhow!("CGI output contains malformed header line"));
             }
         }
         let body = Bytes::copy_from_slice(&data[body_start..]);
@@ -123,4 +130,37 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 #[async_trait]
 pub trait Executor: Send + Sync {
     async fn start(&self, req: CgiRequest) -> Result<Execution>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CgiResponse;
+
+    #[test]
+    fn parse_cgi_output_rejects_missing_header_terminator() {
+        let err = CgiResponse::parse_cgi_output(b"Status: 200 OK\r\nContent-Type: text/plain")
+            .expect_err("missing header terminator must fail");
+        assert!(err.to_string().contains("header terminator"));
+    }
+
+    #[test]
+    fn parse_cgi_output_rejects_malformed_header_line() {
+        let err = CgiResponse::parse_cgi_output(b"not a header\r\n\r\nbody")
+            .expect_err("malformed header line must fail");
+        assert!(err.to_string().contains("malformed header"));
+    }
+
+    #[test]
+    fn parse_cgi_output_rejects_invalid_status() {
+        let err = CgiResponse::parse_cgi_output(b"Status: nope\r\n\r\nbody")
+            .expect_err("invalid Status must fail");
+        assert!(err.to_string().contains("invalid digit"));
+    }
+
+    #[test]
+    fn parse_cgi_output_rejects_non_http_status_class() {
+        let err = CgiResponse::parse_cgi_output(b"Status: 700 Weird\r\n\r\nbody")
+            .expect_err("non-HTTP status class must fail");
+        assert!(err.to_string().contains("out of range"));
+    }
 }

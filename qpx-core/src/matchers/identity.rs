@@ -71,6 +71,10 @@ impl CompiledTlsFingerprintMatch {
     pub(super) fn matches(&self, ctx: &RuleMatchContext<'_>) -> bool {
         match_optional_text(&self.ja3, ctx.ja3) && match_optional_text(&self.ja4, ctx.ja4)
     }
+
+    pub(super) fn requires_tls_fingerprint(&self) -> bool {
+        self.ja3.is_some() || self.ja4.is_some()
+    }
 }
 
 impl CompiledCertificateMatch {

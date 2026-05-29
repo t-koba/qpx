@@ -33,7 +33,7 @@ const PROXY_V2_SIGNATURE: [u8; 12] = [
 ];
 const MAX_PROXY_V2_HEADER_BYTES: usize = 4096;
 
-pub async fn consume_proxy_metadata(
+pub(crate) async fn consume_proxy_metadata(
     stream: &mut TcpStream,
     require_metadata: bool,
     metadata_timeout: Duration,
@@ -41,7 +41,7 @@ pub async fn consume_proxy_metadata(
     consume_proxy_v2(stream, require_metadata, metadata_timeout).await
 }
 
-pub fn compile_xdp_config(
+pub(crate) fn compile_xdp_config(
     cfg: Option<&qpx_core::config::XdpConfig>,
 ) -> Result<Option<CompiledXdpConfig>> {
     let Some(cfg) = cfg.filter(|cfg| cfg.enabled) else {
@@ -60,7 +60,7 @@ pub fn compile_xdp_config(
     }))
 }
 
-pub fn compile_trusted_peers(trusted_peers: &[String]) -> Result<Vec<IpCidr>> {
+pub(crate) fn compile_trusted_peers(trusted_peers: &[String]) -> Result<Vec<IpCidr>> {
     let mut out = Vec::with_capacity(trusted_peers.len());
     for peer in trusted_peers {
         let cidr: IpCidr = peer
@@ -71,7 +71,7 @@ pub fn compile_trusted_peers(trusted_peers: &[String]) -> Result<Vec<IpCidr>> {
     Ok(out)
 }
 
-pub fn peer_is_trusted(remote_ip: IpAddr, trusted_peers: &[IpCidr]) -> bool {
+pub(crate) fn peer_is_trusted(remote_ip: IpAddr, trusted_peers: &[IpCidr]) -> bool {
     trusted_peers.iter().any(|cidr| cidr.contains(&remote_ip))
 }
 
@@ -80,7 +80,7 @@ async fn consume_proxy_v2(
     require_metadata: bool,
     metadata_timeout: Duration,
 ) -> Result<ProxyReadResult> {
-    let deadline = Instant::now() + metadata_timeout;
+    let deadline = crate::runtime::tokio_deadline_after(metadata_timeout);
     if require_metadata {
         let meta = read_proxy_v2(stream, true, deadline).await?;
         return Ok(ProxyReadResult {
@@ -275,7 +275,7 @@ pub(crate) fn fuzz_parse_proxy_v2_frame(frame: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::xdp::*;
 
     #[test]
     fn parse_proxy_v2_ipv4_payload() {

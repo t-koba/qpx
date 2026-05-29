@@ -82,7 +82,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
    - Forward proxy:
      - HTTP/3 listener supports standard request forwarding and CONNECT tunnel proxying.
      - On the default `http3-backend-h3` build, CONNECT-UDP is handled with MASQUE capsule flow (`Capsule-Protocol: ?1`, DATAGRAM capsule type, context id `0`) for both direct targets and chained upstream HTTP/3 proxies.
-     - On the clean-room `http3-backend-qpx` build, the HTTP/3 server path covers buffered request/response handling, reverse terminate, CONNECT-UDP MASQUE capsule/datagram relay (direct and chained), generic extended CONNECT with per-stream datagrams, and WebTransport relay.
+     - On the clean-room `http3-backend-qpx` build, the HTTP/3 server path covers streaming request/response relay, reverse terminate, CONNECT-UDP MASQUE capsule/datagram relay (direct and chained), generic extended CONNECT with per-stream datagrams, and WebTransport relay.
    - Code:
      - `qpxd/src/reverse/mod.rs`
      - `qpxd/src/reverse/h3_terminate.rs`

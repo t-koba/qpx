@@ -5,6 +5,7 @@ edges:
   listen: 0.0.0.0:19446
   routes:
   - name: chat-ws
+    streaming_requirement: preferred
     match:
       host:
       - chat.example.com
@@ -31,6 +32,7 @@ edges:
       - ws://10.50.0.11:8080
       lb: round_robin
   - name: events-wss
+    streaming_requirement: preferred
     match:
       host:
       - events.example.com

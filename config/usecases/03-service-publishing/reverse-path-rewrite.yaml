@@ -4,7 +4,8 @@ edges:
   name: reverse-path-rewrite
   listen: 0.0.0.0:19082
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - api.example.com
       path:
