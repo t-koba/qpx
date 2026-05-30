@@ -337,7 +337,7 @@ edges:
         ),
     )
     .context("write qpxd config")?;
-    let handle = spawn_qpxd_without_ready_check(&cfg, dir.join("qpxd.log"))?;
+    let handle = spawn_qpxd(&cfg, port, dir.join("qpxd.log"))?;
     Ok((handle, port, cert_path))
 }
 
@@ -459,7 +459,7 @@ fn pick_free_tcp_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-fn spawn_qpxd_without_ready_check(config_path: &Path, log_path: PathBuf) -> Result<QpxdHandle> {
+fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Result<QpxdHandle> {
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_qpxd"));
     let log = fs::File::create(&log_path).context("create qpxd log")?;
     let log_err = log.try_clone().context("clone qpxd log")?;
@@ -472,14 +472,28 @@ fn spawn_qpxd_without_ready_check(config_path: &Path, log_path: PathBuf) -> Resu
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
     let mut child = cmd.spawn().context("spawn qpxd")?;
-    std::thread::sleep(Duration::from_millis(500));
-    if child.try_wait()?.is_some() {
-        return Err(anyhow!(
-            "qpxd exited early while starting HTTP/3 streaming config (log: {})",
-            log_path.display()
-        ));
+    let started = std::time::Instant::now();
+    let addr = SocketAddr::from(([127, 0, 0, 1], ready_port));
+    while started.elapsed() < Duration::from_secs(15) {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
+            return Ok(QpxdHandle::new(child));
+        }
+        if let Some(status) = child.try_wait()? {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!(
+                "qpxd exited early while starting HTTP/3 streaming config: {status} (log: {})",
+                log_path.display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    Ok(QpxdHandle::new(child))
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(anyhow!(
+        "timed out waiting for qpxd to listen on {addr} (log: {})",
+        log_path.display()
+    ))
 }
 
 fn write_self_signed_cert(dir: &Path, dns_name: &str) -> Result<(PathBuf, PathBuf)> {
