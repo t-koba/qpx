@@ -97,6 +97,10 @@ async fn serve_connection<H: H3RequestHandler>(
     };
     let mut builder = ::h3::server::builder();
     builder
+        // Keep response trailer/FIN sequencing deterministic. GREASE frames are
+        // optional, and sending one after trailers has exposed platform-specific
+        // trailer-drain flakes in the h3 client used by the e2e tests.
+        .send_grease(false)
         .enable_extended_connect(handler.enable_extended_connect())
         .enable_datagram(handler.enable_datagram());
     let mut h3_conn = builder
