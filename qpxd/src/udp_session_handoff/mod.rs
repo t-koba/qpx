@@ -20,11 +20,12 @@ use self::windows as platform;
 
 #[cfg(any(feature = "http3", test))]
 pub(crate) use self::types::ExportedQuicConnectionId;
+#[cfg(unix)]
+use self::types::PersistedUdpSessionHandoff;
 #[cfg(feature = "http3")]
 pub(crate) use self::types::ReversePassthroughSessionRestore;
 #[cfg(any(feature = "http3", test))]
 pub(crate) use self::types::TransparentUdpSessionRestore;
-use self::types::*;
 pub(crate) use self::types::{
     ReversePassthroughListenerRestore, TransparentUdpListenerRestore, UdpSessionPreparedHandoff,
     UdpSessionRestoreState,

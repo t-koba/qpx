@@ -14,6 +14,7 @@ use hyper::{Request, Response, StatusCode};
 use qpx_core::config::IpcMode;
 use qpx_core::ipc::meta::IpcResponseMeta;
 use qpx_core::ipc::protocol::{read_frame, write_frame};
+#[cfg(unix)]
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Duration, timeout};

@@ -33,19 +33,28 @@ async fn head_response_data_is_rejected_by_server_stream() -> Result<()> {
     write_frame_raw(&mut send, FRAME_HEADERS, &headers).await?;
     send.finish()?;
 
-    let first = timeout(TEST_TIMEOUT, recv.read_chunk(4096, true))
-        .await
-        .map_err(|_| anyhow!("timed out waiting for HEAD response"))??
-        .ok_or_else(|| anyhow!("missing HEAD response"))?;
-    let bytes = first.bytes;
+    let bytes = loop {
+        let first = timeout(TEST_TIMEOUT, recv.read_chunk(4096, true))
+            .await
+            .map_err(|_| anyhow!("timed out waiting for HEAD response"))??
+            .ok_or_else(|| anyhow!("missing HEAD response"))?;
+        if !first.bytes.is_empty() {
+            break first.bytes;
+        }
+    };
     let (frame_type, used_type) = read_varint(bytes.as_ref())?;
     let (frame_len, used_len) = read_varint(&bytes[used_type..])?;
     assert_eq!(frame_type, FRAME_HEADERS);
     assert!(used_type + used_len + frame_len as usize <= bytes.len());
 
-    let next = timeout(TEST_TIMEOUT, recv.read_chunk(4096, true))
-        .await
-        .map_err(|_| anyhow!("timed out waiting for HEAD response end"))??;
+    let next = loop {
+        let next = timeout(TEST_TIMEOUT, recv.read_chunk(4096, true))
+            .await
+            .map_err(|_| anyhow!("timed out waiting for HEAD response end"))??;
+        if next.as_ref().is_none_or(|chunk| !chunk.bytes.is_empty()) {
+            break next;
+        }
+    };
     if let Some(chunk) = next
         && !chunk.bytes.is_empty()
     {

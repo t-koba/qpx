@@ -17,9 +17,7 @@ use std::path::PathBuf;
 #[cfg(all(feature = "http3", unix))]
 use crate::udp_socket_handoff::adopt_inherited_udp_socket;
 #[cfg(all(feature = "http3", windows))]
-use crate::udp_socket_handoff::{
-    adopt_inherited_udp_socket_windows, duplicate_std_udp_socket_for_child,
-};
+use crate::udp_socket_handoff::adopt_inherited_udp_socket_windows;
 
 const ENV_INHERITED_UDP_BINDINGS: &str = "QPX_INHERITED_UDP_BINDINGS";
 

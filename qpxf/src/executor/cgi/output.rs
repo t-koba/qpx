@@ -178,7 +178,12 @@ fn cgi_fd_command_for_spawn(
     Ok((fd_path.to_path_buf(), Vec::new()))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "dragonfly"
+))]
 fn cgi_fd_command_for_spawn(
     _file: &std::fs::File,
     fd_path: &Path,

@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+#[cfg(unix)]
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
