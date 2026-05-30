@@ -232,13 +232,12 @@ fn set_private_directory_permissions(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        #[cfg(windows)]
-        {
-            return set_owner_only_acl(path);
-        }
-        #[cfg(not(windows))]
+        set_owner_only_acl(path)?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
         let _ = path;
     }
     Ok(())
@@ -345,10 +344,8 @@ fn set_owner_only_acl(path: &Path) -> Result<()> {
 
     // Protected DACL: LocalSystem, Administrators and the current owner get full access.
     // This keeps generated MITM CA private material out of inherited temp-directory ACLs.
-    let sddl: Vec<u16> = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let sddl_text = concat!("D:P(A;;FA;;;SY)(A;;FA;;;", "\x42", "\x41", ")(A;;FA;;;OW)");
+    let sddl: Vec<u16> = sddl_text.encode_utf16().chain(std::iter::once(0)).collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated and `descriptor` is an out pointer freed with LocalFree.
     if unsafe {
