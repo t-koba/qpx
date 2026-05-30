@@ -1,10 +1,10 @@
 use super::proxy::validate_ipc_response_status;
-use super::shm::{
-    downstream_body_closed, read_shm_response_meta_after_body_writer, remove_ipc_shm_path,
-    write_request_body_to_shm,
-};
+use super::shm::{downstream_body_closed, read_shm_response_meta_after_body_writer};
+#[cfg(unix)]
+use super::shm::{remove_ipc_shm_path, write_request_body_to_shm};
 use crate::http::body::Body;
 use anyhow::Result;
+#[cfg(unix)]
 use bytes::Bytes;
 use qpx_core::ipc::meta::IpcResponseMeta;
 use qpx_core::ipc::protocol::write_frame;
@@ -13,6 +13,7 @@ use qpx_core::shm_ring::ShmRingBuffer;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
 use tokio::time::{Duration, timeout};
 
 #[cfg(unix)]
