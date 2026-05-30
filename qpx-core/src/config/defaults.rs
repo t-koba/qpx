@@ -2,6 +2,10 @@ pub(super) fn default_log_level() -> String {
     "info".to_string()
 }
 
+pub(super) fn default_true() -> bool {
+    true
+}
+
 pub(super) fn default_log_format() -> String {
     "json".to_string()
 }
@@ -72,6 +76,10 @@ pub(super) fn default_retry_attempts() -> usize {
 
 pub(super) fn default_retry_backoff() -> u64 {
     100
+}
+
+pub(super) fn default_retry_body_threshold_bytes() -> usize {
+    64 * 1024
 }
 
 pub(super) fn default_health_check_interval_ms() -> u64 {
@@ -219,8 +227,35 @@ pub(super) fn default_http_compression_brotli_level() -> u32 {
     5
 }
 
+pub(super) fn default_runtime_body_channel_capacity() -> usize {
+    16
+}
+
+pub(super) fn default_runtime_max_grpc_web_trailer_bytes() -> u64 {
+    64 * 1024
+}
+
+pub(super) fn default_sse_flush_policy() -> crate::config::SseFlushPolicy {
+    crate::config::SseFlushPolicy::LowLatency
+}
+
+pub(super) fn default_sse_idle_timeout_ms() -> u64 {
+    300_000
+}
+
+pub(super) fn default_sse_max_stream_duration_ms() -> u64 {
+    3_600_000
+}
+
 pub(super) fn default_http_compression_zstd_level() -> i32 {
     3
+}
+
+pub(super) fn default_http_compression_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
 }
 
 pub(super) fn default_http_cache_purge_methods() -> Vec<String> {
@@ -251,6 +286,14 @@ pub(super) fn default_runtime_max_h3_streams_per_connection() -> usize {
     128
 }
 
+pub(super) fn default_runtime_h3_origin_pool_max_connections_per_origin() -> usize {
+    4
+}
+
+pub(super) fn default_runtime_h3_origin_pool_max_inflight_streams_per_connection() -> usize {
+    128
+}
+
 pub(super) fn default_runtime_upstream_proxy_max_concurrent_per_endpoint() -> usize {
     8
 }
@@ -268,11 +311,11 @@ pub(super) fn default_runtime_max_reverse_retry_template_body_bytes() -> usize {
 }
 
 pub(super) fn default_runtime_max_observed_request_body_bytes() -> usize {
-    64 * 1024 * 1024
+    8 * 1024 * 1024
 }
 
 pub(super) fn default_runtime_max_observed_response_body_bytes() -> usize {
-    64 * 1024 * 1024
+    8 * 1024 * 1024
 }
 
 pub(super) fn default_runtime_upstream_http_timeout_ms() -> u64 {
@@ -297,6 +340,26 @@ pub(super) fn default_runtime_tunnel_idle_timeout_ms() -> u64 {
 
 pub(super) fn default_runtime_h3_read_timeout_ms() -> u64 {
     10_000
+}
+
+pub(super) fn default_runtime_datagram_channel_capacity() -> usize {
+    64
+}
+
+pub(super) fn default_runtime_webtransport_datagram_channel_capacity() -> usize {
+    64
+}
+
+pub(super) fn default_runtime_webtransport_stream_channel_capacity() -> usize {
+    64
+}
+
+pub(super) fn default_runtime_max_grpc_message_bytes() -> u64 {
+    4 * 1024 * 1024
+}
+
+pub(super) fn default_runtime_max_grpc_stream_duration_ms() -> u64 {
+    300_000
 }
 
 pub(super) fn default_identity_proxy_name() -> String {

@@ -1,7 +1,7 @@
 use crate::protocol::QPACK_DECOMPRESSION_FAILED;
 
 #[derive(Debug)]
-pub(super) enum FieldDecodeError {
+pub(crate) enum FieldDecodeError {
     MissingRefs(usize),
     DecompressionFailed(String),
 }
@@ -17,6 +17,19 @@ impl From<anyhow::Error> for FieldDecodeError {
         Self::DecompressionFailed(error.to_string())
     }
 }
+
+impl std::fmt::Display for FieldDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingRefs(required) => {
+                write!(f, "missing QPACK dynamic references: {required}")
+            }
+            Self::DecompressionFailed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for FieldDecodeError {}
 
 #[derive(Debug)]
 pub(crate) enum HeaderDecodeError {

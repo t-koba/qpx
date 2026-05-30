@@ -1,8 +1,10 @@
 use super::{DispatchAuditContext, DispatchOutcome, annotate_dispatch_response};
 use crate::cache::CacheRequestKey;
 use crate::http::body::Body;
-use crate::http::cache_flow::{CacheWritebackContext, process_upstream_response_for_cache};
-use crate::http::l7::finalize_response_with_headers_in_place;
+use crate::http::capture::cache_flow::{
+    CacheWritebackContext, process_upstream_response_for_cache,
+};
+use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use anyhow::Result;
 use hyper::{Method, Request, Response};
 use qpx_core::rules::CompiledHeaderControl;
@@ -13,9 +15,9 @@ pub(crate) enum DispatchCacheLookupOutcome {
 }
 
 pub(crate) enum DispatchCacheCollapseOutcome {
-    Response(Response<Body>),
+    Response(Box<Response<Body>>),
     Continue {
-        revalidation_state: Option<crate::cache::RevalidationState>,
+        revalidation_state: Option<Box<crate::cache::RevalidationState>>,
         guard: Option<crate::cache::RequestCollapseGuard>,
     },
 }
@@ -46,6 +48,7 @@ pub(crate) struct DispatchCacheWriteInput<'a> {
     pub(crate) cache_target_key: Option<&'a CacheRequestKey>,
     pub(crate) cache_lookup_key: Option<&'a CacheRequestKey>,
     pub(crate) revalidation_state: Option<crate::cache::RevalidationState>,
+    pub(crate) request_collapse_guard: Option<crate::cache::RequestCollapseGuard>,
     pub(crate) request_method: &'a Method,
     pub(crate) response_delay_secs: u64,
     pub(crate) state: &'a crate::runtime::RuntimeState,
@@ -98,9 +101,10 @@ pub(crate) async fn finalize_dispatch_stale_if_error_response(
     http_modules: &mut crate::http::modules::HttpModuleExecution,
     audit: &DispatchAuditContext,
 ) -> Result<Option<Response<Body>>> {
-    let Some(stale) =
-        revalidation_state.and_then(crate::cache::maybe_build_stale_if_error_response)
-    else {
+    let Some(state) = revalidation_state else {
+        return Ok(None);
+    };
+    let Some(stale) = crate::cache::maybe_build_stale_if_error_response(state).await else {
         return Ok(None);
     };
     Ok(Some(
@@ -136,8 +140,15 @@ pub(crate) async fn write_dispatch_cache_result(
                 cache_policy: Some(policy),
                 request_headers_snapshot: snapshot,
                 revalidation_state: input.revalidation_state,
+                request_collapse_guard: input.request_collapse_guard,
                 body_read_timeout: std::time::Duration::from_millis(
-                    input.state.plan.limits.upstream_http_timeout_ms.max(1),
+                    input
+                        .state
+                        .plan
+                        .limits
+                        .timeouts
+                        .upstream_http_timeout_ms
+                        .max(1),
                 ),
                 backends: &input.state.cache.backends,
             },

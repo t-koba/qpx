@@ -35,11 +35,31 @@ pub(crate) fn plaintext_meta(status: u16) -> IpcResponseMeta {
     }
 }
 
-pub(crate) fn declared_content_length(headers: &[(String, String)]) -> Option<usize> {
-    headers
+pub(crate) fn declared_content_length(headers: &[(String, String)]) -> Result<Option<usize>> {
+    let mut parsed = None;
+    for (_, value) in headers
         .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.parse().ok())
+        .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+    {
+        for part in value.split(',') {
+            let raw = part.trim();
+            if raw.is_empty() || raw.starts_with('-') {
+                return Err(anyhow!("invalid Content-Length value"));
+            }
+            let len = raw
+                .parse::<u64>()
+                .map_err(|_| anyhow!("invalid Content-Length value"))?;
+            let len = usize::try_from(len).map_err(|_| anyhow!("Content-Length too large"))?;
+            match parsed {
+                Some(existing) if existing != len => {
+                    return Err(anyhow!("conflicting Content-Length values"));
+                }
+                Some(_) => {}
+                None => parsed = Some(len),
+            }
+        }
+    }
+    Ok(parsed)
 }
 
 pub(crate) fn meta_params_bytes(meta: &IpcRequestMeta) -> usize {
@@ -63,7 +83,7 @@ pub(crate) fn plan_ipc_request(
         .uri
         .parse()
         .map_err(|e| anyhow!("invalid IPC request URI '{}': {e}", meta.uri))?;
-    let script_name = uri.path().to_string();
+    let request_path = uri.path().to_string();
     let query_string = uri.query().unwrap_or("").to_string();
     let header_host = meta
         .headers
@@ -74,18 +94,23 @@ pub(crate) fn plan_ipc_request(
         .and_then(host_only)
         .or_else(|| uri.authority().and_then(|a| host_only(a.as_str())));
 
-    let (executor, matched_prefix) = match router.route(script_name.as_str(), route_host.as_deref())
-    {
-        Some(v) => v,
-        None => return Ok(Err(IpcPlainResponse::new(404, b"no handler matched"))),
-    };
+    let (executor, matched_prefix) =
+        match router.route(request_path.as_str(), route_host.as_deref()) {
+            Some(v) => v,
+            None => return Ok(Err(IpcPlainResponse::new(404, b"no handler matched"))),
+        };
+    let (script_name, path_info) =
+        split_script_name_path_info(request_path.as_str(), matched_prefix.as_deref());
 
     let header_host = header_host.or_else(|| uri.authority().map(|a| a.as_str()));
     let (server_name, server_port) = header_host
         .map(host_port)
         .unwrap_or((Some("localhost".to_string()), Some(80)));
 
-    let declared_stdin_bytes = declared_content_length(&meta.headers);
+    let declared_stdin_bytes = match declared_content_length(&meta.headers) {
+        Ok(value) => value,
+        Err(_) => return Ok(Err(IpcPlainResponse::new(400, b"invalid content-length"))),
+    };
     let content_type = meta
         .headers
         .iter()
@@ -96,12 +121,13 @@ pub(crate) fn plan_ipc_request(
     let remote_port = meta.params.get("REMOTE_PORT").and_then(|p| p.parse().ok());
     let cgi_req = CgiRequest {
         script_name,
-        path_info: String::new(),
+        path_info,
         query_string,
         request_method: meta.method,
         content_type,
         content_length: declared_stdin_bytes.unwrap_or(0),
-        server_protocol: "HTTP/1.1".to_string(),
+        declared_content_length: declared_stdin_bytes,
+        server_protocol: meta.server_protocol,
         server_name: server_name.unwrap_or_else(|| "localhost".to_string()),
         server_port: server_port.unwrap_or(80),
         remote_addr,
@@ -119,6 +145,50 @@ pub(crate) fn plan_ipc_request(
         cgi_req,
         expected_stdin_bytes: declared_stdin_bytes,
     }))
+}
+
+fn split_script_name_path_info(path: &str, matched_prefix: Option<&str>) -> (String, String) {
+    let prefix = matched_prefix.unwrap_or("");
+    if !prefix.is_empty() && prefix != "/" && !prefix.ends_with('/') {
+        let normalized = prefix.trim_end_matches('/').to_string();
+        if path == normalized {
+            return (normalized, String::new());
+        }
+        if let Some(path_info) = path.strip_prefix(normalized.as_str())
+            && path_info.starts_with('/')
+        {
+            return (normalized, path_info.to_string());
+        }
+    }
+
+    let suffix = path.strip_prefix(prefix).unwrap_or(path);
+    let suffix = suffix.strip_prefix('/').unwrap_or(suffix);
+    if suffix.is_empty() {
+        return (normalize_script_name(prefix, path), String::new());
+    }
+    let script_tail_end = suffix.find('/').unwrap_or(suffix.len());
+    let script_tail = &suffix[..script_tail_end];
+    let path_info = suffix[script_tail_end..].to_string();
+    let script_name = if prefix.is_empty() || prefix == "/" {
+        format!("/{script_tail}")
+    } else {
+        format!("{}/{}", prefix.trim_end_matches('/'), script_tail)
+    };
+    (script_name, path_info)
+}
+
+fn normalize_script_name(prefix: &str, fallback: &str) -> String {
+    if prefix == "/" {
+        "/".to_string()
+    } else if prefix.is_empty() {
+        if fallback.is_empty() {
+            "/".to_string()
+        } else {
+            fallback.to_string()
+        }
+    } else {
+        prefix.trim_end_matches('/').to_string()
+    }
 }
 
 fn host_only(authority: &str) -> Option<String> {
@@ -174,4 +244,64 @@ fn cgi_header_map(headers: Vec<(String, String)>) -> HashMap<String, String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{declared_content_length, split_script_name_path_info};
+
+    #[test]
+    fn declared_content_length_accepts_repeated_equal_values() {
+        let headers = vec![
+            ("Content-Length".to_string(), "5".to_string()),
+            ("content-length".to_string(), "5, 5".to_string()),
+        ];
+        assert_eq!(declared_content_length(&headers).expect("length"), Some(5));
+    }
+
+    #[test]
+    fn declared_content_length_rejects_conflicting_values() {
+        let headers = vec![
+            ("Content-Length".to_string(), "5".to_string()),
+            ("content-length".to_string(), "6".to_string()),
+        ];
+        assert!(declared_content_length(&headers).is_err());
+    }
+
+    #[test]
+    fn declared_content_length_rejects_invalid_values() {
+        let headers = vec![("Content-Length".to_string(), "nope".to_string())];
+        assert!(declared_content_length(&headers).is_err());
+    }
+
+    #[test]
+    fn splits_script_name_and_path_info_after_matched_prefix() {
+        let (script_name, path_info) =
+            split_script_name_path_info("/cgi-bin/app/foo/bar", Some("/cgi-bin/"));
+        assert_eq!(script_name, "/cgi-bin/app");
+        assert_eq!(path_info, "/foo/bar");
+    }
+
+    #[test]
+    fn treats_non_slash_terminated_prefix_as_script_name() {
+        let (script_name, path_info) =
+            split_script_name_path_info("/cgi-bin/nested/app/foo", Some("/cgi-bin/nested/app"));
+        assert_eq!(script_name, "/cgi-bin/nested/app");
+        assert_eq!(path_info, "/foo");
+    }
+
+    #[test]
+    fn exact_non_slash_terminated_prefix_is_script_name() {
+        let (script_name, path_info) =
+            split_script_name_path_info("/cgi-bin/nested/app", Some("/cgi-bin/nested/app"));
+        assert_eq!(script_name, "/cgi-bin/nested/app");
+        assert_eq!(path_info, "");
+    }
+
+    #[test]
+    fn splits_without_matched_prefix() {
+        let (script_name, path_info) = split_script_name_path_info("/app/foo", None);
+        assert_eq!(script_name, "/app");
+        assert_eq!(path_info, "/foo");
+    }
 }

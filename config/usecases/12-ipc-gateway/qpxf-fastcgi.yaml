@@ -13,6 +13,8 @@ handlers:
     type: fastcgi
     address: ${QPXF_FASTCGI_ADDRESS:-127.0.0.1:9000}
     timeout_ms: 3000
+    script_name_prefixes:
+    - /php/index.php
     pool:
       max_concurrency: 128
       max_idle: 16
@@ -25,6 +27,8 @@ handlers:
     type: scgi
     address: ${QPXF_SCGI_ADDRESS:-127.0.0.1:4000}
     timeout_ms: 3000
+    script_name_prefixes:
+    - /scgi/app
     max_concurrency: 128
     max_stdin_bytes: 33554432
     max_stdout_bytes: 33554432

@@ -2,9 +2,11 @@
 mod cgi_tests {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    use tokio::io::AsyncReadExt;
-    use tokio::io::AsyncWriteExt;
-    use tokio::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+    use tokio::net::UnixListener;
+    use tokio::net::UnixStream;
+    use tokio::sync::Semaphore;
 
     use qpx_core::shm_ring::ShmRingBuffer;
 
@@ -48,55 +50,16 @@ handlers:
         let tmp = tempdir();
         let _script = create_cgi_script(&tmp);
 
-        // Find a free port by binding, getting the port, then closing.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        // Brief sleep to ensure OS fully releases the port.
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let listen_addr = format!("127.0.0.1:{}", port);
+        let socket_path = tmp.join("qpxf.sock");
+        let listen_addr = format!("unix://{}", socket_path.display());
         let config_path = create_qpxf_config(&tmp, &listen_addr);
-
-        // Build qpxf binary path.
-        let qpxf_bin = std::path::Path::new(env!("CARGO_BIN_EXE_qpxf"));
-
-        // Start qpxf — pass --listen to override the config to avoid conflict
-        // with the default CLI value.
-        let mut child = tokio::process::Command::new(qpxf_bin)
-            .args([
-                "--config",
-                config_path.to_str().unwrap(),
-                "--listen",
-                &listen_addr,
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("failed to start qpxf");
-
-        // Wait for qpxf to be ready (retry connection).
-        let mut connected = false;
-        for _ in 0..20 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            if TcpStream::connect(&listen_addr).await.is_ok() {
-                connected = true;
-                break;
-            }
-        }
-        if !connected {
-            // Read stderr to diagnose.
-            let _ = child.kill().await;
-            let output = child.wait_with_output().await.unwrap();
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            panic!("qpxf did not start in time. stderr: {}", stderr);
-        }
+        let server = spawn_test_server(&config_path, &socket_path).await;
 
         // Connect and send IPC request.
-        let result = send_ipc_request(&listen_addr, "/hello.sh", "GET").await;
+        let result = send_ipc_request(&socket_path, "/hello.sh", "GET").await;
 
         // Cleanup.
-        child.kill().await.ok();
+        server.abort();
 
         let (_status, body) = result.expect("IPC request failed");
         assert!(body.contains("Hello from CGI!"), "body was: {}", body);
@@ -109,45 +72,13 @@ handlers:
         let tmp = tempdir();
         let _script = create_cgi_script(&tmp);
 
-        // Find a free port by binding, getting the port, then closing.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let listen_addr = format!("127.0.0.1:{}", port);
+        let socket_path = tmp.join("qpxf.sock");
+        let listen_addr = format!("unix://{}", socket_path.display());
         let config_path = create_qpxf_config(&tmp, &listen_addr);
-        let qpxf_bin = std::path::Path::new(env!("CARGO_BIN_EXE_qpxf"));
+        let server = spawn_test_server(&config_path, &socket_path).await;
 
-        let mut child = tokio::process::Command::new(qpxf_bin)
-            .args([
-                "--config",
-                config_path.to_str().unwrap(),
-                "--listen",
-                &listen_addr,
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("failed to start qpxf");
-
-        let mut connected = false;
-        for _ in 0..20 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            if TcpStream::connect(&listen_addr).await.is_ok() {
-                connected = true;
-                break;
-            }
-        }
-        if !connected {
-            let _ = child.kill().await;
-            let output = child.wait_with_output().await.unwrap();
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            panic!("qpxf did not start in time. stderr: {}", stderr);
-        }
-
-        let result = send_two_ipc_requests_shm_keepalive(&tmp, &listen_addr).await;
-        child.kill().await.ok();
+        let result = send_two_ipc_requests_shm_keepalive(&tmp, &socket_path).await;
+        server.abort();
 
         let (body1, body2) = result.expect("IPC SHM request failed");
         assert!(body1.contains("Hello from CGI!"), "body1 was: {}", body1);
@@ -156,11 +87,44 @@ handlers:
         assert!(body2.contains("METHOD=POST"), "body2 was: {}", body2);
     }
 
+    async fn spawn_test_server(
+        config_path: &std::path::Path,
+        socket_path: &std::path::Path,
+    ) -> tokio::task::JoinHandle<()> {
+        let cfg = qpxf::config::load_config(config_path).expect("qpxf config");
+        cfg.validate().expect("qpxf config validation");
+        let router = Arc::new(qpxf::router::Router::new(&cfg).expect("qpxf router"));
+        let semaphore = Arc::new(Semaphore::new(cfg.workers));
+        let listener = UnixListener::bind(socket_path).expect("bind qpxf test socket");
+        let ctx = qpxf::server::ConnectionContext {
+            router,
+            semaphore,
+            allow_shm_reuse: true,
+            input_idle: tokio::time::Duration::from_millis(cfg.input_idle_timeout_ms),
+            conn_idle: tokio::time::Duration::from_millis(cfg.conn_idle_timeout_ms),
+            max_requests_per_connection: cfg.max_requests_per_connection,
+            max_params_bytes: cfg.max_params_bytes,
+            max_stdin_bytes: cfg.max_stdin_bytes,
+        };
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let _ = qpxf::server::handle_connection(stream, ctx).await;
+                });
+            }
+        })
+    }
+
     async fn send_two_ipc_requests_shm_keepalive(
         tmp: &std::path::Path,
-        addr: &str,
+        socket_path: &std::path::Path,
     ) -> Result<(String, String), String> {
-        let mut stream = TcpStream::connect(addr)
+        let mut stream = UnixStream::connect(socket_path)
             .await
             .map_err(|e| format!("connect: {}", e))?;
 
@@ -171,7 +135,7 @@ handlers:
 
     async fn send_ipc_request_over_stream_shm(
         _tmp: &std::path::Path,
-        stream: &mut TcpStream,
+        stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
         script_name: &str,
         method: &str,
     ) -> Result<String, String> {
@@ -204,12 +168,14 @@ handlers:
         let meta = qpx_core::ipc::meta::IpcRequestMeta {
             method: method.to_string(),
             uri: script_name.to_string(),
+            server_protocol: "HTTP/3".to_string(),
             headers: vec![("Host".to_string(), "localhost".to_string())],
             params,
             req_body_shm_path: Some(req_token),
             req_body_shm_size_bytes: Some(ring_size),
             res_body_shm_path: Some(res_token),
             res_body_shm_size_bytes: Some(ring_size),
+            shm_reusable: false,
         };
 
         qpx_core::ipc::protocol::write_frame(stream, &meta)
@@ -252,11 +218,11 @@ handlers:
     }
 
     async fn send_ipc_request(
-        addr: &str,
+        socket_path: &std::path::Path,
         script_name: &str,
         method: &str,
     ) -> Result<(u16, String), String> {
-        let mut stream = TcpStream::connect(addr)
+        let mut stream = UnixStream::connect(socket_path)
             .await
             .map_err(|e| format!("connect: {}", e))?;
 
@@ -267,12 +233,14 @@ handlers:
         let meta = qpx_core::ipc::meta::IpcRequestMeta {
             method: method.to_string(),
             uri: script_name.to_string(),
+            server_protocol: "HTTP/3".to_string(),
             headers: vec![("Host".to_string(), "localhost".to_string())],
             params,
             req_body_shm_path: None,
             req_body_shm_size_bytes: None,
             res_body_shm_path: None,
             res_body_shm_size_bytes: None,
+            shm_reusable: false,
         };
 
         qpx_core::ipc::protocol::write_frame(&mut stream, &meta)

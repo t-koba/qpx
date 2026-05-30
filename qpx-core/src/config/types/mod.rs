@@ -10,17 +10,67 @@ mod rules;
 mod security;
 mod upstream;
 
-pub use self::cache::*;
-pub use self::canonical::*;
-pub use self::core::*;
-pub use self::http::*;
-pub use self::listener::*;
-pub use self::observability::*;
-pub use self::policy::*;
-pub use self::reverse::*;
-pub use self::rules::*;
-pub use self::security::*;
-pub use self::upstream::*;
+pub use self::cache::{
+    CacheBackendConfig, CachePolicyConfig, RateLimitApplyTo, RateLimitConfig,
+    RateLimitProfileConfig, RateLimitQuotaConfig, RateLimitRequestsConfig, RateLimitSessionsConfig,
+    RateLimitTrafficConfig,
+};
+pub use self::canonical::{
+    DecisionConfig, HttpGlobalConfig, HttpModuleChainConfig, SecurityConfig, TelemetryConfig,
+    TrafficConfig, canonical_schema_value,
+};
+pub use self::core::{
+    DatagramOverflowStrategyConfig, GrpcConfig, IdentityConfig, MAX_GRPC_STREAM_DURATION_MS,
+    MAX_GRPC_WEB_TRAILER_BYTES, MAX_OBSERVED_BODY_BYTES, MAX_REVERSE_RETRY_TEMPLATE_BODY_BYTES,
+    MAX_SSE_STREAM_DURATION_MS, MessagesConfig, RuntimeConfig, SseFlushPolicy, SseStreamingPolicy,
+    StreamingConfig, StreamingRequirement, UnknownLengthExactSizePolicy,
+};
+pub use self::http::{
+    CachePurgeModuleConfig, HeaderCaptureConfig, HttpGuardJsonConfig, HttpGuardLimitsConfig,
+    HttpGuardMultipartConfig, HttpGuardNormalizeConfig, HttpGuardProfileConfig,
+    HttpGuardProtocolSafetyConfig, HttpModuleConfig, HttpPolicyConfig,
+    HttpResponseCacheEffectsConfig, HttpResponseEffectsConfig, HttpResponseMirrorEffectsConfig,
+    HttpResponseRetryEffectsConfig, HttpResponseRuleConfig, ResponseCompressionModuleConfig,
+    SubrequestModuleConfig, SubrequestPhase, SubrequestResponseMode,
+};
+pub use self::listener::{
+    ConnectUdpConfig, FtpConfig, Http3IngressEdgeConfig, IngressEdgeConfig, IngressEdgeMode,
+    OriginalDstConfig, OriginalDstSource, TlsInspectionConfig, XdpConfig,
+};
+pub use self::observability::{
+    AccessLogConfig, AcmeConfig, AuditIncludeField, AuditLogConfig, CaptureBodyMode,
+    CapturePlaintextPolicyConfig, CapturePolicyConfig, CaptureRedactionConfig,
+    ExporterCaptureConfig, ExporterConfig, LogOutputConfig, MetricsConfig, OtelConfig,
+    SystemLogConfig,
+};
+pub use self::policy::{
+    DestinationConflictMode, DestinationEvidenceSourceKind, DestinationMergeMode,
+    DestinationMinConfidenceConfig, DestinationResolutionConfig,
+    DestinationResolutionOverrideConfig, DestinationResolutionPolicyConfig,
+};
+pub use self::reverse::{
+    AdaptiveThresholdConfig, ConsecutiveFailuresConfig, EjectionConfig, EndpointLifecycleConfig,
+    HalfOpenConfig, HealthCheckConfig, HttpHealthCheckConfig, IpcBodyLimitConfig, IpcMode,
+    IpcUpstreamConfig, LatencyThresholdConfig, OutlierDetectionConfig, PathRewriteConfig,
+    RegexPathRewriteConfig, ResilienceConfig, ResilienceRetryConfig, RetryBudgetConfig,
+    ReverseAffinityConfig, ReverseEdgeConfig, ReverseHttp3Config, ReverseRouteBackendConfig,
+    ReverseRouteConfig, ReverseRouteMirrorConfig, ReverseRouteTargetConfig, ReverseTlsConfig,
+    ReverseTlsPassthroughRouteConfig, TlsCertConfig, TlsPassthroughMatchConfig,
+};
+pub use self::rules::{
+    ActionConfig, ActionKind, CertificateMatchConfig, DestinationDimensionMatchConfig,
+    DestinationMatchConfig, HeaderControl, HeaderMatch, IdentityMatchConfig, LocalResponseConfig,
+    MatchConfig, RegexReplace, RpcLocalResponseConfig, RpcMatchConfig, RuleAuthConfig, RuleConfig,
+    TlsFingerprintMatchConfig,
+};
+pub use self::security::{
+    AssertionClaimsMapConfig, AuthConfig, ExtAuthzConfig, ExtAuthzKind, ExtAuthzOnError,
+    ExtAuthzSendConfig, IdentitySourceConfig, IdentitySourceFromConfig,
+    IdentitySourceHeadersConfig, IdentitySourceKind, LdapConfig, LocalUser, MtlsIdentityMapConfig,
+    NamedSetConfig, NamedSetKind, PolicyContextConfig, SignedAssertionConfig,
+    UpstreamTlsTrustConfig, UpstreamTlsTrustProfileConfig,
+};
+pub use self::upstream::{UpstreamConfig, UpstreamDiscoveryConfig, UpstreamDiscoveryKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {

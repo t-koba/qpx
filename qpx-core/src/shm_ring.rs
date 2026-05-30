@@ -1,11 +1,14 @@
 use anyhow::{Result, anyhow};
 use memmap2::MmapMut;
 use std::collections::hash_map::DefaultHasher;
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use tokio::time::sleep;
 
 const HEADER_SIZE: usize = 80; // Ring header size (bytes)
 const READ_IDX_OFFSET: usize = 0; // 8 bytes for read_idx (AtomicUsize)
@@ -26,6 +29,8 @@ const INIT_STATE_READY: u32 = 2;
 
 const SHM_MAGIC: [u8; 8] = *b"QPXSHM2\0";
 const SHM_VERSION: u32 = 2;
+const DOORBELL_POLL_MIN_INTERVAL: Duration = Duration::from_millis(1);
+const DOORBELL_POLL_MAX_INTERVAL: Duration = Duration::from_millis(16);
 
 // Shared-memory layout invariants:
 // - every mapping is exactly HEADER_SIZE + capacity bytes;
@@ -142,7 +147,19 @@ impl ShmRingBuffer {
 
     /// Try to write data to the ring buffer. Returns Ok(true) if successful, Ok(false) if full.
     pub fn try_push(&mut self, data: &[u8]) -> Result<bool> {
-        let msg_len = data.len();
+        self.try_push_vectored(&[data])
+    }
+
+    /// Try to write a message from multiple contiguous parts.
+    ///
+    /// This keeps callers that already own separate header/payload buffers from first
+    /// materializing another temporary Vec before the ring copy.
+    pub fn try_push_vectored(&mut self, parts: &[&[u8]]) -> Result<bool> {
+        let msg_len = parts.iter().try_fold(0usize, |total, part| {
+            total
+                .checked_add(part.len())
+                .ok_or_else(|| anyhow!("message length overflow"))
+        })?;
         let required_space = msg_len
             .checked_add(4)
             .ok_or_else(|| anyhow!("message length overflow"))?; // 4 bytes for length prefix + payload
@@ -179,8 +196,10 @@ impl ShmRingBuffer {
         w = (w + 4) % self.capacity;
 
         // Write the payload
-        self.write_bytes_at(w, data);
-        w = (w + msg_len) % self.capacity;
+        for part in parts.iter().filter(|part| !part.is_empty()) {
+            self.write_bytes_at(w, part);
+            w = (w + part.len()) % self.capacity;
+        }
 
         // Publish the new write index
         self.write_idx().store(w, Ordering::Release);
@@ -194,11 +213,24 @@ impl ShmRingBuffer {
 
     /// Try to read a message from the ring buffer. Returns Ok(Some(data)) if successful, Ok(None) if empty.
     pub fn try_pop(&mut self) -> Result<Option<Vec<u8>>> {
+        let mut data = Vec::new();
+        if self.try_pop_into(&mut data)? {
+            Ok(Some(data))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Try to read a message into a caller-owned buffer.
+    ///
+    /// Returns `Ok(true)` when a message was read and `Ok(false)` when the ring is empty.
+    /// Reusing `out` avoids one heap allocation per message in hot IPC/capture loops.
+    pub fn try_pop_into(&mut self, out: &mut Vec<u8>) -> Result<bool> {
         let r = self.read_idx().load(Ordering::Acquire);
         let w = self.write_idx().load(Ordering::Acquire);
 
         if r == w {
-            return Ok(None); // Buffer is empty
+            return Ok(false); // Buffer is empty
         }
 
         let unread_bytes = if w >= r { w - r } else { self.capacity - r + w };
@@ -237,8 +269,9 @@ impl ShmRingBuffer {
         let mut new_r = (r + 4) % self.capacity;
 
         // Read the payload
-        let mut data = vec![0u8; msg_len];
-        self.read_bytes_at(new_r, &mut data);
+        out.clear();
+        out.resize(msg_len, 0);
+        self.read_bytes_at(new_r, out);
         new_r = (new_r + msg_len) % self.capacity;
 
         // Publish the new read index
@@ -253,7 +286,7 @@ impl ShmRingBuffer {
             }
         }
 
-        Ok(Some(data))
+        Ok(true)
     }
 
     pub async fn wait_for_data(&self) -> Result<()> {
@@ -322,6 +355,16 @@ impl ShmRingBuffer {
         self.data_doorbell.unlink()?;
         self.space_doorbell.unlink()?;
         Ok(())
+    }
+
+    pub fn reset(&mut self) {
+        self.read_idx().store(0, Ordering::Release);
+        self.write_idx().store(0, Ordering::Release);
+        self.consumer_waiting().store(0, Ordering::Release);
+        self.producer_waiting().store(0, Ordering::Release);
+        self.producer_need_bytes().store(0, Ordering::Release);
+        let _ = self.data_doorbell.signal();
+        let _ = self.space_doorbell.signal();
     }
 
     fn write_bytes_at(&mut self, offset: usize, data: &[u8]) {
@@ -434,7 +477,7 @@ fn doorbell_name(path: &Path, kind: DoorbellKind) -> String {
 #[cfg(unix)]
 struct ShmDoorbell {
     // Store as an integer to keep the type `Send` (raw pointers are not `Send` on all platforms).
-    sem: usize,
+    sem: Option<usize>,
     name: std::ffi::CString,
 }
 
@@ -446,19 +489,26 @@ impl ShmDoorbell {
         // The semaphore is created with private permissions and stored until `Drop` closes it.
         let sem = unsafe { libc::sem_open(name.as_ptr(), libc::O_CREAT, 0o600, 0) };
         if sem as isize == -1 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOSPC) {
+                return Ok(Self { sem: None, name });
+            }
             return Err(anyhow!(
                 "failed to open shared memory doorbell semaphore: {}",
-                std::io::Error::last_os_error()
+                err
             ));
         }
         Ok(Self {
-            sem: sem as usize,
+            sem: Some(sem as usize),
             name,
         })
     }
 
     fn signal(&self) -> Result<()> {
-        let sem = self.sem as *mut libc::sem_t;
+        let Some(sem) = self.sem else {
+            return Ok(());
+        };
+        let sem = sem as *mut libc::sem_t;
         // SAFETY: `self.sem` is produced by a successful `sem_open` and is closed only in `Drop`.
         if unsafe { libc::sem_post(sem) } != 0 {
             return Err(anyhow!(
@@ -470,26 +520,34 @@ impl ShmDoorbell {
     }
 
     async fn wait(&self) -> Result<()> {
-        let sem = self.sem;
-        tokio::task::spawn_blocking(move || {
-            let sem = sem as *mut libc::sem_t;
-            loop {
-                // SAFETY: `sem` is a live named semaphore handle copied from `self.sem`.
-                if unsafe { libc::sem_wait(sem) } == 0 {
-                    return Ok(());
-                }
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                return Err(anyhow!("failed waiting on shared memory doorbell: {}", err));
+        let Some(sem) = self.sem else {
+            sleep(DOORBELL_POLL_MIN_INTERVAL).await;
+            return Ok(());
+        };
+        let mut poll_interval = DOORBELL_POLL_MIN_INTERVAL;
+        loop {
+            let sem_ptr = sem as *mut libc::sem_t;
+            // SAFETY: `sem` is a live named semaphore handle copied from `self.sem`.
+            if unsafe { libc::sem_trywait(sem_ptr) } == 0 {
+                return Ok(());
             }
-        })
-        .await
-        .map_err(|e| anyhow!("doorbell wait join failed: {e}"))?
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::EAGAIN) => {
+                    sleep(poll_interval).await;
+                    poll_interval =
+                        (poll_interval.saturating_mul(2)).min(DOORBELL_POLL_MAX_INTERVAL);
+                }
+                _ => return Err(anyhow!("failed waiting on shared memory doorbell: {}", err)),
+            }
+        }
     }
 
     fn unlink(&self) -> Result<()> {
+        if self.sem.is_none() {
+            return Ok(());
+        }
         // SAFETY: `self.name` is the same valid CString used to open the named semaphore.
         if unsafe { libc::sem_unlink(self.name.as_ptr()) } == 0 {
             return Ok(());
@@ -505,7 +563,10 @@ impl ShmDoorbell {
 #[cfg(unix)]
 impl Drop for ShmDoorbell {
     fn drop(&mut self) {
-        let sem = self.sem as *mut libc::sem_t;
+        let Some(sem) = self.sem else {
+            return;
+        };
+        let sem = sem as *mut libc::sem_t;
         // SAFETY: `sem` was returned by `sem_open`; double close is prevented by ownership of
         // `ShmDoorbell`.
         unsafe {
@@ -560,25 +621,30 @@ impl ShmDoorbell {
     }
 
     async fn wait(&self) -> Result<()> {
-        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-        use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
         let handle = self.handle;
-        tokio::task::spawn_blocking(move || {
-            let handle = handle as windows_sys::Win32::Foundation::HANDLE;
+        let mut poll_interval = DOORBELL_POLL_MIN_INTERVAL;
+        loop {
+            let handle_ptr = handle as windows_sys::Win32::Foundation::HANDLE;
             // SAFETY: `handle` is a valid event handle owned by this doorbell while the wait task
-            // is spawned from a borrowed `&self`.
-            let rc = unsafe { WaitForSingleObject(handle, INFINITE) };
-            if rc != WAIT_OBJECT_0 {
-                return Err(anyhow!(
-                    "failed waiting on shared memory doorbell event: {}",
-                    std::io::Error::last_os_error()
-                ));
+            // is spawned from a borrowed `&self`. A zero timeout performs a nonblocking poll.
+            match unsafe { WaitForSingleObject(handle_ptr, 0) } {
+                WAIT_OBJECT_0 => return Ok(()),
+                WAIT_TIMEOUT => {
+                    sleep(poll_interval).await;
+                    poll_interval =
+                        (poll_interval.saturating_mul(2)).min(DOORBELL_POLL_MAX_INTERVAL);
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "failed waiting on shared memory doorbell event: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
             }
-            Ok(())
-        })
-        .await
-        .map_err(|e| anyhow!("doorbell wait join failed: {e}"))?
+        }
     }
 
     fn unlink(&self) -> Result<()> {
@@ -634,7 +700,7 @@ fn open_shm_file(path: &Path) -> Result<File> {
     ensure_not_symlink(path, "shared memory file")?;
 
     #[cfg(unix)]
-    let file = {
+    {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let file = OpenOptions::new()
             .read(true)
@@ -644,19 +710,61 @@ fn open_shm_file(path: &Path) -> Result<File> {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)?;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-        file
-    };
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+            anyhow!(
+                "failed to set private permissions on shared memory file {}: {e}",
+                path.display()
+            )
+        })?;
+        validate_secure_shm_file(&file, path)?;
+        Ok(file)
+    }
 
     #[cfg(not(unix))]
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
+    {
+        let _ = path;
+        Err(anyhow!(
+            "shared-memory ring files are not supported on this platform without owner-only file permissions"
+        ))
+    }
+}
 
-    Ok(file)
+#[cfg(unix)]
+fn validate_secure_shm_file(file: &File, path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata().map_err(|e| {
+        anyhow!(
+            "failed to stat shared memory file {} after open: {e}",
+            path.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(anyhow!(
+            "shared memory path {} is not a regular file",
+            path.display()
+        ));
+    }
+    if metadata.nlink() != 1 {
+        return Err(anyhow!(
+            "shared memory file {} must have exactly one hard link",
+            path.display()
+        ));
+    }
+    let euid = unsafe { libc::geteuid() };
+    if metadata.uid() != euid {
+        return Err(anyhow!(
+            "shared memory file {} must be owned by the qpx process user",
+            path.display()
+        ));
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Err(anyhow!(
+            "shared memory file {} must not be accessible by group or others",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn init_or_validate_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
@@ -936,6 +1044,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_shm_ring_buffer() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
@@ -951,13 +1060,18 @@ mod tests {
         let msg2 = b"Another message";
         assert!(ring.try_push(msg2)?);
 
-        assert_eq!(ring.try_pop()?.as_deref(), Some(msg1.as_slice()));
-        assert_eq!(ring.try_pop()?.as_deref(), Some(msg2.as_slice()));
+        let mut out = Vec::with_capacity(64);
+        assert!(ring.try_pop_into(&mut out)?);
+        assert_eq!(out.as_slice(), msg1.as_slice());
+        assert!(ring.try_pop_into(&mut out)?);
+        assert_eq!(out.as_slice(), msg2.as_slice());
+        assert!(!ring.try_pop_into(&mut out)?);
         assert_eq!(ring.try_pop()?, None);
 
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_shm_ring_buffer_wrap() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
@@ -978,5 +1092,54 @@ mod tests {
         assert_eq!(ring.try_pop()?.as_deref(), Some(msg2.as_slice()));
 
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_shm_ring_buffer_vectored_push() -> Result<()> {
+        let temp_file = NamedTempFile::new()?;
+        let path = temp_file.path();
+        let mut ring = ShmRingBuffer::create_or_open(path, 1024)?;
+
+        assert!(ring.try_push_vectored(&[b"head", b"-", b"payload"])?);
+        let mut out = Vec::new();
+        assert!(ring.try_pop_into(&mut out)?);
+        assert_eq!(out.as_slice(), b"head-payload");
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shm_ring_rejects_existing_hardlinked_file() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("capture.shm");
+        let other = dir.path().join("capture.link");
+        File::create(&path)?;
+        fs::hard_link(&path, &other)?;
+
+        let err = match ShmRingBuffer::create_or_open(&path, 1024) {
+            Ok(_) => panic!("hardlinked SHM file must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("exactly one hard link"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn shm_ring_buffer_fails_closed_without_owner_only_file_permissions() {
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let err = match ShmRingBuffer::create_or_open(temp_file.path(), 1024) {
+            Ok(_) => panic!("non-Unix SHM file creation must fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("owner-only file permissions"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -1,5 +1,6 @@
 use super::codec::{encode_header_prefix, encode_prefixed_int, encode_string};
 use super::static_table::{static_exact_match, static_name_index};
+use crate::qpack_fields::validate_h3_regular_field;
 use anyhow::Result;
 use http::HeaderMap;
 
@@ -24,6 +25,7 @@ pub(crate) fn encode_request_head(
         encode_field(&mut out, ":protocol", protocol.as_bytes());
     }
     for (name, value) in head.headers() {
+        validate_h3_regular_field(name.as_str(), value.as_bytes())?;
         encode_field(&mut out, name.as_str(), value.as_bytes());
     }
     Ok(out)

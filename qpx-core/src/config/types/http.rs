@@ -39,6 +39,8 @@ pub struct ResponseCompressionModuleConfig {
     pub max_body_bytes: usize,
     #[serde(default)]
     pub content_types: Vec<String>,
+    #[serde(default)]
+    pub force_compress_event_stream: bool,
     #[serde(default = "default_http_compression_enable_gzip")]
     pub gzip: bool,
     #[serde(default = "default_http_compression_enable_brotli")]
@@ -51,6 +53,8 @@ pub struct ResponseCompressionModuleConfig {
     pub brotli_level: u32,
     #[serde(default = "default_http_compression_zstd_level")]
     pub zstd_level: i32,
+    #[serde(default = "default_http_compression_worker_count")]
+    pub worker_count: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

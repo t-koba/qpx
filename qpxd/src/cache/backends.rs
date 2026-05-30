@@ -4,7 +4,7 @@ use qpx_core::config::CacheBackendConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub fn build_backends(
+pub(crate) fn build_backends(
     configs: &[CacheBackendConfig],
     generated_user_agent: Option<&str>,
 ) -> Result<HashMap<String, Arc<dyn CacheBackend>>> {

@@ -1,20 +1,33 @@
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 
-use super::super::types::{Config, ReverseRouteTargetConfig};
+use super::super::types::{Config, ReverseRouteTargetConfig, StreamingRequirement};
 use super::observability::validate_capture_policy;
 use super::rules::{
     has_cache_purge_module, validate_affinity_config, validate_cache_policy,
-    validate_connection_filter_rules, validate_endpoint_lifecycle_config,
+    validate_connection_filter_rules, validate_endpoint_lifecycle_config, validate_grpc_config,
     validate_health_check_config, validate_http_modules, validate_http_response_effects,
     validate_identity_match_config, validate_lb_config, validate_match_config,
-    validate_policy_context_refs, validate_resilience_config, validate_xdp_config,
+    validate_policy_context_refs, validate_resilience_config, validate_sse_policy,
+    validate_streaming_config, validate_xdp_config,
 };
 use super::security::{
     validate_destination_resolution_override, validate_http_guard_profile_ref,
     validate_upstream_trust_profile_ref,
 };
 use super::upstreams::{validate_named_upstream_ref, validate_upstream_tls_trust_config};
+
+fn validate_streaming_requirement(
+    requirement: Option<&StreamingRequirement>,
+    context: &str,
+) -> Result<()> {
+    if matches!(requirement, Some(StreamingRequirement::Disabled)) {
+        return Err(anyhow!(
+            "{context}.streaming_requirement: disabled is not supported; omit the field for the default streaming-first mode or use required to reject buffering features"
+        ));
+    }
+    Ok(())
+}
 use super::{REVERSE_PASSTHROUGH_UPSTREAM_URL_SCHEMES, REVERSE_UPSTREAM_URL_SCHEMES};
 
 pub(super) fn validate_reverse_edge_configs(
@@ -77,6 +90,18 @@ pub(super) fn validate_reverse_edge_configs(
         )?;
         validate_connection_filter_rules(
             reverse_edge.connection_filter.as_slice(),
+            &format!("reverse_edge {}", reverse_edge.name),
+        )?;
+        validate_streaming_config(
+            reverse_edge.streaming.as_ref(),
+            &format!("reverse_edge {}", reverse_edge.name),
+        )?;
+        validate_grpc_config(
+            reverse_edge.grpc.as_ref(),
+            &format!("reverse_edge {}", reverse_edge.name),
+        )?;
+        validate_sse_policy(
+            reverse_edge.sse.as_ref(),
             &format!("reverse_edge {}", reverse_edge.name),
         )?;
         for pattern in &reverse_edge.sni_host_exceptions {
@@ -378,6 +403,15 @@ pub(super) fn validate_reverse_edge_configs(
                 route.resilience.as_ref(),
                 &format!("reverse_edge {} route", reverse_edge.name),
             )?;
+            if let Some(retry) = route.resilience.as_ref().and_then(|r| r.retry.as_ref())
+                && retry.retry_body_threshold_bytes
+                    > config.runtime.max_reverse_retry_template_body_bytes
+            {
+                return Err(anyhow!(
+                    "reverse_edge {} route resilience.retry.retry_body_threshold_bytes must be <= runtime.max_reverse_retry_template_body_bytes",
+                    reverse_edge.name
+                ));
+            }
             validate_endpoint_lifecycle_config(
                 route.lifecycle.as_ref(),
                 &format!("reverse_edge {} route", reverse_edge.name),
@@ -392,6 +426,22 @@ pub(super) fn validate_reverse_edge_configs(
             )?;
             validate_http_modules(
                 route.http_modules.as_slice(),
+                &format!("reverse_edge {} route", reverse_edge.name),
+            )?;
+            validate_streaming_config(
+                route.streaming.as_ref(),
+                &format!("reverse_edge {} route", reverse_edge.name),
+            )?;
+            validate_streaming_requirement(
+                route.streaming_requirement.as_ref(),
+                &format!("reverse_edge {} route", reverse_edge.name),
+            )?;
+            validate_grpc_config(
+                route.grpc.as_ref(),
+                &format!("reverse_edge {} route", reverse_edge.name),
+            )?;
+            validate_sse_policy(
+                route.sse.as_ref(),
                 &format!("reverse_edge {} route", reverse_edge.name),
             )?;
             validate_capture_policy(
@@ -509,6 +559,12 @@ pub(super) fn validate_reverse_edge_configs(
                 if mirror.upstreams.is_empty() {
                     return Err(anyhow!(
                         "reverse_edge {} route mirror must set upstreams",
+                        reverse_edge.name
+                    ));
+                }
+                if mirror.max_mirror_body_bytes == Some(0) {
+                    return Err(anyhow!(
+                        "reverse_edge {} route mirror max_mirror_body_bytes must be >= 1",
                         reverse_edge.name
                     ));
                 }

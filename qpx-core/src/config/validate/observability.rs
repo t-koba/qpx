@@ -1,3 +1,4 @@
+use crate::redaction::compile_json_redaction_path;
 use anyhow::{Result, anyhow};
 use cidr::IpCidr;
 
@@ -5,6 +6,8 @@ use super::super::types::{
     AccessLogConfig, AcmeConfig, AuditLogConfig, CapturePolicyConfig, CaptureRedactionConfig,
     Config, ExporterConfig, LogOutputConfig, MetricsConfig, OtelConfig, SystemLogConfig,
 };
+
+const MAX_PLAINTEXT_BODY_SAMPLE_BYTES: usize = 1024 * 1024;
 
 pub(super) fn validate_system_log_config(system: &SystemLogConfig) -> Result<()> {
     let level = system.level.trim();
@@ -80,6 +83,7 @@ pub(super) fn validate_access_log_config(access: &AccessLogConfig) -> Result<()>
             ));
         }
     }
+    validate_capture_redaction(&access.redact, "access_log.redact")?;
     Ok(())
 }
 
@@ -154,6 +158,7 @@ pub(super) fn validate_otel_config(otel: &OtelConfig) -> Result<()> {
             )
         })?;
     }
+    validate_capture_redaction(&otel.redact, "otel.redact")?;
 
     let Some(endpoint) = otel.endpoint.as_deref() else {
         if otel.enabled {
@@ -284,13 +289,34 @@ pub(super) fn validate_capture_policy(
     {
         return Err(anyhow!("{context}.plaintext.sample_percent must be <= 100"));
     }
-    if capture.plaintext.body {
+    if capture.plaintext.body.is_full() {
         match capture.plaintext.max_body_bytes {
             Some(max_body_bytes) if max_body_bytes > 0 => {}
             Some(_) => return Err(anyhow!("{context}.plaintext.max_body_bytes must be >= 1")),
             None => {
                 return Err(anyhow!(
-                    "{context}.plaintext.max_body_bytes is required when plaintext.body is true"
+                    "{context}.plaintext.max_body_bytes is required when plaintext.body is full"
+                ));
+            }
+        }
+    }
+    if capture.plaintext.body.is_stream_sample() {
+        match capture.plaintext.body_sample_bytes {
+            Some(body_sample_bytes)
+                if (1..=MAX_PLAINTEXT_BODY_SAMPLE_BYTES).contains(&body_sample_bytes) => {}
+            Some(body_sample_bytes) if body_sample_bytes > MAX_PLAINTEXT_BODY_SAMPLE_BYTES => {
+                return Err(anyhow!(
+                    "{context}.plaintext.body_sample_bytes must be <= {MAX_PLAINTEXT_BODY_SAMPLE_BYTES}"
+                ));
+            }
+            Some(_) => {
+                return Err(anyhow!(
+                    "{context}.plaintext.body_sample_bytes must be >= 1"
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "{context}.plaintext.body_sample_bytes is required when plaintext.body is stream_sample"
                 ));
             }
         }
@@ -322,6 +348,8 @@ fn validate_capture_redaction(redact: &CaptureRedactionConfig, context: &str) ->
         if path.trim().is_empty() {
             return Err(anyhow!("{context}.json_paths[] must not be empty"));
         }
+        compile_json_redaction_path(path)
+            .map_err(|err| anyhow!("{context}.json_paths[] is invalid: {err}"))?;
     }
     Ok(())
 }

@@ -1,8 +1,7 @@
 use super::{ConfigReloadHandler, emit_config_reload_audit};
-use crate::{
-    ProxyTasks, log_runtime_ready, refresh_watches, runtime, tcp_bindings, udp_bindings,
-    validate_runtime_state,
-};
+use crate::server::ProxyTasks;
+use crate::startup::{log_runtime_ready, refresh_watches, validate_runtime_state};
+use crate::{runtime, tcp_bindings, udp_bindings};
 use anyhow::Result;
 use qpx_core::config::Config as ProxyConfig;
 use std::collections::HashSet;
@@ -89,6 +88,7 @@ impl ConfigReloadHandler {
             next_state
                 .plan
                 .limits
+                .upstream
                 .upstream_proxy_max_concurrent_per_endpoint,
         );
         let new_proxy = match ProxyTasks::start(

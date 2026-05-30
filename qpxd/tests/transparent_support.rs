@@ -9,16 +9,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-pub struct QpxdHandle {
-    child: Child,
-}
+#[path = "common/mod.rs"]
+pub mod common;
 
-impl Drop for QpxdHandle {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
+pub use common::QpxdHandle;
 
 pub fn temp_dir(prefix: &str) -> Result<PathBuf> {
     let suffix = std::time::SystemTime::now()
@@ -60,7 +54,7 @@ pub fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Res
         .stderr(Stdio::from(log_err));
     let mut child = cmd.spawn().context("spawn qpxd")?;
     wait_for_qpxd(&mut child, ready_port, &log_path)?;
-    Ok(QpxdHandle { child })
+    Ok(QpxdHandle::new(child))
 }
 
 fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<()> {

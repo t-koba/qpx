@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use qpx_core::config::{Config, IngressEdgeConfig, ReverseEdgeConfig, RuntimeConfig, XdpConfig};
 
-pub fn ensure_hot_reload_compatible(old: &Config, new: &Config) -> Result<()> {
+pub(crate) fn ensure_hot_reload_compatible(old: &Config, new: &Config) -> Result<()> {
     if old.state_dir != new.state_dir {
         return Err(anyhow!("state_dir changed; restart required"));
     }
@@ -33,7 +33,7 @@ pub fn ensure_hot_reload_compatible(old: &Config, new: &Config) -> Result<()> {
     Ok(())
 }
 
-pub fn requires_server_restart(old: &Config, new: &Config) -> bool {
+pub(crate) fn requires_server_restart(old: &Config, new: &Config) -> bool {
     if runtime_server_signature(&old.runtime) != runtime_server_signature(&new.runtime) {
         return true;
     }

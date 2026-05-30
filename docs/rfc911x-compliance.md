@@ -82,7 +82,7 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
    - Forward proxy:
      - HTTP/3 listener supports standard request forwarding and CONNECT tunnel proxying.
      - On the default `http3-backend-h3` build, CONNECT-UDP is handled with MASQUE capsule flow (`Capsule-Protocol: ?1`, DATAGRAM capsule type, context id `0`) for both direct targets and chained upstream HTTP/3 proxies.
-     - On the clean-room `http3-backend-qpx` build, the HTTP/3 server path covers buffered request/response handling, reverse terminate, CONNECT-UDP MASQUE capsule/datagram relay (direct and chained), generic extended CONNECT with per-stream datagrams, and WebTransport relay.
+     - On the clean-room `http3-backend-qpx` build, the HTTP/3 server path covers streaming request/response relay, reverse terminate, CONNECT-UDP MASQUE capsule/datagram relay (direct and chained), generic extended CONNECT with per-stream datagrams, and WebTransport relay.
    - Code:
      - `qpxd/src/reverse/mod.rs`
      - `qpxd/src/reverse/h3_terminate.rs`
@@ -273,9 +273,9 @@ This document tracks concrete interoperability behavior implemented in `qpxd` ag
     - `qpxd` also generates a local `100 Continue` where required, and it normalizes standalone `1xx` responses correctly.
 
 5. RFC 9298 / RFC 6570 URI Template handling is implemented for CONNECT-UDP request matching and upstream expansion.
-    - Edge-side `edges[].http3.connect_udp.uri_template` is strict: the request target must match the configured template exactly, including absolute-template `scheme`/`authority`, path structure, query structure, and the RFC 6570 operators/modifiers accepted by the configured variables.
+    - Edge-side `edges[].http3.connect_udp.uri_template` matching is intentionally strict and scalar: the request target must match the configured template exactly, including absolute-template `scheme`/`authority`, path structure, query variable order, and the configured scalar variables such as `target_host` and `target_port`.
     - The shared URI template engine supports scalar, list, and associative (map) composite expansion semantics, including explode and named query/path-parameter forms.
-    - CONNECT-UDP uses that engine for upstream expansion; the current built-in CONNECT-UDP variables remain `target_host` and `target_port`, so list/map semantics are available through the template engine even though the built-in listener variables are scalar.
+    - CONNECT-UDP uses scalar matching on listener request targets and uses the shared engine for upstream expansion. List/map expansion semantics are therefore available to expansion callers, but the built-in CONNECT-UDP listener variables are scalar.
     - Full CONNECT-UDP relay, including HTTP/3 datagrams and chained upstream HTTP/3 proxying, is implemented on both HTTP/3 backends. `http3-backend-qpx` is the clean-room path; `http3-backend-h3` remains the upstream-`h3` path.
 
 6. Non-CONNECT-UDP HTTP/3 extended CONNECT is supported end-to-end over HTTP/3.

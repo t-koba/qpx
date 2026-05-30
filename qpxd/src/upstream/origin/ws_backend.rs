@@ -6,8 +6,8 @@ use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
 
-use crate::http::l7::prepare_request_with_headers_in_place;
-use crate::http::websocket::spawn_upgrade_tunnel;
+use crate::http::protocol::l7::prepare_request_with_headers_in_place;
+use crate::http::protocol::websocket::spawn_upgrade_tunnel;
 use crate::tls::CompiledUpstreamTlsTrust;
 use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::http1::{
@@ -29,6 +29,7 @@ pub(crate) async fn proxy_websocket(
     let scheme = match origin_scheme(origin)? {
         OriginScheme::Ws | OriginScheme::Http => OriginScheme::Ws,
         OriginScheme::Wss | OriginScheme::Https => OriginScheme::Wss,
+        OriginScheme::H3 => anyhow::bail!("websocket upstreams do not support h3 schemes"),
         OriginScheme::Ipc | OriginScheme::IpcUnix => {
             anyhow::bail!("websocket upstreams do not support ipc schemes")
         }
@@ -101,7 +102,7 @@ async fn proxy_wss(
     tunnel_idle_timeout: Duration,
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<Response<Body>> {
-    let client_upgrade = crate::http::upgrade::on(&mut req);
+    let client_upgrade = crate::http::protocol::upgrade::on(&mut req);
     let tcp = timeout(timeout_dur, TcpStream::connect(connect_authority)).await??;
     let _ = tcp.set_nodelay(true);
     let tls = timeout(
@@ -109,8 +110,11 @@ async fn proxy_wss(
         connect_tls_http1_with_options(server_name, tcp, true, trust),
     )
     .await??;
-    let (mut sender, conn) =
-        timeout(timeout_dur, crate::http::common::handshake_http1(tls)).await??;
+    let (mut sender, conn) = timeout(
+        timeout_dur,
+        crate::http::protocol::common::handshake_http1(tls),
+    )
+    .await??;
     let authority = connect_authority.to_string();
     tokio::spawn(async move {
         if let Err(err) = conn.await {

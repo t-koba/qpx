@@ -22,6 +22,10 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
+pub mod common;
+
+use common::QpxdHandle;
+
 type PerfOperation =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
@@ -31,20 +35,9 @@ struct PerfThresholds {
     max_p95: Duration,
 }
 
-struct QpxdHandle {
-    child: Child,
-}
-
 fn benchmark_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-impl Drop for QpxdHandle {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -533,7 +526,8 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
         &self,
         _request: qpx_h3::Request,
         _conn: qpx_h3::ConnectionInfo,
-    ) -> Result<qpx_h3::Response> {
+        _stream: qpx_h3::RequestStream,
+    ) -> Result<()> {
         anyhow::bail!("unexpected buffered request")
     }
 
@@ -597,7 +591,8 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
         &self,
         _request: qpx_h3::Request,
         _conn: qpx_h3::ConnectionInfo,
-    ) -> Result<qpx_h3::Response> {
+        _stream: qpx_h3::RequestStream,
+    ) -> Result<()> {
         anyhow::bail!("unexpected buffered request")
     }
 
@@ -808,7 +803,7 @@ fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Result<
         .stderr(Stdio::from(log_err));
     let mut child = cmd.spawn().context("spawn qpxd")?;
     wait_for_qpxd(&mut child, ready_port, &log_path)?;
-    Ok(QpxdHandle { child })
+    Ok(QpxdHandle::new(child))
 }
 
 fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<()> {

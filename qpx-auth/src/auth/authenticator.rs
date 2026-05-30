@@ -16,7 +16,9 @@ use std::time::Duration;
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use tracing::Level;
 
-use qpx_core::config::AuthConfig;
+use qpx_core::config::{AuthConfig, CaptureRedactionConfig};
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+use qpx_core::redaction::redact_uri_query_keys;
 
 use super::Authenticator;
 #[cfg(feature = "ldap-auth")]
@@ -26,7 +28,9 @@ use super::cache::LdapCache;
 #[cfg(feature = "digest-auth")]
 use super::digest::sha256_hex;
 #[cfg(feature = "digest-auth")]
-use super::digest::{DigestAlgorithm, NonceStore, constant_time_eq_hex_lower, parse_digest};
+use super::digest::{
+    DigestAlgorithm, NonceCheck, NonceStore, constant_time_eq_hex_lower, parse_digest,
+};
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use super::local::LocalUserEntry;
 #[cfg(feature = "basic-auth")]
@@ -36,8 +40,25 @@ use super::util::escape_quoted_header_value;
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use super::{AuthChallenge, AuthOutcome, AuthenticatedUser};
 
+#[cfg(feature = "digest-auth")]
+enum DigestAuthResult {
+    Allowed(AuthenticatedUser),
+    Stale,
+    Invalid,
+}
+
 impl Authenticator {
     pub fn new(config: &AuthConfig, realm: &str) -> Result<Self> {
+        Self::new_with_audit_redaction(config, realm, &CaptureRedactionConfig::default().query_keys)
+    }
+
+    pub fn new_with_audit_redaction(
+        config: &AuthConfig,
+        realm: &str,
+        audit_redact_query_keys: &[String],
+    ) -> Result<Self> {
+        #[cfg(not(any(feature = "basic-auth", feature = "digest-auth")))]
+        let _ = audit_redact_query_keys;
         #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
         let mut local = std::collections::HashMap::new();
         #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
@@ -77,6 +98,8 @@ impl Authenticator {
 
         Ok(Self {
             realm: realm.to_string(),
+            #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+            audit_redact_query_keys: audit_redact_query_keys.to_vec(),
             #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
             local,
             #[cfg(feature = "ldap-auth")]
@@ -131,6 +154,7 @@ impl Authenticator {
             .get("proxy-authorization")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
+        let audit_uri = self.redact_audit_uri(uri);
 
         if header.is_empty() {
             if tracing::enabled!(target: "audit_log", Level::INFO) {
@@ -141,11 +165,11 @@ impl Authenticator {
                     reason = "missing_proxy_authorization",
                     src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                     method = method,
-                    uri = uri,
+                    uri = audit_uri.as_str(),
                     required_providers = ?required_providers,
                 );
             }
-            return Ok(AuthOutcome::Challenge(self.build_challenge()));
+            return Ok(AuthOutcome::Challenge(self.build_challenge(false)?));
         }
 
         #[cfg(feature = "basic-auth")]
@@ -159,7 +183,7 @@ impl Authenticator {
                             outcome = "allowed",
                             src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                             method = method,
-                            uri = uri,
+                            uri = audit_uri.as_str(),
                             username = %user.username,
                             provider = %user.provider,
                             required_providers = ?required_providers,
@@ -175,34 +199,52 @@ impl Authenticator {
                         reason = "invalid_basic_credentials",
                         src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                         method = method,
-                        uri = uri,
+                        uri = audit_uri.as_str(),
                         required_providers = ?required_providers,
                     );
                 }
-                return Ok(AuthOutcome::Challenge(self.build_challenge()));
+                return Ok(AuthOutcome::Challenge(self.build_challenge(false)?));
             }
         }
 
         if let Some(digest) = Self::strip_auth_scheme(header, "Digest") {
             #[cfg(feature = "digest-auth")]
             {
-                if required_providers.iter().any(|p| p == "local")
-                    && let Some(user) = self.verify_digest(digest, method, uri)?
-                {
-                    if tracing::enabled!(target: "audit_log", Level::INFO) {
-                        tracing::info!(
-                            target: "audit_log",
-                            event = "auth",
-                            outcome = "allowed",
-                            src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
-                            method = method,
-                            uri = uri,
-                            username = %user.username,
-                            provider = %user.provider,
-                            required_providers = ?required_providers,
-                        );
+                if required_providers.iter().any(|p| p == "local") {
+                    match self.verify_digest(digest, method, uri)? {
+                        DigestAuthResult::Allowed(user) => {
+                            if tracing::enabled!(target: "audit_log", Level::INFO) {
+                                tracing::info!(
+                                    target: "audit_log",
+                                    event = "auth",
+                                    outcome = "allowed",
+                                    src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                                    method = method,
+                                    uri = audit_uri.as_str(),
+                                    username = %user.username,
+                                    provider = %user.provider,
+                                    required_providers = ?required_providers,
+                                );
+                            }
+                            return Ok(AuthOutcome::Allowed(user));
+                        }
+                        DigestAuthResult::Stale => {
+                            if tracing::enabled!(target: "audit_log", Level::INFO) {
+                                tracing::info!(
+                                    target: "audit_log",
+                                    event = "auth",
+                                    outcome = "challenge",
+                                    reason = "stale_digest_nonce",
+                                    src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                                    method = method,
+                                    uri = audit_uri.as_str(),
+                                    required_providers = ?required_providers,
+                                );
+                            }
+                            return Ok(AuthOutcome::Challenge(self.build_challenge(true)?));
+                        }
+                        DigestAuthResult::Invalid => {}
                     }
-                    return Ok(AuthOutcome::Allowed(user));
                 }
             }
             #[cfg(not(feature = "digest-auth"))]
@@ -215,11 +257,11 @@ impl Authenticator {
                     reason = "invalid_digest_credentials",
                     src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                     method = method,
-                    uri = uri,
+                    uri = audit_uri.as_str(),
                     required_providers = ?required_providers,
                 );
             }
-            return Ok(AuthOutcome::Challenge(self.build_challenge()));
+            return Ok(AuthOutcome::Challenge(self.build_challenge(false)?));
         }
 
         if tracing::enabled!(target: "audit_log", Level::INFO) {
@@ -230,11 +272,11 @@ impl Authenticator {
                 reason = "unsupported_proxy_authorization_scheme",
                 src_ip = src_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                 method = method,
-                uri = uri,
+                uri = audit_uri.as_str(),
                 required_providers = ?required_providers,
             );
         }
-        Ok(AuthOutcome::Challenge(self.build_challenge()))
+        Ok(AuthOutcome::Challenge(self.build_challenge(false)?))
     }
 
     #[cfg(feature = "basic-auth")]
@@ -251,9 +293,12 @@ impl Authenticator {
             Ok(decoded) => decoded,
             Err(_) => return Ok(None),
         };
-        let mut parts = decoded.splitn(2, ':');
-        let username = parts.next().unwrap_or("");
-        let password = parts.next().unwrap_or("");
+        let Some((username, password)) = decoded.split_once(':') else {
+            return Ok(None);
+        };
+        if username.is_empty() || password.is_empty() {
+            return Ok(None);
+        }
 
         if required_providers.iter().any(|p| p == "local")
             && let Some(entry) = self.local.get(username)
@@ -294,16 +339,14 @@ impl Authenticator {
     }
 
     #[cfg(feature = "digest-auth")]
-    fn verify_digest(
-        &self,
-        payload: &str,
-        method: &str,
-        uri: &str,
-    ) -> Result<Option<AuthenticatedUser>> {
-        let params = parse_digest(payload);
+    fn verify_digest(&self, payload: &str, method: &str, uri: &str) -> Result<DigestAuthResult> {
+        let Some(params) = parse_digest(payload) else {
+            return Ok(DigestAuthResult::Invalid);
+        };
         let username = params.get("username").map(String::as_str).unwrap_or("");
         let realm = params.get("realm").map(String::as_str).unwrap_or("");
         let nonce = params.get("nonce").map(String::as_str).unwrap_or("");
+        let opaque = params.get("opaque").map(String::as_str).unwrap_or("");
         let digest_uri = params.get("uri").map(String::as_str).unwrap_or("");
         let response = params.get("response").map(String::as_str).unwrap_or("");
         let qop = params.get("qop").map(String::as_str);
@@ -312,30 +355,32 @@ impl Authenticator {
         let cnonce = params.get("cnonce").map(String::as_str).unwrap_or("");
 
         if realm != self.realm {
-            return Ok(None);
+            return Ok(DigestAuthResult::Invalid);
         }
         if digest_uri.is_empty() || digest_uri != uri {
-            return Ok(None);
+            return Ok(DigestAuthResult::Invalid);
         }
         let algo = match algorithm {
             None => DigestAlgorithm::Sha256,
             Some(v) if v.eq_ignore_ascii_case("SHA-256") => DigestAlgorithm::Sha256,
             Some(v) if v.eq_ignore_ascii_case("SHA-256-sess") => DigestAlgorithm::Sha256Sess,
-            Some(_) => return Ok(None),
+            Some(_) => return Ok(DigestAuthResult::Invalid),
         };
         if !matches!(qop, Some(q) if q.eq_ignore_ascii_case("auth")) {
-            return Ok(None);
+            return Ok(DigestAuthResult::Invalid);
         }
         if cnonce.is_empty() {
-            return Ok(None);
+            return Ok(DigestAuthResult::Invalid);
         }
-        let Some(parsed_nc) = self.nonces.parse_digest_nc(nonce, nc) else {
-            return Ok(None);
+        let parsed_nc = match self.nonces.validate_digest_nonce(nonce, opaque, nc) {
+            NonceCheck::Valid(nc) => nc,
+            NonceCheck::Stale => return Ok(DigestAuthResult::Stale),
+            NonceCheck::Invalid => return Ok(DigestAuthResult::Invalid),
         };
 
         let entry = match self.local.get(username) {
             Some(entry) => entry,
-            None => return Ok(None),
+            None => return Ok(DigestAuthResult::Invalid),
         };
 
         let ha1 = entry
@@ -363,36 +408,47 @@ impl Authenticator {
 
         if constant_time_eq_hex_lower(expected.as_str(), response) {
             if !self.nonces.mark_digest_nc_used(nonce, parsed_nc) {
-                return Ok(None);
+                return Ok(DigestAuthResult::Invalid);
             }
-            return Ok(Some(AuthenticatedUser {
+            return Ok(DigestAuthResult::Allowed(AuthenticatedUser {
                 username: username.to_string(),
                 groups: Vec::new(),
                 provider: "local".to_string(),
             }));
         }
 
-        Ok(None)
+        Ok(DigestAuthResult::Invalid)
     }
 
     #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
-    fn build_challenge(&self) -> AuthChallenge {
+    fn build_challenge(&self, stale: bool) -> Result<AuthChallenge> {
         let mut headers = Vec::new();
         let escaped_realm = escape_quoted_header_value(self.realm.as_str());
         #[cfg(feature = "basic-auth")]
-        headers.push(format!("Basic realm=\"{}\"", escaped_realm));
+        headers.push(format!(
+            "Basic realm=\"{}\", charset=\"UTF-8\"",
+            escaped_realm
+        ));
         #[cfg(feature = "digest-auth")]
         {
-            let nonce = self.nonces.issue_digest_nonce();
-            let opaque = NonceStore::issue_opaque();
+            let challenge = self
+                .nonces
+                .issue_digest_challenge()
+                .ok_or_else(|| anyhow::anyhow!("secure random digest nonce generation failed"))?;
+            let stale_param = if stale { ", stale=true" } else { "" };
             headers.push(format!(
-                "Digest realm=\"{}\", qop=\"auth\", nonce=\"{}\", opaque=\"{}\", algorithm=SHA-256",
-                escaped_realm, nonce, opaque
+                "Digest realm=\"{}\", qop=\"auth\", nonce=\"{}\", opaque=\"{}\", algorithm=SHA-256{}",
+                escaped_realm, challenge.nonce, challenge.opaque, stale_param
             ));
         }
-        AuthChallenge {
+        Ok(AuthChallenge {
             header_values: headers,
-            stale: false,
-        }
+            stale,
+        })
+    }
+
+    #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+    pub(crate) fn redact_audit_uri(&self, uri: &str) -> String {
+        redact_uri_query_keys(uri, &self.audit_redact_query_keys)
     }
 }

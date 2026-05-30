@@ -13,6 +13,7 @@ use qpx_core::config::{
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::time::Duration;
 use subrequest::SubrequestModule;
 
 fn module_test_runtime() -> Runtime {
@@ -225,8 +226,8 @@ fn subrequest_rejects_disallowed_target_host() {
     assert!(err.to_string().contains("URL host is not allowed"));
 }
 
-#[test]
-fn subrequest_rejects_private_ip_redirect_location() {
+#[tokio::test]
+async fn subrequest_rejects_private_ip_redirect_location() {
     let module =
         SubrequestModule::new(subrequest_config("http://auth.example.com/check")).expect("module");
     let response = Response::builder()
@@ -235,7 +236,10 @@ fn subrequest_rejects_private_ip_redirect_location() {
         .body(Body::empty())
         .expect("response");
 
-    let err = match module.validate_redirect_location(response.headers().get(LOCATION)) {
+    let err = match module
+        .validate_redirect_location(response.headers().get(LOCATION), Duration::from_secs(1))
+        .await
+    {
         Ok(_) => panic!("private redirect should be rejected"),
         Err(err) => err,
     };

@@ -2,6 +2,7 @@ use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::runtime::RuntimeState;
 use qpx_core::config::AuditIncludeField;
 use qpx_observability::access_log::RequestLogContext;
+use std::borrow::Cow;
 use std::net::IpAddr;
 use tracing::Level;
 
@@ -45,6 +46,10 @@ pub(crate) fn emit_audit_log(
             .include
             .contains(&field)
     };
+    let groups = include(AuditIncludeField::Groups).then(|| joined_or_empty(&context.groups));
+    let posture = include(AuditIncludeField::Posture).then(|| joined_or_empty(&context.posture));
+    let policy_tags =
+        include(AuditIncludeField::PolicyTags).then(|| joined_or_empty(&context.policy_tags));
     tracing::info!(
         target: "audit_log",
         event = "policy",
@@ -62,21 +67,13 @@ pub(crate) fn emit_audit_log(
         } else {
             ""
         },
-        groups = if include(AuditIncludeField::Groups) {
-            context.groups.join(",")
-        } else {
-            String::new()
-        },
+        groups = groups.as_deref().unwrap_or(""),
         device_id = if include(AuditIncludeField::DeviceId) {
             context.device_id.as_deref().unwrap_or("")
         } else {
             ""
         },
-        posture = if include(AuditIncludeField::Posture) {
-            context.posture.join(",")
-        } else {
-            String::new()
-        },
+        posture = posture.as_deref().unwrap_or(""),
         tenant = if include(AuditIncludeField::Tenant) {
             context.tenant.as_deref().unwrap_or("")
         } else {
@@ -97,11 +94,7 @@ pub(crate) fn emit_audit_log(
         } else {
             ""
         },
-        policy_tags = if include(AuditIncludeField::PolicyTags) {
-            context.policy_tags.join(",")
-        } else {
-            String::new()
-        },
+        policy_tags = policy_tags.as_deref().unwrap_or(""),
         ext_authz_policy_id = if include(AuditIncludeField::ExtAuthzPolicyId) {
             record
                 .ext_authz_policy_id
@@ -128,4 +121,12 @@ pub(crate) fn emit_audit_log(
         },
         destination_trace = context.destination_trace.as_deref().unwrap_or(""),
     );
+}
+
+fn joined_or_empty(values: &[String]) -> Cow<'_, str> {
+    match values {
+        [] => Cow::Borrowed(""),
+        [value] => Cow::Borrowed(value.as_str()),
+        _ => Cow::Owned(values.join(",")),
+    }
 }

@@ -96,6 +96,8 @@ pub(super) fn parse_if_match(headers: &http::HeaderMap) -> Vec<String> {
 
 pub(super) fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDirectives {
     let mut out = ResponseDirectives::default();
+    let mut saw_max_age = false;
+    let mut saw_s_maxage = false;
     for value in headers.get_all(CACHE_CONTROL) {
         let Ok(value) = value.to_str() else {
             continue;
@@ -129,12 +131,22 @@ pub(super) fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDi
             } else if directive == "proxy-revalidate" {
                 out.proxy_revalidate = true;
             } else if directive == "max-age" {
-                if let Some(value) = value.as_deref() {
-                    out.max_age = parse_u64_directive(value);
+                if saw_max_age {
+                    out.invalid_freshness = true;
+                }
+                saw_max_age = true;
+                match value.as_deref().and_then(parse_u64_directive) {
+                    Some(parsed) => out.max_age = Some(parsed),
+                    None => out.invalid_freshness = true,
                 }
             } else if directive == "s-maxage" {
-                if let Some(value) = value.as_deref() {
-                    out.s_maxage = parse_u64_directive(value);
+                if saw_s_maxage {
+                    out.invalid_freshness = true;
+                }
+                saw_s_maxage = true;
+                match value.as_deref().and_then(parse_u64_directive) {
+                    Some(parsed) => out.s_maxage = Some(parsed),
+                    None => out.invalid_freshness = true,
                 }
             } else if directive == "stale-while-revalidate" {
                 if let Some(value) = value.as_deref() {

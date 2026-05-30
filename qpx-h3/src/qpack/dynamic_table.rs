@@ -1,25 +1,75 @@
 use super::codec::{decode_prefixed_int, decode_string};
 use super::encoder::{
-    apply_encoder_instruction, decode_field_section_prefix, parse_encoder_instruction,
-    track_field_section_size,
+    EncoderInstruction, FieldSectionPrefix, apply_encoder_instruction, decode_field_section_prefix,
+    decode_required_insert_count, track_field_section_size,
 };
 use super::errors::FieldDecodeError;
 use super::static_table::static_field;
 use super::{DecodedFields, HEADER_ENTRY_OVERHEAD};
 use anyhow::{Result, anyhow};
+use bytes::Bytes;
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 struct DynamicEntry {
-    name: String,
-    value: Vec<u8>,
+    name: Arc<str>,
+    value: Bytes,
     size: usize,
 }
 
 impl DynamicEntry {
     fn new(name: String, value: Vec<u8>) -> Self {
         let size = name.len() + value.len() + HEADER_ENTRY_OVERHEAD as usize;
-        Self { name, value, size }
+        Self {
+            name: Arc::<str>::from(name),
+            value: Bytes::from(value),
+            size,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct DynamicTableSnapshot {
+    entries: Vec<DynamicEntry>,
+    inserted: usize,
+    dropped: usize,
+}
+
+impl DynamicTableSnapshot {
+    pub(super) fn get_relative_from_base_shared(
+        &self,
+        base: usize,
+        index: usize,
+    ) -> Result<(Arc<str>, Bytes)> {
+        let absolute = base
+            .checked_sub(index)
+            .ok_or_else(|| anyhow!("invalid QPACK relative index {index} for base {base}"))?;
+        self.get_absolute_shared(absolute)
+    }
+
+    pub(super) fn get_post_base_shared(
+        &self,
+        base: usize,
+        index: usize,
+    ) -> Result<(Arc<str>, Bytes)> {
+        let absolute = base
+            .checked_add(index)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| anyhow!("QPACK post-base index overflow"))?;
+        self.get_absolute_shared(absolute)
+    }
+
+    fn get_absolute_shared(&self, absolute: usize) -> Result<(Arc<str>, Bytes)> {
+        if absolute == 0 || absolute <= self.dropped || absolute > self.inserted {
+            return Err(anyhow!("invalid QPACK absolute index {absolute}"));
+        }
+        let position = absolute - self.dropped - 1;
+        let entry = self
+            .entries
+            .get(position)
+            .ok_or_else(|| anyhow!("missing QPACK dynamic entry {absolute}"))?;
+        Ok((entry.name.clone(), entry.value.clone()))
     }
 }
 
@@ -51,6 +101,14 @@ impl DynamicTable {
 
     pub(super) fn max_capacity(&self) -> usize {
         self.max_capacity
+    }
+
+    pub(super) fn snapshot(&self) -> DynamicTableSnapshot {
+        DynamicTableSnapshot {
+            entries: self.entries.iter().cloned().collect(),
+            inserted: self.inserted,
+            dropped: self.dropped,
+        }
     }
 
     pub(super) fn set_max_size(&mut self, new_size: usize) -> Result<()> {
@@ -110,6 +168,11 @@ impl DynamicTable {
     }
 
     fn get_absolute(&self, absolute: usize) -> Result<(String, Vec<u8>)> {
+        let (name, value) = self.get_absolute_shared(absolute)?;
+        Ok((name.to_string(), value.to_vec()))
+    }
+
+    fn get_absolute_shared(&self, absolute: usize) -> Result<(Arc<str>, Bytes)> {
         if absolute == 0 || absolute <= self.dropped || absolute > self.inserted {
             return Err(anyhow!("invalid QPACK absolute index {absolute}"));
         }
@@ -322,24 +385,52 @@ impl DecoderState {
         })
     }
 
-    pub(super) fn process_encoder_chunk(&mut self, payload: &[u8]) -> Result<Option<(usize, u64)>> {
-        let mut cursor = payload;
-        let mut consumed = 0usize;
+    pub(super) fn decode_field_section_prefix_values(
+        &self,
+        encoded_insert_count: usize,
+        sign_bit: u8,
+        delta_base: usize,
+    ) -> Result<FieldSectionPrefix, FieldDecodeError> {
+        let required_insert_count = decode_required_insert_count(
+            encoded_insert_count,
+            self.table.total_inserted(),
+            self.table.max_capacity(),
+        )?;
+        let base = if required_insert_count == 0 {
+            0
+        } else if sign_bit == 0 {
+            required_insert_count
+                .checked_add(delta_base)
+                .ok_or_else(|| FieldDecodeError::decompression_failed("QPACK base overflow"))?
+        } else {
+            required_insert_count
+                .checked_sub(delta_base + 1)
+                .ok_or_else(|| FieldDecodeError::decompression_failed("invalid QPACK base index"))?
+        };
+        Ok(FieldSectionPrefix {
+            required_insert_count,
+            base,
+        })
+    }
+
+    pub(super) fn total_inserted(&self) -> usize {
+        self.table.total_inserted()
+    }
+
+    pub(super) fn max_field_section_size(&self) -> u64 {
+        self.max_field_section_size
+    }
+
+    pub(super) fn dynamic_table_snapshot(&self) -> DynamicTableSnapshot {
+        self.table.snapshot()
+    }
+
+    pub(super) fn apply_encoder_instruction(
+        &mut self,
+        instruction: EncoderInstruction,
+    ) -> Result<u64> {
         let inserted_before = self.table.total_inserted();
-
-        while !cursor.is_empty() {
-            let before = cursor.len();
-            let Some(instruction) = parse_encoder_instruction(&mut cursor)? else {
-                break;
-            };
-            apply_encoder_instruction(&mut self.table, instruction)?;
-            consumed += before - cursor.len();
-        }
-
-        if consumed == 0 {
-            return Ok(None);
-        }
-        let inserted_delta = (self.table.total_inserted() - inserted_before) as u64;
-        Ok(Some((consumed, inserted_delta)))
+        apply_encoder_instruction(&mut self.table, instruction)?;
+        Ok((self.table.total_inserted() - inserted_before) as u64)
     }
 }

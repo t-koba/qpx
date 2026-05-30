@@ -9,7 +9,8 @@ edges:
       pkcs12: "${QPX_TLS_PKCS12:-/etc/qpx/tls/shop.example.com.p12}"
       pkcs12_password_env: QPX_TLS_PKCS12_PASSWORD
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - shop.example.com
     timeout_ms: 20000

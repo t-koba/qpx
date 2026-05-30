@@ -58,6 +58,37 @@ impl CompiledRpcMatch {
             && regex_headers_match(&self.trailers_regex, ctx.rpc_trailers)
     }
 
+    pub(super) fn matches_without_request_body_observation(
+        &self,
+        ctx: &RuleMatchContext<'_>,
+    ) -> bool {
+        match_optional_text(&self.protocol, ctx.rpc_protocol)
+            && match_optional_text(&self.service, ctx.rpc_service)
+            && match_optional_text(&self.method, ctx.rpc_method)
+            && self.status.is_none()
+            && self.message.is_none()
+            && self.trailers_fast.is_empty()
+            && self.trailers_regex.is_empty()
+    }
+
+    pub(super) fn matches_without_response_body_observation(
+        &self,
+        ctx: &RuleMatchContext<'_>,
+    ) -> bool {
+        match_optional_text(&self.protocol, ctx.rpc_protocol)
+            && match_optional_text(&self.service, ctx.rpc_service)
+            && match_optional_text(&self.method, ctx.rpc_method)
+    }
+
+    pub(super) fn matches_known_request_without_body_observation(
+        &self,
+        ctx: &RuleMatchContext<'_>,
+    ) -> bool {
+        known_optional_text_matches(&self.protocol, ctx.rpc_protocol)
+            && known_optional_text_matches(&self.service, ctx.rpc_service)
+            && known_optional_text_matches(&self.method, ctx.rpc_method)
+    }
+
     pub(super) fn requires_request_body_observation(&self) -> bool {
         self.message_size.is_some() || self.streaming.is_some()
     }
@@ -98,4 +129,8 @@ impl CompiledRpcMatch {
     pub(super) fn requires_any_response_rule_rpc_context(&self) -> bool {
         self.requires_request_context_for_response_rule() || self.requires_response_observation()
     }
+}
+
+fn known_optional_text_matches(matcher: &Option<TextPatternMatcher>, value: Option<&str>) -> bool {
+    value.is_none_or(|value| match_optional_text(matcher, Some(value)))
 }

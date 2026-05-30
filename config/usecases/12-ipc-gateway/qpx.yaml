@@ -11,6 +11,8 @@ edges:
     target:
       type: ipc
       endpoint: "${QPXF_UNIX_LISTEN}"
+      # SHM mode is for same-host Unix deployments with owner-only SHM file permissions.
+      # Use qpx-tcp.yaml for Windows, other non-Unix platforms, or cross-host IPC.
       mode: shm
       timeout_ms: 30000
   - name: not-found

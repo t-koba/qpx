@@ -2,15 +2,16 @@ use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 
 use super::super::super::uri_template::UriTemplate;
-use super::super::types::{Config, IngressEdgeMode, OriginalDstSource};
+use super::super::types::{Config, IngressEdgeMode, OriginalDstSource, StreamingRequirement};
 use super::UPSTREAM_PROXY_URL_SCHEMES;
 use super::observability::validate_capture_policy;
 use super::rules::{
     has_cache_purge_module, validate_action_config, validate_cache_policy,
-    validate_connection_filter_rules, validate_header_control, validate_http_modules,
-    validate_http_response_effects, validate_identity_match_config, validate_match_config,
-    validate_policy_context_refs, validate_proxy_tunnel_upstream_requirement,
-    validate_rate_limit_config, validate_xdp_config,
+    validate_connection_filter_rules, validate_grpc_config, validate_header_control,
+    validate_http_modules, validate_http_response_effects, validate_identity_match_config,
+    validate_match_config, validate_policy_context_refs,
+    validate_proxy_tunnel_upstream_requirement, validate_rate_limit_config, validate_sse_policy,
+    validate_streaming_config, validate_xdp_config,
 };
 use super::security::{
     validate_destination_resolution_override, validate_http_guard_profile_ref,
@@ -38,6 +39,13 @@ pub(super) fn validate_ingress_edge_configs(
             .parse()
             .map_err(|e| anyhow!("edge {} listen is invalid: {}", edge.name, e))?;
         validate_rate_limit_config(edge.rate_limit.as_ref(), &format!("edge {}", edge.name))?;
+        validate_streaming_config(edge.streaming.as_ref(), &format!("edge {}", edge.name))?;
+        validate_streaming_requirement(
+            edge.streaming_requirement.as_ref(),
+            &format!("edge {}", edge.name),
+        )?;
+        validate_grpc_config(edge.grpc.as_ref(), &format!("edge {}", edge.name))?;
+        validate_sse_policy(edge.sse.as_ref(), &format!("edge {}", edge.name))?;
         validate_policy_context_refs(
             edge.policy_context.as_ref(),
             &config.security.identity_sources,
@@ -358,6 +366,18 @@ pub(super) fn validate_ingress_edge_configs(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_streaming_requirement(
+    requirement: Option<&StreamingRequirement>,
+    context: &str,
+) -> Result<()> {
+    if matches!(requirement, Some(StreamingRequirement::Disabled)) {
+        return Err(anyhow!(
+            "{context}.streaming_requirement: disabled is not supported; omit the field for the default streaming-first mode or use required to reject buffering features"
+        ));
     }
     Ok(())
 }

@@ -1,19 +1,35 @@
-use super::CacheBackend;
-use crate::http::address::format_authority_host_port;
-use crate::tls::client::{IoStream, connect_tls_http1};
+use super::types::CachedBodyStream;
+use super::{CacheBackend, CachedBody};
+use crate::http::body::Body;
+use crate::http::protocol::address::format_authority_host_port;
+use crate::tls::client::connect_tls_http1;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use bytes::{Bytes, BytesMut};
 use qpx_core::config::CacheBackendConfig;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::{path::PathBuf, str::FromStr};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio::time::{Duration, timeout};
 use url::Url;
 
 type DynStream = crate::tls::client::BoxTlsStream;
+const REDIS_CACHE_MAX_IDLE_CONNECTIONS: usize = 8;
+const REDIS_CACHE_MAX_ACTIVE_OPERATIONS: usize = 32;
+const REDIS_APPEND_PIPELINE_WINDOW: usize = 16;
+static REDIS_STREAM_PUT_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+struct RedisConnection {
+    stream: DynStream,
+    read_buf: BytesMut,
+}
 
 #[derive(Debug, Clone)]
 enum RedisTransport {
@@ -42,6 +58,8 @@ pub(super) struct RedisCacheBackend {
     timeout: Duration,
     key_prefix: String,
     max_object_bytes: usize,
+    idle: Arc<AsyncMutex<Vec<RedisConnection>>>,
+    active: Arc<Semaphore>,
 }
 
 impl RedisCacheBackend {
@@ -57,6 +75,8 @@ impl RedisCacheBackend {
             timeout: Duration::from_millis(cfg.timeout_ms),
             key_prefix: cfg.name,
             max_object_bytes: cfg.max_object_bytes,
+            idle: Arc::new(AsyncMutex::new(Vec::new())),
+            active: Arc::new(Semaphore::new(REDIS_CACHE_MAX_ACTIVE_OPERATIONS)),
         })
     }
 
@@ -64,8 +84,8 @@ impl RedisCacheBackend {
         format!("qpx:{}:{}:{}", self.key_prefix, namespace, key)
     }
 
-    async fn open(&self) -> Result<DynStream> {
-        let mut stream: DynStream = match &self.transport {
+    async fn open(&self) -> Result<RedisConnection> {
+        let stream: DynStream = match &self.transport {
             RedisTransport::Tcp { addr } => {
                 let tcp = timeout(self.timeout, TcpStream::connect(addr)).await??;
                 if let Some(domain) = self.tls_domain.as_deref() {
@@ -81,33 +101,180 @@ impl RedisCacheBackend {
             }
         };
 
+        let mut conn = RedisConnection {
+            stream,
+            read_buf: BytesMut::with_capacity(4096),
+        };
+
         if let Some(password) = self.password.as_deref() {
             let auth = encode_command(&[b"AUTH".to_vec(), password.as_bytes().to_vec()]);
-            timeout(self.timeout, stream.write_all(&auth)).await??;
-            read_simple_ok(stream.as_mut(), self.timeout).await?;
+            timeout(self.timeout, conn.stream.write_all(&auth)).await??;
+            read_simple_ok(&mut conn, self.timeout).await?;
         }
 
         if let Some(db) = self.db {
             let select = encode_command(&[b"SELECT".to_vec(), db.to_string().into_bytes()]);
-            timeout(self.timeout, stream.write_all(&select)).await??;
-            read_simple_ok(stream.as_mut(), self.timeout).await?;
+            timeout(self.timeout, conn.stream.write_all(&select)).await??;
+            read_simple_ok(&mut conn, self.timeout).await?;
         }
 
-        Ok(stream)
+        Ok(conn)
+    }
+
+    async fn checkout(&self) -> Result<RedisConnection> {
+        if let Some(stream) = self.idle.lock().await.pop() {
+            return Ok(stream);
+        }
+        self.open().await
+    }
+
+    async fn recycle(&self, stream: RedisConnection) {
+        recycle_stream(self.idle.clone(), stream).await;
     }
 }
 
 #[async_trait]
 impl CacheBackend for RedisCacheBackend {
-    async fn get(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>> {
-        let mut stream = self.open().await?;
+    async fn get(&self, namespace: &str, key: &str) -> Result<Option<Bytes>> {
+        let _permit = self
+            .active
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
+        let mut stream = self.checkout().await?;
         let full_key = self.full_key(namespace, key);
         let cmd = encode_command(&[b"GET".to_vec(), full_key.into_bytes()]);
-        timeout(self.timeout, stream.write_all(&cmd)).await??;
-        read_bulk_string(stream.as_mut(), self.timeout, self.max_object_bytes).await
+        let result = async {
+            timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
+            read_bulk_string(&mut stream, self.timeout, self.max_object_bytes).await
+        }
+        .await;
+        if result.is_ok() {
+            self.recycle(stream).await;
+        }
+        result
+    }
+
+    async fn get_many(&self, namespace: &str, keys: &[String]) -> Result<Vec<Option<Bytes>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _permit = self
+            .active
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
+        let mut stream = self.checkout().await?;
+        let mut parts = Vec::with_capacity(keys.len() + 1);
+        parts.push(b"MGET".to_vec());
+        parts.extend(
+            keys.iter()
+                .map(|key| self.full_key(namespace, key).into_bytes()),
+        );
+        let cmd = encode_command(&parts);
+        let result = async {
+            timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
+            read_bulk_string_array(&mut stream, self.timeout, keys.len(), self.max_object_bytes)
+                .await
+        }
+        .await;
+        if result.is_ok() {
+            self.recycle(stream).await;
+        }
+        result
+    }
+
+    async fn get_object(&self, namespace: &str, key: &str) -> Result<Option<CachedBody>> {
+        let _permit = self
+            .active
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
+        let mut stream = self.checkout().await?;
+        let full_key = self.full_key(namespace, key);
+        let cmd = encode_command(&[b"GET".to_vec(), full_key.into_bytes()]);
+        let result = async {
+            timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
+            read_bulk_cached_body(&mut stream, self.timeout, self.max_object_bytes).await
+        }
+        .await;
+        if result.is_ok() {
+            self.recycle(stream).await;
+        }
+        result
+    }
+
+    async fn get_object_stream(
+        &self,
+        namespace: &str,
+        key: &str,
+        expected_len: u64,
+        range: Option<(u64, u64)>,
+    ) -> Result<Option<CachedBodyStream>> {
+        let permit = self
+            .active
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
+        let mut stream = self.checkout().await?;
+        let full_key = self.full_key(namespace, key);
+        match range {
+            Some((start, end)) => {
+                let start_arg = start.to_string();
+                let end_arg = end.to_string();
+                let cmd = encode_command(&[
+                    b"GETRANGE".to_vec(),
+                    full_key.into_bytes(),
+                    start_arg.into_bytes(),
+                    end_arg.into_bytes(),
+                ]);
+                timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
+            }
+            None => {
+                let cmd = encode_command(&[b"GET".to_vec(), full_key.into_bytes()]);
+                timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
+            }
+        }
+
+        let Some(len) = read_bulk_len(&mut stream, self.timeout, self.max_object_bytes).await?
+        else {
+            return Ok(None);
+        };
+        let expected_stream_len = range
+            .map(|(start, end)| end.saturating_sub(start).saturating_add(1))
+            .unwrap_or(expected_len);
+        if len as u64 != expected_stream_len {
+            return Ok(None);
+        }
+
+        let (tx, body) = Body::channel_with_capacity(16);
+        let idle = self.idle.clone();
+        let timeout_dur = self.timeout;
+        tokio::spawn(async move {
+            let result = stream_redis_bulk_to_body(stream, timeout_dur, len, tx).await;
+            if let Ok(stream) = result {
+                recycle_stream(idle, stream).await;
+            }
+            drop(permit);
+        });
+
+        Ok(Some(CachedBodyStream {
+            len: expected_stream_len,
+            body,
+        }))
     }
 
     async fn put(&self, namespace: &str, key: &str, value: &[u8], ttl_secs: u64) -> Result<()> {
+        let _permit = self
+            .active
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
         if value.len() > self.max_object_bytes {
             return Err(anyhow!(
                 "redis cache put payload too large: {} > {}",
@@ -115,7 +282,7 @@ impl CacheBackend for RedisCacheBackend {
                 self.max_object_bytes
             ));
         }
-        let mut stream = self.open().await?;
+        let mut stream = self.checkout().await?;
         let full_key = self.full_key(namespace, key);
         let cmd = encode_command(&[
             b"SET".to_vec(),
@@ -124,17 +291,161 @@ impl CacheBackend for RedisCacheBackend {
             b"EX".to_vec(),
             ttl_secs.to_string().into_bytes(),
         ]);
-        timeout(self.timeout, stream.write_all(&cmd)).await??;
-        read_simple_ok(stream.as_mut(), self.timeout).await
+        let result = async {
+            timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
+            read_simple_ok(&mut stream, self.timeout).await
+        }
+        .await;
+        if result.is_ok() {
+            self.recycle(stream).await;
+        }
+        result
+    }
+
+    async fn put_object(
+        &self,
+        namespace: &str,
+        key: &str,
+        body: &CachedBody,
+        ttl_secs: u64,
+    ) -> Result<()> {
+        let _permit = self
+            .active
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
+        if body.len() > self.max_object_bytes as u64 {
+            return Err(anyhow!(
+                "redis cache put payload too large: {} > {}",
+                body.len(),
+                self.max_object_bytes
+            ));
+        }
+        let mut stream = self.checkout().await?;
+        let full_key = self.full_key(namespace, key);
+        let result = async {
+            write_set_cached_body(
+                &mut stream,
+                self.timeout,
+                full_key.as_bytes(),
+                body,
+                ttl_secs,
+            )
+            .await?;
+            read_simple_ok(&mut stream, self.timeout).await
+        }
+        .await;
+        if result.is_ok() {
+            self.recycle(stream).await;
+        }
+        result
+    }
+
+    async fn put_object_stream(
+        &self,
+        namespace: &str,
+        key: &str,
+        mut body: crate::http::body::Body,
+        max_body_bytes: usize,
+        body_read_timeout: Duration,
+        ttl_secs: u64,
+    ) -> Result<u64> {
+        let _permit = self
+            .active
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
+        let max_body_bytes = max_body_bytes.min(self.max_object_bytes);
+        let mut stream = self.checkout().await?;
+        let full_key = self.full_key(namespace, key);
+        let tmp_id = REDIS_STREAM_PUT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_key = format!("{full_key}:tmp:{tmp_id}");
+        let result = async {
+            let init = encode_command(&[
+                b"SET".to_vec(),
+                tmp_key.as_bytes().to_vec(),
+                Vec::new(),
+                b"EX".to_vec(),
+                ttl_secs.to_string().into_bytes(),
+            ]);
+            timeout(self.timeout, stream.stream.write_all(&init)).await??;
+            read_simple_ok(&mut stream, self.timeout).await?;
+
+            let mut size = 0usize;
+            let mut pending_appends = VecDeque::new();
+            while let Some(chunk) = timeout(body_read_timeout, body.data())
+                .await
+                .map_err(|_| anyhow!("cache object body read timed out"))?
+            {
+                let chunk = chunk?;
+                let next = size
+                    .checked_add(chunk.len())
+                    .ok_or_else(|| anyhow!("cache object length overflow"))?;
+                if next > max_body_bytes {
+                    return Err(anyhow!(
+                        "cache object exceeds configured limit: {} bytes",
+                        max_body_bytes
+                    ));
+                }
+                size = next;
+                if !chunk.is_empty() {
+                    write_command3(
+                        &mut stream,
+                        self.timeout,
+                        b"APPEND",
+                        tmp_key.as_bytes(),
+                        chunk.as_ref(),
+                    )
+                    .await?;
+                    pending_appends.push_back(size);
+                    if pending_appends.len() >= REDIS_APPEND_PIPELINE_WINDOW {
+                        validate_next_append_reply(&mut stream, self.timeout, &mut pending_appends)
+                            .await?;
+                    }
+                }
+            }
+            while !pending_appends.is_empty() {
+                validate_next_append_reply(&mut stream, self.timeout, &mut pending_appends).await?;
+            }
+
+            let rename = encode_command(&[
+                b"RENAME".to_vec(),
+                tmp_key.as_bytes().to_vec(),
+                full_key.as_bytes().to_vec(),
+            ]);
+            timeout(self.timeout, stream.stream.write_all(&rename)).await??;
+            read_simple_ok(&mut stream, self.timeout).await?;
+            Ok(size as u64)
+        }
+        .await;
+        if result.is_ok() {
+            self.recycle(stream).await;
+        }
+        result
     }
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
-        let mut stream = self.open().await?;
+        let _permit = self
+            .active
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
+        let mut stream = self.checkout().await?;
         let full_key = self.full_key(namespace, key);
         let cmd = encode_command(&[b"DEL".to_vec(), full_key.into_bytes()]);
-        timeout(self.timeout, stream.write_all(&cmd)).await??;
-        read_integer(stream.as_mut(), self.timeout).await?;
-        Ok(())
+        let result = async {
+            timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
+            read_integer(&mut stream, self.timeout).await?;
+            Ok(())
+        }
+        .await;
+        if result.is_ok() {
+            self.recycle(stream).await;
+        }
+        result
     }
 }
 
@@ -216,142 +527,9 @@ fn percent_decode(path: &str) -> Result<PathBuf> {
     Ok(PathBuf::from_str(decoded.as_ref())?)
 }
 
-fn encode_command(parts: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(64);
-    out.extend_from_slice(format!("*{}\r\n", parts.len()).as_bytes());
-    for part in parts {
-        out.extend_from_slice(format!("${}\r\n", part.len()).as_bytes());
-        out.extend_from_slice(part);
-        out.extend_from_slice(b"\r\n");
-    }
-    out
-}
+mod protocol;
 
-async fn read_simple_ok(stream: &mut (dyn IoStream + '_), timeout_dur: Duration) -> Result<()> {
-    let line = read_line(stream, timeout_dur).await?;
-    if line == b"+OK" {
-        return Ok(());
-    }
-    if let Some(err) = line.strip_prefix(b"-") {
-        return Err(anyhow!("redis error: {}", String::from_utf8_lossy(err)));
-    }
-    Err(anyhow!(
-        "unexpected redis response: {}",
-        String::from_utf8_lossy(&line)
-    ))
-}
-
-async fn read_bulk_string(
-    stream: &mut (dyn IoStream + '_),
-    timeout_dur: Duration,
-    max_bytes: usize,
-) -> Result<Option<Vec<u8>>> {
-    let line = read_line(stream, timeout_dur).await?;
-    if line == b"$-1" {
-        return Ok(None);
-    }
-    let len_str = line
-        .strip_prefix(b"$")
-        .ok_or_else(|| anyhow!("invalid redis bulk response"))?;
-    let len: usize = std::str::from_utf8(len_str)?.parse()?;
-    if len > max_bytes {
-        return Err(anyhow!(
-            "redis cache get payload too large: {} > {}",
-            len,
-            max_bytes
-        ));
-    }
-    let mut payload = vec![0u8; len + 2];
-    timeout(timeout_dur, stream.read_exact(&mut payload)).await??;
-    if &payload[len..] != b"\r\n" {
-        return Err(anyhow!("invalid redis bulk terminator"));
-    }
-    payload.truncate(len);
-    Ok(Some(payload))
-}
-
-async fn read_line(stream: &mut (dyn IoStream + '_), timeout_dur: Duration) -> Result<Vec<u8>> {
-    timeout(timeout_dur, async {
-        let mut line = Vec::with_capacity(64);
-        loop {
-            let mut b = [0u8; 1];
-            stream.read_exact(&mut b).await?;
-            line.push(b[0]);
-            if line.len() >= 2 && line[line.len() - 2..] == *b"\r\n" {
-                line.truncate(line.len() - 2);
-                return Ok(line);
-            }
-            if line.len() > 8192 {
-                return Err(anyhow!("redis line too long"));
-            }
-        }
-    })
-    .await?
-}
-
-async fn read_integer(stream: &mut (dyn IoStream + '_), timeout_dur: Duration) -> Result<i64> {
-    let line = read_line(stream, timeout_dur).await?;
-    if let Some(err) = line.strip_prefix(b"-") {
-        return Err(anyhow!("redis error: {}", String::from_utf8_lossy(err)));
-    }
-    let value = line
-        .strip_prefix(b":")
-        .ok_or_else(|| anyhow!("invalid redis integer response"))?;
-    Ok(std::str::from_utf8(value)?.parse::<i64>()?)
-}
+use self::protocol::*;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cfg(endpoint: &str) -> CacheBackendConfig {
-        CacheBackendConfig {
-            name: "cache-a".to_string(),
-            kind: "redis".to_string(),
-            endpoint: endpoint.to_string(),
-            timeout_ms: 500,
-            max_object_bytes: 1024,
-            auth_header_env: None,
-        }
-    }
-
-    #[test]
-    fn parse_plain_redis_tcp() {
-        let backend =
-            RedisCacheBackend::new(cfg("redis://cache.internal:6380/2")).expect("backend");
-        assert!(matches!(backend.transport, RedisTransport::Tcp { .. }));
-        assert_eq!(backend.db, Some(2));
-        assert!(backend.tls_domain.is_none());
-    }
-
-    #[test]
-    fn parse_rediss_enables_tls() {
-        let backend =
-            RedisCacheBackend::new(cfg("rediss://cache.internal:6380/5")).expect("backend");
-        assert!(matches!(backend.transport, RedisTransport::Tcp { .. }));
-        assert_eq!(backend.db, Some(5));
-        assert!(backend.tls_domain.is_some());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parse_redis_unix_socket_endpoint() {
-        let backend =
-            RedisCacheBackend::new(cfg("redis+unix:///tmp/redis.sock?db=1")).expect("backend");
-        assert!(matches!(backend.transport, RedisTransport::Unix { .. }));
-        assert_eq!(backend.db, Some(1));
-        assert!(backend.tls_domain.is_none());
-    }
-
-    #[tokio::test]
-    async fn read_bulk_string_rejects_over_limit() {
-        let (mut client, mut server) = tokio::io::duplex(64);
-        tokio::spawn(async move {
-            let _ = server.write_all(b"$5\r\nhello\r\n").await;
-        });
-        let err = read_bulk_string(&mut client, Duration::from_secs(1), 4)
-            .await
-            .expect_err("must fail");
-        assert!(err.to_string().contains("payload too large"));
-    }
-}
+mod tests;

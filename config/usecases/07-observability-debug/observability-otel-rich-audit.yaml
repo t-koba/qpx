@@ -61,13 +61,14 @@ edges:
 - kind: forward
   name: observed-forward
   listen: 127.0.0.1:18098
+  streaming_requirement: preferred
   default_action:
     type: block
   capture:
     plaintext:
       enabled: true
       headers: true
-      body: true
+      body: full
       sample_percent: 25
       max_body_bytes: 16384
       redact:

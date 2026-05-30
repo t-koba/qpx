@@ -1,9 +1,11 @@
 use super::{DispatchAuditContext, annotate_dispatch_response, record_response_policy_action};
 use crate::http::body::Body;
-use crate::http::l7::{finalize_response_for_request, finalize_response_with_headers_in_place};
-use crate::http::response_policy::{
+use crate::http::policy::response_policy::{
     HttpResponseRuleEngine, ListenerResponsePolicyDecision, ResponseBodyObservationLimits,
     ResponseRuleCandidates, apply_listener_response_policy,
+};
+use crate::http::protocol::l7::{
+    finalize_response_with_headers, finalize_response_with_headers_in_place,
 };
 use anyhow::Result;
 use hyper::{Method, Response};
@@ -80,24 +82,27 @@ pub(crate) async fn apply_dispatch_response_policy(
                 .prepare_downstream_response(response)
                 .await?;
             let mut response = if input.pre_finalize_local_response {
-                finalize_response_for_request(
+                finalize_response_with_headers(
                     input.request_method,
                     input.request_version,
                     input.proxy_name,
                     response,
+                    headers.as_deref(),
                     false,
                 )
             } else {
                 response
             };
-            finalize_response_with_headers_in_place(
-                input.request_method,
-                input.request_version,
-                input.proxy_name,
-                &mut response,
-                headers.as_deref(),
-                false,
-            );
+            if !input.pre_finalize_local_response {
+                finalize_response_with_headers_in_place(
+                    input.request_method,
+                    input.request_version,
+                    input.proxy_name,
+                    &mut response,
+                    headers.as_deref(),
+                    false,
+                );
+            }
             input
                 .http_modules
                 .on_logging(Some(response.status()), None)

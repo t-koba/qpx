@@ -71,7 +71,7 @@ pub(crate) async fn spawn_http1_send_request(
     )
     .await;
     let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    let (sender, connection) = crate::http::common::handshake_http1(stream)
+    let (sender, connection) = crate::http::protocol::common::handshake_http1(stream)
         .await
         .expect("handshake");
     tokio::spawn(async move {

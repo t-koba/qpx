@@ -21,7 +21,8 @@ edges:
         backoff_ms: 10
     timeout_ms: 5000
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - fallback.example.com
     timeout_ms: 15000

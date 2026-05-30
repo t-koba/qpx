@@ -1,6 +1,6 @@
 use crate::http::body::Body;
-use crate::http::common::request_with_shared_client;
-use crate::http::websocket::spawn_upgrade_tunnel;
+use crate::http::protocol::common::request_with_shared_client;
+use crate::http::protocol::websocket::spawn_upgrade_tunnel;
 use crate::tls::CompiledUpstreamTlsTrust;
 use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::origin::OriginEndpoint;
@@ -82,14 +82,22 @@ impl UpstreamProxyScheme {
     }
 }
 
-pub fn ensure_absolute_uri(req: &mut Request<Body>, scheme: &str, authority: &str) -> Result<()> {
+pub(crate) fn ensure_absolute_uri(
+    req: &mut Request<Body>,
+    scheme: &str,
+    authority: &str,
+) -> Result<()> {
     if req.uri().scheme().is_none() || req.uri().authority().is_none() {
         set_absolute_uri(req, scheme, authority)?;
     }
     Ok(())
 }
 
-pub fn set_absolute_uri(req: &mut Request<Body>, scheme: &str, authority: &str) -> Result<()> {
+pub(crate) fn set_absolute_uri(
+    req: &mut Request<Body>,
+    scheme: &str,
+    authority: &str,
+) -> Result<()> {
     let absolute = Uri::builder()
         .scheme(scheme)
         .authority(authority)
@@ -104,7 +112,7 @@ pub fn set_absolute_uri(req: &mut Request<Body>, scheme: &str, authority: &str) 
     Ok(())
 }
 
-pub fn ensure_origin_form_uri(req: &mut Request<Body>) -> Result<()> {
+pub(crate) fn ensure_origin_form_uri(req: &mut Request<Body>) -> Result<()> {
     let origin_form = req
         .uri()
         .path_and_query()
@@ -114,20 +122,20 @@ pub fn ensure_origin_form_uri(req: &mut Request<Body>) -> Result<()> {
     Ok(())
 }
 
-pub fn ensure_host_header(req: &mut Request<Body>, authority: &str) -> Result<()> {
+pub(crate) fn ensure_host_header(req: &mut Request<Body>, authority: &str) -> Result<()> {
     if !req.headers().contains_key(HOST) {
         set_host_header(req, authority)?;
     }
     Ok(())
 }
 
-pub fn set_host_header(req: &mut Request<Body>, authority: &str) -> Result<()> {
+pub(crate) fn set_host_header(req: &mut Request<Body>, authority: &str) -> Result<()> {
     req.headers_mut()
         .insert(HOST, HeaderValue::from_str(authority)?);
     Ok(())
 }
 
-pub fn parse_upstream_proxy_endpoint(upstream: &str) -> Result<UpstreamProxyEndpoint> {
+pub(crate) fn parse_upstream_proxy_endpoint(upstream: &str) -> Result<UpstreamProxyEndpoint> {
     let (scheme, authority, host, proxy_authorization) = if upstream.contains("://") {
         let url = Url::parse(upstream)?;
         let scheme = match url.scheme() {
@@ -147,7 +155,8 @@ pub fn parse_upstream_proxy_endpoint(upstream: &str) -> Result<UpstreamProxyEndp
         let port = url
             .port_or_known_default()
             .ok_or_else(|| anyhow!("upstream proxy missing port"))?;
-        let authority = crate::http::address::format_authority_host_port(host.as_str(), port);
+        let authority =
+            crate::http::protocol::address::format_authority_host_port(host.as_str(), port);
         let proxy_authorization = if !url.username().is_empty() || url.password().is_some() {
             let creds = format!("{}:{}", url.username(), url.password().unwrap_or(""));
             let encoded = BASE64.encode(creds);
@@ -159,9 +168,11 @@ pub fn parse_upstream_proxy_endpoint(upstream: &str) -> Result<UpstreamProxyEndp
         };
         (scheme, authority, host, proxy_authorization)
     } else {
-        let (host, port) = crate::http::address::parse_authority_host_port(upstream.trim(), 80)
-            .ok_or_else(|| anyhow!("invalid upstream proxy authority: {}", upstream))?;
-        let authority = crate::http::address::format_authority_host_port(host.as_str(), port);
+        let (host, port) =
+            crate::http::protocol::address::parse_authority_host_port(upstream.trim(), 80)
+                .ok_or_else(|| anyhow!("invalid upstream proxy authority: {}", upstream))?;
+        let authority =
+            crate::http::protocol::address::format_authority_host_port(host.as_str(), port);
         (
             UpstreamProxyScheme::Http,
             authority,
@@ -178,12 +189,12 @@ pub fn parse_upstream_proxy_endpoint(upstream: &str) -> Result<UpstreamProxyEndp
     })
 }
 
-pub async fn open_upstream_proxy_sender(
+pub(crate) async fn open_upstream_proxy_sender(
     endpoint: &UpstreamProxyEndpoint,
     timeout_dur: Option<Duration>,
     context: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
-) -> Result<crate::http::common::Http1SendRequest> {
+) -> Result<crate::http::protocol::common::Http1SendRequest> {
     let tcp = match timeout_dur {
         Some(dur) => timeout(dur, TcpStream::connect(endpoint.authority.as_str())).await??,
         None => TcpStream::connect(endpoint.authority.as_str()).await?,
@@ -191,8 +202,10 @@ pub async fn open_upstream_proxy_sender(
     match endpoint.scheme {
         UpstreamProxyScheme::Http => {
             let (sender, conn) = match timeout_dur {
-                Some(dur) => timeout(dur, crate::http::common::handshake_http1(tcp)).await??,
-                None => crate::http::common::handshake_http1(tcp).await?,
+                Some(dur) => {
+                    timeout(dur, crate::http::protocol::common::handshake_http1(tcp)).await??
+                }
+                None => crate::http::protocol::common::handshake_http1(tcp).await?,
             };
             let authority = endpoint.authority.clone();
             let context = context.to_string();
@@ -222,8 +235,10 @@ pub async fn open_upstream_proxy_sender(
                 }
             };
             let (sender, conn) = match timeout_dur {
-                Some(dur) => timeout(dur, crate::http::common::handshake_http1(tls)).await??,
-                None => crate::http::common::handshake_http1(tls).await?,
+                Some(dur) => {
+                    timeout(dur, crate::http::protocol::common::handshake_http1(tls)).await??
+                }
+                None => crate::http::protocol::common::handshake_http1(tls).await?,
             };
             let authority = endpoint.authority.clone();
             let context = context.to_string();
@@ -242,18 +257,18 @@ pub async fn open_upstream_proxy_sender(
     }
 }
 
-pub async fn open_http1_sender(
+pub(crate) async fn open_http1_sender(
     authority: &str,
     timeout_dur: Option<Duration>,
     context: &str,
-) -> Result<crate::http::common::Http1SendRequest> {
+) -> Result<crate::http::protocol::common::Http1SendRequest> {
     let stream = match timeout_dur {
         Some(dur) => timeout(dur, TcpStream::connect(authority)).await??,
         None => TcpStream::connect(authority).await?,
     };
     let (sender, conn) = match timeout_dur {
-        Some(dur) => timeout(dur, crate::http::common::handshake_http1(stream)).await??,
-        None => crate::http::common::handshake_http1(stream).await?,
+        Some(dur) => timeout(dur, crate::http::protocol::common::handshake_http1(stream)).await??,
+        None => crate::http::protocol::common::handshake_http1(stream).await?,
     };
     let authority = authority.to_string();
     let context = context.to_string();
@@ -270,7 +285,7 @@ pub async fn open_http1_sender(
     Ok(sender)
 }
 
-pub async fn proxy_websocket_http1(
+pub(crate) async fn proxy_websocket_http1(
     mut req: Request<Body>,
     cfg: WebsocketProxyConfig<'_>,
 ) -> Result<Response<Body>> {
@@ -285,7 +300,7 @@ pub async fn proxy_websocket_http1(
         upstream_context,
         direct_context,
     } = cfg;
-    let client_upgrade = crate::http::upgrade::on(&mut req);
+    let client_upgrade = crate::http::protocol::upgrade::on(&mut req);
 
     let mut sender = if let Some(upstream_proxy) = upstream_proxy {
         let endpoint = upstream_proxy.endpoint();
@@ -339,7 +354,7 @@ pub(crate) fn normalize_websocket_switching_protocols_response(response: &mut Re
         .or_insert(HeaderValue::from_static("websocket"));
 }
 
-pub async fn proxy_http1_request(
+pub(crate) async fn proxy_http1_request(
     mut req: Request<Body>,
     upstream_proxy: Option<&crate::upstream::pool::ResolvedUpstreamProxy>,
     direct_authority: &str,
@@ -353,7 +368,7 @@ pub async fn proxy_http1_request(
     Ok(timeout(timeout_dur, request_with_shared_client(req)).await??)
 }
 
-pub async fn proxy_http1_request_with_interim(
+pub(crate) async fn proxy_http1_request_with_interim(
     mut req: Request<Body>,
     upstream_proxy: Option<&crate::upstream::pool::ResolvedUpstreamProxy>,
     direct_authority: &str,
@@ -370,19 +385,19 @@ pub async fn proxy_http1_request_with_interim(
         .await;
     }
 
-    let deadline = Instant::now() + timeout_dur;
+    let started = Instant::now();
+    let deadline = started.checked_add(timeout_dur);
     let stream = timeout(timeout_dur, TcpStream::connect(direct_authority)).await??;
     let _ = stream.set_nodelay(true);
-    timeout(
-        deadline.saturating_duration_since(Instant::now()),
-        send_http1_request_with_interim(stream, req),
-    )
-    .await?
+    let remaining = deadline
+        .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+        .unwrap_or(timeout_dur);
+    timeout(remaining, send_http1_request_with_interim(stream, req)).await?
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::upstream::http1::*;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
 

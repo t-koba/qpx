@@ -7,10 +7,12 @@ use super::util::{
 use anyhow::{Result, anyhow};
 use http::header::HeaderName;
 use hyper::HeaderMap;
+use metrics::counter;
 use qpx_core::config::{AssertionClaimsMapConfig, SignedAssertionConfig};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledSignedAssertion {
@@ -23,7 +25,6 @@ pub(super) struct CompiledSignedAssertion {
     hmac_secret: Option<Arc<[u8]>>,
     public_key: Option<Arc<[u8]>>,
     claims: CompiledAssertionClaims,
-    pub(super) strip_from_untrusted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -44,11 +45,7 @@ struct JwtHeader {
     alg: String,
 }
 impl CompiledSignedAssertion {
-    pub(super) fn from_config(
-        name: &str,
-        config: &SignedAssertionConfig,
-        strip_from_untrusted: bool,
-    ) -> Result<Self> {
+    pub(super) fn from_config(name: &str, config: &SignedAssertionConfig) -> Result<Self> {
         let header = HeaderName::from_bytes(config.header.as_bytes())?;
         let hmac_secret = config
             .secret_env
@@ -77,16 +74,31 @@ impl CompiledSignedAssertion {
             hmac_secret,
             public_key,
             claims: CompiledAssertionClaims::from_config(&config.claims),
-            strip_from_untrusted,
         })
     }
 
-    pub(super) fn extract(&self, headers: &HeaderMap) -> ResolvedIdentity {
+    pub(super) fn extract(&self, headers: &HeaderMap) -> Result<ResolvedIdentity> {
         let Some(token) = extract_assertion_token(headers, &self.header, self.prefix.as_deref())
         else {
-            return ResolvedIdentity::default();
+            return Ok(ResolvedIdentity::default());
         };
-        self.verify_and_extract(token).unwrap_or_default()
+        match self.verify_and_extract(token) {
+            Ok(identity) => Ok(identity),
+            Err(err) => {
+                warn!(
+                    source = %self.name,
+                    header = %self.header,
+                    error = ?err,
+                    "signed assertion verification failed"
+                );
+                counter!(
+                    "qpx_signed_assertion_verification_failed_total",
+                    "source" => self.name.clone(),
+                )
+                .increment(1);
+                Err(anyhow!("invalid signed assertion {}: {err}", self.name))
+            }
+        }
     }
 
     fn verify_and_extract(&self, token: &str) -> Result<ResolvedIdentity> {
@@ -220,227 +232,4 @@ impl CompiledAssertionClaims {
     }
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use http::HeaderValue;
-    use qpx_core::config::{AssertionClaimsMapConfig, SignedAssertionConfig};
-    use ring::{rand::SystemRandom, signature};
-    use serde_json::json;
-
-    fn test_env_name(label: &str) -> String {
-        format!(
-            "QPX_TEST_{}_{}_{}",
-            label,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        )
-    }
-
-    fn set_test_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
-        // SAFETY: these tests hold crate::test_env_lock(), use process-unique keys,
-        // and remove the variable before releasing the lock.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-    }
-
-    fn remove_test_env(key: impl AsRef<std::ffi::OsStr>) {
-        // SAFETY: these tests hold crate::test_env_lock() and use process-unique keys.
-        unsafe {
-            std::env::remove_var(key);
-        }
-    }
-
-    fn encode_segment(value: &JsonValue) -> String {
-        URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).expect("segment json"))
-    }
-
-    fn sign_es256_jwt(private_key_der: &[u8], payload: JsonValue) -> String {
-        let header = json!({
-            "alg": "ES256",
-            "typ": "JWT"
-        });
-        let header_segment = encode_segment(&header);
-        let payload_segment = encode_segment(&payload);
-        let signing_input = format!("{header_segment}.{payload_segment}");
-        let rng = SystemRandom::new();
-        let key_pair = signature::EcdsaKeyPair::from_pkcs8(
-            &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-            private_key_der,
-            &rng,
-        )
-        .expect("ecdsa keypair");
-        let signature = key_pair
-            .sign(&rng, signing_input.as_bytes())
-            .expect("ecdsa sign");
-        format!(
-            "{}.{}",
-            signing_input,
-            URL_SAFE_NO_PAD.encode(signature.as_ref())
-        )
-    }
-
-    fn compiled_hs256() -> CompiledSignedAssertion {
-        CompiledSignedAssertion {
-            name: "signed-jwt".to_string(),
-            header: HeaderName::from_static("x-assertion"),
-            prefix: None,
-            algorithms: vec![JwtAlgorithm::Hs256],
-            issuer: None,
-            audience: None,
-            hmac_secret: Some(Arc::from(&b"secret"[..])),
-            public_key: None,
-            claims: CompiledAssertionClaims::from_config(&AssertionClaimsMapConfig {
-                user_from_sub: true,
-                ..Default::default()
-            }),
-            strip_from_untrusted: false,
-        }
-    }
-
-    fn sign_hs256_jwt(payload: JsonValue) -> String {
-        let header = json!({"alg": "HS256", "typ": "JWT"});
-        let header_segment = encode_segment(&header);
-        let payload_segment = encode_segment(&payload);
-        let signing_input = format!("{header_segment}.{payload_segment}");
-        let signature = crate::policy_context::util::hmac_digest::<sha2::Sha256>(
-            b"secret",
-            signing_input.as_bytes(),
-            64,
-        );
-        format!("{}.{}", signing_input, URL_SAFE_NO_PAD.encode(signature))
-    }
-
-    #[test]
-    fn jwt_missing_header_segment() {
-        assert!(compiled_hs256().verify_and_extract("payload.sig").is_err());
-    }
-
-    #[test]
-    fn jwt_empty_segments() {
-        assert!(compiled_hs256().verify_and_extract("..sig").is_err());
-    }
-
-    #[test]
-    fn jwt_invalid_base64_header() {
-        assert!(
-            compiled_hs256()
-                .verify_and_extract("%%% .payload.sig")
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn jwt_unsupported_algorithm() {
-        let header = encode_segment(&json!({"alg": "none"}));
-        let payload = encode_segment(&json!({"sub": "alice"}));
-        assert!(
-            compiled_hs256()
-                .verify_and_extract(format!("{header}.{payload}.sig").as_str())
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn jwt_expired_claim() {
-        let token = sign_hs256_jwt(json!({"sub": "alice", "exp": 1}));
-        assert!(compiled_hs256().verify_and_extract(token.as_str()).is_err());
-    }
-
-    #[test]
-    fn signed_assertion_accepts_es256_public_key_tokens() {
-        let _guard = crate::test_env_lock().lock().expect("env lock");
-        let key_pair =
-            rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
-        let private_key_der = key_pair.serialize_der();
-        let public_key_pem = key_pair.public_key_pem();
-        let env_name = test_env_name("ASSERTION_PUBLIC_KEY");
-        set_test_env(&env_name, public_key_pem);
-
-        let config = SignedAssertionConfig {
-            header: "x-assertion".to_string(),
-            algorithms: vec!["ES256".to_string()],
-            public_key_env: Some(env_name.clone()),
-            claims: AssertionClaimsMapConfig {
-                user_from_sub: true,
-                groups: Some("groups".to_string()),
-                groups_separator: Some(",".to_string()),
-                tenant: Some("tenant".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let compiled =
-            CompiledSignedAssertion::from_config("signed-jwt", &config, false).expect("compile");
-        let token = sign_es256_jwt(
-            private_key_der.as_slice(),
-            json!({
-                "sub": "alice",
-                "groups": ["eng", "ops"],
-                "tenant": "acme",
-                "exp": i64::MAX,
-            }),
-        );
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-assertion",
-            HeaderValue::from_str(token.as_str()).expect("header value"),
-        );
-        let identity = compiled.extract(&headers);
-
-        assert_eq!(identity.user.as_deref(), Some("alice"));
-        assert_eq!(identity.groups, vec!["eng".to_string(), "ops".to_string()]);
-        assert_eq!(identity.tenant.as_deref(), Some("acme"));
-        assert_eq!(identity.identity_source.as_deref(), Some("signed-jwt"));
-
-        remove_test_env(env_name);
-    }
-
-    #[test]
-    fn signed_assertion_defaults_to_public_key_algorithms() {
-        let _guard = crate::test_env_lock().lock().expect("env lock");
-        let key_pair =
-            rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
-        let private_key_der = key_pair.serialize_der();
-        let public_key_pem = key_pair.public_key_pem();
-        let env_name = test_env_name("ASSERTION_PUBLIC_KEY_DEFAULT");
-        set_test_env(&env_name, public_key_pem);
-
-        let config = SignedAssertionConfig {
-            header: "x-assertion".to_string(),
-            algorithms: Vec::new(),
-            public_key_env: Some(env_name.clone()),
-            claims: AssertionClaimsMapConfig {
-                user_from_sub: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let compiled =
-            CompiledSignedAssertion::from_config("signed-jwt", &config, false).expect("compile");
-        let token = sign_es256_jwt(
-            private_key_der.as_slice(),
-            json!({
-                "sub": "alice",
-                "exp": i64::MAX,
-            }),
-        );
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-assertion",
-            HeaderValue::from_str(token.as_str()).expect("header value"),
-        );
-        let identity = compiled.extract(&headers);
-
-        assert_eq!(identity.user.as_deref(), Some("alice"));
-
-        remove_test_env(env_name);
-    }
-}
+mod tests;

@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 
 static DEFAULT_HTTP_MODULE_REGISTRY: OnceLock<Arc<HttpModuleRegistry>> = OnceLock::new();
 
-pub fn default_http_module_registry() -> Arc<HttpModuleRegistry> {
+pub(crate) fn default_http_module_registry() -> Arc<HttpModuleRegistry> {
     DEFAULT_HTTP_MODULE_REGISTRY
         .get_or_init(|| Arc::new(HttpModuleRegistryBuilder::with_builtins().build()))
         .clone()

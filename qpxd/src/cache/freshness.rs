@@ -52,6 +52,9 @@ pub(super) fn freshness_lifetime_secs(
     now_ms: u64,
     directives: &ResponseDirectives,
 ) -> Option<u64> {
+    if directives.invalid_freshness {
+        return Some(0);
+    }
     if let Some(ttl) = directives.s_maxage {
         return Some(ttl);
     }

@@ -1,5 +1,5 @@
 use super::key::normalize_url_authority;
-use super::types::{CacheBackend, CacheRequestKey};
+use super::types::{CacheBackend, CacheRequestKey, cache_body_storage_key};
 use super::util::{cache_namespace, load_variant_index};
 use super::vary::index_storage_key;
 use anyhow::Result;
@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use url::Url;
 
-pub async fn maybe_invalidate(
+pub(crate) async fn maybe_invalidate(
     request_method: &Method,
     response_status: StatusCode,
     response_headers: &http::HeaderMap,
@@ -45,7 +45,7 @@ pub async fn maybe_invalidate(
     Ok(())
 }
 
-pub async fn purge_cache_key(
+pub(crate) async fn purge_cache_key(
     key: &CacheRequestKey,
     policy: &CachePolicyConfig,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
@@ -74,6 +74,9 @@ pub(super) async fn invalidate_primary(
     let index = load_variant_index(backend, namespace, primary).await?;
     for variant in index.variants {
         let _ = backend.delete(namespace, variant.as_str()).await;
+        let _ = backend
+            .delete(namespace, cache_body_storage_key(variant.as_str()).as_str())
+            .await;
     }
     let _ = backend
         .delete(namespace, index_storage_key(primary).as_str())

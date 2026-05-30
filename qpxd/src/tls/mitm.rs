@@ -1,12 +1,32 @@
 use crate::tls::cert_info::UpstreamCertificateInfo;
 use crate::tls::trust::CompiledUpstreamTlsTrust;
 use crate::upstream::connect::TunnelIo;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use qpx_core::tls::MitmConfig;
 use std::sync::Arc;
 use tokio::time::{Duration, timeout};
 use tokio_rustls::TlsAcceptor;
 use tracing::warn;
+
+pub(crate) async fn prewarm_mitm_cert(
+    mitm: &MitmConfig,
+    server_name: &str,
+    timeout_dur: Duration,
+) -> Result<()> {
+    let resolver = mitm.resolver.clone();
+    let server_name = server_name.to_string();
+    timeout(
+        timeout_dur,
+        tokio::task::spawn_blocking(move || resolver.prewarm_server_name(server_name.as_str())),
+    )
+    .await
+    .map_err(|_| anyhow!("MITM certificate prewarm timed out"))?
+    .map_err(|err| anyhow!("MITM certificate prewarm task failed: {err}"))
+    .and_then(|ok| {
+        ok.then_some(())
+            .ok_or_else(|| anyhow!("failed to prewarm MITM certificate"))
+    })
+}
 
 pub(crate) async fn accept_mitm_client<C>(
     client_io: C,
@@ -28,7 +48,7 @@ pub(crate) async fn connect_mitm_upstream(
     timeout_dur: Duration,
     log_context: &'static str,
 ) -> Result<(
-    Arc<tokio::sync::Mutex<crate::http::common::Http1SendRequest>>,
+    Arc<tokio::sync::Mutex<crate::http::protocol::common::Http1SendRequest>>,
     UpstreamCertificateInfo,
 )> {
     // For MITM traffic we force HTTP/1.1 upstream to keep Upgrade/WebSocket semantics working
@@ -40,7 +60,7 @@ pub(crate) async fn connect_mitm_upstream(
     .await??;
     let (sender, conn) = timeout(
         timeout_dur,
-        crate::http::common::handshake_http1(server_tls),
+        crate::http::protocol::common::handshake_http1(server_tls),
     )
     .await??;
     tokio::spawn(async move {

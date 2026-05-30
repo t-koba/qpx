@@ -207,6 +207,11 @@ pub(super) fn validate_named_upstream_ref(
         && allow_authority
         && (upstream_ref.contains(':') || upstream_ref.starts_with('['))
     {
+        if !allow_userinfo && upstream_ref.contains('@') {
+            return Err(anyhow!(
+                "{context} upstream authority must not include userinfo"
+            ));
+        }
         upstream_ref.parse::<http::uri::Authority>().map_err(|_| {
             anyhow!(
                 "{context} has invalid upstream authority reference: {}",

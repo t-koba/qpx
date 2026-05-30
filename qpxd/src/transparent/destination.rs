@@ -1,6 +1,6 @@
-use crate::http::address::parse_authority_host_port;
 use crate::http::body::Body;
-use crate::http::common::resolve_named_upstream;
+use crate::http::protocol::address::parse_authority_host_port;
+use crate::http::protocol::common::resolve_named_upstream;
 use crate::upstream::connect::{ConnectedTunnel, connect_tunnel_target};
 use crate::xdp;
 use anyhow::{Result, anyhow};
@@ -65,7 +65,7 @@ impl DestinationResolver {
         remote_addr: SocketAddr,
         metadata_timeout: Duration,
     ) -> Result<(
-        crate::io_prefix::PrefixedIo<TcpStream>,
+        crate::http::protocol::io_prefix::PrefixedIo<TcpStream>,
         SocketAddr,
         Option<ConnectTarget>,
     )> {
@@ -83,7 +83,7 @@ impl DestinationResolver {
                     .filter(|dst| local_addr != Some(*dst))
                     .map(ConnectTarget::Socket);
                 Ok((
-                    crate::io_prefix::PrefixedIo::new(stream, Bytes::new()),
+                    crate::http::protocol::io_prefix::PrefixedIo::new(stream, Bytes::new()),
                     remote_addr,
                     target,
                 ))
@@ -106,7 +106,7 @@ impl DestinationResolver {
                         .filter(|dst| local_addr != Some(*dst))
                         .map(ConnectTarget::Socket);
                     return Ok((
-                        crate::io_prefix::PrefixedIo::new(stream, Bytes::new()),
+                        crate::http::protocol::io_prefix::PrefixedIo::new(stream, Bytes::new()),
                         remote_addr,
                         target,
                     ));
@@ -129,7 +129,7 @@ impl DestinationResolver {
                             .map(ConnectTarget::Socket)
                     });
                 Ok((
-                    crate::io_prefix::PrefixedIo::new(stream, result.prefix),
+                    crate::http::protocol::io_prefix::PrefixedIo::new(stream, result.prefix),
                     effective_remote,
                     target,
                 ))
@@ -307,7 +307,7 @@ fn original_dst_socket(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::transparent::destination::*;
     use cidr::IpCidr;
     use hyper::Request;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

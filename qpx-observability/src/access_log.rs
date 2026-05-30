@@ -1,6 +1,8 @@
 use crate::handler::RequestHandler;
 use http::{Request, Response};
 use qpx_core::config::AccessLogConfig;
+use qpx_core::redaction::redact_uri_query_keys;
+use std::borrow::Cow;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -32,6 +34,30 @@ pub struct RequestLogContext {
     pub destination_trace: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RpcLogContext {
+    pub protocol: Option<String>,
+    pub service: Option<String>,
+    pub method: Option<String>,
+    pub streaming: Option<String>,
+    pub status: Option<String>,
+    pub message_size: Option<u64>,
+    pub message: Option<String>,
+    pub request_message_count: Option<usize>,
+    pub response_message_count: Option<usize>,
+    pub request_message_bytes: Option<u64>,
+    pub response_message_bytes: Option<u64>,
+    pub stream_duration_ms: Option<u64>,
+}
+
+fn joined_or_empty(values: &[String]) -> Cow<'_, str> {
+    match values {
+        [] => Cow::Borrowed(""),
+        [value] => Cow::Borrowed(value.as_str()),
+        _ => Cow::Owned(values.join(",")),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AccessLogService<S> {
     inner: S,
@@ -39,6 +65,7 @@ pub struct AccessLogService<S> {
     context: AccessLogContext,
     enabled: bool,
     exclude: Arc<[Arc<str>]>,
+    redact_query_keys: Arc<[String]>,
 }
 
 impl<S> AccessLogService<S> {
@@ -60,6 +87,7 @@ impl<S> AccessLogService<S> {
             context,
             enabled: config.output.enabled,
             exclude,
+            redact_query_keys: Arc::from(config.redact.query_keys.clone()),
         }
     }
 
@@ -134,7 +162,8 @@ where
                                     span.record("qpx.ext_authz_policy_id", policy_id);
                                 }
                                 if !ctx.policy_tags.is_empty() {
-                                    span.record("qpx.policy_tags", ctx.policy_tags.join(","));
+                                    let policy_tags = joined_or_empty(&ctx.policy_tags);
+                                    span.record("qpx.policy_tags", policy_tags.as_ref());
                                 }
                             }
                             if status >= 500 {
@@ -150,13 +179,47 @@ where
                     (this.start.take(), this.snapshot.take(), &result)
                 {
                     let req_ctx = resp.extensions().get::<RequestLogContext>().cloned();
+                    let rpc_ctx = resp.extensions().get::<RpcLogContext>().cloned();
                     let elapsed = start.elapsed();
                     let latency_ms = (elapsed.as_micros() as f64) / 1000.0;
+                    let rpc_stream_duration_ms = rpc_ctx
+                        .as_ref()
+                        .and_then(|ctx| ctx.stream_duration_ms)
+                        .unwrap_or(elapsed.as_millis() as u64);
+                    if let Some(rpc) = rpc_ctx.as_ref()
+                        && matches!(
+                            rpc.protocol.as_deref(),
+                            Some("grpc" | "grpc_web" | "connect")
+                        )
+                    {
+                        metrics::histogram!(
+                            "qpx_grpc_stream_duration_seconds",
+                            "listener" => snapshot.name.to_string(),
+                            "protocol" => rpc.protocol.clone().unwrap_or_default(),
+                            "streaming" => rpc
+                                .streaming
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string())
+                        )
+                        .record(elapsed.as_secs_f64());
+                    }
                     let bytes_out = resp
                         .headers()
                         .get(http::header::CONTENT_LENGTH)
                         .and_then(|v| v.to_str().ok())
                         .and_then(|raw| raw.trim().parse::<u64>().ok());
+                    let groups = req_ctx
+                        .as_ref()
+                        .map(|ctx| joined_or_empty(&ctx.groups))
+                        .unwrap_or(Cow::Borrowed(""));
+                    let posture = req_ctx
+                        .as_ref()
+                        .map(|ctx| joined_or_empty(&ctx.posture))
+                        .unwrap_or(Cow::Borrowed(""));
+                    let policy_tags = req_ctx
+                        .as_ref()
+                        .map(|ctx| joined_or_empty(&ctx.policy_tags))
+                        .unwrap_or(Cow::Borrowed(""));
                     tracing::info!(
                         target: "access_log",
                         kind = snapshot.kind,
@@ -175,18 +238,12 @@ where
                             .as_ref()
                             .and_then(|ctx| ctx.subject.as_deref())
                             .unwrap_or(""),
-                        groups = %req_ctx
-                            .as_ref()
-                            .map(|ctx| ctx.groups.join(","))
-                            .unwrap_or_default(),
+                        groups = %groups,
                         device_id = req_ctx
                             .as_ref()
                             .and_then(|ctx| ctx.device_id.as_deref())
                             .unwrap_or(""),
-                        posture = %req_ctx
-                            .as_ref()
-                            .map(|ctx| ctx.posture.join(","))
-                            .unwrap_or_default(),
+                        posture = %posture,
                         tenant = req_ctx
                             .as_ref()
                             .and_then(|ctx| ctx.tenant.as_deref())
@@ -203,10 +260,7 @@ where
                             .as_ref()
                             .and_then(|ctx| ctx.identity_source.as_deref())
                             .unwrap_or(""),
-                        policy_tags = %req_ctx
-                            .as_ref()
-                            .map(|ctx| ctx.policy_tags.join(","))
-                            .unwrap_or_default(),
+                        policy_tags = %policy_tags,
                         ext_authz_policy_id = req_ctx
                             .as_ref()
                             .and_then(|ctx| ctx.ext_authz_policy_id.as_deref())
@@ -223,6 +277,51 @@ where
                             .as_ref()
                             .and_then(|ctx| ctx.destination_trace.as_deref())
                             .unwrap_or(""),
+                        rpc_protocol = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.protocol.as_deref())
+                            .unwrap_or(""),
+                        rpc_service = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.service.as_deref())
+                            .unwrap_or(""),
+                        rpc_method = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.method.as_deref())
+                            .unwrap_or(""),
+                        rpc_streaming = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.streaming.as_deref())
+                            .unwrap_or(""),
+                        rpc_status = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.status.as_deref())
+                            .unwrap_or(""),
+                        rpc_message_size = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.message_size)
+                            .unwrap_or(0),
+                        rpc_message = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.message.as_deref())
+                            .unwrap_or(""),
+                        rpc_request_message_count = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.request_message_count)
+                            .unwrap_or(0),
+                        rpc_response_message_count = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.response_message_count)
+                            .unwrap_or(0),
+                        rpc_request_message_bytes = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.request_message_bytes)
+                            .unwrap_or(0),
+                        rpc_response_message_bytes = rpc_ctx
+                            .as_ref()
+                            .and_then(|ctx| ctx.response_message_bytes)
+                            .unwrap_or(0),
+                        rpc_stream_duration_ms = rpc_stream_duration_ms,
                     );
                 }
                 Poll::Ready(result)
@@ -261,27 +360,27 @@ where
                 .map(|s| s.to_string());
         }
 
+        let redacted_uri = if should_log || should_trace {
+            Some(redact_uri_query_keys(
+                req.uri().to_string().as_str(),
+                &self.redact_query_keys,
+            ))
+        } else {
+            None
+        };
+
         let span = if should_trace {
             use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-            let path_and_query = req
-                .uri()
-                .path_and_query()
-                .map(|pq| pq.as_str())
-                .unwrap_or("/");
-            let span_name = format!(
-                "{} {} {}",
-                self.context.kind,
-                req.method().as_str(),
-                path_and_query
-            );
+            let path = req.uri().path();
+            let span_name = format!("{} {} {}", self.context.kind, req.method().as_str(), path);
             let span = tracing::info_span!(
                 target: "otel",
                 "http",
                 "otel.name" = span_name,
                 "otel.kind" = "server",
                 "http.request.method" = %req.method(),
-                "url.full" = %req.uri(),
+                "url.full" = redacted_uri.as_deref().unwrap_or(""),
                 "url.path" = %req.uri().path(),
                 "client.address" = %self.remote_addr.ip(),
                 "client.port" = self.remote_addr.port(),
@@ -305,21 +404,11 @@ where
         };
 
         let (start, snapshot) = if should_log {
-            let host = req
-                .headers()
-                .get(http::header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
             let referer = req
                 .headers()
                 .get(http::header::REFERER)
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let user_agent = req
-                .headers()
-                .get(http::header::USER_AGENT)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+                .map(|s| redact_uri_query_keys(s, &self.redact_query_keys));
             (
                 Some(Instant::now()),
                 Some(AccessLogSnapshot {
@@ -327,11 +416,11 @@ where
                     kind: self.context.kind,
                     name: self.context.name.clone(),
                     method: req.method().clone(),
-                    uri: req.uri().to_string(),
+                    uri: redacted_uri.unwrap_or_else(|| req.uri().to_string()),
                     version: req.version(),
-                    host,
+                    host: host.clone(),
                     referer,
-                    user_agent,
+                    user_agent: user_agent.clone(),
                 }),
             )
         } else {
@@ -351,5 +440,34 @@ where
             snapshot,
             span,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_log_redacts_uri_and_referer_query_keys() {
+        let keys = Arc::<[String]>::from(vec![
+            "code".to_string(),
+            "access_token".to_string(),
+            "id_token".to_string(),
+        ]);
+        assert_eq!(
+            redact_uri_query_keys("/callback?code=secret&ok=1", &keys),
+            "/callback?code=<redacted>&ok=1"
+        );
+        assert_eq!(
+            redact_uri_query_keys("https://idp.example/cb?access_token=secret", &keys),
+            "https://idp.example/cb?access_token=<redacted>"
+        );
+        assert_eq!(
+            redact_uri_query_keys(
+                "https://idp.example/cb#access_token=secret&id_token=jwt&state=ok",
+                &keys
+            ),
+            "https://idp.example/cb#access_token=<redacted>&id_token=<redacted>&state=ok"
+        );
     }
 }

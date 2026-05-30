@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use pcap_file::pcapng::{Block, PcapNgReader};
 use qpx_core::exporter::STREAM_PREFACE_LINE;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -142,7 +142,7 @@ fn run_stream(
     };
     let mut save_file = match save {
         Some(path) => Some(
-            File::create(path)
+            qpx_core::secure_file::open_secure_output_file(path)
                 .with_context(|| format!("failed to open save file: {}", path.display()))?,
         ),
         None => None,

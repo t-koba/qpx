@@ -1,9 +1,4 @@
 use super::destination::{ConnectTarget, connect_target_stream, resolve_upstream};
-use crate::destination::DestinationInputs;
-#[cfg(feature = "mitm")]
-use crate::http::body::Body;
-#[cfg(feature = "mitm")]
-use crate::http::http1_codec::serve_http1_with_interim;
 use crate::policy_context::{
     AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
     apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
@@ -11,32 +6,13 @@ use crate::policy_context::{
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
+use crate::tls::TlsClientHelloInfo;
 use crate::tls::client::preview_tls_certificate_with_options;
-use crate::tls::{CompiledUpstreamTlsTrust, TlsClientHelloInfo, UpstreamCertificateInfo};
-#[cfg(feature = "mitm")]
-use anyhow::Context;
 use anyhow::{Result, anyhow};
-#[cfg(feature = "mitm")]
-use hyper::Request;
-use qpx_core::config::{ActionConfig, ActionKind};
-use qpx_core::rules::RuleMatchContext;
-#[cfg(feature = "mitm")]
-use qpx_observability::access_log::{AccessLogContext, AccessLogService};
-#[cfg(feature = "mitm")]
-use qpx_observability::handler_fn;
-#[cfg(feature = "mitm")]
-use std::convert::Infallible;
+use qpx_core::config::ActionKind;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::time::Duration;
-#[cfg(feature = "mitm")]
-use tokio::time::timeout;
 use tracing::warn;
-
-#[cfg(feature = "mitm")]
-use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
-#[cfg(feature = "mitm")]
-use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TransparentTlsOutcome {
@@ -44,25 +20,6 @@ pub(super) enum TransparentTlsOutcome {
     #[cfg(feature = "mitm")]
     Inspected,
     Blocked,
-}
-
-#[derive(Debug, Clone)]
-struct TransparentTlsDecision {
-    action: ActionConfig,
-    matched_rule: Option<String>,
-    auth_required: bool,
-}
-
-struct TransparentTlsPolicyInput<'a> {
-    runtime: &'a Runtime,
-    listener_name: &'a str,
-    remote_addr: SocketAddr,
-    connect_target: &'a ConnectTarget,
-    host_for_match: Option<&'a str>,
-    sni_for_match: Option<&'a str>,
-    client_hello: Option<&'a TlsClientHelloInfo>,
-    identity: &'a crate::policy_context::ResolvedIdentity,
-    upstream_cert: Option<&'a UpstreamCertificateInfo>,
 }
 
 fn resolve_tls_connect_target(
@@ -172,7 +129,7 @@ where
             &connect_target,
             preview_upstream.as_ref(),
             state.plan.identity.proxy_name.as_ref(),
-            Duration::from_millis(state.plan.limits.upstream_http_timeout_ms),
+            Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms),
         )
         .await
         {
@@ -335,8 +292,9 @@ where
         }
     };
 
-    let upstream_timeout = timeout_override
-        .unwrap_or_else(|| Duration::from_millis(state.plan.limits.upstream_http_timeout_ms));
+    let upstream_timeout = timeout_override.unwrap_or_else(|| {
+        Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
+    });
     let upstream = resolve_upstream(&action, &state, listener_cfg)?;
     let rate_limit_ctx = RateLimitContext::from_identity(
         remote_addr.ip(),
@@ -500,18 +458,17 @@ where
     let export = upstream_connected
         .peer_addr
         .and_then(|server_addr| runtime.state().export_session(remote_addr, server_addr));
-    let idle_timeout = Duration::from_millis(runtime.state().plan.limits.tunnel_idle_timeout_ms);
-    let throttle = crate::io_copy::BandwidthThrottle::with_context(
+    let idle_timeout =
+        Duration::from_millis(runtime.state().plan.limits.timeouts.tunnel_idle_timeout_ms);
+    let throttle = crate::upstream::io_copy::BandwidthThrottle::with_context(
         rate_limit_ctx,
         request_limits.byte_limiters.clone(),
         request_limits.byte_quota_limiters.clone(),
     );
-    crate::io_copy::copy_bidirectional_with_export_and_idle(
+    crate::tunnel::relay_tcp_tunnel(
         stream,
         upstream_connected.io,
-        export,
-        Some(idle_timeout),
-        throttle,
+        crate::tunnel::TunnelPolicy::tcp(Some(idle_timeout), throttle, export),
     )
     .await?;
     emit_audit_log(
@@ -535,400 +492,12 @@ where
     Ok(TransparentTlsOutcome::Tunneled)
 }
 
-fn evaluate_tls_policy_decision(
-    input: TransparentTlsPolicyInput<'_>,
-) -> Result<TransparentTlsDecision> {
-    let TransparentTlsPolicyInput {
-        runtime,
-        listener_name,
-        remote_addr,
-        connect_target,
-        host_for_match,
-        sni_for_match,
-        client_hello,
-        identity,
-        upstream_cert,
-    } = input;
-    let state = runtime.state();
-    let engine = state
-        .policy
-        .rules_by_listener
-        .get(listener_name)
-        .ok_or_else(|| anyhow!("rule engine not found"))?;
-    let base_plan = state
-        .plan
-        .ingress_edge_execution_plan(listener_name, None)
-        .ok_or_else(|| anyhow!("listener plan not found"))?;
-    let destination = state.classify_destination(
-        &DestinationInputs {
-            host: host_for_match,
-            ip: host_for_match.and_then(|value| value.parse().ok()),
-            sni: sni_for_match,
-            scheme: Some("https"),
-            port: Some(connect_target.port()),
-            alpn: client_hello.and_then(|hello| hello.alpn.as_deref()),
-            ja3: client_hello.and_then(|hello| hello.ja3.as_deref()),
-            ja4: client_hello.and_then(|hello| hello.ja4.as_deref()),
-            cert_subject: upstream_cert.and_then(|cert| cert.subject.as_deref()),
-            cert_issuer: upstream_cert.and_then(|cert| cert.issuer.as_deref()),
-            cert_san_dns: upstream_cert
-                .map(|cert| cert.san_dns.as_slice())
-                .unwrap_or(&[]),
-            cert_san_uri: upstream_cert
-                .map(|cert| cert.san_uri.as_slice())
-                .unwrap_or(&[]),
-            cert_fingerprint_sha256: upstream_cert
-                .and_then(|cert| cert.fingerprint_sha256.as_deref()),
-        },
-        base_plan.destination_resolution.as_ref(),
-    );
-    let ctx = RuleMatchContext {
-        src_ip: Some(remote_addr.ip()),
-        dst_port: Some(connect_target.port()),
-        host: host_for_match,
-        sni: sni_for_match,
-        method: None,
-        path: None,
-        alpn: client_hello.and_then(|hello| hello.alpn.as_deref()),
-        tls_version: client_hello.and_then(|hello| hello.tls_version.as_deref()),
-        destination_category: destination.category.as_deref(),
-        destination_category_source: destination.category_source.as_deref(),
-        destination_category_confidence: destination.category_confidence.map(u64::from),
-        destination_reputation: destination.reputation.as_deref(),
-        destination_reputation_source: destination.reputation_source.as_deref(),
-        destination_reputation_confidence: destination.reputation_confidence.map(u64::from),
-        destination_application: destination.application.as_deref(),
-        destination_application_source: destination.application_source.as_deref(),
-        destination_application_confidence: destination.application_confidence.map(u64::from),
-        ja3: client_hello.and_then(|hello| hello.ja3.as_deref()),
-        ja4: client_hello.and_then(|hello| hello.ja4.as_deref()),
-        headers: None,
-        user: identity.user.as_deref(),
-        user_groups: &identity.groups,
-        device_id: identity.device_id.as_deref(),
-        posture: &identity.posture,
-        tenant: identity.tenant.as_deref(),
-        auth_strength: identity.auth_strength.as_deref(),
-        idp: identity.idp.as_deref(),
-        upstream_cert_present: upstream_cert.map(|cert| cert.present),
-        upstream_cert_subject: upstream_cert.and_then(|cert| cert.subject.as_deref()),
-        upstream_cert_issuer: upstream_cert.and_then(|cert| cert.issuer.as_deref()),
-        upstream_cert_san_dns: upstream_cert
-            .map(|cert| cert.san_dns.as_slice())
-            .unwrap_or(&[]),
-        upstream_cert_san_uri: upstream_cert
-            .map(|cert| cert.san_uri.as_slice())
-            .unwrap_or(&[]),
-        upstream_cert_fingerprint_sha256: upstream_cert
-            .and_then(|cert| cert.fingerprint_sha256.as_deref()),
-        ..Default::default()
-    };
-    let outcome = engine.evaluate_ref(&ctx);
-    Ok(TransparentTlsDecision {
-        action: outcome.action.clone(),
-        matched_rule: outcome.matched_rule.map(str::to_string),
-        auth_required: outcome
-            .auth
-            .map(|auth| !auth.require.is_empty())
-            .unwrap_or(false),
-    })
-}
-
-fn listener_upstream_trust(
-    listener_cfg: &crate::runtime::CompiledListenerSettings,
-) -> Result<Option<Arc<CompiledUpstreamTlsTrust>>> {
-    Ok(listener_cfg
-        .tls_inspection
-        .as_ref()
-        .and_then(|cfg| cfg.upstream_trust.clone()))
-}
-
-fn listener_requires_upstream_cert_preview(
-    listener_cfg: &crate::runtime::CompiledListenerSettings,
-) -> bool {
-    listener_cfg.requires_upstream_cert_preview
-}
-
 #[cfg(feature = "mitm")]
-struct TransparentMitmContext {
-    connect_target: ConnectTarget,
-    upstream_proxy: Option<crate::upstream::pool::ResolvedUpstreamProxy>,
-    runtime: Runtime,
-    listener_name: String,
-    remote_addr: SocketAddr,
-    sni: String,
-    mitm: qpx_core::tls::MitmConfig,
-    verify_upstream: bool,
-    trust: Option<Arc<CompiledUpstreamTlsTrust>>,
-}
-
+mod mitm;
 #[cfg(feature = "mitm")]
-async fn transparent_mitm<I>(stream: I, ctx: TransparentMitmContext) -> Result<()>
-where
-    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
-{
-    let TransparentMitmContext {
-        connect_target,
-        upstream_proxy,
-        runtime,
-        listener_name,
-        remote_addr,
-        sni,
-        mitm,
-        verify_upstream,
-        trust,
-    } = ctx;
-    let upstream_timeout =
-        Duration::from_millis(runtime.state().plan.limits.upstream_http_timeout_ms);
-
-    let upstream_connected = timeout(
-        upstream_timeout,
-        connect_target_stream(
-            &connect_target,
-            upstream_proxy.as_ref(),
-            runtime.state().plan.identity.proxy_name.as_ref(),
-            upstream_timeout,
-        ),
-    )
-    .await??;
-    let client_tls = accept_mitm_client(stream, &mitm, upstream_timeout).await?;
-    let (sender, upstream_cert) = connect_mitm_upstream(
-        upstream_connected.io,
-        sni.as_str(),
-        verify_upstream,
-        trust.as_deref(),
-        upstream_timeout,
-        "transparent MITM upstream conn",
-    )
-    .await?;
-    let upstream_cert = Arc::new(upstream_cert);
-    let runtime_for_service = runtime.clone();
-    let listener_for_service = listener_name.clone();
-    let sni_for_service = sni.clone();
-    let connect_target_for_service = connect_target.clone();
-    let access_cfg = runtime.state().resources.access_log.clone();
-    let access_name = Arc::<str>::from(listener_name.as_str());
-
-    let service = handler_fn(move |req: Request<Body>| {
-        let sender = sender.clone();
-        let runtime = runtime_for_service.clone();
-        let listener_name = listener_for_service.clone();
-        let sni = sni_for_service.clone();
-        let connect_target = connect_target_for_service.clone();
-        let upstream_cert = upstream_cert.clone();
-
-        async move {
-            let proxy_name = runtime.state().plan.identity.proxy_name.to_string();
-            let proxy_error = runtime.state().messages.proxy_error.clone();
-            let request_method = req.method().clone();
-            let request_version = req.version();
-            let target_host = connect_target.host_for_connect();
-            let route = MitmRouteContext {
-                listener_name: listener_name.as_str(),
-                src_addr: remote_addr,
-                dst_port: connect_target.port(),
-                host: target_host.as_str(),
-                sni: sni.as_str(),
-                upstream_cert: Some(upstream_cert),
-            };
-            match proxy_mitm_request(req, runtime, sender, route).await {
-                Ok(response) => Ok::<_, Infallible>(response),
-                Err(err) => {
-                    warn!(error = ?err, "transparent MITM request failed");
-                    Ok(crate::http::l7::finalize_response_for_request(
-                        &request_method,
-                        request_version,
-                        proxy_name.as_str(),
-                        hyper::Response::builder()
-                            .status(hyper::StatusCode::BAD_GATEWAY)
-                            .body(Body::from(proxy_error))
-                            .unwrap_or_else(|_| hyper::Response::new(Body::from("proxy error"))),
-                        false,
-                    ))
-                }
-            }
-        }
-    });
-    let service = AccessLogService::new(
-        service,
-        remote_addr,
-        AccessLogContext {
-            kind: crate::http::dispatch::ProxyKind::Transparent.as_str(),
-            name: access_name,
-        },
-        &access_cfg,
-    );
-
-    let header_read_timeout =
-        Duration::from_millis(runtime.state().plan.limits.http_header_read_timeout_ms);
-    serve_http1_with_interim(client_tls, service, header_read_timeout)
-        .await
-        .context("transparent MITM serve_connection failed")?;
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use qpx_core::config::{
-        AccessLogConfig, AuditLogConfig, AuthConfig, CertificateMatchConfig, Config,
-        IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MatchConfig, MessagesConfig,
-        RuleConfig, RuntimeConfig, SystemLogConfig, TlsInspectionConfig,
-    };
-
-    fn tls_runtime(rules: Vec<RuleConfig>) -> Runtime {
-        #[cfg(feature = "tls-rustls")]
-        qpx_core::tls::init_rustls_crypto_provider();
-
-        Runtime::new(Config {
-            state_dir: None,
-            identity: IdentityConfig::default(),
-            messages: MessagesConfig::default(),
-            runtime: RuntimeConfig::default(),
-            telemetry: qpx_core::config::TelemetryConfig {
-                system_log: SystemLogConfig::default(),
-                access_log: AccessLogConfig::default(),
-                audit_log: AuditLogConfig::default(),
-                metrics: None,
-                otel: None,
-                exporter: None,
-            },
-            security: qpx_core::config::SecurityConfig {
-                auth: AuthConfig::default(),
-                identity_sources: Vec::new(),
-                decisions: qpx_core::config::DecisionConfig {
-                    ext_authz: Vec::new(),
-                },
-                destination: Default::default(),
-                named_sets: Vec::new(),
-                upstream_trust_profiles: Vec::new(),
-            },
-            http: qpx_core::config::HttpGlobalConfig::default(),
-            traffic: qpx_core::config::TrafficConfig::default(),
-            acme: None,
-            edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
-                name: "transparent".to_string(),
-                mode: IngressEdgeMode::Transparent,
-                listen: "127.0.0.1:18443".to_string(),
-                default_action: ActionConfig {
-                    kind: ActionKind::Tunnel,
-                    upstream: None,
-                    local_response: None,
-                },
-                original_dst: None,
-                tls_inspection: Some(TlsInspectionConfig {
-                    enabled: true,
-                    ca: None,
-                    verify_upstream: false,
-                    verify_exceptions: Vec::new(),
-                    upstream_trust_profile: None,
-                    upstream_trust: None,
-                }),
-                rules,
-                connection_filter: Vec::new(),
-                upstream_proxy: None,
-                http3: None,
-                ftp: qpx_core::config::FtpConfig::default(),
-                xdp: None,
-                cache: None,
-                capture: None,
-                rate_limit: None,
-                policy_context: None,
-                http: None,
-                http_guard_profile: None,
-                destination_resolution: None,
-                http_modules: Vec::new(),
-            })],
-            upstreams: Vec::new(),
-            caches: Vec::new(),
-        })
-        .expect("runtime")
-    }
-
-    #[test]
-    fn upstream_cert_match_can_force_block_before_mitm() {
-        let runtime = tls_runtime(vec![RuleConfig {
-            name: "block-bad-issuer".to_string(),
-            r#match: Some(MatchConfig {
-                upstream_cert: Some(CertificateMatchConfig {
-                    issuer: vec!["Bad Issuer".to_string()],
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            auth: None,
-            action: Some(ActionConfig {
-                kind: ActionKind::Block,
-                upstream: None,
-                local_response: None,
-            }),
-            headers: None,
-            rate_limit: None,
-        }]);
-        let client_hello = TlsClientHelloInfo {
-            sni: Some("example.com".to_string()),
-            alpn: Some("h2".to_string()),
-            tls_version: Some("TLS1.3".to_string()),
-            ja3: Some("ja3".to_string()),
-            ja4: Some("ja4".to_string()),
-        };
-        let identity = crate::policy_context::ResolvedIdentity::default();
-        let upstream_cert = UpstreamCertificateInfo {
-            present: true,
-            issuer: Some("Bad Issuer".to_string()),
-            ..Default::default()
-        };
-        let target = ConnectTarget::HostPort("example.com".to_string(), 443);
-        let decision = evaluate_tls_policy_decision(TransparentTlsPolicyInput {
-            runtime: &runtime,
-            listener_name: "transparent",
-            remote_addr: "127.0.0.1:44321".parse().expect("remote"),
-            connect_target: &target,
-            host_for_match: Some("example.com"),
-            sni_for_match: Some("example.com"),
-            client_hello: Some(&client_hello),
-            identity: &identity,
-            upstream_cert: Some(&upstream_cert),
-        })
-        .expect("decision");
-        assert_eq!(decision.action.kind, ActionKind::Block);
-        assert_eq!(decision.matched_rule.as_deref(), Some("block-bad-issuer"));
-    }
-
-    #[test]
-    fn resolve_tls_connect_target_uses_sni_when_original_target_is_missing() {
-        let (target, sni) = resolve_tls_connect_target(
-            None,
-            Some(&TlsClientHelloInfo {
-                sni: Some("example.com".to_string()),
-                alpn: Some("h2".to_string()),
-                tls_version: Some("TLS1.3".to_string()),
-                ja3: None,
-                ja4: None,
-            }),
-        )
-        .expect("target");
-        assert!(matches!(target, ConnectTarget::HostPort(ref host, 443) if host == "example.com"));
-        assert_eq!(sni.as_deref(), Some("example.com"));
-    }
-
-    #[test]
-    fn resolve_tls_connect_target_prefers_original_target_over_sni() {
-        let (target, sni) = resolve_tls_connect_target(
-            Some(ConnectTarget::Socket(
-                "127.0.0.1:18443".parse().expect("socket"),
-            )),
-            Some(&TlsClientHelloInfo {
-                sni: Some("example.com".to_string()),
-                alpn: None,
-                tls_version: None,
-                ja3: None,
-                ja4: None,
-            }),
-        )
-        .expect("target");
-        assert!(matches!(target, ConnectTarget::Socket(addr) if addr.port() == 18443));
-        assert_eq!(sni.as_deref(), Some("example.com"));
-    }
-}
+use self::mitm::{TransparentMitmContext, transparent_mitm};
+mod policy;
+use self::policy::{
+    TransparentTlsPolicyInput, evaluate_tls_policy_decision,
+    listener_requires_upstream_cert_preview, listener_upstream_trust,
+};

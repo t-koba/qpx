@@ -19,7 +19,7 @@ qpxr       reader:         reads capture events from qpxd's SHM ring, writes PCA
 qpxc       client:         streams PCAPNG from qpxr to Wireshark or stdout
 ```
 
-`xtask` provides developer automation and is intentionally omitted from the runtime flow diagrams below. `qpxd` is the main network proxy. It forwards requests to `qpxf` over the QPX-IPC protocol using reverse-route `ipc:` targets in the YAML. QPX-IPC uses a shared-memory ring buffer for body transfer when both processes share a host, and falls back to a plain TCP/Unix stream otherwise. `qpxr` and `qpxc` are post-capture tooling and never participate in the proxy data path.
+`xtask` provides developer automation and is intentionally omitted from the runtime flow diagrams below. `qpxd` is the main network proxy. It forwards requests to `qpxf` over the QPX-IPC protocol using reverse-route `ipc:` targets in the YAML. QPX-IPC uses a shared-memory ring buffer for body transfer when both processes share a Unix host with owner-only SHM file permissions, and falls back to a plain TCP/Unix stream otherwise. `qpxr` and `qpxc` are post-capture tooling and never participate in the proxy data path.
 
 HTTP/3 is now split by build-time backend selection inside `qpxd`. `http3-backend-h3` keeps the upstream-`h3` implementation as the default path. `http3-backend-qpx` switches `qpxd` to the clean-room `qpx-h3` crate and preserves the shared QUIC socket/broker plumbing in `qpxd::http3::quinn_socket`.
 
@@ -145,7 +145,7 @@ Runtime-only ACME machinery used by `qpxd` when built with feature `acme`. This 
 Clean-room HTTP/3 backend crate for `qpxd`.
 
 - `lib.rs`: current backend crate root. Holds the clean-room implementation entry surface that `qpxd` can depend on without importing `h3`.
-- Current state: `qpx-h3` provides the clean-room buffered HTTP/3 runtime for forward and reverse terminate listeners, plus clean-room CONNECT-UDP / MASQUE relay, generic extended CONNECT, and WebTransport relay.
+- Current state: `qpx-h3` provides the clean-room streaming HTTP/3 runtime for forward and reverse terminate listeners, plus clean-room CONNECT-UDP / MASQUE relay, generic extended CONNECT, and WebTransport relay.
 - Select it when you need WebTransport relay or when you want the full QPX-owned advanced HTTP/3 surface on the clean-room backend.
 
 ---
@@ -236,9 +236,10 @@ Shared HTTP processing used by all three modes. Nothing in this directory is mod
 
 Origin backend implementations for direct reverse/forward upstream traffic.
 
-- `http_backend.rs`: origin HTTP entrypoint, plain HTTP/1 dispatch, HTTPS proxy dispatch, and HTTP/1 proxy request preparation.
+- `http_backend.rs`: origin HTTP entrypoint, plain HTTP/1 dispatch, HTTPS proxy dispatch, Alt-Svc H3 upgrade attempts, and HTTP/1 proxy request preparation.
 - `http_backend_h2.rs`: HTTP/2 request preparation, body streaming, interim/final response receiving, and H2 inflight reservation accounting.
 - `http_backend_shared.rs`: shared direct-origin reverse HTTP/HTTPS client surfaces and absolute-URI internal request preparation.
+- `h3_pool.rs`: pooled HTTP/3 origin connections, streamed H3 request/response relay, Alt-Svc cache handling, and H3 fallback invalidation.
 - `http_pool.rs`: reusable HTTP/1 and HTTP/2 origin connection pool state, including the unified HTTPS connection acquisition sequence used by proxy and shared-client paths.
 
 ### HTTP/3 protocol (`http3/`)
@@ -294,8 +295,8 @@ RFC 9111 proxy cache implementation. Used by both forward listeners and reverse 
 
 - `policy_context.rs` / `policy_context/`: policy-context facade plus responsibility modules. `identity.rs` compiles and resolves trusted-header, mTLS, and signed-assertion identities; `ext_authz.rs` performs external authorization round trips and action/header overrides; `audit.rs` emits audit-log records; `util.rs` holds shared parsing/claim/header helpers used by those modules.
 - `ftp.rs`: FTP-over-HTTP gateway — translates HTTP GET/PUT/LIST to FTP commands, PASV/PORT fallback, bounded transfer sizes.
-- `ipc_client.rs`: QPX-IPC client used by reverse `ipc:` routes. Sends an `IpcRequestMeta` JSON frame, then transfers request/response bodies: in `shm` mode via per-request `ShmRingBuffer` files (64 KiB chunks, EOF signalled by empty push); in `tcp` mode by streaming bytes directly over the connection. Maintains a small idle-connection pool per backend. Also contains the internal URL-based IPC helper path used by reverse transport. Entry points: `proxy_ipc_upstream()` and `proxy_ipc()`.
-- `exporter.rs`: capture event producer — writes serialized capture events to a shared-memory ring buffer (`ShmRingBuffer`), with queue/backpressure behavior controlled by config. Plaintext events are redacted before enqueue using configured header, query-key, and simple JSON-path rules.
+- `ipc_client.rs`: QPX-IPC client used by reverse `ipc:` routes. Sends an `IpcRequestMeta` JSON frame, then transfers request/response bodies: in `shm` mode via per-request `ShmRingBuffer` files on supported Unix platforms (64 KiB chunks, EOF signalled by empty push); in `tcp` mode by streaming bytes directly over the connection. Maintains a small idle-connection pool per backend. Also contains the internal URL-based IPC helper path used by reverse transport. Entry points: `proxy_ipc_upstream()` and `proxy_ipc()`.
+- `exporter.rs`: capture event producer — writes serialized capture events to a shared-memory ring buffer (`ShmRingBuffer`) on platforms with secure owner-only backing-file support, with queue/backpressure behavior controlled by config. Plaintext events are redacted before enqueue using configured header, query-key, and simple JSON-path rules.
 - `io_copy.rs`: bidirectional stream copy (used for CONNECT tunnels and WebSocket) with optional capture export hooks and idle timeout.
 - `io_prefix.rs`: `PrefixedIo` adapter — "unreads" a byte buffer back onto a stream after peeking (used for PROXY v2 metadata and TLS ClientHello inspection) so downstream consumers see the original byte stream from the beginning.
 - `net.rs`: socket helpers — `SO_REUSEPORT`, `SO_REUSEADDR`, TCP backlog, multi-socket listener binding.
@@ -482,7 +483,7 @@ QPX-IPC server that executes CGI scripts, dispatches optional WASM execution thr
 - `executor/mod.rs`: `Executor` trait definition and shared request/response types (`CgiRequest`, `CgiResponse`). `matched_prefix` field enables correct script path resolution.
 - `executor/cgi.rs`: RFC 3875 CGI script executor — spawns external processes via `tokio::process::Command`, sets CGI environment variables (including `SERVER_SOFTWARE`), pipes stdin/stdout/stderr. Security: canonicalizes CGI root on startup, rejects `..` paths and symlink escapes, enforces configurable stdout/stderr size limits, reads stdout/stderr concurrently (prevents deadlock), post-timeout `wait()` ensures zombie process cleanup. Hop-by-hop headers are excluded from HTTP_* env.
 - `executor/wasm.rs`: adapter for feature `wasm` — translates `qpxf`'s `CgiRequest` into `qpx_wasm::WasmRequest`, builds an optional pool of precompiled executors, applies per-handler concurrency limits, and maps the returned execution handles back into the generic `Execution` shape used by the IPC server.
-- `executor/persistent.rs`: FastCGI/SCGI adapter — FastCGI reuses TCP or `unix://` connections through a bounded idle pool after a complete FastCGI end request and discards broken responders; SCGI intentionally keeps per-request connections and only shares the concurrency limiter. Both paths collect the request body within configured limits, build CGI environment metadata, and return raw CGI-compatible stdout/stderr to the IPC server.
+- `executor/persistent.rs`: FastCGI/SCGI adapter — FastCGI reuses TCP or `unix://` connections through a bounded idle pool after a complete FastCGI end request and discards broken responders; SCGI intentionally keeps per-request connections and only shares the concurrency limiter. FastCGI streams stdin while enforcing the configured byte cap. SCGI streams stdin when `Content-Length` is known; unknown-length empty stdin is sent as `CONTENT_LENGTH=0`, while unknown-length non-empty stdin is rejected instead of being buffered to compute a netstring length. Both paths build CGI environment metadata and stream raw CGI-compatible stdout/stderr back to the IPC server.
 
 ---
 

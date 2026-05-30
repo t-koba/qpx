@@ -6,6 +6,7 @@ use super::OriginEndpoint;
 pub(super) enum OriginScheme {
     Http,
     Https,
+    H3,
     Ws,
     Wss,
     Ipc,
@@ -27,6 +28,7 @@ pub(super) fn scheme_from_upstream(upstream: &str) -> Result<OriginScheme> {
     match parsed.scheme.as_deref() {
         Some("http") | Some("h2c") => Ok(OriginScheme::Http),
         Some("https") | Some("h2") => Ok(OriginScheme::Https),
+        Some("h3") => Ok(OriginScheme::H3),
         Some("ws") => Ok(OriginScheme::Ws),
         Some("wss") => Ok(OriginScheme::Wss),
         Some(other) => Err(anyhow!("unsupported origin scheme: {}", other)),
@@ -37,7 +39,7 @@ pub(super) fn scheme_from_upstream(upstream: &str) -> Result<OriginScheme> {
 pub(super) fn default_port_for_scheme(scheme: &str) -> u16 {
     match scheme {
         "http" | "ws" | "h2c" => 80,
-        "https" | "wss" | "h2" => 443,
+        "https" | "wss" | "h2" | "h3" => 443,
         _ => 443,
     }
 }

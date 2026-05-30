@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcRequestMeta {
     pub method: String,
     pub uri: String,
+    pub server_protocol: String,
     pub headers: Vec<(String, String)>,
     pub params: HashMap<String, String>,
 
@@ -33,6 +38,11 @@ pub struct IpcRequestMeta {
     /// Must be set when `res_body_shm_path` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub res_body_shm_size_bytes: Option<usize>,
+
+    /// Whether SHM ring files and doorbells are owned by the client connection and may be reused
+    /// for later requests on the same IPC stream.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shm_reusable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

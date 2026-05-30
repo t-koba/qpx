@@ -1,4 +1,8 @@
+#[cfg(feature = "digest-auth")]
+use super::digest;
 use super::*;
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+use qpx_core::config::AuthConfig;
 #[cfg(any(feature = "digest-auth", feature = "ldap-auth"))]
 use std::time::Duration;
 
@@ -26,12 +30,63 @@ fn nonce_store_rejects_replayed_nc() {
 
 #[cfg(feature = "digest-auth")]
 #[test]
+fn nonce_store_binds_opaque_to_nonce() {
+    let store = NonceStore::new(Duration::from_secs(60));
+    let Some(challenge) = store.issue_digest_challenge() else {
+        panic!("digest challenge generation should succeed");
+    };
+    assert_eq!(
+        store.validate_digest_nonce(&challenge.nonce, &challenge.opaque, "00000001"),
+        digest::NonceCheck::Valid(1)
+    );
+    assert_eq!(
+        store.validate_digest_nonce(&challenge.nonce, "wrong", "00000001"),
+        digest::NonceCheck::Invalid
+    );
+    assert_eq!(
+        store.validate_digest_nonce(&challenge.nonce, "", "00000001"),
+        digest::NonceCheck::Invalid
+    );
+}
+
+#[cfg(feature = "digest-auth")]
+#[test]
+fn nonce_store_reports_stale_nonce() {
+    let store = NonceStore::new(Duration::from_millis(1));
+    let Some(challenge) = store.issue_digest_challenge() else {
+        panic!("digest challenge generation should succeed");
+    };
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(
+        store.validate_digest_nonce(&challenge.nonce, &challenge.opaque, "00000001"),
+        digest::NonceCheck::Stale
+    );
+}
+
+#[cfg(feature = "digest-auth")]
+#[test]
 fn nonce_store_caps_growth_on_issue() {
     let store = NonceStore::with_max_entries(Duration::from_secs(3600), 4);
     for _ in 0..32 {
         let _ = store.issue_digest_nonce();
     }
     assert!(store.len() <= 4);
+    assert!(store.queue_len() <= 4);
+}
+
+#[cfg(feature = "digest-auth")]
+#[test]
+fn parse_digest_rejects_duplicate_directives() {
+    assert!(digest::parse_digest(r#"username="alice", nonce="one", nonce="two""#).is_none());
+}
+
+#[cfg(feature = "digest-auth")]
+#[test]
+fn parse_digest_rejects_malformed_directives() {
+    assert!(digest::parse_digest(r#"username="alice, nonce="one""#).is_none());
+    assert!(digest::parse_digest(r#"username="alice", broken"#).is_none());
+    assert!(digest::parse_digest(r#"username="alice", =value"#).is_none());
+    assert!(digest::parse_digest(r#"username=ali"ce, nonce="one""#).is_none());
 }
 
 #[cfg(feature = "ldap-auth")]
@@ -52,4 +107,21 @@ fn ldap_cache_caps_growth() {
 fn quoted_header_escape_escapes_quote_and_backslash() {
     let escaped = escape_quoted_header_value("a\"b\\c");
     assert_eq!(escaped, "a\\\"b\\\\c");
+}
+
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+#[test]
+fn audit_uri_redaction_covers_percent_encoded_sensitive_query_keys() {
+    let config = AuthConfig::default();
+    let auth = Authenticator::new_with_audit_redaction(
+        &config,
+        "test",
+        &["api_key".to_string(), "access_token".to_string()],
+    )
+    .expect("authenticator");
+    let redacted = auth.redact_audit_uri("/login?api%5Fkey=secret&access%5Ftoken=abc&ok=yes");
+    assert_eq!(
+        redacted,
+        "/login?api%5Fkey=<redacted>&access%5Ftoken=<redacted>&ok=yes"
+    );
 }

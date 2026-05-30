@@ -1,53 +1,23 @@
-#[cfg(all(
-    feature = "http3",
-    feature = "http3-backend-h3",
-    not(feature = "http3-backend-qpx")
-))]
-pub(crate) mod h3_passthrough;
-#[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
-pub(crate) mod h3_passthrough;
-#[cfg(all(
-    feature = "http3",
-    not(any(
-        all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")),
-        feature = "http3-backend-qpx"
-    ))
-))]
-#[path = "h3_passthrough_invalid.rs"]
-pub(crate) mod h3_passthrough;
-#[cfg(all(
-    feature = "http3",
-    feature = "http3-backend-h3",
-    not(feature = "http3-backend-qpx")
-))]
-pub(crate) mod h3_terminate;
-#[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
-#[path = "h3_terminate_qpx.rs"]
-pub(crate) mod h3_terminate;
-#[cfg(all(
-    feature = "http3",
-    not(any(
-        all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")),
-        feature = "http3-backend-qpx"
-    ))
-))]
-#[path = "h3_terminate_invalid.rs"]
-pub(crate) mod h3_terminate;
+#[cfg(feature = "http3")]
+pub(crate) mod h3;
 mod health;
 mod listener;
-mod request_template;
 mod router;
-mod security;
+mod tls;
 mod transport;
 
-use crate::connection_filter::{
-    ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
-};
+#[cfg(any(feature = "http3", feature = "tls-rustls", feature = "tls-native"))]
+use crate::runtime::PlanFlags;
 use crate::runtime::Runtime;
 use crate::runtime::{CompiledReverseEdge, metric_names};
+use crate::tcp_bindings::filter::{
+    ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
+};
 use crate::tls::TlsClientHelloInfo;
 #[cfg(feature = "http3")]
-use crate::transparent::quic::{extract_quic_client_hello_info, looks_like_quic_initial};
+use crate::transparent::quic::{
+    extract_quic_client_hello_info_with_fingerprints, looks_like_quic_initial,
+};
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
 use metrics::counter;
@@ -62,9 +32,10 @@ use tracing::{info, warn};
 #[derive(Clone)]
 pub(crate) struct CompiledReverse {
     pub(crate) router: Arc<router::ReverseRouter>,
-    pub(crate) security_policy: Arc<security::ReverseTlsHostPolicy>,
+    pub(crate) security_policy: Arc<tls::ReverseTlsHostPolicy>,
+    pub(crate) streaming: crate::runtime::ResolvedStreamingLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
-    pub(in crate::reverse) tls_acceptor: Option<transport::ReverseTlsAcceptor>,
+    pub(in crate::reverse) tls_acceptor: Option<tls::ReverseTlsAcceptor>,
 }
 
 pub(crate) fn compile_reverse(
@@ -79,18 +50,19 @@ pub(crate) fn compile_reverse(
         http_module_registry,
         compiled_edge,
     )?);
-    let security_policy = Arc::new(security::ReverseTlsHostPolicy::from_config(reverse)?);
+    let security_policy = Arc::new(tls::ReverseTlsHostPolicy::from_config(reverse)?);
 
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     {
         let tls_acceptor = if reverse.tls.is_some() {
-            Some(transport::build_tls_acceptor(reverse)?)
+            Some(tls::build_tls_acceptor(reverse)?)
         } else {
             None
         };
         Ok(CompiledReverse {
             router,
             security_policy,
+            streaming: compiled_edge.streaming,
             tls_acceptor,
         })
     }
@@ -106,6 +78,7 @@ pub(crate) fn compile_reverse(
         Ok(CompiledReverse {
             router,
             security_policy,
+            streaming: compiled_edge.streaming,
         })
     }
 }
@@ -233,7 +206,23 @@ pub(super) fn reverse_connection_filter_match(
     .map(str::to_string)
 }
 
-pub(super) fn record_reverse_connection_filter_block(
+#[cfg(any(feature = "http3", feature = "tls-rustls", feature = "tls-native"))]
+pub(super) fn reverse_tls_fingerprints_required(reverse: &ReloadableReverse) -> bool {
+    let state = reverse.runtime.state();
+    state
+        .plan
+        .reverse_edge(reverse.name.as_ref())
+        .map(|edge| edge.flags.contains(PlanFlags::TLS_FINGERPRINT))
+        .unwrap_or(false)
+        || state
+            .policy
+            .connection_filters_by_reverse
+            .get(reverse.name.as_ref())
+            .map(|engine| engine.any_rule_requires_tls_fingerprint())
+            .unwrap_or(false)
+}
+
+pub(in crate::reverse) fn record_reverse_connection_filter_block(
     reverse: &ReloadableReverse,
     remote_addr: SocketAddr,
     local_port: u16,
@@ -254,7 +243,7 @@ pub(super) fn record_reverse_connection_filter_block(
 }
 
 #[cfg(feature = "http3")]
-pub(super) fn reverse_quic_connection_filter_match(
+pub(in crate::reverse) fn reverse_quic_connection_filter_match(
     reverse: &ReloadableReverse,
     remote_addr: SocketAddr,
     local_port: u16,
@@ -268,7 +257,10 @@ pub(super) fn reverse_quic_connection_filter_match(
     if !looks_like_quic_initial(packet) {
         return None;
     }
-    let client_hello = extract_quic_client_hello_info(packet)?;
+    let client_hello = extract_quic_client_hello_info_with_fingerprints(
+        packet,
+        reverse_tls_fingerprints_required(reverse),
+    )?;
     let matched_rule =
         reverse_connection_filter_match(reverse, remote_addr, local_port, Some(&client_hello))?;
     Some((
@@ -299,7 +291,7 @@ pub(crate) fn check_reverse_runtime(
                 .map(|h| !h.passthrough_upstreams.is_empty())
                 .unwrap_or(false);
             if !passthrough {
-                let _ = h3_terminate::build_reverse_tls_config(reverse)?;
+                let _ = h3::terminate::build_reverse_tls_config(reverse)?;
             }
         }
         #[cfg(not(feature = "http3"))]
@@ -327,7 +319,7 @@ fn reverse_passthrough_only(reverse: &ReverseEdgeConfig) -> bool {
         .unwrap_or(false)
 }
 
-pub async fn run_tcp(
+pub(crate) async fn run_tcp(
     reverse: ReverseEdgeConfig,
     reverse_rt: ReloadableReverse,
     shutdown: watch::Receiver<bool>,

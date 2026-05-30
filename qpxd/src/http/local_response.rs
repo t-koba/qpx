@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::LocalResponseConfig;
 
-pub fn build_local_response(config: &LocalResponseConfig) -> Result<Response<Body>> {
+pub(crate) fn build_local_response(config: &LocalResponseConfig) -> Result<Response<Body>> {
     if let Some(rpc) = config.rpc.as_ref() {
         let mut response = build_rpc_local_response(rpc, config.body.as_bytes())?;
         if let Some(content_type) = config.content_type.as_ref() {

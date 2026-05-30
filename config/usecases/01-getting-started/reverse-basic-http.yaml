@@ -4,7 +4,8 @@ edges:
   name: reverse-basic
   listen: 0.0.0.0:19080
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - app.example.com
     timeout_ms: 10000

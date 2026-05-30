@@ -7,19 +7,26 @@ use crate::http::body::Body;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
+use crossbeam_channel::{Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, VARY};
+use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use hyper::Response;
 use qpx_core::config::{HttpModuleConfig, ResponseCompressionModuleConfig};
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, mpsc as std_mpsc};
-use tokio::sync::oneshot;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::thread;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 use tracing::warn;
 
+mod accept;
+
+use self::accept::{accept_encoding_q, append_vary_accept_encoding, parse_accept_encoding};
+
 pub(super) struct ResponseCompressionModuleFactory;
+const COMPRESSION_PIPELINE_DEPTH: usize = 4;
 
 impl HttpModuleFactory for ResponseCompressionModuleFactory {
     fn build(&self, spec: &HttpModuleConfig) -> Result<Arc<dyn HttpModule>> {
@@ -32,11 +39,13 @@ impl HttpModuleFactory for ResponseCompressionModuleFactory {
 #[derive(Clone)]
 struct ResponseCompressionModule {
     config: ResponseCompressionModuleConfig,
+    pool: Arc<CompressionPool>,
 }
 
 impl ResponseCompressionModule {
     fn new(config: ResponseCompressionModuleConfig) -> Self {
-        Self { config }
+        let pool = Arc::new(CompressionPool::new(config.worker_count));
+        Self { config, pool }
     }
 
     async fn compress(
@@ -62,10 +71,18 @@ impl ResponseCompressionModule {
             ctx.runtime_state()
                 .plan
                 .limits
+                .timeouts
                 .upstream_http_timeout_ms
                 .max(1),
         );
-        let body = stream_compressed_body(body, encoding, &self.config, body_read_timeout);
+        let body = stream_compressed_body(
+            body,
+            encoding,
+            &self.config,
+            self.pool.clone(),
+            body_read_timeout,
+            ctx.runtime_state().plan.limits.body.body_channel_capacity,
+        );
         Ok(Response::from_parts(parts, body))
     }
 }
@@ -200,135 +217,129 @@ impl StreamingCompressionEncoder {
     }
 }
 
-type SharedCompressionEncoder = Arc<StdMutex<Option<StreamingCompressionEncoder>>>;
+enum CompressionInput {
+    Chunk(Bytes),
+    Finish,
+}
 
-enum CompressionJob {
-    Chunk {
-        encoder: SharedCompressionEncoder,
-        chunk: Bytes,
-        result: oneshot::Sender<Result<Option<Bytes>>>,
-    },
-    Finish {
-        encoder: SharedCompressionEncoder,
-        result: oneshot::Sender<Result<Option<Bytes>>>,
-    },
+enum CompressionStreamInput {
+    Chunk(Bytes),
+    Finish(Option<HeaderMap>),
+    Error(anyhow::Error),
 }
 
 struct CompressionPool {
-    sender: std_mpsc::Sender<CompressionJob>,
+    jobs: CrossbeamSender<CompressionJob>,
+    slots: Arc<Semaphore>,
 }
 
 impl CompressionPool {
-    fn global() -> &'static Self {
-        static POOL: OnceLock<CompressionPool> = OnceLock::new();
-        POOL.get_or_init(Self::new)
-    }
-
-    fn new() -> Self {
-        let (sender, receiver) = std_mpsc::channel();
-        let receiver = Arc::new(StdMutex::new(receiver));
-        let workers = std::thread::available_parallelism()
-            .map(|value| value.get())
-            .unwrap_or(1)
-            .clamp(1, 8);
-        for idx in 0..workers {
-            let receiver = receiver.clone();
-            if let Err(err) = std::thread::Builder::new()
-                .name(format!("qpx-compress-{idx}"))
-                .spawn(move || compression_pool_worker(receiver))
-            {
-                warn!(error = ?err, "response compression worker thread spawn failed");
-            }
+    fn new(worker_count: usize) -> Self {
+        let worker_count = worker_count.clamp(1, 256);
+        let queue_capacity = worker_count.saturating_mul(64).max(64);
+        let (jobs, receiver) = crossbeam_channel::unbounded();
+        for worker_id in 0..worker_count {
+            spawn_compression_worker(worker_id, receiver.clone());
         }
-        Self { sender }
+        Self {
+            jobs,
+            slots: Arc::new(Semaphore::new(queue_capacity)),
+        }
     }
 
-    async fn submit<F>(&self, build: F) -> Result<Option<Bytes>>
-    where
-        F: FnOnce(oneshot::Sender<Result<Option<Bytes>>>) -> CompressionJob,
-    {
-        let (result_tx, result_rx) = oneshot::channel();
-        let job = build(result_tx);
-        self.sender
-            .send(job)
-            .map_err(|_| anyhow!("response compression pool unavailable"))?;
-        result_rx
-            .await
-            .map_err(|_| anyhow!("response compression worker terminated unexpectedly"))?
+    async fn start_session(
+        &self,
+        encoder: StreamingCompressionEncoder,
+    ) -> Result<CompressionSession> {
+        Ok(CompressionSession {
+            jobs: self.jobs.clone(),
+            slots: self.slots.clone(),
+            encoder: Arc::new(StdMutex::new(Some(encoder))),
+        })
     }
 }
 
-fn compression_pool_worker(receiver: Arc<StdMutex<std_mpsc::Receiver<CompressionJob>>>) {
-    loop {
-        let job = {
-            receiver
-                .lock()
-                .expect("compression pool receiver poisoned")
-                .recv()
-        };
-        let Ok(job) = job else {
-            return;
-        };
-        match job {
-            CompressionJob::Chunk {
-                encoder,
-                chunk,
-                result,
-            } => {
-                let mut guard = encoder.lock().expect("compression encoder poisoned");
-                let outcome = match guard.as_mut() {
-                    Some(encoder) => encoder.write_chunk(chunk.as_ref()),
-                    None => Err(anyhow!("response compression encoder state missing")),
-                };
-                if outcome.is_err() {
-                    *guard = None;
-                }
-                drop(guard);
-                let _ = result.send(outcome);
+struct CompressionJob {
+    encoder: Arc<StdMutex<Option<StreamingCompressionEncoder>>>,
+    input: CompressionInput,
+    result: oneshot::Sender<Result<Option<Bytes>>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+fn spawn_compression_worker(worker_id: usize, receiver: CrossbeamReceiver<CompressionJob>) {
+    let _ = thread::Builder::new()
+        .name(format!("qpx-compress-{worker_id}"))
+        .spawn(move || {
+            while let Ok(job) = receiver.recv() {
+                let result = process_compression_job(job.encoder, job.input);
+                let _ = job.result.send(result);
             }
-            CompressionJob::Finish { encoder, result } => {
-                let mut guard = encoder.lock().expect("compression encoder poisoned");
-                let outcome = match guard.take() {
-                    Some(encoder) => encoder.finish(),
-                    None => Err(anyhow!("response compression encoder state missing")),
-                };
-                drop(guard);
-                let _ = result.send(outcome);
-            }
-        }
+        });
+}
+
+fn process_compression_job(
+    encoder: Arc<StdMutex<Option<StreamingCompressionEncoder>>>,
+    input: CompressionInput,
+) -> Result<Option<Bytes>> {
+    let mut guard = encoder
+        .lock()
+        .map_err(|_| anyhow!("response compression encoder lock poisoned"))?;
+    match input {
+        CompressionInput::Chunk(chunk) => match guard.as_mut() {
+            Some(encoder) => encoder.write_chunk(chunk.as_ref()),
+            None => Err(anyhow!("response compression encoder state missing")),
+        },
+        CompressionInput::Finish => match guard.take() {
+            Some(encoder) => encoder.finish(),
+            None => Err(anyhow!("response compression encoder state missing")),
+        },
     }
 }
 
 struct CompressionSession {
-    encoder: SharedCompressionEncoder,
+    jobs: CrossbeamSender<CompressionJob>,
+    slots: Arc<Semaphore>,
+    encoder: Arc<StdMutex<Option<StreamingCompressionEncoder>>>,
 }
 
 impl CompressionSession {
-    fn new(encoding: ContentEncoding, config: &ResponseCompressionModuleConfig) -> Result<Self> {
-        Ok(Self {
-            encoder: Arc::new(StdMutex::new(Some(StreamingCompressionEncoder::new(
-                encoding, config,
-            )?))),
-        })
+    async fn start(
+        encoding: ContentEncoding,
+        config: &ResponseCompressionModuleConfig,
+        pool: Arc<CompressionPool>,
+    ) -> Result<Self> {
+        let encoder = StreamingCompressionEncoder::new(encoding, config)?;
+        pool.start_session(encoder).await
     }
 
-    async fn write_chunk(&self, chunk: Bytes) -> Result<Option<Bytes>> {
-        CompressionPool::global()
-            .submit(|result| CompressionJob::Chunk {
-                encoder: self.encoder.clone(),
-                chunk,
-                result,
-            })
-            .await
+    async fn process_chunk(&self, chunk: Bytes) -> Result<Option<Bytes>> {
+        self.process(CompressionInput::Chunk(chunk)).await
     }
 
-    async fn finish(self) -> Result<Option<Bytes>> {
-        CompressionPool::global()
-            .submit(|result| CompressionJob::Finish {
-                encoder: self.encoder,
-                result,
-            })
+    async fn finish(&self) -> Result<Option<Bytes>> {
+        self.process(CompressionInput::Finish).await
+    }
+
+    async fn process(&self, input: CompressionInput) -> Result<Option<Bytes>> {
+        let permit = self
+            .slots
+            .clone()
+            .acquire_owned()
             .await
+            .map_err(|_| anyhow!("response compression pool unavailable"))?;
+        let (result, receiver) = oneshot::channel();
+        let job = CompressionJob {
+            encoder: self.encoder.clone(),
+            input,
+            result,
+            _permit: permit,
+        };
+        self.jobs
+            .send(job)
+            .map_err(|_| anyhow!("response compression pool unavailable"))?;
+        receiver
+            .await
+            .map_err(|_| anyhow!("response compression worker stopped"))?
     }
 }
 
@@ -336,13 +347,94 @@ fn stream_compressed_body(
     mut body: Body,
     encoding: ContentEncoding,
     config: &ResponseCompressionModuleConfig,
+    pool: Arc<CompressionPool>,
     body_read_timeout: Duration,
+    body_channel_capacity: usize,
 ) -> Body {
-    let (mut sender, out) = Body::channel();
+    let (mut sender, out) = Body::channel_with_capacity(body_channel_capacity);
     let max_body_bytes = config.max_body_bytes;
-    let session = CompressionSession::new(encoding, config);
+    let config = config.clone();
+    let (reader_tx, mut input_rx) = mpsc::channel::<CompressionStreamInput>(
+        body_channel_capacity.max(COMPRESSION_PIPELINE_DEPTH),
+    );
     tokio::spawn(async move {
-        let session = match session {
+        let mut seen = 0usize;
+        loop {
+            let chunk = timeout(body_read_timeout, body.data()).await;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(_) => {
+                    let _ = reader_tx
+                        .send(CompressionStreamInput::Error(anyhow!(
+                            "response compression body read timed out"
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    let _ = reader_tx
+                        .send(CompressionStreamInput::Error(anyhow!(err)))
+                        .await;
+                    return;
+                }
+            };
+            seen = match seen.checked_add(chunk.len()) {
+                Some(value) => value,
+                None => {
+                    let _ = reader_tx
+                        .send(CompressionStreamInput::Error(anyhow!(
+                            "body length overflow"
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            if seen > max_body_bytes {
+                let _ = reader_tx
+                    .send(CompressionStreamInput::Error(anyhow!(
+                        "body exceeds configured compression limit: {} bytes",
+                        max_body_bytes
+                    )))
+                    .await;
+                return;
+            }
+            if reader_tx
+                .send(CompressionStreamInput::Chunk(chunk))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        let trailers = match timeout(body_read_timeout, body.trailers()).await {
+            Ok(Ok(trailers)) => trailers,
+            Ok(Err(err)) => {
+                let _ = reader_tx
+                    .send(CompressionStreamInput::Error(anyhow!(err)))
+                    .await;
+                return;
+            }
+            Err(_) => {
+                let _ = reader_tx
+                    .send(CompressionStreamInput::Error(anyhow!(
+                        "response compression trailers read timed out"
+                    )))
+                    .await;
+                return;
+            }
+        };
+        let _ = reader_tx
+            .send(CompressionStreamInput::Finish(trailers))
+            .await;
+    });
+    tokio::spawn(async move {
+        let session = match CompressionSession::start(encoding, &config, pool).await {
             Ok(session) => session,
             Err(err) => {
                 warn!(
@@ -355,54 +447,34 @@ fn stream_compressed_body(
             }
         };
         let result: Result<()> = async {
-            let mut seen = 0usize;
-            loop {
-                let chunk = tokio::select! {
-                    _ = sender.closed() => return Ok(()),
-                    chunk = timeout(body_read_timeout, body.data()) => match chunk {
-                        Ok(chunk) => chunk,
-                        Err(_) => return Err(anyhow!("response compression body read timed out")),
-                    },
-                };
-                let Some(chunk) = chunk else {
-                    break;
-                };
-                let chunk = chunk?;
-                seen = seen
-                    .checked_add(chunk.len())
-                    .ok_or_else(|| anyhow!("body length overflow"))?;
-                if seen > max_body_bytes {
-                    return Err(anyhow!(
-                        "body exceeds configured compression limit: {} bytes",
-                        max_body_bytes
-                    ));
-                }
+            while let Some(input) = input_rx.recv().await {
                 if sender.is_closed() {
                     return Ok(());
                 }
-                let compressed = session.write_chunk(chunk).await?;
-                if let Some(compressed) = compressed {
-                    sender.send_data(compressed).await?;
+                match input {
+                    CompressionStreamInput::Chunk(chunk) => {
+                        if let Some(compressed) = session.process_chunk(chunk).await? {
+                            sender.send_data(compressed).await?;
+                        }
+                    }
+                    CompressionStreamInput::Finish(trailers) => {
+                        if let Some(compressed) = session.finish().await? {
+                            sender.send_data(compressed).await?;
+                        }
+                        if sender.is_closed() {
+                            return Ok(());
+                        }
+                        if let Some(trailers) = trailers {
+                            sender.send_trailers(trailers).await?;
+                        }
+                        return Ok(());
+                    }
+                    CompressionStreamInput::Error(err) => return Err(err),
                 }
-                if sender.is_closed() {
-                    return Ok(());
-                }
             }
-            let trailers = tokio::select! {
-                _ = sender.closed() => return Ok(()),
-                trailers = timeout(body_read_timeout, body.trailers()) => match trailers {
-                    Ok(trailers) => trailers?,
-                    Err(_) => return Err(anyhow!("response compression trailers read timed out")),
-                },
-            };
-            let compressed = session.finish().await?;
-            if let Some(compressed) = compressed {
-                sender.send_data(compressed).await?;
-            }
-            if let Some(trailers) = trailers {
-                sender.send_trailers(trailers).await?;
-            }
-            Ok(())
+            Err(anyhow!(
+                "response compression input stream ended before finish"
+            ))
         }
         .await;
 
@@ -424,8 +496,10 @@ fn select_response_encoding(
     response: &Response<Body>,
 ) -> Result<Option<ContentEncoding>> {
     if request.method() == Method::HEAD
+        || (request.method() == Method::CONNECT && response.status().is_success())
         || response.status().is_informational()
         || response.status() == StatusCode::NO_CONTENT
+        || response.status() == StatusCode::RESET_CONTENT
         || response.status() == StatusCode::NOT_MODIFIED
         || response.headers().contains_key(CONTENT_ENCODING)
         || response.headers().contains_key(CONTENT_RANGE)
@@ -442,6 +516,9 @@ fn select_response_encoding(
         return Ok(None);
     };
     if content_length < config.min_body_bytes || content_length > config.max_body_bytes {
+        return Ok(None);
+    }
+    if !config.force_compress_event_stream && is_event_stream_headers(response.headers()) {
         return Ok(None);
     }
     if !content_type_allowed(response.headers(), &config.content_types) {
@@ -469,6 +546,15 @@ fn select_response_encoding(
         }
     }
     Ok(best.map(|(_, encoding)| encoding))
+}
+
+pub(crate) fn is_event_stream_headers(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or(value).trim())
+        .map(|value| value.eq_ignore_ascii_case("text/event-stream"))
+        .unwrap_or(false)
 }
 
 fn content_type_allowed(headers: &HeaderMap, configured: &[String]) -> bool {
@@ -508,71 +594,5 @@ fn mime_pattern_matches(pattern: &str, content_type: &str) -> bool {
     pattern.eq_ignore_ascii_case(content_type)
 }
 
-fn parse_accept_encoding(headers: &HeaderMap) -> Vec<(String, i32)> {
-    let mut out = Vec::new();
-    for value in headers.get_all("accept-encoding") {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        for part in value.split(',') {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            let mut segments = part.split(';');
-            let name = segments
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase();
-            let mut q = 1000i32;
-            for segment in segments {
-                let segment = segment.trim();
-                if let Some(raw) = segment.strip_prefix("q=") {
-                    q = parse_quality(raw);
-                }
-            }
-            out.push((name, q));
-        }
-    }
-    out
-}
-
-fn parse_quality(raw: &str) -> i32 {
-    let raw = raw.trim();
-    if raw.eq("1") || raw.eq("1.0") || raw.eq("1.00") || raw.eq("1.000") {
-        return 1000;
-    }
-    if raw.eq("0") || raw.eq("0.0") || raw.eq("0.00") || raw.eq("0.000") {
-        return 0;
-    }
-    let Ok(value) = raw.parse::<f32>() else {
-        return 0;
-    };
-    (value.clamp(0.0, 1.0) * 1000.0) as i32
-}
-
-fn accept_encoding_q(name: &str, values: &[(String, i32)]) -> i32 {
-    let wildcard = values
-        .iter()
-        .find_map(|(value, q)| (value == "*").then_some(*q))
-        .unwrap_or(0);
-    values
-        .iter()
-        .find_map(|(value, q)| (value == name).then_some(*q))
-        .unwrap_or(wildcard)
-}
-
-fn append_vary_accept_encoding(headers: &mut HeaderMap) {
-    let existing = headers
-        .get_all(VARY)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(|token| token.trim().to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    if existing.iter().any(|token| token == "accept-encoding") {
-        return;
-    }
-    headers.append(VARY, HeaderValue::from_static("Accept-Encoding"));
-}
+#[cfg(test)]
+mod tests;

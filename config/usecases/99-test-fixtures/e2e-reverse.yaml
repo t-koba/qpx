@@ -4,7 +4,8 @@ edges:
   name: e2e-reverse
   listen: 127.0.0.1:19150
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - reverse.local
     timeout_ms: 5000

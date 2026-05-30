@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::net::IpAddr;
 
-use super::resolve::{
+use super::patterns::{
     extract_regex_pattern, host_matches_suffix, is_exact_pattern, normalize_regex_pattern,
 };
 

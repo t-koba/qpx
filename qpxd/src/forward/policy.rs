@@ -1,10 +1,12 @@
-#[cfg(feature = "auth-basic")]
-use crate::auth_runtime::AuthChallenge;
-use crate::auth_runtime::{AuthOutcome, AuthenticatedUser};
 use crate::runtime::Runtime;
+#[cfg(feature = "auth-basic")]
+use crate::runtime::auth::AuthChallenge;
+use crate::runtime::auth::{AuthOutcome, AuthenticatedUser};
 use anyhow::{Result, anyhow};
 use hyper::HeaderMap;
 use qpx_core::config::ActionConfig;
+use qpx_core::prefilter::MatchPrefilterContext;
+use qpx_core::rules::CandidateRequestObservationRequirements;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_core::rules::RuleMatchContext;
 use std::collections::HashMap;
@@ -23,6 +25,95 @@ pub(crate) enum ForwardPolicyDecision {
     Challenge(AuthChallenge),
     #[cfg(feature = "auth-basic")]
     Forbidden,
+}
+
+pub(crate) enum ForwardPolicyEvaluation {
+    Decision(ForwardPolicyDecision),
+    Observe(CandidateRequestObservationRequirements),
+}
+
+pub(crate) async fn evaluate_forward_policy_staged(
+    runtime: &Runtime,
+    listener_name: &str,
+    ctx: RuleMatchContext<'_>,
+    request_headers: &HeaderMap,
+    auth_method: &str,
+    auth_uri: &str,
+) -> Result<ForwardPolicyEvaluation> {
+    let state = runtime.state();
+    let engine = state
+        .policy
+        .rules_by_listener
+        .get(listener_name)
+        .ok_or_else(|| anyhow!("rule engine not found"))?;
+    let prefilter_ctx = MatchPrefilterContext {
+        method: ctx.method,
+        dst_port: ctx.dst_port,
+        src_ip: ctx.src_ip,
+        host: ctx.host,
+        sni: ctx.sni,
+        path: ctx.path,
+    };
+    let candidates = engine.candidate_rule_indices(prefilter_ctx);
+    if candidates.is_empty() {
+        return evaluate_forward_policy(
+            runtime,
+            listener_name,
+            ctx,
+            request_headers,
+            auth_method,
+            auth_uri,
+        )
+        .await
+        .map(ForwardPolicyEvaluation::Decision);
+    }
+
+    for (pos, idx) in candidates.iter().copied().enumerate() {
+        let Some(rule) = engine.rule_at(idx) else {
+            continue;
+        };
+        let requirements = rule.request_observation_requirements();
+        if !requirements.is_empty() {
+            if !rule.matches_without_request_body_observation(&ctx) {
+                continue;
+            }
+            let mut combined = CandidateRequestObservationRequirements::default();
+            for later_idx in candidates.iter().copied().skip(pos) {
+                if let Some(later) = engine.rule_at(later_idx) {
+                    let later_requirements = later.request_observation_requirements();
+                    if later_requirements.is_empty()
+                        || later.matches_without_request_body_observation(&ctx)
+                    {
+                        combined.include(later_requirements);
+                    }
+                }
+            }
+            return Ok(ForwardPolicyEvaluation::Observe(combined));
+        }
+        if rule.matches(&ctx) {
+            return evaluate_forward_policy(
+                runtime,
+                listener_name,
+                ctx,
+                request_headers,
+                auth_method,
+                auth_uri,
+            )
+            .await
+            .map(ForwardPolicyEvaluation::Decision);
+        }
+    }
+
+    evaluate_forward_policy(
+        runtime,
+        listener_name,
+        ctx,
+        request_headers,
+        auth_method,
+        auth_uri,
+    )
+    .await
+    .map(ForwardPolicyEvaluation::Decision)
 }
 
 pub(crate) async fn evaluate_forward_policy(
@@ -128,145 +219,4 @@ fn normalized_require_key(require: &[String]) -> String {
 }
 
 #[cfg(all(test, feature = "auth-basic"))]
-mod tests {
-    use super::*;
-    use crate::runtime::Runtime;
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use hyper::HeaderMap;
-    use hyper::header::HeaderValue;
-    use qpx_core::config::{
-        ActionConfig, ActionKind, AuthConfig, Config, DecisionConfig, HttpGlobalConfig,
-        IdentityConfig, IngressEdgeConfig, IngressEdgeMode, LocalUser, MessagesConfig,
-        RuleAuthConfig, RuleConfig, RuntimeConfig, SecurityConfig, TelemetryConfig, TrafficConfig,
-    };
-
-    #[tokio::test]
-    async fn groups_mismatch_continues_to_next_rule() {
-        let config = Config {
-            state_dir: None,
-            identity: IdentityConfig::default(),
-            messages: MessagesConfig::default(),
-            runtime: RuntimeConfig::default(),
-            telemetry: TelemetryConfig::default(),
-            security: SecurityConfig {
-                auth: AuthConfig {
-                    users: vec![LocalUser {
-                        username: "user".to_string(),
-                        password: Some("pass".to_string()),
-                        ha1: None,
-                    }],
-                    ldap: None,
-                },
-                identity_sources: Vec::new(),
-                decisions: DecisionConfig::default(),
-                destination: Default::default(),
-                named_sets: Vec::new(),
-                upstream_trust_profiles: Vec::new(),
-            },
-            http: HttpGlobalConfig::default(),
-            traffic: TrafficConfig::default(),
-            acme: None,
-            edges: vec![qpx_core::config::EdgeConfig::Forward(IngressEdgeConfig {
-                name: "forward".to_string(),
-                mode: IngressEdgeMode::Forward,
-                listen: "127.0.0.1:0".to_string(),
-                default_action: ActionConfig {
-                    kind: ActionKind::Block,
-                    upstream: None,
-                    local_response: None,
-                },
-                original_dst: None,
-                tls_inspection: None,
-                rules: vec![
-                    RuleConfig {
-                        name: "grouped".to_string(),
-                        r#match: None,
-                        auth: Some(RuleAuthConfig {
-                            require: vec!["local".to_string()],
-                            groups: vec!["dev".to_string()],
-                        }),
-                        action: Some(ActionConfig {
-                            kind: ActionKind::Block,
-                            upstream: None,
-                            local_response: None,
-                        }),
-                        headers: None,
-                        rate_limit: None,
-                    },
-                    RuleConfig {
-                        name: "fallback".to_string(),
-                        r#match: None,
-                        auth: None,
-                        action: Some(ActionConfig {
-                            kind: ActionKind::Direct,
-                            upstream: None,
-                            local_response: None,
-                        }),
-                        headers: None,
-                        rate_limit: None,
-                    },
-                ],
-                connection_filter: Vec::new(),
-                upstream_proxy: None,
-                http3: None,
-                ftp: Default::default(),
-                xdp: None,
-                cache: None,
-                capture: None,
-                rate_limit: None,
-                policy_context: None,
-                http: None,
-                http_guard_profile: None,
-                destination_resolution: None,
-                http_modules: Vec::new(),
-            })],
-            upstreams: Vec::new(),
-            caches: Vec::new(),
-        };
-
-        let runtime = Runtime::new(config).expect("runtime");
-
-        let credentials = BASE64.encode("user:pass");
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "proxy-authorization",
-            HeaderValue::from_str(format!("Basic {}", credentials).as_str()).unwrap(),
-        );
-
-        let ctx = RuleMatchContext {
-            src_ip: None,
-            dst_port: None,
-            host: None,
-            sni: None,
-            method: Some("GET"),
-            path: Some("/"),
-            headers: None,
-            user: None,
-            user_groups: &[],
-            device_id: None,
-            posture: &[],
-            tenant: None,
-            auth_strength: None,
-            idp: None,
-            ..Default::default()
-        };
-
-        let decision = evaluate_forward_policy(
-            &runtime,
-            "forward",
-            ctx,
-            &headers,
-            "GET",
-            "http://example.com/",
-        )
-        .await
-        .expect("policy");
-        match decision {
-            ForwardPolicyDecision::Allow(policy) => {
-                assert!(matches!(policy.action.kind, ActionKind::Direct));
-            }
-            _ => panic!("unexpected decision"),
-        }
-    }
-}
+mod tests;

@@ -14,7 +14,10 @@ mod tests;
 pub(crate) use chain::{CompiledHttpModuleChain, compile_http_modules};
 pub use execution::{HttpModuleContext, HttpModuleRequestView};
 pub(crate) use execution::{HttpModuleExecution, HttpModuleSessionInit};
-pub use registry::{HttpModuleRegistry, HttpModuleRegistryBuilder, default_http_module_registry};
+pub(crate) use registry::default_http_module_registry;
+pub use registry::{HttpModuleRegistry, HttpModuleRegistryBuilder};
+#[cfg(feature = "http3")]
+pub(crate) use response_compression::is_event_stream_headers;
 pub use traits::{
     BodyAccess, CacheLookupStatus, HttpModule, HttpModuleCapabilities, HttpModuleEvent,
     HttpModuleFactory, HttpModuleStage, ModuleStages, RequestHeadersOutcome, RetryEvent,

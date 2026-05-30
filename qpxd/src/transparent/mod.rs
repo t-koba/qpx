@@ -1,14 +1,15 @@
 use crate::runtime::Runtime;
 #[cfg(feature = "http3")]
-use crate::sidecar_control::SidecarControl;
+use crate::server::control::SidecarControl;
 use crate::tls::{
-    extract_client_hello_info, looks_like_tls_client_hello, read_client_hello_with_timeout,
+    extract_client_hello_info_with_fingerprints, looks_like_tls_client_hello,
+    read_client_hello_with_timeout,
 };
 use crate::{
-    connection_filter::{
+    runtime::{PlanFlags, metric_names},
+    tcp_bindings::filter::{
         ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
     },
-    runtime::metric_names,
 };
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
@@ -23,18 +24,33 @@ use tokio::time::Duration;
 use tracing::{info, warn};
 
 mod destination;
-mod http_path;
+mod http;
 #[cfg(feature = "http3")]
 pub(crate) mod quic;
 mod tls_path;
 #[cfg(feature = "http3")]
-mod udp_path;
+mod udp;
 #[cfg(feature = "http3")]
 pub(crate) mod udp_socket;
 
 use self::destination::{DestinationResolver, destination_resolver_for_listener};
 
-pub async fn run_tcp(
+fn transparent_tls_fingerprints_required(runtime: &Runtime, listener_name: &str) -> bool {
+    let state = runtime.state();
+    state
+        .plan
+        .transparent_edge(listener_name)
+        .map(|edge| edge.flags.contains(PlanFlags::TLS_FINGERPRINT))
+        .unwrap_or(false)
+        || state
+            .policy
+            .connection_filters_by_listener
+            .get(listener_name)
+            .map(|engine| engine.any_rule_requires_tls_fingerprint())
+            .unwrap_or(false)
+}
+
+pub(crate) async fn run_tcp(
     listener: IngressEdgeConfig,
     runtime: Runtime,
     shutdown: watch::Receiver<bool>,
@@ -79,7 +95,7 @@ pub async fn run_tcp(
 }
 
 #[cfg(feature = "http3")]
-pub async fn run_udp(
+pub(crate) async fn run_udp(
     listener: IngressEdgeConfig,
     runtime: Runtime,
     shutdown: watch::Receiver<SidecarControl>,
@@ -89,7 +105,7 @@ pub async fn run_udp(
         std::sync::Mutex<crate::udp_session_handoff::UdpSessionRestoreState>,
     >,
 ) -> Result<()> {
-    udp_path::run_transparent_udp_listener(
+    udp::run_transparent_udp_listener(
         listener,
         runtime,
         shutdown,
@@ -180,8 +196,14 @@ async fn handle_connection(
 ) -> Result<()> {
     let started = Instant::now();
     let _ = stream.set_nodelay(true);
-    let metadata_timeout =
-        Duration::from_millis(runtime.state().plan.limits.http_header_read_timeout_ms);
+    let metadata_timeout = Duration::from_millis(
+        runtime
+            .state()
+            .plan
+            .limits
+            .timeouts
+            .http_header_read_timeout_ms,
+    );
     let (mut stream, remote_addr, original_target) = resolver
         .resolve_original_target(stream, remote_addr, metadata_timeout)
         .await?;
@@ -217,12 +239,15 @@ async fn handle_connection(
         return Ok(());
     }
     let state = runtime.state();
-    let peek_timeout = Duration::from_millis(state.plan.limits.tls_peek_timeout_ms);
+    let peek_timeout = Duration::from_millis(state.plan.limits.timeouts.tls_peek_timeout_ms);
     let sniff = read_client_hello_with_timeout(&mut stream, peek_timeout)
         .await
         .context("transparent TLS peek timed out")?;
     let is_tls = looks_like_tls_client_hello(&sniff);
-    let client_hello = is_tls.then(|| extract_client_hello_info(&sniff)).flatten();
+    let include_fingerprints = transparent_tls_fingerprints_required(&runtime, listener_name);
+    let client_hello = is_tls
+        .then(|| extract_client_hello_info_with_fingerprints(&sniff, include_fingerprints))
+        .flatten();
     if let Some(client_hello) = client_hello.as_ref() {
         let client_hello_stage_block = {
             let state = runtime.state();
@@ -261,7 +286,7 @@ async fn handle_connection(
             return Ok(());
         }
     }
-    let stream = crate::io_prefix::PrefixedIo::new(stream, Bytes::from(sniff));
+    let stream = crate::http::protocol::io_prefix::PrefixedIo::new(stream, Bytes::from(sniff));
 
     if is_tls {
         let result = tls_path::handle_tls_connection(
@@ -303,7 +328,7 @@ async fn handle_connection(
         }
     }
 
-    let result = http_path::handle_http_connection(
+    let result = http::handle_http_connection(
         stream,
         remote_addr,
         original_target,

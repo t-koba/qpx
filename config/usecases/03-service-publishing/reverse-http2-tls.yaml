@@ -9,7 +9,8 @@ edges:
       cert: "${QPX_TLS_CERT:-/etc/qpx/certs/app.example.com.crt}"
       key: "${QPX_TLS_KEY:-/etc/qpx/certs/app.example.com.key}"
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - app.example.com
     timeout_ms: 15000

@@ -56,12 +56,14 @@ url.workspace = true
 percent-encoding.workspace = true
 httpdate.workspace = true
 bytes.workspace = true
+lru.workspace = true
 brotli.workspace = true
 flate2.workspace = true
 zstd.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 arc-swap.workspace = true
+crossbeam-channel.workspace = true
 notify.workspace = true
 async-trait.workspace = true
 dirs-next.workspace = true
@@ -116,3 +118,8 @@ qpxf = { path = "../qpxf", default-features = false }
 tracing-subscriber.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "streaming_throughput"
+harness = false

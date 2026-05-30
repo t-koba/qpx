@@ -7,19 +7,21 @@ mod response;
 mod server;
 mod transport;
 
-pub use client::{ExtendedConnectStream, open_extended_connect_stream};
+pub use client::{ClientSession, ExtendedConnectStream, open_extended_connect_stream};
+pub use protocol::{PriorityUpdates, StreamPriority};
 pub use server::{
-    ConnectionInfo, Protocol, Request, RequestHandler, Response, Settings, SupportLevel,
-    WebTransportSession, serve_connection,
+    ConnectionInfo, Protocol, Request, RequestHandler, Settings, SupportLevel, WebTransportSession,
+    serve_connection,
 };
 pub use transport::{
-    BidiStream, OpenStreams, RequestStream, StreamDatagrams, UniRecvStream, UniSendStream,
+    BidiStream, OpenStreams, RequestRecvStream, RequestSendStream, RequestStream, StreamDatagrams,
+    StreamRecv, StreamSend, UniRecvStream, UniSendStream,
 };
 
 pub const BACKEND_NAME: &str = "qpx-h3";
 
 pub fn support_level() -> SupportLevel {
-    SupportLevel::BufferedServer
+    SupportLevel::StreamingServer
 }
 
 #[doc(hidden)]

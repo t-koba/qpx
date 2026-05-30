@@ -12,7 +12,8 @@ edges:
     enabled: true
     listen: 0.0.0.0:443
   routes:
-  - match:
+  - streaming_requirement: preferred
+    match:
       host:
       - example.com
     timeout_ms: 30000

@@ -236,7 +236,7 @@ main() {
   assert_qpxd_explain "observability capture compiles to capture plan" \
     "config/usecases/07-observability-debug/observability-high-detail.yaml" "obs-forward" "" \
     '^[[:space:]]+capture_encrypted: on$' '^[[:space:]]+capture_plaintext: on$' \
-    '^[[:space:]]+plaintext_headers: on$' '^[[:space:]]+plaintext_body: on$' \
+    '^[[:space:]]+plaintext_headers: on$' '^[[:space:]]+plaintext_body: full$' \
     '^[[:space:]]+max_body_bytes: 16384$'
   assert_qpxd_explain "HTTP modules compile into request and response stages" \
     "config/usecases/07-observability-debug/http-modules-advanced.yaml" "modules-forward" "" \

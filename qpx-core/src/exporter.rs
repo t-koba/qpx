@@ -56,11 +56,30 @@ impl CaptureEvent {
         }
     }
 
+    pub fn new_bytes(
+        session_id: String,
+        plane: CapturePlane,
+        direction: CaptureDirection,
+        client: String,
+        server: String,
+        payload: Bytes,
+    ) -> Self {
+        Self {
+            session_id,
+            timestamp_unix_nanos: unix_timestamp_nanos(),
+            plane,
+            direction,
+            client,
+            server,
+            payload,
+        }
+    }
+
     pub fn payload_bytes(&self) -> &[u8] {
         self.payload.as_ref()
     }
 
-    pub fn encode_wire(&self, out: &mut Vec<u8>) -> Result<()> {
+    pub fn encode_wire_prefix(&self, out: &mut Vec<u8>) -> Result<()> {
         let session = self.session_id.as_bytes();
         let client = self.client.as_bytes();
         let server = self.server.as_bytes();
@@ -77,10 +96,9 @@ impl CaptureEvent {
             }
         }
 
-        let total_len =
-            CAPTURE_WIRE_HEADER_LEN + session.len() + client.len() + server.len() + payload.len();
+        let prefix_len = CAPTURE_WIRE_HEADER_LEN + session.len() + client.len() + server.len();
         out.clear();
-        out.reserve(total_len);
+        out.reserve(prefix_len);
 
         out.extend_from_slice(&CAPTURE_WIRE_MAGIC);
         out.push(CAPTURE_WIRE_VERSION);
@@ -97,7 +115,36 @@ impl CaptureEvent {
         out.extend_from_slice(session);
         out.extend_from_slice(client);
         out.extend_from_slice(server);
-        out.extend_from_slice(payload);
+        debug_assert_eq!(out.len(), prefix_len);
+        Ok(())
+    }
+
+    pub fn wire_len(&self) -> Result<usize> {
+        let session = self.session_id.as_bytes();
+        let client = self.client.as_bytes();
+        let server = self.server.as_bytes();
+        let payload = self.payload.as_ref();
+        for (label, bytes) in [
+            ("session_id", session),
+            ("client", client),
+            ("server", server),
+            ("payload", payload),
+        ] {
+            if bytes.len() > u32::MAX as usize {
+                return Err(anyhow!("capture event {} too large", label));
+            }
+        }
+        CAPTURE_WIRE_HEADER_LEN
+            .checked_add(session.len())
+            .and_then(|len| len.checked_add(client.len()))
+            .and_then(|len| len.checked_add(server.len()))
+            .and_then(|len| len.checked_add(payload.len()))
+            .ok_or_else(|| anyhow!("capture event wire length overflow"))
+    }
+
+    pub fn encode_wire(&self, out: &mut Vec<u8>) -> Result<()> {
+        self.encode_wire_prefix(out)?;
+        out.extend_from_slice(self.payload.as_ref());
         Ok(())
     }
 
@@ -233,6 +280,27 @@ mod tests {
         event.encode_wire(&mut buf)?;
         let decoded = CaptureEvent::decode_wire(Bytes::from(buf))?;
         assert_eq!(decoded, event);
+        Ok(())
+    }
+
+    #[test]
+    fn capture_event_wire_prefix_can_be_combined_with_payload() -> Result<()> {
+        let event = CaptureEvent {
+            session_id: "sess-1".to_string(),
+            timestamp_unix_nanos: 1234567890,
+            plane: CapturePlane::ClientServerPlaintext,
+            direction: CaptureDirection::ServerToClient,
+            client: "client".to_string(),
+            server: "server".to_string(),
+            payload: Bytes::from_static(b"payload"),
+        };
+        let mut full = Vec::new();
+        event.encode_wire(&mut full)?;
+        let mut prefix = Vec::new();
+        event.encode_wire_prefix(&mut prefix)?;
+        prefix.extend_from_slice(event.payload_bytes());
+        assert_eq!(prefix, full);
+        assert_eq!(event.wire_len()?, full.len());
         Ok(())
     }
 }

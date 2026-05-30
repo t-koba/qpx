@@ -1,0 +1,434 @@
+#[cfg(test)]
+use super::quic::extract_quic_client_hello_info;
+use super::quic::{extract_quic_client_hello_info_with_fingerprints, looks_like_quic_initial};
+use crate::runtime::Runtime;
+use crate::server::control::SidecarControl;
+use crate::udp_session_handoff::{
+    ExportedQuicConnectionId, TransparentUdpListenerRestore, TransparentUdpSessionRestore,
+    UdpSessionRestoreState,
+};
+use crate::udp_socket_handoff::duplicate_tokio_udp_socket;
+use anyhow::{Context, Result, anyhow};
+use metrics::{counter, histogram};
+use qpx_core::config::IngressEdgeConfig;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tokio::net::UdpSocket;
+use tokio::sync::watch;
+use tokio::time::{Duration, MissedTickBehavior, timeout};
+use tracing::{info, warn};
+
+mod dispatch;
+mod session;
+use self::dispatch::{NewUdpSessionContext, apply_udp_bandwidth_controls, handle_new_udp_session};
+#[cfg(test)]
+use self::session::SessionIndex;
+#[cfg(test)]
+use self::session::parse_quic_long_header;
+use self::session::{SharedSessionIndex, TransparentUdpSession, TransparentUdpSessionInit};
+use super::udp_socket::{bind_udp_listener, recv_transparent_datagram};
+
+const UNSPECIFIED_V4: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+const UNSPECIFIED_V6: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+
+pub(super) async fn run_transparent_udp_listener(
+    listener: IngressEdgeConfig,
+    runtime: Runtime,
+    mut shutdown: watch::Receiver<SidecarControl>,
+    inherited_socket: Option<std::net::UdpSocket>,
+    restore: Option<TransparentUdpListenerRestore>,
+    export_sink: Arc<Mutex<UdpSessionRestoreState>>,
+) -> Result<()> {
+    let listen_addr: SocketAddr = listener
+        .http3
+        .as_ref()
+        .and_then(|cfg| cfg.listen.clone())
+        .unwrap_or_else(|| listener.listen.clone())
+        .parse()?;
+    let socket = Arc::new(match inherited_socket {
+        Some(socket) => {
+            socket
+                .set_nonblocking(true)
+                .context("failed to set inherited transparent UDP socket nonblocking")?;
+            UdpSocket::from_std(socket)
+                .context("failed to adopt inherited transparent UDP socket")?
+        }
+        None => bind_udp_listener(listen_addr, runtime.state().plan.limits.general.reuse_port)?,
+    });
+    let sessions = Arc::new(SharedSessionIndex::new());
+    let idle_timeout = Duration::from_millis(
+        runtime
+            .state()
+            .plan
+            .limits
+            .timeouts
+            .tunnel_idle_timeout_ms
+            .max(1),
+    );
+    let idle_timeout_ms = idle_timeout.as_millis() as u64;
+    let run_started = restore
+        .as_ref()
+        .map(|state| run_started_from_exported_elapsed(state.exported_elapsed_ms))
+        .unwrap_or_else(Instant::now);
+    let listener_name = listener.name.clone();
+
+    info!(
+        listener = %listener.name,
+        addr = %listen_addr,
+        "transparent UDP/QUIC listener starting"
+    );
+
+    let mut cleanup = tokio::time::interval(Duration::from_secs(1));
+    cleanup.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut next_session_id = 1u64;
+    if let Some(restore) = restore {
+        next_session_id = restore_transparent_udp_sessions(
+            listener_name.as_str(),
+            socket.clone(),
+            sessions.clone(),
+            &runtime,
+            restore,
+            idle_timeout,
+            run_started,
+        )
+        .await?;
+    }
+    let mut buf = vec![0u8; 65535];
+
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                let stop_mode = if changed.is_err() {
+                    SidecarControl::Stop
+                } else {
+                    *shutdown.borrow()
+                };
+                if stop_mode.should_stop() {
+                    drain_transparent_udp_sessions(
+                        listener_name.as_str(),
+                        listen_addr,
+                        sessions.clone(),
+                        run_started,
+                        stop_mode.should_export(),
+                        export_sink.as_ref(),
+                    )
+                    .await?;
+                    break;
+                }
+            }
+            _ = cleanup.tick() => {
+                let now_ms = run_started.elapsed().as_millis() as u64;
+                let expired = sessions.evict_expired(now_ms, idle_timeout_ms);
+                for session in expired {
+                    let _ = session.close_tx.send(true);
+                }
+            }
+            recv = recv_transparent_datagram(socket.as_ref(), &mut buf) => {
+                let started = Instant::now();
+                let (n, client_addr, original_target) = recv?;
+                let packet = &buf[..n];
+                let target_key = original_target
+                    .filter(|target| Some(*target) != socket.local_addr().ok())
+                    .map(|target| target.to_string());
+                let existing = sessions
+                    .find_session_for_client_packet(client_addr, target_key.as_deref(), packet)
+                    .map(|(session_id, session)| {
+                        let needs_index_update = sessions.client_packet_needs_index_update(
+                            session_id,
+                            session.as_ref(),
+                            packet,
+                        );
+                        (session_id, session, needs_index_update)
+                    });
+
+                let result = if let Some((session_id, session, needs_index_update)) = existing {
+                    let now_ms = run_started.elapsed().as_millis() as u64;
+                    session.mark_client_seen(now_ms);
+                    let bandwidth = apply_udp_bandwidth_controls(
+                        &session.rate_limit_ctx,
+                        &session.limits,
+                        packet.len() as u64,
+                    );
+                    if let Err(()) = bandwidth {
+                        "blocked"
+                    } else if let Ok(delay) = bandwidth {
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
+                        if let Err(err) = session.socket.send(packet).await {
+                            warn!(
+                                error = ?err,
+                                client = %client_addr,
+                                target = %session.target_key,
+                                "transparent UDP upstream send failed"
+                            );
+                            if let Some(session) = sessions.remove_session(session_id) {
+                                let _ = session.close_tx.send(true);
+                            }
+                            "error"
+                        } else {
+                            if session.current_client_addr() != client_addr || needs_index_update {
+                                sessions.update_client_address(session_id, client_addr);
+                                if needs_index_update {
+                                    sessions.observe_client_packet(session_id, packet);
+                                }
+                            }
+                            "tunneled"
+                        }
+                    } else {
+                        warn!(
+                            client = %client_addr,
+                            target = %session.target_key,
+                            "transparent UDP bandwidth evaluation reached unexpected state"
+                        );
+                        "error"
+                    }
+                } else {
+                    match handle_new_udp_session(NewUdpSessionContext {
+                        listener_socket: socket.clone(),
+                        sessions: sessions.clone(),
+                        session_id: next_session_id,
+                        listener_name: &listener_name,
+                        runtime: runtime.clone(),
+                        client_addr,
+                        original_target,
+                        packet,
+                        run_started,
+                        idle_timeout,
+                    })
+                    .await {
+                        Ok(result) => {
+                            if result == "tunneled" {
+                                next_session_id = next_session_id.wrapping_add(1);
+                            }
+                            result
+                        }
+                        Err(err) => {
+                            warn!(error = ?err, "transparent UDP session setup failed");
+                            "error"
+                        }
+                    }
+                };
+
+                let state = runtime.state();
+                counter!(
+                    state.observability.metric_names.transparent_requests_total.clone(),
+                    "result" => result
+                )
+                .increment(1);
+                histogram!(state.observability.metric_names.transparent_latency_ms.clone())
+                    .record(started.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_started_from_exported_elapsed(exported_elapsed_ms: u64) -> Instant {
+    Instant::now()
+        .checked_sub(Duration::from_millis(exported_elapsed_ms))
+        .unwrap_or_else(Instant::now)
+}
+
+async fn drain_transparent_udp_sessions(
+    listener_name: &str,
+    listen_addr: SocketAddr,
+    sessions: Arc<SharedSessionIndex>,
+    run_started: Instant,
+    export: bool,
+    export_sink: &Mutex<UdpSessionRestoreState>,
+) -> Result<()> {
+    let drained = sessions.drain_all();
+    for (_, session) in &drained {
+        let _ = session.close_tx.send(true);
+    }
+    for task in drained
+        .iter()
+        .filter_map(|(_, session)| session.take_relay_task())
+    {
+        task.await
+            .map_err(|err| anyhow!("transparent UDP relay join failed: {err}"))?;
+    }
+    if export && !drained.is_empty() {
+        let exported_elapsed_ms = run_started.elapsed().as_millis() as u64;
+        let mut restored = Vec::with_capacity(drained.len());
+        for (session_id, session) in drained {
+            restored.push(TransparentUdpSessionRestore {
+                session_id,
+                upstream_local_addr: session
+                    .socket
+                    .local_addr()
+                    .context("failed to resolve transparent UDP upstream local addr")?,
+                upstream_peer_addr: session
+                    .socket
+                    .peer_addr()
+                    .context("failed to resolve transparent UDP upstream peer addr")?,
+                socket: duplicate_tokio_udp_socket(session.socket.as_ref())?,
+                client_addr: session.current_client_addr(),
+                target_key: session.target_key.clone(),
+                last_seen_ms: session.last_seen_ms(),
+                client_cid_len: session.client_cid_len(),
+                server_cid_len: session.server_cid_len(),
+                cids: session
+                    .snapshot_cids()
+                    .into_iter()
+                    .map(|cid| ExportedQuicConnectionId {
+                        len: cid.len,
+                        bytes: cid.bytes,
+                    })
+                    .collect(),
+                matched_rule: session.matched_rule.clone(),
+                rate_limit_profile: session.rate_limit_profile.clone(),
+                rate_limit_ctx: session.rate_limit_ctx.clone(),
+            });
+        }
+        export_sink
+            .lock()
+            .map_err(|_| anyhow!("transparent export lock poisoned"))?
+            .insert_transparent(
+                listener_name.to_string(),
+                TransparentUdpListenerRestore {
+                    listen: listen_addr.to_string(),
+                    exported_elapsed_ms,
+                    sessions: restored,
+                },
+            );
+    }
+    Ok(())
+}
+
+async fn restore_transparent_udp_sessions(
+    listener_name: &str,
+    listener_socket: Arc<UdpSocket>,
+    sessions: Arc<SharedSessionIndex>,
+    runtime: &Runtime,
+    restore: TransparentUdpListenerRestore,
+    idle_timeout: Duration,
+    run_started: Instant,
+) -> Result<u64> {
+    let mut next_session_id = 1u64;
+    for restored in restore.sessions {
+        restored
+            .socket
+            .set_nonblocking(true)
+            .context("failed to set restored transparent UDP session nonblocking")?;
+        let socket = Arc::new(
+            UdpSocket::from_std(restored.socket)
+                .context("failed to adopt restored transparent UDP session socket")?,
+        );
+        let state = runtime.state();
+        let selected_plan = state
+            .plan
+            .ingress_edge_execution_plan(listener_name, restored.matched_rule.as_deref())
+            .ok_or_else(|| anyhow!("compiled transparent UDP execution plan not found"))?;
+        let limits = state.policy.rate_limiters.collect_plan_with_profile(
+            &selected_plan.rate_limits,
+            restored.rate_limit_profile.as_deref(),
+            crate::rate_limit::TransportScope::Udp,
+        )?;
+        let concurrency_permits = limits
+            .acquire_concurrency(&restored.rate_limit_ctx)
+            .ok_or_else(|| anyhow!("failed to reacquire transparent UDP concurrency permit"))?;
+        let (close_tx, _close_rx) = watch::channel(false);
+        let session = Arc::new(TransparentUdpSession::new(TransparentUdpSessionInit {
+            socket: socket.clone(),
+            close_tx,
+            client_addr: restored.client_addr,
+            target_key: restored.target_key,
+            matched_rule: restored.matched_rule,
+            rate_limit_profile: restored.rate_limit_profile,
+            seen_ms: restored.last_seen_ms,
+            limits: limits.clone(),
+            rate_limit_ctx: restored.rate_limit_ctx,
+            concurrency_permits,
+        }));
+        session.set_client_cid_len_if_some(restored.client_cid_len);
+        session.set_server_cid_len_if_some(restored.server_cid_len);
+        let cids = restored
+            .cids
+            .into_iter()
+            .map(|cid| session::QuicConnectionId {
+                len: cid.len,
+                bytes: cid.bytes,
+            })
+            .collect::<Vec<_>>();
+        sessions.insert_restored(restored.session_id, session.clone(), cids);
+        let relay_task = spawn_transparent_udp_relay(
+            listener_socket.clone(),
+            sessions.clone(),
+            restored.session_id,
+            session.clone(),
+            socket,
+            idle_timeout,
+            run_started,
+        );
+        session.attach_relay_task(relay_task);
+        next_session_id = next_session_id.max(restored.session_id.wrapping_add(1));
+    }
+    Ok(next_session_id)
+}
+
+fn spawn_transparent_udp_relay(
+    listener_socket: Arc<UdpSocket>,
+    sessions: Arc<SharedSessionIndex>,
+    session_id: u64,
+    session: Arc<TransparentUdpSession>,
+    udp_recv: Arc<UdpSocket>,
+    idle_timeout: Duration,
+    run_started: Instant,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut recv_buf = vec![0u8; 65535];
+        let mut close_rx = session.close_tx.subscribe();
+        loop {
+            let n = tokio::select! {
+                changed = close_rx.changed() => {
+                    if changed.is_ok() && *close_rx.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+                recv = timeout(idle_timeout, udp_recv.recv(&mut recv_buf)) => {
+                    match recv {
+                        Ok(Ok(n)) => n,
+                        Ok(Err(_)) | Err(_) => break,
+                    }
+                }
+            };
+            let now_ms = run_started.elapsed().as_millis() as u64;
+            session.mark_upstream_seen(now_ms);
+            if let Ok(delay) =
+                apply_udp_bandwidth_controls(&session.rate_limit_ctx, &session.limits, n as u64)
+            {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            } else {
+                break;
+            }
+            let needs_index_update = sessions.session(session_id).is_some_and(|current| {
+                sessions.upstream_packet_needs_index_update(
+                    session_id,
+                    current.as_ref(),
+                    &recv_buf[..n],
+                )
+            });
+            if needs_index_update {
+                sessions.observe_upstream_packet(session_id, &recv_buf[..n]);
+            }
+            let client_addr = session.current_client_addr();
+            if listener_socket
+                .send_to(&recv_buf[..n], client_addr)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        let _ = sessions.remove_session(session_id);
+    })
+}
+
+#[cfg(test)]
+mod tests;

@@ -19,6 +19,11 @@ use url::Url;
 use super::identity::{EffectivePolicyContext, ResolvedIdentity};
 use super::util::{normalize_string_list, selected_headers_map};
 
+mod validation;
+
+pub(crate) use self::validation::validate_ext_authz_allow_mode;
+use self::validation::{validate_ext_authz_local_response, validate_ext_authz_upstream_value};
+
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledExtAuthz {
     endpoint: Url,
@@ -320,12 +325,23 @@ impl ExtAuthzResponse {
             .rate_limit_profile
             .map(|profile| profile.trim().to_string())
             .filter(|profile| !profile.is_empty());
+        let override_upstream = self
+            .override_upstream
+            .map(|value| validate_ext_authz_upstream_value(value, "override_upstream"))
+            .transpose()?;
         let mirror_upstreams = normalize_string_list(self.mirror_upstreams);
+        for upstream in &mirror_upstreams {
+            validate_ext_authz_upstream_value(upstream.clone(), "mirror_upstreams")?;
+        }
         let policy_tags = normalize_string_list(self.policy_tags);
+        let local_response = self
+            .local_response
+            .map(validate_ext_authz_local_response)
+            .transpose()?;
         match self.decision.trim().to_ascii_lowercase().as_str() {
             "allow" => Ok(ExtAuthzEnforcement::Continue(ExtAuthzAllow {
                 policy_id: self.policy_id,
-                override_upstream: self.override_upstream,
+                override_upstream,
                 headers,
                 timeout_override,
                 cache_bypass: self.cache_bypass,
@@ -338,11 +354,11 @@ impl ExtAuthzResponse {
             "deny" => Ok(ExtAuthzEnforcement::Deny(ExtAuthzDeny {
                 policy_id: self.policy_id,
                 headers,
-                local_response: self.local_response,
+                local_response,
                 policy_tags,
             })),
             "local_response" => {
-                let local_response = self.local_response.ok_or_else(|| {
+                let local_response = local_response.ok_or_else(|| {
                     anyhow!("ext_authz local_response decision requires local_response")
                 })?;
                 Ok(ExtAuthzEnforcement::Deny(ExtAuthzDeny {
@@ -353,7 +369,7 @@ impl ExtAuthzResponse {
                 }))
             }
             "challenge" => {
-                let local_response = self.local_response.ok_or_else(|| {
+                let local_response = local_response.ok_or_else(|| {
                     anyhow!("ext_authz challenge decision requires local_response")
                 })?;
                 Ok(ExtAuthzEnforcement::Deny(ExtAuthzDeny {
@@ -366,145 +382,6 @@ impl ExtAuthzResponse {
             other => Err(anyhow!("unsupported ext_authz decision: {}", other)),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ExtAuthzModeCapabilities {
-    name: &'static str,
-    inject_headers: bool,
-    override_upstream: bool,
-    timeout_override: bool,
-    cache_bypass: bool,
-    mirror_upstreams: bool,
-    rate_limit_profile: bool,
-    force_inspect: bool,
-    force_tunnel: bool,
-}
-
-impl ExtAuthzMode {
-    fn capabilities(self) -> ExtAuthzModeCapabilities {
-        match self {
-            Self::ForwardHttp => ExtAuthzModeCapabilities {
-                name: "forward_http",
-                inject_headers: true,
-                override_upstream: true,
-                timeout_override: true,
-                cache_bypass: true,
-                mirror_upstreams: false,
-                rate_limit_profile: true,
-                force_inspect: false,
-                force_tunnel: false,
-            },
-            Self::ForwardConnect => ExtAuthzModeCapabilities {
-                name: "forward_connect",
-                inject_headers: true,
-                override_upstream: true,
-                timeout_override: true,
-                cache_bypass: false,
-                mirror_upstreams: false,
-                rate_limit_profile: true,
-                force_inspect: true,
-                force_tunnel: true,
-            },
-            #[cfg(feature = "mitm")]
-            Self::ForwardMitmHttp => ExtAuthzModeCapabilities {
-                name: "forward_mitm_http",
-                inject_headers: true,
-                override_upstream: false,
-                timeout_override: true,
-                cache_bypass: false,
-                mirror_upstreams: false,
-                rate_limit_profile: true,
-                force_inspect: false,
-                force_tunnel: false,
-            },
-            Self::ReverseHttp => ExtAuthzModeCapabilities {
-                name: "reverse_http",
-                inject_headers: true,
-                override_upstream: true,
-                timeout_override: true,
-                cache_bypass: true,
-                mirror_upstreams: true,
-                rate_limit_profile: true,
-                force_inspect: false,
-                force_tunnel: false,
-            },
-            Self::TransparentHttp => ExtAuthzModeCapabilities {
-                name: "transparent_http",
-                inject_headers: true,
-                override_upstream: true,
-                timeout_override: true,
-                cache_bypass: false,
-                mirror_upstreams: false,
-                rate_limit_profile: true,
-                force_inspect: false,
-                force_tunnel: false,
-            },
-            Self::TransparentTls => ExtAuthzModeCapabilities {
-                name: "transparent_tls",
-                inject_headers: false,
-                override_upstream: true,
-                timeout_override: true,
-                cache_bypass: false,
-                mirror_upstreams: false,
-                rate_limit_profile: true,
-                force_inspect: true,
-                force_tunnel: true,
-            },
-            #[cfg(feature = "http3")]
-            Self::TransparentUdp => ExtAuthzModeCapabilities {
-                name: "transparent_udp",
-                inject_headers: false,
-                override_upstream: false,
-                timeout_override: true,
-                cache_bypass: false,
-                mirror_upstreams: false,
-                rate_limit_profile: true,
-                force_inspect: false,
-                force_tunnel: false,
-            },
-        }
-    }
-}
-
-pub(crate) fn validate_ext_authz_allow_mode(
-    allow: &ExtAuthzAllow,
-    mode: ExtAuthzMode,
-) -> Result<()> {
-    let caps = mode.capabilities();
-    let mut unsupported = Vec::new();
-    if allow.headers.is_some() && !caps.inject_headers {
-        unsupported.push("inject_headers");
-    }
-    if allow.override_upstream.is_some() && !caps.override_upstream {
-        unsupported.push("override_upstream");
-    }
-    if allow.timeout_override.is_some() && !caps.timeout_override {
-        unsupported.push("timeout_override_ms");
-    }
-    if allow.cache_bypass && !caps.cache_bypass {
-        unsupported.push("cache_bypass");
-    }
-    if !allow.mirror_upstreams.is_empty() && !caps.mirror_upstreams {
-        unsupported.push("mirror_upstreams");
-    }
-    if allow.rate_limit_profile.is_some() && !caps.rate_limit_profile {
-        unsupported.push("rate_limit_profile");
-    }
-    if allow.force_inspect && !caps.force_inspect {
-        unsupported.push("force_inspect");
-    }
-    if allow.force_tunnel && !caps.force_tunnel {
-        unsupported.push("force_tunnel");
-    }
-    if unsupported.is_empty() {
-        return Ok(());
-    }
-    Err(anyhow!(
-        "ext_authz fields [{}] are not supported for {}",
-        unsupported.join(", "),
-        caps.name
-    ))
 }
 
 pub(crate) fn merge_header_controls(
@@ -542,116 +419,4 @@ pub(crate) fn apply_ext_authz_action_overrides(action: &mut ActionConfig, allow:
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use qpx_core::config::HeaderControl;
-
-    #[test]
-    fn ext_authz_mode_validation_rejects_unsupported_fields() {
-        let allow = ExtAuthzAllow {
-            force_inspect: true,
-            ..Default::default()
-        };
-        let err = validate_ext_authz_allow_mode(&allow, ExtAuthzMode::ReverseHttp)
-            .expect_err("reverse_edges should reject force_inspect");
-        assert!(err.to_string().contains("force_inspect"));
-
-        let allow = ExtAuthzAllow {
-            headers: Some(Arc::new(
-                CompiledHeaderControl::compile(&HeaderControl::default()).expect("headers"),
-            )),
-            ..Default::default()
-        };
-        let err = validate_ext_authz_allow_mode(&allow, ExtAuthzMode::TransparentTls)
-            .expect_err("transparent tls should reject header injection");
-        assert!(err.to_string().contains("inject_headers"));
-    }
-
-    #[test]
-    fn ext_authz_mode_validation_accepts_supported_fields() {
-        let connect_allow = ExtAuthzAllow {
-            headers: Some(Arc::new(
-                CompiledHeaderControl::compile(&HeaderControl::default()).expect("headers"),
-            )),
-            override_upstream: Some("http://upstream.internal:8080".to_string()),
-            timeout_override: Some(Duration::from_millis(250)),
-            rate_limit_profile: Some("subject-egress".to_string()),
-            force_inspect: true,
-            force_tunnel: false,
-            ..Default::default()
-        };
-
-        validate_ext_authz_allow_mode(&connect_allow, ExtAuthzMode::ForwardConnect)
-            .expect("forward connect should accept force_inspect");
-
-        let transparent_tls_allow = ExtAuthzAllow {
-            override_upstream: connect_allow.override_upstream.clone(),
-            timeout_override: connect_allow.timeout_override,
-            rate_limit_profile: connect_allow.rate_limit_profile.clone(),
-            force_inspect: true,
-            ..Default::default()
-        };
-        validate_ext_authz_allow_mode(&transparent_tls_allow, ExtAuthzMode::TransparentTls)
-            .expect("transparent tls should accept force_inspect");
-
-        let http_allow = ExtAuthzAllow {
-            headers: connect_allow.headers.clone(),
-            override_upstream: connect_allow.override_upstream.clone(),
-            timeout_override: connect_allow.timeout_override,
-            cache_bypass: true,
-            rate_limit_profile: connect_allow.rate_limit_profile.clone(),
-            ..Default::default()
-        };
-        validate_ext_authz_allow_mode(&http_allow, ExtAuthzMode::ForwardHttp)
-            .expect("forward http should accept cache_bypass");
-        validate_ext_authz_allow_mode(&http_allow, ExtAuthzMode::ReverseHttp)
-            .expect("reverse_edges http should accept cache_bypass");
-
-        let reverse_allow = ExtAuthzAllow {
-            headers: connect_allow.headers.clone(),
-            override_upstream: connect_allow.override_upstream.clone(),
-            timeout_override: connect_allow.timeout_override,
-            mirror_upstreams: vec!["http://mirror.internal:8080".to_string()],
-            rate_limit_profile: connect_allow.rate_limit_profile.clone(),
-            ..Default::default()
-        };
-        validate_ext_authz_allow_mode(&reverse_allow, ExtAuthzMode::ReverseHttp)
-            .expect("reverse_edges http should accept mirror_upstreams");
-    }
-
-    #[test]
-    fn ext_authz_action_overrides_apply_force_modes() {
-        let mut action = ActionConfig {
-            kind: ActionKind::Tunnel,
-            upstream: Some("baseline".to_string()),
-            local_response: None,
-        };
-        apply_ext_authz_action_overrides(
-            &mut action,
-            &ExtAuthzAllow {
-                override_upstream: Some("http://override.internal:8080".to_string()),
-                force_inspect: true,
-                ..Default::default()
-            },
-        );
-        assert!(matches!(action.kind, ActionKind::Inspect));
-        assert_eq!(
-            action.upstream.as_deref(),
-            Some("http://override.internal:8080")
-        );
-
-        let mut action = ActionConfig {
-            kind: ActionKind::Inspect,
-            upstream: None,
-            local_response: None,
-        };
-        apply_ext_authz_action_overrides(
-            &mut action,
-            &ExtAuthzAllow {
-                force_tunnel: true,
-                ..Default::default()
-            },
-        );
-        assert!(matches!(action.kind, ActionKind::Tunnel));
-    }
-}
+mod tests;

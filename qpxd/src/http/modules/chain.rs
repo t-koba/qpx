@@ -59,6 +59,13 @@ impl Default for CompiledHttpModuleChain {
 }
 
 impl CompiledHttpModuleChain {
+    #[cfg(test)]
+    pub(crate) fn test_with_body_access(body_access: super::BodyAccess) -> Self {
+        let mut chain = Self::default();
+        chain.aggregate.body_access = body_access;
+        chain
+    }
+
     pub(crate) fn aggregate(&self) -> HttpModuleCapabilities {
         self.aggregate
     }

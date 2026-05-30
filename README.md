@@ -30,7 +30,7 @@ qpx supports two TLS backends, selectable at build time:
 Choose the HTTP/3 backend by required behavior, not by listener YAML. Backend choice is build-time only.
 
 - `http3-backend-h3`: choose this for standard HTTP/3 request/response, CONNECT-UDP / MASQUE datagram relay, chained upstream HTTP/3 proxying, and non-WebTransport extended CONNECT.
-- `http3-backend-qpx`: choose this when you need the clean-room backend or the full QPX-owned advanced HTTP/3 surface. It covers buffered HTTP/3 request/response handling, reverse HTTP/3 terminate, CONNECT-UDP / MASQUE datagram relay, generic extended CONNECT, and WebTransport relay.
+- `http3-backend-qpx`: choose this when you need the clean-room backend or the full QPX-owned advanced HTTP/3 surface. It covers streaming HTTP/3 request/response relay, reverse HTTP/3 terminate, CONNECT-UDP / MASQUE datagram relay, generic extended CONNECT, and WebTransport relay. HTTP/3 request and response bodies are relayed as bounded streams. Individual modules may opt into buffering depending on their body mode.
 - Reverse HTTP/3 passthrough is backend-neutral. It stays in `qpxd` as raw UDP/QUIC session routing and works with either backend.
 
 ```bash
@@ -188,7 +188,7 @@ capture:
   plaintext:
     enabled: true
     headers: true
-    body: true
+    body: full
     sample_percent: 10
     max_body_bytes: 16384
     redact:
@@ -209,8 +209,8 @@ For local deployments, `qpxf` defaults to a user-scoped `unix://` socket. Any TC
 |---------|-------------|
 | CGI scripts | Spawns external processes (RFC 3875). Path containment, symlink-escape prevention, concurrent I/O with deadlock prevention, configurable size limits. |
 | WASM modules | Executes WASI-compatible modules via `qpx-wasm` (`wasmtime` + `wasmtime-wasi`). Module/stdin/stdout/stderr size caps, memory limits via `ResourceLimiter`, request wall-clock timeout, stderr capture, and optional executor pool/prewarm settings. Prewarm validates modules during executor construction. |
-| FastCGI | Sends CGI-shaped requests to a persistent FastCGI responder over TCP or `unix://`, with a per-backend connection pool (`pool.max_concurrency`, `pool.max_idle`), timeout, stdin/stdout/stderr limits. Pooled connections are reused only after a complete FastCGI end request; broken responders are discarded. |
-| SCGI | Sends CGI-shaped requests to an SCGI responder over TCP or `unix://` using per-request connections, with per-backend concurrency, timeout, stdin/stdout/stderr limits. |
+| FastCGI | Sends CGI-shaped requests to a persistent FastCGI responder over TCP or `unix://`, with a per-backend connection pool (`pool.max_concurrency`, `pool.max_idle`), timeout, stdin/stdout/stderr limits, and optional `script_name_prefixes` for deterministic `SCRIPT_NAME` / `PATH_INFO` splitting. Pooled connections are reused only after a complete FastCGI end request; broken responders are discarded. |
+| SCGI | Sends CGI-shaped requests to an SCGI responder over TCP or `unix://` using per-request connections, with per-backend concurrency, timeout, stdin/stdout/stderr limits. Non-empty stdin requires a valid `Content-Length` so qpxf can construct the SCGI netstring without buffering the full upload. |
 
 The default `qpxf` build enables the `wasm` feature, which pulls in `qpx-wasm`. Use `cargo build -p qpxf --no-default-features` for a CGI-only build.
 
@@ -218,15 +218,15 @@ For `ipc:` routes, `ipc.mode` controls how request/response bodies are transferr
 
 | `ipc.mode` | Body transfer | When to use |
 |--------------------|--------------|-------------|
-| `shm` (default) | shared-memory ring buffer | `qpxd` and `qpxf` on the same host |
-| `tcp` | streamed over the connection | cross-host or non-Unix deployments |
+| `shm` (default) | shared-memory ring buffer | `qpxd` and `qpxf` on the same Unix host with owner-only SHM file permissions |
+| `tcp` | streamed over the connection | cross-host, Windows, or other non-Unix deployments |
 
 ```yaml
 # reverse route config in qpxd
 routes:
   - match: { path: ["/cgi-bin/*"] }
     ipc:
-      mode: shm          # "shm" (default) or "tcp"
+      mode: shm          # "shm" for same-host Unix deployments, or "tcp"
       address: "${QPXF_UNIX_LISTEN}"
       timeout_ms: 30000
 ```
@@ -331,8 +331,55 @@ See [`config/usecases/03-service-publishing/reverse-http-guard-lite.yaml`](confi
 - `match.rpc.service` / `match.rpc.method` use the canonical `/Service/Method` path split.
 - `match.rpc.status`, `match.rpc.message`, `match.rpc.message_size`, and `match.rpc.trailers` apply on the response stage.
 - `action.local_response.rpc` emits protocol-correct local replies for the same three protocols.
+- HTTP/3 streaming paths parse gRPC, gRPC-Web, and Connect envelopes incrementally for message counts, message-byte totals, status metrics, and stream duration metrics. gRPC-Web trailer bytes use `max_grpc_web_trailer_bytes`, separate from message-byte limits.
 
-See [`config/usecases/03-service-publishing/reverse-rpc-aware-policy.yaml`](config/usecases/03-service-publishing/reverse-rpc-aware-policy.yaml).
+Streaming behavior can be tuned globally under `runtime`, at listener level with `edges[].streaming` / `edges[].grpc` / `edges[].sse`, and at reverse-route level with `edges[kind=reverse].routes[].streaming` / `grpc` / `sse`. Route values override listener values, which override runtime defaults.
+
+```yaml
+runtime:
+  body_channel_capacity: 16
+  h3_origin_pool_max_connections_per_origin: 4
+  h3_origin_pool_max_inflight_streams_per_connection: 128
+  max_grpc_message_bytes: 4194304
+  max_grpc_web_trailer_bytes: 65536
+  max_grpc_stream_duration_ms: 300000
+  sse:
+    disable_compression: true
+    flush_policy: low_latency
+    idle_timeout_ms: 300000
+    max_stream_duration_ms: 3600000
+```
+
+By default, routes stay streaming-first and qpx rejects features that would
+require full body buffering unless the route or listener explicitly opts into
+that cost with `streaming_requirement: preferred`. Use
+`streaming_requirement: required` to reject buffering features even when they
+are added later. Body-mode compatibility is:
+
+- `headers_only`: streaming safe.
+- `streaming`: streaming safe transform.
+- Plaintext capture `body: stream_sample`: streaming safe; only the configured prefix is sampled.
+- Plaintext capture `body: full`: streaming safe pass-through capture; it must still be explicitly bounded with `max_body_bytes`.
+- `request_body_buffered`, `response_body_buffered`, and `request_and_response_body_buffered`: incompatible with `streaming_requirement: required`.
+
+Without explicit `preferred`, qpx rejects policy predicates that semantically
+need complete body observation, including `request_size`, `response_size`, RPC
+message/status/trailer predicates that require full request or response
+inspection, buffering HTTP guard profiles, retry templates, and buffering
+response rules. `required`
+uses the same boundary as a hard no-buffering assertion. `qpxd explain` prints
+`buffering.because` for each compiled route/action, using labels such as
+`rpc.body`, `request.size_exact_unknown`, and `retry.body_template`.
+Runtime metrics `qpx_body_buffering_bytes_total` and
+`qpx_body_spooled_bytes_total` expose the actual buffering cost by direction and
+reason.
+
+Unknown-length exact size matching is additionally guarded by
+`runtime.unknown_length_exact_size`, which defaults to `reject`. Set it to
+`buffer` only when the deployment intentionally accepts EOF read/spool/replay
+for exact `request_size` / `response_size` predicates without `Content-Length`.
+
+See [`docs/streaming-config.md`](docs/streaming-config.md) and [`config/usecases/03-service-publishing/reverse-rpc-aware-policy.yaml`](config/usecases/03-service-publishing/reverse-rpc-aware-policy.yaml).
 
 ### HTTP modules
 
@@ -673,7 +720,7 @@ cargo build -p qpxd
 - `runtime.max_h3_streams_per_connection` caps concurrent HTTP/3 streams and associated WebTransport sessions per QUIC connection.
 - `runtime.upstream_http_timeout_ms` is the default dial/request timeout for upstream HTTP and reverse route proxying.
 - `runtime.max_h3_request_body_bytes` / `runtime.max_h3_response_body_bytes` bound HTTP/3 body buffering.
-- `runtime.max_observed_request_body_bytes` / `runtime.max_observed_response_body_bytes` are hard caps for policy, guard, RPC, and response-rule body observation before buffering.
+- `runtime.max_observed_request_body_bytes` / `runtime.max_observed_response_body_bytes` are hard caps for policy, guard, RPC, and response-rule body observation before buffering; the default is 8 MiB per direction.
 - `runtime.trace_enabled` controls whether local `TRACE` loop-back handling is available at all.
 - `runtime.trace_reflect_all_headers` controls whether `TRACE` loop-back reflects every request header or uses the safer default that strips hop-by-hop, auth, forwarding, and tracing headers.
 
