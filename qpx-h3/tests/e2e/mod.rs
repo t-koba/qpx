@@ -806,6 +806,25 @@ fn read_varint(buf: &[u8]) -> Result<(u64, usize)> {
     }
 }
 
+fn read_varint_partial(buf: &[u8]) -> Result<Option<(u64, usize)>> {
+    let Some(first) = buf.first().copied() else {
+        return Ok(None);
+    };
+    match first >> 6 {
+        0 => Ok(Some((u64::from(first & 0x3f), 1))),
+        1 => {
+            if buf.len() < 2 {
+                return Ok(None);
+            }
+            Ok(Some((
+                ((u64::from(first & 0x3f)) << 8) | u64::from(buf[1]),
+                2,
+            )))
+        }
+        _ => Err(anyhow!("test helper does not support long varints")),
+    }
+}
+
 async fn read_non_empty_chunk(recv: &mut quinn::RecvStream, label: &str) -> Result<Bytes> {
     loop {
         let chunk = timeout(TEST_TIMEOUT, recv.read_chunk(4096, true))
@@ -818,39 +837,19 @@ async fn read_non_empty_chunk(recv: &mut quinn::RecvStream, label: &str) -> Resu
     }
 }
 
-fn short_varint_len(buf: &[u8]) -> Result<Option<usize>> {
-    let Some(first) = buf.first() else {
-        return Ok(None);
-    };
-    match first >> 6 {
-        0 => Ok(Some(1)),
-        1 => {
-            if buf.len() < 2 {
-                Ok(None)
-            } else {
-                Ok(Some(2))
-            }
-        }
-        _ => Err(anyhow!("test helper does not support long varints")),
-    }
-}
-
 async fn read_frame_raw(recv: &mut quinn::RecvStream, label: &str) -> Result<(u64, Bytes)> {
     let mut buf = Vec::new();
     loop {
         let chunk = read_non_empty_chunk(recv, label).await?;
         buf.extend_from_slice(chunk.as_ref());
 
-        let Some(type_len) = short_varint_len(buf.as_slice())? else {
+        let Some((frame_type, used_type)) = read_varint_partial(buf.as_slice())? else {
             continue;
         };
-        let Some(len_len) = short_varint_len(&buf[type_len..])? else {
+        let Some((frame_len, used_len)) = read_varint_partial(&buf[used_type..])? else {
             continue;
         };
-        let (frame_type, used_type) = read_varint(buf.as_slice())?;
-        let (frame_len, used_len) = read_varint(&buf[used_type..])?;
         let payload_start = used_type + used_len;
-        debug_assert_eq!(payload_start, type_len + len_len);
         let payload_end = payload_start + frame_len as usize;
         if buf.len() >= payload_end {
             return Ok((
