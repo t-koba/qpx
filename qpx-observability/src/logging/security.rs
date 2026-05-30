@@ -43,16 +43,15 @@ fn set_private_directory_permissions(path: &Path) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        Ok(())
     }
     #[cfg(not(unix))]
     {
         let _ = path;
-        return Err(anyhow!(
+        Err(anyhow!(
             "refusing file logging on this platform: private ACL and reparse-point protection is not implemented"
-        ));
+        ))
     }
-    #[cfg(unix)]
-    Ok(())
 }
 
 #[cfg(unix)]
