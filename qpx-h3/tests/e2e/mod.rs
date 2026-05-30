@@ -839,23 +839,33 @@ async fn read_non_empty_chunk(recv: &mut quinn::RecvStream, label: &str) -> Resu
 
 async fn read_frame_raw(recv: &mut quinn::RecvStream, label: &str) -> Result<(u64, Bytes)> {
     let mut buf = Vec::new();
-    loop {
-        let chunk = read_non_empty_chunk(recv, label).await?;
-        buf.extend_from_slice(chunk.as_ref());
+    read_frame_raw_buffered(recv, label, &mut buf).await
+}
 
+async fn read_frame_raw_buffered(
+    recv: &mut quinn::RecvStream,
+    label: &str,
+    buf: &mut Vec<u8>,
+) -> Result<(u64, Bytes)> {
+    loop {
         let Some((frame_type, used_type)) = read_varint_partial(buf.as_slice())? else {
+            let chunk = read_non_empty_chunk(recv, label).await?;
+            buf.extend_from_slice(chunk.as_ref());
             continue;
         };
         let Some((frame_len, used_len)) = read_varint_partial(&buf[used_type..])? else {
+            let chunk = read_non_empty_chunk(recv, label).await?;
+            buf.extend_from_slice(chunk.as_ref());
             continue;
         };
         let payload_start = used_type + used_len;
         let payload_end = payload_start + frame_len as usize;
         if buf.len() >= payload_end {
-            return Ok((
-                frame_type,
-                Bytes::copy_from_slice(&buf[payload_start..payload_end]),
-            ));
+            let payload = Bytes::copy_from_slice(&buf[payload_start..payload_end]);
+            buf.drain(..payload_end);
+            return Ok((frame_type, payload));
         }
+        let chunk = read_non_empty_chunk(recv, label).await?;
+        buf.extend_from_slice(chunk.as_ref());
     }
 }

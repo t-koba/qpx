@@ -89,6 +89,10 @@ async fn serve_slow_chunked_response(
         }
     }
     stream.write_all(b"\r\n").await?;
+    stream.flush().await?;
+    if trailers.is_some() {
+        sleep(Duration::from_millis(10)).await;
+    }
     stream.shutdown().await
 }
 
