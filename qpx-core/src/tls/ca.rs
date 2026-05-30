@@ -134,11 +134,19 @@ fn write_text_file(path: &Path, contents: &str, mode: u32) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn write_text_file(path: &Path, contents: &str) -> Result<()> {
-    let _ = (path, contents);
+    ensure_path_not_symlink(path, "MITM CA material")?;
+    fs::write(path, contents)
+        .with_context(|| format!("failed to write MITM CA material {}", path.display()))?;
+    set_owner_only_acl(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn write_text_file(path: &Path, _contents: &str) -> Result<()> {
     Err(anyhow!(
-        "refusing to write MITM CA material on this platform: private ACL and reparse-point protection is not implemented"
+        "refusing to write MITM CA material on this platform: private ACL and reparse-point protection is not implemented: {}",
+        path.display()
     ))
 }
 
@@ -154,11 +162,16 @@ fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn enforce_private_key_permissions(path: &Path) -> Result<()> {
-    let _ = path;
+    set_owner_only_acl(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     Err(anyhow!(
-        "refusing to use MITM CA private key on this platform: private ACL and reparse-point protection is not implemented"
+        "refusing to use MITM CA private key on this platform: private ACL and reparse-point protection is not implemented: {}",
+        path.display()
     ))
 }
 
@@ -206,6 +219,10 @@ fn ensure_private_state_dir(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(windows)]
+    {
+        set_private_directory_permissions(path)?;
+    }
     Ok(())
 }
 
@@ -217,6 +234,11 @@ fn set_private_directory_permissions(path: &Path) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
+        #[cfg(windows)]
+        {
+            return set_owner_only_acl(path);
+        }
+        #[cfg(not(windows))]
         let _ = path;
     }
     Ok(())
@@ -297,11 +319,72 @@ fn resolve_trusted_state_symlink(path: &Path, _meta: &fs::Metadata) -> Result<Pa
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn reject_untrusted_state_ancestor(_path: &Path, _meta: &fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn reject_untrusted_state_ancestor(path: &Path, _meta: &fs::Metadata) -> Result<()> {
     Err(anyhow!(
-        "refusing to use MITM state directory on this platform: private ACL and reparse-point protection is not implemented"
+        "refusing to use MITM state directory on this platform: private ACL and reparse-point protection is not implemented: {}",
+        path.display()
     ))
+}
+
+#[cfg(windows)]
+fn set_owner_only_acl(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+    };
+
+    // Protected DACL: LocalSystem, Administrators and the current owner get full access.
+    // This keeps generated MITM CA private material out of inherited temp-directory ACLs.
+    let sddl: Vec<u16> = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated and `descriptor` is an out pointer freed with LocalFree.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(anyhow!(
+            "failed to build owner-only security descriptor: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let path_wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both pointers are valid NUL-terminated/Windows-owned buffers for the call.
+    let ok = unsafe { SetFileSecurityW(path_wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor) };
+    // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe {
+        let _ = LocalFree(descriptor.cast());
+    }
+    if ok == 0 {
+        return Err(anyhow!(
+            "failed to set owner-only ACL on {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 impl CaStore {
     pub fn state_dir(&self) -> &Path {
