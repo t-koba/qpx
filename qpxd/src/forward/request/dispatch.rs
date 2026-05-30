@@ -14,7 +14,7 @@ use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
 use anyhow::anyhow;
 use hyper::{Request, Response, StatusCode};
-use tokio::time::Duration;
+use tokio::time::{Duration, timeout};
 mod access;
 mod http_execute;
 mod local;
@@ -65,6 +65,34 @@ async fn execute_forward_request(
             Ok(response)
         }
     }
+}
+
+fn spawn_drain_local_response_request_body(mut body: Body, body_read_timeout: Duration) {
+    tokio::spawn(async move {
+        loop {
+            match timeout(body_read_timeout, body.data()).await {
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(err))) => {
+                    tracing::debug!(error = ?err, "local response request body drain failed");
+                    return;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::debug!("local response request body drain timed out");
+                    return;
+                }
+            }
+        }
+        match timeout(body_read_timeout, body.trailers()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                tracing::debug!(error = ?err, "local response request trailer drain failed");
+            }
+            Err(_) => {
+                tracing::debug!("local response request trailer drain timed out");
+            }
+        }
+    });
 }
 
 async fn prepare_forward_request(
@@ -468,6 +496,7 @@ async fn complete_forward_request(
         headers.as_deref(),
         &audit,
     )? {
+        spawn_drain_local_response_request_body(req.into_body(), body_read_timeout);
         return Ok(response);
     }
 
