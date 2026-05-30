@@ -805,3 +805,15 @@ fn read_varint(buf: &[u8]) -> Result<(u64, usize)> {
         _ => Err(anyhow!("test helper does not support long varints")),
     }
 }
+
+async fn read_non_empty_chunk(recv: &mut quinn::RecvStream, label: &str) -> Result<Bytes> {
+    loop {
+        let chunk = timeout(TEST_TIMEOUT, recv.read_chunk(4096, true))
+            .await
+            .map_err(|_| anyhow!("timed out waiting for {label}"))??
+            .ok_or_else(|| anyhow!("missing {label}"))?;
+        if !chunk.bytes.is_empty() {
+            return Ok(chunk.bytes);
+        }
+    }
+}

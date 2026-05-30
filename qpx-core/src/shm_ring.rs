@@ -1133,8 +1133,10 @@ mod tests {
     #[test]
     fn shm_ring_buffer_fails_closed_without_owner_only_file_permissions() {
         let temp_file = NamedTempFile::new().expect("temp file");
-        let err = ShmRingBuffer::create_or_open(temp_file.path(), 1024)
-            .expect_err("non-Unix SHM file creation must fail closed");
+        let err = match ShmRingBuffer::create_or_open(temp_file.path(), 1024) {
+            Ok(_) => panic!("non-Unix SHM file creation must fail closed"),
+            Err(err) => err,
+        };
         assert!(
             err.to_string().contains("owner-only file permissions"),
             "unexpected error: {err}"

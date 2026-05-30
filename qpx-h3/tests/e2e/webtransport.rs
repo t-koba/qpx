@@ -159,11 +159,7 @@ async fn webtransport_zero_max_sessions_is_enforced() -> Result<()> {
     write_frame_raw(&mut send, FRAME_HEADERS, &headers).await?;
     send.finish()?;
 
-    let frame = timeout(TEST_TIMEOUT, recv.read_chunk(4096, true))
-        .await
-        .map_err(|_| anyhow!("timed out waiting for WebTransport max-session rejection"))??
-        .ok_or_else(|| anyhow!("missing WebTransport max-session rejection frame"))?;
-    let bytes = frame.bytes;
+    let bytes = read_non_empty_chunk(&mut recv, "WebTransport max-session rejection frame").await?;
     let (frame_type, used_type) = read_varint(bytes.as_ref())?;
     let (frame_len, used_len) = read_varint(&bytes[used_type..])?;
     let payload_start = used_type + used_len;

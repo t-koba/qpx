@@ -99,11 +99,10 @@ mod windows {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(all(feature = "http3", not(unix)))]
 mod non_unix_http3 {
     use anyhow::{Result, anyhow};
 
-    #[cfg(feature = "http3")]
     pub(crate) fn duplicate_tokio_udp_socket(
         socket: &tokio::net::UdpSocket,
     ) -> Result<std::net::UdpSocket> {
