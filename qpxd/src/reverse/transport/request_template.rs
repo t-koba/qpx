@@ -285,6 +285,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn reverse_request_template_spools_large_body_outside_memory() {
         let payload = vec![b'x'; RETRY_TEMPLATE_MEMORY_BYTES + 1];
         let req = Request::builder()

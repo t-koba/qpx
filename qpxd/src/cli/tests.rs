@@ -279,6 +279,7 @@ edges:
 }
 
 #[test]
+#[cfg(feature = "tls-rustls")]
 fn explain_renderer_reports_all_reverse_target_kinds_and_generated_route_id() {
     let state = runtime_state_from_yaml(
         "target-kinds",

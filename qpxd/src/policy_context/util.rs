@@ -10,11 +10,8 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-#[cfg(feature = "tls-rustls")]
 use x509_parser::certificate::X509Certificate;
-#[cfg(feature = "tls-rustls")]
 use x509_parser::prelude::FromDer;
-#[cfg(feature = "tls-rustls")]
 use x509_parser::x509::SubjectPublicKeyInfo;
 
 pub(super) fn compile_optional_header_name(name: Option<&str>) -> Result<Option<HeaderName>> {
@@ -141,32 +138,16 @@ pub(super) fn parse_public_key_material(raw: &str) -> Result<Vec<u8>> {
         for block in blocks {
             match block.tag() {
                 "PUBLIC KEY" => {
-                    #[cfg(feature = "tls-rustls")]
-                    {
-                        let der = block.into_contents();
-                        let (_, spki) = SubjectPublicKeyInfo::from_der(der.as_slice())
-                            .map_err(|_| anyhow!("invalid PUBLIC KEY PEM"))?;
-                        return Ok(spki.subject_public_key.data.to_vec());
-                    }
-                    #[cfg(not(feature = "tls-rustls"))]
-                    {
-                        return Ok(block.into_contents());
-                    }
+                    let der = block.into_contents();
+                    let (_, spki) = SubjectPublicKeyInfo::from_der(der.as_slice())
+                        .map_err(|_| anyhow!("invalid PUBLIC KEY PEM"))?;
+                    return Ok(spki.subject_public_key.data.to_vec());
                 }
                 "CERTIFICATE" => {
-                    #[cfg(feature = "tls-rustls")]
-                    {
-                        let der = block.into_contents();
-                        let (_, cert) = X509Certificate::from_der(der.as_slice())
-                            .map_err(|_| anyhow!("invalid CERTIFICATE PEM"))?;
-                        return Ok(cert.public_key().subject_public_key.data.to_vec());
-                    }
-                    #[cfg(not(feature = "tls-rustls"))]
-                    {
-                        return Err(anyhow!(
-                            "signed assertion certificate PEM requires build feature tls-rustls"
-                        ));
-                    }
+                    let der = block.into_contents();
+                    let (_, cert) = X509Certificate::from_der(der.as_slice())
+                        .map_err(|_| anyhow!("invalid CERTIFICATE PEM"))?;
+                    return Ok(cert.public_key().subject_public_key.data.to_vec());
                 }
                 _ => continue,
             }

@@ -3,13 +3,12 @@ use super::*;
 use qpx_core::config::{
     AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CachePolicyConfig,
     CaptureBodyMode, CapturePlaintextPolicyConfig, CapturePolicyConfig, CaptureRedactionConfig,
-    ExporterCaptureConfig, ExporterConfig, HttpModuleConfig, HttpPolicyConfig, IngressEdgeConfig,
-    IngressEdgeMode, IpcMode, IpcUpstreamConfig, MatchConfig, NamedSetConfig, NamedSetKind,
-    OtelConfig, PolicyContextConfig, RateLimitApplyTo, RateLimitConfig, RateLimitRequestsConfig,
-    ReverseEdgeConfig, ReverseRouteConfig, ReverseRouteTargetConfig,
-    ReverseTlsPassthroughRouteConfig, RuleConfig, StreamingRequirement, SystemLogConfig,
-    TlsInspectionConfig, TlsPassthroughMatchConfig, UnknownLengthExactSizePolicy,
-    UpstreamTlsTrustConfig, UpstreamTlsTrustProfileConfig, XdpConfig,
+    HttpModuleConfig, HttpPolicyConfig, IngressEdgeConfig, IngressEdgeMode, IpcMode,
+    IpcUpstreamConfig, MatchConfig, NamedSetConfig, NamedSetKind, OtelConfig, PolicyContextConfig,
+    RateLimitApplyTo, RateLimitConfig, RateLimitRequestsConfig, ReverseEdgeConfig,
+    ReverseRouteConfig, ReverseRouteTargetConfig, ReverseTlsPassthroughRouteConfig, RuleConfig,
+    StreamingRequirement, SystemLogConfig, TlsInspectionConfig, TlsPassthroughMatchConfig,
+    UnknownLengthExactSizePolicy, UpstreamTlsTrustConfig, UpstreamTlsTrustProfileConfig, XdpConfig,
 };
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -165,6 +164,7 @@ fn temp_named_set_file(name: &str, contents: &str) -> PathBuf {
     path
 }
 
+#[cfg(unix)]
 fn temp_exporter_shm_path(name: &str) -> String {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -2,14 +2,20 @@ use super::*;
 
 #[tokio::test]
 async fn cache_backend_default_put_object_rejects_file_backed_body() {
-    let (mut file, path) =
-        qpx_core::secure_file::create_secure_temp_file("qpx-cache-test", ".body")
-            .expect("temp file");
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "qpx-cache-default-backend-test-{}-{unique}.body",
+        std::process::id()
+    ));
+    let mut file = std::fs::File::create(&path).expect("temp file");
     file.write_all(b"spooled").expect("write body");
     file.flush().expect("flush body");
     drop(file);
 
-    let body = CachedBody::from_spooled_file(path, 7);
+    let body = CachedBody::from_spooled_file(path.clone(), 7);
     let backend = DefaultPutObjectBackend;
     let err = CacheBackend::put_object(&backend, "ns", "key", &body, 60)
         .await
@@ -45,4 +51,5 @@ async fn cache_backend_default_put_object_rejects_file_backed_body() {
             .contains("must implement streaming get_object_stream"),
         "unexpected error: {err}"
     );
+    let _ = std::fs::remove_file(path);
 }

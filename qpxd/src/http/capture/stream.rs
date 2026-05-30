@@ -214,13 +214,18 @@ fn append_sample(sample: &mut Vec<u8>, sample_bytes: usize, chunk: &Bytes) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use crate::exporter::ExporterSink;
     use crate::http::capture::stream::*;
+    #[cfg(unix)]
     use qpx_core::config::{CaptureRedactionConfig, ExporterConfig};
+    #[cfg(unix)]
     use std::path::PathBuf;
+    #[cfg(unix)]
     use std::time::Duration;
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn capture_stream_sample_preserves_body_and_emits_prefix() {
         let shm_path = unique_test_shm_path();
         let config = ExporterConfig {
@@ -254,6 +259,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn capture_stream_sample_preserves_response_body() {
         let shm_path = unique_test_shm_path();
         let config = ExporterConfig {
@@ -287,6 +293,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn full_capture_preserves_request_body() {
         let shm_path = unique_test_shm_path();
         let config = ExporterConfig {
@@ -320,6 +327,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn full_capture_preserves_response_body() {
         let shm_path = unique_test_shm_path();
         let config = ExporterConfig {
@@ -360,6 +368,7 @@ mod tests {
         assert_eq!(sample.as_slice(), b"abcd");
     }
 
+    #[cfg(unix)]
     fn unique_test_shm_path() -> PathBuf {
         std::env::temp_dir().join(format!(
             "qpx-capture-stream-{}-{}.shm",

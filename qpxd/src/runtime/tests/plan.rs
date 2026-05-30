@@ -239,15 +239,16 @@ fn runtime_plan_marks_ipc_reverse_routes() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn runtime_plan_exporter_only_does_not_enable_plaintext_body_capture() {
     let mut config = base_config();
-    config.telemetry.exporter = Some(ExporterConfig {
+    config.telemetry.exporter = Some(qpx_core::config::ExporterConfig {
         enabled: true,
         shm_path: temp_exporter_shm_path("runtime-exporter-only"),
         shm_size_mb: 16,
         lossy: true,
         max_queue_events: 128,
-        capture: ExporterCaptureConfig {
+        capture: qpx_core::config::ExporterCaptureConfig {
             plaintext: true,
             encrypted: true,
             max_chunk_bytes: 4096,

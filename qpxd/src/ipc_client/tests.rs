@@ -9,10 +9,13 @@ use bytes::Bytes;
 use qpx_core::ipc::meta::IpcResponseMeta;
 use qpx_core::ipc::protocol::write_frame;
 use qpx_core::shm_ring::ShmRingBuffer;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{Duration, timeout};
 
+#[cfg(unix)]
 fn temp_shm_path(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -30,6 +33,7 @@ fn temp_shm_path(name: &str) -> PathBuf {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn shm_body_writer_does_not_push_eof_after_body_error() {
     let req_path = temp_shm_path("ipc-body-writer");
     let mut reader = ShmRingBuffer::create_or_open(&req_path, 64 * 1024).unwrap();
@@ -55,6 +59,7 @@ async fn shm_body_writer_does_not_push_eof_after_body_error() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn shm_body_writer_enforces_request_body_limit() {
     let req_path = temp_shm_path("ipc-body-limit");
     let writer = ShmRingBuffer::create_or_open(&req_path, 64 * 1024).unwrap();
