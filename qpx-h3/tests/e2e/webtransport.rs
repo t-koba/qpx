@@ -159,21 +159,15 @@ async fn webtransport_zero_max_sessions_is_enforced() -> Result<()> {
     write_frame_raw(&mut send, FRAME_HEADERS, &headers).await?;
     send.finish()?;
 
-    let bytes = read_non_empty_chunk(&mut recv, "WebTransport max-session rejection frame").await?;
-    let (frame_type, used_type) = read_varint(bytes.as_ref())?;
-    let (frame_len, used_len) = read_varint(&bytes[used_type..])?;
-    let payload_start = used_type + used_len;
-    let payload_end = payload_start + frame_len as usize;
+    let (frame_type, payload) =
+        read_frame_raw(&mut recv, "WebTransport max-session rejection frame").await?;
     assert_eq!(frame_type, FRAME_HEADERS);
-    assert!(payload_end <= bytes.len());
     assert!(
-        bytes[payload_start..payload_end]
-            .windows(3)
-            .any(|window| window == b"429"),
+        payload.windows(3).any(|window| window == b"429"),
         "server should reject ignored max-session setting with 429"
     );
     assert!(
-        bytes[payload_start..payload_end]
+        payload
             .windows("qpx-test".len())
             .any(|window| window == b"qpx-test"),
         "server early response should use handler-provided Via received-by"
