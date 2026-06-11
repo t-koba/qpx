@@ -113,7 +113,7 @@ where
     .map_err(|err| stop_map_err!(err, H3ResponseSendError::before_response_head))?;
     if !prepared.body_allowed {
         grpc_observer.emit_status_without_body(&parts.headers);
-        finish_h3_response_stream(req_stream, body_send_timeout, stream_deadline)
+        finish_h3_response_stream(req_stream, body_send_timeout, stream_deadline, false)
             .await
             .map_err(|err| stop_map_err!(err, H3ResponseSendError::after_response_head))?;
         return Ok(None);
@@ -234,6 +234,7 @@ where
     .map_err(|err| stop_map_err!(err, H3ResponseSendError::after_response_head))?
     .map_err(|err| stop_map_err!(err, H3ResponseSendError::after_response_head))?;
     let mut trailers_for_status = trailers.clone();
+    let sent_trailers = trailers.is_some();
     if let Some(mut trailers) = trailers {
         qpx_http::protocol::semantics::sanitize_response_trailers(&mut trailers);
         let trailers = crate::http3::codec::http_headers_to_h1(&trailers)
@@ -248,13 +249,19 @@ where
         .await
         .map_err(|err| stop_map_err!(err, H3ResponseSendError::after_trailers_started))?
         .map_err(|err| stop_map_err!(err, H3ResponseSendError::after_trailers_started))?;
+        tokio::task::yield_now().await;
     }
     let summary = grpc_observer
         .finish(&parts.headers, &mut trailers_for_status)
         .map_err(|err| stop_body_map_err!(err))?;
-    finish_h3_response_stream(req_stream, body_send_timeout, stream_deadline)
-        .await
-        .map_err(|err| stop_body_map_err!(err))?;
+    finish_h3_response_stream(
+        req_stream,
+        body_send_timeout,
+        stream_deadline,
+        sent_trailers,
+    )
+    .await
+    .map_err(|err| stop_body_map_err!(err))?;
     Ok(summary)
 }
 
@@ -262,10 +269,14 @@ async fn finish_h3_response_stream<S>(
     req_stream: &mut ::h3::server::RequestStream<S, Bytes>,
     body_send_timeout: Duration,
     stream_deadline: Option<Instant>,
+    sent_trailers: bool,
 ) -> Result<()>
 where
     S: ::h3::quic::SendStream<Bytes>,
 {
+    if sent_trailers {
+        tokio::task::yield_now().await;
+    }
     timeout_or_deadline(
         req_stream.finish(),
         body_send_timeout,

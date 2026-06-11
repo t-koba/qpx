@@ -103,7 +103,7 @@ fn write_cert_file(path: &Path, contents: &str) -> Result<()> {
 
 #[cfg(not(unix))]
 fn write_cert_file(path: &Path, contents: &str) -> Result<()> {
-    write_text_file(path, contents)
+    write_text_file(path, contents, false)
 }
 
 #[cfg(unix)]
@@ -115,7 +115,7 @@ fn write_private_key_file(path: &Path, contents: &str) -> Result<()> {
 
 #[cfg(not(unix))]
 fn write_private_key_file(path: &Path, contents: &str) -> Result<()> {
-    write_text_file(path, contents)?;
+    write_text_file(path, contents, true)?;
     enforce_private_key_permissions(path)?;
     Ok(())
 }
@@ -134,7 +134,7 @@ fn write_text_file(path: &Path, contents: &str, mode: u32) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn write_text_file(path: &Path, contents: &str) -> Result<()> {
+fn write_text_file(path: &Path, contents: &str, owner_only_acl: bool) -> Result<()> {
     use std::io::Write;
 
     ensure_path_not_symlink(path, "MITM CA material")?;
@@ -156,11 +156,16 @@ fn write_text_file(path: &Path, contents: &str) -> Result<()> {
         }
     };
     validate_windows_ca_material_handle(&file, path)?;
-    set_owner_only_acl(&file, path)?;
+    if owner_only_acl {
+        set_owner_only_acl(path)?;
+    }
     file.set_len(0)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
-    set_owner_only_acl(&file, path)
+    if owner_only_acl {
+        set_owner_only_acl(path)?;
+    }
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -191,7 +196,7 @@ fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     ensure_path_not_symlink(path, "ca key")?;
     let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
     validate_windows_ca_material_handle(&file, path)?;
-    set_owner_only_acl(&file, path)
+    set_owner_only_acl(path)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -421,12 +426,12 @@ fn reject_untrusted_state_ancestor(path: &Path, _meta: &fs::Metadata) -> Result<
 }
 
 #[cfg(windows)]
-fn set_owner_only_acl(file: &fs::File, path: &Path) -> Result<()> {
-    use std::os::windows::io::AsRawHandle;
+fn set_owner_only_acl(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
-        SetSecurityInfo,
+        SetNamedSecurityInfoW,
     };
     use windows_sys::Win32::Security::{
         ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
@@ -488,10 +493,11 @@ fn set_owner_only_acl(file: &fs::File, path: &Path) -> Result<()> {
         )
         .into());
     }
-    // SAFETY: file is the already validated handle, and DACL belongs to the live descriptor.
+    let mut path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: path_wide is NUL-terminated and DACL belongs to the live descriptor.
     let status = unsafe {
-        SetSecurityInfo(
-            file.as_raw_handle().cast(),
+        SetNamedSecurityInfoW(
+            path_wide.as_mut_ptr(),
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION,
             std::ptr::null_mut(),
