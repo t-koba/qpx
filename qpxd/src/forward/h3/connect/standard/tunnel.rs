@@ -3,8 +3,8 @@ use crate::forward::connect::{ConnectPolicyInput, decide_connect_action_from_cli
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 #[cfg(feature = "mitm")]
 use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
-use crate::http3::server::H3ServerRequestStream;
 use crate::http3::h3_buf_to_bytes;
+use crate::http3::server::H3ServerRequestStream;
 use crate::runtime::PlanFlags;
 #[cfg(feature = "mitm")]
 use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream, prewarm_mitm_cert};

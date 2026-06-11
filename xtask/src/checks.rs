@@ -207,7 +207,13 @@ pub(crate) fn check_dependency_policy_config(root: &Path) -> Result<()> {
         .with_context(|| format!("failed to read {}", deny_path.display()))?;
     let value: toml::Value = toml::from_str(&content)
         .with_context(|| format!("failed to parse {}", deny_path.display()))?;
-    let violations = dependency_policy_config_violations(&value);
+    let mut violations = dependency_policy_config_violations(&value);
+    let cargo_path = root.join("Cargo.toml");
+    let cargo_content = fs::read_to_string(&cargo_path)
+        .with_context(|| format!("failed to read {}", cargo_path.display()))?;
+    let cargo: toml::Value = toml::from_str(&cargo_content)
+        .with_context(|| format!("failed to parse {}", cargo_path.display()))?;
+    violations.extend(external_wildcard_dependency_violations(root, &cargo)?);
     if !violations.is_empty() {
         bail!(
             "dependency policy config violations:\n{}",
@@ -271,8 +277,8 @@ fn workspace_lint_posture_violations(cargo: &toml::Value) -> Vec<String> {
         .and_then(toml::Value::as_table)
         .and_then(|package| package.get("rust-version"))
         .and_then(toml::Value::as_str);
-    if rust_version != Some("1.87") {
-        violations.push("workspace.package.rust-version must be 1.87".to_string());
+    if rust_version != Some("1.92") {
+        violations.push("workspace.package.rust-version must be 1.92".to_string());
     }
     let Some(lints) = workspace.get("lints").and_then(toml::Value::as_table) else {
         violations.push("Cargo.toml missing [workspace.lints]".to_string());
@@ -308,8 +314,11 @@ fn dependency_policy_config_violations(value: &toml::Value) -> Vec<String> {
     if bans.get("multiple-versions").and_then(toml::Value::as_str) != Some("deny") {
         violations.push("deny.toml bans.multiple-versions must be deny".to_string());
     }
-    if bans.get("wildcards").and_then(toml::Value::as_str) != Some("deny") {
-        violations.push("deny.toml bans.wildcards must be deny".to_string());
+    if bans.get("wildcards").and_then(toml::Value::as_str) != Some("allow") {
+        violations.push(
+            "deny.toml bans.wildcards must be allow; xtask rejects external wildcard dependencies"
+                .to_string(),
+        );
     }
     if bans
         .get("skip-tree")
@@ -365,6 +374,62 @@ fn dependency_policy_config_violations(value: &toml::Value) -> Vec<String> {
         violations.push("deny.toml sources.unknown-git must be deny".to_string());
     }
     violations
+}
+
+fn external_wildcard_dependency_violations(
+    root: &Path,
+    cargo: &toml::Value,
+) -> Result<Vec<String>> {
+    let Some(members) = cargo
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+    else {
+        return Ok(vec!["Cargo.toml missing workspace.members".to_string()]);
+    };
+
+    let mut violations = Vec::new();
+    for member in members.iter().filter_map(toml::Value::as_str) {
+        if member.contains('*') {
+            continue;
+        }
+        let manifest_path = root.join(member).join("Cargo.toml");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let content = fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        let manifest: toml::Value = toml::from_str(&content)
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+        for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            let Some(deps) = manifest.get(section).and_then(toml::Value::as_table) else {
+                continue;
+            };
+            for (name, dep) in deps {
+                if dependency_is_external_wildcard(dep) {
+                    violations.push(format!(
+                        "{member}/Cargo.toml {section}.{name} must use workspace, path, or an explicit version"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(violations)
+}
+
+fn dependency_is_external_wildcard(dep: &toml::Value) -> bool {
+    match dep {
+        toml::Value::String(version) => version.trim() == "*",
+        toml::Value::Table(table) => {
+            !table.contains_key("workspace")
+                && !table.contains_key("path")
+                && table.get("version").is_none_or(|version| {
+                    version.as_str().is_none_or(|version| version.trim() == "*")
+                })
+        }
+        _ => false,
+    }
 }
 
 fn unquote_toml_string(value: &str) -> Result<String> {
@@ -2880,7 +2945,7 @@ fn phase4_ci_acceptance_violations(
 ) -> Vec<&'static str> {
     let mut violations = Vec::new();
     for required in [
-        "dtolnay/rust-toolchain@1.87",
+        "dtolnay/rust-toolchain@1.92",
         "cargo fmt --all -- --check",
         "cargo check --workspace --locked",
         "cargo build --workspace --all-targets --locked",
@@ -5057,7 +5122,7 @@ mod tests {
     #[test]
     fn phase4_ci_acceptance_gate_rejects_missing_required_workflow_commands() {
         let ci = r#"
-            dtolnay/rust-toolchain@1.87
+            dtolnay/rust-toolchain@1.92
             cargo fmt --all -- --check
             cargo check --workspace --locked
             cargo build --workspace --all-targets --locked
@@ -5234,7 +5299,7 @@ mod tests {
             r#"
             [bans]
             multiple-versions = "deny"
-            wildcards = "deny"
+            wildcards = "allow"
             skip = [
               { crate = "legacy@1.0.0", reason = "documented transitive holdback" },
             ]
@@ -5252,7 +5317,7 @@ mod tests {
             r#"
             [bans]
             multiple-versions = "warn"
-            wildcards = "allow"
+            wildcards = "deny"
             skip = [
               { crate = "legacy@1.0.0" },
             ]
@@ -5270,7 +5335,7 @@ mod tests {
             dependency_policy_config_violations(&bad),
             [
                 "deny.toml bans.multiple-versions must be deny",
-                "deny.toml bans.wildcards must be deny",
+                "deny.toml bans.wildcards must be allow; xtask rejects external wildcard dependencies",
                 "deny.toml bans.skip-tree must stay empty",
                 "deny.toml bans.skip[0] missing reason",
                 "deny.toml sources.unknown-registry must be deny",
@@ -5284,7 +5349,7 @@ mod tests {
         let good: toml::Value = toml::from_str(
             r#"
             [workspace.package]
-            rust-version = "1.87"
+            rust-version = "1.92"
 
             [workspace.lints.rust]
             dead_code = "deny"
@@ -5301,7 +5366,7 @@ mod tests {
         let bad: toml::Value = toml::from_str(
             r#"
             [workspace.package]
-            rust-version = "1.88"
+            rust-version = "1.91"
 
             [workspace.lints.rust]
             dead_code = "warn"
@@ -5315,7 +5380,7 @@ mod tests {
         assert_eq!(
             workspace_lint_posture_violations(&bad),
             [
-                "workspace.package.rust-version must be 1.87",
+                "workspace.package.rust-version must be 1.92",
                 "workspace rust lint dead_code must be deny",
                 "workspace rust lint unsafe_op_in_unsafe_fn must be deny",
                 "workspace rust lint unused must be deny",

@@ -20,7 +20,7 @@ exclude = ["fuzz"]
 [workspace.package]
 edition = "2024"
 license = "MIT"
-rust-version = "1.87"
+rust-version = "1.92"
 version = "0.3.2"
 
 [workspace.lints.rust]

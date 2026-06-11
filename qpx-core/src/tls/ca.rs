@@ -150,8 +150,9 @@ fn write_text_file(path: &Path, contents: &str) -> Result<()> {
             .open(path)
             .with_context(|| format!("failed to create MITM CA material {}", path.display()))?,
         Err(err) => {
-            return Err(err)
-                .with_context(|| format!("failed to open MITM CA material {}", path.display()));
+            return Err(
+                anyhow!("failed to open MITM CA material {}: {err}", path.display()).into(),
+            );
         }
     };
     validate_windows_ca_material_handle(&file, path)?;
@@ -428,7 +429,7 @@ fn set_owner_only_acl(file: &fs::File, path: &Path) -> Result<()> {
         SetSecurityInfo,
     };
     use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PACL, PSECURITY_DESCRIPTOR,
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
     };
 
     // Protected DACL: LocalSystem, Administrators and the current owner get full access.
@@ -449,11 +450,12 @@ fn set_owner_only_acl(file: &fs::File, path: &Path) -> Result<()> {
         return Err(anyhow!(
             "failed to build owner-only security descriptor: {}",
             std::io::Error::last_os_error()
-        ));
+        )
+        .into());
     }
     let mut dacl_present = 0;
     let mut dacl_defaulted = 0;
-    let mut dacl: PACL = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
     // SAFETY: descriptor is a valid security descriptor produced by the Win32 conversion API.
     if unsafe {
         GetSecurityDescriptorDacl(
@@ -507,7 +509,8 @@ fn set_owner_only_acl(file: &fs::File, path: &Path) -> Result<()> {
             "failed to set owner-only ACL on MITM CA material {}: {}",
             path.display(),
             std::io::Error::from_raw_os_error(status as i32)
-        ));
+        )
+        .into());
     }
     Ok(())
 }
