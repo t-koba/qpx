@@ -42,25 +42,25 @@ pub(crate) fn apply_ext_authz_http_access(
     match input.enforcement {
         ExtAuthzEnforcement::Continue(allow) => {
             let allow = prepare_ext_authz_allow_controls(allow, input.mode, input.base_headers)?;
-            if let Some((request_limits, request_limit_ctx, rate_limiters)) = input.request_limit {
-                if let Some(retry_after) = request_limits.merge_profile_and_check(
+            if let Some((request_limits, request_limit_ctx, rate_limiters)) = input.request_limit
+                && let Some(retry_after) = request_limits.merge_profile_and_check(
                     rate_limiters,
                     allow.rate_limit_profile.as_deref(),
                     TransportScope::Request,
                     request_limit_ctx,
                     1,
-                )? {
-                    return Ok(ExtAuthzHttpAccessOutcome::Blocked(
-                        rate_limit_response_for_parts(
-                            input.request_head.0,
-                            input.request_head.1,
-                            input.proxy_name,
-                            Some(retry_after),
-                            input.audit.clone(),
-                        ),
-                        true,
-                    ));
-                }
+                )?
+            {
+                return Ok(ExtAuthzHttpAccessOutcome::Blocked(
+                    rate_limit_response_for_parts(
+                        input.request_head.0,
+                        input.request_head.1,
+                        input.proxy_name,
+                        Some(retry_after),
+                        input.audit.clone(),
+                    ),
+                    true,
+                ));
             }
             Ok(ExtAuthzHttpAccessOutcome::Continue(allow))
         }

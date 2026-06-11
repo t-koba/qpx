@@ -247,6 +247,7 @@ require .github/workflows/ci.yml 'cargo test --workspace --locked -- --test-thre
 require .github/workflows/ci.yml 'cargo doc --workspace --locked --no-deps --document-private-items'
 require .github/workflows/ci.yml 'cargo llvm-cov --workspace --locked --fail-under-lines 20'
 require .github/workflows/ci.yml 'bash ./scripts/check-public-api.sh'
+require .github/workflows/ci.yml 'dtolnay/rust-toolchain@nightly'
 require .github/workflows/ci.yml 'cargo clippy --workspace --all-targets --locked -- -D warnings'
 require .github/workflows/ci.yml 'cargo clippy -p "${pkg}" --locked --all-targets --no-default-features --features "${features}" -- -D warnings'
 require .github/workflows/ci.yml '"http3-backend-qpx"'

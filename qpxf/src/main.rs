@@ -97,9 +97,12 @@ async fn run_server(args: RunArgs) -> Result<()> {
     let input_idle = Duration::from_millis(cfg.input_idle_timeout_ms);
     let conn_idle = Duration::from_millis(cfg.conn_idle_timeout_ms);
 
-    if let Some(path) = listen.strip_prefix("unix://") {
+    if listen.starts_with("unix://") {
         #[cfg(unix)]
         {
+            let path = listen
+                .strip_prefix("unix://")
+                .expect("unix listen address has unix:// prefix");
             ensure_unix_socket_parent_secure(Path::new(path))?;
             // Only remove existing path if it is a Unix socket.
             if let Ok(meta) = std::fs::symlink_metadata(path) {

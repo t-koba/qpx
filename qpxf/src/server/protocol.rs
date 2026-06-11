@@ -473,18 +473,17 @@ where
         }
     };
 
-    if stdin_result_rx_active {
-        if let Ok(outcome) = (&mut stdin_result_rx).await {
-            if let Some((status, body)) = outcome.error_response() {
-                let res_meta = text_plain_meta(status);
-                write_frame(stream, &res_meta).await?;
-                let _ = push_ring_bytes(&mut res_ring, body, input_idle).await;
-                let _ = push_ring_eof(&mut res_ring, input_idle).await;
-                abort_execution(exec_abort, stdin_task, exec_done).await;
-                release_ipc_shm_path(&res_path, shm_reusable);
-                return Ok(());
-            }
-        }
+    if stdin_result_rx_active
+        && let Ok(outcome) = (&mut stdin_result_rx).await
+        && let Some((status, body)) = outcome.error_response()
+    {
+        let res_meta = text_plain_meta(status);
+        write_frame(stream, &res_meta).await?;
+        let _ = push_ring_bytes(&mut res_ring, body, input_idle).await;
+        let _ = push_ring_eof(&mut res_ring, input_idle).await;
+        abort_execution(exec_abort, stdin_task, exec_done).await;
+        release_ipc_shm_path(&res_path, shm_reusable);
+        return Ok(());
     }
 
     let (res_meta, body_leftover) = if let Some(parsed) = parsed_res {
@@ -757,16 +756,15 @@ where
         }
     };
 
-    if stdin_result_rx_active {
-        if let Ok(outcome) = (&mut stdin_result_rx).await {
-            if let Some((status, body)) = outcome.error_response() {
-                let res_meta = text_plain_meta(status);
-                write_frame_with_timeout(&mut tx, &res_meta, output_idle).await?;
-                let _ = write_all_with_timeout(&mut tx, body, output_idle).await;
-                abort_execution(exec_abort, stdin_task, exec_done).await;
-                return Ok(());
-            }
-        }
+    if stdin_result_rx_active
+        && let Ok(outcome) = (&mut stdin_result_rx).await
+        && let Some((status, body)) = outcome.error_response()
+    {
+        let res_meta = text_plain_meta(status);
+        write_frame_with_timeout(&mut tx, &res_meta, output_idle).await?;
+        let _ = write_all_with_timeout(&mut tx, body, output_idle).await;
+        abort_execution(exec_abort, stdin_task, exec_done).await;
+        return Ok(());
     }
 
     let (res_meta, body_leftover) = if let Some(parsed) = parsed_res {

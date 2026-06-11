@@ -400,10 +400,10 @@ impl Drop for ExtAuthzBodyBuffer {
 }
 
 fn checkout_ext_authz_response_buffer() -> Vec<u8> {
-    if let Ok(mut pool) = EXT_AUTHZ_RESPONSE_BUFFERS.lock() {
-        if let Some(buffer) = pool.pop() {
-            return buffer;
-        }
+    if let Ok(mut pool) = EXT_AUTHZ_RESPONSE_BUFFERS.lock()
+        && let Some(buffer) = pool.pop()
+    {
+        return buffer;
     }
     Vec::new()
 }
@@ -413,10 +413,10 @@ fn recycle_ext_authz_response_buffer(mut buffer: Vec<u8>) {
         return;
     }
     buffer.clear();
-    if let Ok(mut pool) = EXT_AUTHZ_RESPONSE_BUFFERS.lock() {
-        if pool.len() < EXT_AUTHZ_RESPONSE_BUFFER_POOL_LIMIT {
-            pool.push(buffer);
-        }
+    if let Ok(mut pool) = EXT_AUTHZ_RESPONSE_BUFFERS.lock()
+        && pool.len() < EXT_AUTHZ_RESPONSE_BUFFER_POOL_LIMIT
+    {
+        pool.push(buffer);
     }
 }
 

@@ -6,6 +6,8 @@ if ! command -v cargo-public-api >/dev/null 2>&1 && ! cargo public-api --version
   exit 1
 fi
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
@@ -22,7 +24,7 @@ check_crate() {
   local expected="$2"
   local output="$tmpdir/${crate}.api"
 
-  cargo public-api -p "$crate" -sss --color never >"$output"
+  cargo public-api --manifest-path "$ROOT_DIR/$crate/Cargo.toml" -sss --color never >"$output"
   local actual
   actual="$(hash_file "$output")"
   if [[ "$actual" != "$expected" ]]; then

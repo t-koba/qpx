@@ -253,11 +253,10 @@ async fn handle_client_packet(
     }
     if let Some((session_id, socket)) =
         create_passthrough_session(&mut ctx, client_addr, payload, now, now_ms).await?
+        && let Err(err) = socket.send(payload).await
     {
-        if let Err(err) = socket.send(payload).await {
-            cleanup_passthrough_session(ctx.sessions.as_ref(), session_id);
-            return Err(err.into());
-        }
+        cleanup_passthrough_session(ctx.sessions.as_ref(), session_id);
+        return Err(err.into());
     }
     Ok(())
 }
