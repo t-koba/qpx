@@ -7,6 +7,8 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Duration, Instant, timeout};
 
 mod cert_support;
@@ -21,6 +23,11 @@ use h3_client_support::{build_h3_test_client_config, build_quinn_client_endpoint
 use yaml_support::yaml_quote_path;
 
 const H3_HOST: &str = "reverse.local";
+
+struct H3StreamingProxy {
+    _handle: QpxdHandle,
+    _permit: OwnedSemaphorePermit,
+}
 
 struct H3ReadResult {
     status: http::StatusCode,
@@ -48,7 +55,7 @@ async fn response_streaming_not_buffered() -> Result<()> {
         None,
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/stream", &[], false).await?;
 
@@ -85,7 +92,7 @@ async fn large_response_bounded_memory() -> Result<()> {
         None,
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/large", &[], false).await?;
 
@@ -108,7 +115,7 @@ async fn client_cancel_propagates_to_upstream() -> Result<()> {
         Duration::from_millis(50),
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/infinite", &[], true).await?;
 
@@ -135,7 +142,7 @@ async fn upstream_abort_resets_h3_stream() -> Result<()> {
         Duration::from_millis(50),
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/abort", &[], false).await?;
 
@@ -158,7 +165,7 @@ async fn grpc_frame_split_across_chunks() -> Result<()> {
         vec![3, 5],
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/grpc", &[], false).await?;
 
@@ -183,7 +190,8 @@ async fn grpc_message_exceeds_limit_aborts() -> Result<()> {
         r#"    grpc:
       max_message_bytes: 1024
 "#,
-    )?;
+    )
+    .await?;
 
     match request_h3(port, &cert_path, "/grpc-limit", &[], false).await {
         Ok(response) => {
@@ -219,7 +227,7 @@ async fn grpc_web_text_base64_boundary_split() -> Result<()> {
         None,
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/grpc-web-text", &[], false).await?;
 
@@ -241,7 +249,7 @@ async fn trailers_preserved_through_streaming() -> Result<()> {
         Some(vec![("grpc-status", "0"), ("x-trailer", "kept")]),
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/trailers", &[], false).await?;
 
@@ -272,7 +280,7 @@ async fn partial_failure_no_double_response() -> Result<()> {
         Duration::from_millis(50),
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/partial", &[], false).await?;
 
@@ -292,10 +300,11 @@ async fn partial_failure_no_double_response() -> Result<()> {
     Ok(())
 }
 
-fn spawn_reverse_h3_proxy(
+async fn spawn_reverse_h3_proxy(
     backend_port: u16,
     route_extra: &str,
-) -> Result<(QpxdHandle, u16, PathBuf)> {
+) -> Result<(H3StreamingProxy, u16, PathBuf)> {
+    let permit = h3_streaming_proxy_permit().await?;
     let dir = temp_dir("qpxd-h3-streaming")?;
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir).context("create state dir")?;
@@ -341,7 +350,24 @@ edges:
     )
     .context("write qpxd config")?;
     let handle = spawn_qpxd(&cfg, port, dir.join("qpxd.log"))?;
-    Ok((handle, port, cert_path))
+    Ok((
+        H3StreamingProxy {
+            _handle: handle,
+            _permit: permit,
+        },
+        port,
+        cert_path,
+    ))
+}
+
+async fn h3_streaming_proxy_permit() -> Result<OwnedSemaphorePermit> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(1)))
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|err| anyhow!("h3 streaming proxy semaphore closed: {err}"))
 }
 
 async fn request_h3(
