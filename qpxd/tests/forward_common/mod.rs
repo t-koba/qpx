@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
-pub use super::handle_common::{pick_free_tcp_port, spawn_qpxd};
+pub use super::handle_common::{pick_free_tcp_port, spawn_qpxd_on_random_tcp_udp_ports};
 pub use super::handle_common::{spawn_qpxd_on_random_port, temp_dir};
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 #[path = "../h3_client_support/mod.rs"]

@@ -7,14 +7,14 @@ pub(super) async fn forward_h3_connect_udp_smoke() -> Result<()> {
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)?;
     let cfg = dir.join("forward-connect-udp.yaml");
-    let tcp_port = pick_free_tcp_port()?;
-    let udp_port = pick_free_tcp_port()?;
     let target_port = pick_free_tcp_port()?;
-    let state_dir_yaml = yaml_quote_path(&state_dir);
-    fs::write(
+    let (_tcp_port, udp_port, _qpxd) = spawn_qpxd_on_random_tcp_udp_ports(
         &cfg,
-        format!(
-            r#"edges:
+        dir.join("forward-connect-udp.log"),
+        |tcp_port, udp_port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
+            format!(
+                r#"edges:
 - kind: forward
   name: forward-h3
   listen: 127.0.0.1:{tcp_port}
@@ -33,10 +33,10 @@ state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,
-            state_dir_yaml = state_dir_yaml
-        ),
+                state_dir_yaml = state_dir_yaml
+            )
+        },
     )?;
-    let _qpxd = spawn_qpxd(&cfg, tcp_port, dir.join("forward-connect-udp.log"))?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -103,13 +103,13 @@ pub(super) async fn forward_h3_qpx_extended_connect_smoke() -> Result<()> {
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)?;
     let cfg = dir.join("forward-qpx-extended-connect.yaml");
-    let tcp_port = pick_free_tcp_port()?;
-    let udp_port = pick_free_tcp_port()?;
-    let state_dir_yaml = yaml_quote_path(&state_dir);
-    fs::write(
+    let (_tcp_port, udp_port, _qpxd) = spawn_qpxd_on_random_tcp_udp_ports(
         &cfg,
-        format!(
-            r#"edges:
+        dir.join("forward-qpx-extended-connect.log"),
+        |tcp_port, udp_port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
+            format!(
+                r#"edges:
 - kind: forward
   name: forward-h3
   listen: 127.0.0.1:{tcp_port}
@@ -128,10 +128,10 @@ state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,
-            state_dir_yaml = state_dir_yaml
-        ),
+                state_dir_yaml = state_dir_yaml
+            )
+        },
     )?;
-    let _qpxd = spawn_qpxd(&cfg, tcp_port, dir.join("forward-qpx-extended-connect.log"))?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -220,13 +220,13 @@ pub(super) async fn forward_h3_qpx_webtransport_rate_limit_scope_enforced() -> R
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)?;
     let cfg = dir.join("forward-qpx-webtransport-rate-limit.yaml");
-    let tcp_port = pick_free_tcp_port()?;
-    let udp_port = pick_free_tcp_port()?;
-    let state_dir_yaml = yaml_quote_path(&state_dir);
-    fs::write(
+    let (_tcp_port, udp_port, _qpxd) = spawn_qpxd_on_random_tcp_udp_ports(
         &cfg,
-        format!(
-            r#"edges:
+        dir.join("forward-qpx-webtransport-rate-limit.log"),
+        |tcp_port, udp_port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
+            format!(
+                r#"edges:
 - kind: forward
   name: forward-h3
   listen: 127.0.0.1:{tcp_port}
@@ -251,13 +251,9 @@ state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,
-            state_dir_yaml = state_dir_yaml
-        ),
-    )?;
-    let _qpxd = spawn_qpxd(
-        &cfg,
-        tcp_port,
-        dir.join("forward-qpx-webtransport-rate-limit.log"),
+                state_dir_yaml = state_dir_yaml
+            )
+        },
     )?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -297,13 +293,13 @@ pub(super) async fn forward_h3_qpx_webtransport_individual_flow_scopes_smoke() -
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)?;
     let cfg = dir.join("forward-qpx-webtransport.yaml");
-    let tcp_port = pick_free_tcp_port()?;
-    let udp_port = pick_free_tcp_port()?;
-    let state_dir_yaml = yaml_quote_path(&state_dir);
-    fs::write(
+    let (_tcp_port, udp_port, _qpxd) = spawn_qpxd_on_random_tcp_udp_ports(
         &cfg,
-        format!(
-            r#"edges:
+        dir.join("forward-qpx-webtransport.log"),
+        |tcp_port, udp_port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
+            format!(
+                r#"edges:
 - kind: forward
   name: forward-h3
   listen: 127.0.0.1:{tcp_port}
@@ -335,10 +331,10 @@ state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,
-            state_dir_yaml = state_dir_yaml
-        ),
+                state_dir_yaml = state_dir_yaml
+            )
+        },
     )?;
-    let _qpxd = spawn_qpxd(&cfg, tcp_port, dir.join("forward-qpx-webtransport.log"))?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 

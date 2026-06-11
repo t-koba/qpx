@@ -28,7 +28,7 @@ use common::yaml_quote_path;
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 use common::{build_h3_test_client_config, build_quinn_client_endpoint};
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
-use common::{pick_free_tcp_port, spawn_qpxd};
+use common::{pick_free_tcp_port, spawn_qpxd_on_random_tcp_udp_ports};
 use common::{read_http1_head, serve_tcp_echo_once, spawn_qpxd_on_random_port, temp_dir};
 #[cfg(feature = "auth-basic")]
 use common::{send_http1_and_read_head, serve_http1_capture_once};
