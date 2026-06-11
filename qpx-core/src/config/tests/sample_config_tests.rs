@@ -28,12 +28,15 @@ fn collect_yaml_files(dir: &Path, files: &mut Vec<PathBuf>) {
 }
 
 fn is_qpxd_sample_config(path: &Path) -> bool {
-    let path = path.to_string_lossy();
-    !path.contains("/fragments/")
-        && !path.ends_with("/qpxf.yaml")
-        && !path.ends_with("/qpxf-tcp.yaml")
-        && !path.ends_with("/qpxf-fastcgi.yaml")
-        && !path.contains("-native-")
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    !path
+        .components()
+        .any(|component| component.as_os_str() == "fragments")
+        && !matches!(
+            file_name,
+            Some("qpxf.yaml" | "qpxf-tcp.yaml" | "qpxf-fastcgi.yaml")
+        )
+        && !file_name.is_some_and(|name| name.contains("-native-"))
 }
 
 fn load_sample_config(path: &Path) -> Result<crate::config::Config, ConfigLoadError> {
