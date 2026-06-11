@@ -100,9 +100,11 @@ async fn run_server(args: RunArgs) -> Result<()> {
     if listen.starts_with("unix://") {
         #[cfg(unix)]
         {
-            let path = listen
-                .strip_prefix("unix://")
-                .expect("unix listen address has unix:// prefix");
+            let Some(path) = listen.strip_prefix("unix://") else {
+                return Err(anyhow::anyhow!(
+                    "Unix socket listen address must start with unix://"
+                ));
+            };
             ensure_unix_socket_parent_secure(Path::new(path))?;
             // Only remove existing path if it is a Unix socket.
             if let Ok(meta) = std::fs::symlink_metadata(path) {
