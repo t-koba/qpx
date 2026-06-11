@@ -101,6 +101,7 @@ fn streaming_required_rejects_buffering_module_chain() {
         .expect_err("buffering module should be rejected");
 
     assert!(err.to_string().contains("streaming_requirement: required"));
+    assert!(err.to_string().contains("aggregate module body access"));
 }
 
 #[test]
@@ -117,6 +118,16 @@ fn omitted_streaming_requirement_rejects_implicit_buffering() {
 
     assert!(err.to_string().contains("streaming_requirement: preferred"));
     assert!(err.to_string().contains("retry.body_template"));
+}
+
+#[test]
+fn observation_limits_use_request_and_response_streaming_caps_separately() {
+    let mut plan = ExecutionPlan::empty();
+    plan.streaming.max_request_body_bytes = 1024;
+    plan.streaming.max_response_body_bytes = 64 * 1024;
+
+    assert_eq!(plan.request_body_observation_limit(128 * 1024), 1024);
+    assert_eq!(plan.response_body_observation_limit(128 * 1024), 64 * 1024);
 }
 
 #[test]

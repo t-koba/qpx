@@ -1,3 +1,10 @@
+//! Prefilter indexes for quickly narrowing candidate rule sets.
+//!
+//! These types are public because compiled rules are shared across crates, but
+//! they are implementation-facing rather than user-facing schema objects.
+
+#![allow(missing_docs)]
+
 use cidr::IpCidr;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -268,8 +275,18 @@ impl MatchPrefilterIndex {
 
         PREFILTER_CANDIDATES.with(|candidate_words| {
             PREFILTER_SCRATCH.with(|scratch_words| {
-                let mut candidates = candidate_words.borrow_mut();
-                let mut scratch = scratch_words.borrow_mut();
+                if let (Ok(mut candidates), Ok(mut scratch)) = (
+                    candidate_words.try_borrow_mut(),
+                    scratch_words.try_borrow_mut(),
+                ) {
+                    self.fill_candidate_words(ctx, &mut candidates, &mut scratch);
+                    if bit_is_empty(candidates.as_slice()) {
+                        return false;
+                    }
+                    return for_each_set_bit(candidates.as_slice(), self.rule_count, &mut visitor);
+                }
+                let mut candidates = Vec::new();
+                let mut scratch = Vec::new();
                 self.fill_candidate_words(ctx, &mut candidates, &mut scratch);
                 if bit_is_empty(candidates.as_slice()) {
                     return false;

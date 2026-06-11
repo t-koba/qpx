@@ -1,4 +1,3 @@
-use anyhow::{Result, anyhow};
 use memmap2::MmapMut;
 use std::collections::hash_map::DefaultHasher;
 #[cfg(unix)]
@@ -9,6 +8,28 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
+
+type Result<T> = std::result::Result<T, ShmRingError>;
+
+/// Error returned by shared-memory ring operations.
+#[derive(Debug, thiserror::Error)]
+pub enum ShmRingError {
+    /// Underlying I/O failure.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// NUL byte in an OS string passed to a platform primitive.
+    #[error(transparent)]
+    Nul(#[from] std::ffi::NulError),
+    /// Higher-level shared-memory backend failure.
+    #[error(transparent)]
+    Backend(#[from] anyhow::Error),
+}
+
+macro_rules! anyhow {
+    ($($arg:tt)*) => {
+        ShmRingError::Backend(anyhow::anyhow!($($arg)*))
+    };
+}
 
 const HEADER_SIZE: usize = 80; // Ring header size (bytes)
 const READ_IDX_OFFSET: usize = 0; // 8 bytes for read_idx (AtomicUsize)
@@ -43,6 +64,7 @@ const DOORBELL_POLL_MAX_INTERVAL: Duration = Duration::from_millis(16);
 /// Prevent pathological allocations if the ring gets corrupted or incorrectly sized.
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024; // 1 MiB
 
+/// Fixed-size shared-memory ring with async doorbells for producer/consumer use.
 pub struct ShmRingBuffer {
     mmap: MmapMut,
     capacity: usize,
@@ -60,6 +82,7 @@ impl Drop for ShmRingBuffer {
 }
 
 impl ShmRingBuffer {
+    /// Returns the default directory used for qpx shared-memory files.
     pub fn default_shm_dir() -> PathBuf {
         #[cfg(unix)]
         {
@@ -77,10 +100,12 @@ impl ShmRingBuffer {
         }
     }
 
+    /// Returns the default capture ring path.
     pub fn default_capture_shm_path() -> PathBuf {
         Self::default_shm_dir().join("capture.shm")
     }
 
+    /// Creates or opens a ring at `path` with total file size `size_bytes`.
     pub fn create_or_open<P: AsRef<Path>>(path: P, size_bytes: usize) -> Result<Self> {
         if size_bytes <= HEADER_SIZE {
             return Err(anyhow!(
@@ -289,6 +314,7 @@ impl ShmRingBuffer {
         Ok(true)
     }
 
+    /// Waits until at least one unread message is available.
     pub async fn wait_for_data(&self) -> Result<()> {
         loop {
             let r = self.read_idx().load(Ordering::Acquire);
@@ -311,6 +337,7 @@ impl ShmRingBuffer {
         }
     }
 
+    /// Waits until the ring can accept a message with `msg_len` payload bytes.
     pub async fn wait_for_space(&self, msg_len: usize) -> Result<()> {
         let required_space = msg_len
             .checked_add(4)
@@ -351,12 +378,14 @@ impl ShmRingBuffer {
         }
     }
 
+    /// Removes platform doorbell resources associated with this ring.
     pub fn unlink_doorbells(&self) -> Result<()> {
         self.data_doorbell.unlink()?;
         self.space_doorbell.unlink()?;
         Ok(())
     }
 
+    /// Clears producer/consumer indexes and wait flags without resizing the ring.
     pub fn reset(&mut self) {
         self.read_idx().store(0, Ordering::Release);
         self.write_idx().store(0, Ordering::Release);
@@ -468,8 +497,7 @@ fn doorbell_name(path: &Path, kind: DoorbellKind) -> String {
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = hash;
-        let _ = kind;
+        let _ = (hash, kind);
         "qpxshm_unsupported".to_string()
     }
 }
@@ -710,13 +738,14 @@ fn open_shm_file(path: &Path) -> Result<File> {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| {
-            anyhow!(
-                "failed to set private permissions on shared memory file {}: {e}",
-                path.display()
-            )
-        })?;
         validate_secure_shm_file(&file, path)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|e| {
+                anyhow!(
+                    "failed to set private permissions on shared memory file {}: {e}",
+                    path.display()
+                )
+            })?;
         Ok(file)
     }
 
@@ -751,6 +780,7 @@ fn validate_secure_shm_file(file: &File, path: &Path) -> Result<()> {
             path.display()
         ));
     }
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
     if metadata.uid() != euid {
         return Err(anyhow!(

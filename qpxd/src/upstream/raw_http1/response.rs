@@ -7,12 +7,12 @@ use super::{
     Http1ConnectionRecycler, InterimResponseHead, MAX_CHUNKED_BODY_BYTES, MAX_HEADER_BYTES,
     RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, READ_BUF_SIZE,
 };
-use crate::http::body::Body;
 use crate::http::codec::h1_common::{parse_header_map, parse_version};
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
 use hyper::header::CONTENT_LENGTH;
 use hyper::{HeaderMap, Method, Response, StatusCode, Version};
+use qpx_http::body::Body;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Duration;
 use tracing::warn;
@@ -196,7 +196,7 @@ async fn forward_content_length_body<S>(
     mut stream: S,
     mut prefix: BytesMut,
     mut remaining: u64,
-    sender: &mut crate::http::body::Sender,
+    sender: &mut qpx_http::body::Sender,
     read_timeout: Duration,
 ) -> Result<(S, BytesMut)>
 where
@@ -235,7 +235,7 @@ where
 pub(super) async fn forward_close_delimited_body<S>(
     mut stream: S,
     mut prefix: BytesMut,
-    sender: &mut crate::http::body::Sender,
+    sender: &mut qpx_http::body::Sender,
     read_timeout: Duration,
 ) -> Result<()>
 where
@@ -259,7 +259,7 @@ where
 pub(super) async fn forward_chunked_body<S>(
     mut stream: S,
     mut buf: BytesMut,
-    sender: &mut crate::http::body::Sender,
+    sender: &mut qpx_http::body::Sender,
     read_timeout: Duration,
 ) -> Result<(S, BytesMut)>
 where
@@ -301,7 +301,7 @@ async fn forward_chunk_payload_segmented<S>(
     stream: &mut S,
     buf: &mut BytesMut,
     mut remaining: usize,
-    sender: &mut crate::http::body::Sender,
+    sender: &mut qpx_http::body::Sender,
     read_timeout: Duration,
 ) -> Result<()>
 where

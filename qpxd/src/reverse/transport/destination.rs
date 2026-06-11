@@ -1,7 +1,7 @@
 use super::ReverseConnInfo;
 use crate::destination::{DestinationInputs, DestinationMetadata};
 use crate::runtime::RuntimeState;
-use crate::tls::UpstreamCertificateInfo;
+use qpx_core::tls::UpstreamCertificateInfo;
 
 use qpx_core::config::DestinationResolutionOverrideConfig;
 

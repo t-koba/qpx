@@ -1,4 +1,5 @@
 use super::registry::SessionRegistry;
+use crate::H3Result as Result;
 use crate::protocol::{
     ConnectionClose, FRAME_SETTINGS, H3_CLOSED_CRITICAL_STREAM, H3_FRAME_UNEXPECTED, H3_ID_ERROR,
     H3_MESSAGE_ERROR, H3_MISSING_SETTINGS, H3_SETTINGS_ERROR, H3_STREAM_CREATION_ERROR,
@@ -10,7 +11,7 @@ use crate::protocol::{
 use crate::qpack::QpackConnection;
 use crate::server::{Protocol, Settings};
 use crate::transport::{BidiStream, RequestStream, UniRecvStream};
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Semaphore, mpsc};
@@ -74,20 +75,20 @@ pub(super) fn validate_peer_settings_for_protocol(
         if close_on_error {
             return fail_client_setup(connection, err);
         }
-        return Err(err);
+        return Err(err.into());
     }
     Ok(())
 }
 
 pub(super) fn fail_client_setup<T>(
     connection: &quinn::Connection,
-    err: anyhow::Error,
+    err: impl Into<anyhow::Error>,
 ) -> Result<T> {
     connection.close(
         quinn::VarInt::from_u32(H3_MESSAGE_ERROR as u32),
         b"qpx-h3 client setup failed",
     );
-    Err(err)
+    Err(err.into().into())
 }
 
 pub(super) async fn open_critical_streams(
@@ -159,7 +160,7 @@ pub(super) async fn recv_response_with_interim(
         if response.status().is_informational() {
             if response.status() == http::StatusCode::SWITCHING_PROTOCOLS {
                 request_stream.abort_with_code(H3_FRAME_UNEXPECTED);
-                return Err(anyhow!("HTTP/3 interim response must not use 101"));
+                return Err(anyhow!("HTTP/3 interim response must not use 101").into());
             }
             interim.push(response);
             continue;
@@ -169,10 +170,10 @@ pub(super) async fn recv_response_with_interim(
 }
 
 async fn recv_response_head(request_stream: &mut RequestStream) -> Result<http::Response<()>> {
-    request_stream
+    Ok(request_stream
         .recv_response_head()
         .await?
-        .ok_or_else(|| anyhow!("response stream closed before headers"))
+        .ok_or_else(|| anyhow!("response stream closed before headers"))?)
 }
 
 async fn drive_connection(

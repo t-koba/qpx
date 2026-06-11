@@ -501,98 +501,82 @@ impl ReverseRouteInputConfig {
             .as_deref()
             .map(|name| format!("edge {edge_name} route {name}"))
             .unwrap_or_else(|| format!("edge {edge_name} route <unnamed>"));
-        match self.target {
-            RouteTargetConfig::TlsPassthrough { upstreams, lb } => Ok(
-                LoadedReverseRoute::TlsPassthrough(Box::new(ReverseTlsPassthroughRouteConfig {
-                    r#match: TlsPassthroughMatchConfig {
-                        src_ip: self.r#match.src_ip,
-                        dst_port: self.r#match.dst_port,
-                        sni: self.r#match.sni,
+        let target = match self.target {
+            RouteTargetConfig::TlsPassthrough { upstreams, lb } => {
+                return Ok(LoadedReverseRoute::TlsPassthrough(Box::new(
+                    ReverseTlsPassthroughRouteConfig {
+                        r#match: TlsPassthroughMatchConfig {
+                            src_ip: self.r#match.src_ip,
+                            dst_port: self.r#match.dst_port,
+                            sni: self.r#match.sni,
+                        },
+                        upstreams,
+                        lb,
+                        timeout_ms: self.timeout_ms,
+                        health_check: self.health_check,
+                        resilience: self.resilience,
+                        lifecycle: self.lifecycle,
+                        affinity: self.affinity,
                     },
-                    upstreams,
-                    lb,
-                    timeout_ms: self.timeout_ms,
-                    health_check: self.health_check,
-                    resilience: self.resilience,
-                    lifecycle: self.lifecycle,
-                    affinity: self.affinity,
-                })),
-            ),
-            target => {
-                let http_modules = expand_module_refs(
-                    &self.modules,
-                    self.http_modules,
-                    chains,
-                    route_context.as_str(),
-                )?;
-                let mut route = ReverseRouteConfig {
-                    name: self.name,
-                    r#match: self.r#match,
-                    target: ReverseRouteTargetConfig::LocalResponse {
-                        response: Box::new(LocalResponseConfig {
-                            status: 500,
-                            body: String::new(),
-                            content_type: None,
-                            headers: Default::default(),
-                            rpc: None,
-                        }),
-                    },
-                    mirrors: self.mirrors,
-                    headers: self.headers,
-                    timeout_ms: self.timeout_ms,
-                    health_check: self.health_check,
-                    resilience: self.resilience,
-                    cache: self.cache,
-                    capture: self.capture,
-                    rate_limit: self.rate_limit,
-                    path_rewrite: self.path_rewrite,
-                    upstream_trust_profile: self.upstream_trust_profile,
-                    upstream_trust: self.upstream_trust,
-                    lifecycle: self.lifecycle,
-                    affinity: self.affinity,
-                    policy_context: self.policy_context,
-                    destination_resolution: self.destination_resolution,
-                    http: self.http,
-                    http_guard_profile: self.http_guard_profile,
-                    http_modules,
-                    streaming: self.streaming,
-                    grpc: self.grpc,
-                    sse: self.sse,
-                    streaming_requirement: self.streaming_requirement,
-                };
-                match target {
-                    RouteTargetConfig::Upstream { upstreams, lb } => {
-                        route.target = ReverseRouteTargetConfig::Upstream { upstreams, lb };
-                    }
-                    RouteTargetConfig::Weighted { backends } => {
-                        route.target = ReverseRouteTargetConfig::Weighted {
-                            backends,
-                            lb: super::super::defaults::default_lb(),
-                        };
-                    }
-                    RouteTargetConfig::Ipc {
-                        endpoint,
-                        mode,
-                        timeout_ms,
-                        body,
-                    } => {
-                        route.target = ReverseRouteTargetConfig::Ipc {
-                            config: IpcUpstreamConfig {
-                                mode,
-                                address: endpoint,
-                                timeout_ms,
-                                body,
-                            },
-                        };
-                    }
-                    RouteTargetConfig::LocalResponse { response } => {
-                        route.target = ReverseRouteTargetConfig::LocalResponse { response };
-                    }
-                    RouteTargetConfig::TlsPassthrough { .. } => unreachable!(),
-                }
-                Ok(LoadedReverseRoute::Http(Box::new(route)))
+                )));
             }
-        }
+            RouteTargetConfig::Upstream { upstreams, lb } => {
+                ReverseRouteTargetConfig::Upstream { upstreams, lb }
+            }
+            RouteTargetConfig::Weighted { backends } => ReverseRouteTargetConfig::Weighted {
+                backends,
+                lb: super::super::defaults::default_lb(),
+            },
+            RouteTargetConfig::Ipc {
+                endpoint,
+                mode,
+                timeout_ms,
+                body,
+            } => ReverseRouteTargetConfig::Ipc {
+                config: IpcUpstreamConfig {
+                    mode,
+                    address: endpoint,
+                    timeout_ms,
+                    body,
+                },
+            },
+            RouteTargetConfig::LocalResponse { response } => {
+                ReverseRouteTargetConfig::LocalResponse { response }
+            }
+        };
+        let http_modules = expand_module_refs(
+            &self.modules,
+            self.http_modules,
+            chains,
+            route_context.as_str(),
+        )?;
+        Ok(LoadedReverseRoute::Http(Box::new(ReverseRouteConfig {
+            name: self.name,
+            r#match: self.r#match,
+            target,
+            mirrors: self.mirrors,
+            headers: self.headers,
+            timeout_ms: self.timeout_ms,
+            health_check: self.health_check,
+            resilience: self.resilience,
+            cache: self.cache,
+            capture: self.capture,
+            rate_limit: self.rate_limit,
+            path_rewrite: self.path_rewrite,
+            upstream_trust_profile: self.upstream_trust_profile,
+            upstream_trust: self.upstream_trust,
+            lifecycle: self.lifecycle,
+            affinity: self.affinity,
+            policy_context: self.policy_context,
+            destination_resolution: self.destination_resolution,
+            http: self.http,
+            http_guard_profile: self.http_guard_profile,
+            http_modules,
+            streaming: self.streaming,
+            grpc: self.grpc,
+            sse: self.sse,
+            streaming_requirement: self.streaming_requirement,
+        })))
     }
 }
 

@@ -1,8 +1,8 @@
-use crate::http::body::Body;
 use anyhow::{Result, anyhow};
 use qpx_core::ipc::meta::IpcResponseMeta;
 use qpx_core::ipc::protocol::read_frame;
 use qpx_core::shm_ring::ShmRingBuffer;
+use qpx_http::body::Body;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use tokio::io::AsyncRead;
@@ -42,7 +42,7 @@ async fn push_request_ring_bytes(
                     .await
                     .map_err(|_| anyhow!("IPC SHM request body writer timed out"))??;
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(err.into()),
         }
     }
 }
@@ -136,7 +136,7 @@ pub(super) async fn take_or_finish_req_ring(
     }
 }
 
-pub(super) async fn downstream_body_closed(sender: &mut crate::http::body::Sender) -> bool {
+pub(super) async fn downstream_body_closed(sender: &mut qpx_http::body::Sender) -> bool {
     sender.is_closed()
 }
 

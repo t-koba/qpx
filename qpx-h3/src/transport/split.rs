@@ -1,9 +1,10 @@
+use crate::H3Result as Result;
 use crate::protocol::{
     FRAME_DATA, FRAME_HEADERS, H3_FRAME_UNEXPECTED, H3_MESSAGE_ERROR, H3_REQUEST_CANCELLED,
     read_varint, validate_message_stream_frame, write_frame,
 };
 use crate::qpack::{QpackConnection, encode_response_head, encode_trailers};
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use bytes::Bytes;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -14,6 +15,7 @@ use super::{
     enforce_response_content_length_send, max_message_frame_payload_bytes, stop_recv_stream,
 };
 
+/// Send half of an HTTP/3 request stream.
 pub struct RequestSendStream {
     pub(super) send: quinn::SendStream,
     pub(super) stream_id: u64,
@@ -21,19 +23,22 @@ pub struct RequestSendStream {
 }
 
 impl RequestSendStream {
+    /// Returns the QUIC stream id.
     pub fn id(&self) -> u64 {
         self.stream_id
     }
 
+    /// Sends response headers.
     pub async fn send_response_head(&mut self, response: &http::Response<()>) -> Result<()> {
         let mut response = response.clone();
         let Some(state) = self.response_state.as_mut() else {
             return Err(anyhow!(
                 "HTTP/3 response HEADERS can only be sent by server response streams"
-            ));
+            )
+            .into());
         };
         if state.final_sent {
-            return Err(anyhow!("HTTP/3 final response HEADERS already sent"));
+            return Err(anyhow!("HTTP/3 final response HEADERS already sent").into());
         }
         let body_allowed = crate::response::sanitize_streaming_response_head_for_h3(&mut response)?;
         state.response_started = true;
@@ -50,13 +55,14 @@ impl RequestSendStream {
         self.send_headers(&payload).await
     }
 
+    /// Sends one DATA frame.
     pub async fn send_data(&mut self, payload: Bytes) -> Result<()> {
         if let Some(state) = self.response_state.as_ref() {
             if !state.final_sent {
-                return Err(anyhow!("HTTP/3 DATA cannot precede final response HEADERS"));
+                return Err(anyhow!("HTTP/3 DATA cannot precede final response HEADERS").into());
             }
             if !state.body_allowed {
-                return Err(anyhow!("HTTP/3 DATA is not allowed for this response"));
+                return Err(anyhow!("HTTP/3 DATA is not allowed for this response").into());
             }
         }
         if let Some(state) = self.response_state.as_mut() {
@@ -69,16 +75,17 @@ impl RequestSendStream {
         write_frame(&mut self.send, FRAME_HEADERS, payload).await
     }
 
+    /// Sends response trailers.
     pub async fn send_trailers(&mut self, trailers: &http::HeaderMap) -> Result<()> {
         let mut trailers = trailers.clone();
         if let Some(state) = self.response_state.as_ref() {
             if !state.final_sent {
-                return Err(anyhow!(
-                    "HTTP/3 trailers cannot precede final response HEADERS"
-                ));
+                return Err(
+                    anyhow!("HTTP/3 trailers cannot precede final response HEADERS").into(),
+                );
             }
             if !state.body_allowed {
-                return Err(anyhow!("HTTP/3 trailers are not allowed for this response"));
+                return Err(anyhow!("HTTP/3 trailers are not allowed for this response").into());
             }
             enforce_response_content_length_complete(state)?;
             crate::response::sanitize_trailers_for_h3(&mut trailers)?;
@@ -87,14 +94,13 @@ impl RequestSendStream {
         self.send_headers(&payload).await
     }
 
+    /// Finishes the response stream.
     pub async fn finish(&mut self) -> Result<()> {
         if let Some(state) = self.response_state.as_ref()
             && state.response_started
             && !state.final_sent
         {
-            return Err(anyhow!(
-                "HTTP/3 response ended without final response HEADERS"
-            ));
+            return Err(anyhow!("HTTP/3 response ended without final response HEADERS").into());
         }
         if let Some(state) = self.response_state.as_ref() {
             enforce_response_content_length_complete(state)?;
@@ -103,6 +109,7 @@ impl RequestSendStream {
         Ok(())
     }
 
+    /// Aborts the message stream.
     pub fn abort_message_stream(&mut self) {
         if let Ok(code) = quinn::VarInt::from_u64(H3_MESSAGE_ERROR) {
             let _ = self.send.reset(code);
@@ -110,6 +117,7 @@ impl RequestSendStream {
     }
 }
 
+/// Receive half of an HTTP/3 request stream.
 #[derive(Debug)]
 pub struct RequestRecvStream {
     pub(super) recv: quinn::RecvStream,
@@ -132,6 +140,7 @@ pub struct RequestRecvStream {
 }
 
 impl RequestRecvStream {
+    /// Returns the QUIC stream id.
     pub fn id(&self) -> u64 {
         self.stream_id
     }
@@ -152,7 +161,8 @@ impl RequestRecvStream {
         if len > max_payload_bytes as u64 {
             return Err(anyhow!(
                 "HTTP/3 frame 0x{ty:x} payload length {len} exceeds limit {max_payload_bytes}"
-            ));
+            )
+            .into());
         }
         Ok(Some((ty, len as usize)))
     }
@@ -180,7 +190,7 @@ impl RequestRecvStream {
             .map_err(|_| anyhow!("timed out reading DATA frame payload"))??
             .ok_or_else(|| anyhow!("truncated DATA frame payload"))?;
         if chunk.bytes.is_empty() {
-            return Err(anyhow!("truncated DATA frame payload"));
+            return Err(anyhow!("truncated DATA frame payload").into());
         }
         self.pending_data_frame_bytes = self
             .pending_data_frame_bytes
@@ -188,6 +198,7 @@ impl RequestRecvStream {
         Ok(Some(chunk.bytes))
     }
 
+    /// Receives one DATA frame payload.
     pub async fn recv_data(&mut self) -> Result<Option<Bytes>> {
         if self.closed {
             return Ok(None);
@@ -203,7 +214,7 @@ impl RequestRecvStream {
             };
             if self.pending_trailers.is_some() {
                 stop_recv_stream(&mut self.recv, H3_FRAME_UNEXPECTED);
-                return Err(anyhow!("received HTTP/3 frame after trailers"));
+                return Err(anyhow!("received HTTP/3 frame after trailers").into());
             }
             match ty {
                 FRAME_DATA => {
@@ -230,7 +241,7 @@ impl RequestRecvStream {
                         Ok(trailers) => self.pending_trailers = Some(trailers),
                         Err(err) => {
                             stop_recv_stream(&mut self.recv, err.code());
-                            return Err(anyhow!(err.to_string()));
+                            return Err(anyhow!(err.to_string()).into());
                         }
                     }
                     if let Err(err) = self.enforce_received_content_length_complete() {
@@ -242,7 +253,7 @@ impl RequestRecvStream {
                 _ => {
                     if let Err(close) = validate_message_stream_frame(ty) {
                         stop_recv_stream(&mut self.recv, close.code);
-                        return Err(anyhow!(close.message));
+                        return Err(anyhow!(close.message).into());
                     }
                     self.discard_frame_payload(len).await?;
                 }
@@ -255,7 +266,8 @@ impl RequestRecvStream {
             if !self.response_head_received {
                 return Err(anyhow!(
                     "HTTP/3 response DATA cannot be received before response HEADERS"
-                ));
+                )
+                .into());
             }
             enforce_body_frame(
                 None,
@@ -291,6 +303,7 @@ impl RequestRecvStream {
         }
     }
 
+    /// Receives trailers, if present.
     pub async fn recv_trailers(&mut self) -> Result<Option<http::HeaderMap>> {
         if self.pending_trailers.is_some() {
             return Ok(self.pending_trailers.take());
@@ -303,11 +316,13 @@ impl RequestRecvStream {
         Ok(self.pending_trailers.take())
     }
 
+    /// Aborts the message stream.
     pub fn abort_message_stream(&mut self) {
         stop_recv_stream(&mut self.recv, H3_MESSAGE_ERROR);
         self.closed = true;
     }
 
+    /// Stops receiving request body bytes.
     pub fn stop_receiving_request_body(&mut self) {
         stop_recv_stream(&mut self.recv, H3_REQUEST_CANCELLED);
         self.closed = true;

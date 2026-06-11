@@ -1,9 +1,9 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
-use crate::http::body::Body;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::{HeaderMap, Response, StatusCode};
 use qpx_core::config::RpcLocalResponseConfig;
+use qpx_http::body::Body;
 use serde_json::json;
 
 pub(crate) fn build_rpc_local_response(

@@ -25,6 +25,9 @@ pub(crate) mod passthrough {
     pub(crate) use super::passthrough_invalid::*;
 }
 
+#[cfg(feature = "http3")]
+mod streaming;
+
 #[cfg(all(
     feature = "http3",
     feature = "http3-backend-h3",

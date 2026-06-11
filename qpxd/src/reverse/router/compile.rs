@@ -1,4 +1,4 @@
-use super::{DynamicDiscovery, MirrorTarget, UpstreamPool, WeightedBackend};
+use super::{DynamicDiscovery, MirrorTarget, UpstreamEndpointSet, WeightedBackend};
 use crate::http::policy::response_policy::HttpResponseRuleEngine;
 use anyhow::Result;
 use qpx_core::config::{
@@ -80,7 +80,7 @@ pub(super) fn compile_upstream_pool(
     upstream_configs: &HashMap<&str, &UpstreamConfig>,
     allow_authority: bool,
     lifecycle: &EndpointLifecycleRuntime,
-) -> Result<Arc<UpstreamPool>> {
+) -> Result<Arc<UpstreamEndpointSet>> {
     let mut static_endpoints = Vec::new();
     let mut seed_endpoints = Vec::new();
     let mut discovery = Vec::new();
@@ -101,7 +101,7 @@ pub(super) fn compile_upstream_pool(
         }
     }
 
-    Ok(UpstreamPool::new(
+    Ok(UpstreamEndpointSet::new(
         static_endpoints,
         seed_endpoints,
         discovery,
@@ -122,7 +122,7 @@ fn resolve_route_upstream(
     }
     if allow_authority
         && (upstream_ref.contains(':') || upstream_ref.starts_with('['))
-        && crate::http::protocol::address::parse_authority_host_port(upstream_ref, 443).is_some()
+        && qpx_http::protocol::address::parse_authority_host_port(upstream_ref, 443).is_some()
     {
         return Ok(ResolvedRouteUpstream {
             target: upstream_ref.to_string(),

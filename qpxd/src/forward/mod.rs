@@ -1,24 +1,21 @@
-use crate::http::body::Body;
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 use crate::http::codec::interim::{
     H2_PREFACE, serve_h2_with_interim_and_capacity, sniff_h2_preface,
 };
+use crate::http::metrics as http_metrics;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
 #[cfg(feature = "http3")]
 use crate::server::control::SidecarControl;
-use crate::xdp::remote::resolve_remote_addr_with_xdp;
-use crate::{
-    runtime::metric_names,
-    tcp_bindings::filter::{
-        ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
-    },
+use crate::tcp_bindings::filter::{
+    ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
 };
+use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use anyhow::{Result, anyhow};
 use hyper::{Request, Response, StatusCode};
-use metrics::{counter, histogram};
 use qpx_core::config::IngressEdgeConfig;
 use qpx_core::rules::RuleMatchContext;
+use qpx_http::body::Body;
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 use qpx_observability::handler_fn;
 use std::convert::Infallible;
@@ -35,10 +32,10 @@ pub(crate) mod h3;
 mod policy;
 mod request;
 
+#[cfg(feature = "mitm")]
+pub(crate) use policy::evaluate_forward_policy_staged;
 #[cfg(any(feature = "mitm", all(feature = "http3", feature = "http3-backend-h3")))]
 pub(crate) use policy::{ForwardPolicyDecision, evaluate_forward_policy};
-#[cfg(feature = "mitm")]
-pub(crate) use policy::{ForwardPolicyEvaluation, evaluate_forward_policy_staged};
 pub(crate) use request::handle_request_inner;
 #[cfg(feature = "mitm")]
 #[cfg(feature = "auth-basic")]
@@ -166,12 +163,11 @@ async fn run_forward_acceptor(
                     .timeouts
                     .http_header_read_timeout_ms,
             );
-            let metadata_timeout = header_read_timeout;
             let (stream, effective_remote_addr) = match resolve_remote_addr_with_xdp(
                 stream,
                 remote_addr,
                 xdp_cfg.as_ref(),
-                metadata_timeout,
+                header_read_timeout,
             )
             .await
             {
@@ -197,8 +193,7 @@ async fn run_forward_acceptor(
                 .map(str::to_string)
             };
             if let Some(matched_rule) = block_rule {
-                counter!(metric_names().forward_requests_total.clone(), "result" => "blocked")
-                    .increment(1);
+                http_metrics::forward_request(crate::runtime::metric_names(), "blocked");
                 emit_connection_filter_audit(
                     "listener",
                     listener_name.as_str(),
@@ -279,15 +274,15 @@ async fn handle_request(
     let result = handle_request_inner(req, runtime, &listener_name, remote_addr).await;
     match result {
         Ok(response) => {
-            counter!(state.observability.metric_names.forward_requests_total.clone(), "result" => "ok")
-                .increment(1);
-            histogram!(state.observability.metric_names.forward_latency_ms.clone())
-                .record(started.elapsed().as_secs_f64() * 1000.0);
+            http_metrics::forward_request_with_latency(
+                &state.observability.metric_names,
+                "ok",
+                started.elapsed(),
+            );
             Ok(response)
         }
         Err(err) => {
-            counter!(state.observability.metric_names.forward_requests_total.clone(), "result" => "error")
-                .increment(1);
+            http_metrics::forward_request(&state.observability.metric_names, "error");
             error!(error = ?err, "request handling failed");
             Ok(finalize_response_for_request(
                 &request_method,

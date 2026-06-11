@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use pcap_file::pcapng::{Block, PcapNgReader};
@@ -367,4 +369,42 @@ fn server_name_for_host(host: &str) -> Result<ServerName<'static>> {
     }
     ServerName::try_from(host.to_string())
         .map_err(|_| anyhow::anyhow!("invalid server name for TLS: {}", host))
+}
+
+#[cfg(all(test, feature = "tls-rustls"))]
+mod tests {
+    use super::{parse_host_from_endpoint, server_name_for_host};
+
+    #[test]
+    fn parse_host_extracts_host_from_authority() {
+        assert_eq!(
+            parse_host_from_endpoint("example.com:443").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            parse_host_from_endpoint("example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            parse_host_from_endpoint("127.0.0.1:8080").as_deref(),
+            Some("127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn parse_host_rejects_invalid_authority() {
+        assert!(parse_host_from_endpoint("inv alid host").is_none());
+    }
+
+    #[test]
+    fn server_name_accepts_dns_and_ip_hosts() {
+        assert!(server_name_for_host("example.com").is_ok());
+        assert!(server_name_for_host("127.0.0.1").is_ok());
+        assert!(server_name_for_host("::1").is_ok());
+    }
+
+    #[test]
+    fn server_name_rejects_invalid_dns_name() {
+        assert!(server_name_for_host("inv alid").is_err());
+    }
 }

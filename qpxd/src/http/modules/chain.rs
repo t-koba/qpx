@@ -23,7 +23,25 @@ impl CompiledHttpModule {
     }
 
     fn explain(&self) -> Option<(String, Vec<String>)> {
-        let detail = self.module.explain();
+        let capabilities = self.module.capabilities();
+        let mut detail = vec![
+            format!("body_mode={}", capabilities.body_access.mode_label()),
+            format!(
+                "streaming_safe={}",
+                if capabilities.body_access.streaming_safe() {
+                    "true"
+                } else {
+                    "false"
+                }
+            ),
+        ];
+        if let Some(max_bytes) = capabilities.body_access.request_buffer_bytes() {
+            detail.push(format!("request_buffer_max_bytes={max_bytes}"));
+        }
+        if let Some(max_bytes) = capabilities.body_access.response_buffer_bytes() {
+            detail.push(format!("response_buffer_max_bytes={max_bytes}"));
+        }
+        detail.extend(self.module.explain());
         (!detail.is_empty()).then(|| (self.label(), detail))
     }
 }
@@ -117,6 +135,24 @@ impl CompiledHttpModuleChain {
         ]
         .into_iter()
         .flat_map(|modules| modules.iter().filter_map(CompiledHttpModule::explain))
+        .collect()
+    }
+
+    pub(crate) fn buffering_modules(&self) -> Vec<String> {
+        [
+            self.request_headers.as_ref(),
+            self.cache_lookup.as_ref(),
+            self.upstream_request.as_ref(),
+            self.upstream_response.as_ref(),
+            self.downstream_response.as_ref(),
+            self.retry.as_ref(),
+            self.error.as_ref(),
+            self.log.as_ref(),
+        ]
+        .into_iter()
+        .flat_map(|modules| modules.iter())
+        .filter(|module| !module.module.capabilities().body_access.streaming_safe())
+        .map(CompiledHttpModule::label)
         .collect()
     }
 

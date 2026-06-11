@@ -56,14 +56,4 @@ impl DispatchOutcome {
             Self::ExtAuthzLocalResponse => "ext_authz_local_response",
         }
     }
-
-    pub(crate) fn audit_outcome(self) -> Self {
-        self
-    }
-}
-
-impl std::fmt::Display for DispatchOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
 }

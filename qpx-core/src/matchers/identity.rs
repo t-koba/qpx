@@ -1,7 +1,8 @@
 use crate::config::{CertificateMatchConfig, IdentityMatchConfig, TlsFingerprintMatchConfig};
 use crate::prefilter::{StringInterner, TextPatternMatcher, compile_text_patterns};
 use crate::rules::RuleMatchContext;
-use anyhow::Result;
+
+use super::Result;
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledIdentityMatch {

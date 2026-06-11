@@ -1,8 +1,8 @@
-use crate::tls::CompiledUpstreamTlsTrust;
-use crate::tls::UpstreamCertificateInfo;
-#[cfg(feature = "tls-rustls")]
-use crate::tls::cert_info::extract_upstream_certificate_info;
 use anyhow::{Result, anyhow};
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_core::tls::UpstreamCertificateInfo;
+#[cfg(feature = "tls-rustls")]
+use qpx_core::tls::extract_upstream_certificate_info;
 #[cfg(feature = "http3")]
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::crypto::rustls::QuicServerConfig;
@@ -77,9 +77,7 @@ pub(crate) fn enforce_h3_connection_trust(
     }
     #[cfg(not(feature = "tls-rustls"))]
     {
-        let _ = connection;
-        let _ = peer_name;
-        let _ = trust;
+        let _ = (connection, peer_name, trust);
         Err(anyhow!(
             "HTTP/3 upstream TLS trust enforcement requires the tls-rustls backend"
         ))

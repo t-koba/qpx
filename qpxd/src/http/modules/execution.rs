@@ -2,8 +2,6 @@ use super::{
     CacheLookupStatus, CompiledHttpModuleChain, HttpModuleEvent, HttpModuleStage,
     RequestHeadersOutcome, RetryEvent,
 };
-use crate::cache::{CacheRequestKey, purge_cache_key};
-use crate::http::body::Body;
 use crate::http::dispatch::ProxyKind;
 use crate::runtime::RuntimeState;
 use crate::upstream::origin::{OriginEndpoint, proxy_http};
@@ -12,6 +10,8 @@ use http::header::HOST;
 use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
 use hyper::{Request, Response};
 use qpx_core::config::CachePolicyConfig;
+use qpx_http::body::Body;
+use qpxd_cache::{CacheRequestKey, purge_cache_key};
 use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -328,7 +328,14 @@ impl HttpModuleContext {
     pub async fn send_absolute_request(&self, req: Request<Body>) -> Result<Response<Body>> {
         let url = req.uri().to_string();
         let origin = OriginEndpoint::direct(url.as_str());
-        proxy_http(req, &origin, self.session.proxy_name.as_str(), None).await
+        proxy_http(
+            &self.runtime.pools,
+            req,
+            &origin,
+            self.session.proxy_name.as_str(),
+            None,
+        )
+        .await
     }
 
     pub async fn send_absolute_request_to_addr(
@@ -357,7 +364,14 @@ impl HttpModuleContext {
             logical_port,
             host.to_string(),
         );
-        proxy_http(req, &origin, self.session.proxy_name.as_str(), None).await
+        proxy_http(
+            &self.runtime.pools,
+            req,
+            &origin,
+            self.session.proxy_name.as_str(),
+            None,
+        )
+        .await
     }
 
     pub fn cache_request_key(&self, req: &Request<Body>) -> Result<Option<CacheRequestKey>> {

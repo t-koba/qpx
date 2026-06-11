@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, anyhow};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -8,9 +8,11 @@ use std::path::Path;
 use std::sync::Arc;
 use webpki_roots::TLS_SERVER_ROOTS;
 
+use super::TlsResult as Result;
 use super::ca::CaStore;
 
 impl CaStore {
+    /// Builds a client config using the generated MITM CA trust material.
     pub fn client_config(&self, verify: bool) -> Result<Arc<ClientConfig>> {
         let mut root = RootCertStore::empty();
         root.extend(TLS_SERVER_ROOTS.iter().cloned());
@@ -73,26 +75,30 @@ impl ServerCertVerifier for NoVerifier {
         ]
     }
 }
+/// Loads a PEM certificate chain from disk.
 pub fn load_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     let data = fs::read(path).with_context(|| format!("failed to read cert {}", path.display()))?;
     let certs = CertificateDer::pem_slice_iter(&data)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| anyhow!("invalid cert {}: {e}", path.display()))?;
     if certs.is_empty() {
-        return Err(anyhow!("no certificate found in {}", path.display()));
+        return Err(anyhow!("no certificate found in {}", path.display()).into());
     }
     Ok(certs)
 }
 
+/// Loads the last PEM private key from disk.
 pub fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     let data = fs::read(path).with_context(|| format!("failed to read key {}", path.display()))?;
     let mut keys = PrivateKeyDer::pem_slice_iter(&data)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| anyhow!("invalid key {}: {e}", path.display()))?;
-    keys.pop()
-        .ok_or_else(|| anyhow!("no private key found in {}", path.display()))
+    Ok(keys
+        .pop()
+        .ok_or_else(|| anyhow!("no private key found in {}", path.display()))?)
 }
 
+/// Builds a rustls server config for HTTP/2 and HTTP/1.1.
 pub fn build_server_config(
     cert_chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
@@ -104,6 +110,7 @@ pub fn build_server_config(
     Ok(Arc::new(config))
 }
 
+/// Builds a rustls client config with optional CA and client certificate.
 pub fn build_client_config(
     ca_cert: Option<&Path>,
     client_cert_chain: Option<Vec<CertificateDer<'static>>>,
@@ -115,7 +122,7 @@ pub fn build_client_config(
         let certs = load_cert_chain(path)?;
         let (added, _) = root.add_parsable_certificates(certs);
         if added == 0 {
-            return Err(anyhow!("no CA certs loaded from {}", path.display()));
+            return Err(anyhow!("no CA certs loaded from {}", path.display()).into());
         }
     } else {
         root.extend(TLS_SERVER_ROOTS.iter().cloned());
@@ -128,9 +135,7 @@ pub fn build_client_config(
             .map_err(|_| anyhow!("invalid client certificate/key"))?,
         (None, None) => builder.with_no_client_auth(),
         _ => {
-            return Err(anyhow!(
-                "client_cert_chain and client_key must be set together"
-            ));
+            return Err(anyhow!("client_cert_chain and client_key must be set together").into());
         }
     };
     if insecure_skip_verify {

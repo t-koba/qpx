@@ -21,7 +21,6 @@ compile_error!("qpxd: feature mitm requires tls-rustls");
 #[cfg(all(feature = "acme", not(feature = "tls-rustls")))]
 compile_error!("qpxd: feature acme requires tls-rustls");
 
-mod cache;
 mod cli;
 mod cli_render;
 mod config_reload;
@@ -35,6 +34,7 @@ mod http;
 mod http3;
 mod ipc_client;
 mod policy_context;
+mod pool;
 mod rate_limit;
 mod reverse;
 mod runtime;
@@ -55,12 +55,12 @@ mod windows_handoff;
 mod xdp;
 
 pub mod module_api {
-    pub use crate::http::body::{Body, BodyError, Sender};
     pub use crate::http::modules::{
         BodyAccess, CacheLookupStatus, HttpModule, HttpModuleCapabilities, HttpModuleContext,
         HttpModuleEvent, HttpModuleFactory, HttpModuleRegistry, HttpModuleRegistryBuilder,
         HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome, RetryEvent,
     };
+    pub use qpx_http::body::{Body, BodyError, Sender};
 }
 
 pub use daemon::{Daemon, DaemonBuilder};
@@ -108,6 +108,16 @@ pub mod bench_support {
 
 #[doc(hidden)]
 pub mod fuzz_support {
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    fn rpc_headers(content_type: &'static str) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static(content_type),
+        );
+        headers
+    }
+
     pub fn parse_proxy_v2_frame(frame: &[u8]) {
         crate::xdp::fuzz_parse_proxy_v2_frame(frame);
     }
@@ -118,6 +128,75 @@ pub mod fuzz_support {
 
     pub fn sniff_client_hello(bytes: &[u8]) {
         crate::tls::sniff::fuzz_client_hello_parser(bytes);
+    }
+
+    pub fn parse_ftp_response(bytes: &[u8]) {
+        crate::ftp::fuzz_parse_ftp_response_parser(bytes);
+    }
+
+    pub fn parse_ipc_meta_frame(bytes: &[u8]) {
+        qpx_core::ipc::protocol::fuzz_decode_ipc_meta_frame(bytes);
+    }
+
+    #[cfg(feature = "http3")]
+    pub fn observe_sse_events(bytes: &[u8]) {
+        let mut observer = crate::http::protocol::sse::SseEventObserver::new();
+        observer.feed(bytes);
+        let _ = observer.summary();
+    }
+
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    pub fn observe_grpc_frames(bytes: &[u8]) {
+        let headers = rpc_headers("application/grpc");
+        if let Some(mut observer) =
+            crate::http::rpc::streaming_rpc_observer(&headers, None, Some(16 * 1024 * 1024), None)
+        {
+            let _ = observer.feed(bytes);
+            let _ = observer.finish();
+        }
+    }
+
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    pub fn observe_grpc_web_binary_frames(bytes: &[u8]) {
+        let headers = rpc_headers("application/grpc-web+proto");
+        if let Some(mut observer) =
+            crate::http::rpc::streaming_rpc_observer(&headers, None, Some(16 * 1024 * 1024), None)
+        {
+            let _ = observer.feed(bytes);
+            let _ = observer.finish();
+        }
+    }
+
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    pub fn observe_grpc_web_text_frames(bytes: &[u8]) {
+        let headers = rpc_headers("application/grpc-web-text+proto");
+        if let Some(mut observer) =
+            crate::http::rpc::streaming_rpc_observer(&headers, None, Some(16 * 1024 * 1024), None)
+        {
+            let _ = observer.feed(bytes);
+            let _ = observer.finish();
+        }
+    }
+
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    pub fn observe_connect_frames(bytes: &[u8]) {
+        let headers = rpc_headers("application/connect+proto");
+        if let Some(mut observer) = crate::http::rpc::streaming_rpc_observer(
+            &headers,
+            Some("connect"),
+            Some(16 * 1024 * 1024),
+            Some(64 * 1024),
+        ) {
+            let _ = observer.feed(bytes);
+            let _ = observer.finish();
+        }
+    }
+
+    #[cfg(feature = "http3")]
+    pub fn parse_datagram_capsules(bytes: &[u8]) {
+        let mut buffer = crate::http3::capsule::CapsuleBuffer::new();
+        let _ = buffer.push(bytes::Bytes::copy_from_slice(bytes), 256 * 1024);
+        while let Ok(Some((_kind, _payload))) = buffer.take_next() {}
     }
 }
 

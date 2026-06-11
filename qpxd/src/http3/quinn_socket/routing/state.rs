@@ -221,11 +221,3 @@ fn compact_queue_if_needed<K>(
             .is_some_and(|entry| entry.generation == *generation)
     });
 }
-
-pub(super) fn shard_index<T: std::hash::Hash>(value: &T, shard_count: usize) -> usize {
-    use std::hash::Hasher;
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    (hasher.finish() as usize) % shard_count.max(1)
-}

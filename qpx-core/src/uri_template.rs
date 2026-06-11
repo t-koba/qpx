@@ -1,7 +1,8 @@
-use anyhow::{Result, anyhow, bail};
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use regex::Regex;
 use std::collections::HashMap;
+
+type Result<T> = std::result::Result<T, UriTemplateError>;
 
 const SIMPLE_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b':')
@@ -37,6 +38,7 @@ const RESERVED_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'|')
     .add(b'}');
 
+/// Parsed RFC 6570 URI template with expansion and reverse-match support.
 #[derive(Debug, Clone)]
 pub struct UriTemplate {
     source: String,
@@ -45,10 +47,61 @@ pub struct UriTemplate {
     bindings: Vec<CaptureBinding>,
 }
 
+/// URI template parse, expansion, or reverse-match error.
+#[derive(Debug, thiserror::Error)]
+pub enum UriTemplateError {
+    /// The actual URI did not match the template.
+    #[error("uri_template mismatch")]
+    Mismatch,
+    /// The same variable captured conflicting values.
+    #[error("uri_template variable mismatch for {0}")]
+    VariableMismatch(String),
+    /// A prefix capture did not match the full captured variable value.
+    #[error("uri_template variable prefix mismatch for {0}")]
+    VariablePrefixMismatch(String),
+    /// Template contains an opening brace without a matching close brace.
+    #[error("uri_template has unmatched '{{'")]
+    UnmatchedOpenBrace,
+    /// Expression braces were empty.
+    #[error("uri_template expression must not be empty")]
+    EmptyExpression,
+    /// Expression did not contain any variable names.
+    #[error("uri_template expression must include at least one variable")]
+    EmptyExpressionVariables,
+    /// A variable name was empty.
+    #[error("uri_template variable name must not be empty")]
+    EmptyVariableName,
+    /// A prefix modifier was not numeric.
+    #[error("uri_template prefix modifier must be numeric")]
+    NonNumericPrefix,
+    /// A prefix modifier was zero.
+    #[error("uri_template prefix modifier must be >= 1")]
+    ZeroPrefix,
+    /// A variable name used unsupported characters.
+    #[error("uri_template variable name contains unsupported characters")]
+    UnsupportedVariableName,
+    /// Prefix modifier was applied to a list variable.
+    #[error("uri_template prefix modifier is not allowed on list variable {0}")]
+    ListPrefix(String),
+    /// Prefix modifier was applied to an associative variable.
+    #[error("uri_template prefix modifier is not allowed on assoc variable {0}")]
+    AssocPrefix(String),
+    /// Captured URI bytes were not valid UTF-8 after decoding.
+    #[error("uri_template capture is not valid UTF-8")]
+    InvalidCaptureUtf8,
+    /// Internal regex generation failed.
+    #[error("uri_template regex is invalid: {0}")]
+    Regex(#[from] regex::Error),
+}
+
+/// Value supplied while expanding a URI template variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UriTemplateValue {
+    /// Scalar string value.
     Scalar(String),
+    /// List value.
     List(Vec<String>),
+    /// Associative list value.
     Assoc(Vec<(String, Option<String>)>),
 }
 
@@ -64,10 +117,14 @@ struct Expression {
     vars: Vec<VarSpec>,
 }
 
+/// Variable specification inside a URI template expression.
 #[derive(Debug, Clone)]
 pub struct VarSpec {
+    /// Variable name.
     pub name: String,
+    /// Whether the variable uses explode expansion.
     pub explode: bool,
+    /// Optional prefix character limit.
     pub prefix: Option<usize>,
 }
 
@@ -96,6 +153,7 @@ struct CaptureBinding {
 }
 
 impl UriTemplate {
+    /// Parses a URI template.
     pub fn parse(template: &str) -> Result<Self> {
         let parts = parse_template_parts(template)?;
         let (regex, bindings) = build_match_regex(&parts)?;
@@ -107,10 +165,12 @@ impl UriTemplate {
         })
     }
 
+    /// Returns the original template string.
     pub fn source(&self) -> &str {
         self.source.as_str()
     }
 
+    /// Iterates variable specs in template order.
     pub fn var_specs(&self) -> impl Iterator<Item = &VarSpec> {
         self.parts.iter().flat_map(|part| match part {
             TemplatePart::Literal(_) => [].iter(),
@@ -118,11 +178,13 @@ impl UriTemplate {
         })
     }
 
+    /// Returns true when `name` can be recovered by reverse matching.
     pub fn has_recoverable_variable(&self, name: &str) -> bool {
         self.var_specs()
             .any(|spec| spec.name == name && spec.prefix.is_none())
     }
 
+    /// Expands scalar variables with a resolver callback.
     pub fn expand<F>(&self, mut resolve: F) -> Result<String>
     where
         F: FnMut(&str) -> Option<String>,
@@ -130,6 +192,7 @@ impl UriTemplate {
         self.expand_values(|name| resolve(name).map(UriTemplateValue::Scalar))
     }
 
+    /// Expands scalar, list, and associative variables with a resolver callback.
     pub fn expand_values<F>(&self, mut resolve: F) -> Result<String>
     where
         F: FnMut(&str) -> Option<UriTemplateValue>,
@@ -146,11 +209,12 @@ impl UriTemplate {
         Ok(out)
     }
 
+    /// Reverse-matches a URI and returns recovered scalar variables.
     pub fn match_scalars(&self, actual: &str) -> Result<HashMap<String, String>> {
         let captures = self
             .regex
             .captures(actual)
-            .ok_or_else(|| anyhow!("uri_template mismatch"))?;
+            .ok_or(UriTemplateError::Mismatch)?;
         let mut resolved = HashMap::<String, String>::new();
         let mut prefixes = Vec::<(String, usize, String)>::new();
         for (idx, binding) in self.bindings.iter().enumerate() {
@@ -164,7 +228,7 @@ impl UriTemplate {
             }
             match resolved.get(binding.name.as_str()) {
                 Some(existing) if existing != &decoded => {
-                    bail!("uri_template variable mismatch for {}", binding.name);
+                    return Err(UriTemplateError::VariableMismatch(binding.name.clone()));
                 }
                 Some(_) => {}
                 None => {
@@ -177,7 +241,7 @@ impl UriTemplate {
                 continue;
             };
             if truncate_chars(full.as_str(), prefix_len) != prefix_value {
-                bail!("uri_template variable prefix mismatch for {}", name);
+                return Err(UriTemplateError::VariablePrefixMismatch(name));
             }
         }
         Ok(resolved)
@@ -193,7 +257,7 @@ fn parse_template_parts(template: &str) -> Result<Vec<TemplatePart>> {
             parts.push(TemplatePart::Literal(template[cursor..start].to_string()));
         }
         let Some(rel_end) = template[start + 1..].find('}') else {
-            bail!("uri_template has unmatched '{{'");
+            return Err(UriTemplateError::UnmatchedOpenBrace);
         };
         let end = start + 1 + rel_end;
         let expr = &template[start + 1..end];
@@ -209,7 +273,7 @@ fn parse_template_parts(template: &str) -> Result<Vec<TemplatePart>> {
 fn parse_expression(expr: &str) -> Result<Expression> {
     let expr = expr.trim();
     if expr.is_empty() {
-        bail!("uri_template expression must not be empty");
+        return Err(UriTemplateError::EmptyExpression);
     }
     let (operator, vars_raw) = match expr.as_bytes()[0] {
         b'+' => (Operator::Reserved, &expr[1..]),
@@ -226,7 +290,7 @@ fn parse_expression(expr: &str) -> Result<Expression> {
         vars.push(parse_var_spec(raw)?);
     }
     if vars.is_empty() {
-        bail!("uri_template expression must include at least one variable");
+        return Err(UriTemplateError::EmptyExpressionVariables);
     }
     Ok(Expression { operator, vars })
 }
@@ -234,7 +298,7 @@ fn parse_expression(expr: &str) -> Result<Expression> {
 fn parse_var_spec(raw: &str) -> Result<VarSpec> {
     let raw = raw.trim();
     if raw.is_empty() {
-        bail!("uri_template variable name must not be empty");
+        return Err(UriTemplateError::EmptyVariableName);
     }
     let (raw, explode) = raw
         .strip_suffix('*')
@@ -243,22 +307,22 @@ fn parse_var_spec(raw: &str) -> Result<VarSpec> {
         Some((name, prefix)) => {
             let prefix = prefix
                 .parse::<usize>()
-                .map_err(|_| anyhow!("uri_template prefix modifier must be numeric"))?;
+                .map_err(|_| UriTemplateError::NonNumericPrefix)?;
             if prefix == 0 {
-                bail!("uri_template prefix modifier must be >= 1");
+                return Err(UriTemplateError::ZeroPrefix);
             }
             (name, Some(prefix))
         }
         None => (raw, None),
     };
     if name.is_empty() {
-        bail!("uri_template variable name must not be empty");
+        return Err(UriTemplateError::EmptyVariableName);
     }
     if !name
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.')
     {
-        bail!("uri_template variable name contains unsupported characters");
+        return Err(UriTemplateError::UnsupportedVariableName);
     }
     Ok(VarSpec {
         name: name.to_string(),
@@ -437,10 +501,7 @@ fn expand_varspec(
         }
         UriTemplateValue::List(values) => {
             if var.prefix.is_some() {
-                bail!(
-                    "uri_template prefix modifier is not allowed on list variable {}",
-                    var.name
-                );
+                return Err(UriTemplateError::ListPrefix(var.name.clone()));
             }
             if values.is_empty() {
                 return Ok(());
@@ -475,10 +536,7 @@ fn expand_varspec(
         }
         UriTemplateValue::Assoc(entries) => {
             if var.prefix.is_some() {
-                bail!(
-                    "uri_template prefix modifier is not allowed on assoc variable {}",
-                    var.name
-                );
+                return Err(UriTemplateError::AssocPrefix(var.name.clone()));
             }
             let defined = entries
                 .into_iter()
@@ -560,7 +618,7 @@ fn expand_non_exploded_composite(
 fn decode_capture(raw: &str, _mode: DecodeMode) -> Result<String> {
     Ok(percent_decode_str(raw)
         .decode_utf8()
-        .map_err(|_| anyhow!("uri_template capture is not valid UTF-8"))?
+        .map_err(|_| UriTemplateError::InvalidCaptureUtf8)?
         .into_owned())
 }
 

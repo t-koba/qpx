@@ -1,11 +1,10 @@
-use crate::http::body::{Body, BodyError};
 use crate::http::rpc::{PrecomputedRpcBodySummary, RpcBodySummaryObserver};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
 use http_body::Frame;
 use hyper::{Request, Response};
-use metrics::counter;
+use qpx_http::body::{Body, BodyError};
 use std::fmt;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -62,14 +61,14 @@ pub(crate) fn observed_request_bytes(req: &Request<Body>) -> Option<Bytes> {
         .and_then(|body| body.read_all().ok())
 }
 
-pub(crate) fn observed_request_prefix_bytes_async(
+pub(crate) fn observed_request_prefix_chunks_async(
     req: &Request<Body>,
     max_bytes: usize,
-) -> impl std::future::Future<Output = Option<Bytes>> + Send + 'static {
+) -> impl std::future::Future<Output = Option<Vec<Bytes>>> + Send + 'static {
     let body = req.extensions().get::<ObservedBodyBytes>().cloned();
     async move {
         match body {
-            Some(body) => body.read_prefix_async(max_bytes).await.ok(),
+            Some(body) => body.read_prefix_chunks_async(max_bytes).await.ok(),
             None => None,
         }
     }
@@ -107,14 +106,14 @@ pub(crate) fn observed_response_body_reader(
         .map(|body| ObservedBodyReader { body })
 }
 
-pub(crate) fn observed_response_prefix_bytes_async(
+pub(crate) fn observed_response_prefix_chunks_async(
     response: &Response<Body>,
     max_bytes: usize,
-) -> impl std::future::Future<Output = Option<Bytes>> + Send + 'static {
+) -> impl std::future::Future<Output = Option<Vec<Bytes>>> + Send + 'static {
     let body = response.extensions().get::<ObservedBodyBytes>().cloned();
     async move {
         match body {
-            Some(body) => body.read_prefix_async(max_bytes).await.ok(),
+            Some(body) => body.read_prefix_chunks_async(max_bytes).await.ok(),
             None => None,
         }
     }
@@ -168,6 +167,30 @@ impl std::error::Error for ObservedBodyLimitExceeded {}
 
 pub(crate) fn is_observed_body_limit_exceeded(err: &anyhow::Error) -> bool {
     err.downcast_ref::<ObservedBodyLimitExceeded>().is_some()
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ObservedBodySpoolError {
+    #[error("observed body spool create failed for {direction}/{reason}")]
+    Create {
+        direction: &'static str,
+        reason: &'static str,
+        #[source]
+        source: qpx_core::secure_file::SecureFileError,
+    },
+    #[error("observed body spool {operation} failed for {direction}/{reason}")]
+    Io {
+        direction: &'static str,
+        reason: &'static str,
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[cfg(test)]
+pub(crate) fn is_observed_body_spool_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<ObservedBodySpoolError>().is_some()
 }
 
 struct LimitedBody {
@@ -463,20 +486,20 @@ async fn collect_observed_body(
             continue;
         }
         if file.is_none() {
-            let (mut spool, path) = create_observed_body_spool()?;
+            let (mut spool, path) = create_observed_body_spool(direction, reason)?;
             for existing in chunks.drain(..) {
-                spool.write_all(existing.as_ref()).await?;
+                write_observed_body_spool(&mut spool, existing.as_ref(), direction, reason).await?;
             }
             file = Some((spool, path));
         }
         if let Some((spool, _)) = file.as_mut() {
-            spool.write_all(chunk.as_ref()).await?;
+            write_observed_body_spool(spool, chunk.as_ref(), direction, reason).await?;
         }
     }
     let trailers = read_body_trailers(&mut body, read_timeout).await?;
     let mut spooled = 0usize;
     let storage = if let Some((mut spool, path)) = file {
-        spool.flush().await?;
+        flush_observed_body_spool(&mut spool, direction, reason).await?;
         drop(spool);
         spooled = size;
         ObservedBodyStorage::File(Arc::new(ObservedBodyFile { path }))
@@ -522,20 +545,20 @@ async fn collect_observed_body_for_size(
             continue;
         }
         if file.is_none() {
-            let (mut spool, path) = create_observed_body_spool()?;
+            let (mut spool, path) = create_observed_body_spool(direction, reason)?;
             for existing in chunks.drain(..) {
-                spool.write_all(existing.as_ref()).await?;
+                write_observed_body_spool(&mut spool, existing.as_ref(), direction, reason).await?;
             }
             file = Some((spool, path));
         }
         if let Some((spool, _)) = file.as_mut() {
-            spool.write_all(chunk.as_ref()).await?;
+            write_observed_body_spool(spool, chunk.as_ref(), direction, reason).await?;
         }
     }
     let trailers = read_body_trailers(&mut body, read_timeout).await?;
     let mut spooled = 0usize;
     let storage = if let Some((mut spool, path)) = file {
-        spool.flush().await?;
+        flush_observed_body_spool(&mut spool, direction, reason).await?;
         drop(spool);
         spooled = size;
         ObservedBodyStorage::File(Arc::new(ObservedBodyFile { path }))
@@ -558,30 +581,61 @@ fn record_body_buffering(
     bytes: usize,
     spooled: usize,
 ) {
-    counter!(
-        "qpx_body_buffering_events_total",
-        "direction" => direction,
-        "reason" => reason
-    )
-    .increment(1);
-    counter!(
-        "qpx_body_buffering_bytes_total",
-        "direction" => direction,
-        "reason" => reason
-    )
-    .increment(bytes as u64);
-    if spooled > 0 {
-        counter!(
-            "qpx_body_spooled_bytes_total",
-            "direction" => direction,
-            "reason" => reason
-        )
-        .increment(spooled as u64);
-    }
+    qpx_http::body::metrics::buffering(direction, reason, bytes, spooled);
 }
-fn create_observed_body_spool() -> Result<(TokioFile, PathBuf)> {
-    let (file, path) =
-        qpx_core::secure_file::create_secure_temp_file("qpx-observed-body", ".body")?;
+
+fn record_body_spool_error(direction: &'static str, reason: &'static str, error: &'static str) {
+    qpx_http::body::metrics::spool_error(direction, reason, error);
+}
+
+async fn write_observed_body_spool(
+    spool: &mut TokioFile,
+    bytes: &[u8],
+    direction: &'static str,
+    reason: &'static str,
+) -> Result<()> {
+    spool.write_all(bytes).await.map_err(|source| {
+        record_body_spool_error(direction, reason, "write");
+        ObservedBodySpoolError::Io {
+            direction,
+            reason,
+            operation: "write",
+            source,
+        }
+    })?;
+    Ok(())
+}
+
+async fn flush_observed_body_spool(
+    spool: &mut TokioFile,
+    direction: &'static str,
+    reason: &'static str,
+) -> Result<()> {
+    spool.flush().await.map_err(|source| {
+        record_body_spool_error(direction, reason, "flush");
+        ObservedBodySpoolError::Io {
+            direction,
+            reason,
+            operation: "flush",
+            source,
+        }
+    })?;
+    Ok(())
+}
+
+fn create_observed_body_spool(
+    direction: &'static str,
+    reason: &'static str,
+) -> Result<(TokioFile, PathBuf)> {
+    let (file, path) = qpx_core::secure_file::create_secure_temp_file("qpx-observed-body", ".body")
+        .map_err(|source| {
+            record_body_spool_error(direction, reason, "create");
+            ObservedBodySpoolError::Create {
+                direction,
+                reason,
+                source,
+            }
+        })?;
     Ok((TokioFile::from_std(file), path))
 }
 

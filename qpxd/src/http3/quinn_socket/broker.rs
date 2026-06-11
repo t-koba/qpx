@@ -1,3 +1,4 @@
+mod metrics;
 mod packet_pool;
 mod poller;
 mod queue;
@@ -90,14 +91,13 @@ pub(super) fn new_remote_broker_socket(
     filter: Arc<dyn QuinnUdpIngressFilter>,
 ) -> Result<QuinnEndpointSocket> {
     std_socket.set_nonblocking(true)?;
-    let local_addr = std_socket.local_addr()?;
+    let _ = std_socket.local_addr()?;
     let socket = Arc::new(RemoteBrokerSocket::new(
         std_socket,
         inherited_stream,
         filter,
     )?);
     socket.start_remote_tasks();
-    let _ = local_addr;
     Ok(QuinnEndpointSocket::new(socket))
 }
 

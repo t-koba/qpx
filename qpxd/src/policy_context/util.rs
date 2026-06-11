@@ -9,6 +9,7 @@ use sha2::Digest;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
@@ -117,9 +118,12 @@ pub(super) fn extract_assertion_token<'a>(
 }
 
 pub(super) fn load_hmac_secret_from_env(env_name: &str) -> Result<Arc<[u8]>> {
-    let secret = std::env::var(env_name)
-        .map_err(|_| anyhow!("missing environment variable {}", env_name))?;
-    Ok(Arc::<[u8]>::from(secret.into_bytes()))
+    let secret = Zeroizing::new(
+        std::env::var(env_name)
+            .map_err(|_| anyhow!("missing environment variable {}", env_name))?
+            .into_bytes(),
+    );
+    Ok(Arc::<[u8]>::from(secret.as_slice()))
 }
 
 pub(super) fn load_public_key_from_env(env_name: &str) -> Result<Arc<[u8]>> {

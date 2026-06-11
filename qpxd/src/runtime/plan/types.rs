@@ -5,14 +5,14 @@ use crate::http::policy::guard::CompiledHttpGuardProfile;
 use crate::http::policy::response_policy::HttpResponseRuleEngine;
 use crate::policy_context::EffectivePolicyContext;
 use crate::rate_limit::CompiledRateLimitPlan;
-use crate::tls::trust::CompiledUpstreamTlsTrust;
 use qpx_core::config::{
     ActionKind, CaptureRedactionConfig, DestinationResolutionOverrideConfig, FtpConfig,
-    RuntimeConfig, SseStreamingPolicy,
+    H3RequestBodyDrainConfig, RuntimeConfig, SseStreamingPolicy,
 };
 use qpx_core::matchers::CompiledMatch;
 use qpx_core::prefilter::MatchPrefilterHint;
 use qpx_core::rules::RuleMatchContext;
+use qpx_core::tls::CompiledUpstreamTlsTrust;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -78,6 +78,7 @@ pub struct H3ChannelLimits {
     pub datagram_channel_capacity: usize,
     pub webtransport_datagram_channel_capacity: usize,
     pub webtransport_stream_channel_capacity: usize,
+    pub request_body_drain: H3RequestBodyDrainConfig,
 }
 
 #[derive(Clone, Copy)]
@@ -321,10 +322,11 @@ impl CompiledForwardEdge {
             .unwrap_or(&self.default_plan)
     }
 
-    pub(crate) fn body_observation_limit(&self, default_limit: usize) -> usize {
+    pub(crate) fn request_body_observation_limit(&self, default_limit: usize) -> usize {
         self.rules.iter().fold(
-            self.default_plan.body_observation_limit(default_limit),
-            |limit, rule| rule.plan.body_observation_limit(limit),
+            self.default_plan
+                .request_body_observation_limit(default_limit),
+            |limit, rule| rule.plan.request_body_observation_limit(limit),
         )
     }
 }
@@ -343,10 +345,11 @@ impl CompiledTransparentEdge {
             .unwrap_or(&self.default_plan)
     }
 
-    pub(crate) fn body_observation_limit(&self, default_limit: usize) -> usize {
+    pub(crate) fn request_body_observation_limit(&self, default_limit: usize) -> usize {
         self.rules.iter().fold(
-            self.default_plan.body_observation_limit(default_limit),
-            |limit, rule| rule.plan.body_observation_limit(limit),
+            self.default_plan
+                .request_body_observation_limit(default_limit),
+            |limit, rule| rule.plan.request_body_observation_limit(limit),
         )
     }
 }
@@ -485,8 +488,12 @@ impl ExecutionPlan {
         self.capture_body_max_bytes()
     }
 
-    pub(crate) fn body_observation_limit(&self, default_limit: usize) -> usize {
-        default_limit
+    pub(crate) fn request_body_observation_limit(&self, default_limit: usize) -> usize {
+        default_limit.min(self.streaming.max_request_body_bytes)
+    }
+
+    pub(crate) fn response_body_observation_limit(&self, default_limit: usize) -> usize {
+        default_limit.min(self.streaming.max_response_body_bytes)
     }
 
     pub(super) fn add_buffering_reason(&mut self, reason: &'static str) {

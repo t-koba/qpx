@@ -1,10 +1,11 @@
 use super::super::destination::ConnectTarget;
 use crate::destination::DestinationInputs;
 use crate::runtime::Runtime;
-use crate::tls::{CompiledUpstreamTlsTrust, TlsClientHelloInfo, UpstreamCertificateInfo};
+use crate::tls::TlsClientHelloInfo;
 use anyhow::{Result, anyhow};
 use qpx_core::config::ActionConfig;
 use qpx_core::rules::RuleMatchContext;
+use qpx_core::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
 use std::net::SocketAddr;
 use std::sync::Arc;
 

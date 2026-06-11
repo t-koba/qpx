@@ -1,5 +1,7 @@
 #![cfg(all(feature = "http3", feature = "tls-rustls"))]
 
+#[path = "../cert_support/mod.rs"]
+mod cert_support;
 #[path = "../collect_body_support/mod.rs"]
 mod collect_body_support;
 #[path = "../common/mod.rs"]
@@ -8,19 +10,25 @@ pub mod common;
 mod empty_body_support;
 #[path = "../full_body_support/mod.rs"]
 mod full_body_support;
+#[path = "../h3_client_support/mod.rs"]
+mod h3_client_support;
 #[path = "../http1_service_shutdown_support/mod.rs"]
 mod http1_service_shutdown_support;
 #[path = "../http2_client_support/mod.rs"]
 mod http2_client_support;
+#[path = "../yaml_support/mod.rs"]
+mod yaml_support;
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::{Buf, Bytes};
+use cert_support::write_self_signed_cert;
 use collect_body_support::collect_body;
-use common::QpxdHandle;
+use common::{spawn_qpxd_on_random_port, temp_dir};
 use empty_body_support::empty_body;
 use full_body_support::full_body;
+use h3_client_support::{build_h3_test_client_config, build_quinn_client_endpoint};
 use http_body_util::combinators::BoxBody;
 use http1_service_shutdown_support::spawn_http1_service_with_shutdown;
 use http2_client_support::handshake_http2;
@@ -31,8 +39,7 @@ use std::collections::HashMap;
 use std::fs;
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -40,6 +47,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Instant, timeout};
+use yaml_support::yaml_quote_path;
 
 type TestBody = BoxBody<Bytes, std::convert::Infallible>;
 
@@ -137,129 +145,6 @@ runtime:
 
     Ok(())
 }
-fn spawn_qpxd(config_path: &Path, port: u16, log_path: PathBuf) -> Result<QpxdHandle> {
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_qpxd"));
-    let log = fs::File::create(&log_path).context("create qpxd log")?;
-    let log_err = log.try_clone().context("clone qpxd log")?;
-
-    let mut cmd = Command::new(bin);
-    cmd.arg("run")
-        .arg("--config")
-        .arg(config_path)
-        .env("RUST_LOG", "warn")
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-    let mut child = cmd.spawn().context("spawn qpxd")?;
-
-    // Wait for TCP listener to come up (best-effort).
-    let started = std::time::Instant::now();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
-    while started.elapsed() < Duration::from_secs(15) {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
-            return Ok(QpxdHandle::new(child));
-        }
-        if let Some(status) = child.try_wait().context("qpxd wait")? {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(anyhow!(
-                "qpxd exited early: {status} (log: {})",
-                log_path.display()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    Err(anyhow!(
-        "timed out waiting for qpxd to listen on {addr} (log: {})",
-        log_path.display()
-    ))
-}
-
-fn temp_dir(prefix: &str) -> Result<PathBuf> {
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("{prefix}.{suffix}"));
-    fs::create_dir_all(&dir).with_context(|| format!("create temp dir {}", dir.display()))?;
-    Ok(dir)
-}
-
-fn yaml_single_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
-fn yaml_quote_path(path: &Path) -> String {
-    yaml_single_quote(path.to_string_lossy().as_ref())
-}
-
-const PORT_PICK_ATTEMPTS: usize = 256;
-
-fn pick_free_tcp_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).context("pick free tcp port")?;
-    Ok(listener.local_addr()?.port())
-}
-
-fn is_retryable_bind_error_text(msg: &str) -> bool {
-    let msg = msg.to_ascii_lowercase();
-    msg.contains("address already in use")
-        || msg.contains("eaddrinuse")
-        || msg.contains("permission denied")
-        || msg.contains("operation not permitted")
-        || msg.contains("os error 1")
-}
-
-fn spawn_qpxd_on_random_port(
-    config_path: &Path,
-    log_path: PathBuf,
-    make_config: impl Fn(u16) -> String,
-) -> Result<(u16, QpxdHandle)> {
-    let mut last_err: Option<anyhow::Error> = None;
-    for _ in 0..PORT_PICK_ATTEMPTS {
-        let port = pick_free_tcp_port()?;
-        fs::write(config_path, make_config(port)).context("write qpxd config")?;
-        match spawn_qpxd(config_path, port, log_path.clone()) {
-            Ok(handle) => return Ok((port, handle)),
-            Err(err) => {
-                let log_retryable = fs::read_to_string(&log_path)
-                    .ok()
-                    .map(|s| is_retryable_bind_error_text(&s))
-                    .unwrap_or(false);
-                let err_retryable = is_retryable_bind_error_text(&err.to_string());
-                if log_retryable || err_retryable {
-                    last_err = Some(err);
-                    continue;
-                }
-                return Err(err);
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| {
-        anyhow!(
-            "failed to start qpxd after {} port attempts",
-            PORT_PICK_ATTEMPTS
-        )
-    }))
-}
-
-fn build_quinn_client_endpoint() -> Result<quinn::Endpoint> {
-    let addr: SocketAddr = SocketAddr::from(([127, 0, 0, 1], 0));
-    quinn::Endpoint::client(addr)
-        .map_err(|e| anyhow!(e))
-        .context("bind quinn client endpoint")
-}
-
 async fn read_at_least(
     stream: &mut TcpStream,
     mut already: Vec<u8>,
@@ -711,23 +596,6 @@ async fn handle_cache_backend(
     }
 }
 
-fn write_self_signed_cert(dir: &Path, dns_name: &str) -> Result<(PathBuf, PathBuf)> {
-    let mut params = rcgen::CertificateParams::new(vec![dns_name.to_string()])?;
-    params.distinguished_name = rcgen::DistinguishedName::new();
-    params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, dns_name);
-    let key_pair = rcgen::KeyPair::generate()?;
-    let cert = params.self_signed(&key_pair)?;
-    let cert_pem = cert.pem();
-    let key_pem = key_pair.serialize_pem();
-    let cert_path = dir.join(format!("{dns_name}.crt.pem"));
-    let key_path = dir.join(format!("{dns_name}.key.pem"));
-    fs::write(&cert_path, cert_pem).context("write cert")?;
-    fs::write(&key_path, key_pem).context("write key")?;
-    Ok((cert_path, key_path))
-}
-
 async fn connect_tls_with_alpn_h2(
     addr: impl tokio::net::ToSocketAddrs,
     ca_cert_pem: &Path,
@@ -750,25 +618,4 @@ async fn connect_tls_with_alpn_h2(
     let name = rustls::pki_types::ServerName::try_from(server_name.to_string())
         .map_err(|_| anyhow!("invalid server name"))?;
     Ok(timeout(Duration::from_secs(3), connector.connect(name, stream)).await??)
-}
-
-fn build_h3_test_client_config(ca_cert_pem: &Path) -> Result<quinn::ClientConfig> {
-    use quinn::crypto::rustls::QuicClientConfig;
-    let mut roots = quinn::rustls::RootCertStore::empty();
-    let certs = qpx_core::tls::load_cert_chain(ca_cert_pem)?;
-    let (added, _) = roots.add_parsable_certificates(certs);
-    if added == 0 {
-        return Err(anyhow!("no certs loaded from {}", ca_cert_pem.display()));
-    }
-
-    let provider = quinn::rustls::crypto::ring::default_provider();
-    let mut tls = quinn::rustls::ClientConfig::builder_with_provider(provider.into())
-        .with_protocol_versions(&[&quinn::rustls::version::TLS13])
-        .map_err(|_| anyhow!("failed to configure h3 client tls versions"))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![b"h3".to_vec()];
-    let quic_crypto =
-        QuicClientConfig::try_from(tls).map_err(|_| anyhow!("failed to build h3 client crypto"))?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic_crypto)))
 }

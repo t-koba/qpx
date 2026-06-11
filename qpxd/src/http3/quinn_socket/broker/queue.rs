@@ -1,7 +1,6 @@
 use super::super::frame::{BrokerFrame, InjectedPacket};
 use super::rate_limiter::ShardedDatagramRateLimiter;
 use bytes::Bytes;
-use metrics::counter;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
@@ -63,10 +62,5 @@ pub(super) fn allow_source_datagram(
 }
 
 pub(super) fn record_broker_drop(queue: &'static str, reason: &'static str) {
-    counter!(
-        "qpx_quic_broker_dropped_datagrams_total",
-        "queue" => queue,
-        "reason" => reason,
-    )
-    .increment(1);
+    super::metrics::dropped_datagram(queue, reason);
 }

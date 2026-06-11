@@ -9,6 +9,10 @@ fn load_config_preserves_streaming_grpc_and_sse_knobs() {
         &cfg,
         r#"runtime:
   body_channel_capacity: 8
+  h3_request_body_drain:
+    mode: bounded
+    max_concurrent: 9
+    timeout_ms: 3000
   max_grpc_message_bytes: 4194304
   max_grpc_web_trailer_bytes: 32768
   sse:
@@ -16,6 +20,8 @@ fn load_config_preserves_streaming_grpc_and_sse_knobs() {
     flush_policy: low_latency
     idle_timeout_ms: 120000
     max_stream_duration_ms: 600000
+    max_line_bytes: 4096
+    max_event_id_bytes: 128
 edges:
 - kind: forward
   name: forward
@@ -44,6 +50,8 @@ edges:
       max_message_bytes: 2097152
     sse:
       max_stream_duration_ms: 3600000
+      max_line_bytes: 8192
+      max_event_id_bytes: 256
     target:
       type: local_response
       response:
@@ -56,8 +64,16 @@ edges:
     fs::remove_dir_all(&dir).ok();
 
     assert_eq!(loaded.runtime.body_channel_capacity, 8);
+    assert!(matches!(
+        loaded.runtime.h3_request_body_drain.mode,
+        H3RequestBodyDrainMode::Bounded
+    ));
+    assert_eq!(loaded.runtime.h3_request_body_drain.max_concurrent, 9);
+    assert_eq!(loaded.runtime.h3_request_body_drain.timeout_ms, 3000);
     assert_eq!(loaded.runtime.max_grpc_web_trailer_bytes, 32768);
     assert_eq!(loaded.runtime.sse.idle_timeout_ms, 120000);
+    assert_eq!(loaded.runtime.sse.max_line_bytes, 4096);
+    assert_eq!(loaded.runtime.sse.max_event_id_bytes, 128);
     let ingress = loaded.ingress_edge_configs()[0];
     assert_eq!(
         ingress
@@ -96,6 +112,67 @@ edges:
     assert_eq!(
         route.sse.as_ref().map(|cfg| cfg.max_stream_duration_ms),
         Some(3_600_000)
+    );
+    assert_eq!(route.sse.as_ref().map(|cfg| cfg.max_line_bytes), Some(8192));
+    assert_eq!(
+        route.sse.as_ref().map(|cfg| cfg.max_event_id_bytes),
+        Some(256)
+    );
+}
+
+#[test]
+fn load_config_rejects_h3_drain_max_concurrent_zero() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("h3-drain-max-concurrent.yaml");
+    write_config(
+        &cfg,
+        r#"runtime:
+  h3_request_body_drain:
+    max_concurrent: 0
+edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action:
+    type: direct"#,
+    )
+    .expect("write");
+
+    let err = load_config(&cfg).expect_err("must reject zero H3 drain concurrency");
+    fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        format!("{err:?}").contains("h3_request_body_drain.max_concurrent must be >= 1"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn load_config_rejects_h3_drain_timeout_zero() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("h3-drain-timeout.yaml");
+    write_config(
+        &cfg,
+        r#"runtime:
+  h3_request_body_drain:
+    timeout_ms: 0
+edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action:
+    type: direct"#,
+    )
+    .expect("write");
+
+    let err = load_config(&cfg).expect_err("must reject zero H3 drain timeout");
+    fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        format!("{err:?}").contains("h3_request_body_drain.timeout_ms must be >= 1"),
+        "unexpected error: {err:?}"
     );
 }
 

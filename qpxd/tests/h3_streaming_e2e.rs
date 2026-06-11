@@ -3,19 +3,22 @@
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::{Buf, Bytes};
-use quinn::crypto::rustls::QuicClientConfig;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, Instant, timeout};
 
+mod cert_support;
 pub mod common;
+mod h3_client_support;
 mod streaming_backend;
+mod yaml_support;
 
-use common::QpxdHandle;
+use cert_support::write_self_signed_cert;
+use common::{QpxdHandle, pick_free_tcp_port, spawn_qpxd, temp_dir};
+use h3_client_support::{build_h3_test_client_config, build_quinn_client_endpoint};
+use yaml_support::yaml_quote_path;
 
 const H3_HOST: &str = "reverse.local";
 
@@ -428,114 +431,4 @@ async fn request_h3(
         trailers,
         data_error,
     })
-}
-
-fn temp_dir(prefix: &str) -> Result<PathBuf> {
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("{prefix}.{suffix}"));
-    fs::create_dir_all(&dir).with_context(|| format!("create temp dir {}", dir.display()))?;
-    Ok(dir)
-}
-
-fn yaml_quote_path(path: &Path) -> String {
-    let mut out = String::with_capacity(path.as_os_str().len() + 2);
-    out.push('\'');
-    for ch in path.to_string_lossy().chars() {
-        if ch == '\'' {
-            out.push_str("''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
-fn pick_free_tcp_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).context("pick free tcp port")?;
-    Ok(listener.local_addr()?.port())
-}
-
-fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Result<QpxdHandle> {
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_qpxd"));
-    let log = fs::File::create(&log_path).context("create qpxd log")?;
-    let log_err = log.try_clone().context("clone qpxd log")?;
-
-    let mut cmd = Command::new(bin);
-    cmd.arg("run")
-        .arg("--config")
-        .arg(config_path)
-        .env("RUST_LOG", "warn")
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-    let mut child = cmd.spawn().context("spawn qpxd")?;
-    let started = std::time::Instant::now();
-    let addr = SocketAddr::from(([127, 0, 0, 1], ready_port));
-    while started.elapsed() < Duration::from_secs(15) {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
-            return Ok(QpxdHandle::new(child));
-        }
-        if let Some(status) = child.try_wait()? {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(anyhow!(
-                "qpxd exited early while starting HTTP/3 streaming config: {status} (log: {})",
-                log_path.display()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    Err(anyhow!(
-        "timed out waiting for qpxd to listen on {addr} (log: {})",
-        log_path.display()
-    ))
-}
-
-fn write_self_signed_cert(dir: &Path, dns_name: &str) -> Result<(PathBuf, PathBuf)> {
-    let mut params = rcgen::CertificateParams::new(vec![dns_name.to_string()])?;
-    params.distinguished_name = rcgen::DistinguishedName::new();
-    params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, dns_name);
-    let key_pair = rcgen::KeyPair::generate()?;
-    let cert = params.self_signed(&key_pair)?;
-    let cert_pem = cert.pem();
-    let key_pem = key_pair.serialize_pem();
-    let cert_path = dir.join(format!("{dns_name}.crt.pem"));
-    let key_path = dir.join(format!("{dns_name}.key.pem"));
-    fs::write(&cert_path, cert_pem).context("write cert")?;
-    fs::write(&key_path, key_pem).context("write key")?;
-    Ok((cert_path, key_path))
-}
-
-fn build_quinn_client_endpoint() -> Result<quinn::Endpoint> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
-    quinn::Endpoint::client(addr)
-        .map_err(|err| anyhow!(err))
-        .context("bind quinn client endpoint")
-}
-
-fn build_h3_test_client_config(ca_cert_pem: &Path) -> Result<quinn::ClientConfig> {
-    let mut roots = quinn::rustls::RootCertStore::empty();
-    let certs = qpx_core::tls::load_cert_chain(ca_cert_pem)?;
-    let (added, _) = roots.add_parsable_certificates(certs);
-    if added == 0 {
-        return Err(anyhow!("no certs loaded from {}", ca_cert_pem.display()));
-    }
-
-    let provider = quinn::rustls::crypto::ring::default_provider();
-    let mut tls = quinn::rustls::ClientConfig::builder_with_provider(provider.into())
-        .with_protocol_versions(&[&quinn::rustls::version::TLS13])
-        .map_err(|_| anyhow!("failed to configure h3 client tls versions"))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![b"h3".to_vec()];
-    let quic_crypto =
-        QuicClientConfig::try_from(tls).map_err(|_| anyhow!("failed to build h3 client crypto"))?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic_crypto)))
 }

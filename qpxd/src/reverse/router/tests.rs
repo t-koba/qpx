@@ -10,8 +10,8 @@ use qpx_core::config::{
 };
 use std::sync::atomic::Ordering;
 
-fn empty_pool() -> Arc<UpstreamPool> {
-    UpstreamPool::new(
+fn empty_pool() -> Arc<UpstreamEndpointSet> {
+    UpstreamEndpointSet::new(
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -76,6 +76,7 @@ fn route_policy_uses_configured_values() {
             retry: Some(ResilienceRetryConfig {
                 attempts: 4,
                 backoff_ms: 250,
+                retry_body_replay: false,
                 retry_body_threshold_bytes: 64 * 1024,
                 budget: None,
             }),
@@ -194,6 +195,7 @@ fn draining_endpoint_is_not_selected_while_healthy_peers_exist() {
     let policy = RoutePolicy {
         retry_attempts: 1,
         retry_backoff: Duration::ZERO,
+        retry_body_replay: false,
         retry_body_threshold_bytes: 64 * 1024,
         retry_budget: RetryBudgetRuntime::new(1),
         timeout: Duration::from_secs(30),
@@ -226,6 +228,7 @@ fn half_open_endpoint_requires_zero_inflight() {
     let policy = RoutePolicy {
         retry_attempts: 1,
         retry_backoff: Duration::ZERO,
+        retry_body_replay: false,
         retry_body_threshold_bytes: 64 * 1024,
         retry_budget: RetryBudgetRuntime::new(1),
         timeout: Duration::from_secs(30),
@@ -310,7 +313,7 @@ fn dynamic_discovery_churn_reuses_draining_endpoint_when_target_returns() {
         drain_timeout: Some(Duration::from_secs(10)),
     };
     let first = Arc::new(UpstreamEndpoint::new("http://a".to_string()));
-    let pool = UpstreamPool::new(vec![], vec![first.clone()], vec![], lifecycle.clone());
+    let pool = UpstreamEndpointSet::new(vec![], vec![first.clone()], vec![], lifecycle.clone());
 
     let combined =
         pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);

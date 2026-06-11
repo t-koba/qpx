@@ -3,6 +3,10 @@ name = "qpx-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 default = [
@@ -17,9 +21,15 @@ tls-rustls = [
   "dep:rcgen",
   "dep:lru",
   "dep:chrono",
+  "tls-cert-info",
 ]
 
-tls-native = []
+tls-native = ["tls-cert-info"]
+
+tls-cert-info = [
+  "dep:sha2",
+  "dep:x509-parser",
+]
 
 ipc-support = ["dep:tokio", "dep:memmap2", "dep:dirs-next"]
 
@@ -44,12 +54,15 @@ rustls = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 lru = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+x509-parser = { workspace = true, optional = true }
 
 # Async runtime
 tokio = { workspace = true, optional = true }
 memmap2 = { workspace = true, optional = true }
 bytes.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

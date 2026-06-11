@@ -25,6 +25,19 @@ async fn observe_response_body_size_rejects_before_exceeding_hard_cap() {
 }
 
 #[tokio::test]
+async fn observed_body_spool_errors_remain_typed() {
+    let err: anyhow::Error = ObservedBodySpoolError::Io {
+        direction: "request",
+        reason: "request.body",
+        operation: "write",
+        source: std::io::Error::other("spool write failed"),
+    }
+    .into();
+    assert!(is_observed_body_spool_error(&err));
+    assert!(err.to_string().contains("spool write failed"));
+}
+
+#[tokio::test]
 async fn observe_request_body_size_uses_content_length_without_buffering() {
     let (_sender, body) = Body::channel();
     let req = Request::builder()
@@ -109,7 +122,7 @@ async fn observe_request_body_size_without_content_length_replays_from_spool_onl
 
     assert_eq!(observed_request_size(&req), Some(payload.len() as u64));
     assert!(!has_observed_request_bytes(&req));
-    let replayed = crate::http::body::to_bytes(req.into_body())
+    let replayed = qpx_http::body::to_bytes(req.into_body())
         .await
         .expect("replayed body");
     assert_eq!(replayed.as_ref(), payload.as_slice());
@@ -127,7 +140,7 @@ async fn observe_request_body_size_without_content_length_keeps_small_body_in_me
         .expect("observed");
 
     assert_eq!(observed_request_size(&req), Some(payload.len() as u64));
-    let replayed = crate::http::body::to_bytes(req.into_body())
+    let replayed = qpx_http::body::to_bytes(req.into_body())
         .await
         .expect("replayed body");
     assert_eq!(replayed.as_ref(), payload.as_slice());
@@ -171,7 +184,7 @@ async fn buffer_request_body_spools_large_observed_body() {
         payload.as_slice()
     );
 
-    let replayed = crate::http::body::to_bytes(req.into_body())
+    let replayed = qpx_http::body::to_bytes(req.into_body())
         .await
         .expect("replayed body");
     assert_eq!(replayed.as_ref(), payload.as_slice());

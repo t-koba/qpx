@@ -15,7 +15,7 @@ impl WebTransportPolicyResponder<'_> {
     pub(super) async fn send(
         &self,
         req_stream: &mut qpx_h3::RequestStream,
-        response: Response<crate::http::body::Body>,
+        response: Response<qpx_http::body::Body>,
         outcome: crate::http::dispatch::DispatchOutcome,
         matched_rule: Option<&str>,
         ext_authz_policy_id: Option<&str>,

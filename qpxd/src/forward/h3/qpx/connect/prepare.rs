@@ -38,11 +38,6 @@ pub(super) struct PreparedQpxConnect {
     pub(super) sanitized_headers: http::HeaderMap,
 }
 
-pub(super) enum QpxConnectPreparation {
-    Continue(Box<PreparedQpxConnect>),
-    Responded,
-}
-
 pub(super) struct PrepareQpxConnectInput<'a> {
     pub(super) req_head: &'a http::Request<()>,
     pub(super) req_stream: &'a mut qpx_h3::RequestStream,
@@ -58,6 +53,14 @@ pub(super) struct ValidatedQpxConnect {
     pub(super) port: u16,
     pub(super) auth_uri: String,
     pub(super) headers: http::HeaderMap,
+}
+
+struct ValidatedQpxConnectTarget {
+    host: String,
+    port: u16,
+    authority_host_for_validation: String,
+    authority_port_for_validation: u16,
+    auth_uri: String,
 }
 
 pub(super) struct ConnectPolicyContext {
@@ -80,18 +83,18 @@ pub(super) struct EvaluatedConnectPolicy {
 
 pub(super) async fn prepare_qpx_connect_request(
     mut input: PrepareQpxConnectInput<'_>,
-) -> Result<QpxConnectPreparation> {
+) -> Result<Option<Box<PreparedQpxConnect>>> {
     let Some(validated) = validate_connect_request(&mut input).await? else {
-        return Ok(QpxConnectPreparation::Responded);
+        return Ok(None);
     };
     let context = build_connect_policy_context(&input, validated)?;
     let Some(evaluated) = evaluate_connect_policy(&mut input, context).await? else {
-        return Ok(QpxConnectPreparation::Responded);
+        return Ok(None);
     };
     let Some(prepared) = apply_connect_rate_limits(&mut input, evaluated).await? else {
-        return Ok(QpxConnectPreparation::Responded);
+        return Ok(None);
     };
-    Ok(QpxConnectPreparation::Continue(Box::new(prepared)))
+    Ok(Some(Box::new(prepared)))
 }
 
 async fn validate_connect_request(
@@ -107,29 +110,14 @@ async fn validate_connect_request(
     let is_connect_udp = protocol == Some(&qpx_h3::Protocol::ConnectUdp);
     let is_extended_connect = protocol.is_some();
 
-    if is_connect_udp {
-        let Some(cfg) = connect_udp_cfg else {
-            send_qpx_static_response(
-                req_stream,
-                StatusCode::NOT_IMPLEMENTED,
-                state.messages.connect_udp_disabled.as_bytes(),
-                &http::Method::CONNECT,
-                proxy_name,
-            )
-            .await?;
-            return Ok(None);
-        };
-        if !cfg.enabled {
-            send_qpx_static_response(
-                req_stream,
-                StatusCode::NOT_IMPLEMENTED,
-                state.messages.connect_udp_disabled.as_bytes(),
-                &http::Method::CONNECT,
-                proxy_name,
-            )
-            .await?;
-            return Ok(None);
-        }
+    if is_connect_udp && !connect_udp_cfg.is_some_and(|cfg| cfg.enabled) {
+        return reject_qpx_connect(
+            req_stream,
+            StatusCode::NOT_IMPLEMENTED,
+            state.messages.connect_udp_disabled.as_bytes(),
+            proxy_name,
+        )
+        .await;
     }
 
     let req_authority = match req_head.uri().authority().map(|a| a.as_str().to_string()) {
@@ -140,129 +128,23 @@ async fn validate_connect_request(
             } else {
                 b"missing CONNECT authority".as_slice()
             };
-            send_qpx_static_response(
-                req_stream,
-                StatusCode::BAD_REQUEST,
-                message,
-                &http::Method::CONNECT,
-                proxy_name,
-            )
-            .await?;
-            return Ok(None);
+            return reject_bad_qpx_connect(req_stream, message, proxy_name).await;
         }
     };
 
-    let (host, port, authority_host_for_validation, authority_port_for_validation, auth_uri) =
-        if is_connect_udp {
-            let uri_template = connect_udp_cfg.and_then(|cfg| cfg.uri_template.as_deref());
-            let (host, port) = match parse_connect_udp_target(req_head.uri(), uri_template) {
-                Ok(parsed) => parsed,
-                Err(_) => {
-                    send_qpx_static_response(
-                        req_stream,
-                        StatusCode::BAD_REQUEST,
-                        b"invalid CONNECT-UDP target",
-                        &http::Method::CONNECT,
-                        proxy_name,
-                    )
-                    .await?;
-                    return Ok(None);
-                }
-            };
-            let scheme = match validate_connect_udp_scheme(req_head.uri(), uri_template) {
-                Ok(scheme) => scheme,
-                Err(_) => {
-                    let message = if req_head.uri().scheme_str().is_some() {
-                        b"invalid CONNECT-UDP :scheme".as_slice()
-                    } else {
-                        b"missing CONNECT-UDP :scheme".as_slice()
-                    };
-                    send_qpx_static_response(
-                        req_stream,
-                        StatusCode::BAD_REQUEST,
-                        message,
-                        &http::Method::CONNECT,
-                        proxy_name,
-                    )
-                    .await?;
-                    return Ok(None);
-                }
-            };
-            if !scheme.eq_ignore_ascii_case("https") {
-                send_qpx_static_response(
-                    req_stream,
-                    StatusCode::BAD_REQUEST,
-                    b"invalid CONNECT-UDP :scheme",
-                    &http::Method::CONNECT,
-                    proxy_name,
-                )
-                .await?;
-                return Ok(None);
-            }
-            let default_port = 443;
-            let (authority_host, authority_port) =
-                match parse_connect_authority_with_default(&req_authority, Some(default_port)) {
-                    Ok(parsed) => parsed,
-                    Err(_) => {
-                        send_qpx_static_response(
-                            req_stream,
-                            StatusCode::BAD_REQUEST,
-                            b"invalid CONNECT-UDP authority",
-                            &http::Method::CONNECT,
-                            proxy_name,
-                        )
-                        .await?;
-                        return Ok(None);
-                    }
-                };
-            let path = match req_head.uri().path_and_query().map(|pq| pq.as_str()) {
-                Some(path) => path,
-                None => {
-                    send_qpx_static_response(
-                        req_stream,
-                        StatusCode::BAD_REQUEST,
-                        b"missing CONNECT-UDP :path",
-                        &http::Method::CONNECT,
-                        proxy_name,
-                    )
-                    .await?;
-                    return Ok(None);
-                }
-            };
-            let auth_uri = format!("{scheme}://{req_authority}{path}");
-            (host, port, authority_host, authority_port, auth_uri)
-        } else {
-            let default_port = is_extended_connect
-                .then(|| default_connect_port_for_scheme(req_head.uri().scheme_str()))
-                .flatten();
-            let (host, port) =
-                match parse_connect_authority_with_default(&req_authority, default_port) {
-                    Ok(parsed) => parsed,
-                    Err(_) => {
-                        send_qpx_static_response(
-                            req_stream,
-                            StatusCode::BAD_REQUEST,
-                            b"invalid CONNECT authority",
-                            &http::Method::CONNECT,
-                            proxy_name,
-                        )
-                        .await?;
-                        return Ok(None);
-                    }
-                };
-            let auth_uri = if is_extended_connect {
-                let scheme = req_head.uri().scheme_str().unwrap_or("https");
-                let path = req_head
-                    .uri()
-                    .path_and_query()
-                    .map(|pq| pq.as_str())
-                    .unwrap_or("/");
-                format!("{scheme}://{req_authority}{path}")
-            } else {
-                req_authority.clone()
-            };
-            (host.clone(), port, host, port, auth_uri)
-        };
+    let Some(target) = resolve_qpx_connect_target(
+        req_head,
+        req_stream,
+        connect_udp_cfg,
+        req_authority.as_str(),
+        is_connect_udp,
+        is_extended_connect,
+        proxy_name,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
 
     let headers = match h1_headers_to_http(req_head.headers()) {
         Ok(headers) => headers,
@@ -272,23 +154,15 @@ async fn validate_connect_request(
             } else {
                 b"invalid CONNECT headers".as_slice()
             };
-            send_qpx_static_response(
-                req_stream,
-                StatusCode::BAD_REQUEST,
-                message,
-                &http::Method::CONNECT,
-                proxy_name,
-            )
-            .await?;
-            return Ok(None);
+            return reject_bad_qpx_connect(req_stream, message, proxy_name).await;
         }
     };
 
     if let Err(err) = validate_qpx_connect_head(
         req_head,
         &headers,
-        authority_host_for_validation.as_str(),
-        authority_port_for_validation,
+        target.authority_host_for_validation.as_str(),
+        target.authority_port_for_validation,
         protocol,
     ) {
         let message = if is_connect_udp {
@@ -297,22 +171,142 @@ async fn validate_connect_request(
             b"bad CONNECT request".as_slice()
         };
         warn!(error = ?err, "invalid forward HTTP/3 qpx-h3 CONNECT request");
-        send_qpx_static_response(
-            req_stream,
-            StatusCode::BAD_REQUEST,
-            message,
-            &http::Method::CONNECT,
-            proxy_name,
-        )
-        .await?;
-        return Ok(None);
+        return reject_bad_qpx_connect(req_stream, message, proxy_name).await;
     }
     Ok(Some(ValidatedQpxConnect {
         req_authority,
+        host: target.host,
+        port: target.port,
+        auth_uri: target.auth_uri,
+        headers,
+    }))
+}
+
+async fn reject_qpx_connect<T>(
+    req_stream: &mut qpx_h3::RequestStream,
+    status: StatusCode,
+    message: &[u8],
+    proxy_name: &str,
+) -> Result<Option<T>> {
+    send_qpx_static_response(
+        req_stream,
+        status,
+        message,
+        &http::Method::CONNECT,
+        proxy_name,
+    )
+    .await?;
+    Ok(None)
+}
+
+async fn reject_bad_qpx_connect<T>(
+    req_stream: &mut qpx_h3::RequestStream,
+    message: &[u8],
+    proxy_name: &str,
+) -> Result<Option<T>> {
+    reject_qpx_connect(req_stream, StatusCode::BAD_REQUEST, message, proxy_name).await
+}
+
+async fn resolve_qpx_connect_target(
+    req_head: &http::Request<()>,
+    req_stream: &mut qpx_h3::RequestStream,
+    connect_udp_cfg: Option<&ConnectUdpConfig>,
+    req_authority: &str,
+    is_connect_udp: bool,
+    is_extended_connect: bool,
+    proxy_name: &str,
+) -> Result<Option<ValidatedQpxConnectTarget>> {
+    if is_connect_udp {
+        return resolve_qpx_connect_udp_target(
+            req_head,
+            req_stream,
+            connect_udp_cfg,
+            req_authority,
+            proxy_name,
+        )
+        .await;
+    }
+    let default_port = is_extended_connect
+        .then(|| default_connect_port_for_scheme(req_head.uri().scheme_str()))
+        .flatten();
+    let (host, port) = match parse_connect_authority_with_default(req_authority, default_port) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return reject_bad_qpx_connect(req_stream, b"invalid CONNECT authority", proxy_name)
+                .await;
+        }
+    };
+    let auth_uri = if is_extended_connect {
+        let scheme = req_head.uri().scheme_str().unwrap_or("https");
+        let path = req_head
+            .uri()
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+        format!("{scheme}://{req_authority}{path}")
+    } else {
+        req_authority.to_owned()
+    };
+    Ok(Some(ValidatedQpxConnectTarget {
+        authority_host_for_validation: host.clone(),
+        authority_port_for_validation: port,
+        auth_uri,
         host,
         port,
-        auth_uri,
-        headers,
+    }))
+}
+
+async fn resolve_qpx_connect_udp_target(
+    req_head: &http::Request<()>,
+    req_stream: &mut qpx_h3::RequestStream,
+    connect_udp_cfg: Option<&ConnectUdpConfig>,
+    req_authority: &str,
+    proxy_name: &str,
+) -> Result<Option<ValidatedQpxConnectTarget>> {
+    let uri_template = connect_udp_cfg.and_then(|cfg| cfg.uri_template.as_deref());
+    let (host, port) = match parse_connect_udp_target(req_head.uri(), uri_template) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return reject_bad_qpx_connect(req_stream, b"invalid CONNECT-UDP target", proxy_name)
+                .await;
+        }
+    };
+    let scheme = match validate_connect_udp_scheme(req_head.uri(), uri_template) {
+        Ok(scheme) => scheme,
+        Err(_) => {
+            let message = if req_head.uri().scheme_str().is_some() {
+                b"invalid CONNECT-UDP :scheme".as_slice()
+            } else {
+                b"missing CONNECT-UDP :scheme".as_slice()
+            };
+            return reject_bad_qpx_connect(req_stream, message, proxy_name).await;
+        }
+    };
+    if !scheme.eq_ignore_ascii_case("https") {
+        return reject_bad_qpx_connect(req_stream, b"invalid CONNECT-UDP :scheme", proxy_name)
+            .await;
+    }
+    let (authority_host, authority_port) =
+        match parse_connect_authority_with_default(req_authority, Some(443)) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return reject_bad_qpx_connect(
+                    req_stream,
+                    b"invalid CONNECT-UDP authority",
+                    proxy_name,
+                )
+                .await;
+            }
+        };
+    let Some(path) = req_head.uri().path_and_query().map(|pq| pq.as_str()) else {
+        return reject_bad_qpx_connect(req_stream, b"missing CONNECT-UDP :path", proxy_name).await;
+    };
+    Ok(Some(ValidatedQpxConnectTarget {
+        host,
+        port,
+        authority_host_for_validation: authority_host,
+        authority_port_for_validation: authority_port,
+        auth_uri: format!("{scheme}://{req_authority}{path}"),
     }))
 }
 

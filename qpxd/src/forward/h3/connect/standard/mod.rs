@@ -1,4 +1,3 @@
-use crate::http::body::Body;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::connect_established_response as connect_established;
 use crate::http::protocol::l7::finalize_response_with_headers;
@@ -11,6 +10,7 @@ use anyhow::Result;
 use hyper::Response;
 use qpx_core::config::ActionConfig;
 use qpx_core::rules::CompiledHeaderControl;
+use qpx_http::body::Body;
 use qpx_observability::access_log::RequestLogContext;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -49,11 +49,6 @@ pub(super) struct PreparedH3Connect {
     pub(super) identity: crate::policy_context::ResolvedIdentity,
 }
 
-pub(super) enum H3ConnectPreparation {
-    Continue(Box<PreparedH3Connect>),
-    Responded,
-}
-
 pub(super) struct H3PolicyResponseContext<'a> {
     pub(super) request_method: &'a http::Method,
     pub(super) state: &'a crate::runtime::RuntimeState,
@@ -88,7 +83,7 @@ pub(super) fn build_h3_connect_success_response(
         header_control,
         false,
     );
-    let status = crate::http::protocol::semantics::validate_http_status_class(
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
         response.status(),
         "HTTP/3 CONNECT response",
     )?;

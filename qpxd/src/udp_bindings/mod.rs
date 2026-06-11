@@ -190,9 +190,7 @@ impl UdpBindings {
 
         #[cfg(not(feature = "http3"))]
         {
-            let _ = config;
-            let _ = previous_config;
-            let _ = previous;
+            let _ = (config, previous_config, previous);
             Ok(Self {})
         }
     }
@@ -242,6 +240,7 @@ impl UdpBindings {
         let Some(raw) = std::env::var_os(ENV_INHERITED_UDP_BINDINGS) else {
             return Ok(None);
         };
+        // SAFETY: the process environment is mutated only during controlled handoff bootstrap.
         unsafe {
             std::env::remove_var(ENV_INHERITED_UDP_BINDINGS);
         }
@@ -358,8 +357,7 @@ impl UdpBindings {
 
         #[cfg(not(feature = "http3"))]
         {
-            let _ = config;
-            let _ = raw;
+            let _ = (config, raw);
             Ok(Some(Self {}))
         }
     }

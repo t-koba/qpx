@@ -1,9 +1,11 @@
 use http::HeaderMap;
-use metrics::{counter, histogram};
-use std::time::Duration;
+use qpx_core::config::SseStreamingPolicy;
 
-const MAX_SSE_LINE_BYTES: usize = 8 * 1024;
-const MAX_SSE_EVENT_ID_BYTES: usize = 256;
+#[path = "sse/metrics.rs"]
+mod metrics;
+pub(crate) use metrics::{
+    SseActiveGuard, SseMetricHandles, emit_slow_upstream_body, emit_sse_reconnect,
+};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct SseStreamSummary {
@@ -18,24 +20,47 @@ pub(crate) struct SseFeedResult {
     pub(crate) bytes: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct SseEventObserver {
     line: Vec<u8>,
     line_truncated: bool,
     in_event: bool,
+    max_line_bytes: usize,
+    max_event_id_bytes: usize,
     summary: SseStreamSummary,
+}
+
+impl Default for SseEventObserver {
+    fn default() -> Self {
+        Self {
+            line: Vec::new(),
+            line_truncated: false,
+            in_event: false,
+            max_line_bytes: SseStreamingPolicy::default().max_line_bytes,
+            max_event_id_bytes: SseStreamingPolicy::default().max_event_id_bytes,
+            summary: SseStreamSummary::default(),
+        }
+    }
 }
 
 impl SseEventObserver {
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self::with_policy(SseStreamingPolicy::default())
+    }
+
+    pub(crate) fn with_policy(policy: SseStreamingPolicy) -> Self {
+        Self {
+            max_line_bytes: policy.max_line_bytes,
+            max_event_id_bytes: policy.max_event_id_bytes,
+            ..Self::default()
+        }
     }
 
     pub(crate) fn feed(&mut self, chunk: &[u8]) -> SseFeedResult {
         let before = self.summary.event_count;
         self.summary.byte_count = self.summary.byte_count.saturating_add(chunk.len() as u64);
         for byte in chunk {
-            if self.line.len() < MAX_SSE_LINE_BYTES {
+            if self.line.len() < self.max_line_bytes {
                 self.line.push(*byte);
             } else {
                 self.line_truncated = true;
@@ -81,7 +106,7 @@ impl SseEventObserver {
         self.in_event = true;
         if let Some(value) = self.line.strip_prefix(b"id:") {
             let value = value.strip_prefix(b" ").unwrap_or(value);
-            let value = &value[..value.len().min(MAX_SSE_EVENT_ID_BYTES)];
+            let value = &value[..value.len().min(self.max_event_id_bytes)];
             self.summary.last_event_id = Some(String::from_utf8_lossy(value).into_owned());
         }
         self.line.clear();
@@ -90,58 +115,6 @@ impl SseEventObserver {
 
 pub(crate) fn is_sse_reconnect(headers: &HeaderMap) -> bool {
     headers.contains_key("last-event-id")
-}
-
-pub(crate) fn emit_sse_reconnect(listener: &str, route: &str) {
-    counter!(
-        "qpx_sse_reconnections_total",
-        "listener" => listener.to_string(),
-        "route" => route.to_string()
-    )
-    .increment(1);
-}
-
-pub(crate) fn emit_sse_summary(
-    listener: &str,
-    route: &str,
-    summary: &SseStreamSummary,
-    duration: Duration,
-) {
-    counter!(
-        "qpx_sse_events_total",
-        "listener" => listener.to_string(),
-        "route" => route.to_string()
-    )
-    .increment(summary.event_count);
-    counter!(
-        "qpx_sse_bytes_total",
-        "listener" => listener.to_string(),
-        "route" => route.to_string()
-    )
-    .increment(summary.byte_count);
-    histogram!(
-        "qpx_sse_stream_duration_seconds",
-        "listener" => listener.to_string(),
-        "route" => route.to_string()
-    )
-    .record(duration.as_secs_f64());
-}
-
-pub(crate) fn emit_sse_idle_disconnect(listener: &str, route: &str) {
-    counter!(
-        "qpx_sse_idle_disconnects_total",
-        "listener" => listener.to_string(),
-        "route" => route.to_string()
-    )
-    .increment(1);
-}
-
-pub(crate) fn emit_slow_upstream_body(listener: &str) {
-    counter!(
-        "qpx_upstream_slow_body_total",
-        "listener" => listener.to_string()
-    )
-    .increment(1);
 }
 
 #[cfg(test)]
@@ -167,7 +140,8 @@ mod tests {
     #[test]
     fn sse_event_observer_caps_line_and_event_id_storage() {
         let mut observer = SseEventObserver::new();
-        let long_line = vec![b'a'; MAX_SSE_LINE_BYTES + 32];
+        let defaults = qpx_core::config::SseStreamingPolicy::default();
+        let long_line = vec![b'a'; defaults.max_line_bytes + 32];
         observer.feed(long_line.as_slice());
         observer.feed(b"\n\n");
         let summary = observer.summary();
@@ -175,14 +149,14 @@ mod tests {
 
         let mut observer = SseEventObserver::new();
         let mut id = b"id: ".to_vec();
-        id.extend(std::iter::repeat_n(b'x', MAX_SSE_EVENT_ID_BYTES + 32));
+        id.extend(std::iter::repeat_n(b'x', defaults.max_event_id_bytes + 32));
         id.extend_from_slice(b"\ndata: ok\n\n");
         observer.feed(id.as_slice());
         let summary = observer.summary();
         assert_eq!(summary.event_count, 1);
         assert_eq!(
             summary.last_event_id.as_ref().map(String::len),
-            Some(MAX_SSE_EVENT_ID_BYTES)
+            Some(defaults.max_event_id_bytes)
         );
     }
 }

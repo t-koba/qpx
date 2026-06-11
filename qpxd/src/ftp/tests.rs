@@ -7,9 +7,9 @@ use super::{
     MAX_FTP_CONTROL_LINE, MAX_FTP_DEADLINE, OperationTimedOut, RequestBodyTooLarge,
     ResponseBodyTooLarge, handle_ftp,
 };
-use crate::http::body::Body;
 use hyper::{Method, Request, StatusCode};
 use qpx_core::config::FtpConfig;
+use qpx_http::body::Body;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -65,7 +65,12 @@ impl<'ast> Visit<'ast> for FinalizeVisitor {
 #[derive(Default)]
 pub(crate) struct UnwrapVisitor {
     fn_stack: Vec<String>,
-    pub(crate) unwraps: Vec<String>,
+    pub(crate) panicking_calls: Vec<PanickingMethodCall>,
+}
+
+pub(crate) struct PanickingMethodCall {
+    pub(crate) enclosing_fn: String,
+    pub(crate) method: String,
 }
 
 impl UnwrapVisitor {
@@ -115,8 +120,11 @@ impl<'ast> Visit<'ast> for UnwrapVisitor {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if node.method == "unwrap" {
-            self.unwraps.push(self.current_fn());
+        if matches!(node.method.to_string().as_str(), "unwrap" | "expect") {
+            self.panicking_calls.push(PanickingMethodCall {
+                enclosing_fn: self.current_fn(),
+                method: node.method.to_string(),
+            });
         }
         syn::visit::visit_expr_method_call(self, node);
     }

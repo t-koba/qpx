@@ -182,7 +182,10 @@ runtime:
         .as_mut()
         .ok_or_else(|| anyhow!("missing extended CONNECT datagrams"))?
         .sender
-        .send_datagram(Bytes::from_static(b"dg"))?;
+        .send_unprefixed_datagram_with_scratch(
+            Bytes::from_static(b"dg"),
+            &mut bytes::BytesMut::new(),
+        )?;
     let echoed_datagram = timeout(
         Duration::from_secs(5),
         stream
@@ -360,7 +363,10 @@ runtime:
         .as_mut()
         .ok_or_else(|| anyhow!("missing WebTransport datagrams"))?
         .sender
-        .send_datagram(Bytes::from_static(b"wt-dgram"))?;
+        .send_unprefixed_datagram_with_scratch(
+            Bytes::from_static(b"wt-dgram"),
+            &mut bytes::BytesMut::new(),
+        )?;
     let echoed_datagram = timeout(
         Duration::from_secs(5),
         stream

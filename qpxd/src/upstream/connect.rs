@@ -1,17 +1,17 @@
-use crate::http::protocol::address::format_authority_host_port;
-use crate::http::protocol::semantics::append_via_for_version;
-use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::http1::UpstreamProxyScheme;
 use crate::upstream::pool::ResolvedUpstreamProxy;
 use anyhow::{Result, anyhow};
 use hyper::header::{HOST, HeaderMap, HeaderName, HeaderValue};
 use hyper::{StatusCode, Version};
+use qpx_http::protocol::address::format_authority_host_port;
+use qpx_http::protocol::semantics::append_via_for_version;
+use qpx_http::tls::client::connect_tls_http1_with_options;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 
-pub type TunnelIo = crate::tls::client::BoxTlsStream;
+pub type TunnelIo = qpx_http::tls::client::BoxTlsStream;
 
 pub struct ConnectedTunnel {
     pub io: TunnelIo,
@@ -177,11 +177,8 @@ pub(crate) async fn connect_via_upstream(
 
 fn validated_upstream_connect_failure_status(status: u16) -> Option<StatusCode> {
     let status = StatusCode::from_u16(status).ok()?;
-    crate::http::protocol::semantics::validate_http_status_class(
-        status,
-        "upstream CONNECT response",
-    )
-    .ok()
+    qpx_http::protocol::semantics::validate_http_status_class(status, "upstream CONNECT response")
+        .ok()
 }
 
 pub(crate) async fn connect_tunnel_target(

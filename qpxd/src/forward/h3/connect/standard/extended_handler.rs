@@ -5,11 +5,10 @@ use super::extended::{
     relay_h3_extended_connect_stream, upstream_extended_connect_error_response,
 };
 use super::{
-    H3ConnectPreparation, H3PolicyResponseContext, PreparedH3Connect, prepare_h3_connect_request,
-    send_h3_policy_response,
+    H3PolicyResponseContext, PreparedH3Connect, prepare_h3_connect_request, send_h3_policy_response,
 };
 use crate::forward::connect::listener_upstream_trust;
-use crate::http::body::Body;
+use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::{
     blocked_response as blocked, too_many_requests_response as too_many_requests,
 };
@@ -17,9 +16,11 @@ use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::datagram::H3StreamDatagrams;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};
+use crate::rate_limit::TransportScope;
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::ActionKind;
+use qpx_http::body::Body;
 use tokio::time::Duration;
 use tracing::warn;
 
@@ -31,20 +32,15 @@ pub(crate) async fn handle_h3_extended_connect(
     protocol: ::h3::ext::Protocol,
     datagrams: Option<H3StreamDatagrams>,
 ) -> Result<()> {
+    let state = handler.runtime.state();
     if protocol == ::h3::ext::Protocol::WEB_TRANSPORT {
         send_h3_static_response(
             &mut req_stream,
             ::http::StatusCode::NOT_IMPLEMENTED,
             b"WEBTRANSPORT relay requires the http3-backend-qpx build",
             &http::Method::CONNECT,
-            handler.runtime.state().plan.identity.proxy_name.as_ref(),
-            handler
-                .runtime
-                .state()
-                .plan
-                .limits
-                .body
-                .max_h3_response_body_bytes,
+            state.plan.identity.proxy_name.as_ref(),
+            state.plan.limits.body.max_h3_response_body_bytes,
         )
         .await?;
         return Ok(());
@@ -58,11 +54,10 @@ pub(crate) async fn handle_h3_extended_connect(
     )
     .await?
     {
-        H3ConnectPreparation::Continue(prepared) => *prepared,
-        H3ConnectPreparation::Responded => return Ok(()),
+        Some(prepared) => *prepared,
+        None => return Ok(()),
     };
 
-    let state = handler.runtime.state();
     let tunnel_idle_timeout =
         Duration::from_millis(state.plan.limits.timeouts.tunnel_idle_timeout_ms.max(1));
     let proxy_name = state.plan.identity.proxy_name.to_string();
@@ -85,10 +80,11 @@ pub(crate) async fn handle_h3_extended_connect(
         .plan
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled HTTP/3 CONNECT execution plan not found"))?;
+    let matched_rule_name = matched_rule.as_deref();
     let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
         &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
-        crate::rate_limit::TransportScope::Connect,
+        TransportScope::Connect,
     )?;
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
@@ -106,7 +102,7 @@ pub(crate) async fn handle_h3_extended_connect(
                     host: host.as_str(),
                     path: audit_path.as_deref(),
                     outcome: $outcome,
-                    matched_rule: matched_rule.as_deref(),
+                    matched_rule: matched_rule_name,
                     ext_authz_policy_id: ext_authz_policy_id.as_deref(),
                     log_context: &log_context,
                 },
@@ -126,12 +122,7 @@ pub(crate) async fn handle_h3_extended_connect(
             response_headers.as_deref(),
             false,
         );
-        send_policy!(
-            &mut req_stream,
-            response,
-            crate::http::dispatch::DispatchOutcome::Block
-        )
-        .await?;
+        send_policy!(&mut req_stream, response, DispatchOutcome::Block).await?;
         return Ok(());
     }
 
@@ -149,7 +140,7 @@ pub(crate) async fn handle_h3_extended_connect(
             send_policy!(
                 &mut req_stream,
                 response,
-                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited
+                DispatchOutcome::ConcurrencyLimited
             )
             .await?;
             return Ok(());
@@ -198,16 +189,38 @@ pub(crate) async fn handle_h3_extended_connect(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(
-                &mut req_stream,
-                response,
-                crate::http::dispatch::DispatchOutcome::Error
-            )
-            .await?;
+            send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
             return Ok(());
         }
     };
 
+    finish_h3_extended_connect_stream(
+        &state,
+        req_stream,
+        protocol,
+        datagrams,
+        upstream,
+        proxy_name.as_str(),
+        response_headers.as_deref(),
+        tunnel_idle_timeout,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "extended CONNECT finish keeps stream, upstream, datagram, and policy facts explicit"
+)]
+async fn finish_h3_extended_connect_stream(
+    state: &crate::runtime::RuntimeState,
+    mut req_stream: H3ServerRequestStream,
+    protocol: ::h3::ext::Protocol,
+    datagrams: Option<H3StreamDatagrams>,
+    upstream: UpstreamExtendedConnectStream,
+    proxy_name: &str,
+    response_headers: Option<&qpx_core::rules::CompiledHeaderControl>,
+    tunnel_idle_timeout: Duration,
+) -> Result<()> {
     let UpstreamExtendedConnectStream {
         interim,
         response,
@@ -216,7 +229,6 @@ pub(crate) async fn handle_h3_extended_connect(
         _endpoint,
         driver,
         datagram_task,
-        ..
     } = upstream;
     for interim in interim {
         let interim = crate::http3::codec::sanitize_interim_response_for_h3(interim)?;
@@ -228,8 +240,8 @@ pub(crate) async fn handle_h3_extended_connect(
         let response = upstream_extended_connect_error_response(
             response,
             upstream_stream,
-            proxy_name.as_str(),
-            response_headers.as_deref(),
+            proxy_name,
+            response_headers,
             Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
         )?;
         send_h3_response(
@@ -240,19 +252,11 @@ pub(crate) async fn handle_h3_extended_connect(
             Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
         )
         .await?;
-        if let Some(task) = datagram_task {
-            task.abort();
-            let _ = task.await;
-        }
-        let _ = driver.await;
+        abort_h3_extended_driver(datagram_task, driver).await;
         return Ok(());
     }
 
-    let established = finalize_h3_connect_head_response(
-        response,
-        proxy_name.as_str(),
-        response_headers.as_deref(),
-    )?;
+    let established = finalize_h3_connect_head_response(response, proxy_name, response_headers)?;
     tokio::time::timeout(tunnel_idle_timeout, req_stream.send_response(established))
         .await
         .map_err(|_| anyhow!("forward HTTP/3 extended CONNECT response send timeout"))??;
@@ -267,10 +271,17 @@ pub(crate) async fn handle_h3_extended_connect(
     {
         warn!(error = ?err, protocol = ?protocol, "forward HTTP/3 extended CONNECT relay failed");
     }
+    abort_h3_extended_driver(datagram_task, driver).await;
+    Ok(())
+}
+
+async fn abort_h3_extended_driver(
+    datagram_task: Option<tokio::task::JoinHandle<()>>,
+    driver: tokio::task::JoinHandle<()>,
+) {
     if let Some(task) = datagram_task {
         task.abort();
         let _ = task.await;
     }
     let _ = driver.await;
-    Ok(())
 }

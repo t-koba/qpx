@@ -1,7 +1,6 @@
 use super::super::{
     ReloadableReverse, record_reverse_connection_filter_block, reverse_quic_connection_filter_match,
 };
-use crate::http::body::Body;
 use crate::http3::codec::http_headers_to_h1;
 use crate::http3::listener::{
     H3ConnInfo, H3ConnectKind, H3HttpResponse, H3Limits, H3RequestHandler,
@@ -19,6 +18,7 @@ use async_trait::async_trait;
 use hyper::{Request, Response};
 use qpx_core::config::ReverseEdgeConfig;
 use qpx_core::tls::{load_cert_chain, load_private_key};
+use qpx_http::body::Body;
 use std::collections::HashMap;
 #[cfg(test)]
 use std::io::IoSliceMut;
@@ -311,15 +311,44 @@ impl H3RequestHandler for ReverseH3Handler {
             .reverse_edge(self.reverse.name.as_ref())
             .map(|edge| edge.streaming)
             .unwrap_or_else(|| crate::runtime::ResolvedStreamingLimits::from(limits));
+        let mut connection_streaming = streaming;
+        connection_streaming.max_request_body_bytes =
+            super::streaming::max_reverse_h3_request_body_bytes(&self.reverse, streaming);
         H3Limits {
             listener_name: Arc::<str>::from(self.reverse.name.as_ref()),
             max_concurrent_streams_per_connection: limits.h3.max_h3_streams_per_connection,
             datagram_channel_capacity: limits.h3.datagram_channel_capacity,
-            streaming,
+            streaming: connection_streaming,
+            request_body_drain: crate::http3::server::H3RequestBodyDrainControl {
+                config: limits.h3.request_body_drain,
+                semaphore: state.h3_request_body_drain_semaphore.clone(),
+            },
             read_timeout: Duration::from_millis(limits.timeouts.h3_read_timeout_ms),
             proxy_name: Arc::<str>::from(state.plan.identity.proxy_name.as_ref()),
             error_body: Arc::<str>::from(state.messages.reverse_error.as_str()),
         }
+    }
+
+    fn request_streaming_limits(
+        &self,
+        req_head: &::http::Request<()>,
+        conn: &H3ConnInfo,
+        fallback: crate::runtime::ResolvedStreamingLimits,
+    ) -> crate::runtime::ResolvedStreamingLimits {
+        super::streaming::request_streaming_limits_for_head(
+            &self.reverse,
+            req_head,
+            super::streaming::ReverseH3RequestPeer {
+                remote_addr: conn.remote_addr,
+                dst_port: conn.dst_port,
+                tls_sni: conn.tls_sni.as_deref(),
+                peer_certificates: conn
+                    .peer_certificates
+                    .as_deref()
+                    .map(|certs| certs.as_slice()),
+            },
+            fallback,
+        )
     }
 
     async fn handle_http(&self, req: Request<Body>, conn: H3ConnInfo) -> Response<Body> {
@@ -352,7 +381,7 @@ impl H3RequestHandler for ReverseH3Handler {
                 interim: interim
                     .into_iter()
                     .filter_map(|head| {
-                        let status = crate::http::protocol::semantics::validate_http_status_class(
+                        let status = qpx_http::protocol::semantics::validate_http_status_class(
                             head.status,
                             "HTTP/3 interim response",
                         )

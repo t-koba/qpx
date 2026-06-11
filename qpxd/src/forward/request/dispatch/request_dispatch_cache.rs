@@ -1,20 +1,22 @@
-use crate::cache::CacheRequestKey;
 use crate::forward::request::resolve_upstream;
-use crate::http::body::Body;
 use crate::http::capture::cache_flow::{
     CacheLookupDecision, CacheWritebackContext, clone_request_head_for_revalidation,
     lookup_with_revalidation, process_upstream_response_for_cache,
 };
 use crate::http::dispatch::{
-    DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheLookupOutcome,
-    DispatchCachedResponseInput, finalize_dispatch_cached_response, prepare_dispatch_cache_keys,
-    record_cache_lookup_duration, record_cache_lookup_result,
+    DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheDecisionInput,
+    DispatchCacheLookupOutcome, DispatchCollapsedCacheDecisionInput, DispatchOutcome,
+    cache_decision_is_hit, dispatch_cache_collapse_continue, dispatch_cache_collapse_response,
+    finalize_dispatch_cache_decision, finalize_dispatch_collapsed_cache_decision,
+    prepare_dispatch_cache_keys, record_cache_lookup_duration, record_cache_lookup_result,
 };
 use crate::runtime::Runtime;
 use crate::upstream::http1::proxy_http1_request;
 use anyhow::Result;
 use hyper::{Method, Request, Response};
 use qpx_core::config::ActionKind;
+use qpx_http::body::Body;
+use qpxd_cache::CacheRequestKey;
 use std::time::Duration;
 
 pub(super) struct ForwardCacheLookupInput<'a> {
@@ -28,6 +30,7 @@ pub(super) struct ForwardCacheLookupInput<'a> {
     pub(super) client_version: http::Version,
     pub(super) proxy_name: &'a str,
     pub(super) headers: Option<&'a qpx_core::rules::CompiledHeaderControl>,
+    pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
@@ -53,72 +56,52 @@ pub(super) async fn try_forward_cache_lookup(
         input.cache_lookup_key,
         input.cache_policy,
         &input.state.cache.backends,
+        &input.state.cache.background_revalidations,
         input.state.messages.cache_miss.as_str(),
     )
     .await;
     record_cache_lookup_duration(input.audit.kind, lookup_started.elapsed());
     let (lookup_decision, lookup_revalidation_state) = lookup_result?;
-    let cache_hit = matches!(
-        lookup_decision,
-        CacheLookupDecision::Hit(_) | CacheLookupDecision::StaleWhileRevalidate(_, _)
-    );
-    input.http_modules.on_cache_lookup(cache_hit).await?;
-    match lookup_decision {
-        CacheLookupDecision::Hit(hit) => {
-            let response = finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                response: hit,
-                outcome: crate::http::dispatch::DispatchOutcome::CacheHit,
-                request_method: input.request_method,
-                response_version: None,
-                proxy_name: input.proxy_name,
-                headers: input.headers,
-                http_modules: input.http_modules,
-                audit: input.audit,
-            })
-            .await?;
-            Ok(DispatchCacheLookupOutcome::Response(response))
-        }
-        CacheLookupDecision::StaleWhileRevalidate(hit, state) => {
-            maybe_spawn_forward_background_revalidation(&input, state.as_ref());
-            let response = finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                response: *hit,
-                outcome: crate::http::dispatch::DispatchOutcome::CacheStale,
-                request_method: input.request_method,
-                response_version: None,
-                proxy_name: input.proxy_name,
-                headers: input.headers,
-                http_modules: input.http_modules,
-                audit: input.audit,
-            })
-            .await?;
-            Ok(DispatchCacheLookupOutcome::Response(response))
-        }
-        CacheLookupDecision::OnlyIfCachedMiss(response) => {
-            let response = finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                response,
-                outcome: crate::http::dispatch::DispatchOutcome::CacheOnlyIfCachedMiss,
-                request_method: input.request_method,
-                response_version: Some(input.client_version),
-                proxy_name: input.proxy_name,
-                headers: input.headers,
-                http_modules: input.http_modules,
-                audit: input.audit,
-            })
-            .await?;
-            Ok(DispatchCacheLookupOutcome::Response(response))
+    input
+        .http_modules
+        .on_cache_lookup(cache_decision_is_hit(&lookup_decision))
+        .await?;
+    let response_version = matches!(lookup_decision, CacheLookupDecision::OnlyIfCachedMiss(_))
+        .then_some(input.client_version);
+    match &lookup_decision {
+        CacheLookupDecision::Hit(_) | CacheLookupDecision::OnlyIfCachedMiss(_) => {}
+        CacheLookupDecision::StaleWhileRevalidate(_, state) => {
+            maybe_spawn_forward_background_revalidation(&input, state);
         }
         CacheLookupDecision::Miss => {
             record_cache_lookup_result(input.audit.kind, "miss");
-            Ok(DispatchCacheLookupOutcome::Continue(
-                lookup_revalidation_state,
-            ))
+            return Ok(DispatchCacheLookupOutcome::Continue(
+                lookup_revalidation_state.map(Box::new),
+            ));
         }
     }
+    let response = finalize_dispatch_cache_decision(DispatchCacheDecisionInput {
+        decision: lookup_decision,
+        hit_outcome: DispatchOutcome::CacheHit,
+        stale_outcome: DispatchOutcome::CacheStale,
+        plan: input.selected_plan,
+        request_method: input.request_method,
+        response_version,
+        proxy_name: input.proxy_name,
+        headers: input.headers,
+        http_modules: input.http_modules,
+        audit: input.audit,
+    })
+    .await?;
+    Ok(match response {
+        Some(response) => DispatchCacheLookupOutcome::Response(Box::new(response)),
+        None => DispatchCacheLookupOutcome::Continue(lookup_revalidation_state.map(Box::new)),
+    })
 }
 
 fn maybe_spawn_forward_background_revalidation(
     input: &ForwardCacheLookupInput<'_>,
-    state: &crate::cache::RevalidationState,
+    state: &qpxd_cache::RevalidationState,
 ) {
     if *input.request_method != Method::GET {
         return;
@@ -131,7 +114,7 @@ fn maybe_spawn_forward_background_revalidation(
     ) else {
         return;
     };
-    let Some(guard) = crate::cache::try_begin_background_revalidation(state) else {
+    let Some(guard) = state.begin_background_revalidation() else {
         return;
     };
     let runtime = input.runtime.clone();
@@ -157,14 +140,14 @@ fn maybe_spawn_forward_background_revalidation(
             upstream.as_ref(),
             http_authority.as_str(),
             upstream_timeout,
+            &runtime_state.pools.upstream_proxy,
         )
         .await
         else {
             return;
         };
         let response_delay_secs = started.elapsed().as_secs();
-        let state_ref = runtime.state();
-        let backends = &state_ref.cache.backends;
+        let backends = &runtime_state.cache.backends;
         let method = Method::GET;
         let _ = process_upstream_response_for_cache(
             resp,
@@ -178,7 +161,7 @@ fn maybe_spawn_forward_background_revalidation(
                 revalidation_state: Some(state),
                 request_collapse_guard: None,
                 body_read_timeout: std::time::Duration::from_millis(
-                    state_ref
+                    runtime_state
                         .plan
                         .limits
                         .timeouts
@@ -198,6 +181,7 @@ pub(super) struct ForwardCacheCollapseInput<'a> {
     pub(super) client_version: http::Version,
     pub(super) proxy_name: &'a str,
     pub(super) headers: Option<&'a qpx_core::rules::CompiledHeaderControl>,
+    pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,
     pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
@@ -205,7 +189,7 @@ pub(super) struct ForwardCacheCollapseInput<'a> {
     pub(super) http_modules: &'a mut crate::http::modules::HttpModuleExecution,
     pub(super) upstream_timeout: Duration,
     pub(super) audit: &'a DispatchAuditContext,
-    pub(super) revalidation_state: Option<crate::cache::RevalidationState>,
+    pub(super) revalidation_state: Option<qpxd_cache::RevalidationState>,
 }
 
 pub(super) async fn try_forward_cache_collapse(
@@ -214,24 +198,18 @@ pub(super) async fn try_forward_cache_collapse(
     let mut revalidation_state = input.revalidation_state.clone();
     let mut guard = None;
     if input.request_method != Method::GET {
-        return Ok(DispatchCacheCollapseOutcome::Continue {
-            revalidation_state: revalidation_state.map(Box::new),
-            guard,
-        });
+        return Ok(dispatch_cache_collapse_continue(revalidation_state, guard));
     }
     let (Some(snapshot), Some(policy), Some(lookup_key)) = (
         input.request_headers_snapshot,
         input.cache_policy,
         input.cache_lookup_key,
     ) else {
-        return Ok(DispatchCacheCollapseOutcome::Continue {
-            revalidation_state: revalidation_state.map(Box::new),
-            guard,
-        });
+        return Ok(dispatch_cache_collapse_continue(revalidation_state, guard));
     };
-    match crate::cache::begin_request_collapse(lookup_key) {
-        crate::cache::RequestCollapseJoin::Leader(leader) => guard = Some(leader),
-        crate::cache::RequestCollapseJoin::Follower(waiter) => {
+    match input.state.cache.begin_request_collapse(lookup_key) {
+        qpxd_cache::RequestCollapseJoin::Leader(leader) => guard = Some(leader),
+        qpxd_cache::RequestCollapseJoin::Follower(waiter) => {
             if waiter.wait(input.upstream_timeout).await {
                 let (lookup_decision, next_revalidation_state) = lookup_with_revalidation(
                     input.req,
@@ -239,76 +217,43 @@ pub(super) async fn try_forward_cache_collapse(
                     input.cache_lookup_key,
                     Some(policy),
                     &input.state.cache.backends,
+                    &input.state.cache.background_revalidations,
                     input.state.messages.cache_miss.as_str(),
                 )
                 .await?;
                 revalidation_state = next_revalidation_state;
-                let cache_hit = matches!(
-                    lookup_decision,
-                    CacheLookupDecision::Hit(_) | CacheLookupDecision::StaleWhileRevalidate(_, _)
-                );
-                input.http_modules.on_cache_lookup(cache_hit).await?;
+                input
+                    .http_modules
+                    .on_cache_lookup(cache_decision_is_hit(&lookup_decision))
+                    .await?;
                 if let Some(response) =
                     finalize_forward_collapsed_cache_decision(input, lookup_decision).await?
                 {
-                    return Ok(DispatchCacheCollapseOutcome::Response(Box::new(response)));
+                    return Ok(dispatch_cache_collapse_response(response));
                 }
             }
         }
     }
-    Ok(DispatchCacheCollapseOutcome::Continue {
-        revalidation_state: revalidation_state.map(Box::new),
-        guard,
-    })
+    Ok(dispatch_cache_collapse_continue(revalidation_state, guard))
 }
 
 async fn finalize_forward_collapsed_cache_decision(
     input: ForwardCacheCollapseInput<'_>,
     lookup_decision: CacheLookupDecision,
 ) -> Result<Option<Response<Body>>> {
-    match lookup_decision {
-        CacheLookupDecision::Hit(hit) => Ok(Some(
-            finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                response: hit,
-                outcome: crate::http::dispatch::DispatchOutcome::CacheCollapsedHit,
-                request_method: input.request_method,
-                response_version: None,
-                proxy_name: input.proxy_name,
-                headers: input.headers,
-                http_modules: input.http_modules,
-                audit: input.audit,
-            })
-            .await?,
-        )),
-        CacheLookupDecision::StaleWhileRevalidate(hit, _) => Ok(Some(
-            finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                response: *hit,
-                outcome: crate::http::dispatch::DispatchOutcome::CacheCollapsedStale,
-                request_method: input.request_method,
-                response_version: None,
-                proxy_name: input.proxy_name,
-                headers: input.headers,
-                http_modules: input.http_modules,
-                audit: input.audit,
-            })
-            .await?,
-        )),
-        CacheLookupDecision::OnlyIfCachedMiss(response) => {
-            let response = finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                response,
-                outcome: crate::http::dispatch::DispatchOutcome::CacheOnlyIfCachedMiss,
-                request_method: input.request_method,
-                response_version: Some(input.client_version),
-                proxy_name: input.proxy_name,
-                headers: input.headers,
-                http_modules: input.http_modules,
-                audit: input.audit,
-            })
-            .await?;
-            Ok(Some(response))
-        }
-        CacheLookupDecision::Miss => Ok(None),
-    }
+    let response_version = matches!(lookup_decision, CacheLookupDecision::OnlyIfCachedMiss(_))
+        .then_some(input.client_version);
+    finalize_dispatch_collapsed_cache_decision(DispatchCollapsedCacheDecisionInput {
+        decision: lookup_decision,
+        plan: input.selected_plan,
+        request_method: input.request_method,
+        response_version,
+        proxy_name: input.proxy_name,
+        headers: input.headers,
+        http_modules: input.http_modules,
+        audit: input.audit,
+    })
+    .await
 }
 
 pub(super) fn prepare_forward_cache_keys(

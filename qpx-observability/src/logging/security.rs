@@ -64,6 +64,7 @@ fn reject_untrusted_log_ancestor(path: &Path, meta: &fs::Metadata) -> Result<()>
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let sticky_bit = libc::S_ISVTX;
     let sticky = mode & sticky_bit != 0;
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
 
     if meta.uid() != 0 && meta.uid() != euid {

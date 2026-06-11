@@ -1,9 +1,9 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
 use super::local_response::build_rpc_local_response;
-use crate::http::body::Body;
 use anyhow::Result;
 use http::{HeaderMap, Response};
 use qpx_core::config::RpcLocalResponseConfig;
+use qpx_http::body::Body;
 use std::time::Duration;
 use tokio::time::Instant;
 

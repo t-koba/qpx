@@ -7,7 +7,6 @@ use crate::http::policy::response_policy::HttpResponseRuleEngine;
 use crate::runtime::{CompiledReverseEdge, CompiledReverseRouteTarget, ExecutionPlan};
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
-use metrics::gauge;
 use qpx_core::config::{
     ReverseEdgeConfig, ReverseRouteTargetConfig, UpstreamConfig, UpstreamDiscoveryConfig,
 };
@@ -26,13 +25,15 @@ use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
 
 use crate::ipc_client::IpcUpstream;
-use crate::tls::CompiledUpstreamTlsTrust;
+use qpx_core::tls::CompiledUpstreamTlsTrust;
 
 mod compile;
 mod impls;
 mod selection;
 
 pub(in crate::reverse) use self::impls::normalize_host_for_match;
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+use self::selection::{feed, feed_ip, fnv_offset};
 
 pub(crate) struct ReverseRouter {
     http_routes: Vec<HttpRoute>,
@@ -57,6 +58,7 @@ enum LoadBalanceStrategy {
 pub(super) struct RoutePolicy {
     pub(super) retry_attempts: usize,
     pub(super) retry_backoff: Duration,
+    pub(super) retry_body_replay: bool,
     pub(super) retry_body_threshold_bytes: usize,
     pub(super) retry_budget: Arc<RetryBudgetRuntime>,
     pub(super) timeout: Duration,
@@ -70,7 +72,7 @@ pub(super) struct RoutePolicy {
 #[derive(Debug)]
 struct WeightedBackend {
     weight: u32,
-    upstreams: Arc<UpstreamPool>,
+    upstreams: Arc<UpstreamEndpointSet>,
     rr_counter: AtomicUsize,
 }
 
@@ -78,7 +80,7 @@ struct WeightedBackend {
 struct MirrorTarget {
     percent: u32,
     max_mirror_body_bytes: Option<usize>,
-    upstreams: Arc<UpstreamPool>,
+    upstreams: Arc<UpstreamEndpointSet>,
     rr_counter: AtomicUsize,
 }
 
@@ -95,7 +97,7 @@ pub(super) struct RetryBudgetRuntime {
 }
 
 #[derive(Debug)]
-struct UpstreamPool {
+struct UpstreamEndpointSet {
     static_endpoints: Arc<Vec<Arc<UpstreamEndpoint>>>,
     endpoints: ArcSwap<Vec<Arc<UpstreamEndpoint>>>,
     discovery: Vec<DynamicDiscovery>,
@@ -158,7 +160,7 @@ pub(super) struct HttpRoute {
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(super) struct TlsPassthroughRoute {
     matcher: CompiledMatch,
-    upstreams: Arc<UpstreamPool>,
+    upstreams: Arc<UpstreamEndpointSet>,
     affinity: ReverseAffinityRuntime,
     pub(super) policy: RoutePolicy,
     rr_counter: AtomicUsize,
@@ -345,7 +347,7 @@ impl ReverseRouter {
         self.spawn_discovery_tasks();
         let spawn_one = |route_kind: &'static str,
                          route_idx: usize,
-                         pools: Vec<Arc<UpstreamPool>>,
+                         pools: Vec<Arc<UpstreamEndpointSet>>,
                          trust: Option<Arc<CompiledUpstreamTlsTrust>>,
                          policy: HealthCheckRuntime,
                          lifecycle: EndpointLifecycleRuntime,
@@ -354,19 +356,16 @@ impl ReverseRouter {
                          mut shutdown: watch::Receiver<()>| {
             tokio::spawn(async move {
                 let route_idx_label = route_idx.to_string();
-                let unhealthy_gauge = gauge!(
-                    unhealthy_metric.to_string(),
-                    "reverse" => reverse_name.to_string(),
-                    "route_kind" => route_kind,
-                    "route_idx" => route_idx_label.clone()
+                let unhealthy_gauge = super::metrics::unhealthy_upstreams_gauge(
+                    unhealthy_metric.as_ref(),
+                    reverse_name.as_ref(),
+                    route_kind,
+                    route_idx_label.as_str(),
                 );
-                let draining_gauge = gauge!(
-                    crate::runtime::metric_names()
-                        .reverse_upstreams_draining
-                        .clone(),
-                    "reverse" => reverse_name.to_string(),
-                    "route_kind" => route_kind,
-                    "route_idx" => route_idx_label
+                let draining_gauge = super::metrics::draining_upstreams_gauge(
+                    reverse_name.as_ref(),
+                    route_kind,
+                    route_idx_label.as_str(),
                 );
                 let mut ticker = tokio::time::interval(policy.interval);
                 loop {
@@ -485,17 +484,20 @@ impl ReverseRouter {
         result
     }
 
-    pub(super) fn candidate_route_indices(&self, ctx: MatchPrefilterContext<'_>) -> Vec<usize> {
-        let mut indices = Vec::new();
-        self.http_prefilter.for_each_candidate(&ctx, |idx| {
-            indices.push(idx);
-            false
-        });
-        indices
-    }
-
     pub(super) fn route_at(&self, idx: usize) -> Option<&HttpRoute> {
         self.http_routes.get(idx)
+    }
+
+    pub(super) fn mirror_targets(&self) -> Vec<String> {
+        let mut targets = Vec::new();
+        for route in &self.http_routes {
+            for mirror in &route.mirrors {
+                for endpoint in mirror.upstreams.endpoints().iter() {
+                    targets.push(endpoint.target.clone());
+                }
+            }
+        }
+        targets
     }
 
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -506,24 +508,7 @@ impl ReverseRouter {
         sni: Option<&str>,
     ) -> Option<Arc<UpstreamEndpoint>> {
         // Deterministic hashing for stable selection across connections.
-        const FNV_OFFSET: u64 = 14695981039346656037;
-        const FNV_PRIME: u64 = 1099511628211;
-        fn feed(mut hash: u64, bytes: &[u8]) -> u64 {
-            for b in bytes {
-                hash ^= *b as u64;
-                hash = hash.wrapping_mul(FNV_PRIME);
-            }
-            hash
-        }
-        let mut tls_seed = FNV_OFFSET;
-        match remote_ip {
-            IpAddr::V4(ip) => {
-                tls_seed = feed(tls_seed, &ip.octets());
-            }
-            IpAddr::V6(ip) => {
-                tls_seed = feed(tls_seed, &ip.octets());
-            }
-        }
+        let mut tls_seed = feed_ip(fnv_offset(), remote_ip);
         tls_seed = feed(tls_seed, &dst_port.to_be_bytes());
         if let Some(sni) = sni {
             tls_seed = feed(tls_seed, sni.as_bytes());
@@ -564,7 +549,7 @@ impl ReverseRouter {
         })
     }
 
-    fn all_upstream_pools(&self) -> Vec<Arc<UpstreamPool>> {
+    fn all_upstream_pools(&self) -> Vec<Arc<UpstreamEndpointSet>> {
         let mut pools = Vec::new();
         for route in &self.http_routes {
             pools.extend(route.health_upstream_pools());

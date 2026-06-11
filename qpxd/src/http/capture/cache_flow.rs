@@ -1,8 +1,8 @@
-use crate::cache::{self, CacheBackend, CacheRequestKey, LookupOutcome, RevalidationState};
-use crate::http::body::Body;
 use anyhow::Result;
 use hyper::{Method, Request, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
+use qpx_http::body::Body;
+use qpxd_cache::{self as cache, CacheBackend, CacheRequestKey, LookupOutcome, RevalidationState};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +42,7 @@ pub(crate) async fn lookup_with_revalidation(
     cache_lookup_key: Option<&CacheRequestKey>,
     cache_policy: Option<&CachePolicyConfig>,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
+    background_revalidations: &Arc<cache::InFlightRevalidations>,
     cache_miss_message: &str,
 ) -> Result<(CacheLookupDecision, Option<RevalidationState>)> {
     let Some(policy) = cache_policy else {
@@ -57,6 +58,7 @@ pub(crate) async fn lookup_with_revalidation(
         key,
         policy,
         backends,
+        background_revalidations,
     )
     .await?
     {

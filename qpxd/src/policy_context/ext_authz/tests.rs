@@ -25,6 +25,33 @@ fn ext_authz_mode_validation_rejects_unsupported_fields() {
 }
 
 #[test]
+fn ext_authz_minimal_decision_uses_fast_path() {
+    let allow =
+        parse_ext_authz_response(br#" { "decision" : "allow" } "#).expect("minimal allow decision");
+    assert!(matches!(allow, ExtAuthzEnforcement::Continue(_)));
+
+    let deny = parse_ext_authz_response(br#"{"decision":"deny"}"#).expect("minimal deny decision");
+    assert!(matches!(deny, ExtAuthzEnforcement::Deny(_)));
+}
+
+#[test]
+fn ext_authz_minimal_decision_falls_back_for_full_schema() {
+    let allow = parse_ext_authz_response(
+        br#"{
+            "decision": "allow",
+            "cache_bypass": true,
+            "policy_tags": ["audit"]
+        }"#,
+    )
+    .expect("full allow response");
+    let ExtAuthzEnforcement::Continue(allow) = allow else {
+        panic!("expected allow");
+    };
+    assert!(allow.cache_bypass);
+    assert_eq!(allow.policy_tags, vec!["audit"]);
+}
+
+#[test]
 fn ext_authz_mode_validation_accepts_supported_fields() {
     let connect_allow = ExtAuthzAllow {
         headers: Some(Arc::new(

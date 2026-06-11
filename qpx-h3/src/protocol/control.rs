@@ -16,9 +16,12 @@ use super::{
 pub(crate) const MAX_BUFFERED_PRIORITY_UPDATES: usize = 1024;
 const MAX_TRACKED_PRIORITY_REQUESTS: usize = 4096;
 
+/// HTTP/3 priority state for a request stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamPriority {
+    /// Priority urgency, where lower values are more urgent.
     pub urgency: u8,
+    /// Whether the stream should be scheduled incrementally.
     pub incremental: bool,
 }
 
@@ -31,6 +34,7 @@ impl Default for StreamPriority {
     }
 }
 
+/// Handle used to observe peer priority updates for a request stream.
 #[derive(Debug, Clone)]
 pub struct PriorityUpdates {
     control: PeerControlState,
@@ -42,6 +46,7 @@ impl PriorityUpdates {
         Self { control, stream_id }
     }
 
+    /// Returns the latest priority known for the stream.
     pub async fn latest(&self) -> StreamPriority {
         self.control
             .latest_priority_for_request(self.stream_id)

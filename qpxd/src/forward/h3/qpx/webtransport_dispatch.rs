@@ -9,24 +9,25 @@ use super::response::send_qpx_static_response;
 use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
-use crate::http::body::Body;
-use crate::http::local_response::build_local_response;
+use crate::http::dispatch::{
+    DispatchConnectRuleContextInput, DispatchOutcome, ProxyKind,
+    build_dispatch_connect_rule_context,
+};
+use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::{
     blocked_response as blocked, forbidden_response as forbidden, http_version_label,
     too_many_requests_response as too_many_requests,
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
-    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, apply_ext_authz_action_overrides,
-    enforce_ext_authz, resolve_identity, sanitize_headers_for_policy,
-    validate_ext_authz_allow_mode,
+    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, enforce_ext_authz,
+    prepare_ext_authz_allow_controls, resolve_identity, sanitize_headers_for_policy,
 };
-use crate::rate_limit::RateLimitContext;
+use crate::rate_limit::{RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::ActionKind;
-use qpx_core::rules::RuleMatchContext;
-use std::sync::Arc;
+use qpx_http::body::Body;
 use tokio::time::Duration;
 use tracing::warn;
 
@@ -121,35 +122,54 @@ pub(super) async fn handle_qpx_webtransport_connect(
         host: host.as_str(),
         path: audit_path.as_deref(),
     };
-    let ctx = RuleMatchContext {
-        src_ip: Some(conn.remote_addr.ip()),
-        dst_port: Some(port),
-        host: Some(host.as_str()),
-        sni: Some(host.as_str()),
-        method: Some("CONNECT"),
+    macro_rules! return_with_policy {
+        ($response:expr, $outcome:expr, $matched_rule:expr, $ext_authz_policy_id:expr, $log_context:expr) => {{
+            policy_responder
+                .send(
+                    &mut req_stream,
+                    $response,
+                    $outcome,
+                    $matched_rule,
+                    $ext_authz_policy_id,
+                    $log_context,
+                )
+                .await?;
+            return Ok(());
+        }};
+    }
+    #[cfg(feature = "auth-basic")]
+    macro_rules! return_with_unmatched_policy {
+        ($response:expr, $outcome:expr, $log_context:expr) => {{ return_with_policy!($response, $outcome, None, None, $log_context) }};
+    }
+    macro_rules! return_rate_limited {
+        ($retry_after:expr, $matched_rule:expr, $ext_authz_policy_id:expr, $log_context:expr) => {{
+            return_with_policy!(
+                finalize_response_for_request(
+                    &http::Method::CONNECT,
+                    http::Version::HTTP_3,
+                    proxy_name.as_str(),
+                    too_many_requests($retry_after),
+                    false,
+                ),
+                DispatchOutcome::RateLimited,
+                $matched_rule,
+                $ext_authz_policy_id,
+                $log_context
+            );
+        }};
+    }
+    let ctx = build_dispatch_connect_rule_context(DispatchConnectRuleContextInput {
+        remote_ip: conn.remote_addr.ip(),
+        port,
+        host: host.as_str(),
         path: audit_path.as_deref(),
-        authority: Some(req_authority.as_str()),
-        http_version: Some(http_version_label(http::Version::HTTP_3)),
+        authority: req_authority.as_str(),
+        http_version: http_version_label(http::Version::HTTP_3),
         alpn: Some("h3"),
-        destination_category: destination.category.as_deref(),
-        destination_category_source: destination.category_source.as_deref(),
-        destination_category_confidence: destination.category_confidence.map(u64::from),
-        destination_reputation: destination.reputation.as_deref(),
-        destination_reputation_source: destination.reputation_source.as_deref(),
-        destination_reputation_confidence: destination.reputation_confidence.map(u64::from),
-        destination_application: destination.application.as_deref(),
-        destination_application_source: destination.application_source.as_deref(),
-        destination_application_confidence: destination.application_confidence.map(u64::from),
-        headers: Some(&sanitized_headers),
-        user: identity.user.as_deref(),
-        user_groups: &identity.groups,
-        device_id: identity.device_id.as_deref(),
-        posture: &identity.posture,
-        tenant: identity.tenant.as_deref(),
-        auth_strength: identity.auth_strength.as_deref(),
-        idp: identity.idp.as_deref(),
-        ..Default::default()
-    };
+        destination: &destination,
+        headers: &sanitized_headers,
+        identity: &identity,
+    });
 
     let (mut action, matched_rule) = match evaluate_forward_policy(
         &handler.runtime,
@@ -165,7 +185,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
             identity.supplement_builtin_auth(allowed.authenticated_user.as_ref());
             (
                 allowed.action,
-                allowed.matched_rule.map(|rule: Arc<str>| rule.to_string()),
+                allowed.matched_rule.map(|rule| rule.to_string()),
             )
         }
         #[cfg(feature = "auth-basic")]
@@ -178,17 +198,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 proxy_auth_required(challenge, state.messages.proxy_auth_required.as_str()),
                 false,
             );
-            policy_responder
-                .send(
-                    &mut req_stream,
-                    response,
-                    crate::http::dispatch::DispatchOutcome::Challenge,
-                    None,
-                    None,
-                    &log_context,
-                )
-                .await?;
-            return Ok(());
+            return_with_unmatched_policy!(response, DispatchOutcome::Challenge, &log_context);
         }
         #[cfg(feature = "auth-basic")]
         Ok(ForwardPolicyDecision::Forbidden) => {
@@ -200,17 +210,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 forbidden(state.messages.forbidden.as_str()),
                 false,
             );
-            policy_responder
-                .send(
-                    &mut req_stream,
-                    response,
-                    crate::http::dispatch::DispatchOutcome::Forbidden,
-                    None,
-                    None,
-                    &log_context,
-                )
-                .await?;
-            return Ok(());
+            return_with_unmatched_policy!(response, DispatchOutcome::Forbidden, &log_context);
         }
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 WebTransport policy evaluation failed");
@@ -229,50 +229,30 @@ pub(super) async fn handle_qpx_webtransport_connect(
         .plan
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled WebTransport listener execution plan not found"))?;
+    let matched_rule_name = matched_rule.as_deref();
 
-    let request_limit_ctx = RateLimitContext::from_identity(
-        conn.remote_addr.ip(),
-        &identity,
-        matched_rule.as_deref(),
-        None,
-    );
+    let request_limit_ctx =
+        RateLimitContext::from_identity(conn.remote_addr.ip(), &identity, matched_rule_name, None);
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
     } = state.policy.rate_limiters.collect_checked_plan_request(
         &selected_plan.rate_limits,
         None,
-        crate::rate_limit::TransportScope::Webtransport,
+        TransportScope::Webtransport,
         &request_limit_ctx,
         1,
     )?;
     if let Some(retry_after) = retry_after {
-        let log_context = identity.to_log_context(matched_rule.as_deref(), None, None);
-        let response = finalize_response_for_request(
-            &http::Method::CONNECT,
-            http::Version::HTTP_3,
-            proxy_name.as_str(),
-            too_many_requests(Some(retry_after)),
-            false,
-        );
-        policy_responder
-            .send(
-                &mut req_stream,
-                response,
-                crate::http::dispatch::DispatchOutcome::RateLimited,
-                matched_rule.as_deref(),
-                None,
-                &log_context,
-            )
-            .await?;
-        return Ok(());
+        let log_context = identity.to_log_context(matched_rule_name, None, None);
+        return_rate_limited!(Some(retry_after), matched_rule_name, None, &log_context);
     }
 
     let ext_authz = enforce_ext_authz(
         &state,
         &effective_policy,
         ExtAuthzInput {
-            proxy_kind: crate::http::dispatch::ProxyKind::Forward,
+            proxy_kind: ProxyKind::Forward,
             proxy_name: proxy_name.as_str(),
             scope_name: handler.listener_name.as_ref(),
             remote_ip: conn.remote_addr.ip(),
@@ -282,7 +262,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
             method: Some("CONNECT"),
             path: audit_path.as_deref(),
             uri: Some(auth_uri.as_str()),
-            matched_rule: matched_rule.as_deref(),
+            matched_rule: matched_rule_name,
             matched_route: None,
             action: Some(&action),
             headers: Some(&sanitized_headers),
@@ -290,63 +270,42 @@ pub(super) async fn handle_qpx_webtransport_connect(
         },
     )
     .await?;
-    let ext_authz_policy_id = match &ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => allow.policy_id.clone(),
-        ExtAuthzEnforcement::Deny(deny) => deny.policy_id.clone(),
-    };
-    let ext_authz_policy_tags = match &ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => allow.policy_tags.clone(),
-        ExtAuthzEnforcement::Deny(deny) => deny.policy_tags.clone(),
-    };
-    let mut log_context = identity.to_log_context(
-        matched_rule.as_deref(),
-        None,
-        ext_authz_policy_id.as_deref(),
-    );
+    let ext_authz_policy_id = ext_authz.policy_id().map(str::to_owned);
+    let ext_authz_policy_tags = ext_authz.policy_tags().to_vec();
+    let mut log_context =
+        identity.to_log_context(matched_rule_name, None, ext_authz_policy_id.as_deref());
     log_context.policy_tags = ext_authz_policy_tags;
     let (response_headers, timeout_override, rate_limit_profile) = match ext_authz {
         ExtAuthzEnforcement::Continue(allow) => {
-            validate_ext_authz_allow_mode(&allow, ExtAuthzMode::ForwardConnect)?;
+            let allow =
+                prepare_ext_authz_allow_controls(allow, ExtAuthzMode::ForwardConnect, None)?;
             let rate_limit_profile = allow.rate_limit_profile.clone();
             if let Some(retry_after) = request_limits.merge_profile_and_check(
                 &state.policy.rate_limiters,
                 rate_limit_profile.as_deref(),
-                crate::rate_limit::TransportScope::Webtransport,
+                TransportScope::Webtransport,
                 &request_limit_ctx,
                 1,
             )? {
-                let response = finalize_response_for_request(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name.as_str(),
-                    too_many_requests(Some(retry_after)),
-                    false,
+                return_rate_limited!(
+                    Some(retry_after),
+                    matched_rule_name,
+                    ext_authz_policy_id.as_deref(),
+                    &log_context
                 );
-                policy_responder
-                    .send(
-                        &mut req_stream,
-                        response,
-                        crate::http::dispatch::DispatchOutcome::RateLimited,
-                        matched_rule.as_deref(),
-                        ext_authz_policy_id.as_deref(),
-                        &log_context,
-                    )
-                    .await?;
-                return Ok(());
             }
-            apply_ext_authz_action_overrides(&mut action, &allow);
+            allow.apply_action_overrides(&mut action);
             (allow.headers, allow.timeout_override, rate_limit_profile)
         }
         ExtAuthzEnforcement::Deny(deny) => {
             let response = if let Some(local) = deny.local_response.as_ref() {
-                finalize_response_with_headers(
+                finalized_local_response(
                     &http::Method::CONNECT,
                     http::Version::HTTP_3,
                     proxy_name.as_str(),
-                    build_local_response(local)?,
+                    local,
                     deny.headers.as_deref(),
-                    false,
-                )
+                )?
             } else {
                 finalize_response_with_headers(
                     &http::Method::CONNECT,
@@ -357,26 +316,22 @@ pub(super) async fn handle_qpx_webtransport_connect(
                     false,
                 )
             };
-            policy_responder
-                .send(
-                    &mut req_stream,
-                    response,
-                    if deny.local_response.is_some() {
-                        crate::http::dispatch::DispatchOutcome::ExtAuthzLocalResponse
-                    } else {
-                        crate::http::dispatch::DispatchOutcome::ExtAuthzDeny
-                    },
-                    matched_rule.as_deref(),
-                    ext_authz_policy_id.as_deref(),
-                    &log_context,
-                )
-                .await?;
-            return Ok(());
+            return_with_policy!(
+                response,
+                if deny.local_response.is_some() {
+                    DispatchOutcome::ExtAuthzLocalResponse
+                } else {
+                    DispatchOutcome::ExtAuthzDeny
+                },
+                matched_rule_name,
+                ext_authz_policy_id.as_deref(),
+                &log_context
+            );
         }
     };
 
     match action.kind {
-        ActionKind::Block => {
+        ActionKind::Block | ActionKind::Inspect => {
             let response = finalize_response_with_headers(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
@@ -385,63 +340,33 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 response_headers.as_deref(),
                 false,
             );
-            policy_responder
-                .send(
-                    &mut req_stream,
-                    response,
-                    crate::http::dispatch::DispatchOutcome::Block,
-                    matched_rule.as_deref(),
-                    ext_authz_policy_id.as_deref(),
-                    &log_context,
-                )
-                .await?;
-            return Ok(());
+            return_with_policy!(
+                response,
+                DispatchOutcome::Block,
+                matched_rule_name,
+                ext_authz_policy_id.as_deref(),
+                &log_context
+            );
         }
         ActionKind::Respond => {
             let local = action
                 .local_response
                 .as_ref()
                 .ok_or_else(|| anyhow!("respond action requires local_response"))?;
-            let response = finalize_response_with_headers(
+            let response = finalized_local_response(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                build_local_response(local)?,
+                local,
                 response_headers.as_deref(),
-                false,
+            )?;
+            return_with_policy!(
+                response,
+                DispatchOutcome::Respond,
+                matched_rule_name,
+                ext_authz_policy_id.as_deref(),
+                &log_context
             );
-            policy_responder
-                .send(
-                    &mut req_stream,
-                    response,
-                    crate::http::dispatch::DispatchOutcome::Respond,
-                    matched_rule.as_deref(),
-                    ext_authz_policy_id.as_deref(),
-                    &log_context,
-                )
-                .await?;
-            return Ok(());
-        }
-        ActionKind::Inspect => {
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                blocked(state.messages.blocked.as_str()),
-                response_headers.as_deref(),
-                false,
-            );
-            policy_responder
-                .send(
-                    &mut req_stream,
-                    response,
-                    crate::http::dispatch::DispatchOutcome::Block,
-                    matched_rule.as_deref(),
-                    ext_authz_policy_id.as_deref(),
-                    &log_context,
-                )
-                .await?;
-            return Ok(());
         }
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {}
     }
@@ -452,25 +377,12 @@ pub(super) async fn handle_qpx_webtransport_connect(
     let _concurrency_permits = match request_limits.acquire_concurrency(&request_limit_ctx) {
         Some(permits) => Some(permits),
         None => {
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                too_many_requests(None),
-                response_headers.as_deref(),
-                false,
+            return_rate_limited!(
+                None,
+                matched_rule_name,
+                ext_authz_policy_id.as_deref(),
+                &log_context
             );
-            policy_responder
-                .send(
-                    &mut req_stream,
-                    response,
-                    crate::http::dispatch::DispatchOutcome::RateLimited,
-                    matched_rule.as_deref(),
-                    ext_authz_policy_id.as_deref(),
-                    &log_context,
-                )
-                .await?;
-            return Ok(());
         }
     };
     let listener_cfg = state
@@ -486,8 +398,9 @@ pub(super) async fn handle_qpx_webtransport_connect(
                     .tls_verify_exception_matches(handler.listener_name.as_ref(), host.as_str())
         })
         .unwrap_or(true);
-    let upstream =
-        match open_upstream_qpx_extended_connect_stream(OpenUpstreamQpxExtendedConnectInput {
+    let upstream = match open_upstream_qpx_extended_connect_stream(
+        &state.pools,
+        OpenUpstreamQpxExtendedConnectInput {
             req_head: &req_head,
             sanitized_headers: &sanitized_headers,
             proxy_name: proxy_name.as_str(),
@@ -497,35 +410,32 @@ pub(super) async fn handle_qpx_webtransport_connect(
             protocol: qpx_h3::Protocol::WebTransport,
             enable_datagram: session.datagrams.is_some(),
             timeout_dur: upstream_timeout,
-        })
-        .await
-        {
-            Ok(upstream) => upstream,
-            Err(err) => {
-                warn!(error = ?err, "forward HTTP/3 WebTransport CONNECT establish failed");
-                let response = finalize_response_with_headers(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name.as_str(),
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::from(state.messages.proxy_error.clone()))?,
-                    response_headers.as_deref(),
-                    false,
-                );
-                policy_responder
-                    .send(
-                        &mut req_stream,
-                        response,
-                        crate::http::dispatch::DispatchOutcome::Error,
-                        matched_rule.as_deref(),
-                        ext_authz_policy_id.as_deref(),
-                        &log_context,
-                    )
-                    .await?;
-                return Ok(());
-            }
-        };
+        },
+    )
+    .await
+    {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            warn!(error = ?err, "forward HTTP/3 WebTransport CONNECT establish failed");
+            let response = finalize_response_with_headers(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
+                proxy_name.as_str(),
+                Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::from(state.messages.proxy_error.clone()))?,
+                response_headers.as_deref(),
+                false,
+            );
+            return_with_policy!(
+                response,
+                DispatchOutcome::Error,
+                matched_rule_name,
+                ext_authz_policy_id.as_deref(),
+                &log_context
+            );
+        }
+    };
 
     relay_established_webtransport(QpxWebTransportEstablishedContext {
         handler,
@@ -536,7 +446,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
         upstream,
         host: host.as_str(),
         audit_path: audit_path.as_deref(),
-        matched_rule: matched_rule.as_deref(),
+        matched_rule: matched_rule_name,
         ext_authz_policy_id: ext_authz_policy_id.as_deref(),
         log_context: &log_context,
         response_headers: response_headers.as_deref(),

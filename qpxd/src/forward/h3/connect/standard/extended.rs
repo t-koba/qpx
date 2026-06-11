@@ -1,14 +1,15 @@
-use crate::http::body::Body;
 use crate::http::protocol::l7::{
     finalize_response_with_headers, prepare_request_with_headers_in_place,
 };
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
 use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
+use crate::http3::h3_buf_to_bytes;
 use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
 use anyhow::{Result, anyhow};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use hyper::Response;
 use qpx_core::rules::CompiledHeaderControl;
+use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::lookup_host;
@@ -31,7 +32,7 @@ pub(super) struct OpenUpstreamExtendedConnectInput<'a> {
     pub(super) proxy_name: &'a str,
     pub(super) upstream: Option<&'a str>,
     pub(super) verify_upstream: bool,
-    pub(super) trust: Option<&'a crate::tls::CompiledUpstreamTlsTrust>,
+    pub(super) trust: Option<&'a qpx_core::tls::CompiledUpstreamTlsTrust>,
     pub(super) protocol: ::h3::ext::Protocol,
     pub(super) enable_datagram: bool,
     pub(super) datagram_channel_capacity: usize,
@@ -223,13 +224,13 @@ async fn parse_extended_connect_upstream(
             let port = parsed.port().unwrap_or(443);
             return Ok((host.to_string(), port));
         }
-        return crate::http::protocol::address::parse_authority_host_port(upstream, 443)
+        return qpx_http::protocol::address::parse_authority_host_port(upstream, 443)
             .ok_or_else(|| anyhow!("invalid extended CONNECT upstream authority"));
     }
     let authority = uri
         .authority()
         .ok_or_else(|| anyhow!("extended CONNECT missing authority"))?;
-    crate::http::protocol::address::parse_authority_host_port(authority.as_str(), 443)
+    qpx_http::protocol::address::parse_authority_host_port(authority.as_str(), 443)
         .ok_or_else(|| anyhow!("invalid extended CONNECT authority"))
 }
 
@@ -239,7 +240,7 @@ pub(super) fn finalize_h3_connect_head_response(
     header_control: Option<&CompiledHeaderControl>,
 ) -> Result<::http::Response<()>> {
     let (parts, _) = response.into_parts();
-    let status = crate::http::protocol::semantics::validate_http_status_class(
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
         parts.status,
         "HTTP/3 extended CONNECT response",
     )?;
@@ -253,7 +254,7 @@ pub(super) fn finalize_h3_connect_head_response(
         header_control,
         false,
     );
-    let status = crate::http::protocol::semantics::validate_http_status_class(
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
         downstream.status(),
         "HTTP/3 extended CONNECT response",
     )?;
@@ -270,7 +271,7 @@ pub(super) fn upstream_extended_connect_error_response(
     body_read_timeout: Duration,
 ) -> Result<Response<Body>> {
     let (parts, _) = response.into_parts();
-    let status = crate::http::protocol::semantics::validate_http_status_class(
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
         parts.status,
         "HTTP/3 extended CONNECT response",
     )?;
@@ -305,9 +306,8 @@ fn body_from_upstream_h3_stream(
                     sender.abort();
                     return;
                 }
-                Ok(Ok(Some(mut bytes))) => {
-                    let remaining = bytes.remaining();
-                    let bytes = bytes.copy_to_bytes(remaining);
+                Ok(Ok(Some(chunk))) => {
+                    let bytes = h3_buf_to_bytes(chunk);
                     if sender.send_data(bytes).await.is_err() {
                         return;
                     }
@@ -381,7 +381,7 @@ pub(super) async fn relay_h3_extended_connect_stream(
                         && let Err(err) = datagrams.sender.send_datagram(payload) {
                             warn!(error = ?err, "forward HTTP/3 extended CONNECT upstream datagram send failed");
                         }
-                    activity.touch().await;
+                    activity.touch();
                 }
                 up_payload = async {
                     if let Some(datagrams) = upstream_datagrams.as_mut() {
@@ -397,7 +397,7 @@ pub(super) async fn relay_h3_extended_connect_stream(
                         && let Err(err) = datagrams.sender.send_datagram(payload) {
                             warn!(error = ?err, "forward HTTP/3 extended CONNECT downstream datagram send failed");
                         }
-                    activity.touch().await;
+                    activity.touch();
                 }
             }
         }

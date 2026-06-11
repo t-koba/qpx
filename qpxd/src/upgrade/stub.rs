@@ -17,8 +17,7 @@ impl UpgradeTrigger {
     }
 }
 
-pub(crate) fn request_upgrade(pid: u32) -> Result<()> {
-    let _ = pid;
+pub(crate) fn request_upgrade(_pid: u32) -> Result<()> {
     Err(anyhow!(
         "binary upgrade requests are unsupported on this platform"
     ))

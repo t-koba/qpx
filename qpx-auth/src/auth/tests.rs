@@ -109,6 +109,14 @@ fn quoted_header_escape_escapes_quote_and_backslash() {
     assert_eq!(escaped, "a\\\"b\\\\c");
 }
 
+#[cfg(feature = "basic-auth")]
+#[test]
+fn basic_constant_time_compare_handles_different_lengths() {
+    assert!(constant_time_eq_bytes(b"secret", b"secret"));
+    assert!(!constant_time_eq_bytes(b"secret", b"secre"));
+    assert!(!constant_time_eq_bytes(b"secret", b"secret2"));
+}
+
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 #[test]
 fn audit_uri_redaction_covers_percent_encoded_sensitive_query_keys() {

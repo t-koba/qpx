@@ -9,7 +9,8 @@ use super::static_table::static_field;
 use super::{
     DECODER_INSTRUCTION_QUEUE_DEPTH, DecodedRequestHead, DecodedResponseHead, HeaderDecodeError,
 };
-use anyhow::{Result, anyhow};
+use crate::H3Result as Result;
+use anyhow::anyhow;
 use bytes::Bytes;
 use http::HeaderMap;
 use std::sync::Arc;
@@ -211,141 +212,145 @@ impl QpackConnection {
                 state.dynamic_table_snapshot(),
             )
         };
-        let mut field_section_size = 0u64;
-        while reader.remaining() != 0 {
-            let first = reader.read_u8().await?;
-            if (first & 0x80) != 0 {
-                let (flags, index) = reader.read_prefixed_int_after_first(first, 6).await?;
-                let field = match flags {
-                    0b11 => {
-                        let (name, value) = static_field(index as usize).ok_or_else(|| {
-                            HeaderDecodeError::qpack(format!(
-                                "unknown static QPACK table index {index}"
-                            ))
-                        })?;
-                        DecodedField::static_field(name, value)
-                    }
-                    0b10 => {
-                        let (name, value) = dynamic_snapshot
-                            .get_relative_from_base_shared(prefix.base, index as usize)
-                            .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?;
-                        DecodedField::shared(name, value)
-                    }
-                    _ => {
+        let decode_result = async {
+            let mut field_section_size = 0u64;
+            while reader.remaining() != 0 {
+                let first = reader.read_u8().await?;
+                if (first & 0x80) != 0 {
+                    let (flags, index) = reader.read_prefixed_int_after_first(first, 6).await?;
+                    let field = match flags {
+                        0b11 => {
+                            let (name, value) = static_field(index as usize).ok_or_else(|| {
+                                HeaderDecodeError::qpack(format!(
+                                    "unknown static QPACK table index {index}"
+                                ))
+                            })?;
+                            DecodedField::static_field(name, value)
+                        }
+                        0b10 => {
+                            let (name, value) = dynamic_snapshot
+                                .get_relative_from_base_shared(prefix.base, index as usize)
+                                .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?;
+                            DecodedField::shared(name, value)
+                        }
+                        _ => {
+                            return Err(HeaderDecodeError::qpack(format!(
+                                "invalid indexed QPACK field flags {flags:#b}"
+                            )));
+                        }
+                    };
+                    push_decoded_field(
+                        &mut sink,
+                        &mut field_section_size,
+                        field,
+                        max_field_section_size,
+                    )?;
+                    continue;
+                }
+                if (first & 0xf0) == 0x10 {
+                    let (flags, index) = reader.read_prefixed_int_after_first(first, 4).await?;
+                    if flags != 0b0001 {
                         return Err(HeaderDecodeError::qpack(format!(
-                            "invalid indexed QPACK field flags {flags:#b}"
+                            "invalid post-base indexed QPACK flags {flags:#b}"
                         )));
                     }
-                };
-                push_decoded_field(
-                    &mut sink,
-                    &mut field_section_size,
-                    field,
-                    max_field_section_size,
-                )?;
-                continue;
-            }
-            if (first & 0xf0) == 0x10 {
-                let (flags, index) = reader.read_prefixed_int_after_first(first, 4).await?;
-                if flags != 0b0001 {
-                    return Err(HeaderDecodeError::qpack(format!(
-                        "invalid post-base indexed QPACK flags {flags:#b}"
-                    )));
+                    let (name, value) = dynamic_snapshot
+                        .get_post_base_shared(prefix.base, index as usize)
+                        .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?;
+                    let field = DecodedField::shared(name, value);
+                    push_decoded_field(
+                        &mut sink,
+                        &mut field_section_size,
+                        field,
+                        max_field_section_size,
+                    )?;
+                    continue;
                 }
-                let (name, value) = dynamic_snapshot
-                    .get_post_base_shared(prefix.base, index as usize)
-                    .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?;
-                let field = DecodedField::shared(name, value);
-                push_decoded_field(
-                    &mut sink,
-                    &mut field_section_size,
-                    field,
-                    max_field_section_size,
-                )?;
-                continue;
-            }
-            if (first & 0xc0) == 0x40 {
-                let (flags, index) = reader.read_prefixed_int_after_first(first, 4).await?;
-                let value = reader.read_string(8).await?;
-                let field = match flags {
-                    flag if (flag & 0b0101) == 0b0101 => {
-                        let (name, _) = static_field(index as usize).ok_or_else(|| {
-                            HeaderDecodeError::qpack(format!(
-                                "unknown static QPACK name index {index}"
-                            ))
-                        })?;
-                        DecodedField::owned(name.to_string(), value)
-                    }
-                    flag if (flag & 0b0101) == 0b0100 => {
-                        let (name, _) = dynamic_snapshot
-                            .get_relative_from_base_shared(prefix.base, index as usize)
-                            .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?;
-                        DecodedField::owned(name.to_string(), value)
-                    }
-                    _ => {
+                if (first & 0xc0) == 0x40 {
+                    let (flags, index) = reader.read_prefixed_int_after_first(first, 4).await?;
+                    let value = reader.read_string(8).await?;
+                    let field = match flags {
+                        flag if (flag & 0b0101) == 0b0101 => {
+                            let (name, _) = static_field(index as usize).ok_or_else(|| {
+                                HeaderDecodeError::qpack(format!(
+                                    "unknown static QPACK name index {index}"
+                                ))
+                            })?;
+                            DecodedField::owned(name.to_string(), value)
+                        }
+                        flag if (flag & 0b0101) == 0b0100 => {
+                            let (name, _) = dynamic_snapshot
+                                .get_relative_from_base_shared(prefix.base, index as usize)
+                                .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?;
+                            DecodedField::owned(name.to_string(), value)
+                        }
+                        _ => {
+                            return Err(HeaderDecodeError::qpack(format!(
+                                "invalid QPACK name-reference flags {flags:#b}"
+                            )));
+                        }
+                    };
+                    push_decoded_field(
+                        &mut sink,
+                        &mut field_section_size,
+                        field,
+                        max_field_section_size,
+                    )?;
+                    continue;
+                }
+                if (first & 0xf0) == 0x00 {
+                    let (flags, index) = reader.read_prefixed_int_after_first(first, 3).await?;
+                    if flags != 0 {
                         return Err(HeaderDecodeError::qpack(format!(
-                            "invalid QPACK name-reference flags {flags:#b}"
+                            "invalid QPACK post-base name-reference flags {flags:#b}"
                         )));
                     }
-                };
-                push_decoded_field(
-                    &mut sink,
-                    &mut field_section_size,
-                    field,
-                    max_field_section_size,
-                )?;
-                continue;
-            }
-            if (first & 0xf0) == 0x00 {
-                let (flags, index) = reader.read_prefixed_int_after_first(first, 3).await?;
-                if flags != 0 {
-                    return Err(HeaderDecodeError::qpack(format!(
-                        "invalid QPACK post-base name-reference flags {flags:#b}"
-                    )));
+                    let (name, _) = dynamic_snapshot
+                        .get_post_base_shared(prefix.base, index as usize)
+                        .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?;
+                    let value = reader.read_string(8).await?;
+                    let field = DecodedField::owned(name.to_string(), value);
+                    push_decoded_field(
+                        &mut sink,
+                        &mut field_section_size,
+                        field,
+                        max_field_section_size,
+                    )?;
+                    continue;
                 }
-                let (name, _) = dynamic_snapshot
-                    .get_post_base_shared(prefix.base, index as usize)
-                    .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?;
-                let value = reader.read_string(8).await?;
-                let field = DecodedField::owned(name.to_string(), value);
-                push_decoded_field(
-                    &mut sink,
-                    &mut field_section_size,
-                    field,
-                    max_field_section_size,
-                )?;
-                continue;
+                if (first & 0xe0) == 0x20 {
+                    let name = reader.read_string_after_first(first, 4).await?;
+                    let value = reader.read_string(8).await?;
+                    let field = DecodedField::owned(
+                        String::from_utf8(name.to_vec())
+                            .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?,
+                        value,
+                    );
+                    push_decoded_field(
+                        &mut sink,
+                        &mut field_section_size,
+                        field,
+                        max_field_section_size,
+                    )?;
+                    continue;
+                }
+                return Err(HeaderDecodeError::qpack(format!(
+                    "unsupported QPACK field representation: 0x{first:02x}"
+                )));
             }
-            if (first & 0xe0) == 0x20 {
-                let name = reader.read_string_after_first(first, 4).await?;
-                let value = reader.read_string(8).await?;
-                let field = DecodedField::owned(
-                    String::from_utf8(name.to_vec())
-                        .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?,
-                    value,
-                );
-                push_decoded_field(
-                    &mut sink,
-                    &mut field_section_size,
-                    field,
-                    max_field_section_size,
-                )?;
-                continue;
-            }
-            return Err(HeaderDecodeError::qpack(format!(
-                "unsupported QPACK field representation: 0x{first:02x}"
-            )));
+            sink.finish()
         }
-
+        .await;
         if blocked_registered {
             self.state.lock().await.unregister_blocked_stream(stream_id);
         }
+        let output = decode_result?;
         if prefix.required_insert_count != 0 {
             self.send_decoder_instruction(Bytes::from(codec::encode_header_ack(stream_id)))
                 .await
                 .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?;
         }
-        sink.finish()
+        Ok(output)
     }
 
     async fn send_decoder_instruction(&self, payload: Bytes) -> Result<()> {

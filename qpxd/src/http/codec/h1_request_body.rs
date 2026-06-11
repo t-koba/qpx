@@ -1,9 +1,9 @@
-use crate::http::body::Sender;
 use crate::http::codec::h1_common::{MAX_HEADER_BYTES, find_crlf, parse_header_map};
-use crate::http::protocol::semantics::validate_request_trailers;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
 use hyper::HeaderMap;
+use qpx_http::body::Sender;
+use qpx_http::protocol::semantics::validate_request_trailers;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadHalf};
 use tokio::time::{Duration, timeout};
 
@@ -270,8 +270,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::http::body::Body;
     use crate::http::codec::h1_request_body::*;
+    use qpx_http::body::Body;
     use tokio::io::{AsyncWriteExt, duplex};
 
     #[tokio::test]

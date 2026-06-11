@@ -1,4 +1,3 @@
-use crate::http::body::{Body, to_bytes};
 use crate::http::mitm::proxy_mitm_request;
 use crate::runtime::Runtime;
 use crate::test_util::{decode_gzip, spawn_http1_send_request};
@@ -7,6 +6,7 @@ use qpx_core::config::{
     AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config, IdentityConfig,
     IngressEdgeConfig, IngressEdgeMode, MessagesConfig, RuntimeConfig, SystemLogConfig,
 };
+use qpx_http::body::{Body, to_bytes};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[tokio::test]

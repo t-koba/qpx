@@ -2,7 +2,7 @@ mod protocol;
 
 use self::protocol::{
     ShmRequestContext, TcpRequestContext, handle_one_request_shm, handle_one_request_tcp,
-    is_unexpected_eof, meta_uses_shm,
+    meta_uses_shm,
 };
 use anyhow::Result;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use tokio::time::{Duration, timeout};
 use crate::router::Router;
 
 use qpx_core::ipc::meta::IpcRequestMeta;
-use qpx_core::ipc::protocol::read_frame;
+use qpx_core::ipc::protocol::{IpcProtocolError, read_frame};
 
 #[derive(Clone)]
 pub struct ConnectionContext {
@@ -50,7 +50,7 @@ where
                 if is_unexpected_eof(&err) {
                     return Ok(());
                 }
-                return Err(err);
+                return Err(err.into());
             }
             Err(_) => return Ok(()), // idle
         };
@@ -91,4 +91,8 @@ where
         )
         .await;
     }
+}
+
+fn is_unexpected_eof(err: &IpcProtocolError) -> bool {
+    matches!(err, IpcProtocolError::Io(io) if io.kind() == std::io::ErrorKind::UnexpectedEof)
 }

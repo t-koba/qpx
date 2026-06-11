@@ -1,3 +1,4 @@
+use crate::http::metrics as http_metrics;
 use crate::runtime::Runtime;
 #[cfg(feature = "http3")]
 use crate::server::control::SidecarControl;
@@ -13,7 +14,6 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
-use metrics::{counter, histogram};
 use qpx_core::config::IngressEdgeConfig;
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
@@ -223,10 +223,7 @@ async fn handle_connection(
         .map(str::to_string)
     };
     if let Some(matched_rule) = accept_stage_block {
-        counter!(metric_names().transparent_requests_total.clone(), "result" => "blocked")
-            .increment(1);
-        histogram!(metric_names().transparent_latency_ms.clone())
-            .record(started.elapsed().as_secs_f64() * 1000.0);
+        http_metrics::transparent_request(metric_names(), "blocked", started.elapsed());
         emit_connection_filter_audit(
             "listener",
             listener_name,
@@ -270,10 +267,7 @@ async fn handle_connection(
             .map(str::to_string)
         };
         if let Some(matched_rule) = client_hello_stage_block {
-            counter!(metric_names().transparent_requests_total.clone(), "result" => "blocked")
-                .increment(1);
-            histogram!(metric_names().transparent_latency_ms.clone())
-                .record(started.elapsed().as_secs_f64() * 1000.0);
+            http_metrics::transparent_request(metric_names(), "blocked", started.elapsed());
             emit_connection_filter_audit(
                 "listener",
                 listener_name,
@@ -301,28 +295,20 @@ async fn handle_connection(
         match result {
             Ok(outcome) => {
                 let state = runtime.state();
-                counter!(
-                    state.observability.metric_names.transparent_requests_total.clone(),
-                    "result" => outcome.metric_result()
-                )
-                .increment(1);
-                histogram!(
-                    state
-                        .observability
-                        .metric_names
-                        .transparent_latency_ms
-                        .clone()
-                )
-                .record(started.elapsed().as_secs_f64() * 1000.0);
+                http_metrics::transparent_request(
+                    &state.observability.metric_names,
+                    outcome.metric_result(),
+                    started.elapsed(),
+                );
                 return Ok(());
             }
             Err(err) => {
                 let state = runtime.state();
-                counter!(
-                    state.observability.metric_names.transparent_requests_total.clone(),
-                    "result" => "error"
-                )
-                .increment(1);
+                http_metrics::transparent_request(
+                    &state.observability.metric_names,
+                    "error",
+                    started.elapsed(),
+                );
                 return Err(err);
             }
         }
@@ -338,26 +324,18 @@ async fn handle_connection(
     .await;
     if result.is_ok() {
         let state = runtime.state();
-        counter!(
-            state.observability.metric_names.transparent_requests_total.clone(),
-            "result" => "ok"
-        )
-        .increment(1);
-        histogram!(
-            state
-                .observability
-                .metric_names
-                .transparent_latency_ms
-                .clone()
-        )
-        .record(started.elapsed().as_secs_f64() * 1000.0);
+        http_metrics::transparent_request(
+            &state.observability.metric_names,
+            "ok",
+            started.elapsed(),
+        );
     } else {
         let state = runtime.state();
-        counter!(
-            state.observability.metric_names.transparent_requests_total.clone(),
-            "result" => "error"
-        )
-        .increment(1);
+        http_metrics::transparent_request(
+            &state.observability.metric_names,
+            "error",
+            started.elapsed(),
+        );
     }
     result
 }

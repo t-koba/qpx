@@ -75,8 +75,7 @@ pub async fn run() -> Result<()> {
             .to_string_lossy()
             .into_owned()
     });
-    let shm_size_bytes = cli.shm_size_mb * 1024 * 1024;
-    let ring = ShmRingBuffer::create_or_open(&shm_path, shm_size_bytes)?;
+    let ring = ShmRingBuffer::create_or_open(&shm_path, cli.shm_size_mb * 1024 * 1024)?;
 
     let stream_listener = TcpListener::bind(stream_listen)
         .await
@@ -103,7 +102,7 @@ pub async fn run() -> Result<()> {
             connections: Arc::new(Semaphore::new(cli.max_connections.max(1))),
         },
     ));
-    let _ = tokio::try_join!(event_task, stream_task)?;
+    tokio::try_join!(event_task, stream_task).map(|(event, stream)| event.and(stream))??;
     Ok(())
 }
 

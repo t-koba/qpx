@@ -97,10 +97,9 @@ async fn run_server(args: RunArgs) -> Result<()> {
     let input_idle = Duration::from_millis(cfg.input_idle_timeout_ms);
     let conn_idle = Duration::from_millis(cfg.conn_idle_timeout_ms);
 
-    if listen.starts_with("unix://") {
+    if let Some(path) = listen.strip_prefix("unix://") {
         #[cfg(unix)]
         {
-            let path = listen.strip_prefix("unix://").unwrap();
             ensure_unix_socket_parent_secure(Path::new(path))?;
             // Only remove existing path if it is a Unix socket.
             if let Ok(meta) = std::fs::symlink_metadata(path) {
@@ -244,6 +243,7 @@ fn resolve_trusted_symlink_component(
 ) -> Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow::anyhow!(
@@ -277,6 +277,7 @@ fn reject_untrusted_dir_component(
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let sticky_bit = libc::S_ISVTX;
     let sticky = mode & sticky_bit != 0;
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow::anyhow!(

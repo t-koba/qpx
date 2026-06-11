@@ -158,6 +158,7 @@ pub(crate) fn take_ready_notifier_from_env() -> Result<Option<ReadyNotifier>> {
             "upgrade ready token missing while ready address is present"
         ));
     };
+    // SAFETY: upgrade handoff env is consumed during startup before concurrent env access.
     unsafe {
         std::env::remove_var(ENV_READY_ADDR);
         std::env::remove_var(ENV_READY_TOKEN);

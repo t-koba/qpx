@@ -6,7 +6,8 @@ use super::encoder::{
 use super::errors::FieldDecodeError;
 use super::static_table::static_field;
 use super::{DecodedFields, HEADER_ENTRY_OVERHEAD};
-use anyhow::{Result, anyhow};
+use crate::H3Result as Result;
+use anyhow::anyhow;
 use bytes::Bytes;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -62,7 +63,7 @@ impl DynamicTableSnapshot {
 
     fn get_absolute_shared(&self, absolute: usize) -> Result<(Arc<str>, Bytes)> {
         if absolute == 0 || absolute <= self.dropped || absolute > self.inserted {
-            return Err(anyhow!("invalid QPACK absolute index {absolute}"));
+            return Err(anyhow!("invalid QPACK absolute index {absolute}").into());
         }
         let position = absolute - self.dropped - 1;
         let entry = self
@@ -116,7 +117,8 @@ impl DynamicTable {
             return Err(anyhow!(
                 "QPACK dynamic table size {new_size} exceeds advertised capacity {}",
                 self.max_capacity
-            ));
+            )
+            .into());
         }
         self.max_size = new_size;
         self.evict_to_limit(0)?;
@@ -130,7 +132,8 @@ impl DynamicTable {
                 "QPACK dynamic entry size {} exceeds current table capacity {}",
                 entry.size,
                 self.max_size
-            ));
+            )
+            .into());
         }
         self.evict_to_limit(entry.size)?;
         self.current_size += entry.size;
@@ -174,7 +177,7 @@ impl DynamicTable {
 
     fn get_absolute_shared(&self, absolute: usize) -> Result<(Arc<str>, Bytes)> {
         if absolute == 0 || absolute <= self.dropped || absolute > self.inserted {
-            return Err(anyhow!("invalid QPACK absolute index {absolute}"));
+            return Err(anyhow!("invalid QPACK absolute index {absolute}").into());
         }
         let position = absolute - self.dropped - 1;
         let entry = self
@@ -187,7 +190,7 @@ impl DynamicTable {
     fn evict_to_limit(&mut self, additional: usize) -> Result<()> {
         while self.current_size + additional > self.max_size {
             let Some(entry) = self.entries.pop_front() else {
-                return Err(anyhow!("QPACK dynamic table eviction underflow"));
+                return Err(anyhow!("QPACK dynamic table eviction underflow").into());
             };
             self.current_size -= entry.size;
             self.dropped += 1;
@@ -241,7 +244,7 @@ impl DecoderState {
     pub(super) fn decode_field_lines(
         &self,
         payload: &[u8],
-    ) -> Result<DecodedFields, FieldDecodeError> {
+    ) -> std::result::Result<DecodedFields, FieldDecodeError> {
         let mut cursor = payload;
         let prefix = decode_field_section_prefix(
             &mut cursor,
@@ -390,7 +393,7 @@ impl DecoderState {
         encoded_insert_count: usize,
         sign_bit: u8,
         delta_base: usize,
-    ) -> Result<FieldSectionPrefix, FieldDecodeError> {
+    ) -> std::result::Result<FieldSectionPrefix, FieldDecodeError> {
         let required_insert_count = decode_required_insert_count(
             encoded_insert_count,
             self.table.total_inserted(),

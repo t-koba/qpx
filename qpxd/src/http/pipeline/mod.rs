@@ -1,3 +1,3 @@
 pub mod types;
 
-pub(crate) use types::{AccessOutcome, PrepareOutcome, PreparedRequestParts};
+pub(crate) use types::{PolicyStage, PrepareOutcome, PreparedRequestParts};

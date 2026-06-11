@@ -1,10 +1,10 @@
-use crate::http::body::Body;
 use crate::http::codec::h2::send_h2_response_with_interim;
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::Result;
 use bytes::Bytes;
 use h2::Reason;
 use http::{Request, Response};
+use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use std::future::poll_fn;
@@ -166,8 +166,8 @@ pub(crate) fn take_interim_response_heads(
 #[cfg(test)]
 mod tests {
     use super::{H2_PREFACE, serve_h2_with_interim};
-    use crate::http::body::Body;
     use http::{Request, Response};
+    use qpx_http::body::Body;
     use qpx_observability::handler_fn;
     use std::convert::Infallible;
     use tokio::io::AsyncWriteExt;

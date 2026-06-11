@@ -18,6 +18,18 @@ impl From<anyhow::Error> for FieldDecodeError {
     }
 }
 
+impl From<crate::H3Error> for FieldDecodeError {
+    fn from(error: crate::H3Error) -> Self {
+        Self::DecompressionFailed(error.to_string())
+    }
+}
+
+impl From<FieldDecodeError> for crate::H3Error {
+    fn from(error: FieldDecodeError) -> Self {
+        anyhow::anyhow!(error.to_string()).into()
+    }
+}
+
 impl std::fmt::Display for FieldDecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -63,3 +75,9 @@ impl std::fmt::Display for HeaderDecodeError {
 }
 
 impl std::error::Error for HeaderDecodeError {}
+
+impl From<HeaderDecodeError> for crate::H3Error {
+    fn from(error: HeaderDecodeError) -> Self {
+        anyhow::anyhow!(error.to_string()).into()
+    }
+}

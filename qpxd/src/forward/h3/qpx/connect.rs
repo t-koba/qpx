@@ -10,25 +10,25 @@ use super::response::{
     upstream_qpx_extended_connect_error_response,
 };
 use crate::forward::request::resolve_upstream;
-use crate::http::body::Body;
+use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::protocol::common::{
     blocked_response as blocked, too_many_requests_response as too_many_requests,
 };
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::policy_context::{AuditRecord, emit_audit_log};
+use crate::rate_limit::TransportScope;
 use crate::upstream::connect::connect_tunnel_target;
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::ActionKind;
+use qpx_http::body::Body;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 mod prepare;
 mod udp;
 
-use self::prepare::{
-    PrepareQpxConnectInput, PreparedQpxConnect, QpxConnectPreparation, prepare_qpx_connect_request,
-};
+use self::prepare::{PrepareQpxConnectInput, PreparedQpxConnect, prepare_qpx_connect_request};
 pub(super) async fn handle_qpx_connect_stream(
     handler: &ForwardQpxHandler,
     req_head: http::Request<()>,
@@ -47,13 +47,13 @@ pub(super) async fn handle_qpx_connect_stream(
     })
     .await?
     {
-        QpxConnectPreparation::Continue(prepared) => *prepared,
-        QpxConnectPreparation::Responded => return Ok(()),
+        Some(prepared) => *prepared,
+        None => return Ok(()),
     };
 
     match protocol {
         qpx_h3::Protocol::ConnectUdp => {
-            udp::handle_qpx_connect_udp_stream(handler, prepared, req_stream, conn, datagrams).await
+            udp::run_connect_udp_relay(handler, prepared, req_stream, conn, datagrams).await
         }
         qpx_h3::Protocol::Other(protocol_name) => {
             handle_qpx_extended_connect_stream(
@@ -96,8 +96,8 @@ pub(super) async fn handle_qpx_traditional_connect_stream(
     })
     .await?
     {
-        QpxConnectPreparation::Continue(prepared) => *prepared,
-        QpxConnectPreparation::Responded => return Ok(()),
+        Some(prepared) => *prepared,
+        None => return Ok(()),
     };
     run_qpx_traditional_connect_tunnel(handler, prepared, req_stream, conn).await
 }
@@ -128,10 +128,11 @@ async fn run_qpx_traditional_connect_tunnel(
         .plan
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled qpx-h3 CONNECT execution plan not found"))?;
+    let matched_rule_name = matched_rule.as_deref();
     let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
         &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
-        crate::rate_limit::TransportScope::Connect,
+        TransportScope::Connect,
     )?;
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
@@ -148,7 +149,7 @@ async fn run_qpx_traditional_connect_tunnel(
                     host: host.as_str(),
                     path: audit_path.as_deref(),
                     outcome: $outcome,
-                    matched_rule: matched_rule.as_deref(),
+                    matched_rule: matched_rule_name,
                     ext_authz_policy_id: ext_authz_policy_id.as_deref(),
                     log_context: &log_context,
                 },
@@ -168,12 +169,7 @@ async fn run_qpx_traditional_connect_tunnel(
             response_headers.as_deref(),
             false,
         );
-        send_policy!(
-            &mut req_stream,
-            response,
-            crate::http::dispatch::DispatchOutcome::Block
-        )
-        .await?;
+        send_policy!(&mut req_stream, response, DispatchOutcome::Block).await?;
         return Ok(());
     }
 
@@ -191,7 +187,7 @@ async fn run_qpx_traditional_connect_tunnel(
             send_policy!(
                 &mut req_stream,
                 response,
-                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited
+                DispatchOutcome::ConcurrencyLimited
             )
             .await?;
             return Ok(());
@@ -212,12 +208,7 @@ async fn run_qpx_traditional_connect_tunnel(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(
-                &mut req_stream,
-                response,
-                crate::http::dispatch::DispatchOutcome::Error
-            )
-            .await?;
+            send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
             return Ok(());
         }
     };
@@ -243,12 +234,7 @@ async fn run_qpx_traditional_connect_tunnel(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(
-                &mut req_stream,
-                response,
-                crate::http::dispatch::DispatchOutcome::Error
-            )
-            .await?;
+            send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
             return Ok(());
         }
     };
@@ -264,16 +250,16 @@ async fn run_qpx_traditional_connect_tunnel(
     emit_audit_log(
         &state,
         AuditRecord {
-            kind: crate::http::dispatch::ProxyKind::Forward,
+            kind: ProxyKind::Forward,
             name: handler.listener_name.as_ref(),
             remote_ip: conn.remote_addr.ip(),
             host: Some(host.as_str()),
             sni: Some(host.as_str()),
             method: Some("CONNECT"),
             path: audit_path.as_deref(),
-            outcome: crate::http::dispatch::DispatchOutcome::Allow,
+            outcome: DispatchOutcome::Allow,
             status: Some(StatusCode::OK.as_u16()),
-            matched_rule: matched_rule.as_deref(),
+            matched_rule: matched_rule_name,
             matched_route: None,
             ext_authz_policy_id: ext_authz_policy_id.as_deref(),
         },
@@ -333,10 +319,11 @@ async fn handle_qpx_extended_connect_stream(
         .plan
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled qpx-h3 CONNECT execution plan not found"))?;
+    let matched_rule_name = matched_rule.as_deref();
     let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
         &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
-        crate::rate_limit::TransportScope::Connect,
+        TransportScope::Connect,
     )?;
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
@@ -353,7 +340,7 @@ async fn handle_qpx_extended_connect_stream(
                     host: host.as_str(),
                     path: audit_path.as_deref(),
                     outcome: $outcome,
-                    matched_rule: matched_rule.as_deref(),
+                    matched_rule: matched_rule_name,
                     ext_authz_policy_id: ext_authz_policy_id.as_deref(),
                     log_context: &log_context,
                 },
@@ -373,12 +360,7 @@ async fn handle_qpx_extended_connect_stream(
             response_headers.as_deref(),
             false,
         );
-        send_policy!(
-            &mut req_stream,
-            response,
-            crate::http::dispatch::DispatchOutcome::Block
-        )
-        .await?;
+        send_policy!(&mut req_stream, response, DispatchOutcome::Block).await?;
         return Ok(());
     }
 
@@ -396,7 +378,7 @@ async fn handle_qpx_extended_connect_stream(
             send_policy!(
                 &mut req_stream,
                 response,
-                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited
+                DispatchOutcome::ConcurrencyLimited
             )
             .await?;
             return Ok(());
@@ -416,8 +398,9 @@ async fn handle_qpx_extended_connect_stream(
                     .tls_verify_exception_matches(handler.listener_name.as_ref(), host.as_str())
         })
         .unwrap_or(true);
-    let upstream =
-        match open_upstream_qpx_extended_connect_stream(OpenUpstreamQpxExtendedConnectInput {
+    let upstream = match open_upstream_qpx_extended_connect_stream(
+        &state.pools,
+        OpenUpstreamQpxExtendedConnectInput {
             req_head: &req_head,
             sanitized_headers: &sanitized_headers,
             proxy_name: proxy_name.as_str(),
@@ -427,109 +410,140 @@ async fn handle_qpx_extended_connect_stream(
             protocol: qpx_h3::Protocol::Other(protocol_name),
             enable_datagram: datagrams.is_some(),
             timeout_dur: upstream_timeout,
-        })
-        .await
-        {
-            Ok(upstream) => upstream,
-            Err(err) => {
-                warn!(error = ?err, "forward HTTP/3 qpx-h3 extended CONNECT establish failed");
-                let response = finalize_response_with_headers(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name.as_str(),
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::from(state.messages.proxy_error.clone()))?,
-                    response_headers.as_deref(),
-                    false,
-                );
-                send_policy!(
-                    &mut req_stream,
-                    response,
-                    crate::http::dispatch::DispatchOutcome::Error
-                )
-                .await?;
-                return Ok(());
-            }
-        };
+        },
+    )
+    .await
+    {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            warn!(error = ?err, "forward HTTP/3 qpx-h3 extended CONNECT establish failed");
+            let response = finalize_response_with_headers(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
+                proxy_name.as_str(),
+                Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::from(state.messages.proxy_error.clone()))?,
+                response_headers.as_deref(),
+                false,
+            );
+            send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
+            return Ok(());
+        }
+    };
 
+    finish_qpx_extended_connect_stream(FinishQpxExtendedConnectInput {
+        state: &state,
+        handler,
+        req_stream,
+        conn: &conn,
+        datagrams,
+        upstream,
+        proxy_name: proxy_name.as_str(),
+        host: host.as_str(),
+        response_headers: response_headers.as_deref(),
+        audit_path: audit_path.as_deref(),
+        matched_rule: matched_rule_name,
+        ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+        log_context: &log_context,
+        tunnel_idle_timeout,
+    })
+    .await
+}
+
+struct FinishQpxExtendedConnectInput<'a> {
+    state: &'a crate::runtime::RuntimeState,
+    handler: &'a ForwardQpxHandler,
+    req_stream: qpx_h3::RequestStream,
+    conn: &'a qpx_h3::ConnectionInfo,
+    datagrams: Option<qpx_h3::StreamDatagrams>,
+    upstream: qpx_h3::ExtendedConnectStream,
+    proxy_name: &'a str,
+    host: &'a str,
+    response_headers: Option<&'a qpx_core::rules::CompiledHeaderControl>,
+    audit_path: Option<&'a str>,
+    matched_rule: Option<&'a str>,
+    ext_authz_policy_id: Option<&'a str>,
+    log_context: &'a qpx_observability::access_log::RequestLogContext,
+    tunnel_idle_timeout: Duration,
+}
+
+async fn finish_qpx_extended_connect_stream(
+    input: FinishQpxExtendedConnectInput<'_>,
+) -> Result<()> {
+    let FinishQpxExtendedConnectInput {
+        state,
+        handler,
+        mut req_stream,
+        conn,
+        datagrams,
+        upstream,
+        proxy_name,
+        host,
+        response_headers,
+        audit_path,
+        matched_rule,
+        ext_authz_policy_id,
+        log_context,
+        tunnel_idle_timeout,
+    } = input;
     let qpx_h3::ExtendedConnectStream {
         interim,
         response,
         request_stream: upstream_stream,
         datagrams: upstream_datagrams,
-        opener: _,
-        associated_bidi: _,
-        associated_uni: _,
-        _critical_streams,
-        _endpoint,
         driver,
         datagram_task,
-        _connection_use,
-        _session,
         ..
     } = upstream;
+    let h3_timeout = Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1));
     for interim in interim {
         let interim = crate::http3::codec::sanitize_interim_response_for_h3(interim)?;
-        timeout(
-            Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
-            req_stream.send_response_head(&interim),
-        )
-        .await
-        .map_err(|_| anyhow!("qpx-h3 interim response send timed out"))??;
+        timeout(h3_timeout, req_stream.send_response_head(&interim))
+            .await
+            .map_err(|_| anyhow!("qpx-h3 interim response send timed out"))??;
     }
     if !response.status().is_success() {
         let response = upstream_qpx_extended_connect_error_response(
             response,
             upstream_stream,
-            proxy_name.as_str(),
-            response_headers.as_deref(),
-            Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
+            proxy_name,
+            response_headers,
+            h3_timeout,
         )?;
         send_qpx_response_stream(
             &mut req_stream,
             response,
             &http::Method::CONNECT,
             state.plan.limits.body.max_h3_response_body_bytes,
-            Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
+            h3_timeout,
         )
         .await?;
-        if let Some(task) = datagram_task {
-            task.abort();
-            let _ = task.await;
-        }
-        let _ = driver.await;
+        abort_qpx_extended_driver(datagram_task, driver).await;
         return Ok(());
     }
 
-    let established = finalize_qpx_connect_head_response(
-        response,
-        proxy_name.as_str(),
-        response_headers.as_deref(),
-    )?;
-    timeout(
-        Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
-        req_stream.send_response_head(&established),
-    )
-    .await
-    .map_err(|_| anyhow!("qpx-h3 CONNECT response head send timed out"))??;
+    let established = finalize_qpx_connect_head_response(response, proxy_name, response_headers)?;
+    timeout(h3_timeout, req_stream.send_response_head(&established))
+        .await
+        .map_err(|_| anyhow!("qpx-h3 CONNECT response head send timed out"))??;
     emit_audit_log(
-        &state,
+        state,
         AuditRecord {
-            kind: crate::http::dispatch::ProxyKind::Forward,
+            kind: ProxyKind::Forward,
             name: handler.listener_name.as_ref(),
             remote_ip: conn.remote_addr.ip(),
-            host: Some(host.as_str()),
-            sni: Some(host.as_str()),
+            host: Some(host),
+            sni: Some(host),
             method: Some("CONNECT"),
-            path: audit_path.as_deref(),
-            outcome: crate::http::dispatch::DispatchOutcome::Allow,
+            path: audit_path,
+            outcome: DispatchOutcome::Allow,
             status: Some(StatusCode::OK.as_u16()),
-            matched_rule: matched_rule.as_deref(),
+            matched_rule,
             matched_route: None,
-            ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+            ext_authz_policy_id,
         },
-        &log_context,
+        log_context,
     );
     if let Err(err) = relay_qpx_extended_connect_stream(
         req_stream,
@@ -542,10 +556,17 @@ async fn handle_qpx_extended_connect_stream(
     {
         warn!(error = ?err, "forward HTTP/3 qpx-h3 extended CONNECT relay failed");
     }
+    abort_qpx_extended_driver(datagram_task, driver).await;
+    Ok(())
+}
+
+async fn abort_qpx_extended_driver(
+    datagram_task: Option<tokio::task::JoinHandle<()>>,
+    driver: tokio::task::JoinHandle<()>,
+) {
     if let Some(task) = datagram_task {
         task.abort();
         let _ = task.await;
     }
     let _ = driver.await;
-    Ok(())
 }

@@ -130,4 +130,23 @@ fn ipv6_is_non_global_for_subrequest(ip: Ipv6Addr) -> bool {
         || ip.is_unspecified()
         || ip.is_multicast()
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || (segments[0] & 0xe000) != 0x2000
+        || ipv6_is_special_purpose_global_unicast(segments)
+        || ipv6_embedded_6to4_ipv4(ip).is_some_and(ipv4_is_non_global_for_subrequest)
+}
+
+fn ipv6_is_special_purpose_global_unicast(segments: [u16; 8]) -> bool {
+    let discard_only_100_64 =
+        segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0;
+    let ietf_protocol_assignment_2001_23 = segments[0] == 0x2001 && segments[1] <= 0x01ff;
+    let six_to_four_2002_16 = segments[0] == 0x2002;
+    discard_only_100_64 || ietf_protocol_assignment_2001_23 || six_to_four_2002_16
+}
+
+fn ipv6_embedded_6to4_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let octets = ip.octets();
+    if octets[0] == 0x20 && octets[1] == 0x02 {
+        return Some(Ipv4Addr::new(octets[2], octets[3], octets[4], octets[5]));
+    }
+    None
 }

@@ -216,15 +216,13 @@ impl ProxyTasks {
 
     pub(crate) async fn prepare_binary_upgrade(
         &mut self,
-        config: &ProxyConfig,
+        _config: &ProxyConfig,
     ) -> Result<PreparedBinaryUpgradeSidecars> {
         let udp_sessions = self.export_exportable_sidecars().await?;
-        #[cfg(not(feature = "http3"))]
-        let _ = config;
         #[cfg(feature = "http3")]
         let quic_brokers = crate::http3::quinn_socket::prepare_quic_broker_handoff(
             self.quic_broker_handles.as_slice(),
-            config,
+            _config,
         )?;
         Ok(PreparedBinaryUpgradeSidecars {
             udp_sessions,
@@ -361,8 +359,7 @@ fn exportable_listener_udp_bindings(
 
     #[cfg(not(feature = "http3"))]
     {
-        let _ = config;
-        let _ = udp_bindings;
+        let _ = (config, udp_bindings);
         Ok(std::collections::HashMap::new())
     }
 }
@@ -397,8 +394,7 @@ fn exportable_reverse_udp_bindings(
 
     #[cfg(not(feature = "http3"))]
     {
-        let _ = config;
-        let _ = udp_bindings;
+        let _ = (config, udp_bindings);
         Ok(std::collections::HashMap::new())
     }
 }

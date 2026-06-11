@@ -22,13 +22,18 @@ impl WasmExecutor {
             .clamp(1, max_instances);
         let precompile = config.precompile || pool.map(|pool| pool.prewarm).unwrap_or(false);
         let mut instances = Vec::with_capacity(min_idle);
+        let max_memory_bytes = config
+            .max_memory_mb
+            .checked_mul(1024)
+            .and_then(|value| value.checked_mul(1024))
+            .ok_or_else(|| anyhow::anyhow!("wasm max_memory_mb is too large"))?;
         for _ in 0..min_idle {
             instances.push(Arc::new(qpx_wasm::WasmExecutor::new(
                 qpx_wasm::WasmExecutorConfig {
                     module: config.module.clone(),
                     precompile,
                     max_module_bytes: config.max_module_bytes,
-                    max_memory_bytes: config.max_memory_mb * 1024 * 1024,
+                    max_memory_bytes,
                     timeout_ms: config.timeout_ms,
                     env: config.env.clone(),
                     max_stdin_bytes: config.max_stdin_bytes,
@@ -88,7 +93,7 @@ impl Executor for WasmExecutor {
         let done = tokio::spawn(async move {
             let result = exec.done.await.map_err(|err| anyhow::anyhow!(err))?;
             drop(permit);
-            result
+            result.map_err(anyhow::Error::from)
         });
         Ok(Execution {
             stdin: exec.stdin,

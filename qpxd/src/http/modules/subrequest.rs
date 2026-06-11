@@ -4,7 +4,6 @@ use super::{
     HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
     HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome,
 };
-use crate::http::body::Body;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use http::header::{CONTENT_LENGTH, LOCATION};
@@ -14,6 +13,7 @@ use qpx_core::config::{
     HeaderCaptureConfig, HttpModuleConfig, SubrequestModuleConfig, SubrequestPhase,
     SubrequestResponseMode,
 };
+use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::{Duration, timeout};
@@ -350,7 +350,7 @@ impl SubrequestModule {
         }
     }
 
-    fn apply_response_headers(
+    fn apply_subrequest_response_headers(
         &self,
         subresponse: &Response<Body>,
         ctx: &mut HttpModuleContext,
@@ -452,7 +452,7 @@ impl HttpModule for SubrequestModule {
                 if self.should_return_response(&subresponse) {
                     return Ok(HttpModuleEvent::DownstreamResponse(subresponse));
                 }
-                self.apply_response_headers(&subresponse, ctx, &mut response);
+                self.apply_subrequest_response_headers(&subresponse, ctx, &mut response);
                 Ok(HttpModuleEvent::DownstreamResponse(response))
             }
             _ => Ok(event),

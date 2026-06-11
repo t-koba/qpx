@@ -1,6 +1,39 @@
-use metrics::counter;
 use qpx_core::rules::{CompiledHeaderControl, CompiledRegexReplace};
-use tracing::warn;
+
+pub(crate) trait HeaderTransform {
+    fn apply_request_transform(&self, headers: &mut http::HeaderMap);
+    fn apply_response_transform(&self, headers: &mut http::HeaderMap);
+}
+
+impl HeaderTransform for CompiledHeaderControl {
+    fn apply_request_transform(&self, headers: &mut http::HeaderMap) {
+        apply_header_mutations(
+            headers,
+            self.request_set(),
+            self.request_add(),
+            self.request_remove(),
+            self.request_regex_replace(),
+        );
+    }
+
+    fn apply_response_transform(&self, headers: &mut http::HeaderMap) {
+        apply_header_mutations(
+            headers,
+            self.response_set(),
+            self.response_add(),
+            self.response_remove(),
+            self.response_regex_replace(),
+        );
+    }
+}
+
+pub(crate) fn set_proxy_authorization_header(
+    headers: &mut http::HeaderMap,
+    value: Option<&http::HeaderValue>,
+) {
+    headers.remove(http::header::PROXY_AUTHORIZATION);
+    let _ = value.map(|value| headers.insert(http::header::PROXY_AUTHORIZATION, value.clone()));
+}
 
 pub(crate) fn apply_request_headers(
     headers: &mut http::HeaderMap,
@@ -9,13 +42,7 @@ pub(crate) fn apply_request_headers(
     let Some(control) = control else {
         return;
     };
-    apply_header_mutations(
-        headers,
-        control.request_set(),
-        control.request_add(),
-        control.request_remove(),
-        control.request_regex_replace(),
-    );
+    control.apply_request_transform(headers);
 }
 
 pub(crate) fn apply_response_headers(
@@ -25,13 +52,7 @@ pub(crate) fn apply_response_headers(
     let Some(control) = control else {
         return;
     };
-    apply_header_mutations(
-        headers,
-        control.response_set(),
-        control.response_add(),
-        control.response_remove(),
-        control.response_regex_replace(),
-    );
+    control.apply_response_transform(headers);
 }
 
 fn apply_header_mutations(
@@ -61,13 +82,8 @@ fn apply_header_mutations(
         if let Ok(new_value) = http::HeaderValue::from_str(replaced.as_ref()) {
             headers.insert(replace.header().clone(), new_value);
         } else {
-            counter!(
-                crate::runtime::metric_names()
-                    .header_regex_replace_invalid_total
-                    .clone()
-            )
-            .increment(1);
-            warn!(
+            crate::http::metrics::header_regex_replace_invalid(crate::runtime::metric_names());
+            tracing::warn!(
                 header = %replace.header(),
                 "header regex_replace produced invalid HeaderValue; mutation skipped"
             );

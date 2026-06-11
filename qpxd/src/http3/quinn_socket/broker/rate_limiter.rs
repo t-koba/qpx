@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -24,26 +23,20 @@ impl ShardedDatagramRateLimiter {
     pub(super) fn new(shards: usize) -> Self {
         let shards = shards.max(1);
         let per_shard_capacity = (BROKER_SOURCE_RATE_TABLE_CAPACITY / shards).max(1);
-        let mut entries = Vec::with_capacity(shards);
-        for _ in 0..shards {
-            entries.push(Mutex::new(DatagramRateLimiter::new(per_shard_capacity)));
+        Self {
+            shards: qpx_http::sharding::sync_mutex_shards(shards, || {
+                DatagramRateLimiter::new(per_shard_capacity)
+            }),
         }
-        Self { shards: entries }
     }
 
     pub(super) fn allow(&self, addr: SocketAddr) -> bool {
-        let shard = shard_for_addr(addr, self.shards.len());
+        let shard = qpx_http::sharding::modulo(&addr, self.shards.len());
         self.shards[shard]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .allow(addr)
     }
-}
-
-fn shard_for_addr(addr: SocketAddr, shards: usize) -> usize {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    addr.hash(&mut hasher);
-    (hasher.finish() as usize) % shards.max(1)
 }
 
 impl Default for DatagramRateLimiter {

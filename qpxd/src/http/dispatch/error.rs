@@ -1,5 +1,5 @@
-use crate::http::body::Body;
 use hyper::Response;
+use qpx_http::body::Body;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

@@ -1,11 +1,11 @@
+use crate::H3Result as Result;
 use crate::huffman;
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 
 pub(super) fn encode_header_prefix(
     out: &mut Vec<u8>,
     required_insert_count: usize,
     base: usize,
-    total_inserted: usize,
     max_table_capacity: usize,
 ) {
     if max_table_capacity == 0 || required_insert_count == 0 {
@@ -21,7 +21,6 @@ pub(super) fn encode_header_prefix(
     } else {
         (0, base - required_insert_count)
     };
-    let _ = total_inserted;
     encode_prefixed_int(out, 8, 0, encoded_insert_count as u64);
     encode_prefixed_int(out, 7, sign_bit, delta_base as u64);
 }
@@ -44,7 +43,10 @@ pub(super) fn encode_insert_count_increment(increment: u64) -> Vec<u8> {
 }
 
 pub(super) fn decode_string(cursor: &mut &[u8], total_bits: u8) -> Result<Vec<u8>> {
-    try_decode_string(cursor, total_bits)?.ok_or_else(|| anyhow!("truncated string literal"))
+    Ok(
+        try_decode_string(cursor, total_bits)?
+            .ok_or_else(|| anyhow!("truncated string literal"))?,
+    )
 }
 
 pub(super) fn try_decode_string(cursor: &mut &[u8], total_bits: u8) -> Result<Option<Vec<u8>>> {
@@ -67,7 +69,10 @@ pub(super) fn try_decode_string(cursor: &mut &[u8], total_bits: u8) -> Result<Op
 }
 
 pub(super) fn decode_prefixed_int(cursor: &mut &[u8], prefix_bits: u8) -> Result<(u8, u64)> {
-    try_decode_prefixed_int(cursor, prefix_bits)?.ok_or_else(|| anyhow!("truncated integer"))
+    Ok(
+        try_decode_prefixed_int(cursor, prefix_bits)?
+            .ok_or_else(|| anyhow!("truncated integer"))?,
+    )
 }
 
 pub(super) fn try_decode_prefixed_int(
@@ -99,7 +104,7 @@ pub(super) fn try_decode_prefixed_int(
         }
         shift += 7;
         if shift > 56 {
-            return Err(anyhow!("prefixed integer overflow"));
+            return Err(anyhow!("prefixed integer overflow").into());
         }
     }
     Ok(None)

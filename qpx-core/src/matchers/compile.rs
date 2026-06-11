@@ -3,12 +3,11 @@ use crate::prefilter::{
     MatchPrefilterHint, StringInterner, TextPrefilterHint, compile_text_patterns,
     dedup_uppercase_arc,
 };
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use cidr::IpCidr;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::CompiledMatch;
 use super::destination::CompiledDestinationMatch;
 use super::headers::build_header_matchers;
 use super::identity::{
@@ -16,6 +15,7 @@ use super::identity::{
 };
 use super::numeric::compile_numeric_matchers;
 use super::rpc::CompiledRpcMatch;
+use super::{CompiledMatch, Result};
 
 impl CompiledMatch {
     pub fn compile(

@@ -1,11 +1,12 @@
 use super::{H3ClientRecvStream, H3PooledConnection, H3RequestRelayJoin};
-use crate::http::body::{Body, BodyError};
 use crate::http::codec::h2::parse_declared_content_length;
 use crate::http3::codec::h1_headers_to_http;
+use crate::http3::h3_buf_to_bytes;
 use anyhow::{Result, anyhow};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use http_body::Frame;
-use hyper::{Response, StatusCode};
+use hyper::{Method, Response, StatusCode};
+use qpx_http::body::{Body, BodyError};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -36,18 +37,17 @@ pub(super) async fn recv_h3_response_with_interim(
 
 pub(super) fn h3_response_to_hyper(
     response: ::http::Response<()>,
+    request_method: &Method,
     upstream: H3ClientRecvStream,
     inflight_guard: InflightStreamGuard,
     timeout_dur: Duration,
     request_relay: Option<H3RequestRelayJoin>,
 ) -> Result<Response<Body>> {
     let (parts, _) = response.into_parts();
-    let status = crate::http::protocol::semantics::validate_http_status_class(
-        parts.status,
-        "HTTP/3 response",
-    )?;
+    let status =
+        qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/3 response")?;
     let headers = h1_headers_to_http(&parts.headers)?;
-    let declared_length = parse_declared_content_length(&headers)?;
+    let declared_length = declared_h3_response_body_length(request_method, status, &headers)?;
     let mut out = Response::builder()
         .status(status)
         .body(body_from_h3_stream(
@@ -60,6 +60,25 @@ pub(super) fn h3_response_to_hyper(
     *out.headers_mut() = headers;
     *out.version_mut() = http::Version::HTTP_3;
     Ok(out)
+}
+
+pub(super) fn declared_h3_response_body_length(
+    request_method: &Method,
+    status: StatusCode,
+    headers: &http::HeaderMap,
+) -> Result<Option<u64>> {
+    let declared = parse_declared_content_length(headers)?;
+    if *request_method == Method::HEAD
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::RESET_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+        || (*request_method == Method::CONNECT && status.is_success())
+    {
+        Ok(Some(0))
+    } else {
+        Ok(declared)
+    }
 }
 
 fn body_from_h3_stream(
@@ -221,14 +240,14 @@ impl http_body::Body for H3UpstreamBody {
             match this.state {
                 H3UpstreamBodyState::Data => match this.upstream.poll_recv_data(cx) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(Some(mut bytes))) => {
+                    Poll::Ready(Ok(Some(chunk))) => {
+                        let bytes = h3_buf_to_bytes(chunk);
                         this.reset_timeout();
-                        let remaining = bytes.remaining();
-                        if let Err(err) = this.record_data_len(remaining) {
+                        let len = bytes.len();
+                        if let Err(err) = this.record_data_len(len) {
                             warn!(error = ?err, "HTTP/3 upstream response body length mismatch");
                             return this.upstream_error(err.to_string());
                         }
-                        let bytes = bytes.copy_to_bytes(remaining);
                         return Poll::Ready(Some(Ok(Frame::data(bytes))));
                     }
                     Poll::Ready(Ok(None)) => {
@@ -312,7 +331,9 @@ impl InflightStreamGuard {
 impl Drop for InflightStreamGuard {
     fn drop(&mut self) {
         if let Some(pooled) = self.0.take() {
-            pooled.inflight_streams.fetch_sub(1, Ordering::Relaxed);
+            let previous = pooled.inflight_streams.fetch_sub(1, Ordering::Relaxed);
+            let current = previous.saturating_sub(1);
+            super::metrics::inflight(pooled.origin_label.as_str(), current);
             pooled.inflight_below_threshold.notify_waiters();
         }
     }

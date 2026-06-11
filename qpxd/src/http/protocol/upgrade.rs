@@ -1,6 +1,6 @@
-use crate::http::body::Body;
 use anyhow::{Result, anyhow};
 use http::Request;
+use qpx_http::body::Body;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};

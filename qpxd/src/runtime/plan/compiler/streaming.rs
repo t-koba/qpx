@@ -18,12 +18,22 @@ pub(in crate::runtime::plan) fn validate_streaming_requirement(
             | crate::http::modules::BodyAccess::ResponseBodyBuffered { .. }
             | crate::http::modules::BodyAccess::RequestAndResponseBodyBuffered { .. }
     );
+    let buffering_modules = || {
+        let modules = modules.buffering_modules();
+        if modules.is_empty() {
+            "aggregate module body access".to_string()
+        } else {
+            modules.join(", ")
+        }
+    };
     match (requirement, buffers) {
         (Some(StreamingRequirement::Required), true) => Err(anyhow!(
-            "route has streaming_requirement: required but its HTTP module chain requires body buffering"
+            "route has streaming_requirement: required but its HTTP module chain requires body buffering: {}",
+            buffering_modules()
         )),
         (None, true) => Err(anyhow!(
-            "route can buffer bodies through its HTTP module chain; set streaming_requirement: preferred to allow explicit buffering or required to reject it"
+            "route can buffer bodies through its HTTP module chain: {}; set streaming_requirement: preferred to allow explicit buffering or required to reject it",
+            buffering_modules()
         )),
         _ => Ok(()),
     }
@@ -80,9 +90,6 @@ pub(super) fn validate_explicit_streaming_contract(
             "route can buffer bodies because: {}; set streaming_requirement: preferred to allow exact inspection/buffering, or required to reject buffering features",
             reasons.join(", ")
         )),
-        Some(StreamingRequirement::Disabled) => {
-            Err(anyhow!("streaming_requirement: disabled is not supported"))
-        }
     }
 }
 
@@ -123,9 +130,6 @@ pub(super) fn validate_streaming_required_plan(
     match requirement {
         Some(StreamingRequirement::Preferred) => return Ok(()),
         Some(StreamingRequirement::Required) | None => {}
-        Some(StreamingRequirement::Disabled) => {
-            return Err(anyhow!("streaming_requirement: disabled is not supported"));
-        }
     }
     let mut reasons = Vec::new();
     collect_plan_buffering_reasons(plan, &mut reasons);

@@ -1,5 +1,4 @@
 use super::destination::{ConnectTarget, resolve_http_target, resolve_upstream};
-use crate::http::body::Body;
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 use crate::http::codec::interim::{
     H2_PREFACE, serve_h2_with_interim_and_capacity, sniff_h2_preface,
@@ -9,6 +8,7 @@ use crate::http::protocol::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
 use anyhow::{Context, Result};
 use hyper::{Request, StatusCode};
+use qpx_http::body::Body;
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 use qpx_observability::handler_fn;
 use std::convert::Infallible;

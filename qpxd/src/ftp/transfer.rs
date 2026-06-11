@@ -1,8 +1,8 @@
 use super::control::{BasicFtpClient, FtpDeadline};
 use super::{FTP_RESPONSE_STREAM_CHANNEL_CAPACITY, OperationTimedOut, ResponseBodyTooLarge};
-use crate::http::body::Body;
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
+use qpx_http::body::Body;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::OwnedSemaphorePermit;
@@ -67,7 +67,7 @@ async fn stream_ftp_response_body(
     transfer: FtpDataTransfer,
     transform: FtpResponseTransform,
     max_download_bytes: usize,
-    mut sender: crate::http::body::Sender,
+    mut sender: qpx_http::body::Sender,
 ) -> Result<()> {
     let FtpDataTransfer {
         mut client,
@@ -98,7 +98,7 @@ async fn stream_raw_ftp_data(
     reader: &mut TcpStream,
     max_bytes: usize,
     deadline: FtpDeadline,
-    sender: &mut crate::http::body::Sender,
+    sender: &mut qpx_http::body::Sender,
 ) -> Result<FtpBodyStreamOutcome> {
     let mut sent = 0usize;
     let mut chunk = BytesMut::with_capacity(16 * 1024);
@@ -122,7 +122,7 @@ async fn stream_listing_ftp_data(
     reader: &mut TcpStream,
     max_bytes: usize,
     deadline: FtpDeadline,
-    sender: &mut crate::http::body::Sender,
+    sender: &mut qpx_http::body::Sender,
 ) -> Result<FtpBodyStreamOutcome> {
     let mut seen = 0usize;
     let mut emitted = false;
@@ -156,7 +156,7 @@ async fn stream_listing_ftp_data(
 }
 
 async fn flush_ftp_listing_line(
-    sender: &mut crate::http::body::Sender,
+    sender: &mut qpx_http::body::Sender,
     line: &mut Vec<u8>,
     emitted: &mut bool,
 ) -> Result<Result<(), ()>> {

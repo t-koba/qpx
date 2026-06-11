@@ -19,17 +19,8 @@ mod response;
 mod webtransport;
 mod webtransport_dispatch;
 
+pub(crate) use self::connect_upstream::QpxH3UpstreamSessionPool;
 pub(super) use self::handler::{ForwardQpxHandler, h3_body_read_timeout};
-
-pub(crate) fn configure_qpx_h3_upstream_session_pool(
-    max_sessions_per_key: usize,
-    max_inflight_streams_per_session: usize,
-) {
-    connect_upstream::configure_qpx_h3_upstream_session_pool(
-        max_sessions_per_key,
-        max_inflight_streams_per_session,
-    );
-}
 
 pub(crate) fn prepare_http3_listener_socket(
     listener_name: &str,

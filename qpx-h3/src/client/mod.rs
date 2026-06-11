@@ -6,6 +6,7 @@ use self::driver::{
     validate_peer_settings_for_protocol,
 };
 use self::registry::{SessionIngress, SessionRegistry, ShardedSessionRegistry};
+use crate::H3Result as Result;
 use crate::protocol::{PeerControlState, PeerSettings};
 use crate::qpack::{QpackConnection, encode_request_head};
 use crate::server::{Protocol, Settings};
@@ -13,7 +14,7 @@ use crate::transport::{
     BidiStream, DatagramDispatch, OpenStreams, RequestStream, RequestStreamConfig, StreamDatagrams,
     UniRecvStream,
 };
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -21,17 +22,29 @@ use tokio::sync::{Notify, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Duration, timeout};
 
+/// Opened extended CONNECT stream and associated resources.
 pub struct ExtendedConnectStream {
+    /// Interim responses received before the final response.
     pub interim: Vec<http::Response<()>>,
+    /// Final response head.
     pub response: http::Response<()>,
+    /// Request stream.
     pub request_stream: RequestStream,
+    /// Stream datagrams, if enabled.
     pub datagrams: Option<StreamDatagrams>,
+    /// Stream opener for associated streams.
     pub opener: Option<OpenStreams>,
+    /// Incoming associated bidirectional streams.
     pub associated_bidi: Option<mpsc::Receiver<BidiStream>>,
+    /// Incoming associated unidirectional streams.
     pub associated_uni: Option<mpsc::Receiver<UniRecvStream>>,
+    /// Critical stream handles kept alive by this stream.
     pub _critical_streams: Option<(quinn::SendStream, quinn::SendStream)>,
+    /// Endpoint kept alive by this stream.
     pub _endpoint: quinn::Endpoint,
+    /// Background connection driver task.
     pub driver: JoinHandle<()>,
+    /// Background datagram dispatcher task.
     pub datagram_task: Option<JoinHandle<()>>,
     #[doc(hidden)]
     pub _connection_use: Option<ClientConnectionUse>,
@@ -43,6 +56,7 @@ pub struct ExtendedConnectStream {
 
 static ACTIVE_CLIENT_CONNECTIONS: OnceLock<StdMutex<HashSet<usize>>> = OnceLock::new();
 
+/// Reusable HTTP/3 client session.
 #[derive(Clone)]
 pub struct ClientSession {
     inner: Arc<ClientSessionInner>,
@@ -116,7 +130,8 @@ impl ClientConnectionUse {
         if !guard.insert(stable_id) {
             return Err(anyhow!(
                 "qpx-h3 client connection is already owned by an active HTTP/3 driver"
-            ));
+            )
+            .into());
         }
         Ok(Self {
             stable_id,
@@ -156,6 +171,7 @@ impl Drop for ClientConnectionUse {
 }
 
 impl ClientSession {
+    /// Creates a reusable HTTP/3 client session on an existing QUIC connection.
     pub async fn new(
         endpoint: quinn::Endpoint,
         connection: quinn::Connection,
@@ -222,14 +238,17 @@ impl ClientSession {
         })
     }
 
+    /// Returns whether the underlying session is closed.
     pub fn is_closed(&self) -> bool {
         self.inner.driver.is_finished() || self.inner.connection.close_reason().is_some()
     }
 
+    /// Returns the current number of in-flight request streams.
     pub fn inflight_streams(&self) -> usize {
         self.inner.inflight_streams.load(Ordering::Relaxed)
     }
 
+    /// Waits until in-flight streams drop below a limit.
     pub async fn wait_for_inflight_below(&self, limit: usize, timeout_dur: Duration) -> bool {
         if self.inflight_streams() < limit || self.is_closed() {
             return true;
@@ -247,6 +266,7 @@ impl ClientSession {
         .is_ok()
     }
 
+    /// Opens an extended CONNECT stream on this session.
     pub async fn open_extended_connect_stream(
         &self,
         request: http::Request<()>,
@@ -257,6 +277,7 @@ impl ClientSession {
     }
 }
 
+/// Opens an extended CONNECT stream using a fresh HTTP/3 client driver.
 pub async fn open_extended_connect_stream(
     endpoint: quinn::Endpoint,
     connection: quinn::Connection,
@@ -337,7 +358,7 @@ pub async fn open_extended_connect_stream(
     let opener = OpenStreams::new(connection.clone(), settings.read_timeout);
     let (bidi_send, bidi_recv) = match timeout(timeout_dur, connection.open_bi()).await {
         Ok(Ok(streams)) => streams,
-        Ok(Err(err)) => return fail_client_setup(&connection, err.into()),
+        Ok(Err(err)) => return fail_client_setup(&connection, err),
         Err(_) => {
             return fail_client_setup(&connection, anyhow!("extended CONNECT open_bi timed out"));
         }
@@ -406,7 +427,7 @@ pub async fn open_extended_connect_stream(
         let Some(dispatch) = datagram_dispatch else {
             return fail_client_setup(&connection, anyhow!("missing datagram dispatch"));
         };
-        Some(dispatch.register_stream(stream_id).await)
+        Some(dispatch.register_stream(stream_id).await?)
     } else {
         None
     };
@@ -456,7 +477,7 @@ async fn open_extended_connect_on_session(
         }
         Err(_) => {
             drop(session_stream_use);
-            return Err(anyhow!("extended CONNECT open_bi timed out"));
+            return Err(anyhow!("extended CONNECT open_bi timed out").into());
         }
     };
     let stream_id: u64 = bidi_send.id().into();
@@ -466,7 +487,8 @@ async fn open_extended_connect_on_session(
         drop(session_stream_use);
         return Err(anyhow!(
             "peer GOAWAY disallows opening request stream {stream_id} (limit {goaway_id})"
-        ));
+        )
+        .into());
     }
     let protocol_name = protocol.as_ref().map(Protocol::as_str);
     let payload = match encode_request_head(&request, protocol_name) {
@@ -526,9 +548,9 @@ async fn open_extended_connect_on_session(
         && response.status().is_success()
     {
         let Some(dispatch) = inner.datagram_dispatch.as_ref() else {
-            return Err(anyhow!("missing datagram dispatch"));
+            return Err(anyhow!("missing datagram dispatch").into());
         };
-        Some(dispatch.register_stream(stream_id).await)
+        Some(dispatch.register_stream(stream_id).await?)
     } else {
         None
     };

@@ -1,11 +1,13 @@
+use crate::H3Result as Result;
 use crate::protocol::encode_varint;
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use bytes::Bytes;
 use std::time::Duration;
 use tokio::time::timeout;
 
 use super::{WEBTRANSPORT_STREAM_CHUNK_BYTES, abort_bidi_stream, stop_recv_stream};
 
+/// WebTransport bidirectional stream.
 pub struct BidiStream {
     send: quinn::SendStream,
     recv: quinn::RecvStream,
@@ -20,6 +22,7 @@ impl BidiStream {
         abort_bidi_stream(&mut self.send, &mut self.recv, code);
     }
 
+    /// Splits the stream into send and receive halves.
     pub fn split(self) -> (StreamSend, StreamRecv) {
         (
             StreamSend { send: self.send },
@@ -28,28 +31,33 @@ impl BidiStream {
     }
 }
 
+/// Send half of a WebTransport stream.
 pub struct StreamSend {
     send: quinn::SendStream,
 }
 
 impl StreamSend {
+    /// Sends one stream chunk.
     pub async fn send_chunk(&mut self, payload: Bytes) -> Result<()> {
         self.send.write_all(payload.as_ref()).await?;
         Ok(())
     }
 
+    /// Finishes the send stream.
     pub async fn finish(&mut self) -> Result<()> {
         self.send.finish()?;
         Ok(())
     }
 }
 
+/// Receive half of a WebTransport stream.
 #[derive(Debug)]
 pub struct StreamRecv {
     recv: quinn::RecvStream,
 }
 
 impl StreamRecv {
+    /// Receives one stream chunk.
     pub async fn recv_chunk(&mut self) -> Result<Option<Bytes>> {
         Ok(self
             .recv
@@ -59,6 +67,7 @@ impl StreamRecv {
     }
 }
 
+/// Incoming WebTransport unidirectional stream.
 #[derive(Debug)]
 pub struct UniRecvStream {
     recv: quinn::RecvStream,
@@ -73,6 +82,7 @@ impl UniRecvStream {
         stop_recv_stream(&mut self.recv, code);
     }
 
+    /// Receives one stream chunk.
     pub async fn recv_chunk(&mut self) -> Result<Option<Bytes>> {
         Ok(self
             .recv
@@ -82,6 +92,7 @@ impl UniRecvStream {
     }
 }
 
+/// Outgoing WebTransport unidirectional stream.
 #[derive(Debug)]
 pub struct UniSendStream {
     send: quinn::SendStream,
@@ -92,17 +103,20 @@ impl UniSendStream {
         Self { send }
     }
 
+    /// Sends one stream chunk.
     pub async fn send_chunk(&mut self, payload: Bytes) -> Result<()> {
         self.send.write_all(payload.as_ref()).await?;
         Ok(())
     }
 
+    /// Finishes the send stream.
     pub async fn finish(&mut self) -> Result<()> {
         self.send.finish()?;
         Ok(())
     }
 }
 
+/// Opener for WebTransport associated streams.
 #[derive(Debug, Clone)]
 pub struct OpenStreams {
     conn: quinn::Connection,
@@ -117,6 +131,7 @@ impl OpenStreams {
         }
     }
 
+    /// Opens an associated WebTransport bidirectional stream.
     pub async fn open_webtransport_bidi(&mut self, session_id: u64) -> Result<BidiStream> {
         let opened = timeout(self.write_timeout, self.conn.open_bi())
             .await
@@ -134,6 +149,7 @@ impl OpenStreams {
         Ok(BidiStream::new(send, recv))
     }
 
+    /// Opens an associated WebTransport unidirectional stream.
     pub async fn open_webtransport_uni(&mut self, session_id: u64) -> Result<UniSendStream> {
         let opened = timeout(self.write_timeout, self.conn.open_uni())
             .await

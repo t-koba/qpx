@@ -1,5 +1,5 @@
+use crate::H3Result as Result;
 use crate::qpack::HeaderDecodeError;
-use anyhow::Result;
 use http::{HeaderMap, HeaderName, HeaderValue};
 
 pub(crate) fn validate_h3_regular_field(

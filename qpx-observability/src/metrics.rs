@@ -1,5 +1,7 @@
+use crate::ObservabilityResult;
 use anyhow::{Context, Result};
 use cidr::IpCidr;
+use metrics::histogram;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use qpx_core::config::MetricsConfig;
 use std::net::SocketAddr;
@@ -13,6 +15,21 @@ const MAX_METRICS_REQUEST_BYTES: usize = 16 * 1024;
 const METRICS_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const METRICS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const METRICS_RENDER_CACHE_TTL: Duration = Duration::from_millis(250);
+
+pub(crate) fn grpc_stream_duration_seconds(
+    listener: &str,
+    protocol: String,
+    streaming: String,
+    seconds: f64,
+) {
+    histogram!(
+        "qpx_grpc_stream_duration_seconds",
+        "listener" => listener.to_owned(),
+        "protocol" => protocol,
+        "streaming" => streaming,
+    )
+    .record(seconds);
+}
 
 enum MetricsResponseBody {
     Static(&'static str),
@@ -49,7 +66,15 @@ impl MetricsRenderCache {
     }
 }
 
+/// Starts the Prometheus metrics endpoint.
 pub fn start_metrics(
+    config: &MetricsConfig,
+    inherited_listener: Option<std::net::TcpListener>,
+) -> ObservabilityResult<tokio::task::JoinHandle<()>> {
+    start_metrics_inner(config, inherited_listener).map_err(Into::into)
+}
+
+fn start_metrics_inner(
     config: &MetricsConfig,
     inherited_listener: Option<std::net::TcpListener>,
 ) -> Result<tokio::task::JoinHandle<()>> {

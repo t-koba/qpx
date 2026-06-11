@@ -1,11 +1,12 @@
-use crate::http::body::Body;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
 use crate::policy_context::{AuditRecord, emit_audit_log};
 use anyhow::Result;
+use bytes::Bytes;
 use hyper::{Response, StatusCode};
 use qpx_core::rules::CompiledHeaderControl;
+use qpx_http::body::Body;
 use qpx_observability::access_log::RequestLogContext;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -20,10 +21,7 @@ pub(super) async fn send_qpx_static_response(
 ) -> Result<()> {
     const STATIC_RESPONSE_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
-    let response = Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_LENGTH, body.len().to_string())
-        .body(Body::from(body.to_vec()))?;
+    let response = qpx_static_response(status, body)?;
     let response = finalize_response_for_request(
         request_method,
         http::Version::HTTP_3,
@@ -39,6 +37,13 @@ pub(super) async fn send_qpx_static_response(
         STATIC_RESPONSE_SEND_TIMEOUT,
     )
     .await
+}
+
+fn qpx_static_response(status: StatusCode, body: &[u8]) -> Result<Response<Body>> {
+    Ok(Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_LENGTH, body.len().to_string())
+        .body(Body::from(Bytes::copy_from_slice(body)))?)
 }
 
 pub(super) async fn send_qpx_response_stream(
@@ -120,7 +125,7 @@ pub(super) fn finalize_qpx_connect_head_response(
     header_control: Option<&CompiledHeaderControl>,
 ) -> Result<http::Response<()>> {
     let (parts, _) = response.into_parts();
-    let status = crate::http::protocol::semantics::validate_http_status_class(
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
         parts.status,
         "QPX HTTP/3 extended CONNECT response",
     )?;
@@ -134,7 +139,7 @@ pub(super) fn finalize_qpx_connect_head_response(
         header_control,
         false,
     );
-    let status = crate::http::protocol::semantics::validate_http_status_class(
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
         downstream.status(),
         "QPX HTTP/3 extended CONNECT response",
     )?;
@@ -151,7 +156,7 @@ pub(super) fn upstream_qpx_extended_connect_error_response(
     body_read_timeout: Duration,
 ) -> Result<Response<Body>> {
     let (parts, _) = response.into_parts();
-    let status = crate::http::protocol::semantics::validate_http_status_class(
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
         parts.status,
         "QPX HTTP/3 extended CONNECT response",
     )?;
@@ -238,5 +243,17 @@ mod tests {
         let err = finalize_qpx_connect_head_response(response, "qpx-test", None)
             .expect_err("status should be rejected");
         assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn qpx_static_response_sets_exact_content_length() {
+        let response =
+            qpx_static_response(StatusCode::BAD_REQUEST, b"bad qpx request").expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_LENGTH),
+            Some(&http::HeaderValue::from_static("15"))
+        );
     }
 }

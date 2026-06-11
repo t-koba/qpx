@@ -2,35 +2,34 @@ use super::super::mirrors::{
     dispatch_mirrors, record_reverse_upstream_error, record_reverse_upstream_status,
     record_reverse_upstream_timeout,
 };
-use super::super::response_rules::ResponseRuleInput;
-use super::super::{ReverseInterimResponses, empty_interim_response};
+use super::super::response_rules::{
+    DispatchResponseRuleInput, ResponseRuleInput, apply_dispatch_response_rules,
+};
+use super::super::{InterimList, empty_interim_response};
 use super::record_reverse_success_metrics;
 use super::{
     ReverseAttemptOutcome, ReverseIpcDispatchInput, ReverseIpcSuccessInput,
-    ReverseResponseRuleInput, ReverseWebsocketDispatch, apply_response_rules,
-    build_reverse_attempt_request, consume_reverse_retry_budget, record_reverse_loop_error,
-    reverse_continue_response_rule, reverse_retry_backoff,
+    ReverseResponseRuleInput, ReverseWebsocketDispatch, acquire_reverse_upstream_concurrency,
+    build_reverse_attempt_request, capture_reverse_response_outcome, consume_reverse_retry_budget,
+    record_reverse_loop_error, reverse_continue_response_rule, reverse_retry_backoff,
 };
-use crate::http::body::Body;
 use crate::http::dispatch::{
-    DispatchCacheWriteInput, annotate_dispatch_response, finalize_dispatch_stale_if_error_response,
+    DispatchCacheWriteInput, DispatchOutcome, annotate_dispatch_response,
+    concurrency_limited_response_for_parts, finalize_dispatch_stale_if_error_response,
     write_dispatch_cache_result,
 };
-use crate::http::protocol::common::too_many_requests_response as too_many_requests;
-use crate::http::protocol::l7::{
-    finalize_response_for_request, finalize_response_with_headers_in_place,
-};
+use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::ipc_client::{ClientConnInfo, proxy_ipc_upstream};
 use crate::upstream::origin::{OriginEndpoint, proxy_websocket};
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
-use metrics::{counter, histogram};
+use qpx_http::body::Body;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, Instant, timeout};
 
 pub(super) async fn dispatch_reverse_ipc_route(
     input: ReverseIpcDispatchInput<'_>,
-) -> Result<(ReverseInterimResponses, Response<Body>)> {
+) -> Result<(InterimList, Response<Body>)> {
     let ReverseIpcDispatchInput {
         base,
         state,
@@ -50,6 +49,7 @@ pub(super) async fn dispatch_reverse_ipc_route(
         mut cache_collapse_guard,
         mut first_request,
         template,
+        replay_recorder,
         mut mirror_upstreams,
         attempts,
         route_timeout,
@@ -66,18 +66,11 @@ pub(super) async fn dispatch_reverse_ipc_route(
     let _concurrency_permits = match request_limits.acquire_concurrency(request_limit_ctx) {
         Some(permits) => permits,
         None => {
-            let mut response = finalize_response_for_request(
+            let response = concurrency_limited_response_for_parts(
                 request_method,
                 request_version,
                 proxy_name,
-                too_many_requests(None),
-                false,
-            );
-            annotate_dispatch_response(
-                &mut response,
-                audit_ctx,
-                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
-                &[],
+                audit_ctx.clone(),
             );
             return Ok(empty_interim_response(response));
         }
@@ -89,39 +82,42 @@ pub(super) async fn dispatch_reverse_ipc_route(
     let mut last_err = None;
     for attempt_idx in 0..attempts {
         let started = Instant::now();
-        let mut req_for_upstream =
-            build_reverse_attempt_request(attempt_idx, &mut first_request, template.as_ref())?;
+        let mut req_for_upstream = match build_reverse_attempt_request(
+            attempt_idx,
+            &mut first_request,
+            template.as_ref(),
+            replay_recorder.as_ref(),
+        )
+        .await
+        {
+            Ok(req) => req,
+            Err(err) => {
+                last_err = Some(err);
+                break;
+            }
+        };
         http_modules
             .on_upstream_request(&mut req_for_upstream)
             .await?;
         let export_session =
             state.export_session_for_plan(&route.plan, conn.remote_addr, ipc.endpoint_label());
-        if let Some(session) = export_session.as_ref() {
-            let preview = crate::exporter::serialize_request_preview_async(&req_for_upstream).await;
-            session.emit_plaintext(true, &preview);
-            if let Some(sample_bytes) = route.plan.capture_stream_sample_bytes() {
-                req_for_upstream = crate::http::capture::stream::sample_request_body_for_export(
-                    req_for_upstream,
-                    sample_bytes,
-                    route.plan.streaming.body_channel_capacity,
-                    Duration::from_millis(route.plan.streaming.body_read_timeout_ms),
-                    session.clone(),
-                    true,
-                );
-            } else if let Some(max_capture_bytes) = route.plan.capture_full_body_bytes() {
-                req_for_upstream = crate::http::capture::stream::capture_request_body_for_export(
-                    req_for_upstream,
-                    max_capture_bytes,
-                    route.plan.streaming.body_channel_capacity,
-                    Duration::from_millis(route.plan.streaming.body_read_timeout_ms),
-                    session.clone(),
-                    true,
-                );
-            }
-        }
+        req_for_upstream = crate::http::capture::stream::emit_request_for_export(
+            req_for_upstream,
+            &route.plan,
+            export_session.as_ref(),
+            true,
+        )
+        .await;
         let response = timeout(
             timeout_dur,
-            proxy_ipc_upstream(req_for_upstream, ipc, proxy_name, ipc_conn, route_timeout),
+            proxy_ipc_upstream(
+                &state.pools,
+                req_for_upstream,
+                ipc,
+                proxy_name,
+                ipc_conn,
+                route_timeout,
+            ),
         )
         .await;
         match response {
@@ -144,6 +140,7 @@ pub(super) async fn dispatch_reverse_ipc_route(
                     revalidation_state: &mut revalidation_state,
                     cache_collapse_guard: &mut cache_collapse_guard,
                     template: template.as_ref(),
+                    replay_recorder: replay_recorder.clone(),
                     mirror_upstreams: &mut mirror_upstreams,
                     attempts,
                     route_timeout,
@@ -192,6 +189,7 @@ pub(super) async fn dispatch_reverse_ipc_route(
     }
     if let Some(stale) = finalize_dispatch_stale_if_error_response(
         revalidation_state.as_ref(),
+        &route.plan,
         request_method,
         proxy_name,
         route_headers.as_deref(),
@@ -229,6 +227,7 @@ async fn handle_reverse_ipc_success(
         revalidation_state,
         cache_collapse_guard,
         template,
+        replay_recorder,
         mirror_upstreams,
         attempts,
         route_timeout,
@@ -241,33 +240,36 @@ async fn handle_reverse_ipc_success(
         export_session,
     } = input;
     let resp = http_modules.on_upstream_response(response).await?;
-    let response_rule = apply_response_rules(ResponseRuleInput {
-        route,
-        base,
-        conn,
-        destination: request_destination,
-        upstream_cert: None,
-        identity,
-        request_rpc,
-        route_headers: route_headers.clone(),
-        response: resp,
-        max_observed_response_body_bytes: route
-            .plan
-            .body_observation_limit(state.plan.limits.body.max_observed_response_body_bytes),
-        response_body_read_timeout: Duration::from_millis(
-            state.plan.limits.timeouts.upstream_http_timeout_ms.max(1),
-        ),
-        force_response_body_observation: false,
+    let response_rule = apply_dispatch_response_rules(DispatchResponseRuleInput {
+        rule: ResponseRuleInput {
+            route,
+            base,
+            conn,
+            destination: request_destination,
+            upstream_cert: None,
+            identity,
+            request_rpc,
+            route_headers: route_headers.clone(),
+            response: resp,
+            max_observed_response_body_bytes: route.plan.response_body_observation_limit(
+                state.plan.limits.body.max_observed_response_body_bytes,
+            ),
+            response_body_read_timeout: Duration::from_millis(
+                state.plan.limits.timeouts.upstream_http_timeout_ms.max(1),
+            ),
+            force_response_body_observation: false,
+        },
+        http_modules,
+        audit: audit_ctx,
+        request_method,
+        request_version,
+        proxy_name,
     })
     .await?;
     let (mut resp, route_headers_for_response, response_cache_bypass, policy_tags, mirror) =
         match reverse_continue_response_rule(ReverseResponseRuleInput {
             response_rule,
-            request_method,
-            request_version,
-            proxy_name,
             http_modules,
-            audit_ctx,
             state,
             route,
             selected_upstream: None,
@@ -278,15 +280,14 @@ async fn handle_reverse_ipc_success(
         .await?
         {
             Ok(values) => values,
-            Err(outcome) => return Ok(outcome),
+            Err(outcome) => {
+                return Ok(capture_reverse_response_outcome(outcome, route, export_session).await);
+            }
         };
-    if let Some(session) = export_session {
-        let preview = crate::exporter::serialize_response_preview_async(&resp).await;
-        session.emit_plaintext(false, &preview);
-    }
     if resp.status().is_server_error()
         && let Some(stale) = finalize_dispatch_stale_if_error_response(
             revalidation_state.as_ref(),
+            &route.plan,
             request_method,
             proxy_name,
             route_headers.as_deref(),
@@ -295,9 +296,12 @@ async fn handle_reverse_ipc_success(
         )
         .await?
     {
-        return Ok(ReverseAttemptOutcome::Response(Box::new(
-            empty_interim_response(stale),
-        )));
+        return Ok(capture_reverse_response_outcome(
+            ReverseAttemptOutcome::Response(Box::new(empty_interim_response(stale))),
+            route,
+            export_session,
+        )
+        .await);
     }
     record_reverse_success_metrics(state, started);
     resp = write_dispatch_cache_result(DispatchCacheWriteInput {
@@ -315,55 +319,52 @@ async fn handle_reverse_ipc_success(
     })
     .await?;
     resp = http_modules.prepare_downstream_response(resp).await?;
-    let resp_version = resp.version();
     finalize_response_with_headers_in_place(
         request_method,
-        resp_version,
+        resp.version(),
         proxy_name,
         &mut resp,
         route_headers_for_response.as_deref(),
         false,
     );
-    if let Some(session) = export_session
-        && let Some(sample_bytes) = route.plan.capture_stream_sample_bytes()
-    {
-        resp = crate::http::capture::stream::sample_response_body_for_export(
-            resp,
-            sample_bytes,
-            route.plan.streaming.body_channel_capacity,
-            Duration::from_millis(route.plan.streaming.body_read_timeout_ms),
-            session.clone(),
-        );
-    } else if let Some(session) = export_session
-        && let Some(max_capture_bytes) = route.plan.capture_full_body_bytes()
-    {
-        resp = crate::http::capture::stream::capture_response_body_for_export(
-            resp,
-            max_capture_bytes,
-            route.plan.streaming.body_channel_capacity,
-            Duration::from_millis(route.plan.streaming.body_read_timeout_ms),
-            session.clone(),
-        );
-    }
-    if mirror.unwrap_or(true)
-        && !mirror_upstreams.is_empty()
-        && let Some(template) = template
-    {
-        dispatch_mirrors(
-            template,
-            std::mem::take(mirror_upstreams),
-            route_timeout,
-            route.policy.health.clone(),
-            route.policy.lifecycle.clone(),
-            route.upstream_trust.clone(),
-            proxy_name,
-        );
+    resp = crate::http::capture::stream::emit_optional_response_for_export(
+        resp,
+        &route.plan,
+        export_session,
+    )
+    .await;
+    if mirror.unwrap_or(true) && !mirror_upstreams.is_empty() {
+        if let Some(template) = template {
+            dispatch_mirrors(
+                state.pools.clone(),
+                template,
+                std::mem::take(mirror_upstreams),
+                route_timeout,
+                route.policy.health.clone(),
+                route.policy.lifecycle.clone(),
+                route.upstream_trust.clone(),
+                proxy_name,
+            );
+        } else if let Some(recorder) = replay_recorder.as_ref()
+            && let Some(template) = recorder.template().await
+        {
+            dispatch_mirrors(
+                state.pools.clone(),
+                template.as_ref(),
+                std::mem::take(mirror_upstreams),
+                route_timeout,
+                route.policy.health.clone(),
+                route.policy.lifecycle.clone(),
+                route.upstream_trust.clone(),
+                proxy_name,
+            );
+        }
     }
     http_modules.on_logging(Some(resp.status()), None).await;
     annotate_dispatch_response(
         &mut resp,
         audit_ctx,
-        crate::http::dispatch::DispatchOutcome::Allow,
+        DispatchOutcome::Allow,
         policy_tags.as_ref(),
     );
     Ok(ReverseAttemptOutcome::Response(Box::new(
@@ -373,7 +374,7 @@ async fn handle_reverse_ipc_success(
 
 pub(super) async fn handle_reverse_websocket_upgrade(
     ctx: ReverseWebsocketDispatch<'_>,
-) -> Result<(ReverseInterimResponses, Response<Body>)> {
+) -> Result<(InterimList, Response<Body>)> {
     let ReverseWebsocketDispatch {
         req,
         state,
@@ -414,27 +415,18 @@ pub(super) async fn handle_reverse_websocket_upgrade(
         conn.remote_addr,
         upstream_origin.upstream.as_str(),
     );
-    let mut concurrency_ctx = request_limit_ctx.clone();
-    if concurrency_ctx.upstream.is_none() {
-        concurrency_ctx.upstream = selected_upstream
-            .as_ref()
-            .map(|upstream| upstream.target.clone());
-    }
-    let _concurrency_permits = match request_limits.acquire_concurrency(&concurrency_ctx) {
+    let _concurrency_permits = match acquire_reverse_upstream_concurrency(
+        request_limits,
+        request_limit_ctx,
+        selected_upstream.as_ref(),
+    ) {
         Some(permits) => permits,
         None => {
-            let mut response = finalize_response_for_request(
+            let response = concurrency_limited_response_for_parts(
                 request_method,
                 req.version(),
                 proxy_name,
-                too_many_requests(None),
-                false,
-            );
-            annotate_dispatch_response(
-                &mut response,
-                audit_ctx,
-                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
-                &[],
+                audit_ctx.clone(),
             );
             return Ok(empty_interim_response(response));
         }
@@ -473,42 +465,27 @@ pub(super) async fn handle_reverse_websocket_upgrade(
                     started.elapsed(),
                 );
             }
-            histogram!(
-                state
-                    .observability
-                    .metric_names
-                    .reverse_upstream_latency_ms
-                    .clone()
-            )
-            .record(started.elapsed().as_secs_f64() * 1000.0);
-            counter!(
-                state.observability.metric_names.reverse_requests_total.clone(),
-                "result" => "ok"
-            )
-            .increment(1);
+            super::super::metrics::upstream_latency(state, started.elapsed());
+            super::super::metrics::reverse_result(state, "ok");
             resp = http_modules.on_upstream_response(resp).await?;
             resp = http_modules.prepare_downstream_response(resp).await?;
-            if let Some(session) = export_session.as_ref() {
-                let preview = crate::exporter::serialize_response_preview_async(&resp).await;
-                session.emit_plaintext(false, &preview);
-            }
             let keep_upgrade = resp.status() == StatusCode::SWITCHING_PROTOCOLS;
-            let resp_version = resp.version();
             finalize_response_with_headers_in_place(
                 request_method,
-                resp_version,
+                resp.version(),
                 proxy_name,
                 &mut resp,
                 route_headers,
                 keep_upgrade,
             );
+            resp = crate::http::capture::stream::emit_optional_response_for_export(
+                resp,
+                &route.plan,
+                export_session.as_ref(),
+            )
+            .await;
             http_modules.on_logging(Some(resp.status()), None).await;
-            annotate_dispatch_response(
-                &mut resp,
-                audit_ctx,
-                crate::http::dispatch::DispatchOutcome::Allow,
-                &[],
-            );
+            annotate_dispatch_response(&mut resp, audit_ctx, DispatchOutcome::Allow, &[]);
             Ok(empty_interim_response(resp))
         }
         Ok(Err(err)) => {
@@ -516,11 +493,7 @@ pub(super) async fn handle_reverse_websocket_upgrade(
             if let Some(upstream) = selected_upstream.as_ref() {
                 record_reverse_upstream_error(upstream, &route.policy, &err);
             }
-            counter!(
-                state.observability.metric_names.reverse_requests_total.clone(),
-                "result" => "error"
-            )
-            .increment(1);
+            super::super::metrics::reverse_result(state, "error");
             Err(err)
         }
         Err(_) => {
@@ -529,11 +502,7 @@ pub(super) async fn handle_reverse_websocket_upgrade(
             if let Some(upstream) = selected_upstream.as_ref() {
                 record_reverse_upstream_timeout(upstream, &route.policy);
             }
-            counter!(
-                state.observability.metric_names.reverse_requests_total.clone(),
-                "result" => "timeout"
-            )
-            .increment(1);
+            super::super::metrics::reverse_result(state, "timeout");
             Err(err)
         }
     }

@@ -1,11 +1,11 @@
-use crate::http::body::Body;
 use crate::http::protocol::header_control::{apply_request_headers, apply_response_headers};
-use crate::http::protocol::semantics::{
+use hyper::{Method, Request, Response, StatusCode};
+use qpx_core::rules::CompiledHeaderControl;
+use qpx_http::body::Body;
+use qpx_http::protocol::semantics::{
     append_via_for_version, normalize_response_for_request_with_options,
     sanitize_hop_by_hop_headers, sync_host_header_from_absolute_target,
 };
-use hyper::{Method, Request, Response, StatusCode};
-use qpx_core::rules::CompiledHeaderControl;
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
 use tracing::warn;
@@ -36,7 +36,18 @@ pub(crate) fn finalize_response_in_place(
     response: &mut Response<Body>,
     preserve_upgrade: bool,
 ) {
-    let preserve_proxy_auth = response.status() == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED;
+    finalize_response_headers_common(request_version, proxy_name, response, preserve_upgrade);
+    normalize_response_for_request_with_options(request_method, response, preserve_upgrade);
+    wrap_body_sanitizing_response_trailers(response);
+}
+
+fn finalize_response_headers_common(
+    request_version: http::Version,
+    proxy_name: &str,
+    response: &mut Response<Body>,
+    preserve_upgrade: bool,
+) {
+    let preserve_proxy_auth = response.status() == StatusCode::PROXY_AUTHENTICATION_REQUIRED;
     let proxy_authenticate = if preserve_proxy_auth {
         collect_header_values(response.headers(), "proxy-authenticate")
     } else {
@@ -63,16 +74,10 @@ pub(crate) fn finalize_response_in_place(
     }
     ensure_date_header(response.headers_mut());
     append_via_for_version(response.headers_mut(), request_version, proxy_name);
-    normalize_response_for_request_with_options(request_method, response, preserve_upgrade);
-    wrap_body_sanitizing_response_trailers(response);
 }
 
 fn collect_header_values(headers: &http::HeaderMap, name: &str) -> Vec<http::HeaderValue> {
-    headers
-        .get_all(name)
-        .iter()
-        .cloned()
-        .collect::<Vec<http::HeaderValue>>()
+    headers.get_all(name).iter().cloned().collect()
 }
 
 fn restore_header_values(headers: &mut http::HeaderMap, name: &str, values: &[http::HeaderValue]) {
@@ -100,33 +105,7 @@ fn finalize_extended_connect_response_in_place(
     response: &mut Response<Body>,
     preserve_upgrade: bool,
 ) {
-    let preserve_proxy_auth = response.status() == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED;
-    let proxy_authenticate = if preserve_proxy_auth {
-        collect_header_values(response.headers(), "proxy-authenticate")
-    } else {
-        Vec::new()
-    };
-    let proxy_auth_info = if preserve_proxy_auth {
-        collect_header_values(response.headers(), "proxy-authentication-info")
-    } else {
-        Vec::new()
-    };
-
-    sanitize_hop_by_hop_headers(response.headers_mut(), preserve_upgrade);
-    if preserve_proxy_auth {
-        restore_header_values(
-            response.headers_mut(),
-            "proxy-authenticate",
-            &proxy_authenticate,
-        );
-        restore_header_values(
-            response.headers_mut(),
-            "proxy-authentication-info",
-            &proxy_auth_info,
-        );
-    }
-    ensure_date_header(response.headers_mut());
-    append_via_for_version(response.headers_mut(), request_version, proxy_name);
+    finalize_response_headers_common(request_version, proxy_name, response, preserve_upgrade);
     wrap_body_sanitizing_response_trailers(response);
 }
 
@@ -226,6 +205,13 @@ pub(crate) fn prepare_request_with_headers_in_place(
     if validate_trailers {
         wrap_body_validating_request_trailers(request);
     }
+}
+
+pub(crate) fn apply_request_header_control_in_place(
+    request: &mut Request<Body>,
+    header_control: Option<&CompiledHeaderControl>,
+) {
+    apply_request_headers(request.headers_mut(), header_control);
 }
 
 pub(crate) async fn handle_max_forwards_in_place(
@@ -402,7 +388,7 @@ fn should_reflect_trace_header(name: &http::header::HeaderName, reflect_all_head
     }
 
     let lower = name.as_str().to_ascii_lowercase();
-    if crate::http::protocol::semantics::is_hop_by_hop_header_name(lower.as_str()) {
+    if qpx_http::protocol::semantics::is_hop_by_hop_header_name(lower.as_str()) {
         return false;
     }
 
@@ -474,8 +460,7 @@ fn wrap_body_validating_request_trailers(request: &mut Request<Body>) {
             }
         };
         if let Some(trailers) = trailers {
-            if let Err(err) = crate::http::protocol::semantics::validate_request_trailers(&trailers)
-            {
+            if let Err(err) = qpx_http::protocol::semantics::validate_request_trailers(&trailers) {
                 warn!(error = ?err, "rejecting forbidden request trailers");
                 sender.abort();
                 return;
@@ -534,8 +519,7 @@ fn wrap_body_sanitizing_response_trailers(response: &mut Response<Body>) {
             }
         };
         if let Some(mut trailers) = trailers {
-            let removed =
-                crate::http::protocol::semantics::sanitize_response_trailers(&mut trailers);
+            let removed = qpx_http::protocol::semantics::sanitize_response_trailers(&mut trailers);
             if removed > 0 {
                 warn!(removed, "dropping forbidden response trailers");
             }

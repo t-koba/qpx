@@ -1,11 +1,12 @@
 use crate::destination::DestinationInputs;
 use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 use crate::runtime::Runtime;
-use crate::tls::{CompiledUpstreamTlsTrust, TlsClientHelloInfo, UpstreamCertificateInfo};
+use crate::tls::TlsClientHelloInfo;
 use anyhow::{Result, anyhow};
 use http::HeaderMap;
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::RuleMatchContext;
+use qpx_core::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
 use std::net::SocketAddr;
 
 pub(in crate::forward) struct ConnectPolicyInput<'a> {

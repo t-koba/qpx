@@ -173,7 +173,7 @@ async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> 
         reverse_runtimes,
         mut listener_udp_bindings,
         mut reverse_udp_bindings,
-        mut control,
+        control,
         sidecar_restore,
         sidecar_export,
     } = args;
@@ -203,14 +203,7 @@ async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> 
             .remove(name.as_str())
             .ok_or_else(|| anyhow::anyhow!("udp listener binding missing for {}", name))?;
         let task_control = control.clone();
-        let transparent_restore = if matches!(
-            listener.mode,
-            qpx_core::config::IngressEdgeMode::Transparent
-        ) {
-            restore.take_transparent(name.as_str(), listen.as_str())?
-        } else {
-            None
-        };
+        let transparent_restore = restore.take_transparent(name.as_str(), listen.as_str())?;
         let export_sink = sidecar_export.clone();
         tasks.spawn(async move {
             let res = {
@@ -286,11 +279,8 @@ async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> 
                 anyhow::anyhow!("udp reverse binding missing for {}", reverse_cfg.name)
             })?;
         let task_control = control.clone();
-        let passthrough_restore = if !reverse::requires_tcp_listener(&reverse_cfg) {
-            restore.take_reverse_passthrough(name.as_str(), listen.as_str())?
-        } else {
-            None
-        };
+        let passthrough_restore =
+            restore.take_reverse_passthrough(name.as_str(), listen.as_str())?;
         let export_sink = sidecar_export.clone();
         tasks.spawn(async move {
             let res = {
@@ -332,7 +322,13 @@ async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> 
     }
 
     restore.ensure_consumed()?;
+    await_exportable_sidecar_tasks(tasks, control).await
+}
 
+async fn await_exportable_sidecar_tasks(
+    mut tasks: JoinSet<(String, Result<()>)>,
+    mut control: watch::Receiver<SidecarControl>,
+) -> Result<()> {
     if tasks.is_empty() {
         loop {
             if control.changed().await.is_err() || control.borrow().should_stop() {

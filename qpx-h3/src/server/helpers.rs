@@ -1,10 +1,11 @@
 use super::{Protocol, Settings};
+use crate::H3Result as Result;
 use crate::protocol::{
     ConnectionClose, FRAME_DATA, FRAME_HEADERS, H3_MESSAGE_ERROR, read_varint, write_frame,
 };
 use crate::qpack::encode_response_head;
 use crate::transport::RequestStreamConfig;
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -39,7 +40,8 @@ pub(super) async fn read_known_frame_len(
     if len > max_payload_bytes as u64 {
         return Err(anyhow!(
             "HTTP/3 frame 0x{frame_type:x} payload length {len} exceeds limit {max_payload_bytes}"
-        ));
+        )
+        .into());
     }
     Ok(len as usize)
 }

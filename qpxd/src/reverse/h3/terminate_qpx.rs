@@ -1,7 +1,7 @@
 use super::super::{
     ReloadableReverse, record_reverse_connection_filter_block, reverse_quic_connection_filter_match,
 };
-use crate::http::body::Body;
+use super::streaming::ReverseH3RequestPeer;
 use crate::http::body::size::set_observed_request_size;
 use crate::http3::quinn_socket::{
     PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket,
@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use hyper::{Response, StatusCode};
 use qpx_core::config::ReverseEdgeConfig;
 use qpx_core::tls::{load_cert_chain, load_private_key};
+use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -259,7 +260,9 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
     fn settings(&self) -> qpx_h3::Settings {
         let state = self.reverse.runtime.state();
         let limits = state.plan.limits;
-        let streaming = self.edge_streaming_limits();
+        let mut streaming = self.edge_streaming_limits();
+        streaming.max_request_body_bytes =
+            super::streaming::max_reverse_h3_request_body_bytes(&self.reverse, streaming);
         qpx_h3::Settings {
             enable_extended_connect: false,
             enable_datagram: false,
@@ -288,49 +291,35 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
         &self,
         request: qpx_h3::Request,
         conn: qpx_h3::ConnectionInfo,
+        req_stream: qpx_h3::RequestStream,
+    ) -> qpx_h3::H3Result<()> {
+        self.handle_request_inner(request, conn, req_stream)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+impl ReverseQpxHandler {
+    async fn handle_request_inner(
+        &self,
+        request: qpx_h3::Request,
+        conn: qpx_h3::ConnectionInfo,
         mut req_stream: qpx_h3::RequestStream,
     ) -> Result<()> {
-        let response_body_limit = self
-            .reverse
-            .runtime
-            .state()
-            .plan
-            .limits
-            .body
-            .max_h3_response_body_bytes;
+        let state = self.reverse.runtime.state();
+        let proxy_name = state.plan.identity.proxy_name.as_ref();
+        let h3_read_timeout =
+            Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1));
+        let response_body_limit = state.plan.limits.body.max_h3_response_body_bytes;
         if request.head.method() == http::Method::CONNECT || request.protocol.is_some() {
-            let response = crate::http::protocol::l7::finalize_response_for_request(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                self.reverse
-                    .runtime
-                    .state()
-                    .plan
-                    .identity
-                    .proxy_name
-                    .as_ref(),
-                Response::builder()
-                    .status(StatusCode::METHOD_NOT_ALLOWED)
-                    .body(crate::http::body::Body::from(
-                        self.reverse.runtime.state().messages.reverse_error.clone(),
-                    ))?,
-                false,
-            );
-            return crate::http3::qpx_stream::send_qpx_response_stream(
+            return send_reverse_qpx_local_response(
                 &mut req_stream,
-                response,
                 request.head.method(),
+                proxy_name,
+                StatusCode::METHOD_NOT_ALLOWED,
+                Body::from(state.messages.reverse_error.clone()),
                 response_body_limit,
-                Duration::from_millis(
-                    self.reverse
-                        .runtime
-                        .state()
-                        .plan
-                        .limits
-                        .timeouts
-                        .h3_read_timeout_ms
-                        .max(1),
-                ),
+                h3_read_timeout,
             )
             .await;
         }
@@ -342,11 +331,17 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
         let grpc_protocol = crate::http::rpc::streaming_rpc_protocol(&request_headers, None);
         let grpc_started = Instant::now();
         let edge_streaming = self.edge_streaming_limits();
+        let request_streaming = super::streaming::request_streaming_limits_for_head(
+            &self.reverse,
+            &request.head,
+            reverse_qpx_request_peer(&conn),
+            edge_streaming,
+        );
         let grpc_deadline = grpc_protocol.as_deref().map(|protocol| {
             crate::http::rpc::resolve_rpc_deadline(
                 &request_headers,
                 protocol,
-                Duration::from_millis(edge_streaming.max_grpc_stream_duration_ms),
+                Duration::from_millis(request_streaming.max_grpc_stream_duration_ms),
                 grpc_started,
             )
         });
@@ -354,43 +349,21 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
         let declared_content_length =
             crate::http3::codec::parse_content_length_fields(request.head.headers())?;
         if let Some(content_length) = declared_content_length
-            && content_length > edge_streaming.max_request_body_bytes as u64
+            && content_length > request_streaming.max_request_body_bytes as u64
         {
-            let response = crate::http::protocol::l7::finalize_response_for_request(
-                &request_method,
-                http::Version::HTTP_3,
-                self.reverse
-                    .runtime
-                    .state()
-                    .plan
-                    .identity
-                    .proxy_name
-                    .as_ref(),
-                Response::builder()
-                    .status(StatusCode::PAYLOAD_TOO_LARGE)
-                    .body(Body::from("request payload too large"))?,
-                false,
-            );
-            return crate::http3::qpx_stream::send_qpx_response_stream(
+            return send_reverse_qpx_local_response(
                 &mut req_stream,
-                response,
                 &request_method,
+                proxy_name,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Body::from("request payload too large"),
                 response_body_limit,
-                Duration::from_millis(
-                    self.reverse
-                        .runtime
-                        .state()
-                        .plan
-                        .limits
-                        .timeouts
-                        .h3_read_timeout_ms
-                        .max(1),
-                ),
+                h3_read_timeout,
             )
             .await;
         }
 
-        let (sender, body) = Body::channel_with_capacity(edge_streaming.body_channel_capacity);
+        let (sender, body) = Body::channel_with_capacity(request_streaming.body_channel_capacity);
         let mut req = crate::http3::codec::h3_request_to_hyper(request.head, body)?;
         if let Some(content_length) = declared_content_length {
             set_observed_request_size(&mut req, content_length);
@@ -404,8 +377,6 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
             conn.tls_sni.clone(),
             conn.peer_certificates.clone(),
         );
-        let read_timeout = Duration::from_millis(edge_streaming.body_read_timeout_ms);
-        let request_limit = edge_streaming.max_request_body_bytes;
         let response_fut = async {
             let fut =
                 transport::handle_request_with_interim(req, self.reverse.clone(), reverse_conn);
@@ -438,15 +409,15 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
             &mut request_body_stream,
             sender,
             crate::http3::qpx_stream::QpxRequestBodyRelayOptions {
-                read_timeout,
-                max_body_bytes: request_limit,
+                read_timeout: Duration::from_millis(request_streaming.body_read_timeout_ms),
+                max_body_bytes: request_streaming.max_request_body_bytes,
                 declared_content_length,
                 request_headers: &request_headers,
                 listener_name: Some(self.reverse.name.as_ref()),
-                max_grpc_message_bytes: Some(edge_streaming.max_grpc_message_bytes),
-                max_grpc_web_trailer_bytes: Some(edge_streaming.max_grpc_web_trailer_bytes),
+                max_grpc_message_bytes: Some(request_streaming.max_grpc_message_bytes),
+                max_grpc_web_trailer_bytes: Some(request_streaming.max_grpc_web_trailer_bytes),
                 grpc_stream_deadline: grpc_deadline.map(|deadline| deadline.instant()),
-                observe_grpc_messages: edge_streaming.observe_grpc_messages,
+                observe_grpc_messages: request_streaming.observe_grpc_messages,
             },
         );
         tokio::pin!(relay_fut);
@@ -472,18 +443,7 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
         };
 
         for head in interim {
-            let status = crate::http::protocol::semantics::validate_http_status_class(
-                head.status,
-                "QPX HTTP/3 interim response",
-            )?;
-            let mut interim = http::Response::builder().status(status).body(())?;
-            *interim.headers_mut() = head.headers;
-            crate::http3::qpx_stream::send_qpx_interim_response_to_send(
-                &mut response_stream,
-                interim,
-                Duration::from_millis(edge_streaming.body_send_timeout_ms),
-            )
-            .await?;
+            send_reverse_qpx_interim_response(&mut response_stream, head, edge_streaming).await?;
         }
 
         let response_streaming = response_streaming_limits(&response, edge_streaming);
@@ -505,7 +465,7 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
             },
         );
         let response_summary = if relay_done {
-            response_fut.await?
+            reverse_qpx_response_summary(response_fut.await)?
         } else {
             let (response_result, relay_result) = tokio::join!(response_fut, relay_fut);
             request_summary = match relay_result {
@@ -516,7 +476,7 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
                     return Err(err);
                 }
             };
-            response_result?
+            reverse_qpx_response_summary(response_result)?
         };
         if response_streaming.observe_grpc_messages
             && let Some(protocol) = grpc_protocol.as_deref()
@@ -539,6 +499,72 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
         }
         Ok(())
     }
+}
+
+fn reverse_qpx_request_peer(conn: &qpx_h3::ConnectionInfo) -> ReverseH3RequestPeer<'_> {
+    ReverseH3RequestPeer {
+        remote_addr: conn.remote_addr,
+        dst_port: conn.dst_port,
+        tls_sni: conn.tls_sni.as_deref(),
+        peer_certificates: conn.peer_certificates.as_deref().map(Vec::as_slice),
+    }
+}
+
+fn reverse_qpx_response_summary(
+    result: std::result::Result<
+        Option<crate::http::rpc::FramedBodySummary>,
+        crate::http3::response_error::H3ResponseSendError,
+    >,
+) -> Result<Option<crate::http::rpc::FramedBodySummary>> {
+    result.map_err(|err| {
+        crate::http3::response_error::emit_h3_response_send_error("qpx_h3", &err);
+        err.into_inner()
+    })
+}
+
+async fn send_reverse_qpx_local_response(
+    req_stream: &mut qpx_h3::RequestStream,
+    method: &http::Method,
+    proxy_name: &str,
+    status: StatusCode,
+    body: Body,
+    response_body_limit: usize,
+    h3_read_timeout: Duration,
+) -> Result<()> {
+    let response = crate::http::protocol::l7::finalize_response_for_request(
+        method,
+        http::Version::HTTP_3,
+        proxy_name,
+        Response::builder().status(status).body(body)?,
+        false,
+    );
+    crate::http3::qpx_stream::send_qpx_response_stream(
+        req_stream,
+        response,
+        method,
+        response_body_limit,
+        h3_read_timeout,
+    )
+    .await
+}
+
+async fn send_reverse_qpx_interim_response(
+    response_stream: &mut qpx_h3::RequestSendStream,
+    head: crate::upstream::raw_http1::InterimResponseHead,
+    streaming: ResolvedStreamingLimits,
+) -> Result<()> {
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
+        head.status,
+        "QPX HTTP/3 interim response",
+    )?;
+    let mut interim = http::Response::builder().status(status).body(())?;
+    *interim.headers_mut() = head.headers;
+    crate::http3::qpx_stream::send_qpx_interim_response_to_send(
+        response_stream,
+        interim,
+        Duration::from_millis(streaming.body_send_timeout_ms),
+    )
+    .await
 }
 
 fn response_streaming_limits(

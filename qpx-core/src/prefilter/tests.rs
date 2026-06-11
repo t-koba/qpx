@@ -87,6 +87,53 @@ fn for_each_set_bit_respects_limit() {
     assert_eq!(collected, vec![0, 1, 2]);
 }
 
+#[test]
+fn match_prefilter_allows_nested_candidate_scans() {
+    let mut interner = StringInterner::default();
+    let hint = MatchPrefilterHint {
+        method_values: Vec::new(),
+        dst_ports: Vec::new(),
+        src_cidrs: Vec::new(),
+        host: TextPrefilterHint {
+            any: true,
+            ..Default::default()
+        },
+        sni: TextPrefilterHint {
+            any: true,
+            ..Default::default()
+        },
+        path: TextPrefilterHint {
+            any: true,
+            ..Default::default()
+        },
+    };
+    let mut outer = MatchPrefilterIndex::new(1);
+    outer.insert_hint(0, &hint, &mut interner);
+    let mut inner = MatchPrefilterIndex::new(1);
+    inner.insert_hint(0, &hint, &mut interner);
+    let ctx = MatchPrefilterContext {
+        method: Some("GET"),
+        dst_port: Some(443),
+        src_ip: None,
+        host: Some("example.com"),
+        sni: None,
+        path: Some("/"),
+    };
+
+    let mut nested_seen = false;
+    let stopped = outer.for_each_candidate(&ctx, |outer_idx| {
+        assert_eq!(outer_idx, 0);
+        inner.for_each_candidate(&ctx, |inner_idx| {
+            assert_eq!(inner_idx, 0);
+            nested_seen = true;
+            false
+        });
+        false
+    });
+    assert!(!stopped);
+    assert!(nested_seen);
+}
+
 // ---- DomainSuffixTrie ----
 
 #[test]

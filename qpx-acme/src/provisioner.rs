@@ -1,4 +1,4 @@
-use crate::AcmeRuntime;
+use crate::{AcmeResult, AcmeRuntime};
 use anyhow::{Context, Result, anyhow};
 use instant_acme::{
     Account, AccountCredentials, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus,
@@ -17,11 +17,12 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 use x509_parser::pem::Pem;
 
-pub async fn run_manager(state: Arc<AcmeRuntime>) -> Result<()> {
+/// Runs the ACME account and certificate renewal manager.
+pub async fn run_manager(state: Arc<AcmeRuntime>) -> AcmeResult<()> {
     if !state.tos_agreed {
-        return Err(anyhow!(
-            "acme.terms_of_service_agreed must be true when acme.enabled=true"
-        ));
+        return Err(
+            anyhow!("acme.terms_of_service_agreed must be true when acme.enabled=true").into(),
+        );
     }
 
     let mut account: Option<Account> = None;
@@ -359,6 +360,7 @@ fn reject_untrusted_ancestor(path: &Path, meta: &fs::Metadata) -> Result<()> {
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let sticky_bit = libc::S_ISVTX;
     let sticky = mode & sticky_bit != 0;
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
 
     if meta.uid() != 0 && meta.uid() != euid {
@@ -394,36 +396,80 @@ fn reject_untrusted_ancestor(_path: &Path, _meta: &fs::Metadata) -> Result<()> {
 }
 
 fn write_bytes_file(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
+    use std::io::Write;
+
+    let mut file = qpx_core::secure_file::open_secure_output_file(path)
+        .map_err(|err| anyhow!("failed to open ACME material {}: {err}", path.display()))?;
+    file.write_all(contents)?;
+    file.sync_all()?;
     #[cfg(unix)]
     {
-        use std::fs::OpenOptions;
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(mode)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-        Ok(())
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
     }
     #[cfg(not(unix))]
     {
         let _ = mode;
-        if let Ok(meta) = fs::symlink_metadata(path)
-            && meta.file_type().is_symlink()
-        {
-            return Err(anyhow!(
-                "refusing to write through symlink path {}",
-                path.display()
-            ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::acme_directory_url;
+    use qpx_core::config::AcmeConfig;
+
+    fn base_acme_config() -> AcmeConfig {
+        AcmeConfig {
+            enabled: true,
+            staging: false,
+            directory_url: None,
+            email: None,
+            terms_of_service_agreed: false,
+            http01_listen: None,
+            renew_before_days: 30,
         }
-        fs::write(path, contents)?;
-        Ok(())
+    }
+
+    #[test]
+    fn directory_url_defaults_to_production() {
+        assert_eq!(
+            acme_directory_url(&base_acme_config()),
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
+    }
+
+    #[test]
+    fn directory_url_uses_staging_when_requested() {
+        let config = AcmeConfig {
+            staging: true,
+            ..base_acme_config()
+        };
+        assert_eq!(
+            acme_directory_url(&config),
+            "https://acme-staging-v02.api.letsencrypt.org/directory"
+        );
+    }
+
+    #[test]
+    fn directory_url_prefers_explicit_url_over_staging() {
+        let config = AcmeConfig {
+            staging: true,
+            directory_url: Some("  https://custom.example/dir  ".to_string()),
+            ..base_acme_config()
+        };
+        assert_eq!(acme_directory_url(&config), "https://custom.example/dir");
+    }
+
+    #[test]
+    fn directory_url_ignores_blank_explicit_url() {
+        let config = AcmeConfig {
+            directory_url: Some("   ".to_string()),
+            ..base_acme_config()
+        };
+        assert_eq!(
+            acme_directory_url(&config),
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
     }
 }

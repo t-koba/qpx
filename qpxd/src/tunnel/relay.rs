@@ -2,51 +2,56 @@ use crate::exporter::ExportSession;
 use crate::tunnel::{TunnelHalf, TunnelHalfWrite};
 use crate::upstream::io_copy::BandwidthThrottle;
 use anyhow::Result;
-use metrics::{counter, histogram};
 use std::io;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::{Duration, Instant, sleep, timeout};
 
 const TUNNEL_DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(crate) struct TunnelActivity {
-    last_activity: Arc<Mutex<Instant>>,
-    notify: Arc<Notify>,
+    base: Arc<Instant>,
+    last_activity_nanos: Arc<AtomicU64>,
 }
 
 impl TunnelActivity {
     #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
     pub(crate) fn new() -> Self {
         Self {
-            last_activity: Arc::new(Mutex::new(Instant::now())),
-            notify: Arc::new(Notify::new()),
+            base: Arc::new(Instant::now()),
+            last_activity_nanos: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    pub(crate) async fn touch(&self) {
-        *self.last_activity.lock().await = Instant::now();
-        self.notify.notify_waiters();
+    pub(crate) fn touch(&self) {
+        self.last_activity_nanos.store(
+            duration_as_nanos_u64(self.base.elapsed()),
+            Ordering::Relaxed,
+        );
     }
 
     pub(crate) async fn wait_for_idle(&self, idle_timeout: Duration) {
+        if idle_timeout.is_zero() {
+            return;
+        }
+        let idle_timeout_nanos = duration_as_nanos_u64(idle_timeout);
         loop {
-            let deadline = {
-                let last = *self.last_activity.lock().await;
-                last + idle_timeout
-            };
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => {
-                    let last = *self.last_activity.lock().await;
-                    if Instant::now().duration_since(last) >= idle_timeout {
-                        return;
-                    }
-                }
-                _ = self.notify.notified() => {}
+            let last = self.last_activity_nanos.load(Ordering::Relaxed);
+            let deadline_offset = last.saturating_add(idle_timeout_nanos);
+            let deadline = (*self.base) + Duration::from_nanos(deadline_offset);
+            tokio::time::sleep_until(deadline).await;
+            let now = duration_as_nanos_u64(self.base.elapsed());
+            let last = self.last_activity_nanos.load(Ordering::Relaxed);
+            if now.saturating_sub(last) >= idle_timeout_nanos {
+                return;
             }
         }
     }
+}
+
+fn duration_as_nanos_u64(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
 pub(crate) struct TunnelPolicy {
@@ -58,6 +63,7 @@ pub(crate) struct TunnelPolicy {
     pub(crate) transport: &'static str,
     pub(crate) listener: Arc<str>,
     pub(crate) activity: Option<TunnelActivity>,
+    metrics: super::metrics::TunnelMetricHandles,
     io_timeout: Duration,
 }
 
@@ -69,6 +75,7 @@ impl TunnelPolicy {
         transport: &'static str,
         listener: Arc<str>,
     ) -> Self {
+        let metrics = super::metrics::TunnelMetricHandles::new(transport, listener.as_ref());
         Self {
             idle_timeout,
             max_bytes_client_to_server: None,
@@ -78,6 +85,7 @@ impl TunnelPolicy {
             transport,
             listener,
             activity: None,
+            metrics,
             io_timeout: idle_timeout.unwrap_or(TUNNEL_DEFAULT_IO_TIMEOUT),
         }
     }
@@ -107,7 +115,7 @@ pub(crate) enum TunnelCloseReason {
 }
 
 impl TunnelCloseReason {
-    fn as_label(&self) -> &'static str {
+    pub(super) fn as_label(&self) -> &'static str {
         match self {
             Self::Complete => "complete",
             Self::ClientEof => "client_eof",
@@ -132,9 +140,11 @@ where
     SW: TunnelHalfWrite,
 {
     let started = Instant::now();
+    super::metrics::emit_tunnel_active(&policy, 1.0);
+    let _active_guard = TunnelActiveGuard { policy: &policy };
     let activity = policy.activity.clone();
     if let Some(activity) = activity.as_ref() {
-        activity.touch().await;
+        activity.touch();
     }
     let local_idle_deadline = policy
         .idle_timeout
@@ -237,8 +247,18 @@ where
         duration: started.elapsed(),
         close_reason,
     };
-    emit_tunnel_metrics(&policy, &stats);
+    super::metrics::emit_tunnel_metrics(&policy, &stats);
     Ok(stats)
+}
+
+struct TunnelActiveGuard<'a> {
+    policy: &'a TunnelPolicy,
+}
+
+impl Drop for TunnelActiveGuard<'_> {
+    fn drop(&mut self) {
+        super::metrics::emit_tunnel_active(self.policy, -1.0);
+    }
 }
 
 async fn relay_chunk<W>(
@@ -264,6 +284,9 @@ where
     if let Some(throttle) = policy.throttle.as_ref() {
         let delay = throttle.reserve_delay(chunk.len())?;
         if !delay.is_zero() {
+            policy
+                .metrics
+                .record_backpressure(client_to_server, delay.as_secs_f64());
             sleep(delay).await;
         }
     }
@@ -289,7 +312,7 @@ async fn touch_or_reset_idle(
     idle_timeout: Option<Duration>,
 ) {
     if let Some(activity) = activity {
-        activity.touch().await;
+        activity.touch();
     } else if let (Some(deadline), Some(idle_timeout)) =
         (local_idle_deadline.as_mut().as_pin_mut(), idle_timeout)
     {
@@ -313,35 +336,4 @@ async fn wait_for_policy_idle(
         }
         (None, _) => std::future::pending::<()>().await,
     }
-}
-
-fn emit_tunnel_metrics(policy: &TunnelPolicy, stats: &TunnelStats) {
-    counter!(
-        "qpx_tunnel_bytes_total",
-        "direction" => "client_to_server",
-        "transport" => policy.transport,
-        "listener" => policy.listener.to_string()
-    )
-    .increment(stats.bytes_client_to_server);
-    counter!(
-        "qpx_tunnel_bytes_total",
-        "direction" => "server_to_client",
-        "transport" => policy.transport,
-        "listener" => policy.listener.to_string()
-    )
-    .increment(stats.bytes_server_to_client);
-    histogram!(
-        "qpx_tunnel_duration_seconds",
-        "transport" => policy.transport,
-        "listener" => policy.listener.to_string(),
-        "close_reason" => stats.close_reason.as_label()
-    )
-    .record(stats.duration.as_secs_f64());
-    counter!(
-        "qpx_tunnel_close_total",
-        "transport" => policy.transport,
-        "listener" => policy.listener.to_string(),
-        "close_reason" => stats.close_reason.as_label()
-    )
-    .increment(1);
 }

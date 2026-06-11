@@ -3,7 +3,6 @@ use super::template::{
     render_template,
 };
 use super::*;
-use crate::http::body::Body;
 use crate::runtime::Runtime;
 use http::header::{HOST, LOCATION};
 use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode};
@@ -11,6 +10,7 @@ use qpx_core::config::{
     AccessLogConfig, AuditLogConfig, AuthConfig, Config, IdentityConfig, MessagesConfig,
     RuntimeConfig, SubrequestModuleConfig, SubrequestPhase, SystemLogConfig,
 };
+use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;

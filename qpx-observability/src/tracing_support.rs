@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 
 static OTEL_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Returns whether OpenTelemetry tracing is enabled.
 pub fn otel_enabled() -> bool {
     OTEL_ENABLED.load(Ordering::Relaxed)
 }
@@ -109,6 +110,7 @@ pub(super) fn build_otel_layer(
     Ok((layer, OtelGuard { provider }))
 }
 
+/// Extracts an OpenTelemetry trace context from HTTP headers.
 pub fn extract_trace_context(headers: &http::HeaderMap) -> opentelemetry::Context {
     use opentelemetry::propagation::Extractor;
 
@@ -131,6 +133,7 @@ pub fn extract_trace_context(headers: &http::HeaderMap) -> opentelemetry::Contex
     opentelemetry::global::get_text_map_propagator(|prop| prop.extract(&HeaderExtractor(headers)))
 }
 
+/// Injects the current OpenTelemetry trace context into HTTP headers.
 pub fn inject_trace_context(headers: &mut http::HeaderMap) {
     use opentelemetry::propagation::Injector;
     use tracing_opentelemetry::OpenTelemetrySpanExt;

@@ -57,9 +57,7 @@ pub(crate) fn validate_security_posture(sp: &SecurityPosture) -> Result<()> {
             }
             #[cfg(feature = "tls-rustls")]
             let has_local_access_control = sp.token_enabled || sp.mtls_enabled;
-            #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
-            let has_local_access_control = sp.token_enabled;
-            #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+            #[cfg(not(feature = "tls-rustls"))]
             let has_local_access_control = sp.token_enabled;
 
             if !has_local_access_control {
@@ -69,13 +67,7 @@ pub(crate) fn validate_security_posture(sp: &SecurityPosture) -> Result<()> {
                         "{label}.listen is loopback ({addr}) but local users are not authenticated; set --token-env and/or --tls-client-ca (or --unsafe-allow-insecure)"
                     ));
                 }
-                #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
-                {
-                    return Err(anyhow!(
-                        "{label}.listen is loopback ({addr}) but local users are not authenticated; set --token-env (or --unsafe-allow-insecure)"
-                    ));
-                }
-                #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+                #[cfg(not(feature = "tls-rustls"))]
                 {
                     return Err(anyhow!(
                         "{label}.listen is loopback ({addr}) but local users are not authenticated; set --token-env (or --unsafe-allow-insecure)"
@@ -109,9 +101,7 @@ pub(crate) fn validate_security_posture(sp: &SecurityPosture) -> Result<()> {
         }
         #[cfg(feature = "tls-rustls")]
         let has_access_control = allow || sp.token_enabled || sp.mtls_enabled;
-        #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
-        let has_access_control = allow || sp.token_enabled;
-        #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+        #[cfg(not(feature = "tls-rustls"))]
         let has_access_control = allow || sp.token_enabled;
 
         if !has_access_control {
@@ -121,13 +111,7 @@ pub(crate) fn validate_security_posture(sp: &SecurityPosture) -> Result<()> {
                     "{label}.listen is non-loopback ({addr}) but no access control is configured; set --{label}-allow and/or --token-env and/or --tls-client-ca (or --unsafe-allow-insecure)"
                 ));
             }
-            #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
-            {
-                return Err(anyhow!(
-                    "{label}.listen is non-loopback ({addr}) but no access control is configured; set --{label}-allow and/or --token-env (or --unsafe-allow-insecure)"
-                ));
-            }
-            #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+            #[cfg(not(feature = "tls-rustls"))]
             {
                 return Err(anyhow!(
                     "{label}.listen is non-loopback ({addr}) but no access control is configured; set --{label}-allow and/or --token-env (or --unsafe-allow-insecure)"

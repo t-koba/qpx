@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
+use memchr::memmem;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -17,6 +18,11 @@ use qpx_core::ipc::protocol::write_frame;
 use qpx_core::shm_ring::ShmRingBuffer;
 
 const MAX_IPC_SHM_RING_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+
+struct ParsedCgiOutputHead {
+    meta: IpcResponseMeta,
+    body_leftover: Bytes,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StdinReadOutcome {
@@ -45,13 +51,11 @@ pub(super) fn meta_uses_shm(meta: &IpcRequestMeta) -> bool {
         || meta.res_body_shm_size_bytes.is_some()
 }
 
-pub(super) fn is_unexpected_eof(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<std::io::Error>()
-        .is_some_and(|e| e.kind() == std::io::ErrorKind::UnexpectedEof)
-}
-
 fn validate_ipc_shm_token(token: &str, expected_prefix: &str) -> Result<()> {
-    qpx_core::ipc::shm::validate_ipc_shm_token(token, expected_prefix)
+    Ok(qpx_core::ipc::shm::validate_ipc_shm_token(
+        token,
+        expected_prefix,
+    )?)
 }
 
 fn remove_ipc_shm_path(path: impl AsRef<Path>) {
@@ -74,12 +78,22 @@ async fn drain_req_ring(
     ring: &mut ShmRingBuffer,
     input_idle: Duration,
     reusable: bool,
+    max_drain_bytes: usize,
 ) {
     let mut data = Vec::new();
+    let mut drained = 0usize;
     loop {
         match ring.try_pop_into(&mut data) {
             Ok(true) => {
                 if data.is_empty() {
+                    break;
+                }
+                drained = drained.saturating_add(data.len());
+                if drained > max_drain_bytes {
+                    warn!(
+                        drained,
+                        max_drain_bytes, "IPC SHM rejected request drain exceeded limit"
+                    );
                     break;
                 }
             }
@@ -104,7 +118,7 @@ async fn push_ring_bytes(
         match ring.try_push(bytes) {
             Ok(true) => return Ok(()),
             Ok(false) => timeout(wait_timeout, ring.wait_for_space(bytes.len())).await??,
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
     }
 }
@@ -117,6 +131,88 @@ fn log_executor_stderr_chunk(chunk: &[u8]) {
     if !chunk.is_empty() {
         warn!(bytes = chunk.len(), "CGI STDERR chunk suppressed");
     }
+}
+
+fn text_plain_meta(status: u16) -> IpcResponseMeta {
+    IpcResponseMeta {
+        status,
+        headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+    }
+}
+
+async fn abort_execution(
+    exec_abort: oneshot::Sender<()>,
+    stdin_task: tokio::task::JoinHandle<()>,
+    exec_done: tokio::task::JoinHandle<Result<()>>,
+) {
+    let _ = exec_abort.send(());
+    let _ = stdin_task.await;
+    let _ = exec_done.await;
+}
+
+fn consume_cgi_stdout_header(
+    header_buf: &mut BytesMut,
+    chunk: Bytes,
+) -> Result<Option<ParsedCgiOutputHead>> {
+    let prefix_len = header_buf.len().min(3);
+    let prefix = &header_buf[header_buf.len().saturating_sub(prefix_len)..];
+    let header_prefix = header_buf.len() - prefix_len;
+    let terminator = find_cgi_header_terminator(prefix, chunk.as_ref())
+        .and_then(|(idx, len)| idx.checked_add(len).map(|end| (idx, len, end)));
+    if let Some((idx, len, end_in_scan)) = terminator {
+        let absolute_end = header_prefix + idx;
+        let chunk_header_end = end_in_scan.saturating_sub(prefix_len).min(chunk.len());
+        if absolute_end + len > 65536 {
+            return Err(anyhow!("CGI output headers exceeded 65536 bytes"));
+        }
+        header_buf.extend_from_slice(&chunk[..chunk_header_end]);
+        let (status, headers, _) = CgiResponse::parse_cgi_head(header_buf.as_ref())?;
+        return Ok(Some(ParsedCgiOutputHead {
+            meta: IpcResponseMeta { status, headers },
+            body_leftover: chunk.slice(chunk_header_end..),
+        }));
+    }
+
+    if header_buf.len().saturating_add(chunk.len()) > 65536 {
+        return Err(anyhow!("CGI output headers exceeded 65536 bytes"));
+    }
+    header_buf.extend_from_slice(chunk.as_ref());
+    Ok(None)
+}
+
+fn find_cgi_header_terminator(prefix: &[u8], chunk: &[u8]) -> Option<(usize, usize)> {
+    let prefix_len = prefix.len();
+    let byte_at = |idx: usize| -> u8 {
+        if idx < prefix_len {
+            prefix[idx]
+        } else {
+            chunk[idx - prefix_len]
+        }
+    };
+    for idx in 0..prefix_len {
+        let remaining = prefix_len + chunk.len() - idx;
+        if remaining < 2 {
+            break;
+        }
+        if byte_at(idx) == b'\n' && byte_at(idx + 1) == b'\n' {
+            return Some((idx, 2));
+        }
+        if remaining >= 4
+            && byte_at(idx) == b'\r'
+            && byte_at(idx + 1) == b'\n'
+            && byte_at(idx + 2) == b'\r'
+            && byte_at(idx + 3) == b'\n'
+        {
+            return Some((idx, 4));
+        }
+    }
+    if let Some(pos) = memmem::find(chunk, b"\n\n") {
+        return Some((prefix_len + pos, 2));
+    }
+    if let Some(pos) = memmem::find(chunk, b"\r\n\r\n") {
+        return Some((prefix_len + pos, 4));
+    }
+    None
 }
 
 fn stdin_chunk_exceeds_declared_length(
@@ -211,7 +307,14 @@ where
         Ok(plan) => plan,
         Err(response) => {
             let _ = write_shm_plain_response(stream, &mut res_ring, &response, input_idle).await;
-            drain_req_ring(&req_path, &mut req_ring, input_idle, shm_reusable).await;
+            drain_req_ring(
+                &req_path,
+                &mut req_ring,
+                input_idle,
+                shm_reusable,
+                max_stdin_bytes,
+            )
+            .await;
             release_ipc_shm_path(&res_path, shm_reusable);
             return Ok(());
         }
@@ -222,7 +325,14 @@ where
         Err(_) => {
             let response = IpcPlainResponse::new(503, b"overloaded");
             let _ = write_shm_plain_response(stream, &mut res_ring, &response, input_idle).await;
-            drain_req_ring(&req_path, &mut req_ring, input_idle, shm_reusable).await;
+            drain_req_ring(
+                &req_path,
+                &mut req_ring,
+                input_idle,
+                shm_reusable,
+                max_stdin_bytes,
+            )
+            .await;
             release_ipc_shm_path(&res_path, shm_reusable);
             return Ok(());
         }
@@ -236,7 +346,14 @@ where
             let msg = format!("executor start error: {}", e);
             let _ = push_ring_bytes(&mut res_ring, msg.as_bytes(), input_idle).await;
             let _ = push_ring_eof(&mut res_ring, input_idle).await;
-            drain_req_ring(&req_path, &mut req_ring, input_idle, shm_reusable).await;
+            drain_req_ring(
+                &req_path,
+                &mut req_ring,
+                input_idle,
+                shm_reusable,
+                max_stdin_bytes,
+            )
+            .await;
             release_ipc_shm_path(&res_path, shm_reusable);
             return Ok(());
         }
@@ -252,9 +369,6 @@ where
 
     // Drain request body into executor stdin concurrently with header parsing.
     let req_path_task = req_path.clone();
-    let input_idle_for_task = input_idle;
-    let max_stdin_bytes_for_task = max_stdin_bytes;
-    let shm_reusable_for_stdin = shm_reusable;
     let (stdin_result_tx, stdin_result_rx) = oneshot::channel::<StdinReadOutcome>();
     let stdin_task = tokio::spawn(async move {
         let mut stdin_bytes: usize = 0;
@@ -266,7 +380,7 @@ where
                 let _ = tx.send(outcome);
             }
             drop(ring);
-            release_ipc_shm_path(req_path_task, shm_reusable_for_stdin);
+            release_ipc_shm_path(req_path_task, shm_reusable);
             return;
         }
         let mut data = Vec::new();
@@ -288,7 +402,7 @@ where
                         break;
                     }
                     stdin_bytes = stdin_bytes.saturating_add(data.len());
-                    if stdin_bytes > max_stdin_bytes_for_task {
+                    if stdin_bytes > max_stdin_bytes {
                         outcome = StdinReadOutcome::TooLarge;
                         break;
                     }
@@ -302,7 +416,7 @@ where
                     }
                 }
                 Ok(false) => {
-                    let waited = timeout(input_idle_for_task, ring.wait_for_data()).await;
+                    let waited = timeout(input_idle, ring.wait_for_data()).await;
                     if waited.is_err() || waited.is_ok_and(|r| r.is_err()) {
                         outcome = StdinReadOutcome::TimedOut;
                         break;
@@ -318,40 +432,30 @@ where
             let _ = tx.send(outcome);
         }
         drop(ring);
-        release_ipc_shm_path(req_path_task, shm_reusable_for_stdin);
+        release_ipc_shm_path(req_path_task, shm_reusable);
     });
 
     // Read until headers are fully accumulated
     let mut header_buf = BytesMut::new();
-    let stdin_result_rx = stdin_result_rx;
     tokio::pin!(stdin_result_rx);
     let mut stdin_result_rx_active = true;
     let parsed_res = loop {
         tokio::select! {
             res = &mut stdin_result_rx, if stdin_result_rx_active => {
                 match res {
-                    Ok(outcome) if outcome.error_response().is_some() => {
-                        let Some((status, body)) = outcome.error_response() else {
-                            stdin_result_rx_active = false;
-                            continue;
-                        };
-                        let res_meta = IpcResponseMeta {
-                            status,
-                            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-                        };
-                        write_frame(stream, &res_meta).await?;
-                        let _ = push_ring_bytes(&mut res_ring, body, input_idle).await;
-                        let _ = push_ring_eof(&mut res_ring, input_idle).await;
-                        let _ = exec_abort.send(());
-                        let _ = stdin_task.await;
-                        let _ = exec_done.await;
-                        release_ipc_shm_path(&res_path, shm_reusable);
-                        return Ok(());
-                    }
-                    Ok(_) => {
+                    Ok(outcome) => {
+                        if let Some((status, body)) = outcome.error_response() {
+                            let res_meta = text_plain_meta(status);
+                            write_frame(stream, &res_meta).await?;
+                            let _ = push_ring_bytes(&mut res_ring, body, input_idle).await;
+                            let _ = push_ring_eof(&mut res_ring, input_idle).await;
+                            abort_execution(exec_abort, stdin_task, exec_done).await;
+                            release_ipc_shm_path(&res_path, shm_reusable);
+                            return Ok(());
+                        }
                         stdin_result_rx_active = false;
                     }
-                    Err(_) => {
+                    _ => {
                         stdin_result_rx_active = false;
                     }
                 }
@@ -360,59 +464,33 @@ where
                 let Some(chunk) = chunk else {
                     break None;
                 };
-                header_buf.extend_from_slice(&chunk);
-
-                let eof_idx = header_buf
-                    .windows(4)
-                    .position(|window| window == b"\r\n\r\n")
-                    .or_else(|| header_buf.windows(2).position(|window| window == b"\n\n"));
-
-                if eof_idx.is_some() || header_buf.len() > 65536 {
-                    match CgiResponse::parse_cgi_output(&header_buf) {
-                        Ok(resp) => break Some(resp),
-                        Err(_) => break None,
-                    }
+                match consume_cgi_stdout_header(&mut header_buf, chunk) {
+                    Ok(Some(parsed)) => break Some(parsed),
+                    Ok(None) => {}
+                    Err(_) => break None,
                 }
             }
         }
     };
 
     if stdin_result_rx_active {
-        match (&mut stdin_result_rx).await {
-            Ok(outcome) if outcome.error_response().is_some() => {
-                let Some((status, body)) = outcome.error_response() else {
-                    return Ok(());
-                };
-                let res_meta = IpcResponseMeta {
-                    status,
-                    headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-                };
+        if let Ok(outcome) = (&mut stdin_result_rx).await {
+            if let Some((status, body)) = outcome.error_response() {
+                let res_meta = text_plain_meta(status);
                 write_frame(stream, &res_meta).await?;
                 let _ = push_ring_bytes(&mut res_ring, body, input_idle).await;
                 let _ = push_ring_eof(&mut res_ring, input_idle).await;
-                let _ = exec_abort.send(());
-                let _ = stdin_task.await;
-                let _ = exec_done.await;
+                abort_execution(exec_abort, stdin_task, exec_done).await;
                 release_ipc_shm_path(&res_path, shm_reusable);
                 return Ok(());
             }
-            Ok(_) | Err(_) => {}
         }
     }
 
     let (res_meta, body_leftover) = if let Some(parsed) = parsed_res {
-        (
-            IpcResponseMeta {
-                status: parsed.status,
-                headers: parsed.headers,
-            },
-            parsed.body,
-        )
+        (parsed.meta, parsed.body_leftover)
     } else {
-        let meta = IpcResponseMeta {
-            status: 502,
-            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-        };
+        let meta = text_plain_meta(502);
         write_frame(stream, &meta).await?;
         let _ = push_ring_bytes(
             &mut res_ring,
@@ -421,9 +499,7 @@ where
         )
         .await;
         let _ = push_ring_eof(&mut res_ring, input_idle).await;
-        let _ = exec_abort.send(());
-        let _ = stdin_task.await;
-        let _ = exec_done.await;
+        abort_execution(exec_abort, stdin_task, exec_done).await;
         release_ipc_shm_path(&res_path, shm_reusable);
         return Ok(());
     };
@@ -432,13 +508,18 @@ where
     write_frame(stream, &res_meta).await?;
 
     // Handle initial leftover stdout body bytes
-    if !body_leftover.is_empty() {
-        let _ = push_ring_bytes(&mut res_ring, body_leftover.as_ref(), input_idle).await;
+    if !body_leftover.is_empty()
+        && push_ring_bytes(&mut res_ring, body_leftover.as_ref(), input_idle)
+            .await
+            .is_err()
+    {
+        abort_execution(exec_abort, stdin_task, exec_done).await;
+        release_ipc_shm_path(&res_path, shm_reusable);
+        return Ok(());
     }
 
     // Task to forward executor STDOUT to response ring
     let res_path_task = res_path.clone();
-    let shm_reusable_for_stdout = shm_reusable;
     let stdout_task = tokio::spawn(async move {
         let mut ring = res_ring;
         while let Some(chunk) = exec_stdout.recv().await {
@@ -451,7 +532,7 @@ where
         }
         let _ = push_ring_eof(&mut ring, input_idle).await;
         drop(ring);
-        release_ipc_shm_path(res_path_task, shm_reusable_for_stdout);
+        release_ipc_shm_path(res_path_task, shm_reusable);
     });
 
     let stderr_task = tokio::spawn(async move {
@@ -539,13 +620,21 @@ where
         Err(response) => {
             write_tcp_plain_response(&mut stream, &response, output_idle).await?;
             let mut buf = [0u8; 65536];
+            let mut drained = 0usize;
             loop {
                 let n = match timeout(input_idle, stream.read(&mut buf)).await {
                     Ok(Ok(0)) => break,
                     Ok(Ok(n)) => n,
                     _ => break,
                 };
-                let _ = n; // discard
+                drained = drained.saturating_add(n);
+                if drained > max_stdin_bytes {
+                    warn!(
+                        drained,
+                        max_stdin_bytes, "IPC TCP rejected request drain exceeded limit"
+                    );
+                    break;
+                }
             }
             return Ok(());
         }
@@ -634,33 +723,23 @@ where
     });
 
     let mut header_buf = BytesMut::new();
-    let stdin_result_rx = stdin_result_rx;
     tokio::pin!(stdin_result_rx);
     let mut stdin_result_rx_active = true;
     let parsed_res = loop {
         tokio::select! {
             res = &mut stdin_result_rx, if stdin_result_rx_active => {
                 match res {
-                    Ok(outcome) if outcome.error_response().is_some() => {
-                        let Some((status, body)) = outcome.error_response() else {
-                            stdin_result_rx_active = false;
-                            continue;
-                        };
-                        let res_meta = IpcResponseMeta {
-                            status,
-                            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-                        };
-                        write_frame_with_timeout(&mut tx, &res_meta, output_idle).await?;
-                        let _ = write_all_with_timeout(&mut tx, body, output_idle).await;
-                        let _ = exec_abort.send(());
-                        let _ = stdin_task.await;
-                        let _ = exec_done.await;
-                        return Ok(());
-                    }
-                    Ok(_) => {
+                    Ok(outcome) => {
+                        if let Some((status, body)) = outcome.error_response() {
+                            let res_meta = text_plain_meta(status);
+                            write_frame_with_timeout(&mut tx, &res_meta, output_idle).await?;
+                            let _ = write_all_with_timeout(&mut tx, body, output_idle).await;
+                            abort_execution(exec_abort, stdin_task, exec_done).await;
+                            return Ok(());
+                        }
                         stdin_result_rx_active = false;
                     }
-                    Err(_) => {
+                    _ => {
                         stdin_result_rx_active = false;
                     }
                 }
@@ -669,60 +748,35 @@ where
                 let Some(chunk) = chunk else {
                     break None;
                 };
-                header_buf.extend_from_slice(&chunk);
-
-                let eof_idx = header_buf
-                    .windows(4)
-                    .position(|window| window == b"\r\n\r\n")
-                    .or_else(|| header_buf.windows(2).position(|window| window == b"\n\n"));
-
-                if eof_idx.is_some() || header_buf.len() > 65536 {
-                    match CgiResponse::parse_cgi_output(&header_buf) {
-                        Ok(resp) => break Some(resp),
-                        Err(_) => break None,
-                    }
+                match consume_cgi_stdout_header(&mut header_buf, chunk) {
+                    Ok(Some(parsed)) => break Some(parsed),
+                    Ok(None) => {}
+                    Err(_) => break None,
                 }
             }
         }
     };
 
     if stdin_result_rx_active {
-        match (&mut stdin_result_rx).await {
-            Ok(outcome) if outcome.error_response().is_some() => {
-                let Some((status, body)) = outcome.error_response() else {
-                    return Ok(());
-                };
-                let res_meta = IpcResponseMeta {
-                    status,
-                    headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-                };
+        if let Ok(outcome) = (&mut stdin_result_rx).await {
+            if let Some((status, body)) = outcome.error_response() {
+                let res_meta = text_plain_meta(status);
                 write_frame_with_timeout(&mut tx, &res_meta, output_idle).await?;
                 let _ = write_all_with_timeout(&mut tx, body, output_idle).await;
-                let _ = exec_abort.send(());
-                let _ = stdin_task.await;
-                let _ = exec_done.await;
+                abort_execution(exec_abort, stdin_task, exec_done).await;
                 return Ok(());
             }
-            Ok(_) | Err(_) => {}
         }
     }
 
     let (res_meta, body_leftover) = if let Some(parsed) = parsed_res {
-        (
-            IpcResponseMeta {
-                status: parsed.status,
-                headers: parsed.headers,
-            },
-            parsed.body,
-        )
+        (parsed.meta, parsed.body_leftover)
     } else {
         // Executor ended before headers were completed.
-        let meta = IpcResponseMeta {
-            status: 502,
-            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-        };
+        let meta = text_plain_meta(502);
         write_frame_with_timeout(&mut tx, &meta, output_idle).await?;
         write_all_with_timeout(&mut tx, b"bad gateway (no output)", output_idle).await?;
+        abort_execution(exec_abort, stdin_task, exec_done).await;
         return Ok(());
     };
 
@@ -771,5 +825,19 @@ mod tests {
         assert!(stdin_chunk_exceeds_declared_length(Some(5), 0, 6));
         assert!(stdin_chunk_exceeds_declared_length(Some(5), 4, 2));
         assert!(!stdin_chunk_exceeds_declared_length(None, usize::MAX, 1));
+    }
+
+    #[test]
+    fn cgi_header_terminator_detects_boundary_and_chunk_local_sequences() {
+        assert_eq!(
+            find_cgi_header_terminator(b"X\r\n", b"\r\nbody"),
+            Some((1, 4))
+        );
+        assert_eq!(
+            find_cgi_header_terminator(b"", b"Status: 200\r\n\r\nbody"),
+            Some((11, 4))
+        );
+        assert_eq!(find_cgi_header_terminator(b"X\n", b"\nbody"), Some((1, 2)));
+        assert_eq!(find_cgi_header_terminator(b"", b"Status: 200"), None);
     }
 }

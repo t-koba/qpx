@@ -190,6 +190,7 @@ async fn quic_broker_handoff_round_trip_restores_roles() {
     let handoff = prepare_quic_broker_handoff(&[forward_handle, reverse_handle], &test_config())
         .expect("prepare handoff")
         .expect("handoff");
+    // SAFETY: this test serializes environment mutation through the process test env lock.
     unsafe {
         std::env::set_var(QuinnBrokerRestoreSet::handoff_env_key(), &handoff.env_value);
     }

@@ -16,5 +16,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: acceptance gate presence checks
+        run: bash ./scripts/check-ci-acceptance-gates.sh
       - name: structure checks
         run: cargo xtask structure
+      - name: loc budget checks
+        run: cargo xtask budget

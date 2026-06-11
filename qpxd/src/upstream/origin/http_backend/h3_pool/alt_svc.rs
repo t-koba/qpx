@@ -1,11 +1,10 @@
-use super::{OriginEndpoint, content_length_is_zero_or_absent, shard_index};
-use crate::http::body::Body;
+use super::{OriginEndpoint, content_length_is_zero_or_absent};
 use anyhow::Result;
 use http::HeaderMap;
 use hyper::Request;
+use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
 const H3_ALT_SVC_CACHE_SHARDS: usize = 64;
@@ -15,24 +14,18 @@ pub(super) const MAX_H3_ALT_SVC_MAX_AGE: Duration = Duration::from_secs(24 * 60 
 static H3_ALT_SVC_CACHE: LazyLock<ShardedAltSvcCache> = LazyLock::new(ShardedAltSvcCache::new);
 
 struct ShardedAltSvcCache {
-    shards: Vec<Mutex<HashMap<String, AltSvcH3Endpoint>>>,
+    shards: qpx_http::sharding::AsyncShardMap<String, AltSvcH3Endpoint>,
 }
 
 impl ShardedAltSvcCache {
     fn new() -> Self {
         Self {
-            shards: (0..H3_ALT_SVC_CACHE_SHARDS)
-                .map(|_| Mutex::new(HashMap::new()))
-                .collect(),
+            shards: qpx_http::sharding::AsyncShardMap::new(H3_ALT_SVC_CACHE_SHARDS),
         }
     }
 
-    fn shard_for(&self, key: &str) -> &Mutex<HashMap<String, AltSvcH3Endpoint>> {
-        &self.shards[shard_index(&key, self.shards.len())]
-    }
-
     async fn get(&self, key: &str) -> Option<AltSvcH3Endpoint> {
-        let mut cache = self.shard_for(key).lock().await;
+        let mut cache = self.shards.lock(key).await;
         prune_alt_svc_cache(&mut cache);
         let entry = cache.get(key).cloned()?;
         if entry.expires_at <= Instant::now() {
@@ -43,19 +36,19 @@ impl ShardedAltSvcCache {
     }
 
     async fn insert(&self, key: String, endpoint: AltSvcH3Endpoint) {
-        let mut cache = self.shard_for(&key).lock().await;
+        let mut cache = self.shards.lock(&key).await;
         prune_alt_svc_cache(&mut cache);
         evict_alt_svc_cache_if_full(&mut cache, key.as_str(), self.max_keys_per_shard());
         cache.insert(key, endpoint);
     }
 
     async fn remove(&self, key: &str) {
-        self.shard_for(key).lock().await.remove(key);
+        self.shards.lock(key).await.remove(key);
     }
 
     fn max_keys_per_shard(&self) -> usize {
         MAX_H3_ALT_SVC_CACHE_KEYS
-            .div_ceil(self.shards.len().max(1))
+            .div_ceil(H3_ALT_SVC_CACHE_SHARDS)
             .max(1)
     }
 }

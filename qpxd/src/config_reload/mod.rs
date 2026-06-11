@@ -120,16 +120,11 @@ impl ConfigReloadHandler {
                     );
                     return Ok(());
                 }
-                let upstream_proxy_max_concurrent_per_endpoint = state
-                    .plan
-                    .limits
-                    .upstream
-                    .upstream_proxy_max_concurrent_per_endpoint;
+                // `Runtime::swap` carries the connection-pool registry across the reload
+                // and adopts the new config's pool limits, so no explicit setter is needed.
                 runtime.swap(state);
-                crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
-                    upstream_proxy_max_concurrent_per_endpoint,
-                );
-                crate::upstream::origin::clear_direct_origin_connection_pools();
+                // Flush direct-origin connections so the reload picks up new TLS/routing.
+                runtime.state().pools.direct_origin.clear();
                 let _ = refresh_watches(watcher, watched, watch_sources);
                 info!("config reloaded");
                 emit_config_reload_audit(

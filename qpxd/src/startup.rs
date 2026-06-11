@@ -1,4 +1,4 @@
-use crate::cli::{InitTemplate, MatchConfigRequest, SchemaFormat};
+use crate::cli::{ExplainFormat, InitTemplate, MatchConfigRequest, SchemaFormat};
 use crate::server::sets::wait_for_connection_drain;
 use crate::server::{AdminTasks, ProxyTasks};
 use anyhow::{Context, Result};
@@ -95,6 +95,7 @@ pub(crate) fn print_config_schema(format: SchemaFormat) -> Result<()> {
 
 pub(crate) fn explain_config(
     config_paths: Vec<PathBuf>,
+    format: ExplainFormat,
     edge_filter: Option<String>,
     route_filter: Option<String>,
     http_module_registry: Arc<crate::http::modules::HttpModuleRegistry>,
@@ -104,14 +105,30 @@ pub(crate) fn explain_config(
         config,
         http_module_registry,
     )?;
-    print!(
-        "{}",
-        crate::cli_render::render_explain_plan(
-            &plan,
-            edge_filter.as_deref(),
-            route_filter.as_deref()
-        )
-    );
+    match format {
+        ExplainFormat::Text => {
+            let rendered = crate::cli_render::render_explain_plan(
+                &plan,
+                edge_filter.as_deref(),
+                route_filter.as_deref(),
+            );
+            if rendered.trim().is_empty() {
+                anyhow::bail!("no explain target matched the requested edge/route filter");
+            }
+            print!("{rendered}");
+        }
+        ExplainFormat::Json => {
+            let rendered = crate::cli_render::render_explain_plan_json(
+                &plan,
+                edge_filter.as_deref(),
+                route_filter.as_deref(),
+            )?;
+            if rendered == "{\n  \"edges\": []\n}" {
+                anyhow::bail!("no explain target matched the requested edge/route filter");
+            }
+            println!("{rendered}");
+        }
+    }
     Ok(())
 }
 
@@ -157,10 +174,8 @@ pub(crate) async fn run(
         &config.telemetry.audit_log,
         config.telemetry.otel.as_ref(),
     )?;
-    crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
-        config.runtime.upstream_proxy_max_concurrent_per_endpoint,
-    );
-    crate::upstream::origin::clear_direct_origin_connection_pools();
+    // Connection pools are owned per-runtime by `PoolRegistry`; a freshly built
+    // `RuntimeState` starts with empty pools, so no global reset is needed here.
     info!(
         worker_threads = crate::tcp_bindings::net::worker_threads(&config.runtime),
         max_blocking_threads = crate::tcp_bindings::net::max_blocking_threads(&config.runtime),
@@ -457,8 +472,7 @@ fn log_binary_upgrade_capabilities(config: &ProxyConfig) {
         if has_listeners {
             warn!("binary upgrade is unsupported on this platform; use restart instead");
         }
-        let _ = udp_listener_count;
-        let _ = xdp_enabled;
+        let _ = (udp_listener_count, xdp_enabled);
     }
 }
 

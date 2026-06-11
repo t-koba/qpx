@@ -1,11 +1,12 @@
-use crate::http::body::Body;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http3::codec::prepare_h3_response_head;
+use crate::http3::response_error::{H3ResponseSendError, emit_h3_response_send_error};
 use crate::http3::stream_limits::timeout_or_deadline;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
 use hyper::Response;
+use qpx_http::body::Body;
 use tokio::time::{Duration, Instant};
 
 pub struct H3ResponseSendOptions<'a> {
@@ -20,35 +21,6 @@ pub struct H3ResponseSendOptions<'a> {
     pub sse_policy: Option<qpx_core::config::SseStreamingPolicy>,
     pub observe_grpc_messages: bool,
 }
-
-#[derive(Debug)]
-pub enum H3ResponseSendError {
-    BeforeResponseHead(anyhow::Error),
-    AfterResponseHead(anyhow::Error),
-}
-
-impl H3ResponseSendError {
-    pub fn can_send_error_response(&self) -> bool {
-        matches!(self, Self::BeforeResponseHead(_))
-    }
-
-    pub fn into_inner(self) -> anyhow::Error {
-        match self {
-            Self::BeforeResponseHead(err) | Self::AfterResponseHead(err) => err,
-        }
-    }
-}
-
-impl std::fmt::Display for H3ResponseSendError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BeforeResponseHead(err) => write!(f, "before response head: {err}"),
-            Self::AfterResponseHead(err) => write!(f, "after response head: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for H3ResponseSendError {}
 
 impl H3ResponseSendOptions<'_> {
     fn unobserved(max_body_bytes: usize, body_read_timeout: Duration) -> Self {
@@ -85,7 +57,10 @@ where
     )
     .await
     .map(|_summary| ())
-    .map_err(H3ResponseSendError::into_inner)
+    .map_err(|err| {
+        emit_h3_response_send_error("h3", &err);
+        err.into_inner()
+    })
 }
 
 pub(crate) async fn send_h3_response_observed<S>(
@@ -98,22 +73,16 @@ where
     S: ::h3::quic::SendStream<Bytes>,
 {
     let (parts, mut body) = response.into_parts();
-    let mut grpc_observer = options
-        .observe_grpc_messages
-        .then(|| {
-            crate::http::rpc::streaming_rpc_observer(
-                &parts.headers,
-                options.fallback_grpc_protocol,
-                options.max_grpc_message_bytes,
-                options.max_grpc_web_trailer_bytes,
-            )
-        })
-        .flatten();
-    let grpc_protocol = grpc_observer
-        .as_ref()
-        .map(|observer| observer.protocol().to_string());
+    let mut grpc_observer = crate::http3::response_rpc::H3ResponseRpcObserver::new(
+        &parts.headers,
+        options.fallback_grpc_protocol,
+        options.max_grpc_message_bytes,
+        options.max_grpc_web_trailer_bytes,
+        options.observe_grpc_messages,
+        options.listener_name,
+    );
     let prepared = prepare_h3_response_head(&parts, request_method)
-        .map_err(H3ResponseSendError::BeforeResponseHead)?;
+        .map_err(H3ResponseSendError::before_response_head)?;
     let (body_read_timeout, body_send_timeout, stream_deadline) = response_stream_timeouts(
         &parts.headers,
         options.body_read_timeout,
@@ -121,11 +90,17 @@ where
         options.grpc_stream_deadline,
         options.sse_policy,
     );
-    let mut sse_observer = options
-        .listener_name
-        .filter(|_| crate::http::modules::is_event_stream_headers(&parts.headers))
-        .map(|_| crate::http::protocol::sse::SseEventObserver::new());
-    let sse_started = Instant::now();
+    let mut sse_observer = crate::http3::response_sse::H3SseResponseObserver::new(
+        &parts.headers,
+        options.listener_name,
+        options.sse_policy,
+    );
+    macro_rules! stop_map_err {
+        ($err:expr, $builder:expr) => {{
+            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
+            $builder($err)
+        }};
+    }
     timeout_or_deadline(
         req_stream.send_response(prepared.head),
         body_send_timeout,
@@ -134,41 +109,30 @@ where
         "HTTP/3 gRPC stream duration exceeded configured limit",
     )
     .await
-    .map_err(|err| {
-        req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-        H3ResponseSendError::BeforeResponseHead(err)
-    })?
-    .map_err(|err| {
-        req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-        H3ResponseSendError::BeforeResponseHead(err.into())
-    })?;
+    .map_err(|err| stop_map_err!(err, H3ResponseSendError::before_response_head))?
+    .map_err(|err| stop_map_err!(err, H3ResponseSendError::before_response_head))?;
     if !prepared.body_allowed {
-        if options.observe_grpc_messages
-            && let (Some(listener), Some(protocol)) =
-                (options.listener_name, grpc_protocol.as_deref())
-        {
-            crate::http::rpc::emit_grpc_status_metric(listener, protocol, &parts.headers, None);
-        }
-        timeout_or_deadline(
-            req_stream.finish(),
-            body_send_timeout,
-            stream_deadline,
-            "HTTP/3 response finish timed out",
-            "HTTP/3 gRPC stream duration exceeded configured limit",
-        )
-        .await
-        .map_err(|err| {
-            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            H3ResponseSendError::AfterResponseHead(err)
-        })?
-        .map_err(|err| {
-            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            H3ResponseSendError::AfterResponseHead(err.into())
-        })?;
+        grpc_observer.emit_status_without_body(&parts.headers);
+        finish_h3_response_stream(req_stream, body_send_timeout, stream_deadline)
+            .await
+            .map_err(|err| stop_map_err!(err, H3ResponseSendError::after_response_head))?;
         return Ok(None);
     }
 
     let mut bytes_sent = 0usize;
+    let mut body_started = false;
+    macro_rules! stop_body_error {
+        ($code:expr, $err:expr) => {{
+            req_stream.stop_stream($code);
+            return Err(h3_response_send_error_for_body(body_started, $err));
+        }};
+    }
+    macro_rules! stop_body_map_err {
+        ($err:expr) => {{
+            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
+            h3_response_send_error_for_body(body_started, $err)
+        }};
+    }
     loop {
         let read_started = Instant::now();
         let chunk = match timeout_or_deadline(
@@ -189,13 +153,8 @@ where
                 chunk
             }
             Err(err) => {
-                if sse_observer.is_some()
-                    && let Some(listener) = options.listener_name
-                {
-                    crate::http::protocol::sse::emit_sse_idle_disconnect(listener, "unknown");
-                }
-                req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-                return Err(H3ResponseSendError::AfterResponseHead(err));
+                sse_observer.record_read_error(&err);
+                stop_body_error!(::h3::error::Code::H3_INTERNAL_ERROR, err);
             }
         };
         let Some(chunk) = chunk else {
@@ -204,43 +163,39 @@ where
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(err) => {
-                req_stream.stop_stream(::h3::error::Code::H3_MESSAGE_ERROR);
-                return Err(H3ResponseSendError::AfterResponseHead(err.into()));
+                stop_body_error!(::h3::error::Code::H3_MESSAGE_ERROR, err.into());
             }
         };
         let next = match bytes_sent.checked_add(chunk.len()) {
             Some(next) => next,
             None => {
-                req_stream.stop_stream(::h3::error::Code::H3_MESSAGE_ERROR);
-                return Err(H3ResponseSendError::AfterResponseHead(anyhow!(
-                    "HTTP/3 response body length overflow"
-                )));
+                stop_body_error!(
+                    ::h3::error::Code::H3_MESSAGE_ERROR,
+                    anyhow!("HTTP/3 response body length overflow")
+                );
             }
         };
         if next > options.max_body_bytes {
-            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            return Err(H3ResponseSendError::AfterResponseHead(anyhow!(
-                "HTTP/3 response body exceeds configured limit: {} bytes",
-                options.max_body_bytes
-            )));
+            stop_body_error!(
+                ::h3::error::Code::H3_INTERNAL_ERROR,
+                anyhow!(
+                    "HTTP/3 response body exceeds configured limit: {} bytes",
+                    options.max_body_bytes
+                )
+            );
         }
         if let Some(content_length) = prepared.content_length
             && next as u64 > content_length
         {
-            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            return Err(H3ResponseSendError::AfterResponseHead(anyhow!(
-                "HTTP/3 response body exceeds Content-Length"
-            )));
+            stop_body_error!(
+                ::h3::error::Code::H3_INTERNAL_ERROR,
+                anyhow!("HTTP/3 response body exceeds Content-Length")
+            );
         }
-        if let Some(observer) = grpc_observer.as_mut()
-            && let Err(err) = observer.feed(chunk.as_ref())
-        {
-            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            return Err(H3ResponseSendError::AfterResponseHead(anyhow!(err)));
+        if let Err(err) = grpc_observer.feed(chunk.as_ref()) {
+            stop_body_error!(::h3::error::Code::H3_INTERNAL_ERROR, err);
         }
-        if let Some(observer) = sse_observer.as_mut() {
-            observer.feed(chunk.as_ref());
-        }
+        sse_observer.feed_chunk(chunk.as_ref());
         bytes_sent = next;
         timeout_or_deadline(
             req_stream.send_data(chunk),
@@ -250,32 +205,22 @@ where
             "HTTP/3 gRPC stream duration exceeded configured limit",
         )
         .await
-        .map_err(|err| {
-            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            H3ResponseSendError::AfterResponseHead(err)
-        })?
-        .map_err(|err| {
-            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            H3ResponseSendError::AfterResponseHead(err.into())
-        })?;
+        .map_err(|err| stop_body_map_err!(err))?
+        .map_err(|err| stop_body_map_err!(err.into()))?;
+        body_started = true;
     }
 
-    if let (Some(listener), Some(observer)) = (options.listener_name, sse_observer.as_ref()) {
-        crate::http::protocol::sse::emit_sse_summary(
-            listener,
-            "unknown",
-            &observer.summary(),
-            sse_started.elapsed(),
-        );
-    }
+    sse_observer.finish();
 
     if let Some(content_length) = prepared.content_length
         && content_length != bytes_sent as u64
     {
-        req_stream.stop_stream(::h3::error::Code::H3_MESSAGE_ERROR);
-        return Err(H3ResponseSendError::AfterResponseHead(anyhow!(
-            "HTTP/3 response Content-Length mismatch: expected {content_length}, got {bytes_sent}"
-        )));
+        stop_body_error!(
+            ::h3::error::Code::H3_MESSAGE_ERROR,
+            anyhow!(
+                "HTTP/3 response Content-Length mismatch: expected {content_length}, got {bytes_sent}"
+            )
+        );
     }
 
     let trailers = timeout_or_deadline(
@@ -286,19 +231,13 @@ where
         "HTTP/3 gRPC stream duration exceeded configured limit",
     )
     .await
-    .map_err(|err| {
-        req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-        H3ResponseSendError::AfterResponseHead(err)
-    })?
-    .map_err(|err| {
-        req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-        H3ResponseSendError::AfterResponseHead(err.into())
-    })?;
+    .map_err(|err| stop_map_err!(err, H3ResponseSendError::after_response_head))?
+    .map_err(|err| stop_map_err!(err, H3ResponseSendError::after_response_head))?;
     let mut trailers_for_status = trailers.clone();
     if let Some(mut trailers) = trailers {
-        crate::http::protocol::semantics::sanitize_response_trailers(&mut trailers);
+        qpx_http::protocol::semantics::sanitize_response_trailers(&mut trailers);
         let trailers = crate::http3::codec::http_headers_to_h1(&trailers)
-            .map_err(H3ResponseSendError::AfterResponseHead)?;
+            .map_err(H3ResponseSendError::after_trailers_started)?;
         timeout_or_deadline(
             req_stream.send_trailers(trailers),
             body_send_timeout,
@@ -307,44 +246,26 @@ where
             "HTTP/3 gRPC stream duration exceeded configured limit",
         )
         .await
-        .map_err(|err| {
-            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            H3ResponseSendError::AfterResponseHead(err)
-        })?
-        .map_err(|err| {
-            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            H3ResponseSendError::AfterResponseHead(err.into())
-        })?;
+        .map_err(|err| stop_map_err!(err, H3ResponseSendError::after_trailers_started))?
+        .map_err(|err| stop_map_err!(err, H3ResponseSendError::after_trailers_started))?;
     }
-    let summary = if let Some(observer) = grpc_observer {
-        let protocol = observer.protocol().to_string();
-        let summary = observer.finish().map_err(|err| {
-            req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            H3ResponseSendError::AfterResponseHead(anyhow!(err))
-        })?;
-        if trailers_for_status.is_none() {
-            trailers_for_status = summary.trailers().cloned();
-        }
-        if options.observe_grpc_messages
-            && let Some(listener) = options.listener_name
-        {
-            crate::http::rpc::emit_grpc_body_metrics(
-                "response",
-                listener,
-                protocol.as_str(),
-                &summary,
-            );
-            crate::http::rpc::emit_grpc_status_metric(
-                listener,
-                protocol.as_str(),
-                &parts.headers,
-                trailers_for_status.as_ref(),
-            );
-        }
-        Some(summary)
-    } else {
-        None
-    };
+    let summary = grpc_observer
+        .finish(&parts.headers, &mut trailers_for_status)
+        .map_err(|err| stop_body_map_err!(err))?;
+    finish_h3_response_stream(req_stream, body_send_timeout, stream_deadline)
+        .await
+        .map_err(|err| stop_body_map_err!(err))?;
+    Ok(summary)
+}
+
+async fn finish_h3_response_stream<S>(
+    req_stream: &mut ::h3::server::RequestStream<S, Bytes>,
+    body_send_timeout: Duration,
+    stream_deadline: Option<Instant>,
+) -> Result<()>
+where
+    S: ::h3::quic::SendStream<Bytes>,
+{
     timeout_or_deadline(
         req_stream.finish(),
         body_send_timeout,
@@ -352,16 +273,19 @@ where
         "HTTP/3 response finish timed out",
         "HTTP/3 gRPC stream duration exceeded configured limit",
     )
-    .await
-    .map_err(|err| {
-        req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-        H3ResponseSendError::AfterResponseHead(err)
-    })?
-    .map_err(|err| {
-        req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-        H3ResponseSendError::AfterResponseHead(err.into())
-    })?;
-    Ok(summary)
+    .await?
+    .map_err(Into::into)
+}
+
+fn h3_response_send_error_for_body(
+    body_started: bool,
+    source: anyhow::Error,
+) -> H3ResponseSendError {
+    if body_started {
+        H3ResponseSendError::after_body_started(source)
+    } else {
+        H3ResponseSendError::after_response_head(source)
+    }
 }
 
 fn response_stream_timeouts(
@@ -405,12 +329,10 @@ where
         http::Version::HTTP_3,
         proxy_name,
         Response::builder()
-            .status(
-                crate::http::protocol::semantics::validate_http_status_class(
-                    status,
-                    "HTTP/3 static response",
-                )?,
-            )
+            .status(qpx_http::protocol::semantics::validate_http_status_class(
+                status,
+                "HTTP/3 static response",
+            )?)
             .body(Body::from(body.to_vec()))?,
         false,
     );

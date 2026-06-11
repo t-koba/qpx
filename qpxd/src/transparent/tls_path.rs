@@ -1,15 +1,15 @@
 use super::destination::{ConnectTarget, connect_target_stream, resolve_upstream};
+use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::policy_context::{
-    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
-    apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    validate_ext_authz_allow_mode,
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, emit_audit_log,
+    enforce_ext_authz, prepare_ext_authz_allow_controls, resolve_identity,
 };
-use crate::rate_limit::RateLimitContext;
+use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use crate::tls::TlsClientHelloInfo;
-use crate::tls::client::preview_tls_certificate_with_options;
 use anyhow::{Result, anyhow};
 use qpx_core::config::ActionKind;
+use qpx_http::tls::client::preview_tls_certificate_with_options;
 use std::net::SocketAddr;
 use tokio::time::Duration;
 use tracing::warn;
@@ -184,7 +184,7 @@ where
     } = state.policy.rate_limiters.collect_checked_plan_request(
         &selected_plan.rate_limits,
         None,
-        crate::rate_limit::TransportScope::Connect,
+        TransportScope::Connect,
         &request_limit_ctx,
         1,
     )?;
@@ -196,14 +196,14 @@ where
         emit_audit_log(
             &state,
             AuditRecord {
-                kind: crate::http::dispatch::ProxyKind::Transparent,
+                kind: ProxyKind::Transparent,
                 name: listener_name,
                 remote_ip: remote_addr.ip(),
                 host: host_for_match_owned.as_deref(),
                 sni: sni_for_match,
                 method: None,
                 path: None,
-                outcome: crate::http::dispatch::DispatchOutcome::Block,
+                outcome: DispatchOutcome::Block,
                 status: None,
                 matched_rule: decision.matched_rule.as_deref(),
                 matched_route: None,
@@ -218,7 +218,7 @@ where
         &state,
         &effective_policy,
         ExtAuthzInput {
-            proxy_kind: crate::http::dispatch::ProxyKind::Transparent,
+            proxy_kind: ProxyKind::Transparent,
             proxy_name: state.plan.identity.proxy_name.as_ref(),
             scope_name: listener_name,
             remote_ip: remote_addr.ip(),
@@ -236,29 +236,44 @@ where
         },
     )
     .await?;
-    let ext_authz_policy_id = match &ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => allow.policy_id.clone(),
-        ExtAuthzEnforcement::Deny(deny) => deny.policy_id.clone(),
-    };
-    let ext_authz_policy_tags = match &ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => allow.policy_tags.clone(),
-        ExtAuthzEnforcement::Deny(deny) => deny.policy_tags.clone(),
-    };
+    let ext_authz_policy_id = ext_authz.policy_id().map(str::to_owned);
+    let ext_authz_policy_tags = ext_authz.policy_tags().to_vec();
     let mut log_context = identity.to_log_context(
         decision.matched_rule.as_deref(),
         None,
         ext_authz_policy_id.as_deref(),
     );
     log_context.policy_tags = ext_authz_policy_tags;
+    let emit_decision_audit = |audit_outcome| {
+        emit_audit_log(
+            &state,
+            AuditRecord {
+                kind: ProxyKind::Transparent,
+                name: listener_name,
+                remote_ip: remote_addr.ip(),
+                host: host_for_match_owned.as_deref(),
+                sni: sni_for_match,
+                method: None,
+                path: None,
+                outcome: audit_outcome,
+                status: None,
+                matched_rule: decision.matched_rule.as_deref(),
+                matched_route: None,
+                ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+            },
+            &log_context,
+        );
+    };
     let mut action = decision.action.clone();
     let timeout_override = match ext_authz {
         ExtAuthzEnforcement::Continue(allow) => {
-            validate_ext_authz_allow_mode(&allow, ExtAuthzMode::TransparentTls)?;
+            let allow =
+                prepare_ext_authz_allow_controls(allow, ExtAuthzMode::TransparentTls, None)?;
             if request_limits
                 .merge_profile_and_check(
                     &state.policy.rate_limiters,
                     allow.rate_limit_profile.as_deref(),
-                    crate::rate_limit::TransportScope::Connect,
+                    TransportScope::Connect,
                     &request_limit_ctx,
                     1,
                 )?
@@ -266,28 +281,11 @@ where
             {
                 return Ok(TransparentTlsOutcome::Blocked);
             }
-            apply_ext_authz_action_overrides(&mut action, &allow);
+            allow.apply_action_overrides(&mut action);
             allow.timeout_override
         }
         ExtAuthzEnforcement::Deny(_) => {
-            emit_audit_log(
-                &state,
-                AuditRecord {
-                    kind: crate::http::dispatch::ProxyKind::Transparent,
-                    name: listener_name,
-                    remote_ip: remote_addr.ip(),
-                    host: host_for_match_owned.as_deref(),
-                    sni: sni_for_match,
-                    method: None,
-                    path: None,
-                    outcome: crate::http::dispatch::DispatchOutcome::ExtAuthzDeny,
-                    status: None,
-                    matched_rule: decision.matched_rule.as_deref(),
-                    matched_route: None,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
-                },
-                &log_context,
-            );
+            emit_decision_audit(DispatchOutcome::ExtAuthzDeny);
             return Ok(TransparentTlsOutcome::Blocked);
         }
     };
@@ -305,24 +303,7 @@ where
     let _concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_ctx) {
         Some(permits) => permits,
         None => {
-            emit_audit_log(
-                &state,
-                AuditRecord {
-                    kind: crate::http::dispatch::ProxyKind::Transparent,
-                    name: listener_name,
-                    remote_ip: remote_addr.ip(),
-                    host: host_for_match_owned.as_deref(),
-                    sni: sni_for_match,
-                    method: None,
-                    path: None,
-                    outcome: crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
-                    status: None,
-                    matched_rule: decision.matched_rule.as_deref(),
-                    matched_route: None,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
-                },
-                &log_context,
-            );
+            emit_decision_audit(DispatchOutcome::ConcurrencyLimited);
             return Ok(TransparentTlsOutcome::Blocked);
         }
     };
@@ -332,24 +313,7 @@ where
             listener = %listener_name,
             "respond action is not valid for transparent TLS; blocking connection"
         );
-        emit_audit_log(
-            &state,
-            AuditRecord {
-                kind: crate::http::dispatch::ProxyKind::Transparent,
-                name: listener_name,
-                remote_ip: remote_addr.ip(),
-                host: host_for_match_owned.as_deref(),
-                sni: sni_for_match,
-                method: None,
-                path: None,
-                outcome: crate::http::dispatch::DispatchOutcome::Block,
-                status: None,
-                matched_rule: decision.matched_rule.as_deref(),
-                matched_route: None,
-                ext_authz_policy_id: ext_authz_policy_id.as_deref(),
-            },
-            &log_context,
-        );
+        emit_decision_audit(DispatchOutcome::Block);
         return Ok(TransparentTlsOutcome::Blocked);
     }
 
@@ -360,24 +324,7 @@ where
                 listener = %listener_name,
                 "inspect action requires build feature mitm; blocking connection"
             );
-            emit_audit_log(
-                &state,
-                AuditRecord {
-                    kind: crate::http::dispatch::ProxyKind::Transparent,
-                    name: listener_name,
-                    remote_ip: remote_addr.ip(),
-                    host: host_for_match_owned.as_deref(),
-                    sni: sni_for_match,
-                    method: None,
-                    path: None,
-                    outcome: crate::http::dispatch::DispatchOutcome::Block,
-                    status: None,
-                    matched_rule: decision.matched_rule.as_deref(),
-                    matched_route: None,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
-                },
-                &log_context,
-            );
+            emit_decision_audit(DispatchOutcome::Block);
             return Ok(TransparentTlsOutcome::Blocked);
         }
 
@@ -426,24 +373,7 @@ where
             };
 
             transparent_mitm(stream, mitm_context).await?;
-            emit_audit_log(
-                &state,
-                AuditRecord {
-                    kind: crate::http::dispatch::ProxyKind::Transparent,
-                    name: listener_name,
-                    remote_ip: remote_addr.ip(),
-                    host: host_for_match_owned.as_deref(),
-                    sni: sni_for_match,
-                    method: None,
-                    path: None,
-                    outcome: crate::http::dispatch::DispatchOutcome::Allow,
-                    status: None,
-                    matched_rule: decision.matched_rule.as_deref(),
-                    matched_route: None,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
-                },
-                &log_context,
-            );
+            emit_decision_audit(DispatchOutcome::Allow);
             return Ok(TransparentTlsOutcome::Inspected);
         }
     }
@@ -451,15 +381,14 @@ where
     let upstream_connected = connect_target_stream(
         &connect_target,
         upstream.as_ref(),
-        runtime.state().plan.identity.proxy_name.as_ref(),
+        state.plan.identity.proxy_name.as_ref(),
         upstream_timeout,
     )
     .await?;
     let export = upstream_connected
         .peer_addr
-        .and_then(|server_addr| runtime.state().export_session(remote_addr, server_addr));
-    let idle_timeout =
-        Duration::from_millis(runtime.state().plan.limits.timeouts.tunnel_idle_timeout_ms);
+        .and_then(|server_addr| state.export_session(remote_addr, server_addr));
+    let idle_timeout = Duration::from_millis(state.plan.limits.timeouts.tunnel_idle_timeout_ms);
     let throttle = crate::upstream::io_copy::BandwidthThrottle::with_context(
         rate_limit_ctx,
         request_limits.byte_limiters.clone(),
@@ -471,24 +400,7 @@ where
         crate::tunnel::TunnelPolicy::tcp(Some(idle_timeout), throttle, export),
     )
     .await?;
-    emit_audit_log(
-        &state,
-        AuditRecord {
-            kind: crate::http::dispatch::ProxyKind::Transparent,
-            name: listener_name,
-            remote_ip: remote_addr.ip(),
-            host: host_for_match_owned.as_deref(),
-            sni: sni_for_match,
-            method: None,
-            path: None,
-            outcome: crate::http::dispatch::DispatchOutcome::Allow,
-            status: None,
-            matched_rule: decision.matched_rule.as_deref(),
-            matched_route: None,
-            ext_authz_policy_id: ext_authz_policy_id.as_deref(),
-        },
-        &log_context,
-    );
+    emit_decision_audit(DispatchOutcome::Allow);
     Ok(TransparentTlsOutcome::Tunneled)
 }
 

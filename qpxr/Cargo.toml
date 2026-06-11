@@ -3,6 +3,10 @@ name = "qpxr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 default = ["tls-rustls"]
@@ -28,3 +32,4 @@ native-tls = { workspace = true, optional = true }
 tokio-native-tls = { workspace = true, optional = true }
 libc.workspace = true
 byteorder_slice.workspace = true
+sha2.workspace = true

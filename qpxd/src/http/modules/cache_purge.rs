@@ -3,12 +3,13 @@ use super::{
     HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
     HttpModuleStage, ModuleStages, RequestHeadersOutcome,
 };
-use crate::http::body::Body;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use cidr::IpCidr;
 use http::{HeaderName, HeaderValue, Method, StatusCode};
 use hyper::Response;
 use qpx_core::config::{CachePurgeModuleConfig, HttpModuleConfig};
+use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(super) struct CachePurgeModuleFactory;
@@ -24,6 +25,8 @@ impl HttpModuleFactory for CachePurgeModuleFactory {
 #[derive(Clone)]
 struct CachePurgeModule {
     methods: Vec<Method>,
+    require_identity: bool,
+    allowed_peers: Vec<IpCidr>,
     response_status: StatusCode,
     response_body: String,
     response_headers: Vec<(HeaderName, HeaderValue)>,
@@ -39,8 +42,18 @@ impl CachePurgeModule {
                     .map_err(|_| anyhow!("invalid purge method: {method}"))
             })
             .collect::<Result<Vec<_>>>()?;
+        let allowed_peers = config
+            .allowed_peers
+            .into_iter()
+            .map(|peer| {
+                peer.parse::<IpCidr>()
+                    .map_err(|_| anyhow!("invalid cache purge allowed peer CIDR: {peer}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             methods,
+            require_identity: config.require_identity,
+            allowed_peers,
             response_status: StatusCode::from_u16(config.response_status)
                 .context("invalid cache purge response_status")?,
             response_body: config.response_body,
@@ -50,6 +63,17 @@ impl CachePurgeModule {
 
     fn matches(&self, method: &Method) -> bool {
         self.methods.iter().any(|candidate| candidate == method)
+    }
+
+    fn authorized(&self, ctx: &HttpModuleContext) -> bool {
+        if self
+            .allowed_peers
+            .iter()
+            .any(|peer| peer.contains(&ctx.remote_ip()))
+        {
+            return true;
+        }
+        !self.require_identity || ctx.identity_user().is_some()
     }
 
     fn build_response(&self) -> Response<Body> {
@@ -64,6 +88,13 @@ impl CachePurgeModule {
             response.headers_mut().insert(name.clone(), value.clone());
         }
         response
+    }
+
+    fn build_forbidden_response(&self) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::from("cache purge requires authorization"))
+            .unwrap_or_else(|_| Response::new(Body::from("cache purge requires authorization")))
     }
 }
 
@@ -96,6 +127,11 @@ impl HttpModule for CachePurgeModule {
         if !self.matches(request.method()) {
             return Ok(HttpModuleEvent::RequestHeadersResult(
                 RequestHeadersOutcome::Continue,
+            ));
+        }
+        if !self.authorized(ctx) {
+            return Ok(HttpModuleEvent::RequestHeadersResult(
+                RequestHeadersOutcome::Respond(Box::new(self.build_forbidden_response())),
             ));
         }
         if let Some(key) = ctx.cache_request_key(request)? {

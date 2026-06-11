@@ -1,6 +1,5 @@
-use crate::http::body::Body;
 use hyper::Request;
-use metrics::counter;
+use qpx_http::body::Body;
 use tracing::warn;
 
 use crate::reverse::router::CompiledPathRewrite;
@@ -42,12 +41,7 @@ pub(super) fn apply_path_rewrite(req: &mut Request<Body>, rewrite: &CompiledPath
             *req.uri_mut() = new_uri;
         }
         Err(err) => {
-            counter!(
-                crate::runtime::metric_names()
-                    .reverse_path_rewrite_invalid_total
-                    .clone()
-            )
-            .increment(1);
+            super::metrics::path_rewrite_invalid();
             warn!(
                 error = ?err,
                 "reverse path_rewrite produced invalid URI; keeping original"

@@ -4,17 +4,17 @@ use super::super::compile::{
 use super::super::selection::select_upstream_inner;
 use super::super::{
     CompiledPathRewrite, HttpRoute, ReverseAffinityRuntime, RoutePolicy, SelectedMirrorTarget,
-    UpstreamPool,
+    UpstreamEndpointSet,
 };
-use crate::http::body::Body;
 use crate::ipc_client::IpcUpstream;
 use crate::reverse::health::UpstreamEndpoint;
-use crate::tls::CompiledUpstreamTlsTrust;
 use anyhow::Result;
 use hyper::Request;
 use qpx_core::config::{ReverseRouteConfig, ReverseRouteTargetConfig, UpstreamConfig};
 use qpx_core::prefilter::{MatchPrefilterContext, MatchPrefilterHint, StringInterner};
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -183,7 +183,9 @@ impl HttpRoute {
         out
     }
 
-    pub(in crate::reverse::router) fn health_upstream_pools(&self) -> Vec<Arc<UpstreamPool>> {
+    pub(in crate::reverse::router) fn health_upstream_pools(
+        &self,
+    ) -> Vec<Arc<UpstreamEndpointSet>> {
         let mut out = Vec::new();
         for backend in &self.backends {
             out.push(backend.upstreams.clone());

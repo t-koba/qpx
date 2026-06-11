@@ -4,6 +4,7 @@ use super::helpers::{
 };
 use super::registry::{WebTransportSessionIngress, WebTransportSessionRegistry};
 use super::{ConnectionInfo, Protocol, Request, RequestHandler, Settings, WebTransportSession};
+use crate::H3Result as Result;
 use crate::protocol::{
     ConnectionClose, FRAME_HEADERS, FRAME_SETTINGS, H3_CLOSED_CRITICAL_STREAM, H3_FRAME_ERROR,
     H3_FRAME_UNEXPECTED, H3_ID_ERROR, H3_MESSAGE_ERROR, H3_MISSING_SETTINGS, H3_SETTINGS_ERROR,
@@ -18,7 +19,7 @@ use crate::protocol::{
 use crate::qpack::QpackConnection;
 use crate::response::parse_content_length;
 use crate::transport::{BidiStream, DatagramDispatch, OpenStreams, RequestStream, UniRecvStream};
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -525,7 +526,7 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
                         stream_id,
                         ctx.settings.webtransport_datagram_channel_capacity,
                     )
-                    .await,
+                    .await?,
             )
         } else {
             None
@@ -569,7 +570,7 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
                 .datagram_dispatch
                 .as_ref()
                 .ok_or_else(|| anyhow!("missing datagram dispatch"))?;
-            Some(dispatch.register_stream(stream_id).await)
+            Some(dispatch.register_stream(stream_id).await?)
         } else {
             None
         };

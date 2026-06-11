@@ -96,6 +96,65 @@ fn validate_rejects_cgi_zero_timeout_and_byte_limits() {
     assert!(err.to_string().contains("CGI reserved variable"));
 }
 
+#[test]
+fn validate_rejects_wasm_zero_limits_and_reserved_env() {
+    fn wasm_config() -> QpxfConfig {
+        let mut cfg = minimal_config("unix:///tmp/qpxf-test.sock".to_string());
+        cfg.handlers.push(HandlerConfig {
+            r#match: MatchConfig {
+                path_prefix: Some("/wasm".to_string()),
+                path_regex: None,
+                host: None,
+            },
+            backend: BackendConfig::Wasm(WasmBackendConfig {
+                module: PathBuf::from("/tmp/app.wasm"),
+                precompile: false,
+                pool: None,
+                max_module_bytes: 1024,
+                max_memory_mb: 16,
+                timeout_ms: 1000,
+                env: std::collections::HashMap::new(),
+                max_stdin_bytes: 1024,
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            }),
+        });
+        cfg
+    }
+
+    let mut cfg = wasm_config();
+    let BackendConfig::Wasm(wasm) = &mut cfg.handlers[0].backend else {
+        panic!("expected wasm backend");
+    };
+    wasm.timeout_ms = 0;
+    assert!(cfg.validate().is_err());
+
+    let mut cfg = wasm_config();
+    let BackendConfig::Wasm(wasm) = &mut cfg.handlers[0].backend else {
+        panic!("expected wasm backend");
+    };
+    wasm.max_module_bytes = 0;
+    assert!(cfg.validate().is_err());
+
+    let mut cfg = wasm_config();
+    let BackendConfig::Wasm(wasm) = &mut cfg.handlers[0].backend else {
+        panic!("expected wasm backend");
+    };
+    wasm.max_memory_mb = 0;
+    assert!(cfg.validate().is_err());
+
+    let mut cfg = wasm_config();
+    let BackendConfig::Wasm(wasm) = &mut cfg.handlers[0].backend else {
+        panic!("expected wasm backend");
+    };
+    wasm.env
+        .insert("REQUEST_METHOD".to_string(), "POST".to_string());
+    let err = cfg
+        .validate()
+        .expect_err("reserved WASM env variable should fail");
+    assert!(err.to_string().contains("CGI reserved variable"));
+}
+
 #[cfg(unix)]
 #[test]
 fn load_config_expands_env_variables() {

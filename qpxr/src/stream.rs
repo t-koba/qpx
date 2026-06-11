@@ -3,6 +3,7 @@ use crate::hub::ExporterHub;
 use anyhow::{Result, anyhow};
 use cidr::IpCidr;
 use qpx_core::exporter::STREAM_PREFACE_LINE;
+use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -246,14 +247,14 @@ fn parse_mode(line: &[u8]) -> Result<StreamMode> {
     })
 }
 
-/// Constant-time string comparison to prevent timing side-channel attacks
-/// on authentication tokens.
+/// Constant-time token comparison. Both inputs are reduced to fixed-length
+/// digests first so token length does not create a separate timing branch.
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.bytes()
-        .zip(b.bytes())
+    let a_digest = Sha256::digest(a.as_bytes());
+    let b_digest = Sha256::digest(b.as_bytes());
+    a_digest
+        .iter()
+        .zip(b_digest.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
 }

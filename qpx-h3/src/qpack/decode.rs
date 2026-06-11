@@ -1,6 +1,7 @@
 use super::{DecodedRequestHead, errors::HeaderDecodeError};
+use crate::H3Result as Result;
 use crate::qpack_fields::{append_header, validate_h3_regular_field};
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use http::{HeaderMap, Method, Uri};
 
 pub(crate) fn decode_request_head_from_fields(

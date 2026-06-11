@@ -1,14 +1,14 @@
 use super::{ReverseCacheInput, ReverseCacheOutcome, ReverseCacheState};
-use crate::cache::CacheRequestKey;
-use crate::http::body::Body;
 use crate::http::capture::cache_flow::{
     CacheLookupDecision, CacheWritebackContext, clone_request_head_for_revalidation,
     lookup_with_revalidation, process_upstream_response_for_cache,
 };
 use crate::http::dispatch::{
-    DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheLookupOutcome,
-    DispatchCachedResponseInput, finalize_dispatch_cached_response, prepare_dispatch_cache_keys,
-    record_cache_lookup_duration, record_cache_lookup_result,
+    DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheDecisionInput,
+    DispatchCacheLookupOutcome, DispatchCollapsedCacheDecisionInput, DispatchOutcome,
+    cache_decision_is_hit, dispatch_cache_collapse_continue, dispatch_cache_collapse_response,
+    finalize_dispatch_cache_decision, finalize_dispatch_collapsed_cache_decision,
+    prepare_dispatch_cache_keys, record_cache_lookup_duration, record_cache_lookup_result,
 };
 use crate::reverse::router::HttpRoute;
 use crate::runtime;
@@ -17,6 +17,8 @@ use crate::upstream::origin::{OriginEndpoint, proxy_http};
 use anyhow::Result;
 use hyper::{Method, Request, Response};
 use qpx_core::rules::CompiledHeaderControl;
+use qpx_http::body::Body;
+use qpxd_cache::CacheRequestKey;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::{Duration, timeout};
@@ -59,6 +61,7 @@ pub(super) async fn prepare_reverse_cache(
                 request_version,
                 proxy_name,
                 route_headers,
+                plan: &route.plan,
                 policy,
                 snapshot,
                 cache_lookup_key: cache_lookup_key.as_ref(),
@@ -74,9 +77,9 @@ pub(super) async fn prepare_reverse_cache(
         .await?;
         match outcome {
             DispatchCacheLookupOutcome::Response(response) => {
-                return Ok(ReverseCacheOutcome::Response(Box::new(response)));
+                return Ok(ReverseCacheOutcome::Response(response));
             }
-            DispatchCacheLookupOutcome::Continue(state) => revalidation_state = state,
+            DispatchCacheLookupOutcome::Continue(state) => revalidation_state = state.map(|s| *s),
         }
     }
     let collapse = reverse_cache_collapse(
@@ -88,6 +91,7 @@ pub(super) async fn prepare_reverse_cache(
             request_version,
             proxy_name,
             route_headers,
+            plan: &route.plan,
             request_cache_policy,
             request_headers_snapshot: request_headers_snapshot.as_ref(),
             cache_lookup_key: cache_lookup_key.as_ref(),
@@ -125,6 +129,7 @@ struct ReverseCacheLookupInput<'a> {
     request_version: http::Version,
     proxy_name: &'a str,
     route_headers: Option<&'a CompiledHeaderControl>,
+    plan: &'a crate::runtime::ExecutionPlan,
     policy: &'a qpx_core::config::CachePolicyConfig,
     snapshot: &'a http::HeaderMap,
     cache_lookup_key: Option<&'a CacheRequestKey>,
@@ -149,6 +154,7 @@ async fn reverse_cache_lookup(
         request_version,
         proxy_name,
         route_headers,
+        plan,
         policy,
         snapshot,
         cache_lookup_key,
@@ -167,31 +173,19 @@ async fn reverse_cache_lookup(
         cache_lookup_key,
         Some(policy),
         &runtime.state().cache.backends,
+        &runtime.state().cache.background_revalidations,
         state.messages.cache_miss.as_str(),
     )
     .await;
     record_cache_lookup_duration(audit_ctx.kind, lookup_started.elapsed());
     let (lookup_decision, revalidation_state) = lookup_result?;
-    let cache_hit = matches!(
-        lookup_decision,
-        CacheLookupDecision::Hit(_) | CacheLookupDecision::StaleWhileRevalidate(_, _)
-    );
-    http_modules.on_cache_lookup(cache_hit).await?;
-    match lookup_decision {
-        CacheLookupDecision::Hit(hit) => Ok(DispatchCacheLookupOutcome::Response(
-            finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                response: hit,
-                outcome: crate::http::dispatch::DispatchOutcome::CacheHit,
-                request_method,
-                response_version: Some(request_version),
-                proxy_name,
-                headers: route_headers,
-                http_modules,
-                audit: audit_ctx,
-            })
-            .await?,
-        )),
-        CacheLookupDecision::StaleWhileRevalidate(hit, state) => {
+    http_modules
+        .on_cache_lookup(cache_decision_is_hit(&lookup_decision))
+        .await?;
+    let response_version = Some(request_version);
+    match &lookup_decision {
+        CacheLookupDecision::Hit(_) | CacheLookupDecision::OnlyIfCachedMiss(_) => {}
+        CacheLookupDecision::StaleWhileRevalidate(_, state) => {
             maybe_spawn_reverse_revalidation(
                 req,
                 ReverseRevalidationInput {
@@ -207,43 +201,34 @@ async fn reverse_cache_lookup(
                     sticky_seed,
                     route_timeout,
                     proxy_name,
-                    state: *state,
+                    state: state.as_ref().clone(),
                 },
             );
-            Ok(DispatchCacheLookupOutcome::Response(
-                finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                    response: *hit,
-                    outcome: crate::http::dispatch::DispatchOutcome::CacheStale,
-                    request_method,
-                    response_version: Some(request_version),
-                    proxy_name,
-                    headers: route_headers,
-                    http_modules,
-                    audit: audit_ctx,
-                })
-                .await?,
-            ))
-        }
-        CacheLookupDecision::OnlyIfCachedMiss(response) => {
-            Ok(DispatchCacheLookupOutcome::Response(
-                finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                    response,
-                    outcome: crate::http::dispatch::DispatchOutcome::CacheOnlyIfCachedMiss,
-                    request_method,
-                    response_version: Some(request_version),
-                    proxy_name,
-                    headers: route_headers,
-                    http_modules,
-                    audit: audit_ctx,
-                })
-                .await?,
-            ))
         }
         CacheLookupDecision::Miss => {
             record_cache_lookup_result(audit_ctx.kind, "miss");
-            Ok(DispatchCacheLookupOutcome::Continue(revalidation_state))
+            return Ok(DispatchCacheLookupOutcome::Continue(
+                revalidation_state.map(Box::new),
+            ));
         }
     }
+    let response = finalize_dispatch_cache_decision(DispatchCacheDecisionInput {
+        decision: lookup_decision,
+        hit_outcome: DispatchOutcome::CacheHit,
+        stale_outcome: DispatchOutcome::CacheStale,
+        plan,
+        request_method,
+        response_version,
+        proxy_name,
+        headers: route_headers,
+        http_modules,
+        audit: audit_ctx,
+    })
+    .await?;
+    Ok(match response {
+        Some(response) => DispatchCacheLookupOutcome::Response(Box::new(response)),
+        None => DispatchCacheLookupOutcome::Continue(revalidation_state.map(Box::new)),
+    })
 }
 
 struct ReverseRevalidationInput<'a> {
@@ -259,7 +244,7 @@ struct ReverseRevalidationInput<'a> {
     sticky_seed: u64,
     route_timeout: Duration,
     proxy_name: &'a str,
-    state: crate::cache::RevalidationState,
+    state: qpxd_cache::RevalidationState,
 }
 
 fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidationInput<'_>) {
@@ -297,10 +282,10 @@ fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidat
     if target.upstream.starts_with("ipc://") || target.upstream.starts_with("ipc+unix://") {
         return;
     }
-    let Some(guard) = crate::cache::try_begin_background_revalidation(&state) else {
+    let Some(guard) = state.begin_background_revalidation() else {
         return;
     };
-    let runtime = runtime.clone();
+    let runtime_state = runtime.state();
     let proxy_name = proxy_name.to_string();
     let policy = policy.clone();
     let snapshot = snapshot.clone();
@@ -308,12 +293,14 @@ fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidat
     let target_key = target_key.clone();
     let upstream_trust = route.upstream_trust.clone();
     let bg_req = clone_request_head_for_revalidation(req);
+    let pools = runtime_state.pools.clone();
     tokio::spawn(async move {
         let _guard = guard;
         let started = Instant::now();
         let resp = timeout(
             route_timeout,
             proxy_http(
+                &pools,
                 bg_req,
                 &target,
                 proxy_name.as_str(),
@@ -325,7 +312,6 @@ fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidat
             return;
         };
         let response_delay_secs = started.elapsed().as_secs();
-        let state_ref = runtime.state();
         let method = Method::GET;
         let _ = process_upstream_response_for_cache(
             resp,
@@ -339,14 +325,14 @@ fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidat
                 revalidation_state: Some(state),
                 request_collapse_guard: None,
                 body_read_timeout: Duration::from_millis(
-                    state_ref
+                    runtime_state
                         .plan
                         .limits
                         .timeouts
                         .upstream_http_timeout_ms
                         .max(1),
                 ),
-                backends: &state_ref.cache.backends,
+                backends: &runtime_state.cache.backends,
             },
         )
         .await;
@@ -360,13 +346,14 @@ struct ReverseCacheCollapseInput<'a> {
     request_version: http::Version,
     proxy_name: &'a str,
     route_headers: Option<&'a CompiledHeaderControl>,
+    plan: &'a crate::runtime::ExecutionPlan,
     request_cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     request_headers_snapshot: Option<&'a http::HeaderMap>,
     cache_lookup_key: Option<&'a CacheRequestKey>,
     route_timeout: Duration,
     http_modules: &'a mut crate::http::modules::HttpModuleExecution,
     audit_ctx: &'a DispatchAuditContext,
-    revalidation_state: Option<crate::cache::RevalidationState>,
+    revalidation_state: Option<qpxd_cache::RevalidationState>,
 }
 
 async fn reverse_cache_collapse(
@@ -380,6 +367,7 @@ async fn reverse_cache_collapse(
         request_version,
         proxy_name,
         route_headers,
+        plan,
         request_cache_policy,
         request_headers_snapshot,
         cache_lookup_key,
@@ -389,34 +377,23 @@ async fn reverse_cache_collapse(
         mut revalidation_state,
     } = input;
     if *request_method != Method::GET {
-        return Ok(DispatchCacheCollapseOutcome::Continue {
-            revalidation_state: revalidation_state.map(Box::new),
-            guard: None,
-        });
+        return Ok(dispatch_cache_collapse_continue(revalidation_state, None));
     }
     let (Some(snapshot), Some(policy), Some(lookup_key)) = (
         request_headers_snapshot,
         request_cache_policy,
         cache_lookup_key,
     ) else {
-        return Ok(DispatchCacheCollapseOutcome::Continue {
-            revalidation_state: revalidation_state.map(Box::new),
-            guard: None,
-        });
+        return Ok(dispatch_cache_collapse_continue(revalidation_state, None));
     };
-    match crate::cache::begin_request_collapse(lookup_key) {
-        crate::cache::RequestCollapseJoin::Leader(guard) => {
-            Ok(DispatchCacheCollapseOutcome::Continue {
-                revalidation_state: revalidation_state.map(Box::new),
-                guard: Some(guard),
-            })
-        }
-        crate::cache::RequestCollapseJoin::Follower(waiter) => {
+    match runtime.state().cache.begin_request_collapse(lookup_key) {
+        qpxd_cache::RequestCollapseJoin::Leader(guard) => Ok(dispatch_cache_collapse_continue(
+            revalidation_state,
+            Some(guard),
+        )),
+        qpxd_cache::RequestCollapseJoin::Follower(waiter) => {
             if !waiter.wait(route_timeout).await {
-                return Ok(DispatchCacheCollapseOutcome::Continue {
-                    revalidation_state: revalidation_state.map(Box::new),
-                    guard: None,
-                });
+                return Ok(dispatch_cache_collapse_continue(revalidation_state, None));
             }
             let (decision, state_update) = lookup_with_revalidation(
                 req,
@@ -424,88 +401,56 @@ async fn reverse_cache_collapse(
                 Some(lookup_key),
                 Some(policy),
                 &runtime.state().cache.backends,
+                &runtime.state().cache.background_revalidations,
                 state.messages.cache_miss.as_str(),
             )
             .await?;
             revalidation_state = state_update;
-            let cache_hit = matches!(
-                decision,
-                CacheLookupDecision::Hit(_) | CacheLookupDecision::StaleWhileRevalidate(_, _)
-            );
-            http_modules.on_cache_lookup(cache_hit).await?;
-            match reverse_cache_collapse_response(
+            http_modules
+                .on_cache_lookup(cache_decision_is_hit(&decision))
+                .await?;
+            match reverse_cache_collapse_response(ReverseCacheCollapseResponseInput {
                 decision,
                 request_method,
                 request_version,
                 proxy_name,
                 route_headers,
+                plan,
                 http_modules,
                 audit_ctx,
-            )
+            })
             .await?
             {
-                Some(response) => Ok(DispatchCacheCollapseOutcome::Response(Box::new(response))),
-                None => Ok(DispatchCacheCollapseOutcome::Continue {
-                    revalidation_state: revalidation_state.map(Box::new),
-                    guard: None,
-                }),
+                Some(response) => Ok(dispatch_cache_collapse_response(response)),
+                None => Ok(dispatch_cache_collapse_continue(revalidation_state, None)),
             }
         }
     }
 }
 
-async fn reverse_cache_collapse_response(
+struct ReverseCacheCollapseResponseInput<'a> {
     decision: CacheLookupDecision,
-    request_method: &Method,
+    request_method: &'a Method,
     request_version: http::Version,
-    proxy_name: &str,
-    route_headers: Option<&CompiledHeaderControl>,
-    http_modules: &mut crate::http::modules::HttpModuleExecution,
-    audit_ctx: &DispatchAuditContext,
+    proxy_name: &'a str,
+    route_headers: Option<&'a CompiledHeaderControl>,
+    plan: &'a crate::runtime::ExecutionPlan,
+    http_modules: &'a mut crate::http::modules::HttpModuleExecution,
+    audit_ctx: &'a DispatchAuditContext,
+}
+
+async fn reverse_cache_collapse_response(
+    input: ReverseCacheCollapseResponseInput<'_>,
 ) -> Result<Option<Response<Body>>> {
-    match decision {
-        CacheLookupDecision::Hit(hit) => {
-            let response = finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                response: hit,
-                outcome: crate::http::dispatch::DispatchOutcome::CacheCollapsedHit,
-                request_method,
-                response_version: Some(request_version),
-                proxy_name,
-                headers: route_headers,
-                http_modules,
-                audit: audit_ctx,
-            })
-            .await?;
-            Ok(Some(response))
-        }
-        CacheLookupDecision::StaleWhileRevalidate(hit, _) => {
-            let response = finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                response: *hit,
-                outcome: crate::http::dispatch::DispatchOutcome::CacheCollapsedStale,
-                request_method,
-                response_version: Some(request_version),
-                proxy_name,
-                headers: route_headers,
-                http_modules,
-                audit: audit_ctx,
-            })
-            .await?;
-            Ok(Some(response))
-        }
-        CacheLookupDecision::OnlyIfCachedMiss(response) => {
-            let response = finalize_dispatch_cached_response(DispatchCachedResponseInput {
-                response,
-                outcome: crate::http::dispatch::DispatchOutcome::CacheOnlyIfCachedMiss,
-                request_method,
-                response_version: Some(request_version),
-                proxy_name,
-                headers: route_headers,
-                http_modules,
-                audit: audit_ctx,
-            })
-            .await?;
-            Ok(Some(response))
-        }
-        CacheLookupDecision::Miss => Ok(None),
-    }
+    finalize_dispatch_collapsed_cache_decision(DispatchCollapsedCacheDecisionInput {
+        decision: input.decision,
+        plan: input.plan,
+        request_method: input.request_method,
+        response_version: Some(input.request_version),
+        proxy_name: input.proxy_name,
+        headers: input.route_headers,
+        http_modules: input.http_modules,
+        audit: input.audit_ctx,
+    })
+    .await
 }

@@ -26,7 +26,7 @@ impl ShardedSessionRegistry {
     }
 
     pub(super) fn shard(&self, session_id: u64) -> &Mutex<HashMap<u64, SessionIngress>> {
-        &self.shards[(session_id as usize) % self.shards.len()]
+        &self.shards[crate::sharding::modulo_u64(session_id, self.shards.len())]
     }
 
     pub(super) async fn insert(&self, session_id: u64, ingress: SessionIngress) {

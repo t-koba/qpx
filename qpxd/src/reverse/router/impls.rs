@@ -10,9 +10,9 @@ use super::selection::{
 };
 use super::{
     CompiledPathRewrite, CompiledRegexPathRewrite, DynamicDiscovery, LoadBalanceStrategy,
-    RetryBudgetRuntime, ReverseAffinityKey, ReverseAffinityRuntime, RoutePolicy, UpstreamPool,
+    RetryBudgetRuntime, ReverseAffinityKey, ReverseAffinityRuntime, RoutePolicy,
+    UpstreamEndpointSet,
 };
-use crate::http::body::Body;
 use crate::reverse::health::{
     EndpointLifecycleRuntime, HealthCheckRuntime, PassiveHealthRuntime, UpstreamEndpoint,
     now_millis,
@@ -30,6 +30,7 @@ use qpx_core::config::{PathRewriteConfig, ReverseRouteConfig};
 use qpx_core::prefilter::StringInterner;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use qpx_core::rules::RuleMatchContext;
+use qpx_http::body::Body;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -173,7 +174,7 @@ impl ReverseAffinityRuntime {
     }
 }
 
-impl UpstreamPool {
+impl UpstreamEndpointSet {
     pub(in crate::reverse) fn new(
         static_endpoints: Vec<Arc<UpstreamEndpoint>>,
         seed_endpoints: Vec<Arc<UpstreamEndpoint>>,
@@ -249,7 +250,7 @@ impl UpstreamPool {
         let mut combined = self.static_endpoints.as_ref().clone();
         for origin in resolved {
             let label = origin.label();
-            if let Some(endpoint) = reusable.remove(label.as_str()) {
+            if let Some(endpoint) = reusable.remove(label) {
                 endpoint.reactivate(&self.lifecycle);
                 combined.push(endpoint);
             } else {
@@ -313,18 +314,19 @@ impl TlsPassthroughRoute {
         )
     }
 
-    pub(super) fn health_upstream_pools(&self) -> Vec<Arc<UpstreamPool>> {
+    pub(super) fn health_upstream_pools(&self) -> Vec<Arc<UpstreamEndpointSet>> {
         vec![self.upstreams.clone()]
     }
 }
 
 impl RoutePolicy {
     pub(in crate::reverse) fn from_http_config(config: &ReverseRouteConfig) -> Result<Self> {
-        let (retry_attempts, retry_backoff_ms, retry_body_threshold_bytes) = config
-            .resilience
-            .as_ref()
-            .map(resilience_retry_runtime)
-            .unwrap_or((1, 0, 64 * 1024));
+        let (retry_attempts, retry_backoff_ms, retry_body_replay, retry_body_threshold_bytes) =
+            config
+                .resilience
+                .as_ref()
+                .map(resilience_retry_runtime)
+                .unwrap_or((1, 0, false, 64 * 1024));
         let passive_health = config.resilience.as_ref().map(resilience_to_passive_health);
         let max_upstream_concurrency = config
             .resilience
@@ -334,6 +336,7 @@ impl RoutePolicy {
             lb: config.target.lb().unwrap_or("round_robin"),
             retry_attempts,
             retry_backoff_ms,
+            retry_body_replay,
             retry_body_threshold_bytes,
             timeout_ms: config.timeout_ms,
             health_check: config.health_check.as_ref(),
@@ -347,11 +350,12 @@ impl RoutePolicy {
     pub(in crate::reverse) fn from_tls_config(
         config: &ReverseTlsPassthroughRouteConfig,
     ) -> Result<Self> {
-        let (retry_attempts, retry_backoff_ms, retry_body_threshold_bytes) = config
-            .resilience
-            .as_ref()
-            .map(resilience_retry_runtime)
-            .unwrap_or((1, 0, 64 * 1024));
+        let (retry_attempts, retry_backoff_ms, retry_body_replay, retry_body_threshold_bytes) =
+            config
+                .resilience
+                .as_ref()
+                .map(resilience_retry_runtime)
+                .unwrap_or((1, 0, false, 64 * 1024));
         let passive_health = config.resilience.as_ref().map(resilience_to_passive_health);
         let max_upstream_concurrency = config
             .resilience
@@ -361,6 +365,7 @@ impl RoutePolicy {
             lb: config.lb.as_str(),
             retry_attempts,
             retry_backoff_ms,
+            retry_body_replay,
             retry_body_threshold_bytes,
             timeout_ms: config.timeout_ms,
             health_check: config.health_check.as_ref(),
@@ -388,6 +393,7 @@ impl RoutePolicy {
             lb,
             retry_attempts: parts.retry_attempts,
             retry_backoff: Duration::from_millis(parts.retry_backoff_ms),
+            retry_body_replay: parts.retry_body_replay,
             retry_body_threshold_bytes: parts.retry_body_threshold_bytes,
             retry_budget: RetryBudgetRuntime::new(parts.retry_attempts),
             timeout: Duration::from_millis(parts.timeout_ms.unwrap_or(30_000)),
@@ -403,6 +409,7 @@ struct RoutePolicyParts<'a> {
     lb: &'a str,
     retry_attempts: usize,
     retry_backoff_ms: u64,
+    retry_body_replay: bool,
     retry_body_threshold_bytes: usize,
     timeout_ms: Option<u64>,
     health_check: Option<&'a qpx_core::config::HealthCheckConfig>,
@@ -444,7 +451,7 @@ fn resilience_to_passive_health(
 
 fn resilience_retry_runtime(
     resilience: &qpx_core::config::ResilienceConfig,
-) -> (usize, u64, usize) {
+) -> (usize, u64, bool, usize) {
     resilience
         .retry
         .as_ref()
@@ -452,10 +459,11 @@ fn resilience_retry_runtime(
             (
                 retry.attempts,
                 retry.backoff_ms,
+                retry.retry_body_replay,
                 retry.retry_body_threshold_bytes,
             )
         })
-        .unwrap_or((1, 0, 64 * 1024))
+        .unwrap_or((1, 0, false, 64 * 1024))
 }
 
 pub(in crate::reverse) fn normalize_host_for_match(raw: &str) -> String {

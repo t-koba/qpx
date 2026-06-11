@@ -1,7 +1,10 @@
+//! Compiled rule model and evaluation helpers.
+
+#![allow(missing_docs)]
+
 use crate::config::{ActionConfig, RuleAuthConfig, RuleConfig};
-use crate::matchers::CompiledMatch;
+use crate::matchers::{CompiledMatch, MatchCompileError};
 use crate::prefilter::{MatchPrefilterContext, MatchPrefilterIndex, StringInterner};
-use anyhow::Result;
 use std::sync::Arc;
 
 mod context;
@@ -11,6 +14,16 @@ mod observation;
 pub use context::RuleMatchContext;
 pub use header_control::{CompiledHeaderControl, CompiledRegexReplace};
 pub use observation::CandidateRequestObservationRequirements;
+
+type Result<T> = std::result::Result<T, RuleCompileError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuleCompileError {
+    #[error(transparent)]
+    Match(#[from] MatchCompileError),
+    #[error(transparent)]
+    Backend(#[from] anyhow::Error),
+}
 
 #[derive(Debug, Clone)]
 pub struct RuleEngine {

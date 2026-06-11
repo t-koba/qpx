@@ -1,7 +1,7 @@
-use crate::http::body::Body;
 use crate::upstream::http1::{WebsocketProxyConfig, proxy_websocket_http1};
 use anyhow::Result;
 use hyper::{Request, Response};
+use qpx_http::body::Body;
 use std::time::Duration;
 
 pub(crate) struct DispatchWebsocketProxyInput<'a> {

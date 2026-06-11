@@ -1,4 +1,3 @@
-use crate::http::body::Body;
 use crate::http::body::size::{
     buffer_request_body_with_reason, buffer_response_body_with_reason,
     observe_request_body_size_with_reason, observe_response_body_size_with_reason,
@@ -8,6 +7,7 @@ use anyhow::Result;
 use hyper::{Request, Response};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_core::rules::{CandidateRequestObservationRequirements, RuleEngine};
+use qpx_http::body::Body;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
@@ -138,6 +138,27 @@ impl RequestObservationPlan {
     fn request_body_reason(self) -> &'static str {
         self.request_body_reason
     }
+}
+
+pub(crate) async fn observe_missing_request_requirements(
+    req: Request<Body>,
+    requirements: CandidateRequestObservationRequirements,
+    request_body_observed: bool,
+    request_rpc_observed: bool,
+    max_observed_request_body_bytes: usize,
+    body_read_timeout: Duration,
+) -> Result<(Request<Body>, bool)> {
+    if requirements.is_empty()
+        || ((request_body_observed || !requirements.needs_body)
+            && (request_rpc_observed || !requirements.needs_rpc))
+    {
+        return Ok((req, false));
+    }
+    let observation_plan = RequestObservationPlan::from_requirements(requirements);
+    let req = observation_plan
+        .observe_request(req, max_observed_request_body_bytes, body_read_timeout)
+        .await?;
+    Ok((req, observation_plan.needs_rpc))
 }
 
 impl ResponseObservationPlan {

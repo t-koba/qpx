@@ -2,14 +2,16 @@
 pub(crate) mod h3;
 mod health;
 mod listener;
+use crate::http::metrics as http_metrics;
+mod metrics;
 mod router;
 mod tls;
 mod transport;
 
+use crate::runtime::CompiledReverseEdge;
 #[cfg(any(feature = "http3", feature = "tls-rustls", feature = "tls-native"))]
 use crate::runtime::PlanFlags;
 use crate::runtime::Runtime;
-use crate::runtime::{CompiledReverseEdge, metric_names};
 use crate::tcp_bindings::filter::{
     ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
 };
@@ -20,7 +22,6 @@ use crate::transparent::quic::{
 };
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
-use metrics::counter;
 use qpx_core::config::{Config, ReverseEdgeConfig, UpstreamConfig};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
@@ -50,6 +51,7 @@ pub(crate) fn compile_reverse(
         http_module_registry,
         compiled_edge,
     )?);
+    transport::prune_mirror_permits(&router.mirror_targets());
     let security_policy = Arc::new(tls::ReverseTlsHostPolicy::from_config(reverse)?);
 
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -230,7 +232,12 @@ pub(in crate::reverse) fn record_reverse_connection_filter_block(
     matched_rule: &str,
     sni: Option<&str>,
 ) {
-    counter!(metric_names().reverse_requests_total.clone(), "result" => "blocked").increment(1);
+    http_metrics::request_result(
+        crate::runtime::metric_names()
+            .reverse_requests_total
+            .as_str(),
+        "blocked",
+    );
     emit_connection_filter_audit(
         "reverse",
         reverse.name.as_ref(),

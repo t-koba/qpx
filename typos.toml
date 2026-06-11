@@ -1,3 +1,6 @@
+[files]
+extend-exclude = ["vendor/h3"]
+
 [default.extend-words]
 # QUIC packet number abbreviation.
 pn = "pn"
@@ -5,3 +8,5 @@ pn = "pn"
 controllen = "controllen"
 # Common HTTP benchmark tool.
 wrk = "wrk"
+# Windows SDDL SID abbreviation (Built-in Administrators).
+ba = "ba"

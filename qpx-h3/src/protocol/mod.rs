@@ -1,4 +1,5 @@
-use anyhow::{Result, anyhow};
+use crate::H3Result as Result;
+use anyhow::anyhow;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 mod control;
@@ -83,7 +84,7 @@ pub(crate) fn read_varint_slice(input: &[u8]) -> Result<(u64, usize)> {
     let prefix = first >> 6;
     let len = 1usize << prefix;
     if input.len() < len {
-        return Err(anyhow!("truncated varint"));
+        return Err(anyhow!("truncated varint").into());
     }
     let mut value = (first & 0x3f) as u64;
     for byte in &input[1..len] {
@@ -128,7 +129,7 @@ pub(crate) fn encode_varint(value: u64) -> Result<Vec<u8>> {
             (value & 0xff) as u8,
         ]);
     }
-    Err(anyhow!("value exceeds QUIC varint range"))
+    Err(anyhow!("value exceeds QUIC varint range").into())
 }
 
 pub(crate) fn push_varint(buf: &mut Vec<u8>, value: u64) {
@@ -152,7 +153,8 @@ pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
     if len > max_payload_bytes as u64 {
         return Err(anyhow!(
             "HTTP/3 frame 0x{ty:x} payload length {len} exceeds limit {max_payload_bytes}"
-        ));
+        )
+        .into());
     }
     discard_frame_payload(reader, len, max_payload_bytes).await
 }
@@ -175,9 +177,9 @@ pub(crate) async fn discard_frame_payload<R: AsyncRead + Unpin>(
     max_payload_bytes: usize,
 ) -> Result<()> {
     if len > max_payload_bytes as u64 {
-        return Err(anyhow!(
-            "HTTP/3 frame payload length {len} exceeds limit {max_payload_bytes}"
-        ));
+        return Err(
+            anyhow!("HTTP/3 frame payload length {len} exceeds limit {max_payload_bytes}").into(),
+        );
     }
     let mut remaining = len as usize;
     let mut buf = [0u8; FRAME_PAYLOAD_READ_CHUNK_BYTES];

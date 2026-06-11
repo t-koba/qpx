@@ -1,4 +1,3 @@
-use crate::http::body::Body;
 use crate::upstream::raw_http1::InterimResponseHead;
 use ::http::{Request as Http1Request, Response as Http1Response};
 use anyhow::{Result, anyhow};
@@ -8,6 +7,7 @@ use h2::RecvStream;
 use h2::server::SendResponse;
 use hyper::header::{CONTENT_LENGTH, COOKIE};
 use hyper::{Request, Response, Uri};
+use qpx_http::body::Body;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::spawn;
@@ -70,7 +70,7 @@ pub(crate) async fn send_h2_response_with_interim(
     body_read_timeout: Duration,
 ) -> Result<()> {
     for head in interim {
-        let status = crate::http::protocol::semantics::validate_http_status_class(
+        let status = qpx_http::protocol::semantics::validate_http_status_class(
             head.status,
             "HTTP/2 interim response",
         )?;
@@ -84,17 +84,15 @@ pub(crate) async fn send_h2_response_with_interim(
             return Err(anyhow!("HTTP/2 interim responses must not use 101"));
         }
         let mut headers = head.headers.clone();
-        crate::http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
+        qpx_http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
         let mut informational = Http1Response::builder().status(status).body(())?;
         *informational.headers_mut() = http_headers_to_h1(&headers)?;
         respond.send_informational(informational)?;
     }
 
     let (parts, mut body) = response.into_parts();
-    let status = crate::http::protocol::semantics::validate_http_status_class(
-        parts.status,
-        "HTTP/2 response",
-    )?;
+    let status =
+        qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/2 response")?;
     let no_body = request_method == hyper::Method::HEAD
         || parts.status.is_informational()
         || parts.status == http::StatusCode::NO_CONTENT
@@ -106,12 +104,12 @@ pub(crate) async fn send_h2_response_with_interim(
     let mut headers = parts.headers;
     let declared_length = if no_body {
         if request_method == hyper::Method::HEAD {
-            crate::http::protocol::semantics::strip_message_body_framing_headers(&mut headers);
+            qpx_http::protocol::semantics::strip_message_body_framing_headers(&mut headers);
             if parse_declared_content_length(&headers).is_err() {
                 headers.remove(http::header::CONTENT_LENGTH);
             }
         } else {
-            crate::http::protocol::semantics::strip_message_body_headers(&mut headers);
+            qpx_http::protocol::semantics::strip_message_body_headers(&mut headers);
         }
         None
     } else {
@@ -167,7 +165,7 @@ pub(crate) async fn send_h2_response_with_interim(
         ));
     }
     if let Some(mut trailers) = trailers {
-        let removed = crate::http::protocol::semantics::sanitize_response_trailers(&mut trailers);
+        let removed = qpx_http::protocol::semantics::sanitize_response_trailers(&mut trailers);
         if removed > 0 {
             warn!(removed, "dropping forbidden HTTP/2 response trailers");
         }
@@ -186,7 +184,7 @@ pub(crate) async fn send_h2_response_with_interim(
 async fn read_h2_response_body_chunk(
     body: &mut Body,
     body_read_timeout: Duration,
-) -> Result<Option<Result<Bytes, crate::http::body::BodyError>>> {
+) -> Result<Option<Result<Bytes, qpx_http::body::BodyError>>> {
     timeout(body_read_timeout, body.data())
         .await
         .map_err(|_| anyhow!("HTTP/2 response body read timed out"))
@@ -354,10 +352,8 @@ pub(crate) fn h2_response_to_hyper(
     response: ::http::Response<RecvStream>,
 ) -> Result<Response<Body>> {
     let (parts, body) = response.into_parts();
-    let status = crate::http::protocol::semantics::validate_http_status_class(
-        parts.status,
-        "HTTP/2 response",
-    )?;
+    let status =
+        qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/2 response")?;
     let mut out = Response::builder()
         .status(status)
         .body(h2_response_body(body))?;
@@ -371,10 +367,8 @@ pub(crate) fn h2_response_to_hyper_with_inflight(
     inflight: Option<Arc<AtomicUsize>>,
 ) -> Result<Response<Body>> {
     let (parts, body) = response.into_parts();
-    let status = crate::http::protocol::semantics::validate_http_status_class(
-        parts.status,
-        "HTTP/2 response",
-    )?;
+    let status =
+        qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/2 response")?;
     let mut out = Response::builder()
         .status(status)
         .body(h2_response_body_with_inflight(body, inflight))?;
@@ -460,7 +454,7 @@ fn body_from_h2_stream(mut body: RecvStream, body_channel_capacity: usize) -> Bo
                 return;
             }
         };
-        if let Err(err) = crate::http::protocol::semantics::validate_request_trailers(&trailers) {
+        if let Err(err) = qpx_http::protocol::semantics::validate_request_trailers(&trailers) {
             warn!(error = ?err, "rejecting forbidden HTTP/2 request trailers");
             sender.abort();
             return;

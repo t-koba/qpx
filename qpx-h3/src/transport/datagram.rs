@@ -1,71 +1,76 @@
+use crate::H3Result as Result;
 use crate::protocol::{H3_DATAGRAM_ERROR, encode_varint, read_varint_slice};
-use anyhow::{Result, anyhow};
-use bytes::Bytes;
-use metrics::{counter, histogram};
+use crate::transport::metrics;
+use anyhow::anyhow;
+use arc_swap::ArcSwap;
+use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
 const DATAGRAM_ROUTE_SHARDS: usize = 64;
 
+/// Sender for HTTP/3 DATAGRAM frames associated with a stream.
 pub struct DatagramSender {
     conn: quinn::Connection,
-    stream_id: u64,
+    prefix: Bytes,
 }
 
 impl DatagramSender {
-    fn new(conn: quinn::Connection, stream_id: u64) -> Self {
-        Self { conn, stream_id }
+    fn new(conn: quinn::Connection, stream_id: u64) -> Result<Self> {
+        let prefix = datagram_prefix_for_stream(stream_id)?;
+        Ok(Self { conn, prefix })
     }
 
-    pub fn datagram_prefix(&self) -> Result<Bytes> {
-        if !self.stream_id.is_multiple_of(4) {
-            return Err(anyhow!("datagram stream id must be divisible by 4"));
-        }
-        let quarter_stream = self.stream_id / 4;
-        Ok(Bytes::from(encode_varint(quarter_stream)?))
+    /// Returns the encoded DATAGRAM stream prefix.
+    pub fn datagram_prefix(&self) -> Bytes {
+        self.prefix.clone()
     }
 
+    /// Sends a datagram that already includes the encoded prefix.
     pub fn send_prefixed_datagram(&mut self, datagram: Bytes, payload_len: usize) -> Result<()> {
         self.conn
             .send_datagram(datagram)
             .map_err(|err| anyhow!("failed to send QUIC datagram: {err}"))?;
-        self.record_datagram_sent(payload_len);
+        metrics::datagram_sent(payload_len);
         Ok(())
     }
 
-    pub fn send_datagram(&mut self, payload: Bytes) -> Result<()> {
-        let prefix = self.datagram_prefix()?;
-        let mut out = bytes::BytesMut::with_capacity(prefix.len() + payload.len());
-        out.extend_from_slice(prefix.as_ref());
-        out.extend_from_slice(payload.as_ref());
+    /// Sends an unprefixed datagram payload using caller-provided scratch storage.
+    pub fn send_unprefixed_datagram_with_scratch(
+        &mut self,
+        payload: Bytes,
+        scratch: &mut BytesMut,
+    ) -> Result<()> {
+        metrics::datagram_prefix_copy(payload.len());
+        scratch.clear();
+        scratch.reserve(self.prefix.len() + payload.len());
+        scratch.extend_from_slice(self.prefix.as_ref());
+        scratch.extend_from_slice(payload.as_ref());
+        let datagram = scratch.split().freeze();
         self.conn
-            .send_datagram(out.freeze())
+            .send_datagram(datagram)
             .map_err(|err| anyhow!("failed to send QUIC datagram: {err}"))?;
-        self.record_datagram_sent(payload.len());
+        metrics::datagram_sent(payload.len());
         Ok(())
-    }
-
-    fn record_datagram_sent(&self, payload_len: usize) {
-        counter!(
-            "qpx_datagram_sent_total",
-            "transport" => "qpx_h3",
-            "listener" => "unknown"
-        )
-        .increment(1);
-        counter!(
-            "qpx_datagram_sent_bytes_total",
-            "transport" => "qpx_h3",
-            "listener" => "unknown"
-        )
-        .increment(payload_len as u64);
     }
 }
 
+fn datagram_prefix_for_stream(stream_id: u64) -> Result<Bytes> {
+    if !stream_id.is_multiple_of(4) {
+        return Err(anyhow!("datagram stream id must be divisible by 4").into());
+    }
+    let quarter_stream = stream_id / 4;
+    Ok(Bytes::from(encode_varint(quarter_stream)?))
+}
+
+/// DATAGRAM sender and receiver pair for one stream.
 pub struct StreamDatagrams {
+    /// DATAGRAM sender.
     pub sender: DatagramSender,
+    /// DATAGRAM receiver.
     pub receiver: mpsc::Receiver<Bytes>,
     _registration: DatagramRegistration,
 }
@@ -78,9 +83,23 @@ enum DatagramRoute {
 
 pub(crate) struct DatagramDispatch {
     conn: quinn::Connection,
-    streams: Vec<RwLock<HashMap<u64, DatagramRoute>>>,
+    streams: Vec<DatagramRouteShard>,
     channel_capacity: usize,
     utilization_samples: AtomicU64,
+}
+
+struct DatagramRouteShard {
+    routes: ArcSwap<HashMap<u64, DatagramRoute>>,
+    write_lock: Mutex<()>,
+}
+
+impl DatagramRouteShard {
+    fn new() -> Self {
+        Self {
+            routes: ArcSwap::from_pointee(HashMap::new()),
+            write_lock: Mutex::new(()),
+        }
+    }
 }
 
 impl DatagramDispatch {
@@ -88,15 +107,44 @@ impl DatagramDispatch {
         Arc::new(Self {
             conn,
             streams: (0..DATAGRAM_ROUTE_SHARDS)
-                .map(|_| RwLock::new(HashMap::new()))
+                .map(|_| DatagramRouteShard::new())
                 .collect(),
             channel_capacity,
             utilization_samples: AtomicU64::new(0),
         })
     }
 
-    fn shard(&self, stream_id: u64) -> &RwLock<HashMap<u64, DatagramRoute>> {
-        &self.streams[(stream_id as usize) % self.streams.len()]
+    fn shard_idx(&self, stream_id: u64) -> usize {
+        crate::sharding::modulo_u64(stream_id, self.streams.len())
+    }
+
+    fn route(&self, stream_id: u64) -> Option<DatagramRoute> {
+        let shard = &self.streams[self.shard_idx(stream_id)];
+        shard.routes.load().get(&stream_id).cloned()
+    }
+
+    fn insert_route(&self, stream_id: u64, route: DatagramRoute) {
+        let idx = self.shard_idx(stream_id);
+        let shard = &self.streams[idx];
+        let _guard = shard
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut routes = (**shard.routes.load()).clone();
+        routes.insert(stream_id, route);
+        shard.routes.store(Arc::new(routes));
+    }
+
+    fn remove_route(&self, stream_id: u64) {
+        let idx = self.shard_idx(stream_id);
+        let shard = &self.streams[idx];
+        let _guard = shard
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut routes = (**shard.routes.load()).clone();
+        routes.remove(&stream_id);
+        shard.routes.store(Arc::new(routes));
     }
 
     fn should_record_utilization(&self) -> bool {
@@ -105,7 +153,10 @@ impl DatagramDispatch {
             .is_multiple_of(64)
     }
 
-    pub(crate) async fn register_stream(self: &Arc<Self>, stream_id: u64) -> StreamDatagrams {
+    pub(crate) async fn register_stream(
+        self: &Arc<Self>,
+        stream_id: u64,
+    ) -> Result<StreamDatagrams> {
         self.register_stream_with_capacity(stream_id, self.channel_capacity)
             .await
     }
@@ -114,30 +165,25 @@ impl DatagramDispatch {
         self: &Arc<Self>,
         stream_id: u64,
         channel_capacity: usize,
-    ) -> StreamDatagrams {
+    ) -> Result<StreamDatagrams> {
+        let sender = DatagramSender::new(self.conn.clone(), stream_id)?;
         let (tx, rx) = mpsc::channel(channel_capacity.max(1));
-        self.shard(stream_id)
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(stream_id, DatagramRoute::Enabled(tx.clone()));
-        StreamDatagrams {
-            sender: DatagramSender::new(self.conn.clone(), stream_id),
+        self.insert_route(stream_id, DatagramRoute::Enabled(tx.clone()));
+        Ok(StreamDatagrams {
+            sender,
             receiver: rx,
             _registration: DatagramRegistration {
                 dispatch: self.clone(),
                 stream_id,
             },
-        }
+        })
     }
 
     pub(crate) async fn register_stream_without_datagrams(
         self: &Arc<Self>,
         stream_id: u64,
     ) -> DatagramRegistration {
-        self.shard(stream_id)
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(stream_id, DatagramRoute::Disabled);
+        self.insert_route(stream_id, DatagramRoute::Disabled);
         DatagramRegistration {
             dispatch: self.clone(),
             stream_id,
@@ -145,10 +191,7 @@ impl DatagramDispatch {
     }
 
     async fn unregister(&self, stream_id: u64) {
-        self.shard(stream_id)
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&stream_id);
+        self.remove_route(stream_id);
     }
 
     pub(crate) async fn run(self: Arc<Self>) {
@@ -176,12 +219,7 @@ impl DatagramDispatch {
                 break;
             };
             let payload = datagram.slice(used..);
-            let route = self
-                .shard(stream_id)
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(&stream_id)
-                .cloned();
+            let route = self.route(stream_id);
             match route {
                 Some(DatagramRoute::Enabled(tx)) => {
                     let len = payload.len() as u64;
@@ -190,39 +228,16 @@ impl DatagramDispatch {
                     }
                     match tx.try_send(payload) {
                         Ok(()) => {
-                            counter!(
-                                "qpx_datagram_received_total",
-                                "transport" => "qpx_h3",
-                                "listener" => "unknown"
-                            )
-                            .increment(1);
-                            counter!(
-                                "qpx_datagram_received_bytes_total",
-                                "transport" => "qpx_h3",
-                                "listener" => "unknown"
-                            )
-                            .increment(len);
+                            metrics::datagram_received(len);
                         }
                         Err(mpsc::error::TrySendError::Full(_)) => {
-                            counter!(
-                                "qpx_datagram_dropped_total",
-                                "transport" => "qpx_h3",
-                                "listener" => "unknown",
-                                "reason" => "channel_full"
-                            )
-                            .increment(1);
+                            metrics::datagram_dropped("channel_full");
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {}
                     }
                 }
                 Some(DatagramRoute::Disabled) => {
-                    counter!(
-                        "qpx_datagram_dropped_total",
-                        "transport" => "qpx_h3",
-                        "listener" => "unknown",
-                        "reason" => "disabled"
-                    )
-                    .increment(1);
+                    metrics::datagram_dropped("disabled");
                     close_datagram_connection(
                         &self.conn,
                         "datagram received for stream without datagram semantics",
@@ -230,13 +245,7 @@ impl DatagramDispatch {
                     break;
                 }
                 None => {
-                    counter!(
-                        "qpx_datagram_dropped_total",
-                        "transport" => "qpx_h3",
-                        "listener" => "unknown",
-                        "reason" => "unknown_stream"
-                    )
-                    .increment(1);
+                    metrics::datagram_dropped("unknown_stream");
                 }
             }
         }
@@ -244,17 +253,7 @@ impl DatagramDispatch {
 }
 
 fn record_datagram_channel_utilization(tx: &mpsc::Sender<Bytes>) {
-    let max = tx.max_capacity();
-    if max == 0 {
-        return;
-    }
-    let used = max.saturating_sub(tx.capacity());
-    histogram!(
-        "qpx_datagram_channel_utilization",
-        "transport" => "qpx_h3",
-        "listener" => "unknown"
-    )
-    .record(used as f64 / max as f64);
+    metrics::datagram_channel_utilization(tx);
 }
 
 pub(crate) struct DatagramRegistration {

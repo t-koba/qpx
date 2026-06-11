@@ -1,6 +1,7 @@
 use super::super::ConnectTarget;
-use super::types::{TransparentPolicyEvaluation, TransparentPolicyInput, TransparentPolicyStage};
+use super::types::{TransparentPolicyEvaluation, TransparentPolicyInput};
 use crate::http::body::size::observed_request_size;
+use crate::http::pipeline::PolicyStage;
 use crate::http::policy::rule_context::{
     RequestRuleContextInput, build_request_rule_match_context,
 };
@@ -8,6 +9,7 @@ use crate::http::policy::{ListenerPolicyDecision, evaluate_listener_policy};
 use crate::http::protocol::common::forbidden_response as forbidden;
 use anyhow::Result;
 use qpx_core::prefilter::MatchPrefilterContext;
+use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 
 pub(super) fn transparent_prefilter_context<'a>(
@@ -29,27 +31,15 @@ pub(super) fn transparent_prefilter_context<'a>(
 pub(super) fn evaluate_transparent_policy(
     input: TransparentPolicyInput<'_>,
 ) -> Result<TransparentPolicyEvaluation> {
+    let ctx = build_transparent_rule_context(&input);
     let TransparentPolicyInput {
         engine,
         req,
-        base,
-        sanitized_headers,
-        destination,
-        identity,
         request_rpc,
         proxy_name,
         forbidden_message,
+        ..
     } = input;
-    let ctx = build_request_rule_match_context(RequestRuleContextInput {
-        base,
-        headers: sanitized_headers,
-        destination,
-        identity,
-        request_size: observed_request_size(req),
-        rpc: request_rpc,
-        client_cert: None,
-        upstream_cert: None,
-    });
     let decision = evaluate_listener_policy(
         engine,
         &ctx,
@@ -78,7 +68,8 @@ pub(super) fn evaluate_transparent_policy(
 
 pub(super) fn evaluate_transparent_policy_staged(
     input: TransparentPolicyInput<'_>,
-) -> Result<TransparentPolicyStage> {
+) -> Result<PolicyStage<Box<TransparentPolicyEvaluation>>> {
+    let ctx = build_transparent_rule_context(&input);
     let TransparentPolicyInput {
         engine,
         req,
@@ -90,16 +81,6 @@ pub(super) fn evaluate_transparent_policy_staged(
         proxy_name,
         forbidden_message,
     } = input;
-    let ctx = build_request_rule_match_context(RequestRuleContextInput {
-        base,
-        headers: sanitized_headers,
-        destination,
-        identity,
-        request_size: observed_request_size(req),
-        rpc: request_rpc,
-        client_cert: None,
-        upstream_cert: None,
-    });
     let prefilter_ctx = MatchPrefilterContext {
         method: ctx.method,
         dst_port: ctx.dst_port,
@@ -129,7 +110,7 @@ pub(super) fn evaluate_transparent_policy_staged(
                     }
                 }
             }
-            return Ok(TransparentPolicyStage::Observe(combined));
+            return Ok(PolicyStage::Observe(combined));
         }
         if rule.matches(&ctx) {
             return evaluate_transparent_policy(TransparentPolicyInput {
@@ -144,7 +125,7 @@ pub(super) fn evaluate_transparent_policy_staged(
                 forbidden_message,
             })
             .map(Box::new)
-            .map(TransparentPolicyStage::Decision);
+            .map(PolicyStage::Decision);
         }
     }
     evaluate_transparent_policy(TransparentPolicyInput {
@@ -159,5 +140,18 @@ pub(super) fn evaluate_transparent_policy_staged(
         forbidden_message,
     })
     .map(Box::new)
-    .map(TransparentPolicyStage::Decision)
+    .map(PolicyStage::Decision)
+}
+
+fn build_transparent_rule_context<'a>(input: &TransparentPolicyInput<'a>) -> RuleMatchContext<'a> {
+    build_request_rule_match_context(RequestRuleContextInput {
+        base: input.base,
+        headers: input.sanitized_headers,
+        destination: input.destination,
+        identity: input.identity,
+        request_size: observed_request_size(input.req),
+        rpc: input.request_rpc,
+        client_cert: None,
+        upstream_cert: None,
+    })
 }

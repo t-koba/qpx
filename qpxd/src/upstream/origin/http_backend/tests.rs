@@ -1,12 +1,12 @@
 use super::*;
 
-use crate::http::body::to_bytes;
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Full};
 #[cfg(feature = "tls-rustls")]
 use hyper::Response as Http1Response;
 use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
+use qpx_http::body::to_bytes;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,8 +49,10 @@ async fn spawn_counting_http1_origin(scheme: &str) -> Result<(OriginEndpoint, Ar
 #[tokio::test]
 async fn proxy_plain_http_reuses_direct_origin_connection() -> Result<()> {
     let (origin, accepts) = spawn_counting_http1_origin("http").await?;
+    let pools = crate::pool::PoolRegistry::new();
 
     let first = proxy_http_with_interim(
+        &pools,
         Request::builder()
             .uri("http://reverse_edges.test/one")
             .body(Body::empty())?,
@@ -63,6 +65,7 @@ async fn proxy_plain_http_reuses_direct_origin_connection() -> Result<()> {
     yield_now().await;
 
     let second = proxy_http_with_interim(
+        &pools,
         Request::builder()
             .uri("http://reverse_edges.test/two")
             .body(Body::empty())?,
@@ -81,8 +84,8 @@ async fn proxy_plain_http_reuses_direct_origin_connection() -> Result<()> {
 async fn tls_trust_for_localhost(
     alpn: &[u8],
 ) -> Result<(tokio_rustls::TlsAcceptor, Arc<CompiledUpstreamTlsTrust>)> {
-    use crate::tls::cert_info::extract_upstream_certificate_info;
     use qpx_core::config::UpstreamTlsTrustConfig;
+    use qpx_core::tls::extract_upstream_certificate_info;
     use qpx_core::tls::init_rustls_crypto_provider;
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -259,7 +262,10 @@ async fn spawn_limited_https_h2_origin() -> Result<(
 async fn proxy_https_http1_reuses_direct_origin_connection() -> Result<()> {
     let (origin, trust, accepts) = spawn_counting_https_http1_origin().await?;
 
+    let pools = crate::pool::PoolRegistry::new();
+
     let first = proxy_https_with_options(
+        &pools,
         Request::builder()
             .uri("https://reverse_edges.test/one")
             .body(Body::empty())?,
@@ -267,6 +273,7 @@ async fn proxy_https_http1_reuses_direct_origin_connection() -> Result<()> {
         "qpx-test",
         Some(trust.as_ref()),
         false,
+        std::time::Duration::from_secs(30),
     )
     .await?;
     assert!(
@@ -280,6 +287,7 @@ async fn proxy_https_http1_reuses_direct_origin_connection() -> Result<()> {
     yield_now().await;
 
     let second = proxy_https_with_options(
+        &pools,
         Request::builder()
             .uri("https://reverse_edges.test/two")
             .body(Body::empty())?,
@@ -287,6 +295,7 @@ async fn proxy_https_http1_reuses_direct_origin_connection() -> Result<()> {
         "qpx-test",
         Some(trust.as_ref()),
         false,
+        std::time::Duration::from_secs(30),
     )
     .await?;
     assert!(
@@ -307,7 +316,10 @@ async fn proxy_https_http1_reuses_direct_origin_connection() -> Result<()> {
 async fn proxy_https_h2_reuses_direct_origin_connection() -> Result<()> {
     let (origin, trust, accepts) = spawn_counting_https_h2_origin().await?;
 
+    let pools = crate::pool::PoolRegistry::new();
+
     let first = proxy_https_with_options(
+        &pools,
         Request::builder()
             .uri("https://reverse_edges.test/one")
             .body(Body::empty())?,
@@ -315,6 +327,7 @@ async fn proxy_https_h2_reuses_direct_origin_connection() -> Result<()> {
         "qpx-test",
         Some(trust.as_ref()),
         false,
+        std::time::Duration::from_secs(30),
     )
     .await?;
     assert!(
@@ -327,6 +340,7 @@ async fn proxy_https_h2_reuses_direct_origin_connection() -> Result<()> {
     assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
 
     let second = proxy_https_with_options(
+        &pools,
         Request::builder()
             .uri("https://reverse_edges.test/two")
             .body(Body::empty())?,
@@ -334,6 +348,7 @@ async fn proxy_https_h2_reuses_direct_origin_connection() -> Result<()> {
         "qpx-test",
         Some(trust.as_ref()),
         false,
+        std::time::Duration::from_secs(30),
     )
     .await?;
     assert!(
@@ -355,7 +370,10 @@ async fn proxy_https_h2_opens_additional_direct_origin_connections_under_stream_
 -> Result<()> {
     let (origin, trust, accepts, release_first) = spawn_limited_https_h2_origin().await?;
 
+    let pools = crate::pool::PoolRegistry::new();
+
     let first = proxy_https_with_options(
+        &pools,
         Request::builder()
             .uri("https://reverse_edges.test/one")
             .body(Body::empty())?,
@@ -363,6 +381,7 @@ async fn proxy_https_h2_opens_additional_direct_origin_connections_under_stream_
         "qpx-test",
         Some(trust.as_ref()),
         false,
+        std::time::Duration::from_secs(30),
     )
     .await?;
     assert!(
@@ -374,6 +393,7 @@ async fn proxy_https_h2_opens_additional_direct_origin_connections_under_stream_
     );
 
     let second = proxy_https_with_options(
+        &pools,
         Request::builder()
             .uri("https://reverse_edges.test/two")
             .body(Body::empty())?,
@@ -381,6 +401,7 @@ async fn proxy_https_h2_opens_additional_direct_origin_connections_under_stream_
         "qpx-test",
         Some(trust.as_ref()),
         false,
+        std::time::Duration::from_secs(30),
     )
     .await?;
     assert!(

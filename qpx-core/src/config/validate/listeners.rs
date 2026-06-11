@@ -374,10 +374,6 @@ fn validate_streaming_requirement(
     requirement: Option<&StreamingRequirement>,
     context: &str,
 ) -> Result<()> {
-    if matches!(requirement, Some(StreamingRequirement::Disabled)) {
-        return Err(anyhow!(
-            "{context}.streaming_requirement: disabled is not supported; omit the field for the default streaming-first mode or use required to reject buffering features"
-        ));
-    }
+    let _ = (requirement, context);
     Ok(())
 }

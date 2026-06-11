@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, anyhow};
 use chrono::Datelike as _;
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
@@ -9,6 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::TlsResult as Result;
+
+/// Local MITM CA material and issuer state.
 #[derive(Clone)]
 pub struct CaStore {
     pub(super) issuer: Arc<Issuer<'static, KeyPair>>,
@@ -18,6 +21,7 @@ pub struct CaStore {
     state_dir: PathBuf,
 }
 
+/// Loads an existing CA from `state_dir` or generates and stores a new one.
 pub fn load_or_generate_ca(state_dir: &Path) -> Result<CaStore> {
     ensure_private_state_dir(state_dir)?;
     let cert_path = state_dir.join("ca.crt");
@@ -82,6 +86,7 @@ pub fn load_or_generate_ca(state_dir: &Path) -> Result<CaStore> {
     })
 }
 
+/// Rewrites CA certificate and key files and returns their paths.
 pub fn write_ca_files(state_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let ca = load_or_generate_ca(state_dir)?;
     let cert_path = ca.cert_path();
@@ -117,29 +122,44 @@ fn write_private_key_file(path: &Path, contents: &str) -> Result<()> {
 
 #[cfg(unix)]
 fn write_text_file(path: &Path, contents: &str, mode: u32) -> Result<()> {
-    use std::fs::OpenOptions;
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(mode)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+    let mut file =
+        crate::secure_file::open_secure_output_file(path).map_err(|err| anyhow!("{err}"))?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(mode))?;
     Ok(())
 }
 
 #[cfg(windows)]
 fn write_text_file(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+
     ensure_path_not_symlink(path, "MITM CA material")?;
-    fs::write(path, contents)
-        .with_context(|| format!("failed to write MITM CA material {}", path.display()))?;
-    set_owner_only_acl(path)
+    let mut file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => {
+            validate_windows_ca_material_handle(&file, path)?;
+            file
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("failed to create MITM CA material {}", path.display()))?,
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to open MITM CA material {}", path.display()));
+        }
+    };
+    validate_windows_ca_material_handle(&file, path)?;
+    set_owner_only_acl(&file, path)?;
+    file.set_len(0)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    set_owner_only_acl(&file, path)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -154,17 +174,23 @@ fn write_text_file(path: &Path, _contents: &str) -> Result<()> {
 fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    let metadata = fs::metadata(path)?;
+    ensure_path_not_symlink(path, "ca key")?;
+    let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    crate::secure_file::validate_secure_file_handle(&file, path).map_err(|err| anyhow!("{err}"))?;
+    let metadata = file.metadata()?;
     let mode = metadata.permissions().mode() & 0o777;
     if mode != 0o600 {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
 
 #[cfg(windows)]
 fn enforce_private_key_permissions(path: &Path) -> Result<()> {
-    set_owner_only_acl(path)
+    ensure_path_not_symlink(path, "ca key")?;
+    let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    validate_windows_ca_material_handle(&file, path)?;
+    set_owner_only_acl(&file, path)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -172,17 +198,15 @@ fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     Err(anyhow!(
         "refusing to use MITM CA private key on this platform: private ACL and reparse-point protection is not implemented: {}",
         path.display()
-    ))
+    )
+    .into())
 }
 
 fn ensure_path_not_symlink(path: &Path, label: &str) -> Result<()> {
     if let Ok(meta) = fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
     {
-        return Err(anyhow!(
-            "{label} path must not be a symlink: {}",
-            path.display()
-        ));
+        return Err(anyhow!("{label} path must not be a symlink: {}", path.display()).into());
     }
     Ok(())
 }
@@ -201,7 +225,8 @@ fn ensure_private_state_dir(path: &Path) -> Result<()> {
                     return Err(anyhow!(
                         "state dir component is not a directory: {}",
                         current.display()
-                    ));
+                    )
+                    .into());
                 }
                 reject_untrusted_state_ancestor(&current, &meta)?;
             }
@@ -234,7 +259,7 @@ fn set_private_directory_permissions(path: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        set_owner_only_acl(path)?;
+        set_owner_only_directory_acl(path)?;
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -253,31 +278,36 @@ fn reject_untrusted_state_ancestor(path: &Path, meta: &fs::Metadata) -> Result<(
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let sticky_bit = libc::S_ISVTX;
     let sticky = mode & sticky_bit != 0;
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
 
     if meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow!(
             "refusing state dir ancestor not owned by root or current user: {}",
             path.display()
-        ));
+        )
+        .into());
     }
     if sticky && mode & 0o022 != 0 && meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow!(
             "refusing sticky writable state dir ancestor not owned by root or current user: {}",
             path.display()
-        ));
+        )
+        .into());
     }
     if mode & 0o002 != 0 && !sticky {
         return Err(anyhow!(
             "refusing attacker-writable state dir ancestor {}",
             path.display()
-        ));
+        )
+        .into());
     }
     if !sticky && mode & 0o020 != 0 && meta.uid() != euid {
         return Err(anyhow!(
             "refusing group-writable state dir ancestor not owned by current user: {}",
             path.display()
-        ));
+        )
+        .into());
     }
     Ok(())
 }
@@ -286,12 +316,14 @@ fn reject_untrusted_state_ancestor(path: &Path, meta: &fs::Metadata) -> Result<(
 fn resolve_trusted_state_symlink(path: &Path, meta: &fs::Metadata) -> Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow!(
             "state dir path must not contain untrusted symlink component: {}",
             path.display()
-        ));
+        )
+        .into());
     }
     let resolved = fs::canonicalize(path).with_context(|| {
         format!(
@@ -304,7 +336,8 @@ fn resolve_trusted_state_symlink(path: &Path, meta: &fs::Metadata) -> Result<Pat
         return Err(anyhow!(
             "state dir symlink target is not a directory: {}",
             resolved.display()
-        ));
+        )
+        .into());
     }
     reject_untrusted_state_ancestor(&resolved, &resolved_meta)?;
     Ok(resolved)
@@ -315,11 +348,66 @@ fn resolve_trusted_state_symlink(path: &Path, _meta: &fs::Metadata) -> Result<Pa
     Err(anyhow!(
         "state dir path must not contain symlinks: {}",
         path.display()
-    ))
+    )
+    .into())
 }
 
 #[cfg(windows)]
 fn reject_untrusted_state_ancestor(_path: &Path, _meta: &fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_windows_ca_material_handle(file: &fs::File, path: &Path) -> Result<()> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        GetFileInformationByHandle,
+    };
+
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(anyhow!(
+            "MITM CA material must be a regular file: {}",
+            path.display()
+        )
+        .into());
+    }
+    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: `file` is an open file handle and `info` points to writable storage.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), info.as_mut_ptr()) };
+    if ok == 0 {
+        return Err(anyhow!(
+            "failed to inspect MITM CA material handle {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )
+        .into());
+    }
+    // SAFETY: the API succeeded and initialized the structure.
+    let info = unsafe { info.assume_init() };
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(anyhow!(
+            "MITM CA material must not be a reparse point: {}",
+            path.display()
+        )
+        .into());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        return Err(anyhow!(
+            "MITM CA material must not be a directory: {}",
+            path.display()
+        )
+        .into());
+    }
+    if info.nNumberOfLinks != 1 {
+        return Err(anyhow!(
+            "MITM CA material must not have hard links: {}",
+            path.display()
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -332,14 +420,15 @@ fn reject_untrusted_state_ancestor(path: &Path, _meta: &fs::Metadata) -> Result<
 }
 
 #[cfg(windows)]
-fn set_owner_only_acl(path: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
+fn set_owner_only_acl(file: &fs::File, path: &Path) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+        SetSecurityInfo,
     };
     use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+        DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PACL, PSECURITY_DESCRIPTOR,
     };
 
     // Protected DACL: LocalSystem, Administrators and the current owner get full access.
@@ -362,6 +451,97 @@ fn set_owner_only_acl(path: &Path) -> Result<()> {
             std::io::Error::last_os_error()
         ));
     }
+    let mut dacl_present = 0;
+    let mut dacl_defaulted = 0;
+    let mut dacl: PACL = std::ptr::null_mut();
+    // SAFETY: descriptor is a valid security descriptor produced by the Win32 conversion API.
+    if unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor,
+            &mut dacl_present,
+            &mut dacl,
+            &mut dacl_defaulted,
+        )
+    } == 0
+    {
+        // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+        unsafe {
+            let _ = LocalFree(descriptor.cast());
+        }
+        return Err(anyhow!(
+            "failed to extract owner-only DACL for {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )
+        .into());
+    }
+    if dacl_present == 0 || dacl.is_null() {
+        // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+        unsafe {
+            let _ = LocalFree(descriptor.cast());
+        }
+        return Err(anyhow!(
+            "owner-only security descriptor did not contain a DACL for {}",
+            path.display()
+        )
+        .into());
+    }
+    // SAFETY: file is the already validated handle, and DACL belongs to the live descriptor.
+    let status = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle().cast(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe {
+        let _ = LocalFree(descriptor.cast());
+    }
+    if status != 0 {
+        return Err(anyhow!(
+            "failed to set owner-only ACL on MITM CA material {}: {}",
+            path.display(),
+            std::io::Error::from_raw_os_error(status as i32)
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_owner_only_directory_acl(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+    };
+
+    let sddl_text = concat!("D:P(A;;FA;;;SY)(A;;FA;;;", "\x42", "\x41", ")(A;;FA;;;OW)");
+    let sddl: Vec<u16> = sddl_text.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated and `descriptor` is an out pointer freed with LocalFree.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(anyhow!(
+            "failed to build owner-only directory security descriptor: {}",
+            std::io::Error::last_os_error()
+        )
+        .into());
+    }
 
     let path_wide: Vec<u16> = path
         .as_os_str()
@@ -376,30 +556,37 @@ fn set_owner_only_acl(path: &Path) -> Result<()> {
     }
     if ok == 0 {
         return Err(anyhow!(
-            "failed to set owner-only ACL on {}: {}",
+            "failed to set owner-only ACL on MITM CA state directory {}: {}",
             path.display(),
             std::io::Error::last_os_error()
-        ));
+        )
+        .into());
     }
     Ok(())
 }
+
 impl CaStore {
+    /// State directory holding `ca.crt` and `ca.key`.
     pub fn state_dir(&self) -> &Path {
         &self.state_dir
     }
 
+    /// Path to the CA certificate file.
     pub fn cert_path(&self) -> PathBuf {
         self.state_dir().join("ca.crt")
     }
 
+    /// Path to the CA private key file.
     pub fn key_path(&self) -> PathBuf {
         self.state_dir().join("ca.key")
     }
 
+    /// PEM-encoded CA certificate.
     pub fn ca_pem(&self) -> &str {
         &self.ca_pem
     }
 
+    /// Issues a leaf server certificate signed by this CA.
     pub fn issue_server_cert(
         &self,
         subject_alt_names: &[String],

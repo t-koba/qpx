@@ -5,12 +5,16 @@ use super::types::{
     ForwardPolicyResponseInput,
 };
 use crate::forward::policy::{
-    ForwardPolicyDecision, ForwardPolicyEvaluation, evaluate_forward_policy,
-    evaluate_forward_policy_staged,
+    ForwardPolicyDecision, evaluate_forward_policy, evaluate_forward_policy_staged,
 };
 #[cfg(feature = "auth-basic")]
-use crate::http::body::Body;
-use crate::http::dispatch::{DispatchAuditContext, DispatchError};
+use crate::http::dispatch::DispatchOutcome;
+use crate::http::dispatch::{
+    DispatchAuditContext, DispatchAuditInput, DispatchError, ProxyKind,
+    build_dispatch_audit_context,
+};
+use crate::http::pipeline::PolicyStage;
+#[cfg(feature = "auth-basic")]
 use crate::http::policy::rule_context::attach_destination_trace;
 #[cfg(feature = "auth-basic")]
 use crate::http::protocol::common::forbidden_response as forbidden;
@@ -21,6 +25,8 @@ use crate::policy_context::{AuditRecord, attach_log_context, emit_audit_log};
 use hyper::Method;
 #[cfg(feature = "auth-basic")]
 use hyper::Response;
+#[cfg(feature = "auth-basic")]
+use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(super) async fn evaluate_forward_policy_outcome(
@@ -47,7 +53,7 @@ pub(super) async fn evaluate_forward_policy_outcome(
         )
         .await?
     } else {
-        ForwardPolicyEvaluation::Decision(
+        PolicyStage::Decision(
             evaluate_forward_policy(
                 runtime,
                 listener_name,
@@ -60,21 +66,17 @@ pub(super) async fn evaluate_forward_policy_outcome(
         )
     };
     match policy {
-        ForwardPolicyEvaluation::Observe(requirements) => {
-            Ok(ForwardPolicyOutcome::Observe(requirements))
-        }
-        ForwardPolicyEvaluation::Decision(policy) => match policy {
+        PolicyStage::Observe(requirements) => Ok(PolicyStage::Observe(requirements)),
+        PolicyStage::Decision(policy) => match policy {
             ForwardPolicyDecision::Allow(allowed) => {
                 let mut identity = response_input.identity.clone();
                 identity.supplement_builtin_auth(allowed.authenticated_user.as_ref());
-                Ok(ForwardPolicyOutcome::Allow(Box::new(
-                    ForwardAllowedPolicy {
-                        action: allowed.action,
-                        headers: allowed.headers,
-                        matched_rule: allowed.matched_rule.map(|rule| rule.to_string()),
-                        identity,
-                    },
-                )))
+                Ok(PolicyStage::Decision(Box::new(ForwardAllowedPolicy {
+                    action: allowed.action,
+                    headers: allowed.headers,
+                    matched_rule: allowed.matched_rule.map(|rule| rule.to_string()),
+                    identity,
+                })))
             }
             #[cfg(feature = "auth-basic")]
             ForwardPolicyDecision::Challenge(chal) => {
@@ -85,28 +87,24 @@ pub(super) async fn evaluate_forward_policy_outcome(
                 response = finalize_forward_policy_response(
                     response_input,
                     response,
-                    crate::http::dispatch::DispatchOutcome::Challenge,
+                    DispatchOutcome::Challenge,
                 );
-                Ok(ForwardPolicyOutcome::Rejected(
-                    DispatchError::AuthRequired {
-                        method: "proxy".to_string(),
-                        response: Box::new(response),
-                    },
-                ))
+                Err(DispatchError::AuthRequired {
+                    method: "proxy".to_string(),
+                    response: Box::new(response),
+                })
             }
             #[cfg(feature = "auth-basic")]
             ForwardPolicyDecision::Forbidden => {
                 let response = finalize_forward_policy_response(
                     response_input,
                     forbidden(response_input.state.messages.forbidden.as_str()),
-                    crate::http::dispatch::DispatchOutcome::Forbidden,
+                    DispatchOutcome::Forbidden,
                 );
-                Ok(ForwardPolicyOutcome::Rejected(
-                    DispatchError::PolicyDenied {
-                        reason: "authentication denied".to_string(),
-                        response: Box::new(response),
-                    },
-                ))
+                Err(DispatchError::PolicyDenied {
+                    reason: "authentication denied".to_string(),
+                    response: Box::new(response),
+                })
             }
         },
     }
@@ -116,7 +114,7 @@ pub(super) async fn evaluate_forward_policy_outcome(
 pub(super) fn finalize_forward_policy_response(
     input: ForwardPolicyResponseInput<'_>,
     response: Response<Body>,
-    outcome: crate::http::dispatch::DispatchOutcome,
+    outcome: DispatchOutcome,
 ) -> Response<Body> {
     let mut log_context = input.identity.to_log_context(None, None, None);
     attach_destination_trace(&mut log_context, input.destination);
@@ -131,7 +129,7 @@ pub(super) fn finalize_forward_policy_response(
     emit_audit_log(
         input.state,
         AuditRecord {
-            kind: crate::http::dispatch::ProxyKind::Forward,
+            kind: ProxyKind::Forward,
             name: input.listener_name,
             remote_ip: input.remote_addr.ip(),
             host: Some(input.host),
@@ -155,17 +153,19 @@ pub(super) fn build_forward_rate_limit_audit_context(
     request_method: &Method,
     matched_rule: Option<&str>,
 ) -> DispatchAuditContext {
-    let mut log_context = policy.identity.to_log_context(matched_rule, None, None);
-    attach_destination_trace(&mut log_context, policy.destination);
-    DispatchAuditContext::new(
+    build_dispatch_audit_context(DispatchAuditInput {
         state,
-        crate::http::dispatch::ProxyKind::Forward,
-        policy.listener_name,
-        policy.remote_addr,
-        request_method.clone(),
-        policy.path.map(str::to_string),
-        log_context,
-    )
-    .with_host(Some(policy.host.to_string()))
-    .with_matched_rule(matched_rule.map(str::to_string))
+        kind: ProxyKind::Forward,
+        scope_name: policy.listener_name,
+        remote_addr: policy.remote_addr,
+        host: Some(policy.host.to_string()),
+        sni: None,
+        request_method: request_method.clone(),
+        path: policy.path.map(str::to_string),
+        matched_rule: matched_rule.map(str::to_string),
+        matched_route: None,
+        identity: policy.identity,
+        destination: policy.destination,
+        ext_authz: None,
+    })
 }

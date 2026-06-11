@@ -1,79 +1,56 @@
 use super::backend_h2::{prepare_internal_h2_request, send_h2_request_with_sender};
 use super::pool::{
     HttpsConnectionAcquisition, HttpsOriginSlot, MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN,
-    TlsHttp1OriginConnection, acquire_https_connection, https_origin_pool_key, https_origin_slot,
+    TlsHttp1OriginConnection, acquire_https_connection, https_origin_pool_key,
 };
-use crate::http::body::Body;
-use crate::http::protocol::common::request_with_shared_client;
 use crate::upstream::raw_http1::{
     Http1ConnectionRecycler, Http1ResponseWithInterim, send_http1_request_with_interim_reusable,
 };
 use anyhow::{Result, anyhow};
 use hyper::header::{HOST, HeaderValue};
 use hyper::{Request, Response, Uri};
-use std::sync::{Arc, OnceLock};
+use qpx_http::body::Body;
+use std::sync::Arc;
 
-pub(crate) struct SharedReverseHttpClient;
+pub(crate) async fn shared_reverse_https_request(
+    pools: &crate::pool::PoolRegistry,
+    req: Request<Body>,
+) -> Result<Response<Body>> {
+    let target = absolute_request_target(req.uri())?;
+    let authority =
+        qpx_http::protocol::address::format_authority_host_port(&target.host, target.port);
+    let slot = pools.direct_origin.https_slot(https_origin_pool_key(
+        authority.as_str(),
+        authority.as_str(),
+        target.host.as_str(),
+        true,
+        None,
+    ));
 
-pub(crate) fn shared_reverse_http_client() -> &'static SharedReverseHttpClient {
-    static CLIENT: SharedReverseHttpClient = SharedReverseHttpClient;
-    &CLIENT
-}
-
-impl SharedReverseHttpClient {
-    pub(crate) async fn request(&self, req: Request<Body>) -> Result<Response<Body>> {
-        Ok(request_with_shared_client(req).await?)
-    }
-}
-
-pub(crate) struct SharedReverseHttpsClient;
-
-pub(crate) fn shared_reverse_https_client() -> &'static SharedReverseHttpsClient {
-    static CLIENT: OnceLock<SharedReverseHttpsClient> = OnceLock::new();
-    CLIENT.get_or_init(|| SharedReverseHttpsClient)
-}
-
-impl SharedReverseHttpsClient {
-    pub(crate) async fn request(&self, req: Request<Body>) -> Result<Response<Body>> {
-        let target = absolute_request_target(req.uri())?;
-        let authority = crate::http::protocol::address::format_authority_host_port(
-            target.host.as_str(),
-            target.port,
-        );
-        let slot = https_origin_slot(https_origin_pool_key(
-            authority.as_str(),
-            authority.as_str(),
-            target.host.as_str(),
-            true,
-            None,
-        ));
-
-        match acquire_https_connection(&slot, authority.as_str(), target.host.as_str(), true, None)
-            .await?
-        {
-            HttpsConnectionAcquisition::H2Ready { shared, ready } => {
-                let req =
-                    prepare_internal_h2_request(req, target.scheme.as_str(), authority.as_str())?;
-                let mut proxied = send_h2_request_with_sender(
-                    req,
-                    ready,
-                    Some(shared.upstream_cert.clone()),
-                    Some(shared.inflight_streams.clone()),
-                )
-                .await?;
-                if !proxied.interim.is_empty() {
-                    proxied.response.extensions_mut().insert(proxied.interim);
-                }
-                Ok(proxied.response)
+    match acquire_https_connection(&slot, authority.as_str(), target.host.as_str(), true, None)
+        .await?
+    {
+        HttpsConnectionAcquisition::H2Ready { shared, ready } => {
+            let req = prepare_internal_h2_request(req, target.scheme.as_str(), authority.as_str())?;
+            let mut proxied = send_h2_request_with_sender(
+                req,
+                ready,
+                Some(shared.upstream_cert.clone()),
+                Some(shared.inflight_streams.clone()),
+            )
+            .await?;
+            if !proxied.interim.is_empty() {
+                proxied.response.extensions_mut().insert(proxied.interim);
             }
-            HttpsConnectionAcquisition::H1(entry) => {
-                let req = prepare_internal_http1_request(req, authority.as_str())?;
-                let mut proxied = send_tls_http1_with_recycle(slot, entry, req).await?;
-                if !proxied.interim.is_empty() {
-                    proxied.response.extensions_mut().insert(proxied.interim);
-                }
-                Ok(proxied.response)
+            Ok(proxied.response)
+        }
+        HttpsConnectionAcquisition::H1(entry) => {
+            let req = prepare_internal_http1_request(req, authority.as_str())?;
+            let mut proxied = send_tls_http1_with_recycle(slot, entry, req).await?;
+            if !proxied.interim.is_empty() {
+                proxied.response.extensions_mut().insert(proxied.interim);
             }
+            Ok(proxied.response)
         }
     }
 }

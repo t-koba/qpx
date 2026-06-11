@@ -34,7 +34,7 @@ impl ShardedWebTransportSessionRegistry {
         &self,
         session_id: u64,
     ) -> &Mutex<HashMap<u64, WebTransportSessionIngress>> {
-        &self.shards[(session_id as usize) % self.shards.len()]
+        &self.shards[crate::sharding::modulo_u64(session_id, self.shards.len())]
     }
 
     pub(super) fn reserve(&self, max_sessions: u64) -> bool {

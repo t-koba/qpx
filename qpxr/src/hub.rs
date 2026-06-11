@@ -2,8 +2,6 @@ use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use qpx_core::exporter::{CaptureDirection, CapturePlane};
 use std::collections::{HashMap, VecDeque};
-#[cfg(unix)]
-use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -112,16 +110,16 @@ impl ExporterHub {
     }
 
     pub(super) async fn publish_encoded_block(&self, ts_unix_nanos: u64, encoded: Bytes) {
-        if let Some(tx) = self.file_sink.as_ref()
-            && let Err(err) = tx.send(encoded.clone()).await
-        {
-            warn!(error = ?err, "pcapng file sink disconnected");
-        }
         {
             let mut history = self.history.write().await;
             self.push_history_locked(&mut history, ts_unix_nanos, encoded.clone());
         }
-        let _ = self.live_tx.send(encoded);
+        let _ = self.live_tx.send(encoded.clone());
+        if let Some(tx) = self.file_sink.as_ref()
+            && let Err(err) = tx.try_send(encoded)
+        {
+            warn!(error = ?err, "pcapng file sink dropped block");
+        }
     }
 
     fn push_history_locked(&self, state: &mut HistoryState, ts_unix_nanos: u64, bytes: Bytes) {
@@ -137,7 +135,8 @@ impl ExporterHub {
     }
 
     fn evict_history_locked(&self, state: &mut HistoryState, now_unix_nanos: u64) {
-        let min_ts = now_unix_nanos.saturating_sub(self.history_limit_age.as_nanos() as u64);
+        let history_limit_nanos = duration_as_saturating_nanos(self.history_limit_age);
+        let min_ts = now_unix_nanos.saturating_sub(history_limit_nanos);
         while let Some(front) = state.history.front() {
             if front.ts_unix_nanos >= min_ts {
                 break;
@@ -169,8 +168,8 @@ impl ExporterHub {
         }
         state.sequences_last_gc_unix_nanos = now_unix_nanos;
 
-        let cutoff = now_unix_nanos
-            .saturating_sub(self.history_limit_age.as_nanos().min(u64::MAX as u128) as u64);
+        let cutoff =
+            now_unix_nanos.saturating_sub(duration_as_saturating_nanos(self.history_limit_age));
         state
             .sequences
             .retain(|_, v| v.last_seen_unix_nanos >= cutoff);
@@ -207,11 +206,12 @@ impl RotatingFileSink {
 
     fn write_block(&mut self, block: &[u8]) -> Result<()> {
         const FLUSH_EVERY_BLOCKS: usize = 128;
-        if self.current_size > 0 && self.current_size + block.len() as u64 > self.rotate_bytes {
+        let block_len = block.len() as u64;
+        if should_rotate_capture_file(self.current_size, block_len, self.rotate_bytes) {
             self.rotate()?;
         }
         self.file.write_all(block)?;
-        self.current_size += block.len() as u64;
+        self.current_size = self.current_size.saturating_add(block_len);
         self.blocks_since_flush = self.blocks_since_flush.saturating_add(1);
         if self.blocks_since_flush >= FLUSH_EVERY_BLOCKS {
             self.file.flush()?;
@@ -236,6 +236,18 @@ impl RotatingFileSink {
         self.blocks_since_flush = 0;
         Ok(())
     }
+}
+
+fn duration_as_saturating_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
+fn should_rotate_capture_file(current_size: u64, block_len: u64, rotate_bytes: u64) -> bool {
+    current_size > 0
+        && current_size
+            .checked_add(block_len)
+            .map(|size| size > rotate_bytes)
+            .unwrap_or(true)
 }
 
 fn ensure_dir_secure(dir: &Path) -> Result<()> {
@@ -295,6 +307,7 @@ fn resolve_trusted_symlink_component(
 ) -> Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
+    // SAFETY: geteuid has no preconditions and only reads process credentials.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow!(
@@ -325,6 +338,7 @@ fn reject_untrusted_dir_component(path: &Path, meta: &fs::Metadata, label: &str)
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let sticky_bit = libc::S_ISVTX;
     let sticky = mode & sticky_bit != 0;
+    // SAFETY: geteuid has no preconditions and only reads process credentials.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow!(
@@ -354,28 +368,15 @@ fn reject_untrusted_dir_component(path: &Path, meta: &fs::Metadata, label: &str)
 }
 
 fn open_secure_file(path: &Path) -> Result<File> {
-    ensure_not_symlink(path, "pcapng file")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
-            .with_context(|| format!("failed to open {}", path.display()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Err(anyhow!(
-            "secure pcapng file creation is not supported on this platform without owner-only file permissions"
-        ))
-    }
+    qpx_core::secure_file::open_secure_output_file(path).map_err(|err| {
+        anyhow!(
+            "failed to open secure pcapng file {}: {err}",
+            path.display()
+        )
+    })
 }
 
+#[cfg(not(unix))]
 fn ensure_not_symlink(path: &Path, label: &str) -> Result<()> {
     if let Ok(meta) = fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
@@ -383,4 +384,30 @@ fn ensure_not_symlink(path: &Path, label: &str) -> Result<()> {
         return Err(anyhow!("{label} must not be a symlink: {}", path.display()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_age_limit_saturates_to_u64_nanos() {
+        assert_eq!(duration_as_saturating_nanos(Duration::ZERO), 0);
+        assert_eq!(
+            duration_as_saturating_nanos(Duration::from_nanos(u64::MAX)),
+            u64::MAX
+        );
+        assert_eq!(
+            duration_as_saturating_nanos(Duration::from_secs(u64::MAX)),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn capture_file_rotation_handles_u64_overflow() {
+        assert!(!should_rotate_capture_file(0, u64::MAX, 1));
+        assert!(!should_rotate_capture_file(10, 5, 20));
+        assert!(should_rotate_capture_file(10, 11, 20));
+        assert!(should_rotate_capture_file(u64::MAX - 1, 8, u64::MAX));
+    }
 }

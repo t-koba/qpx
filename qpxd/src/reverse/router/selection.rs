@@ -1,6 +1,6 @@
 use super::{LoadBalanceStrategy, RoutePolicy};
-use crate::http::body::Body;
 use hyper::Request;
+use qpx_http::body::Body;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -1,3 +1,4 @@
+use crate::http::pipeline::PolicyStage;
 use crate::runtime::Runtime;
 #[cfg(feature = "auth-basic")]
 use crate::runtime::auth::AuthChallenge;
@@ -27,11 +28,6 @@ pub(crate) enum ForwardPolicyDecision {
     Forbidden,
 }
 
-pub(crate) enum ForwardPolicyEvaluation {
-    Decision(ForwardPolicyDecision),
-    Observe(CandidateRequestObservationRequirements),
-}
-
 pub(crate) async fn evaluate_forward_policy_staged(
     runtime: &Runtime,
     listener_name: &str,
@@ -39,7 +35,7 @@ pub(crate) async fn evaluate_forward_policy_staged(
     request_headers: &HeaderMap,
     auth_method: &str,
     auth_uri: &str,
-) -> Result<ForwardPolicyEvaluation> {
+) -> Result<PolicyStage<ForwardPolicyDecision>> {
     let state = runtime.state();
     let engine = state
         .policy
@@ -65,7 +61,7 @@ pub(crate) async fn evaluate_forward_policy_staged(
             auth_uri,
         )
         .await
-        .map(ForwardPolicyEvaluation::Decision);
+        .map(PolicyStage::Decision);
     }
 
     for (pos, idx) in candidates.iter().copied().enumerate() {
@@ -88,7 +84,7 @@ pub(crate) async fn evaluate_forward_policy_staged(
                     }
                 }
             }
-            return Ok(ForwardPolicyEvaluation::Observe(combined));
+            return Ok(PolicyStage::Observe(combined));
         }
         if rule.matches(&ctx) {
             return evaluate_forward_policy(
@@ -100,7 +96,7 @@ pub(crate) async fn evaluate_forward_policy_staged(
                 auth_uri,
             )
             .await
-            .map(ForwardPolicyEvaluation::Decision);
+            .map(PolicyStage::Decision);
         }
     }
 
@@ -113,7 +109,7 @@ pub(crate) async fn evaluate_forward_policy_staged(
         auth_uri,
     )
     .await
-    .map(ForwardPolicyEvaluation::Decision)
+    .map(PolicyStage::Decision)
 }
 
 pub(crate) async fn evaluate_forward_policy(

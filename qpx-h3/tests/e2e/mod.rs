@@ -1,9 +1,9 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use qpx_h3::{
-    BidiStream, ConnectionInfo, Protocol, Request, RequestHandler, RequestStream, Settings,
-    StreamDatagrams, UniRecvStream, WebTransportSession,
+    BidiStream, ConnectionInfo, H3Result, Protocol, Request, RequestHandler, RequestStream,
+    Settings, StreamDatagrams, UniRecvStream, WebTransportSession,
 };
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -29,6 +29,17 @@ const SETTING_ENABLE_WEBTRANSPORT: u64 = 0x2b603742;
 const SETTING_WEBTRANSPORT_MAX_SESSIONS: u64 = 0x2b603743;
 const DEFAULT_QPACK_TABLE_CAPACITY: usize = 4096;
 
+fn send_test_datagram(datagrams: &mut StreamDatagrams, payload: Bytes) -> H3Result<()> {
+    let prefix = datagrams.sender.datagram_prefix();
+    let payload_len = payload.len();
+    let mut framed = BytesMut::with_capacity(prefix.len() + payload.len());
+    framed.extend_from_slice(prefix.as_ref());
+    framed.extend_from_slice(payload.as_ref());
+    datagrams
+        .sender
+        .send_prefixed_datagram(framed.freeze(), payload_len)
+}
+
 #[derive(Clone, Default)]
 struct ExtendedEchoHandler;
 
@@ -48,8 +59,8 @@ impl RequestHandler for ExtendedEchoHandler {
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> Result<()> {
-        anyhow::bail!("unexpected request")
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
     async fn handle_connect_stream(
@@ -59,10 +70,10 @@ impl RequestHandler for ExtendedEchoHandler {
         _conn: ConnectionInfo,
         protocol: Protocol,
         mut datagrams: Option<StreamDatagrams>,
-    ) -> Result<()> {
+    ) -> H3Result<()> {
         match protocol {
             Protocol::Other(name) if name == "websocket" => {}
-            other => return Err(anyhow!("unexpected protocol: {other:?}")),
+            other => return Err(anyhow!("unexpected protocol: {other:?}").into()),
         }
         req_stream.send_response_head(&ok_head(false)).await?;
         let chunk = timeout(TEST_TIMEOUT, req_stream.recv_data())
@@ -81,11 +92,7 @@ impl RequestHandler for ExtendedEchoHandler {
         })
         .await
         .map_err(|_| anyhow!("timed out waiting for extended CONNECT datagram"))??;
-        datagrams
-            .as_mut()
-            .expect("checked above")
-            .sender
-            .send_datagram(payload)?;
+        send_test_datagram(datagrams.as_mut().expect("checked above"), payload)?;
         req_stream.finish().await
     }
 }
@@ -109,8 +116,8 @@ impl RequestHandler for ConnectUdpEchoHandler {
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> Result<()> {
-        anyhow::bail!("unexpected request")
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
     async fn handle_connect_stream(
@@ -120,9 +127,9 @@ impl RequestHandler for ConnectUdpEchoHandler {
         _conn: ConnectionInfo,
         protocol: Protocol,
         mut datagrams: Option<StreamDatagrams>,
-    ) -> Result<()> {
+    ) -> H3Result<()> {
         if protocol != Protocol::ConnectUdp {
-            return Err(anyhow!("unexpected protocol: {protocol:?}"));
+            return Err(anyhow!("unexpected protocol: {protocol:?}").into());
         }
         req_stream.send_response_head(&ok_head(true)).await?;
         let capsule = timeout(TEST_TIMEOUT, req_stream.recv_data())
@@ -141,11 +148,7 @@ impl RequestHandler for ConnectUdpEchoHandler {
         })
         .await
         .map_err(|_| anyhow!("timed out waiting for CONNECT-UDP datagram"))??;
-        datagrams
-            .as_mut()
-            .expect("checked above")
-            .sender
-            .send_datagram(payload)?;
+        send_test_datagram(datagrams.as_mut().expect("checked above"), payload)?;
         req_stream.finish().await
     }
 }
@@ -171,8 +174,8 @@ impl RequestHandler for WebTransportEchoHandler {
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> Result<()> {
-        anyhow::bail!("unexpected request")
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
     async fn handle_webtransport_connect(
@@ -181,7 +184,7 @@ impl RequestHandler for WebTransportEchoHandler {
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         session: WebTransportSession,
-    ) -> Result<()> {
+    ) -> H3Result<()> {
         let WebTransportSession {
             session_id,
             mut opener,
@@ -222,11 +225,7 @@ impl RequestHandler for WebTransportEchoHandler {
         })
         .await
         .map_err(|_| anyhow!("timed out waiting for WebTransport datagram"))??;
-        datagrams
-            .as_mut()
-            .expect("checked above")
-            .sender
-            .send_datagram(payload)?;
+        send_test_datagram(datagrams.as_mut().expect("checked above"), payload)?;
 
         let bidi = timeout(TEST_TIMEOUT, bidi_streams.recv())
             .await
@@ -279,8 +278,8 @@ impl RequestHandler for WebTransportZeroSessionHandler {
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> Result<()> {
-        anyhow::bail!("unexpected request")
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
     async fn handle_webtransport_connect(
@@ -289,8 +288,8 @@ impl RequestHandler for WebTransportZeroSessionHandler {
         _req_stream: RequestStream,
         _conn: ConnectionInfo,
         _session: WebTransportSession,
-    ) -> Result<()> {
-        anyhow::bail!("WebTransport handler must not run when max sessions is zero")
+    ) -> H3Result<()> {
+        Err(anyhow!("WebTransport handler must not run when max sessions is zero").into())
     }
 }
 
@@ -312,8 +311,8 @@ impl RequestHandler for WebTransportRejectHandler {
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> Result<()> {
-        anyhow::bail!("unexpected request")
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
     async fn handle_webtransport_connect(
@@ -322,7 +321,7 @@ impl RequestHandler for WebTransportRejectHandler {
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         _session: WebTransportSession,
-    ) -> Result<()> {
+    ) -> H3Result<()> {
         let response = http::Response::builder()
             .status(http::StatusCode::FORBIDDEN)
             .body(())?;
@@ -351,7 +350,7 @@ impl RequestHandler for DynamicHeaderHandler {
         request: Request,
         _conn: ConnectionInfo,
         mut stream: RequestStream,
-    ) -> Result<()> {
+    ) -> H3Result<()> {
         let value = request
             .head
             .headers()
@@ -387,9 +386,9 @@ impl RequestHandler for HeadBodyAttemptHandler {
         request: Request,
         _conn: ConnectionInfo,
         mut stream: RequestStream,
-    ) -> Result<()> {
+    ) -> H3Result<()> {
         if request.head.method() != http::Method::HEAD {
-            return Err(anyhow!("expected HEAD request"));
+            return Err(anyhow!("expected HEAD request").into());
         }
         let response = http::Response::builder()
             .status(http::StatusCode::OK)
@@ -425,8 +424,8 @@ impl RequestHandler for ExtendedConnectDisabledHandler {
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> Result<()> {
-        anyhow::bail!("unexpected request")
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
     async fn handle_connect_stream(
@@ -436,8 +435,8 @@ impl RequestHandler for ExtendedConnectDisabledHandler {
         _conn: ConnectionInfo,
         _protocol: Protocol,
         _datagrams: Option<StreamDatagrams>,
-    ) -> Result<()> {
-        anyhow::bail!("extended CONNECT handler must not run when disabled")
+    ) -> H3Result<()> {
+        Err(anyhow!("extended CONNECT handler must not run when disabled").into())
     }
 }
 
@@ -447,7 +446,7 @@ mod webtransport;
 
 async fn start_server<H: RequestHandler>(
     handler: H,
-) -> Result<(SocketAddr, quinn::ClientConfig, JoinHandle<Result<()>>)> {
+) -> Result<(SocketAddr, quinn::ClientConfig, JoinHandle<H3Result<()>>)> {
     let (server_config, client_config) = build_tls_configs()?;
     let endpoint = quinn::Endpoint::server(server_config, SocketAddr::from(([127, 0, 0, 1], 0)))?;
     let addr = endpoint.local_addr()?;

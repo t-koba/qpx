@@ -1,8 +1,8 @@
 use crate::config::RpcMatchConfig;
 use crate::prefilter::{StringInterner, TextPatternMatcher, compile_text_patterns};
 use crate::rules::RuleMatchContext;
-use anyhow::Result;
 
+use super::Result;
 use super::headers::{
     HeaderMatcherFast, HeaderMatcherRegex, build_header_matchers, fast_headers_match,
     regex_headers_match,

@@ -235,6 +235,30 @@ fn parse_ftp_status_code(line: &str) -> Result<u16> {
         .map_err(|err| anyhow!("invalid FTP reply status: {err}"))
 }
 
+pub(crate) fn fuzz_parse_ftp_response_parser(bytes: &[u8]) {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return;
+    };
+    let mut lines = text.lines().map(str::to_string);
+    let Some(first) = lines.next() else {
+        return;
+    };
+    let Ok(code) = parse_ftp_status_code(first.as_str()) else {
+        return;
+    };
+    let mut reply_lines = vec![first];
+    for line in lines.take(64) {
+        reply_lines.push(line);
+    }
+    let reply = FtpReply {
+        code,
+        lines: reply_lines,
+    };
+    let _ = parse_epsv_port(&reply);
+    let _ = parse_pasv_addr(&reply);
+    let _ = ensure_safe_ftp_path(Some(text));
+}
+
 pub(super) fn ensure_safe_ftp_path(path: Option<&str>) -> Result<()> {
     if let Some(path) = path
         && path.as_bytes().iter().any(|b| matches!(b, b'\r' | b'\n'))

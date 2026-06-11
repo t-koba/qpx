@@ -1,7 +1,14 @@
-use anyhow::{Result, anyhow};
+//! Capture exporter wire-format DTOs and encoding helpers.
+//!
+//! This module is intentionally compact: the binary format is tested at the
+//! encode/decode boundary and described in exporter documentation.
+
+#![allow(missing_docs)]
+
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 
 pub const EVENT_PREFACE_LINE: &str = "QPX-EVENT/1";
 pub const STREAM_PREFACE_LINE: &str = "QPX-STREAM/1";
@@ -9,6 +16,34 @@ pub const STREAM_PREFACE_LINE: &str = "QPX-STREAM/1";
 const CAPTURE_WIRE_MAGIC: [u8; 4] = *b"QPXE";
 const CAPTURE_WIRE_VERSION: u8 = 1;
 const CAPTURE_WIRE_HEADER_LEN: usize = 32;
+
+type Result<T> = std::result::Result<T, CaptureWireError>;
+
+#[derive(Debug, Error)]
+pub enum CaptureWireError {
+    #[error("capture event {field} too large")]
+    FieldTooLarge { field: &'static str },
+    #[error("capture event wire length overflow")]
+    LengthOverflow,
+    #[error("capture event truncated (len={len})")]
+    Truncated { len: usize },
+    #[error("invalid capture event magic")]
+    InvalidMagic,
+    #[error("unsupported capture event version")]
+    UnsupportedVersion,
+    #[error("capture event fixed field truncated")]
+    FixedFieldTruncated,
+    #[error("capture event field offset overflow")]
+    FieldOffsetOverflow,
+    #[error("capture event length mismatch (expected={expected} actual={actual})")]
+    LengthMismatch { expected: usize, actual: usize },
+    #[error("capture event {field} is not utf-8")]
+    InvalidUtf8 { field: &'static str },
+    #[error("invalid capture plane: {0}")]
+    InvalidPlane(u8),
+    #[error("invalid capture direction: {0}")]
+    InvalidDirection(u8),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -92,7 +127,7 @@ impl CaptureEvent {
             ("payload", payload),
         ] {
             if bytes.len() > u32::MAX as usize {
-                return Err(anyhow!("capture event {} too large", label));
+                return Err(CaptureWireError::FieldTooLarge { field: label });
             }
         }
 
@@ -131,7 +166,7 @@ impl CaptureEvent {
             ("payload", payload),
         ] {
             if bytes.len() > u32::MAX as usize {
-                return Err(anyhow!("capture event {} too large", label));
+                return Err(CaptureWireError::FieldTooLarge { field: label });
             }
         }
         CAPTURE_WIRE_HEADER_LEN
@@ -139,7 +174,7 @@ impl CaptureEvent {
             .and_then(|len| len.checked_add(client.len()))
             .and_then(|len| len.checked_add(server.len()))
             .and_then(|len| len.checked_add(payload.len()))
-            .ok_or_else(|| anyhow!("capture event wire length overflow"))
+            .ok_or(CaptureWireError::LengthOverflow)
     }
 
     pub fn encode_wire(&self, out: &mut Vec<u8>) -> Result<()> {
@@ -150,13 +185,13 @@ impl CaptureEvent {
 
     pub fn decode_wire(buf: Bytes) -> Result<Self> {
         if buf.len() < CAPTURE_WIRE_HEADER_LEN {
-            return Err(anyhow!("capture event truncated (len={})", buf.len()));
+            return Err(CaptureWireError::Truncated { len: buf.len() });
         }
         if buf[0..4] != CAPTURE_WIRE_MAGIC {
-            return Err(anyhow!("invalid capture event magic"));
+            return Err(CaptureWireError::InvalidMagic);
         }
         if buf[4] != CAPTURE_WIRE_VERSION {
-            return Err(anyhow!("unsupported capture event version"));
+            return Err(CaptureWireError::UnsupportedVersion);
         }
 
         let plane = plane_from_u8(buf[5])?;
@@ -171,11 +206,10 @@ impl CaptureEvent {
         let total_len =
             CAPTURE_WIRE_HEADER_LEN + session_len + client_len + server_len + payload_len;
         if total_len != buf.len() {
-            return Err(anyhow!(
-                "capture event length mismatch (expected={} actual={})",
-                total_len,
-                buf.len()
-            ));
+            return Err(CaptureWireError::LengthMismatch {
+                expected: total_len,
+                actual: buf.len(),
+            });
         }
 
         let mut offset = CAPTURE_WIRE_HEADER_LEN;
@@ -185,17 +219,18 @@ impl CaptureEvent {
         offset += client_len;
         let server_bytes = &buf[offset..offset + server_len];
         offset += server_len;
-        let payload_start = offset;
-        let payload_end = payload_start + payload_len;
+        let payload_end = offset + payload_len;
 
         let session_id = std::str::from_utf8(session_bytes)
-            .map_err(|_| anyhow!("capture event session_id is not utf-8"))?
+            .map_err(|_| CaptureWireError::InvalidUtf8 {
+                field: "session_id",
+            })?
             .to_string();
         let client = std::str::from_utf8(client_bytes)
-            .map_err(|_| anyhow!("capture event client is not utf-8"))?
+            .map_err(|_| CaptureWireError::InvalidUtf8 { field: "client" })?
             .to_string();
         let server = std::str::from_utf8(server_bytes)
-            .map_err(|_| anyhow!("capture event server is not utf-8"))?
+            .map_err(|_| CaptureWireError::InvalidUtf8 { field: "server" })?
             .to_string();
 
         Ok(Self {
@@ -205,7 +240,7 @@ impl CaptureEvent {
             direction,
             client,
             server,
-            payload: buf.slice(payload_start..payload_end),
+            payload: buf.slice(offset..payload_end),
         })
     }
 }
@@ -213,10 +248,10 @@ impl CaptureEvent {
 fn read_array<const N: usize>(buf: &Bytes, offset: usize) -> Result<[u8; N]> {
     let end = offset
         .checked_add(N)
-        .ok_or_else(|| anyhow!("capture event field offset overflow"))?;
+        .ok_or(CaptureWireError::FieldOffsetOverflow)?;
     let bytes = buf
         .get(offset..end)
-        .ok_or_else(|| anyhow!("capture event fixed field truncated"))?;
+        .ok_or(CaptureWireError::FixedFieldTruncated)?;
     let mut out = [0u8; N];
     out.copy_from_slice(bytes);
     Ok(out)
@@ -235,7 +270,7 @@ fn plane_from_u8(v: u8) -> Result<CapturePlane> {
         0 => Ok(CapturePlane::ClientProxyEncrypted),
         1 => Ok(CapturePlane::ProxyServerEncrypted),
         2 => Ok(CapturePlane::ClientServerPlaintext),
-        other => Err(anyhow!("invalid capture plane: {}", other)),
+        other => Err(CaptureWireError::InvalidPlane(other)),
     }
 }
 
@@ -250,7 +285,7 @@ fn direction_from_u8(v: u8) -> Result<CaptureDirection> {
     match v {
         0 => Ok(CaptureDirection::ClientToServer),
         1 => Ok(CaptureDirection::ServerToClient),
-        other => Err(anyhow!("invalid capture direction: {}", other)),
+        other => Err(CaptureWireError::InvalidDirection(other)),
     }
 }
 

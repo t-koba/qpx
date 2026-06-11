@@ -2,23 +2,22 @@ use super::{
     MAX_CIDS_PER_SESSION, QuicConnectionId, TransparentUdpSession, parse_quic_long_header,
     parse_quic_short_dcid,
 };
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 const SESSION_INDEX_SHARDS: usize = 64;
 
 struct SessionIndexShard {
     sessions: RwLock<HashMap<u64, Arc<TransparentUdpSession>>>,
-    by_target: RwLock<HashMap<(SocketAddr, String), u64>>,
+    by_target: RwLock<HashMap<SocketAddr, HashMap<Arc<str>, u64>>>,
     by_cid: RwLock<HashMap<QuicConnectionId, u64>>,
 }
 
 pub(in crate::transparent::udp) struct SharedSessionIndex {
     shards: Vec<SessionIndexShard>,
-    known_server_cid_lens: RwLock<HashSet<u8>>,
+    known_server_cid_len_bits: AtomicU32,
 }
 
 impl SharedSessionIndex {
@@ -31,25 +30,20 @@ impl SharedSessionIndex {
                     by_cid: RwLock::new(HashMap::new()),
                 })
                 .collect(),
-            known_server_cid_lens: RwLock::new(HashSet::new()),
+            known_server_cid_len_bits: AtomicU32::new(0),
         }
     }
 
     fn session_shard(&self, session_id: u64) -> &SessionIndexShard {
-        &self.shards[(session_id as usize) % self.shards.len()]
+        &self.shards[qpx_http::sharding::modulo_u64(session_id, self.shards.len())]
     }
 
     fn target_shard(&self, client_addr: SocketAddr, target_key: &str) -> &SessionIndexShard {
-        let mut hasher = DefaultHasher::new();
-        client_addr.hash(&mut hasher);
-        target_key.hash(&mut hasher);
-        &self.shards[(hasher.finish() as usize) % self.shards.len()]
+        &self.shards[qpx_http::sharding::modulo(&(client_addr, target_key), self.shards.len())]
     }
 
     fn cid_shard(&self, cid: QuicConnectionId) -> &SessionIndexShard {
-        let mut hasher = DefaultHasher::new();
-        cid.hash(&mut hasher);
-        &self.shards[(hasher.finish() as usize) % self.shards.len()]
+        &self.shards[qpx_http::sharding::modulo(&cid, self.shards.len())]
     }
 
     pub(in crate::transparent::udp) fn session(
@@ -73,10 +67,9 @@ impl SharedSessionIndex {
             .by_target
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                (session.current_client_addr(), session.target_key.clone()),
-                session_id,
-            );
+            .entry(session.current_client_addr())
+            .or_default()
+            .insert(Arc::<str>::from(session.target_key.as_str()), session_id);
         self.session_shard(session_id)
             .sessions
             .write()
@@ -91,10 +84,7 @@ impl SharedSessionIndex {
         cids: Vec<QuicConnectionId>,
     ) {
         if let Some(server_cid_len) = session.server_cid_len() {
-            self.known_server_cid_lens
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(server_cid_len);
+            self.record_known_server_cid_len(server_cid_len);
         }
         self.insert(session_id, session);
         self.register_cids(session_id, cids);
@@ -114,7 +104,7 @@ impl SharedSessionIndex {
             .by_target
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&(session.current_client_addr(), session.target_key.clone()));
+            .remove_target(session.current_client_addr(), session.target_key.as_str());
         let cids = session.snapshot_cids();
         for cid in cids {
             let mut by_cid = self
@@ -129,10 +119,10 @@ impl SharedSessionIndex {
         Some(session)
     }
 
-    fn register_cids(&self, session_id: u64, cids: Vec<QuicConnectionId>) {
-        if cids.is_empty() {
-            return;
-        }
+    fn register_cids<I>(&self, session_id: u64, cids: I)
+    where
+        I: IntoIterator<Item = QuicConnectionId>,
+    {
         let Some(session) = self.session(session_id) else {
             return;
         };
@@ -172,10 +162,7 @@ impl SharedSessionIndex {
         };
         let Some(server_cid_len) = session.server_cid_len() else {
             if let Some(long) = parse_quic_long_header(packet) {
-                self.register_cids(
-                    session_id,
-                    [long.dcid, long.scid].into_iter().flatten().collect(),
-                );
+                self.register_cids(session_id, [long.dcid, long.scid].into_iter().flatten());
                 if long.scid_len > 0 {
                     session.set_client_cid_len(long.scid_len);
                 }
@@ -184,15 +171,12 @@ impl SharedSessionIndex {
         };
 
         if let Some(long) = parse_quic_long_header(packet) {
-            self.register_cids(
-                session_id,
-                [long.dcid, long.scid].into_iter().flatten().collect(),
-            );
+            self.register_cids(session_id, [long.dcid, long.scid].into_iter().flatten());
             if long.scid_len > 0 {
                 session.set_client_cid_len(long.scid_len);
             }
         } else if let Some(cid) = parse_quic_short_dcid(packet, server_cid_len) {
-            self.register_cids(session_id, vec![cid]);
+            self.register_cids(session_id, std::iter::once(cid));
         }
     }
 
@@ -206,16 +190,10 @@ impl SharedSessionIndex {
         };
         let client_cid_len = session.client_cid_len();
         if let Some(long) = parse_quic_long_header(packet) {
-            self.register_cids(
-                session_id,
-                [long.dcid, long.scid].into_iter().flatten().collect(),
-            );
+            self.register_cids(session_id, [long.dcid, long.scid].into_iter().flatten());
             if long.scid_len > 0 {
                 session.set_server_cid_len(long.scid_len);
-                self.known_server_cid_lens
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(long.scid_len);
+                self.record_known_server_cid_len(long.scid_len);
             }
             if session.client_cid_len().is_none() && long.dcid_len > 0 {
                 session.set_client_cid_len(long.dcid_len);
@@ -223,7 +201,7 @@ impl SharedSessionIndex {
         } else if let Some(len) = client_cid_len
             && let Some(cid) = parse_quic_short_dcid(packet, len)
         {
-            self.register_cids(session_id, vec![cid]);
+            self.register_cids(session_id, std::iter::once(cid));
         }
     }
 
@@ -233,19 +211,18 @@ impl SharedSessionIndex {
         target_key: Option<&str>,
         packet: &[u8],
     ) -> Option<(u64, Arc<TransparentUdpSession>)> {
-        if let Some(target_key) = target_key {
-            let target_lookup = (client_addr, target_key.to_string());
-            if let Some(session_id) = self
+        if let Some(target_key) = target_key
+            && let Some(session_id) = self
                 .target_shard(client_addr, target_key)
                 .by_target
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(&target_lookup)
+                .get(&client_addr)
+                .and_then(|targets| targets.get(target_key))
                 .copied()
-                && let Some(session) = self.session(session_id)
-            {
-                return Some((session_id, session));
-            }
+            && let Some(session) = self.session(session_id)
+        {
+            return Some((session_id, session));
         }
 
         if let Some(long) = parse_quic_long_header(packet) {
@@ -259,22 +236,22 @@ impl SharedSessionIndex {
         }
 
         let first = *packet.first()?;
-        if (first & 0x80) == 0 {
-            let lens = self
-                .known_server_cid_lens
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .iter()
-                .copied()
-                .collect::<Vec<_>>();
-            for len in lens {
-                if let Some(cid) = parse_quic_short_dcid(packet, len)
-                    && let Some((session_id, session)) = self.session_by_cid(cid)
-                    && session.current_client_addr() == client_addr
-                {
-                    return Some((session_id, session));
-                }
-            }
+        if (first & 0x80) == 0
+            && let Some(found) = for_known_server_cid_len(
+                self.known_server_cid_len_bits.load(Ordering::Relaxed),
+                |len| {
+                    if let Some(cid) = parse_quic_short_dcid(packet, len)
+                        && let Some((session_id, session)) = self.session_by_cid(cid)
+                        && session.current_client_addr() == client_addr
+                    {
+                        Some((session_id, session))
+                    } else {
+                        None
+                    }
+                },
+            )
+        {
+            return Some(found);
         }
         None
     }
@@ -300,17 +277,18 @@ impl SharedSessionIndex {
             return;
         };
         if let Some(old_addr) = session.update_client_addr(client_addr) {
-            let old_key = (old_addr, session.target_key.clone());
             self.target_shard(old_addr, session.target_key.as_str())
                 .by_target
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&old_key);
+                .remove_target(old_addr, session.target_key.as_str());
             self.target_shard(client_addr, session.target_key.as_str())
                 .by_target
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert((client_addr, session.target_key.clone()), session_id);
+                .entry(client_addr)
+                .or_default()
+                .insert(Arc::<str>::from(session.target_key.as_str()), session_id);
         }
     }
 
@@ -420,10 +398,45 @@ impl SharedSessionIndex {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clear();
         }
-        self.known_server_cid_lens
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        self.known_server_cid_len_bits.store(0, Ordering::Relaxed);
         drained
     }
+
+    fn record_known_server_cid_len(&self, len: u8) {
+        if let Some(bit) = cid_len_bit(len) {
+            self.known_server_cid_len_bits
+                .fetch_or(bit, Ordering::Relaxed);
+        }
+    }
+}
+
+trait TargetIndexExt {
+    fn remove_target(&mut self, client_addr: SocketAddr, target_key: &str);
+}
+
+impl TargetIndexExt for HashMap<SocketAddr, HashMap<Arc<str>, u64>> {
+    fn remove_target(&mut self, client_addr: SocketAddr, target_key: &str) {
+        if let Some(targets) = self.get_mut(&client_addr) {
+            targets.remove(target_key);
+            if targets.is_empty() {
+                self.remove(&client_addr);
+            }
+        }
+    }
+}
+
+fn cid_len_bit(len: u8) -> Option<u32> {
+    (1..=20).contains(&len).then_some(1u32 << len)
+}
+
+fn for_known_server_cid_len<T>(mut bits: u32, mut f: impl FnMut(u8) -> Option<T>) -> Option<T> {
+    bits &= !1;
+    while bits != 0 {
+        let len = bits.trailing_zeros() as u8;
+        if let Some(value) = f(len) {
+            return Some(value);
+        }
+        bits &= bits - 1;
+    }
+    None
 }

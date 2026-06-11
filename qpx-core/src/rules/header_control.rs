@@ -1,6 +1,8 @@
 use crate::config::HeaderControl;
-use anyhow::Result;
 
+use super::Result;
+
+/// Compiled regex replacement for one HTTP header.
 #[derive(Debug, Clone)]
 pub struct CompiledRegexReplace {
     header: http::header::HeaderName,
@@ -8,6 +10,7 @@ pub struct CompiledRegexReplace {
     replace: String,
 }
 
+/// Parsed and validated request/response header mutation plan.
 #[derive(Debug, Clone)]
 pub struct CompiledHeaderControl {
     request_set: Vec<(http::header::HeaderName, http::HeaderValue)>,
@@ -21,6 +24,7 @@ pub struct CompiledHeaderControl {
 }
 
 impl CompiledHeaderControl {
+    /// Compiles raw config header mutations into typed header names and values.
     pub fn compile(raw: &HeaderControl) -> Result<Self> {
         Ok(Self {
             request_set: compile_header_set(&raw.request_set, "request_set")?,
@@ -40,10 +44,12 @@ impl CompiledHeaderControl {
         })
     }
 
+    /// Returns request headers that should be replaced or inserted.
     pub fn request_set(&self) -> &[(http::header::HeaderName, http::HeaderValue)] {
         &self.request_set
     }
 
+    /// Returns a new header-control plan with `other` appended after `self`.
     pub fn merged(&self, other: &CompiledHeaderControl) -> Self {
         let mut merged = self.clone();
         merged.request_set.extend(other.request_set.iter().cloned());
@@ -69,34 +75,42 @@ impl CompiledHeaderControl {
         merged
     }
 
+    /// Returns request headers that should be appended.
     pub fn request_add(&self) -> &[(http::header::HeaderName, http::HeaderValue)] {
         &self.request_add
     }
 
+    /// Returns request headers that should be removed.
     pub fn request_remove(&self) -> &[http::header::HeaderName] {
         &self.request_remove
     }
 
+    /// Returns request header regex replacements.
     pub fn request_regex_replace(&self) -> &[CompiledRegexReplace] {
         &self.request_regex_replace
     }
 
+    /// Returns response headers that should be replaced or inserted.
     pub fn response_set(&self) -> &[(http::header::HeaderName, http::HeaderValue)] {
         &self.response_set
     }
 
+    /// Returns response headers that should be appended.
     pub fn response_add(&self) -> &[(http::header::HeaderName, http::HeaderValue)] {
         &self.response_add
     }
 
+    /// Returns response headers that should be removed.
     pub fn response_remove(&self) -> &[http::header::HeaderName] {
         &self.response_remove
     }
 
+    /// Returns response header regex replacements.
     pub fn response_regex_replace(&self) -> &[CompiledRegexReplace] {
         &self.response_regex_replace
     }
 
+    /// Reports whether this plan can modify response headers.
     pub fn has_response_mutations(&self) -> bool {
         !self.response_set.is_empty()
             || !self.response_add.is_empty()
@@ -106,14 +120,17 @@ impl CompiledHeaderControl {
 }
 
 impl CompiledRegexReplace {
+    /// Header to which the regex replacement applies.
     pub fn header(&self) -> &http::header::HeaderName {
         &self.header
     }
 
+    /// Compiled regex pattern.
     pub fn pattern(&self) -> &regex::Regex {
         &self.pattern
     }
 
+    /// Replacement string passed to the regex engine.
     pub fn replace(&self) -> &str {
         &self.replace
     }

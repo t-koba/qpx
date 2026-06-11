@@ -172,8 +172,7 @@ fn match_renderer_uses_compiled_matchers() {
 fn match_renderer_reports_reverse_forward_and_transparent_reasons() {
     let state = runtime_state_from_yaml(
         "trace",
-        r#"
-edges:
+        r#"edges:
 - kind: reverse
   name: trace-reverse
   listen: 127.0.0.1:0
@@ -283,8 +282,7 @@ edges:
 fn explain_renderer_reports_all_reverse_target_kinds_and_generated_route_id() {
     let state = runtime_state_from_yaml(
         "target-kinds",
-        r#"
-edges:
+        r#"edges:
 - kind: reverse
   name: targets
   listen: 127.0.0.1:0

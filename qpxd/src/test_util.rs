@@ -60,9 +60,8 @@ pub(crate) async fn spawn_static_http_server(
 #[cfg(feature = "mitm")]
 pub(crate) async fn spawn_http1_send_request(
     body: &str,
-) -> std::sync::Arc<
-    tokio::sync::Mutex<hyper::client::conn::http1::SendRequest<crate::http::body::Body>>,
-> {
+) -> std::sync::Arc<tokio::sync::Mutex<hyper::client::conn::http1::SendRequest<qpx_http::body::Body>>>
+{
     let addr = spawn_static_http_server(
         "200 OK",
         vec![("Content-Type", "text/plain".to_string())],
@@ -71,7 +70,7 @@ pub(crate) async fn spawn_http1_send_request(
     )
     .await;
     let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    let (sender, connection) = crate::http::protocol::common::handshake_http1(stream)
+    let (sender, connection) = qpx_http::protocol::common::handshake_http1(stream)
         .await
         .expect("handshake");
     tokio::spawn(async move {

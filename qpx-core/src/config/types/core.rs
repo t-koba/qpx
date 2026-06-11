@@ -2,6 +2,8 @@ use super::super::defaults::*;
 use serde::Deserialize;
 
 pub const MAX_SSE_STREAM_DURATION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+pub const MAX_SSE_LINE_BYTES: usize = 64 * 1024;
+pub const MAX_SSE_EVENT_ID_BYTES: usize = 4096;
 pub const MAX_GRPC_STREAM_DURATION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 pub const MAX_GRPC_WEB_TRAILER_BYTES: u64 = 1024 * 1024;
 pub const MAX_OBSERVED_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -100,6 +102,10 @@ pub struct SseStreamingPolicy {
     pub idle_timeout_ms: u64,
     #[serde(default = "default_sse_max_stream_duration_ms")]
     pub max_stream_duration_ms: u64,
+    #[serde(default = "default_sse_max_line_bytes")]
+    pub max_line_bytes: usize,
+    #[serde(default = "default_sse_max_event_id_bytes")]
+    pub max_event_id_bytes: usize,
 }
 
 impl Default for SseStreamingPolicy {
@@ -109,6 +115,8 @@ impl Default for SseStreamingPolicy {
             flush_policy: default_sse_flush_policy(),
             idle_timeout_ms: default_sse_idle_timeout_ms(),
             max_stream_duration_ms: default_sse_max_stream_duration_ms(),
+            max_line_bytes: default_sse_max_line_bytes(),
+            max_event_id_bytes: default_sse_max_event_id_bytes(),
         }
     }
 }
@@ -155,7 +163,36 @@ pub enum StreamingRequirement {
     #[default]
     Preferred,
     Required,
-    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum H3RequestBodyDrainMode {
+    #[default]
+    Bounded,
+    Abort,
+    BestEffort,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct H3RequestBodyDrainConfig {
+    #[serde(default)]
+    pub mode: H3RequestBodyDrainMode,
+    #[serde(default = "default_runtime_h3_request_body_drain_max_concurrent")]
+    pub max_concurrent: usize,
+    #[serde(default = "default_runtime_h3_request_body_drain_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for H3RequestBodyDrainConfig {
+    fn default() -> Self {
+        Self {
+            mode: H3RequestBodyDrainMode::default(),
+            max_concurrent: default_runtime_h3_request_body_drain_max_concurrent(),
+            timeout_ms: default_runtime_h3_request_body_drain_timeout_ms(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -210,6 +247,8 @@ pub struct RuntimeConfig {
     pub tunnel_idle_timeout_ms: u64,
     #[serde(default = "default_runtime_h3_read_timeout_ms")]
     pub h3_read_timeout_ms: u64,
+    #[serde(default)]
+    pub h3_request_body_drain: H3RequestBodyDrainConfig,
     #[serde(default = "default_runtime_body_channel_capacity")]
     pub body_channel_capacity: usize,
     #[serde(default = "default_runtime_datagram_channel_capacity")]
@@ -262,6 +301,7 @@ impl Default for RuntimeConfig {
             upgrade_wait_timeout_ms: default_runtime_upgrade_wait_timeout_ms(),
             tunnel_idle_timeout_ms: default_runtime_tunnel_idle_timeout_ms(),
             h3_read_timeout_ms: default_runtime_h3_read_timeout_ms(),
+            h3_request_body_drain: H3RequestBodyDrainConfig::default(),
             body_channel_capacity: default_runtime_body_channel_capacity(),
             datagram_channel_capacity: default_runtime_datagram_channel_capacity(),
             webtransport_datagram_channel_capacity:

@@ -512,6 +512,9 @@ edges:
     settings:
       methods:
       - PURGE
+      allowed_peers:
+      - 127.0.0.1/32
+      - ::1/128
       response_status: 202
       response_body: purge scheduled
       response_headers:

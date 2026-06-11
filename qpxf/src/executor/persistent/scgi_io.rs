@@ -58,7 +58,7 @@ pub(super) async fn run_scgi_streaming(
         Ok::<_, anyhow::Error>(())
     };
     let read_stdout = stream_read_limited(&mut reader, max_stdout_bytes, "stdout", stdout_tx);
-    let _ = tokio::try_join!(write_body, read_stdout)?;
+    tokio::try_join!(write_body, read_stdout)?;
     Ok(())
 }
 
@@ -97,7 +97,7 @@ pub(super) async fn run_scgi_streaming_stdin(
         Ok::<_, anyhow::Error>(())
     };
     let read_stdout = stream_read_limited(&mut reader, max_stdout_bytes, "stdout", stdout_tx);
-    let _ = tokio::try_join!(write_body, read_stdout)?;
+    tokio::try_join!(write_body, read_stdout)?;
     Ok(())
 }
 async fn write_stdin_rx_to_writer<W>(

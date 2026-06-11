@@ -1,8 +1,8 @@
-use crate::http::body::Body;
-use crate::tls::UpstreamCertificateInfo;
 use anyhow::{Result, anyhow};
 use hyper::header::{CONTENT_LENGTH, HeaderMap};
 use hyper::{Request, Response, StatusCode};
+use qpx_core::tls::UpstreamCertificateInfo;
+use qpx_http::body::Body;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

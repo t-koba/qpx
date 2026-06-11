@@ -1,20 +1,19 @@
 use super::super::HostPort;
 use crate::ftp;
-use crate::http::body::Body;
 use crate::http::dispatch::{
-    DispatchAuditContext, DispatchWebsocketProxyInput, annotate_dispatch_response,
-    emit_dispatch_websocket_response_preview, proxy_dispatch_websocket_http1,
+    DispatchAuditContext, DispatchOutcome, DispatchWebsocketProxyInput, annotate_dispatch_response,
+    annotated_local_response, emit_dispatch_websocket_response_preview,
+    proxy_dispatch_websocket_http1,
 };
-use crate::http::local_response::build_local_response;
-use crate::http::protocol::address::format_authority_host_port;
 use crate::http::protocol::common::blocked_response as blocked;
 use crate::http::protocol::l7::{
-    finalize_response_for_request, finalize_response_with_headers,
-    finalize_response_with_headers_in_place, handle_max_forwards_in_place,
+    finalize_response_for_request, finalize_response_with_headers_in_place,
 };
 use anyhow::{Result, anyhow};
 use hyper::{Method, Request, Response, StatusCode};
 use qpx_core::config::ActionKind;
+use qpx_http::body::Body;
+use qpx_http::protocol::address::format_authority_host_port;
 use std::sync::Arc;
 use tokio::time::Duration;
 
@@ -49,12 +48,7 @@ pub(super) fn handle_forward_local_action(
             blocked(state.messages.blocked.as_str()),
             false,
         );
-        annotate_dispatch_response(
-            &mut response,
-            audit,
-            crate::http::dispatch::DispatchOutcome::Block,
-            &[],
-        );
+        annotate_dispatch_response(&mut response, audit, DispatchOutcome::Block, &[]);
         return Ok(Some(response));
     }
     if matches!(action.kind, ActionKind::Respond) {
@@ -62,21 +56,16 @@ pub(super) fn handle_forward_local_action(
             .local_response
             .as_ref()
             .ok_or_else(|| anyhow!("respond action requires local_response"))?;
-        let mut response = finalize_response_with_headers(
+        return annotated_local_response(
             req.method(),
             req.version(),
             proxy_name,
-            build_local_response(local)?,
+            local,
             headers,
-            false,
-        );
-        annotate_dispatch_response(
-            &mut response,
             audit,
-            crate::http::dispatch::DispatchOutcome::Respond,
-            &[],
-        );
-        return Ok(Some(response));
+            DispatchOutcome::Respond,
+        )
+        .map(Some);
     }
     Ok(None)
 }
@@ -97,46 +86,16 @@ pub(super) async fn handle_forward_ftp(
         state.ftp_semaphore.clone(),
     )
     .await?;
-    let response_version = response.version();
     finalize_response_with_headers_in_place(
         request_method,
-        response_version,
+        response.version(),
         proxy_name,
         &mut response,
         headers,
         false,
     );
-    annotate_dispatch_response(
-        &mut response,
-        audit,
-        crate::http::dispatch::DispatchOutcome::Allow,
-        &[],
-    );
+    annotate_dispatch_response(&mut response, audit, DispatchOutcome::Allow, &[]);
     Ok(response)
-}
-
-pub(super) async fn handle_forward_max_forwards(
-    req: &mut Request<Body>,
-    state: &crate::runtime::RuntimeState,
-    proxy_name: &str,
-    audit: &DispatchAuditContext,
-    body_read_timeout: Duration,
-) -> Option<Response<Body>> {
-    let mut response = handle_max_forwards_in_place(
-        req,
-        proxy_name,
-        state.plan.limits.general.trace_reflect_all_headers,
-        state.plan.limits.body.max_observed_request_body_bytes,
-        body_read_timeout,
-    )
-    .await?;
-    annotate_dispatch_response(
-        &mut response,
-        audit,
-        crate::http::dispatch::DispatchOutcome::MaxForwards,
-        &[],
-    );
-    Some(response)
 }
 
 pub(super) fn ensure_forward_host_header(req: &mut Request<Body>, host: &HostPort) -> Result<()> {
@@ -157,24 +116,12 @@ pub(super) fn ensure_forward_host_header(req: &mut Request<Body>, host: &HostPor
     Ok(())
 }
 
-pub(super) fn forward_http_authority(host: &HostPort) -> String {
-    match host.port {
-        Some(port) => format_authority_host_port(host.host.as_str(), port),
-        None => host.host.clone(),
-    }
-}
-
-pub(super) fn forward_websocket_connect_authority(host: &HostPort) -> String {
-    match host.port {
-        Some(port) => format_authority_host_port(host.host.as_str(), port),
-        None => format_authority_host_port(host.host.as_str(), 80),
-    }
-}
-
-pub(super) fn forward_websocket_host_header(host: &HostPort) -> String {
-    match host.port {
-        Some(port) => format_authority_host_port(host.host.as_str(), port),
-        None => host.host.clone(),
+pub(super) fn forward_authority(host: &HostPort, default_port: Option<u16>) -> String {
+    match (host.port, default_port) {
+        (Some(port), _) | (None, Some(port)) => {
+            format_authority_host_port(host.host.as_str(), port)
+        }
+        (None, None) => host.host.clone(),
     }
 }
 
@@ -209,22 +156,16 @@ pub(super) async fn proxy_forward_websocket(
         export_session,
     })
     .await?;
-    emit_dispatch_websocket_response_preview(export_session, &response).await;
     let keep_upgrade = response.status() == StatusCode::SWITCHING_PROTOCOLS;
-    let response_version = response.version();
     finalize_response_with_headers_in_place(
         request_method,
-        response_version,
+        response.version(),
         proxy_name,
         &mut response,
         headers,
         keep_upgrade,
     );
-    annotate_dispatch_response(
-        &mut response,
-        audit,
-        crate::http::dispatch::DispatchOutcome::Allow,
-        &[],
-    );
+    emit_dispatch_websocket_response_preview(export_session, &response).await;
+    annotate_dispatch_response(&mut response, audit, DispatchOutcome::Allow, &[]);
     Ok(response)
 }

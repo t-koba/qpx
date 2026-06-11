@@ -1,5 +1,6 @@
 use crate::config::{
-    MAX_GRPC_STREAM_DURATION_MS, MAX_GRPC_WEB_TRAILER_BYTES, MAX_SSE_STREAM_DURATION_MS,
+    MAX_GRPC_STREAM_DURATION_MS, MAX_GRPC_WEB_TRAILER_BYTES, MAX_SSE_EVENT_ID_BYTES,
+    MAX_SSE_LINE_BYTES, MAX_SSE_STREAM_DURATION_MS,
 };
 use serde_json::json;
 
@@ -10,6 +11,20 @@ pub fn canonical_schema_value() -> serde_json::Value {
         "type": "object",
         "required": ["edges"],
         "additionalProperties": false,
+        "properties": {
+            "state_dir": {"type": "string"},
+            "identity": {"type": "object"},
+            "messages": {"type": "object"},
+            "runtime": {"type": "object"},
+            "telemetry": {"type": "object"},
+            "security": {"type": "object"},
+            "http": {"type": "object"},
+            "traffic": {"type": "object"},
+            "upstreams": {"type": "array", "items": {"type": "object"}},
+            "caches": {"type": "array", "items": {"type": "object"}},
+            "acme": {"type": "object"},
+            "edges": {"type": "array", "items": {"$ref": "#/$defs/edge"}}
+        },
         "$defs": {
             "capturePolicy": {
                 "type": "object",
@@ -110,7 +125,9 @@ pub fn canonical_schema_value() -> serde_json::Value {
                     "disable_compression": {"type": "boolean"},
                     "flush_policy": {"enum": ["low_latency", "batched"]},
                     "idle_timeout_ms": {"type": "integer", "minimum": 1},
-                    "max_stream_duration_ms": {"type": "integer", "minimum": 1, "maximum": MAX_SSE_STREAM_DURATION_MS}
+                    "max_stream_duration_ms": {"type": "integer", "minimum": 1, "maximum": MAX_SSE_STREAM_DURATION_MS},
+                    "max_line_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_SSE_LINE_BYTES},
+                    "max_event_id_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_SSE_EVENT_ID_BYTES}
                 }
             },
             "commonEdgeFields": {

@@ -1,4 +1,6 @@
 use crate::runtime;
+use anyhow::Result;
+use serde_json::{Value, json};
 
 mod match_plan;
 
@@ -104,6 +106,217 @@ pub(crate) fn render_explain_plan(
         }
     }
     output
+}
+
+pub(crate) fn render_explain_plan_json(
+    plan: &runtime::RuntimePlan,
+    edge_filter: Option<&str>,
+    route_filter: Option<&str>,
+) -> Result<String> {
+    let mut edges = Vec::new();
+    for edge in plan.edges.iter() {
+        match edge {
+            runtime::CompiledEdge::Forward(edge) => {
+                if !edge_filter_matches(edge_filter, &edge.name) {
+                    continue;
+                }
+                edges.push(json!({
+                    "edge": edge.name.as_ref(),
+                    "kind": "forward",
+                    "aggregate_execution_plan": flag_names(edge.flags),
+                    "default_action": ingress_plan_json(&edge.default_action_kind, &edge.default_plan),
+                    "rules": edge.rules.iter()
+                        .filter(|rule| route_filter_matches(route_filter, &rule.name))
+                        .map(|rule| json!({
+                            "name": rule.name.as_ref(),
+                            "action": action_kind_label(&rule.action_kind),
+                            "execution_plan": execution_plan_json(&rule.plan),
+                        }))
+                        .collect::<Vec<_>>(),
+                }));
+            }
+            runtime::CompiledEdge::Transparent(edge) => {
+                if !edge_filter_matches(edge_filter, &edge.name) {
+                    continue;
+                }
+                edges.push(json!({
+                    "edge": edge.name.as_ref(),
+                    "kind": "transparent",
+                    "aggregate_execution_plan": flag_names(edge.flags),
+                    "default_action": ingress_plan_json(&edge.default_action_kind, &edge.default_plan),
+                    "rules": edge.rules.iter()
+                        .filter(|rule| route_filter_matches(route_filter, &rule.name))
+                        .map(|rule| json!({
+                            "name": rule.name.as_ref(),
+                            "action": action_kind_label(&rule.action_kind),
+                            "execution_plan": execution_plan_json(&rule.plan),
+                        }))
+                        .collect::<Vec<_>>(),
+                }));
+            }
+            runtime::CompiledEdge::Reverse(edge) => {
+                if !edge_filter_matches(edge_filter, &edge.name) {
+                    continue;
+                }
+                edges.push(json!({
+                    "edge": edge.name.as_ref(),
+                    "kind": "reverse",
+                    "aggregate_execution_plan": flag_names(edge.flags),
+                    "routes": edge.routes.iter()
+                        .filter(|route| route_filter_matches(route_filter, &route.name))
+                        .map(|route| json!({
+                            "name": route.name.as_ref(),
+                            "target": reverse_target_json(&route.target),
+                            "execution_plan": execution_plan_json(&route.plan),
+                        }))
+                        .collect::<Vec<_>>(),
+                    "tls_passthrough_routes": edge.tls_passthrough_routes.iter()
+                        .filter(|route| route_filter_matches(route_filter, &route.name))
+                        .map(|route| json!({
+                            "name": route.name.as_ref(),
+                            "target": reverse_target_json(&route.target),
+                        }))
+                        .collect::<Vec<_>>(),
+                }));
+            }
+        }
+    }
+    Ok(serde_json::to_string_pretty(&json!({ "edges": edges }))?)
+}
+
+fn ingress_plan_json(
+    action_kind: &qpx_core::config::ActionKind,
+    plan: &runtime::ExecutionPlan,
+) -> Value {
+    json!({
+        "action": action_kind_label(action_kind),
+        "execution_plan": execution_plan_json(plan),
+    })
+}
+
+fn execution_plan_json(plan: &runtime::ExecutionPlan) -> Value {
+    let module_stages = plan
+        .modules
+        .stage_labels()
+        .into_iter()
+        .filter(|(_, modules)| !modules.is_empty())
+        .map(|(stage, modules)| json!({ "stage": stage, "modules": modules }))
+        .collect::<Vec<_>>();
+    let module_details = plan
+        .modules
+        .explain_details()
+        .into_iter()
+        .map(|(module, details)| json!({ "module": module, "details": details }))
+        .collect::<Vec<_>>();
+    json!({
+        "flags": flag_names(plan.flags),
+        "streaming": streaming_json(&plan.streaming),
+        "module_body_mode": body_access_label(plan.modules.aggregate().body_access),
+        "buffering": {
+            "required": !plan.buffering_reasons.is_empty(),
+            "reasons": plan.buffering_reasons.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
+        },
+        "capture": capture_json(&plan.capture),
+        "cache": plan.cache.as_ref().map(|cache| json!({
+            "backend": cache.backend,
+            "namespace": cache.namespace,
+            "max_object_bytes": cache.max_object_bytes,
+        })),
+        "local_response": plan.local_response.as_ref().map(|local_response| json!({
+            "status": local_response.status,
+            "content_type": local_response.content_type.as_deref(),
+            "header_count": local_response.header_count,
+            "body_bytes": local_response.body_bytes,
+            "rpc_protocol": local_response.rpc_protocol.as_deref(),
+            "rpc_status": local_response.rpc_status.as_deref(),
+            "rpc_http_status": local_response.rpc_http_status,
+        })),
+        "modules": module_stages,
+        "module_details": module_details,
+        "response_rules": plan.response_rules.as_ref().map(|rules| json!({
+            "count": rules.len(),
+            "needs_body": rules.any_rule_requires_response_body_observation(),
+            "needs_size": rules.any_rule_requires_response_size(),
+            "needs_rpc": rules.any_rule_requires_response_rpc_observation(),
+            "needs_request_body": rules.any_rule_requires_response_request_body_observation(),
+            "needs_request_rpc": rules.any_rule_requires_response_request_rpc_context(),
+        })),
+    })
+}
+
+fn body_access_label(body_access: crate::http::modules::BodyAccess) -> &'static str {
+    body_access.mode_label()
+}
+
+fn streaming_json(streaming: &runtime::ResolvedStreamingLimits) -> Value {
+    json!({
+        "body_channel_capacity": streaming.body_channel_capacity,
+        "body_read_timeout_ms": streaming.body_read_timeout_ms,
+        "body_send_timeout_ms": streaming.body_send_timeout_ms,
+        "max_request_body_bytes": streaming.max_request_body_bytes,
+        "max_response_body_bytes": streaming.max_response_body_bytes,
+        "max_grpc_message_bytes": streaming.max_grpc_message_bytes,
+        "max_grpc_web_trailer_bytes": streaming.max_grpc_web_trailer_bytes,
+        "max_grpc_stream_duration_ms": streaming.max_grpc_stream_duration_ms,
+        "observe_grpc_messages": streaming.observe_grpc_messages,
+        "sse": {
+            "disable_compression": streaming.sse.disable_compression,
+            "flush_policy": format!("{:?}", streaming.sse.flush_policy),
+            "idle_timeout_ms": streaming.sse.idle_timeout_ms,
+            "max_stream_duration_ms": streaming.sse.max_stream_duration_ms,
+            "max_line_bytes": streaming.sse.max_line_bytes,
+            "max_event_id_bytes": streaming.sse.max_event_id_bytes,
+        },
+    })
+}
+
+fn capture_json(capture: &runtime::CompiledCapturePlan) -> Value {
+    json!({
+        "encrypted": capture.encrypted,
+        "plaintext": capture.plaintext.as_ref().map(|plaintext| json!({
+            "headers": plaintext.headers,
+            "body": plaintext.body.as_str(),
+            "body_sample_bytes": plaintext.body_sample_bytes,
+            "sample_percent": plaintext.sample_percent,
+            "max_body_bytes": plaintext.max_body_bytes,
+            "redacted_query_keys": plaintext.redact.query_keys,
+            "redacted_headers": plaintext.redact.headers,
+            "json_paths": plaintext.redact.json_paths,
+        })),
+    })
+}
+
+fn reverse_target_json(target: &runtime::CompiledReverseRouteTarget) -> Value {
+    match target {
+        runtime::CompiledReverseRouteTarget::Upstream { upstreams, lb } => json!({
+            "type": "upstream",
+            "lb": lb.to_string(),
+            "upstreams": upstreams.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
+        }),
+        runtime::CompiledReverseRouteTarget::Weighted { backends, lb } => json!({
+            "type": "weighted",
+            "lb": lb.to_string(),
+            "backends": backends.iter().map(|backend| json!({
+                "name": backend.name.as_deref(),
+                "weight": backend.weight,
+                "upstreams": backend.upstreams.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        }),
+        runtime::CompiledReverseRouteTarget::Ipc { mode, address } => json!({
+            "type": "ipc",
+            "mode": mode.to_string(),
+            "address": address.to_string(),
+        }),
+        runtime::CompiledReverseRouteTarget::LocalResponse { status } => json!({
+            "type": "local_response",
+            "status": status,
+        }),
+        runtime::CompiledReverseRouteTarget::TlsPassthrough { upstreams, lb } => json!({
+            "type": "tls_passthrough",
+            "lb": lb.to_string(),
+            "upstreams": upstreams.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
+        }),
+    }
 }
 
 fn edge_filter_matches(filter: Option<&str>, name: &str) -> bool {
@@ -375,6 +588,41 @@ fn append_plan_flag_entries(output: &mut String, flags: runtime::PlanFlags) {
         "retry_body_buffer",
         flags.contains(runtime::PlanFlags::RETRY_BODY_BUFFER),
     );
+}
+
+fn flag_names(flags: runtime::PlanFlags) -> Vec<&'static str> {
+    [
+        ("auth", runtime::PlanFlags::AUTH),
+        ("identity_sources", runtime::PlanFlags::IDENTITY_SOURCES),
+        ("ext_authz", runtime::PlanFlags::EXT_AUTHZ),
+        ("destination_intel", runtime::PlanFlags::DESTINATION_INTEL),
+        ("http_guard", runtime::PlanFlags::HTTP_GUARD),
+        ("cache_lookup", runtime::PlanFlags::CACHE_LOOKUP),
+        ("cache_store", runtime::PlanFlags::CACHE_STORE),
+        ("request_modules", runtime::PlanFlags::REQUEST_MODULES),
+        ("response_modules", runtime::PlanFlags::RESPONSE_MODULES),
+        ("response_rules", runtime::PlanFlags::RESPONSE_RULES),
+        ("capture_encrypted", runtime::PlanFlags::CAPTURE_ENCRYPTED),
+        ("capture_plaintext", runtime::PlanFlags::CAPTURE_PLAINTEXT),
+        (
+            "request_body_observe",
+            runtime::PlanFlags::REQUEST_BODY_OBSERVE,
+        ),
+        (
+            "response_body_observe",
+            runtime::PlanFlags::RESPONSE_BODY_OBSERVE,
+        ),
+        ("retry_body_buffer", runtime::PlanFlags::RETRY_BODY_BUFFER),
+        ("mirroring", runtime::PlanFlags::MIRRORING),
+        ("websocket", runtime::PlanFlags::WEBSOCKET),
+        ("ipc", runtime::PlanFlags::IPC),
+        ("capture_body", runtime::PlanFlags::CAPTURE_BODY),
+        ("frozen_request", runtime::PlanFlags::FROZEN_REQUEST),
+        ("tls_fingerprint", runtime::PlanFlags::TLS_FINGERPRINT),
+    ]
+    .into_iter()
+    .filter_map(|(name, flag)| flags.contains(flag).then_some(name))
+    .collect()
 }
 
 fn action_kind_label(action_kind: &qpx_core::config::ActionKind) -> &'static str {

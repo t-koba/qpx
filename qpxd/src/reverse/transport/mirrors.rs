@@ -1,19 +1,34 @@
 use super::ReverseConnInfo;
 use super::request_template::{ReverseRequestHeadTemplate, ReverseRequestTemplate};
-use crate::http::body::Body;
 use crate::reverse::health::{
     EndpointLifecycleRuntime, HealthCheckRuntime, PassiveFailureKind, UpstreamEndpoint,
 };
 use crate::reverse::router::{RoutePolicy, SelectedMirrorTarget};
-use crate::tls::CompiledUpstreamTlsTrust;
 use crate::upstream::origin::proxy_http;
 use anyhow::Error;
 use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use hyper::{Request, StatusCode};
-use std::sync::Arc;
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_http::body::Body;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, LazyLock, Mutex};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Duration, timeout};
 use tracing::warn;
+
+const MIRROR_MAX_INFLIGHT_PER_ENDPOINT: usize = 256;
+static MIRROR_PERMITS: LazyLock<Mutex<HashMap<String, Arc<Semaphore>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(in crate::reverse) fn prune_mirror_permits(active_targets: &[String]) {
+    let active = active_targets.iter().collect::<HashSet<_>>();
+    let mut permits = MIRROR_PERMITS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    permits.retain(|target, _| active.contains(target));
+}
 
 pub(super) fn request_seed(conn: &ReverseConnInfo, host: &str, req: &Request<Body>) -> u64 {
     // Deterministic hashing for stable canary/mirror sampling.
@@ -123,7 +138,12 @@ pub(super) fn request_is_templateable(req: &Request<Body>, max_body_bytes: usize
     (parsed[0] as usize) <= max_body_bytes
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirror dispatch threads each routing/health dimension plus the pool registry"
+)]
 pub(super) fn dispatch_mirrors(
+    pools: Arc<crate::pool::PoolRegistry>,
     template: &ReverseRequestTemplate,
     mirror_upstreams: Vec<SelectedMirrorTarget>,
     timeout_dur: Duration,
@@ -146,16 +166,28 @@ pub(super) fn dispatch_mirrors(
             }
         };
         upstream.inflight.fetch_add(1, Ordering::Relaxed);
+        let Some(_mirror_permit) = try_acquire_mirror_permit(upstream.as_ref()) else {
+            upstream.inflight.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        };
         let upstream_for_task = upstream.clone();
         let target = upstream.origin.clone();
         let proxy_name = proxy_name.clone();
         let health_policy = health_policy.clone();
         let lifecycle = lifecycle.clone();
         let upstream_trust = upstream_trust.clone();
+        let pools = pools.clone();
         tokio::spawn(async move {
+            let _mirror_permit = _mirror_permit;
             let response = timeout(
                 timeout_dur,
-                proxy_http(req, &target, proxy_name.as_str(), upstream_trust.as_deref()),
+                proxy_http(
+                    &pools,
+                    req,
+                    &target,
+                    proxy_name.as_str(),
+                    upstream_trust.as_deref(),
+                ),
             )
             .await;
             upstream_for_task.inflight.fetch_sub(1, Ordering::Relaxed);
@@ -169,6 +201,7 @@ pub(super) fn dispatch_mirrors(
 
 pub(super) fn dispatch_streaming_mirrors(input: StreamingMirrorDispatch<'_>) {
     let StreamingMirrorDispatch {
+        pools,
         template,
         mirror_upstreams,
         mirror_bodies,
@@ -192,16 +225,28 @@ pub(super) fn dispatch_streaming_mirrors(input: StreamingMirrorDispatch<'_>) {
         };
         let upstream = mirror.upstream;
         upstream.inflight.fetch_add(1, Ordering::Relaxed);
+        let Some(_mirror_permit) = try_acquire_mirror_permit(upstream.as_ref()) else {
+            upstream.inflight.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        };
         let upstream_for_task = upstream.clone();
         let target = upstream.origin.clone();
         let proxy_name = proxy_name.clone();
         let health_policy = health_policy.clone();
         let lifecycle = lifecycle.clone();
         let upstream_trust = upstream_trust.clone();
+        let pools = pools.clone();
         tokio::spawn(async move {
+            let _mirror_permit = _mirror_permit;
             let response = timeout(
                 timeout_dur,
-                proxy_http(req, &target, proxy_name.as_str(), upstream_trust.as_deref()),
+                proxy_http(
+                    &pools,
+                    req,
+                    &target,
+                    proxy_name.as_str(),
+                    upstream_trust.as_deref(),
+                ),
             )
             .await;
             upstream_for_task.inflight.fetch_sub(1, Ordering::Relaxed);
@@ -213,7 +258,32 @@ pub(super) fn dispatch_streaming_mirrors(input: StreamingMirrorDispatch<'_>) {
     }
 }
 
+fn try_acquire_mirror_permit(upstream: &UpstreamEndpoint) -> Option<OwnedSemaphorePermit> {
+    let semaphore = {
+        let mut permits = MIRROR_PERMITS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        permits
+            .entry(upstream.target.clone())
+            .or_insert_with(|| Arc::new(Semaphore::new(MIRROR_MAX_INFLIGHT_PER_ENDPOINT)))
+            .clone()
+    };
+    match semaphore.try_acquire_owned() {
+        Ok(permit) => Some(permit),
+        Err(err) => {
+            super::metrics::mirror_dropped(upstream.target.as_str(), "inflight_limit");
+            warn!(
+                error = ?err,
+                target = upstream.target.as_str(),
+                "reverse mirror dropped because endpoint mirror concurrency is full"
+            );
+            None
+        }
+    }
+}
+
 pub(super) struct StreamingMirrorDispatch<'a> {
+    pub(super) pools: Arc<crate::pool::PoolRegistry>,
     pub(super) template: ReverseRequestHeadTemplate,
     pub(super) mirror_upstreams: Vec<SelectedMirrorTarget>,
     pub(super) mirror_bodies: Vec<Body>,

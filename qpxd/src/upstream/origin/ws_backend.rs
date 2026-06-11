@@ -1,18 +1,18 @@
-use crate::http::body::Body;
 use anyhow::Result;
 use hyper::header::{HOST, HeaderValue};
 use hyper::{Request, Response, Uri};
+use qpx_http::body::Body;
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::http::protocol::websocket::spawn_upgrade_tunnel;
-use crate::tls::CompiledUpstreamTlsTrust;
-use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::http1::{
     WebsocketProxyConfig, normalize_websocket_switching_protocols_response, proxy_websocket_http1,
 };
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_http::tls::client::connect_tls_http1_with_options;
 
 use super::OriginEndpoint;
 use super::dispatch::{OriginScheme, origin_scheme};
@@ -112,7 +112,7 @@ async fn proxy_wss(
     .await??;
     let (mut sender, conn) = timeout(
         timeout_dur,
-        crate::http::protocol::common::handshake_http1(tls),
+        qpx_http::protocol::common::handshake_http1(tls),
     )
     .await??;
     let authority = connect_authority.to_string();

@@ -10,13 +10,15 @@ use super::tunnel::{MitmH3ConnectInput, mitm_h3_connect_stream};
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::H3ServerRequestStream;
 use crate::policy_context::{AuditRecord, ResolvedIdentity, emit_audit_log};
-use crate::tls::client::preview_tls_certificate_with_options;
 #[cfg(feature = "mitm")]
-use crate::tls::{CompiledUpstreamTlsTrust, TlsClientHelloInfo};
+use crate::tls::TlsClientHelloInfo;
 use crate::upstream::connect::TunnelIo;
 use anyhow::{Result, anyhow};
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::CompiledHeaderControl;
+#[cfg(feature = "mitm")]
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_http::tls::client::preview_tls_certificate_with_options;
 use qpx_observability::access_log::RequestLogContext;
 use std::sync::Arc;
 use tokio::time::Duration;

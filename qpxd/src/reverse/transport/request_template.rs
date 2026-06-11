@@ -1,13 +1,14 @@
-use crate::http::body::Body;
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use hyper::{Request, Uri};
+use qpx_http::body::Body;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{Mutex, oneshot};
 use tokio::time::timeout;
 
 const RETRY_TEMPLATE_MEMORY_BYTES: usize = 64 * 1024;
@@ -46,7 +47,19 @@ pub(super) struct ReverseRequestHeadTemplate {
     headers: http::HeaderMap,
 }
 
+#[derive(Clone)]
+pub(super) struct ReverseReplayRecorder {
+    state: Arc<Mutex<ReverseReplayRecorderState>>,
+}
+
+enum ReverseReplayRecorderState {
+    Pending(Option<oneshot::Receiver<Result<ReverseRequestTemplate>>>),
+    Ready(Arc<ReverseRequestTemplate>),
+    Failed,
+}
+
 impl ReverseRequestTemplate {
+    #[cfg(test)]
     pub(super) async fn from_request(
         req: Request<Body>,
         max_body_bytes: usize,
@@ -74,6 +87,61 @@ impl ReverseRequestTemplate {
     }
 }
 
+impl ReverseReplayRecorder {
+    pub(super) fn wrap_first_request(
+        req: Request<Body>,
+        max_body_bytes: usize,
+        body_read_timeout: Duration,
+        channel_capacity: usize,
+    ) -> (Request<Body>, Self) {
+        let (parts, body) = req.into_parts();
+        let head = ReverseRequestHeadTemplate::from_parts(&parts);
+        let (mut sender, replay_body) = Body::channel_with_capacity(channel_capacity.max(1));
+        let (result_tx, result_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result =
+                stream_and_record_body(body, head, max_body_bytes, body_read_timeout, &mut sender)
+                    .await;
+            if result.is_err() {
+                sender.abort();
+            }
+            let _ = result_tx.send(result);
+        });
+        (
+            Request::from_parts(parts, replay_body),
+            Self {
+                state: Arc::new(Mutex::new(ReverseReplayRecorderState::Pending(Some(
+                    result_rx,
+                )))),
+            },
+        )
+    }
+
+    pub(super) async fn template(&self) -> Option<Arc<ReverseRequestTemplate>> {
+        let receiver = {
+            let mut state = self.state.lock().await;
+            match &mut *state {
+                ReverseReplayRecorderState::Ready(template) => return Some(template.clone()),
+                ReverseReplayRecorderState::Failed => return None,
+                ReverseReplayRecorderState::Pending(receiver) => receiver.take(),
+            }
+        };
+        let receiver = receiver?;
+        let result = receiver.await.ok().and_then(Result::ok).map(Arc::new);
+        let mut state = self.state.lock().await;
+        match result {
+            Some(template) => {
+                *state = ReverseReplayRecorderState::Ready(template.clone());
+                Some(template)
+            }
+            None => {
+                *state = ReverseReplayRecorderState::Failed;
+                None
+            }
+        }
+    }
+}
+
 impl ReverseRequestTemplateBody {
     fn build(&self) -> Body {
         match self {
@@ -81,6 +149,101 @@ impl ReverseRequestTemplateBody {
             Self::File { file } => file.body(),
         }
     }
+}
+
+struct TemplateBodyRecorder {
+    chunks: Vec<Bytes>,
+    file: Option<(TokioFile, PathBuf)>,
+    seen: usize,
+    max_body_bytes: usize,
+}
+
+impl TemplateBodyRecorder {
+    fn new(max_body_bytes: usize) -> Self {
+        Self {
+            chunks: Vec::new(),
+            file: None,
+            seen: 0,
+            max_body_bytes,
+        }
+    }
+
+    async fn record_chunk(&mut self, chunk: &Bytes) -> Result<()> {
+        let next = self
+            .seen
+            .checked_add(chunk.len())
+            .ok_or_else(|| anyhow!("reverse request body length overflow"))?;
+        if next > self.max_body_bytes {
+            return Err(anyhow!(
+                "reverse retry template body exceeds limit: {} bytes",
+                self.max_body_bytes
+            ));
+        }
+        self.seen = next;
+        if self.file.is_none() && self.seen <= RETRY_TEMPLATE_MEMORY_BYTES {
+            self.chunks.push(chunk.clone());
+            return Ok(());
+        }
+        if self.file.is_none() {
+            let (mut spool, path) = create_template_spool().await?;
+            for existing in self.chunks.drain(..) {
+                spool.write_all(existing.as_ref()).await?;
+            }
+            self.file = Some((spool, path));
+        }
+        if let Some((spool, _)) = self.file.as_mut() {
+            spool.write_all(chunk.as_ref()).await?;
+        }
+        Ok(())
+    }
+
+    async fn finish(self) -> Result<ReverseRequestTemplateBody> {
+        if let Some((mut spool, path)) = self.file {
+            spool.flush().await?;
+            drop(spool);
+            return Ok(ReverseRequestTemplateBody::File {
+                file: Arc::new(SpooledTemplateFile { path }),
+            });
+        }
+        Ok(ReverseRequestTemplateBody::Memory {
+            chunks: Arc::from(self.chunks),
+        })
+    }
+}
+
+async fn stream_and_record_body(
+    mut body: Body,
+    head: ReverseRequestHeadTemplate,
+    max_body_bytes: usize,
+    body_read_timeout: Duration,
+    sender: &mut qpx_http::body::Sender,
+) -> Result<ReverseRequestTemplate> {
+    let mut recorder = TemplateBodyRecorder::new(max_body_bytes);
+    while let Some(frame) = timeout(body_read_timeout, body.data())
+        .await
+        .map_err(|_| anyhow!("reverse request body read timed out"))?
+    {
+        let chunk = frame?;
+        recorder.record_chunk(&chunk).await?;
+        sender
+            .send_data(chunk)
+            .await
+            .map_err(|err| anyhow!("reverse first-attempt body relay failed: {err}"))?;
+    }
+    if let Some(trailers) = body.trailers().await? {
+        sender
+            .send_trailers(trailers)
+            .await
+            .map_err(|err| anyhow!("reverse first-attempt trailer relay failed: {err}"))?;
+    }
+    let body = recorder.finish().await?;
+    Ok(ReverseRequestTemplate {
+        method: head.method,
+        uri: head.uri,
+        version: head.version,
+        headers: head.headers,
+        body,
+    })
 }
 
 impl SpooledTemplateFile {
@@ -192,6 +355,7 @@ fn content_length(req: &Request<Body>) -> Option<u64> {
     parsed
 }
 
+#[cfg(test)]
 async fn collect_body_template(
     mut body: Body,
     max_body_bytes: usize,
@@ -251,6 +415,7 @@ async fn create_template_spool() -> Result<(TokioFile, PathBuf)> {
 #[cfg(test)]
 mod tests {
     use crate::reverse::transport::request_template::*;
+    use bytes::Bytes;
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -307,7 +472,7 @@ mod tests {
 
         for _ in 0..2 {
             let req = template.build().expect("build");
-            let body = crate::http::body::to_bytes(req.into_body())
+            let body = qpx_http::body::to_bytes(req.into_body())
                 .await
                 .expect("read body");
             assert_eq!(body.as_ref(), payload.as_slice());
@@ -315,5 +480,61 @@ mod tests {
 
         drop(template);
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn reverse_replay_recorder_streams_first_attempt_before_eof() {
+        let (mut source_sender, source_body) = Body::channel_with_capacity(1);
+        let req = Request::builder()
+            .method(http::Method::PUT)
+            .uri("http://example.test/upload")
+            .body(source_body)
+            .expect("request");
+        let (mut first_req, recorder) = ReverseReplayRecorder::wrap_first_request(
+            req,
+            RETRY_TEMPLATE_MEMORY_BYTES,
+            Duration::from_secs(1),
+            1,
+        );
+        source_sender
+            .send_data(Bytes::from_static(b"first"))
+            .await
+            .expect("send first chunk");
+        let first_chunk = first_req
+            .body_mut()
+            .data()
+            .await
+            .expect("first attempt should stream before eof")
+            .expect("first chunk");
+        assert_eq!(first_chunk, Bytes::from_static(b"first"));
+        source_sender
+            .send_data(Bytes::from_static(b"second"))
+            .await
+            .expect("send second chunk");
+        drop(source_sender);
+        let second_chunk = first_req
+            .body_mut()
+            .data()
+            .await
+            .expect("second chunk")
+            .expect("second chunk");
+        assert_eq!(second_chunk, Bytes::from_static(b"second"));
+        assert!(first_req.body_mut().data().await.is_none());
+
+        let template = recorder.template().await.expect("recorded template");
+        let mut replay = template.build().expect("replay").into_body();
+        let replay_first = replay
+            .data()
+            .await
+            .expect("replay first")
+            .expect("replay first");
+        let replay_second = replay
+            .data()
+            .await
+            .expect("replay second")
+            .expect("replay second");
+        assert_eq!(replay_first, Bytes::from_static(b"first"));
+        assert_eq!(replay_second, Bytes::from_static(b"second"));
+        assert!(replay.data().await.is_none());
     }
 }

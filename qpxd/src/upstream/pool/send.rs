@@ -1,15 +1,15 @@
 use super::resolved::ResolvedUpstreamProxy;
-use super::sender_pool::{UpstreamProxySender, upstream_proxy_pool};
-use crate::http::body::Body;
-use crate::tls::CompiledUpstreamTlsTrust;
+use super::sender_pool::{UpstreamProxyPool, UpstreamProxySender};
+use crate::http::protocol::header_control::set_proxy_authorization_header;
 use crate::upstream::http1::{
     UpstreamProxyEndpoint, UpstreamProxyScheme,
     open_upstream_proxy_sender as open_proxy_sender_once,
 };
 use crate::upstream::raw_http1::{Http1ResponseWithInterim, send_http1_request_with_interim};
 use anyhow::{Result, anyhow};
-use http::header::PROXY_AUTHORIZATION;
 use hyper::{Request, Response};
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_http::body::Body;
 use tokio::net::TcpStream;
 use tokio::time::{Duration, Instant, timeout};
 
@@ -17,15 +17,13 @@ pub(crate) async fn send_via_upstream_proxy(
     mut req: Request<Body>,
     upstream: &ResolvedUpstreamProxy,
     timeout_dur: Duration,
+    pool: &UpstreamProxyPool,
 ) -> Result<Response<Body>> {
     let endpoint = upstream.endpoint().clone();
-    req.headers_mut().remove(PROXY_AUTHORIZATION);
-    if let Some(value) = endpoint.proxy_authorization.as_ref() {
-        req.headers_mut().insert(PROXY_AUTHORIZATION, value.clone());
-    }
+    set_proxy_authorization_header(req.headers_mut(), endpoint.proxy_authorization.as_ref());
     let pool_key = upstream_proxy_pool_key(&endpoint, upstream.trust());
 
-    let slot = upstream_proxy_pool().slot_for(&pool_key).await;
+    let slot = pool.slot_for(&pool_key).await;
 
     let _permit = slot
         .semaphore
@@ -81,10 +79,7 @@ pub(crate) async fn send_via_upstream_proxy_with_interim(
     timeout_dur: Duration,
 ) -> Result<Http1ResponseWithInterim> {
     let endpoint = upstream.endpoint().clone();
-    req.headers_mut().remove(PROXY_AUTHORIZATION);
-    if let Some(value) = endpoint.proxy_authorization.as_ref() {
-        req.headers_mut().insert(PROXY_AUTHORIZATION, value.clone());
-    }
+    set_proxy_authorization_header(req.headers_mut(), endpoint.proxy_authorization.as_ref());
 
     let started = Instant::now();
     let stream = match timeout(
@@ -131,13 +126,13 @@ async fn open_upstream_proxy_sender(
 async fn open_upstream_proxy_stream(
     endpoint: &UpstreamProxyEndpoint,
     trust: Option<&CompiledUpstreamTlsTrust>,
-) -> Result<crate::tls::client::BoxTlsStream> {
+) -> Result<qpx_http::tls::client::BoxTlsStream> {
     let tcp = TcpStream::connect(endpoint.authority.as_str()).await?;
     let _ = tcp.set_nodelay(true);
     match endpoint.scheme {
         UpstreamProxyScheme::Http => Ok(Box::new(tcp)),
         UpstreamProxyScheme::Https => {
-            crate::tls::client::connect_tls_http1_with_options(
+            qpx_http::tls::client::connect_tls_http1_with_options(
                 endpoint.host.as_str(),
                 tcp,
                 true,

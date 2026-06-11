@@ -8,8 +8,8 @@ pub(crate) use types::CompiledPlaintextCapturePlan;
 pub(crate) use types::CompiledTlsPassthroughRoute;
 pub(crate) use types::{
     CompiledCapturePlan, CompiledEdge, CompiledListenerSettings, CompiledReverseEdge,
-    CompiledReverseRoute, CompiledReverseRouteTarget, ExecutionPlan, PlanFlags,
-    ResolvedStreamingLimits, RuntimePlan,
+    CompiledReverseRoute, CompiledReverseRouteTarget, CompiledTransparentEdge, ExecutionPlan,
+    PlanFlags, ResolvedStreamingLimits, RuntimePlan,
 };
 
 #[cfg(test)]

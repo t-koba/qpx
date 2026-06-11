@@ -1,9 +1,10 @@
+use super::ROUTE_STATE_SHARDS;
 use super::parse::{QuicConnectionId, parse_quic_long_header, parse_quic_short_dcid};
-use super::state::{RouteState, shard_index};
-use super::{ROUTE_STATE_SHARDS, ROUTE_STATE_TTL};
+use super::state::RouteState;
 use arc_swap::ArcSwap;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -11,7 +12,7 @@ pub(crate) struct SharedRouteState {
     shards: Vec<RwLock<RouteState>>,
     addr_snapshots: Vec<ArcSwap<HashSet<SocketAddr>>>,
     cid_snapshots: Vec<ArcSwap<HashSet<QuicConnectionId>>>,
-    known_server_cid_lens: RwLock<HashMap<u8, Instant>>,
+    known_server_cid_len_bits: AtomicU32,
 }
 
 impl Default for SharedRouteState {
@@ -26,7 +27,7 @@ impl Default for SharedRouteState {
             cid_snapshots: (0..ROUTE_STATE_SHARDS)
                 .map(|_| ArcSwap::from_pointee(HashSet::new()))
                 .collect(),
-            known_server_cid_lens: RwLock::new(HashMap::new()),
+            known_server_cid_len_bits: AtomicU32::new(0),
         }
     }
 }
@@ -40,10 +41,7 @@ impl SharedRouteState {
             self.addr_snapshots[idx].store(Arc::new(HashSet::new()));
             self.cid_snapshots[idx].store(Arc::new(HashSet::new()));
         }
-        self.known_server_cid_lens
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        self.known_server_cid_len_bits.store(0, Ordering::Relaxed);
     }
 
     pub(crate) fn observe_inbound(&self, addr: SocketAddr, packet: &[u8]) {
@@ -54,15 +52,15 @@ impl SharedRouteState {
                 self.insert_cid(cid, now);
             }
             if long.dcid_len > 0 {
-                self.record_server_cid_len(long.dcid_len, now);
+                self.record_server_cid_len(long.dcid_len);
             }
             return;
         }
-        for len in self.server_cid_lens(now) {
+        self.for_each_server_cid_len(|len| {
             if let Some(cid) = parse_quic_short_dcid(packet, len) {
                 self.insert_cid(cid, now);
             }
-        }
+        });
     }
 
     pub(crate) fn observe_outbound(&self, addr: SocketAddr, packet: &[u8]) {
@@ -73,7 +71,7 @@ impl SharedRouteState {
                 self.insert_cid(cid, now);
             }
             if long.scid_len > 0 {
-                self.record_server_cid_len(long.scid_len, now);
+                self.record_server_cid_len(long.scid_len);
             }
         }
     }
@@ -88,9 +86,9 @@ impl SharedRouteState {
             }
             return long.dcid.is_some_and(|cid| !self.cid_known(cid));
         }
-        self.server_cid_lens(Instant::now())
-            .into_iter()
-            .any(|len| parse_quic_short_dcid(packet, len).is_some_and(|cid| !self.cid_known(cid)))
+        self.any_server_cid_len(|len| {
+            parse_quic_short_dcid(packet, len).is_some_and(|cid| !self.cid_known(cid))
+        })
     }
 
     pub(crate) fn outbound_update_needed(&self, addr: SocketAddr, packet: &[u8]) -> bool {
@@ -118,9 +116,9 @@ impl SharedRouteState {
                 .chain(long.scid)
                 .any(|cid| self.cid_known(cid));
         }
-        self.server_cid_lens(Instant::now())
-            .into_iter()
-            .any(|len| parse_quic_short_dcid(packet, len).is_some_and(|cid| self.cid_known(cid)))
+        self.any_server_cid_len(|len| {
+            parse_quic_short_dcid(packet, len).is_some_and(|cid| self.cid_known(cid))
+        })
     }
 
     fn insert_addr(&self, addr: SocketAddr, now: Instant) {
@@ -155,39 +153,58 @@ impl SharedRouteState {
             .contains(&cid)
     }
 
-    fn record_server_cid_len(&self, len: u8, now: Instant) {
-        self.known_server_cid_lens
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(len, now);
+    fn record_server_cid_len(&self, len: u8) {
+        if let Some(bit) = cid_len_bit(len) {
+            self.known_server_cid_len_bits
+                .fetch_or(bit, Ordering::Relaxed);
+        }
     }
 
     fn server_cid_len_known(&self, len: u8) -> bool {
-        self.known_server_cid_lens
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains_key(&len)
+        cid_len_bit(len)
+            .is_some_and(|bit| self.known_server_cid_len_bits.load(Ordering::Relaxed) & bit != 0)
     }
 
-    fn server_cid_lens(&self, now: Instant) -> Vec<u8> {
-        let mut lens = self
-            .known_server_cid_lens
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        lens.retain(|_, seen| now.duration_since(*seen) <= ROUTE_STATE_TTL);
-        lens.keys().copied().collect()
+    fn for_each_server_cid_len(&self, mut f: impl FnMut(u8)) {
+        for_server_cid_len_bit(
+            self.known_server_cid_len_bits.load(Ordering::Relaxed),
+            |len| {
+                f(len);
+                false
+            },
+        );
+    }
+
+    fn any_server_cid_len(&self, f: impl FnMut(u8) -> bool) -> bool {
+        for_server_cid_len_bit(self.known_server_cid_len_bits.load(Ordering::Relaxed), f)
     }
 
     fn addr_shard_idx(&self, addr: SocketAddr) -> usize {
-        shard_index(&addr, self.shards.len())
+        qpx_http::sharding::modulo(&addr, self.shards.len())
     }
 
     fn cid_shard_idx(&self, cid: QuicConnectionId) -> usize {
-        shard_index(&cid, self.shards.len())
+        qpx_http::sharding::modulo(&cid, self.shards.len())
     }
 
     fn refresh_shard_snapshots(&self, idx: usize, shard: &RouteState) {
         self.addr_snapshots[idx].store(Arc::new(shard.addrs.keys().copied().collect()));
         self.cid_snapshots[idx].store(Arc::new(shard.cids.keys().copied().collect()));
     }
+}
+
+fn cid_len_bit(len: u8) -> Option<u32> {
+    (1..=20).contains(&len).then_some(1u32 << len)
+}
+
+fn for_server_cid_len_bit(mut bits: u32, mut f: impl FnMut(u8) -> bool) -> bool {
+    bits &= !1;
+    while bits != 0 {
+        let len = bits.trailing_zeros() as u8;
+        if f(len) {
+            return true;
+        }
+        bits &= bits - 1;
+    }
+    false
 }

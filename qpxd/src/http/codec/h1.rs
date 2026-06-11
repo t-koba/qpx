@@ -1,4 +1,3 @@
-use crate::http::body::Body;
 use crate::http::codec::h1_common::{
     MAX_HEADER_BYTES, has_connection_token, has_only_chunked_transfer_encoding, parse_header_map,
     parse_version, request_keep_alive,
@@ -11,6 +10,7 @@ use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use hyper::header::{CONTENT_LENGTH, EXPECT, HeaderMap};
+use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf};
@@ -274,7 +274,7 @@ where
                 let send_continue = version == Version::HTTP_11
                     && body_kind != RequestBodyKind::Empty
                     && expect_continue(&headers)
-                    && crate::http::protocol::semantics::validate_expect_header(&headers).is_ok();
+                    && qpx_http::protocol::semantics::validate_expect_header(&headers).is_ok();
                 return Ok(Some(ParsedRequestHead {
                     method,
                     uri,

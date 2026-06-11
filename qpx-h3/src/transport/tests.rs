@@ -57,6 +57,15 @@ fn no_body_response_declares_zero_received_length() {
         declared_response_body_length(&response, false).expect("declared"),
         Some(0)
     );
+
+    let reset_content = http::Response::builder()
+        .status(http::StatusCode::RESET_CONTENT)
+        .body(())
+        .expect("response");
+    assert_eq!(
+        declared_response_body_length(&reset_content, false).expect("declared"),
+        Some(0)
+    );
 }
 
 #[test]
