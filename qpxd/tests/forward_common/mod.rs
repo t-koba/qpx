@@ -1,5 +1,9 @@
 use anyhow::{Context, Result, anyhow};
+#[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
+use std::fs;
 use std::net::SocketAddr;
+#[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -7,7 +11,9 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
-pub use super::handle_common::{pick_free_tcp_port, spawn_qpxd_on_random_tcp_udp_ports};
+pub use super::handle_common::pick_free_tcp_port;
+#[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
+use super::handle_common::{QpxdHandle, spawn_qpxd};
 pub use super::handle_common::{spawn_qpxd_on_random_port, temp_dir};
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 #[path = "../h3_client_support/mod.rs"]
@@ -27,6 +33,60 @@ mod yaml_support;
 pub use yaml_support::yaml_quote_path;
 
 pub type Http1Head = (u16, Vec<(String, String)>, Vec<u8>);
+
+#[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
+const PORT_PICK_ATTEMPTS: usize = 256;
+
+#[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
+pub fn spawn_qpxd_on_random_tcp_udp_ports(
+    config_path: &Path,
+    log_path: PathBuf,
+    make_config: impl Fn(u16, u16) -> String,
+) -> Result<(u16, u16, QpxdHandle)> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for _ in 0..PORT_PICK_ATTEMPTS {
+        let tcp_port = pick_free_tcp_port()?;
+        let udp_port = pick_free_udp_port()?;
+        fs::write(config_path, make_config(tcp_port, udp_port)).context("write qpxd config")?;
+        match spawn_qpxd(config_path, tcp_port, log_path.clone()) {
+            Ok(handle) => return Ok((tcp_port, udp_port, handle)),
+            Err(err) => {
+                let log_retryable = fs::read_to_string(&log_path)
+                    .ok()
+                    .map(|value| is_retryable_bind_error_text(&value))
+                    .unwrap_or(false);
+                let err_retryable = is_retryable_bind_error_text(&err.to_string());
+                if log_retryable || err_retryable {
+                    last_err = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        anyhow!(
+            "failed to start qpxd after {} tcp/udp port attempts",
+            PORT_PICK_ATTEMPTS
+        )
+    }))
+}
+
+#[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
+fn pick_free_udp_port() -> Result<u16> {
+    let socket = std::net::UdpSocket::bind(("127.0.0.1", 0)).context("pick free udp port")?;
+    Ok(socket.local_addr()?.port())
+}
+
+#[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
+fn is_retryable_bind_error_text(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("address already in use")
+        || message.contains("eaddrinuse")
+        || message.contains("permission denied")
+        || message.contains("operation not permitted")
+        || message.contains("os error 1")
+}
 
 #[cfg(feature = "auth-basic")]
 pub async fn send_http1_and_read_head(addr: SocketAddr, request_bytes: &[u8]) -> Result<Http1Head> {

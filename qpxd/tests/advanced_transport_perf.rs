@@ -13,7 +13,7 @@ use rcgen::generate_simple_self_signed;
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -25,7 +25,7 @@ pub mod common;
 mod h3_client_support;
 mod yaml_support;
 
-use common::{pick_free_tcp_port, spawn_qpxd_on_random_tcp_udp_ports, temp_dir};
+use common::{QpxdHandle, pick_free_tcp_port, spawn_qpxd, temp_dir};
 use h3_client_support::{build_h3_test_client_config, build_quinn_client_endpoint};
 use yaml_support::yaml_quote_path;
 
@@ -41,6 +41,56 @@ struct PerfThresholds {
 fn benchmark_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+const PORT_PICK_ATTEMPTS: usize = 256;
+
+fn spawn_qpxd_on_random_tcp_udp_ports(
+    config_path: &Path,
+    log_path: PathBuf,
+    make_config: impl Fn(u16, u16) -> String,
+) -> Result<(u16, u16, QpxdHandle)> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for _ in 0..PORT_PICK_ATTEMPTS {
+        let tcp_port = pick_free_tcp_port()?;
+        let udp_port = pick_free_udp_port()?;
+        fs::write(config_path, make_config(tcp_port, udp_port))?;
+        match spawn_qpxd(config_path, tcp_port, log_path.clone()) {
+            Ok(handle) => return Ok((tcp_port, udp_port, handle)),
+            Err(err) => {
+                let log_retryable = fs::read_to_string(&log_path)
+                    .ok()
+                    .map(|value| is_retryable_bind_error_text(&value))
+                    .unwrap_or(false);
+                let err_retryable = is_retryable_bind_error_text(&err.to_string());
+                if log_retryable || err_retryable {
+                    last_err = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        anyhow!(
+            "failed to start qpxd after {} tcp/udp port attempts",
+            PORT_PICK_ATTEMPTS
+        )
+    }))
+}
+
+fn pick_free_udp_port() -> Result<u16> {
+    let socket = std::net::UdpSocket::bind(("127.0.0.1", 0))?;
+    Ok(socket.local_addr()?.port())
+}
+
+fn is_retryable_bind_error_text(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("address already in use")
+        || message.contains("eaddrinuse")
+        || message.contains("permission denied")
+        || message.contains("operation not permitted")
+        || message.contains("os error 1")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
