@@ -5,7 +5,6 @@ use super::request_dispatch_cache::{
 };
 use super::request_dispatch_upstream::{ForwardUpstreamInput, execute_forward_upstream};
 use super::types::ForwardDispatchReady;
-use crate::http::body::Body;
 use crate::http::dispatch::{
     DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheLookupOutcome,
 };
@@ -13,6 +12,7 @@ use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::runtime::Runtime;
 use anyhow::Result;
 use hyper::{Method, Response};
+use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(super) struct ForwardPreparedHttpInput<'a> {
@@ -65,6 +65,7 @@ pub(super) async fn execute_forward_http_after_prepare(
         client_version: input.client_version,
         proxy_name: input.proxy_name,
         headers: input.headers.as_deref(),
+        selected_plan: input.selected_plan,
         cache_policy: input.cache_policy,
         request_headers_snapshot: request_headers_snapshot.as_ref(),
         cache_lookup_key: cache_lookup_key.as_ref(),
@@ -75,8 +76,18 @@ pub(super) async fn execute_forward_http_after_prepare(
     })
     .await?
     {
-        DispatchCacheLookupOutcome::Response(response) => return Ok(response),
-        DispatchCacheLookupOutcome::Continue(state) => revalidation_state = state,
+        DispatchCacheLookupOutcome::Response(response) => {
+            let response = *response;
+            return Ok(
+                crate::http::capture::stream::emit_optional_response_for_export(
+                    response,
+                    input.selected_plan,
+                    export_session.as_ref(),
+                )
+                .await,
+            );
+        }
+        DispatchCacheLookupOutcome::Continue(state) => revalidation_state = state.map(|s| *s),
     }
     let cache_collapse_guard = match try_forward_cache_collapse(ForwardCacheCollapseInput {
         req: &mut req,
@@ -84,6 +95,7 @@ pub(super) async fn execute_forward_http_after_prepare(
         client_version: input.client_version,
         proxy_name: input.proxy_name,
         headers: input.headers.as_deref(),
+        selected_plan: input.selected_plan,
         request_headers_snapshot: request_headers_snapshot.as_ref(),
         cache_policy: input.cache_policy,
         cache_lookup_key: cache_lookup_key.as_ref(),
@@ -95,7 +107,17 @@ pub(super) async fn execute_forward_http_after_prepare(
     })
     .await?
     {
-        DispatchCacheCollapseOutcome::Response(response) => return Ok(*response),
+        DispatchCacheCollapseOutcome::Response(response) => {
+            let response = *response;
+            return Ok(
+                crate::http::capture::stream::emit_optional_response_for_export(
+                    response,
+                    input.selected_plan,
+                    export_session.as_ref(),
+                )
+                .await,
+            );
+        }
         DispatchCacheCollapseOutcome::Continue {
             revalidation_state: state,
             guard,

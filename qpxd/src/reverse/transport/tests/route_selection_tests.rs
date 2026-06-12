@@ -171,6 +171,128 @@ async fn route_match_uses_actual_chunked_request_size() {
 }
 
 #[tokio::test]
+async fn selected_body_dependent_route_enforces_route_request_limit_after_observation() {
+    let reverse_cfg = ReverseEdgeConfig {
+        name: "test".to_string(),
+        listen: "127.0.0.1:0".to_string(),
+        tls: None,
+        http3: None,
+        xdp: None,
+        enforce_sni_host_match: false,
+        sni_host_exceptions: Vec::new(),
+        policy_context: None,
+        destination_resolution: None,
+        connection_filter: Vec::new(),
+        streaming: Some(StreamingConfig {
+            max_request_body_bytes: Some(64 * 1024 * 1024),
+            ..Default::default()
+        }),
+        grpc: None,
+        sse: None,
+        routes: vec![ReverseRouteConfig {
+            name: Some("sized".to_string()),
+            r#match: MatchConfig {
+                request_size: vec!["4".to_string()],
+                ..Default::default()
+            },
+            target: qpx_core::config::ReverseRouteTargetConfig::LocalResponse {
+                response: Box::new(LocalResponseConfig {
+                    status: 204,
+                    body: String::new(),
+                    content_type: None,
+                    headers: HashMap::new(),
+                    rpc: None,
+                }),
+            },
+            mirrors: Vec::new(),
+            headers: None,
+            timeout_ms: None,
+            health_check: None,
+            cache: None,
+            capture: None,
+            rate_limit: None,
+            path_rewrite: None,
+            upstream_trust_profile: None,
+            upstream_trust: None,
+            lifecycle: None,
+            affinity: None,
+            policy_context: None,
+            http: None,
+            http_guard_profile: None,
+            destination_resolution: None,
+            resilience: None,
+            http_modules: Vec::new(),
+            streaming: Some(StreamingConfig {
+                max_request_body_bytes: Some(1),
+                ..Default::default()
+            }),
+            grpc: None,
+            sse: None,
+            streaming_requirement: Some(StreamingRequirement::Preferred),
+        }],
+        tls_passthrough_routes: Vec::new(),
+    };
+    let config = Config {
+        state_dir: None,
+        identity: IdentityConfig::default(),
+        messages: MessagesConfig::default(),
+        runtime: RuntimeConfig {
+            unknown_length_exact_size: UnknownLengthExactSizePolicy::Buffer,
+            ..RuntimeConfig::default()
+        },
+        telemetry: qpx_core::config::TelemetryConfig {
+            system_log: SystemLogConfig::default(),
+            access_log: AccessLogConfig::default(),
+            audit_log: AuditLogConfig::default(),
+            metrics: None,
+            otel: None,
+            exporter: None,
+        },
+        security: qpx_core::config::SecurityConfig {
+            auth: AuthConfig::default(),
+            identity_sources: Vec::new(),
+            decisions: qpx_core::config::DecisionConfig {
+                ext_authz: Vec::new(),
+            },
+            destination: Default::default(),
+            named_sets: Vec::new(),
+            upstream_trust_profiles: Vec::new(),
+        },
+        http: qpx_core::config::HttpGlobalConfig::default(),
+        traffic: qpx_core::config::TrafficConfig::default(),
+        acme: None,
+        edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
+        upstreams: Vec::new(),
+        caches: Vec::new(),
+    };
+    let runtime = Runtime::new(config).expect("runtime");
+    let reverse = crate::reverse::ReloadableReverse::new(
+        reverse_cfg,
+        runtime,
+        StdArc::<str>::from("reverse_upstreams_unhealthy"),
+    )
+    .expect("reloadable reverse");
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/upload")
+        .header("host", "reverse.test")
+        .header(CONTENT_LENGTH, "4")
+        .version(http::Version::HTTP_11)
+        .body(Body::from("data"))
+        .expect("request");
+
+    let (_, response) = handle_request_with_interim(
+        request,
+        reverse,
+        ReverseConnInfo::plain(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345), 80),
+    )
+    .await
+    .expect("response");
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
 async fn route_match_uses_destination_category() {
     let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
@@ -330,4 +452,29 @@ async fn route_match_uses_destination_category() {
     .expect("response");
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[test]
+fn destination_override_key_is_stable_and_identity_based() {
+    use qpx_core::config::DestinationResolutionOverrideConfig;
+
+    // No override always maps to the reserved zero key.
+    assert_eq!(super::dispatch::destination_override_key(None), 0);
+
+    let first = DestinationResolutionOverrideConfig::default();
+    let second = DestinationResolutionOverrideConfig::default();
+    let first_key = super::dispatch::destination_override_key(Some(&first));
+    let second_key = super::dispatch::destination_override_key(Some(&second));
+
+    // A real override never collides with the "no override" key.
+    assert_ne!(first_key, 0);
+    assert_ne!(second_key, 0);
+    // The same compiled override yields the same key for the request lifetime.
+    assert_eq!(
+        first_key,
+        super::dispatch::destination_override_key(Some(&first))
+    );
+    // Equal values at different addresses stay distinct: cache entries are
+    // shared per compiled route override, never across unrelated overrides.
+    assert_ne!(first_key, second_key);
 }

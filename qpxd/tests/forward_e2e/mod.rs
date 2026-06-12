@@ -28,7 +28,7 @@ use common::yaml_quote_path;
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 use common::{build_h3_test_client_config, build_quinn_client_endpoint};
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
-use common::{pick_free_tcp_port, spawn_qpxd};
+use common::{pick_free_tcp_port, spawn_qpxd_on_random_tcp_udp_ports};
 use common::{read_http1_head, serve_tcp_echo_once, spawn_qpxd_on_random_port, temp_dir};
 #[cfg(feature = "auth-basic")]
 use common::{send_http1_and_read_head, serve_http1_capture_once};
@@ -197,8 +197,8 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
         _request: qpx_h3::Request,
         _conn: qpx_h3::ConnectionInfo,
         _stream: qpx_h3::RequestStream,
-    ) -> Result<()> {
-        anyhow::bail!("unexpected buffered request")
+    ) -> std::result::Result<(), qpx_h3::H3Error> {
+        Err(anyhow!("unexpected buffered request").into())
     }
 
     async fn handle_connect_stream(
@@ -208,10 +208,10 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
         _conn: qpx_h3::ConnectionInfo,
         protocol: qpx_h3::Protocol,
         mut datagrams: Option<qpx_h3::StreamDatagrams>,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), qpx_h3::H3Error> {
         match protocol {
             qpx_h3::Protocol::Other(name) if name == "websocket" => {}
-            other => return Err(anyhow!("unexpected protocol: {other:?}")),
+            other => return Err(anyhow!("unexpected protocol: {other:?}").into()),
         }
         req_stream
             .send_response_head(&ok_qpx_response_head(false))
@@ -232,11 +232,12 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
         })
         .await
         .map_err(|_| anyhow!("timed out waiting for extended CONNECT datagram"))??;
+        let mut scratch = bytes::BytesMut::new();
         datagrams
             .as_mut()
             .expect("checked above")
             .sender
-            .send_datagram(payload)?;
+            .send_unprefixed_datagram_with_scratch(payload, &mut scratch)?;
         req_stream.finish().await
     }
 }
@@ -272,8 +273,8 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
         _request: qpx_h3::Request,
         _conn: qpx_h3::ConnectionInfo,
         _stream: qpx_h3::RequestStream,
-    ) -> Result<()> {
-        anyhow::bail!("unexpected buffered request")
+    ) -> std::result::Result<(), qpx_h3::H3Error> {
+        Err(anyhow!("unexpected buffered request").into())
     }
 
     async fn handle_webtransport_connect(
@@ -282,7 +283,7 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
         mut req_stream: qpx_h3::RequestStream,
         _conn: qpx_h3::ConnectionInfo,
         session: qpx_h3::WebTransportSession,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), qpx_h3::H3Error> {
         let qpx_h3::WebTransportSession {
             session_id,
             mut opener,
@@ -325,11 +326,12 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
         })
         .await
         .map_err(|_| anyhow!("timed out waiting for WebTransport datagram"))??;
+        let mut scratch = bytes::BytesMut::new();
         datagrams
             .as_mut()
             .expect("checked above")
             .sender
-            .send_datagram(payload)?;
+            .send_unprefixed_datagram_with_scratch(payload, &mut scratch)?;
 
         let bidi = timeout(Duration::from_secs(5), bidi_streams.recv())
             .await
@@ -361,7 +363,11 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
 ))]
 async fn start_qpx_h3_server<H: qpx_h3::RequestHandler>(
     handler: H,
-) -> Result<(SocketAddr, quinn::ClientConfig, JoinHandle<Result<()>>)> {
+) -> Result<(
+    SocketAddr,
+    quinn::ClientConfig,
+    JoinHandle<std::result::Result<(), qpx_h3::H3Error>>,
+)> {
     let (server_config, client_config) = build_qpx_h3_tls_configs()?;
     let endpoint = quinn::Endpoint::server(server_config, SocketAddr::from(([127, 0, 0, 1], 0)))?;
     let addr = endpoint.local_addr()?;
@@ -557,7 +563,7 @@ async fn open_forward_qpx_webtransport_session(
         .method(http::Method::CONNECT)
         .uri(format!("https://127.0.0.1:{upstream_port}/webtransport"))
         .body(())?;
-    qpx_h3::open_extended_connect_stream(
+    Ok(qpx_h3::open_extended_connect_stream(
         endpoint,
         connection,
         request,
@@ -572,5 +578,5 @@ async fn open_forward_qpx_webtransport_session(
         },
         Duration::from_secs(5),
     )
-    .await
+    .await?)
 }

@@ -1,10 +1,8 @@
 use super::super::ConnectTarget;
-use crate::http::body::Body;
-use crate::http::dispatch::DispatchAuditContext;
 use crate::http::policy::EvaluatedAction;
 use hyper::Request;
+use qpx_http::body::Body;
 use std::sync::Arc;
-use tokio::time::Duration;
 
 pub(super) type TransparentPrepareOutcome =
     crate::http::pipeline::PrepareOutcome<TransparentPreparedRequest>;
@@ -35,19 +33,6 @@ pub(super) struct TransparentPolicyEvaluation {
     pub(super) early_response: Option<Box<hyper::Response<Body>>>,
     pub(super) matched_rule: Option<String>,
     pub(super) request_rpc: Option<crate::http::rpc::RpcMatchContext>,
-}
-
-pub(super) enum TransparentPolicyStage {
-    Decision(Box<TransparentPolicyEvaluation>),
-    Observe(qpx_core::rules::CandidateRequestObservationRequirements),
-}
-
-pub(super) type TransparentAccessOutcome = crate::http::pipeline::AccessOutcome<TransparentAccess>;
-
-pub(super) struct TransparentAccess {
-    pub(super) policy: Box<EvaluatedAction>,
-    pub(super) timeout_override: Option<Duration>,
-    pub(super) audit: DispatchAuditContext,
 }
 
 pub(super) struct TransparentPolicyInput<'a> {

@@ -1,19 +1,18 @@
 use anyhow::Result;
 use bytes::Bytes;
-use metrics::counter;
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::HashMap;
 use std::future::{Future, poll_fn};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::task::Poll;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tracing::warn;
 
-use crate::tls::CompiledUpstreamTlsTrust;
-use crate::tls::UpstreamCertificateInfo;
-use crate::tls::client::{BoxTlsStream, connect_tls_h2_h1_with_info_with_options};
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_core::tls::UpstreamCertificateInfo;
+use qpx_http::tls::client::{BoxTlsStream, connect_tls_h2_h1_with_info_with_options};
 
 pub(super) type SharedOriginH2Sender = h2::client::SendRequest<Bytes>;
 const DIRECT_ORIGIN_POOL_SHARDS: usize = 32;
@@ -44,7 +43,7 @@ pub(super) struct PlainHttpOriginSlot {
 }
 
 pub(super) struct TlsHttp1OriginConnection {
-    pub(super) stream: crate::tls::client::BoxTlsStream,
+    pub(super) stream: qpx_http::tls::client::BoxTlsStream,
     pub(super) upstream_cert: UpstreamCertificateInfo,
 }
 
@@ -183,14 +182,56 @@ impl Drop for H2ConnectionReservation<'_> {
 type PlainHttpOriginPoolShard = RwLock<HashMap<PlainHttpOriginPoolKey, Arc<PlainHttpOriginSlot>>>;
 type HttpsOriginPoolShard = RwLock<HashMap<HttpsOriginPoolKey, Arc<HttpsOriginSlot>>>;
 
-fn plain_http_origin_pool() -> &'static [PlainHttpOriginPoolShard] {
-    static POOL: OnceLock<Vec<PlainHttpOriginPoolShard>> = OnceLock::new();
-    POOL.get_or_init(init_sharded_pool).as_slice()
+/// Per-runtime direct-origin connection pools (plain HTTP/1 + HTTPS H1/H2).
+/// Owned by [`crate::pool::PoolRegistry`] (formerly process-global `OnceLock`s).
+pub(crate) struct DirectOriginPools {
+    plain: Vec<PlainHttpOriginPoolShard>,
+    https: Vec<HttpsOriginPoolShard>,
 }
 
-fn https_origin_pool() -> &'static [HttpsOriginPoolShard] {
-    static POOL: OnceLock<Vec<HttpsOriginPoolShard>> = OnceLock::new();
-    POOL.get_or_init(init_sharded_pool).as_slice()
+impl Default for DirectOriginPools {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DirectOriginPools {
+    pub(crate) fn new() -> Self {
+        Self {
+            plain: init_sharded_pool(),
+            https: init_sharded_pool(),
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        for shard in &self.plain {
+            shard
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+        }
+        for shard in &self.https {
+            shard
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+        }
+    }
+
+    pub(super) fn plain_slot(&self, key: PlainHttpOriginPoolKey) -> Arc<PlainHttpOriginSlot> {
+        typed_pool_slot(&self.plain, key, || PlainHttpOriginSlot {
+            idle: Arc::new(AsyncMutex::new(Vec::new())),
+        })
+    }
+
+    pub(super) fn https_slot(&self, key: HttpsOriginPoolKey) -> Arc<HttpsOriginSlot> {
+        typed_pool_slot(&self.https, key, || HttpsOriginSlot {
+            http1_idle: Arc::new(AsyncMutex::new(Vec::new())),
+            h2: StdMutex::new(H2PoolState::default()),
+            h2_ready: Arc::new(Notify::new()),
+            h2_rr: AtomicUsize::new(0),
+        })
+    }
 }
 
 fn init_sharded_pool<K, V>() -> Vec<RwLock<HashMap<K, Arc<V>>>> {
@@ -199,18 +240,12 @@ fn init_sharded_pool<K, V>() -> Vec<RwLock<HashMap<K, Arc<V>>>> {
         .collect()
 }
 
-fn pool_shard_idx<K: Hash>(key: &K) -> usize {
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
-    (hasher.finish() as usize) % DIRECT_ORIGIN_POOL_SHARDS
-}
-
 fn typed_pool_slot<K, V, F>(pool: &[RwLock<HashMap<K, Arc<V>>>], key: K, init: F) -> Arc<V>
 where
     K: Eq + Hash + Clone + std::fmt::Debug,
     F: FnOnce() -> V,
 {
-    let shard = &pool[pool_shard_idx(&key)];
+    let shard = &pool[qpx_http::sharding::modulo(&key, DIRECT_ORIGIN_POOL_SHARDS)];
     if let Some(slot) = shard
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -245,43 +280,13 @@ where
         .is_some_and(|slot| Arc::strong_count(slot) > 1);
     guard.remove(&key);
     let evictions = DIRECT_ORIGIN_POOL_EVICTIONS.fetch_add(1, Ordering::Relaxed) + 1;
-    counter!("qpx_direct_origin_pool_evictions_total").increment(1);
+    super::metrics::direct_origin_pool_eviction();
     warn!(
         ?key,
         evicted_active,
         evictions,
         "direct origin connection pool evicted origin slot after reaching cardinality cap"
     );
-}
-
-pub(crate) fn clear_direct_origin_connection_pools() {
-    for shard in plain_http_origin_pool() {
-        shard
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-    }
-    for shard in https_origin_pool() {
-        shard
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-    }
-}
-
-pub(super) fn plain_http_origin_slot(key: PlainHttpOriginPoolKey) -> Arc<PlainHttpOriginSlot> {
-    typed_pool_slot(plain_http_origin_pool(), key, || PlainHttpOriginSlot {
-        idle: Arc::new(AsyncMutex::new(Vec::new())),
-    })
-}
-
-pub(super) fn https_origin_slot(key: HttpsOriginPoolKey) -> Arc<HttpsOriginSlot> {
-    typed_pool_slot(https_origin_pool(), key, || HttpsOriginSlot {
-        http1_idle: Arc::new(AsyncMutex::new(Vec::new())),
-        h2: StdMutex::new(H2PoolState::default()),
-        h2_ready: Arc::new(Notify::new()),
-        h2_rr: AtomicUsize::new(0),
-    })
 }
 
 pub(super) fn plain_http_origin_pool_key(

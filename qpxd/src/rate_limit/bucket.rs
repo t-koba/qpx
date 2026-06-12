@@ -2,7 +2,7 @@
 use super::RateLimitContext;
 use super::key::{
     DEFAULT_ENTRY_TTL, KeyKind, LimiterKey, make_limiter_key, max_entries_for_key_kind,
-    shard_count_for_key_kind, shard_for_key,
+    shard_count_for_key_kind,
 };
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -135,12 +135,11 @@ pub(crate) struct RateLimiter {
 impl RateLimiter {
     pub(super) fn new(key_kind: KeyKind, capacity: f64, refill_per_sec: f64) -> Self {
         let max_entries = max_entries_for_key_kind(key_kind);
-        let ttl = DEFAULT_ENTRY_TTL;
         let shard_count = shard_count_for_key_kind(key_kind);
         debug_assert!(shard_count.is_power_of_two());
         let per_shard_max_entries = (max_entries / shard_count).max(1);
         let shards = (0..shard_count)
-            .map(|_| Mutex::new(LimiterInner::new(per_shard_max_entries, ttl)))
+            .map(|_| Mutex::new(LimiterInner::new(per_shard_max_entries, DEFAULT_ENTRY_TTL)))
             .collect::<Vec<_>>();
         Self {
             key_kind,
@@ -155,10 +154,6 @@ impl RateLimiter {
         make_limiter_key(self.key_kind, ctx)
     }
 
-    fn shard_for(&self, key: &LimiterKey) -> usize {
-        shard_for_key(key, self.shard_mask)
-    }
-
     pub(crate) fn try_acquire_with_context(
         &self,
         ctx: &RateLimitContext,
@@ -167,7 +162,7 @@ impl RateLimiter {
         let now = Instant::now();
         let cost = cost as f64;
         let key = self.make_key(ctx);
-        let shard = self.shard_for(&key);
+        let shard = qpx_http::sharding::masked(&key, self.shard_mask);
         let mut inner = self.shards[shard]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -181,7 +176,7 @@ impl RateLimiter {
         let now = Instant::now();
         let cost = cost as f64;
         let key = self.make_key(ctx);
-        let shard = self.shard_for(&key);
+        let shard = qpx_http::sharding::masked(&key, self.shard_mask);
         let mut inner = self.shards[shard]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -194,7 +189,7 @@ impl RateLimiter {
     #[cfg(test)]
     pub(super) fn test_entry_count_for_context(&self, ctx: &RateLimitContext) -> usize {
         let key = self.make_key(ctx);
-        let shard = self.shard_for(&key);
+        let shard = qpx_http::sharding::masked(&key, self.shard_mask);
         self.shards[shard]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

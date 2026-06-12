@@ -1,6 +1,7 @@
 use crate::envsubst::expand_env;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, anyhow};
 use serde_yaml::{Mapping, Value};
+use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,24 +9,64 @@ use std::path::{Path, PathBuf};
 use super::types::Config;
 use super::validate::validate_config;
 
+type Result<T> = std::result::Result<T, ConfigLoadError>;
+
+/// Error returned while loading, merging, deserializing, or validating config.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigLoadError {
+    /// No configuration paths were supplied to a multi-file loader.
+    #[error("no config files provided")]
+    NoConfigFiles,
+    /// Backend error with its original context preserved.
+    #[error(transparent)]
+    Backend(#[from] anyhow::Error),
+}
+
+impl ConfigLoadError {
+    /// Iterates this error and its source chain for user-facing diagnostics.
+    pub fn chain(&self) -> ConfigLoadErrorChain<'_> {
+        ConfigLoadErrorChain {
+            next: Some(self as &(dyn StdError + 'static)),
+        }
+    }
+}
+
+/// Iterator over a [`ConfigLoadError`] source chain.
+pub struct ConfigLoadErrorChain<'a> {
+    next: Option<&'a (dyn StdError + 'static)>,
+}
+
+impl<'a> Iterator for ConfigLoadErrorChain<'a> {
+    type Item = &'a (dyn StdError + 'static);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.next?;
+        self.next = current.source();
+        Some(current)
+    }
+}
+
+/// Loads one YAML config file, including any nested includes, and validates it.
 pub fn load_config(path: &Path) -> Result<Config> {
     let mut stack = Vec::new();
     let mut sources = Vec::new();
     let value = load_value(path, &mut stack, &mut sources)?;
-    deserialize_config_value(value, format_args!("{}", path.display()))
+    load_config_value(value, path.display())
 }
 
+/// Loads one YAML config file and returns every source file that contributed.
 pub fn load_config_with_sources(path: &Path) -> Result<(Config, Vec<PathBuf>)> {
     let mut stack = Vec::new();
     let mut sources = Vec::new();
     let value = load_value(path, &mut stack, &mut sources)?;
-    let config = deserialize_config_value(value, format_args!("{}", path.display()))?;
+    let config = load_config_value(value, path.display())?;
     Ok((config, sources))
 }
 
+/// Loads and deep-merges multiple config files in the supplied order.
 pub fn load_configs(paths: &[PathBuf]) -> Result<Config> {
     if paths.is_empty() {
-        return Err(anyhow!("no config files provided"));
+        return Err(ConfigLoadError::NoConfigFiles);
     }
 
     let mut sources = Vec::new();
@@ -36,15 +77,13 @@ pub fn load_configs(paths: &[PathBuf]) -> Result<Config> {
         merged = merge_values(merged, value);
     }
 
-    deserialize_config_value(
-        merged,
-        format_args!("merged config from {}", path_list(paths)),
-    )
+    load_config_value(merged, format!("merged config from {}", path_list(paths)))
 }
 
+/// Loads multiple config files and returns the merged config plus source list.
 pub fn load_configs_with_sources(paths: &[PathBuf]) -> Result<(Config, Vec<PathBuf>)> {
     if paths.is_empty() {
-        return Err(anyhow!("no config files provided"));
+        return Err(ConfigLoadError::NoConfigFiles);
     }
 
     let mut sources = Vec::new();
@@ -55,14 +94,12 @@ pub fn load_configs_with_sources(paths: &[PathBuf]) -> Result<(Config, Vec<PathB
         merged = merge_values(merged, value);
     }
 
-    let config = deserialize_config_value(
-        merged,
-        format_args!("merged config from {}", path_list(paths)),
-    )?;
+    let config = load_config_value(merged, format!("merged config from {}", path_list(paths)))?;
     Ok((config, sources))
 }
 
-fn deserialize_config_value(value: Value, context: fmt::Arguments<'_>) -> Result<Config> {
+/// Deserializes an already-expanded YAML value into a validated [`Config`].
+pub fn load_config_value(value: Value, context: impl fmt::Display) -> Result<Config> {
     use serde::de::IntoDeserializer;
 
     let context = context.to_string();
@@ -76,7 +113,8 @@ fn deserialize_config_value(value: Value, context: fmt::Arguments<'_>) -> Result
         return Err(anyhow!(
             "unknown config keys in {context} (fix typos to avoid unexpected defaults): {}",
             ignored.join(", ")
-        ));
+        )
+        .into());
     }
     validate_config(&config)?;
     Ok(config)
@@ -94,10 +132,7 @@ fn load_value(path: &Path, stack: &mut Vec<PathBuf>, sources: &mut Vec<PathBuf>)
     let canonical =
         fs::canonicalize(path).with_context(|| format!("config not found: {}", path.display()))?;
     if stack.contains(&canonical) {
-        return Err(anyhow!(
-            "config include loop detected at {}",
-            canonical.display()
-        ));
+        return Err(anyhow!("config include loop detected at {}", canonical.display()).into());
     }
     if !sources.contains(&canonical) {
         sources.push(canonical.clone());
@@ -119,7 +154,7 @@ fn load_value(path: &Path, stack: &mut Vec<PathBuf>, sources: &mut Vec<PathBuf>)
         for inc in include_list {
             let inc_path = match inc {
                 Value::String(s) => canonical.parent().unwrap_or(Path::new(".")).join(s),
-                _ => return Err(anyhow!("include entries must be strings")),
+                _ => return Err(anyhow!("include entries must be strings").into()),
             };
             let inc_value = load_value(&inc_path, stack, sources)?;
             merged = merge_values(merged, inc_value);

@@ -1,7 +1,7 @@
-use crate::http::body::Body;
 use anyhow::{Context, Result, anyhow};
 use hyper::{Method, Request, Response, StatusCode};
 use qpx_core::config::FtpConfig;
+use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -22,6 +22,10 @@ mod tests;
 use control::{FtpDeadline, ensure_safe_ftp_path, open_list_with_mode_fallback};
 use get_put::{open_get_file_with_mode_fallback, put_file_with_mode_fallback};
 use transfer::{FtpResponseTransform, spawn_ftp_response_body};
+
+pub(crate) fn fuzz_parse_ftp_response_parser(bytes: &[u8]) {
+    control::fuzz_parse_ftp_response_parser(bytes);
+}
 
 #[derive(Debug, Error)]
 #[error("ftp request body exceeds configured limit: {0} bytes")]

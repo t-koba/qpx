@@ -1,10 +1,10 @@
 use super::HttpModuleContext;
-use crate::http::body::Body;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use http::StatusCode;
 use hyper::{Request, Response};
 use qpx_core::config::HttpModuleConfig;
+use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub trait HttpModuleFactory: Send + Sync {
@@ -78,6 +78,42 @@ pub enum BodyAccess {
     Streaming,
 }
 
+impl BodyAccess {
+    pub fn mode_label(self) -> &'static str {
+        match self {
+            Self::HeadersOnly => "headers_only",
+            Self::Streaming => "stream_transform",
+            Self::RequestBodyBuffered { .. } => "request_buffer_inspect",
+            Self::ResponseBodyBuffered { .. } => "response_buffer_inspect",
+            Self::RequestAndResponseBodyBuffered { .. } => "request_and_response_buffer_inspect",
+        }
+    }
+
+    pub fn streaming_safe(self) -> bool {
+        matches!(self, Self::HeadersOnly | Self::Streaming)
+    }
+
+    pub fn request_buffer_bytes(self) -> Option<usize> {
+        match self {
+            Self::RequestBodyBuffered { max_bytes } => Some(max_bytes),
+            Self::RequestAndResponseBodyBuffered {
+                max_request_bytes, ..
+            } => Some(max_request_bytes),
+            _ => None,
+        }
+    }
+
+    pub fn response_buffer_bytes(self) -> Option<usize> {
+        match self {
+            Self::ResponseBodyBuffered { max_bytes } => Some(max_bytes),
+            Self::RequestAndResponseBodyBuffered {
+                max_response_bytes, ..
+            } => Some(max_response_bytes),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HttpModuleCapabilities {
     pub stages: ModuleStages,
@@ -129,7 +165,6 @@ impl Default for HttpModuleCapabilities {
 
 fn merge_body_access(left: BodyAccess, right: BodyAccess) -> BodyAccess {
     match (left, right) {
-        (BodyAccess::Streaming, _) | (_, BodyAccess::Streaming) => BodyAccess::Streaming,
         (
             BodyAccess::RequestAndResponseBodyBuffered {
                 max_request_bytes,
@@ -188,7 +223,51 @@ fn merge_body_access(left: BodyAccess, right: BodyAccess) -> BodyAccess {
         ) => BodyAccess::ResponseBodyBuffered {
             max_bytes: left.max(right),
         },
+        (BodyAccess::Streaming, BodyAccess::HeadersOnly)
+        | (BodyAccess::HeadersOnly, BodyAccess::Streaming)
+        | (BodyAccess::Streaming, BodyAccess::Streaming) => BodyAccess::Streaming,
+        (BodyAccess::Streaming, other) | (other, BodyAccess::Streaming) => other,
         (BodyAccess::HeadersOnly, other) | (other, BodyAccess::HeadersOnly) => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BodyAccess, merge_body_access};
+
+    #[test]
+    fn streaming_body_access_does_not_hide_buffering_access() {
+        assert_eq!(
+            merge_body_access(
+                BodyAccess::Streaming,
+                BodyAccess::RequestBodyBuffered { max_bytes: 1024 }
+            ),
+            BodyAccess::RequestBodyBuffered { max_bytes: 1024 }
+        );
+        assert_eq!(
+            merge_body_access(
+                BodyAccess::ResponseBodyBuffered { max_bytes: 2048 },
+                BodyAccess::Streaming
+            ),
+            BodyAccess::ResponseBodyBuffered { max_bytes: 2048 }
+        );
+    }
+
+    #[test]
+    fn body_access_exposes_mode_and_streaming_safety() {
+        assert_eq!(BodyAccess::HeadersOnly.mode_label(), "headers_only");
+        assert!(BodyAccess::HeadersOnly.streaming_safe());
+        assert_eq!(BodyAccess::Streaming.mode_label(), "stream_transform");
+        assert!(BodyAccess::Streaming.streaming_safe());
+
+        let buffered = BodyAccess::RequestAndResponseBodyBuffered {
+            max_request_bytes: 1024,
+            max_response_bytes: 2048,
+        };
+        assert_eq!(buffered.mode_label(), "request_and_response_buffer_inspect");
+        assert!(!buffered.streaming_safe());
+        assert_eq!(buffered.request_buffer_bytes(), Some(1024));
+        assert_eq!(buffered.response_buffer_bytes(), Some(2048));
     }
 }
 

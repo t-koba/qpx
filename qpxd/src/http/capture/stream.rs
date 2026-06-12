@@ -1,7 +1,8 @@
 use crate::exporter::ExportSession;
-use crate::http::body::{Body, Sender};
+use crate::runtime::ExecutionPlan;
 use bytes::Bytes;
 use hyper::{Request, Response};
+use qpx_http::body::{Body, Sender};
 use tokio::time::{Duration, timeout};
 
 pub(crate) fn sample_request_body_for_export(
@@ -54,6 +55,41 @@ pub(crate) fn capture_request_body_for_export(
     Request::from_parts(parts, body)
 }
 
+pub(crate) async fn emit_request_for_export(
+    mut request: Request<Body>,
+    plan: &ExecutionPlan,
+    session: Option<&ExportSession>,
+    client_to_server: bool,
+) -> Request<Body> {
+    let Some(session) = session else {
+        return request;
+    };
+    let preview = crate::exporter::serialize_request_preview_async(&request).await;
+    session.emit_plaintext(client_to_server, &preview);
+    let capacity = plan.streaming.body_channel_capacity;
+    let timeout = Duration::from_millis(plan.streaming.body_read_timeout_ms);
+    if let Some(sample_bytes) = plan.capture_stream_sample_bytes() {
+        request = sample_request_body_for_export(
+            request,
+            sample_bytes,
+            capacity,
+            timeout,
+            session.clone(),
+            client_to_server,
+        );
+    } else if let Some(max_capture_bytes) = plan.capture_full_body_bytes() {
+        request = capture_request_body_for_export(
+            request,
+            max_capture_bytes,
+            capacity,
+            timeout,
+            session.clone(),
+            client_to_server,
+        );
+    }
+    request
+}
+
 pub(crate) fn sample_response_body_for_export(
     response: Response<Body>,
     sample_bytes: usize,
@@ -100,6 +136,62 @@ pub(crate) fn capture_response_body_for_export(
         .await;
     });
     Response::from_parts(parts, body)
+}
+
+pub(crate) async fn emit_response_for_export(
+    mut response: Response<Body>,
+    plan: &ExecutionPlan,
+    session: &ExportSession,
+) -> Response<Body> {
+    let preview = crate::exporter::serialize_response_preview_async(&response).await;
+    session.emit_plaintext(false, &preview);
+    if let Some(sample_bytes) = plan.capture_stream_sample_bytes() {
+        response = sample_response_body_for_export(
+            response,
+            sample_bytes,
+            plan.streaming.body_channel_capacity,
+            Duration::from_millis(plan.streaming.body_read_timeout_ms),
+            session.clone(),
+        );
+    } else if let Some(max_capture_bytes) = plan.capture_full_body_bytes() {
+        response = capture_response_body_for_export(
+            response,
+            max_capture_bytes,
+            plan.streaming.body_channel_capacity,
+            Duration::from_millis(plan.streaming.body_read_timeout_ms),
+            session.clone(),
+        );
+    }
+    limit_response_body_for_plan(response, plan)
+}
+
+pub(crate) async fn emit_optional_response_for_export(
+    response: Response<Body>,
+    plan: &ExecutionPlan,
+    session: Option<&ExportSession>,
+) -> Response<Body> {
+    match session {
+        Some(session) => emit_response_for_export(response, plan, session).await,
+        None => limit_response_body_for_plan(response, plan),
+    }
+}
+
+pub(crate) fn limit_response_body_for_plan(
+    response: Response<Body>,
+    plan: &ExecutionPlan,
+) -> Response<Body> {
+    let max_bytes = plan.streaming.max_response_body_bytes;
+    let (mut parts, body) = response.into_parts();
+    if let Some(len) = parts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        && len > max_bytes
+    {
+        parts.headers.remove(http::header::CONTENT_LENGTH);
+    }
+    Response::from_parts(parts, body.limit_bytes(max_bytes))
 }
 
 async fn copy_body_with_sample(
@@ -251,7 +343,7 @@ mod tests {
         let mut req =
             sample_request_body_for_export(req, 3, 1, Duration::from_secs(1), session, true);
 
-        let body = crate::http::body::to_bytes(req.body_mut())
+        let body = qpx_http::body::to_bytes(req.body_mut())
             .await
             .expect("body");
         assert_eq!(body.as_ref(), b"abcdef");
@@ -285,7 +377,7 @@ mod tests {
         let mut response =
             sample_response_body_for_export(response, 4, 1, Duration::from_secs(1), session);
 
-        let body = crate::http::body::to_bytes(response.body_mut())
+        let body = qpx_http::body::to_bytes(response.body_mut())
             .await
             .expect("body");
         assert_eq!(body.as_ref(), b"response-body");
@@ -319,7 +411,7 @@ mod tests {
         let mut req =
             capture_request_body_for_export(req, 4, 1, Duration::from_secs(1), session, true);
 
-        let body = crate::http::body::to_bytes(req.body_mut())
+        let body = qpx_http::body::to_bytes(req.body_mut())
             .await
             .expect("body");
         assert_eq!(body.as_ref(), b"abcdef");
@@ -353,7 +445,7 @@ mod tests {
         let mut response =
             capture_response_body_for_export(response, 8, 1, Duration::from_secs(1), session);
 
-        let body = crate::http::body::to_bytes(response.body_mut())
+        let body = qpx_http::body::to_bytes(response.body_mut())
             .await
             .expect("body");
         assert_eq!(body.as_ref(), b"response-body");

@@ -11,42 +11,72 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 use tracing::Level;
 
+/// Static access-log identity for a listener or proxy surface.
 #[derive(Debug, Clone)]
 pub struct AccessLogContext {
+    /// Proxy kind emitted in logs and tracing spans.
     pub kind: &'static str,
+    /// Listener or route-facing name emitted in logs and tracing spans.
     pub name: Arc<str>,
 }
 
+/// Per-request identity and policy fields attached to responses for logging.
 #[derive(Debug, Clone, Default)]
 pub struct RequestLogContext {
+    /// Authenticated subject.
     pub subject: Option<String>,
+    /// Authenticated groups.
     pub groups: Vec<String>,
+    /// Device identifier.
     pub device_id: Option<String>,
+    /// Device or session posture labels.
     pub posture: Vec<String>,
+    /// Tenant identifier.
     pub tenant: Option<String>,
+    /// Authentication strength label.
     pub auth_strength: Option<String>,
+    /// Identity provider label.
     pub idp: Option<String>,
+    /// Source of identity material.
     pub identity_source: Option<String>,
+    /// Policy tags associated with the decision.
     pub policy_tags: Vec<String>,
+    /// External authorization policy identifier.
     pub ext_authz_policy_id: Option<String>,
+    /// Matched forward rule.
     pub matched_rule: Option<String>,
+    /// Matched reverse route.
     pub matched_route: Option<String>,
+    /// Destination trace string.
     pub destination_trace: Option<String>,
 }
 
+/// Per-request RPC fields attached to responses for logging.
 #[derive(Debug, Clone, Default)]
 pub struct RpcLogContext {
+    /// RPC protocol name.
     pub protocol: Option<String>,
+    /// RPC service name.
     pub service: Option<String>,
+    /// RPC method name.
     pub method: Option<String>,
+    /// RPC streaming mode.
     pub streaming: Option<String>,
+    /// RPC status code or label.
     pub status: Option<String>,
+    /// Last observed RPC message size.
     pub message_size: Option<u64>,
+    /// Last observed RPC message text.
     pub message: Option<String>,
+    /// Request message count.
     pub request_message_count: Option<usize>,
+    /// Response message count.
     pub response_message_count: Option<usize>,
+    /// Request message byte count.
     pub request_message_bytes: Option<u64>,
+    /// Response message byte count.
     pub response_message_bytes: Option<u64>,
+    /// RPC stream duration in milliseconds.
     pub stream_duration_ms: Option<u64>,
 }
 
@@ -58,6 +88,7 @@ fn joined_or_empty(values: &[String]) -> Cow<'_, str> {
     }
 }
 
+/// Request handler wrapper that emits access logs and tracing spans.
 #[derive(Debug, Clone)]
 pub struct AccessLogService<S> {
     inner: S,
@@ -69,6 +100,7 @@ pub struct AccessLogService<S> {
 }
 
 impl<S> AccessLogService<S> {
+    /// Creates an access-log wrapper around an inner handler.
     pub fn new(
         inner: S,
         remote_addr: SocketAddr,
@@ -96,6 +128,7 @@ impl<S> AccessLogService<S> {
     }
 }
 
+/// Future returned by [`AccessLogService`].
 #[derive(Debug)]
 pub struct AccessLogFuture<F> {
     inner: F,
@@ -125,11 +158,13 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let span = {
+            // SAFETY: `AccessLogFuture` is pinned, and accessing the non-pinned span field
+            // does not move the pinned `inner` future.
             let this = unsafe { self.as_mut().get_unchecked_mut() };
             this.span.clone()
         };
 
-        // Safety: we never move `inner` after being pinned.
+        // SAFETY: we never move `inner` after being pinned.
         let inner = unsafe { self.as_mut().map_unchecked_mut(|s| &mut s.inner) };
         let entered = span.as_ref().map(|span| span.enter());
         let polled = inner.poll(cx);
@@ -137,6 +172,8 @@ where
 
         match polled {
             Poll::Ready(result) => {
+                // SAFETY: polling is complete, and mutating bookkeeping fields does not move
+                // the pinned `inner` future.
                 let this = unsafe { self.as_mut().get_unchecked_mut() };
                 if let Some(span) = span.as_ref() {
                     use opentelemetry::trace::Status;
@@ -192,16 +229,14 @@ where
                             Some("grpc" | "grpc_web" | "connect")
                         )
                     {
-                        metrics::histogram!(
-                            "qpx_grpc_stream_duration_seconds",
-                            "listener" => snapshot.name.to_string(),
-                            "protocol" => rpc.protocol.clone().unwrap_or_default(),
-                            "streaming" => rpc
-                                .streaming
+                        crate::metrics::grpc_stream_duration_seconds(
+                            snapshot.name.as_ref(),
+                            rpc.protocol.clone().unwrap_or_default(),
+                            rpc.streaming
                                 .clone()
-                                .unwrap_or_else(|| "unknown".to_string())
-                        )
-                        .record(elapsed.as_secs_f64());
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            elapsed.as_secs_f64(),
+                        );
                     }
                     let bytes_out = resp
                         .headers()

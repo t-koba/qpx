@@ -13,7 +13,9 @@ use format::AccessLogCombinedFormat;
 use security::{ensure_private_log_dir, reject_symlink_path};
 
 use super::tracing_support::{OtelGuard, build_otel_layer};
+use crate::ObservabilityResult;
 
+/// Guards that keep non-blocking logging workers alive.
 #[derive(Debug)]
 pub struct LogGuards {
     _access: Option<tracing_appender::non_blocking::WorkerGuard>,
@@ -21,7 +23,17 @@ pub struct LogGuards {
     _otel: Option<OtelGuard>,
 }
 
+/// Initializes system, access, audit, and optional OpenTelemetry logging.
 pub fn init_logging(
+    system: &SystemLogConfig,
+    access: &AccessLogConfig,
+    audit: &AuditLogConfig,
+    otel: Option<&OtelConfig>,
+) -> ObservabilityResult<LogGuards> {
+    init_logging_inner(system, access, audit, otel).map_err(Into::into)
+}
+
+fn init_logging_inner(
     system: &SystemLogConfig,
     access: &AccessLogConfig,
     audit: &AuditLogConfig,

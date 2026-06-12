@@ -1,10 +1,10 @@
-use crate::http::body::Body;
-use crate::tls::CompiledUpstreamTlsTrust;
-use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::origin::OriginEndpoint;
 use anyhow::{Result, anyhow};
 use hyper::header::HOST;
 use hyper::{Request, StatusCode, Uri};
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_http::body::Body;
+use qpx_http::tls::client::connect_tls_http1_with_options;
 use tokio::net::TcpStream;
 use url::Url;
 
@@ -55,7 +55,7 @@ async fn probe_http(
 
 async fn probe_http_plain(
     origin: &OriginEndpoint,
-    url: &Url,
+    _url: &Url,
     cfg: &HttpHealthCheckRuntime,
 ) -> Result<()> {
     let connect_authority = origin.connect_authority(80)?;
@@ -85,24 +85,22 @@ async fn probe_http_plain(
         .uri(Uri::builder().path_and_query(cfg.path.as_ref()).build()?)
         .header(HOST, host_header.as_str())
         .body(Body::empty())?;
-    let _ = url;
     let resp = sender.send_request(req).await?;
     validate_probe_status(resp.status(), cfg)
 }
 
 async fn probe_http_tls(
     origin: &OriginEndpoint,
-    url: &Url,
+    _url: &Url,
     cfg: &HttpHealthCheckRuntime,
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<()> {
-    let _ = url;
     let authority = origin.host_header_authority(443)?;
     let addr = origin.connect_authority(443)?;
     let server_name = origin.tls_server_name()?;
     let tcp = TcpStream::connect(addr).await?;
     let tls = connect_tls_http1_with_options(server_name.as_str(), tcp, true, trust).await?;
-    let (mut sender, conn) = crate::http::protocol::common::handshake_http1(tls).await?;
+    let (mut sender, conn) = qpx_http::protocol::common::handshake_http1(tls).await?;
     tokio::spawn(async move {
         let _ = conn.await;
     });

@@ -1,6 +1,5 @@
-mod response;
+pub(crate) mod response;
 
-use crate::http::body::Body;
 use crate::http::body::observation::RequestObservationPlan;
 use crate::http::body::size::{is_observed_body_limit_exceeded, limit_request_body};
 use crate::http::policy::guard::CompiledHttpGuardProfile;
@@ -12,6 +11,7 @@ use anyhow::Result;
 use hyper::{Method, Request, Response};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_core::rules::RuleEngine;
+use qpx_http::body::Body;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,6 +59,14 @@ pub(crate) async fn prepare_dispatch_request(
             .is_some_and(|profile| profile.requires_request_body_buffering(&input.req)),
         "http_guard.body",
     );
+    let too_large_response = || {
+        response::request_body_too_large_response(
+            input.request_method,
+            input.request_version,
+            input.proxy_name,
+            None,
+        )
+    };
     let req = match observation_plan
         .observe_request(
             input.req,
@@ -69,11 +77,7 @@ pub(crate) async fn prepare_dispatch_request(
     {
         Ok(req) => req,
         Err(err) if is_observed_body_limit_exceeded(&err) => {
-            return Ok(Err(response::request_body_too_large_response(
-                input.request_method,
-                input.request_version,
-                input.proxy_name,
-            )?));
+            return Ok(Err(too_large_response()?));
         }
         Err(err) => return Err(err),
     };
@@ -84,11 +88,7 @@ pub(crate) async fn prepare_dispatch_request(
         match limit_request_body(req, limit) {
             Ok(req) => req,
             Err(err) if is_observed_body_limit_exceeded(&err) => {
-                return Ok(Err(response::request_body_too_large_response(
-                    input.request_method,
-                    input.request_version,
-                    input.proxy_name,
-                )?));
+                return Ok(Err(too_large_response()?));
             }
             Err(err) => return Err(err),
         }

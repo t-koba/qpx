@@ -6,6 +6,7 @@ mod unix {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {
+        // SAFETY: fcntl with F_GETFD only reads descriptor flags for a valid fd supplied by caller.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         if flags < 0 {
             return Err(anyhow!(
@@ -18,6 +19,7 @@ mod unix {
         } else {
             flags & !libc::FD_CLOEXEC
         };
+        // SAFETY: fd is valid and next is derived from existing descriptor flags.
         if unsafe { libc::fcntl(fd, libc::F_SETFD, next) } < 0 {
             return Err(anyhow!(
                 "failed to set fd flags: {}",
@@ -28,6 +30,7 @@ mod unix {
     }
 
     fn duplicate_raw_fd(fd: i32, cloexec: bool) -> Result<OwnedFd> {
+        // SAFETY: dup duplicates a valid fd; ownership of the returned fd is handled below.
         let duplicated = unsafe { libc::dup(fd) };
         if duplicated < 0 {
             return Err(anyhow!(
@@ -36,10 +39,12 @@ mod unix {
             ));
         }
         set_cloexec(duplicated, cloexec)?;
+        // SAFETY: duplicated was returned by dup and is uniquely owned here.
         Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
     }
 
     pub(crate) fn adopt_inherited_udp_socket(fd: i32) -> Result<std::net::UdpSocket> {
+        // SAFETY: fd is transferred by the parent handoff manifest and is uniquely adopted here.
         let socket = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
         socket
             .set_nonblocking(true)
@@ -53,6 +58,7 @@ mod unix {
         socket: &std::net::UdpSocket,
     ) -> Result<std::net::UdpSocket> {
         let duplicated = duplicate_raw_fd(socket.as_raw_fd(), true)?;
+        // SAFETY: duplicated.into_raw_fd transfers unique ownership to UdpSocket.
         let socket = unsafe { std::net::UdpSocket::from_raw_fd(duplicated.into_raw_fd()) };
         socket
             .set_nonblocking(true)
@@ -65,6 +71,7 @@ mod unix {
         socket: &tokio::net::UdpSocket,
     ) -> Result<std::net::UdpSocket> {
         let duplicated = duplicate_raw_fd(socket.as_raw_fd(), true)?;
+        // SAFETY: duplicated.into_raw_fd transfers unique ownership to UdpSocket.
         let socket = unsafe { std::net::UdpSocket::from_raw_fd(duplicated.into_raw_fd()) };
         socket
             .set_nonblocking(true)

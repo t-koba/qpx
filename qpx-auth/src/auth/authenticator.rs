@@ -1,6 +1,5 @@
 #[cfg(feature = "ldap-auth")]
 use anyhow::Context;
-use anyhow::Result;
 #[cfg(any(not(feature = "ldap-auth"), not(feature = "digest-auth")))]
 use anyhow::anyhow;
 #[cfg(feature = "basic-auth")]
@@ -20,7 +19,6 @@ use qpx_core::config::{AuthConfig, CaptureRedactionConfig};
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use qpx_core::redaction::redact_uri_query_keys;
 
-use super::Authenticator;
 #[cfg(feature = "ldap-auth")]
 use super::LdapAuthenticator;
 #[cfg(feature = "ldap-auth")]
@@ -33,12 +31,13 @@ use super::digest::{
 };
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use super::local::LocalUserEntry;
-#[cfg(feature = "basic-auth")]
-use super::util::constant_time_eq_bytes;
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use super::util::escape_quoted_header_value;
+#[cfg(feature = "basic-auth")]
+use super::util::{constant_time_eq_digest, sha256_digest};
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use super::{AuthChallenge, AuthOutcome, AuthenticatedUser};
+use super::{AuthResult, Authenticator};
 
 #[cfg(feature = "digest-auth")]
 enum DigestAuthResult {
@@ -48,15 +47,17 @@ enum DigestAuthResult {
 }
 
 impl Authenticator {
-    pub fn new(config: &AuthConfig, realm: &str) -> Result<Self> {
+    /// Builds an authenticator from config and realm.
+    pub fn new(config: &AuthConfig, realm: &str) -> AuthResult<Self> {
         Self::new_with_audit_redaction(config, realm, &CaptureRedactionConfig::default().query_keys)
     }
 
+    /// Builds an authenticator with explicit audit URI redaction keys.
     pub fn new_with_audit_redaction(
         config: &AuthConfig,
         realm: &str,
         audit_redact_query_keys: &[String],
-    ) -> Result<Self> {
+    ) -> AuthResult<Self> {
         #[cfg(not(any(feature = "basic-auth", feature = "digest-auth")))]
         let _ = audit_redact_query_keys;
         #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
@@ -83,7 +84,8 @@ impl Authenticator {
         if config.ldap.is_some() {
             return Err(anyhow!(
                 "LDAP auth support is not enabled in this build (enable qpx-auth/ldap-auth-*)"
-            ));
+            )
+            .into());
         }
         #[cfg(not(feature = "digest-auth"))]
         if config
@@ -93,7 +95,8 @@ impl Authenticator {
         {
             return Err(anyhow!(
                 "Digest auth support is not enabled in this build (enable qpx-auth/digest-auth)"
-            ));
+            )
+            .into());
         }
 
         Ok(Self {
@@ -111,6 +114,7 @@ impl Authenticator {
         })
     }
 
+    /// Returns the authentication realm.
     pub fn realm(&self) -> &str {
         &self.realm
     }
@@ -133,6 +137,7 @@ impl Authenticator {
         Some(rest.trim_start_matches(|c: char| c.is_ascii_whitespace()))
     }
 
+    /// Authenticates one proxy request.
     #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
     pub async fn authenticate_proxy(
         &self,
@@ -141,7 +146,7 @@ impl Authenticator {
         required_providers: &[String],
         method: &str,
         uri: &str,
-    ) -> Result<AuthOutcome> {
+    ) -> AuthResult<AuthOutcome> {
         if required_providers.is_empty() {
             return Ok(AuthOutcome::Allowed(AuthenticatedUser {
                 username: "anonymous".to_string(),
@@ -284,7 +289,7 @@ impl Authenticator {
         &self,
         payload: &str,
         required_providers: &[String],
-    ) -> Result<Option<AuthenticatedUser>> {
+    ) -> AuthResult<Option<AuthenticatedUser>> {
         let decoded = match BASE64.decode(payload) {
             Ok(decoded) => decoded,
             Err(_) => return Ok(None),
@@ -300,16 +305,25 @@ impl Authenticator {
             return Ok(None);
         }
 
-        if required_providers.iter().any(|p| p == "local")
-            && let Some(entry) = self.local.get(username)
-            && let Some(stored) = &entry.password
-            && constant_time_eq_bytes(stored.as_bytes(), password.as_bytes())
-        {
-            return Ok(Some(AuthenticatedUser {
-                username: username.to_string(),
-                groups: Vec::new(),
-                provider: "local".to_string(),
-            }));
+        if required_providers.iter().any(|p| p == "local") {
+            const DUMMY_LOCAL_PASSWORD_DIGEST: [u8; 32] = [
+                0x34, 0x7c, 0x3b, 0xa5, 0x45, 0x25, 0xb0, 0xe6, 0x71, 0xa9, 0x2b, 0xb1, 0x9c, 0xc4,
+                0x65, 0x8c, 0x67, 0xc0, 0x58, 0x69, 0x7b, 0x65, 0x67, 0x10, 0xbc, 0xf2, 0xd3, 0x9e,
+                0x08, 0x5d, 0xd7, 0x37,
+            ];
+            let entry = self.local.get(username);
+            let stored = entry
+                .and_then(|entry| entry.password_digest.as_ref())
+                .map(|digest| &digest.0)
+                .unwrap_or(&DUMMY_LOCAL_PASSWORD_DIGEST);
+            let candidate = sha256_digest(password.as_bytes());
+            if constant_time_eq_digest(stored, &candidate) && entry.is_some() {
+                return Ok(Some(AuthenticatedUser {
+                    username: username.to_string(),
+                    groups: Vec::new(),
+                    provider: "local".to_string(),
+                }));
+            }
         }
 
         #[cfg(feature = "ldap-auth")]
@@ -339,7 +353,12 @@ impl Authenticator {
     }
 
     #[cfg(feature = "digest-auth")]
-    fn verify_digest(&self, payload: &str, method: &str, uri: &str) -> Result<DigestAuthResult> {
+    fn verify_digest(
+        &self,
+        payload: &str,
+        method: &str,
+        uri: &str,
+    ) -> AuthResult<DigestAuthResult> {
         let Some(params) = parse_digest(payload) else {
             return Ok(DigestAuthResult::Invalid);
         };
@@ -386,13 +405,7 @@ impl Authenticator {
         let ha1 = entry
             .digest_ha1_sha256
             .as_ref()
-            .cloned()
-            .or_else(|| {
-                entry
-                    .password
-                    .as_ref()
-                    .map(|p| sha256_hex(format!("{}:{}:{}", username, self.realm, p).as_bytes()))
-            })
+            .map(|ha1| ha1.0.clone())
             .ok_or_else(|| anyhow::anyhow!("missing ha1/password for digest user"))?;
         let ha1 = match algo {
             DigestAlgorithm::Sha256 => ha1,
@@ -421,7 +434,7 @@ impl Authenticator {
     }
 
     #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
-    fn build_challenge(&self, stale: bool) -> Result<AuthChallenge> {
+    fn build_challenge(&self, stale: bool) -> AuthResult<AuthChallenge> {
         let mut headers = Vec::new();
         let escaped_realm = escape_quoted_header_value(self.realm.as_str());
         #[cfg(feature = "basic-auth")]

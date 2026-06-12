@@ -3,14 +3,7 @@ use tokio::time::{Duration, Instant, timeout};
 
 const MAX_CLIENT_HELLO_PEEK_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TlsClientHelloInfo {
-    pub sni: Option<String>,
-    pub alpn: Option<String>,
-    pub tls_version: Option<String>,
-    pub ja3: Option<String>,
-    pub ja4: Option<String>,
-}
+pub(crate) use qpx_core::tls::TlsClientHelloInfo;
 
 pub(crate) async fn read_client_hello_with_timeout<R>(
     stream: &mut R,

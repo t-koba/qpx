@@ -1,8 +1,8 @@
-use crate::http::body::Sender;
 use crate::http3::stream_limits::timeout_or_deadline;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
+use qpx_http::body::Sender;
 use tokio::time::{Duration, Instant};
 
 pub(crate) struct QpxRequestBodyRelayOptions<'a> {
@@ -37,13 +37,13 @@ enum QpxRequestBodyReader<'a> {
 impl QpxRequestBodyReader<'_> {
     async fn recv_data(&mut self) -> Result<Option<Bytes>> {
         match self {
-            Self::Recv(stream) => stream.recv_data().await,
+            Self::Recv(stream) => stream.recv_data().await.map_err(Into::into),
         }
     }
 
     async fn recv_trailers(&mut self) -> Result<Option<HeaderMap>> {
         match self {
-            Self::Recv(stream) => stream.recv_trailers().await,
+            Self::Recv(stream) => stream.recv_trailers().await.map_err(Into::into),
         }
     }
 
@@ -171,7 +171,7 @@ async fn relay_qpx_request_body_observed_inner(
         }
     };
     if let Some(trailers) = trailers {
-        if let Err(err) = crate::http::protocol::semantics::validate_request_trailers(&trailers) {
+        if let Err(err) = qpx_http::protocol::semantics::validate_request_trailers(&trailers) {
             sender.abort();
             req_stream.abort_message_stream();
             return Err(anyhow!("invalid qpx-h3 request trailers: {err}"));

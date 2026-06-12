@@ -2,13 +2,13 @@ pub mod guard;
 pub mod response_policy;
 pub mod rule_context;
 
-use crate::http::body::Body;
-use crate::http::local_response::build_local_response;
-use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
+use crate::http::local_response::finalized_local_response;
+use crate::http::protocol::l7::finalize_response_for_request;
 use anyhow::{Result, anyhow};
 use hyper::{Method, Response, Version};
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::{CompiledHeaderControl, RuleEngine, RuleMatchContext};
+use qpx_http::body::Body;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -56,14 +56,13 @@ pub(crate) fn evaluate_listener_policy(
             .as_ref()
             .ok_or_else(|| anyhow!("respond action requires local_response"))?;
         return Ok(ListenerPolicyDecision::Early(
-            Box::new(finalize_response_with_headers(
+            Box::new(finalized_local_response(
                 method,
                 version,
                 proxy_name,
-                build_local_response(local)?,
+                local,
                 outcome.headers.map(|h| h.as_ref()),
-                false,
-            )),
+            )?),
             matched_rule,
         ));
     }

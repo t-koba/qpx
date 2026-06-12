@@ -1,9 +1,9 @@
-use crate::http::body::Body;
 use crate::reverse::router::normalize_host_for_match;
 use anyhow::{Result, anyhow};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use hyper::Request;
 use qpx_core::config::ReverseEdgeConfig;
+use qpx_http::body::Body;
 
 #[derive(Clone)]
 pub(crate) struct ReverseTlsHostPolicy {

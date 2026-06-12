@@ -1,12 +1,10 @@
 use super::super::HostPort;
-use crate::cache::CacheRequestKey;
-use crate::http::body::Body;
 use crate::http::dispatch::DispatchAuditContext;
-#[cfg(feature = "auth-basic")]
-use crate::http::dispatch::DispatchError;
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
-use hyper::{Method, Request, Response};
+use hyper::{Method, Request};
+use qpx_http::body::Body;
+use qpxd_cache::CacheRequestKey;
 use std::sync::Arc;
 use tokio::time::Duration;
 
@@ -23,12 +21,8 @@ pub(super) struct ForwardPreparedMode {
     pub(super) is_ftp_request: bool,
 }
 
-pub(super) enum ForwardPolicyOutcome {
-    #[cfg(feature = "auth-basic")]
-    Rejected(DispatchError),
-    Allow(Box<ForwardAllowedPolicy>),
-    Observe(qpx_core::rules::CandidateRequestObservationRequirements),
-}
+pub(super) type ForwardPolicyOutcome =
+    crate::http::pipeline::PolicyStage<Box<ForwardAllowedPolicy>>;
 
 pub(super) struct ForwardAllowedPolicy {
     pub(super) action: qpx_core::config::ActionConfig,
@@ -37,30 +31,8 @@ pub(super) struct ForwardAllowedPolicy {
     pub(super) identity: crate::policy_context::ResolvedIdentity,
 }
 
-pub(super) type ForwardAccessOutcome = crate::http::pipeline::AccessOutcome<ForwardAccess>;
-
-pub(super) struct ForwardAccess {
-    pub(super) action: qpx_core::config::ActionConfig,
-    pub(super) headers: Option<Arc<qpx_core::rules::CompiledHeaderControl>>,
-    pub(super) cache_policy: Option<qpx_core::config::CachePolicyConfig>,
-    pub(super) timeout_override: Option<Duration>,
-    pub(super) audit: DispatchAuditContext,
-}
-
-pub(super) enum ForwardResponsePolicyOutcome {
-    Response(Response<Body>),
-    Continue {
-        response: Response<Body>,
-        headers: Option<Arc<qpx_core::rules::CompiledHeaderControl>>,
-        cache_policy: Option<qpx_core::config::CachePolicyConfig>,
-        policy_tags: Vec<String>,
-    },
-}
-
-pub(super) enum ForwardDispatchPrepareOutcome {
-    Response(Box<Response<Body>>),
-    Ready(Box<ForwardDispatchReady>),
-}
+pub(super) type ForwardDispatchPrepareOutcome =
+    crate::http::pipeline::PrepareOutcome<ForwardDispatchReady>;
 
 pub(super) struct ForwardDispatchReady {
     pub(super) req: Request<Body>,

@@ -1,24 +1,18 @@
 use super::destination::classify_reverse_destination;
 use super::mirrors::{record_reverse_upstream_status, request_seed};
-use super::request_template::ReverseRequestTemplate;
-use super::response_rules::apply_response_rules;
-use super::{
-    ResponseRuleDecision, ReverseConnInfo, ReverseInterimResponses, empty_interim_response,
-};
-use crate::http::body::Body;
-use crate::http::dispatch::{
-    DispatchAuditContext, annotate_dispatch_response, record_response_policy_action,
-};
+use super::request_template::{ReverseReplayRecorder, ReverseRequestTemplate};
+use super::{InterimList, ReverseConnInfo, empty_interim_response};
+use crate::http::dispatch::{DispatchResponsePolicyOutcome, annotated_max_forwards_response};
 use crate::http::protocol::base_fields::BaseRequestFields;
-use crate::http::protocol::l7::{finalize_response_with_headers, handle_max_forwards_in_place};
 use crate::http::protocol::websocket::is_websocket_upgrade;
 use crate::ipc_client::proxy_ipc;
 use crate::reverse::ReloadableReverse;
 use crate::reverse::router::HttpRoute;
 use crate::runtime::Runtime;
-use crate::upstream::origin::{OriginEndpoint, proxy_http, proxy_http_with_interim};
+use crate::upstream::origin::{OriginEndpoint, proxy_http, proxy_http_with_interim_timeout};
 use anyhow::{Result, anyhow};
 use hyper::{Request, Response};
+use qpx_http::body::Body;
 use tokio::time::{Duration, timeout};
 use url::Url;
 
@@ -31,13 +25,28 @@ mod outcome;
 mod prepare;
 mod types;
 
+/// Cache key for per-request destination classification, keyed by the
+/// identity of the route's compiled `destination_resolution` override. The
+/// override lives in the compiled route plan, so its address is stable for
+/// the request lifetime; `0` is reserved for "no override" since references
+/// are never null. Identity (not value) equality only affects cache sharing
+/// between routes with equal overrides, where re-classification yields the
+/// same result.
+pub(super) fn destination_override_key(
+    resolution_override: Option<&qpx_core::config::DestinationResolutionOverrideConfig>,
+) -> usize {
+    resolution_override.map_or(0, |config| std::ptr::from_ref(config) as usize)
+}
+
 use self::access::enforce_reverse_access_control;
 use self::dispatch_cache::prepare_reverse_cache;
 use self::dispatch_http::dispatch_reverse_http_route;
 use self::dispatch_ipc::{dispatch_reverse_ipc_route, handle_reverse_websocket_upgrade};
 use self::modules::prepare_reverse_modules;
 use self::outcome::{
-    consume_reverse_retry_budget, finish_reverse_upstream_failure, record_reverse_http_loop_error,
+    ReverseUpstreamFailureInput, acquire_reverse_upstream_concurrency,
+    capture_reverse_response_outcome, consume_reverse_retry_budget,
+    finish_reverse_upstream_failure, prepare_reverse_http_retry, record_reverse_http_loop_error,
     record_reverse_http_loop_timeout, record_reverse_loop_error, record_reverse_success_metrics,
     reverse_retry_backoff,
 };
@@ -57,7 +66,7 @@ pub(super) async fn dispatch_reverse_request(
     reverse: ReloadableReverse,
     runtime: Runtime,
     conn: ReverseConnInfo,
-) -> Result<(ReverseInterimResponses, Response<Body>)> {
+) -> Result<(InterimList, Response<Body>)> {
     let compiled = reverse.compiled().await;
     let prepared = match prepare_reverse_request(req, &base, &runtime, &conn, compiled).await? {
         Ok(prepared) => prepared,
@@ -72,7 +81,7 @@ async fn execute_reverse_request(
     reverse: ReloadableReverse,
     runtime: Runtime,
     conn: ReverseConnInfo,
-) -> Result<(ReverseInterimResponses, Response<Body>)> {
+) -> Result<(InterimList, Response<Body>)> {
     let PreparedReverseRequest {
         mut req,
         context,
@@ -98,25 +107,18 @@ async fn execute_reverse_request(
         .and_then(|idx| router.route_at(idx))
         .ok_or_else(|| anyhow!("no route matched"))?;
     let streaming = route.plan.streaming;
-    debug_assert!(match &route.target {
-        crate::runtime::CompiledReverseRouteTarget::Upstream { .. }
-        | crate::runtime::CompiledReverseRouteTarget::Weighted { .. } =>
-            route.local_response.is_none() && route.ipc.is_none(),
-        crate::runtime::CompiledReverseRouteTarget::Ipc { .. } =>
-            route.local_response.is_none() && route.ipc.is_some(),
-        crate::runtime::CompiledReverseRouteTarget::LocalResponse { .. } =>
-            route.local_response.is_some() && route.ipc.is_none(),
-        crate::runtime::CompiledReverseRouteTarget::TlsPassthrough { .. } => false,
-    });
+    debug_assert_reverse_route_target(route);
     let resolution_override = route.plan.destination_resolution.as_ref();
     let route_http_guard = route.plan.guard.as_deref();
     let route_max_observed_request_body_bytes = route_http_guard
         .and_then(|profile| profile.request_body_observation_cap())
         .map(|cap| cap.min(max_observed_request_body_bytes))
         .unwrap_or(max_observed_request_body_bytes);
+    let override_key = destination_override_key(resolution_override);
     let request_destination = request_destination_cache
-        .get(&format!("{:?}", resolution_override))
-        .cloned()
+        .iter()
+        .find(|(key, _)| *key == override_key)
+        .map(|(_, destination)| destination.clone())
         .unwrap_or_else(|| {
             classify_reverse_destination(&state, &conn, host.as_str(), None, resolution_override)
         });
@@ -164,8 +166,7 @@ async fn execute_reverse_request(
     };
     let ReverseAccessControl {
         mut req,
-        log_context,
-        ext_authz_policy_id,
+        audit_ctx,
         route_headers,
         override_upstream,
         route_timeout,
@@ -174,36 +175,17 @@ async fn execute_reverse_request(
         request_limit_ctx,
         mut request_limits,
     } = access;
-    let audit_ctx = DispatchAuditContext::new(
-        state.clone(),
-        crate::http::dispatch::ProxyKind::Reverse,
-        reverse.name.as_ref(),
-        conn.remote_addr,
-        request_method.clone(),
-        path_owned.clone(),
-        log_context,
-    )
-    .with_host((!host.is_empty()).then_some(host.clone()))
-    .with_sni(conn.tls_sni.as_deref().map(ToOwned::to_owned))
-    .with_matched_route(route.name.as_deref().map(ToOwned::to_owned))
-    .with_ext_authz_policy_id(ext_authz_policy_id);
 
-    if let Some(response) = handle_max_forwards_in_place(
+    if let Some(response) = annotated_max_forwards_response(
         &mut req,
         proxy_name.as_str(),
         state.plan.limits.general.trace_reflect_all_headers,
         state.plan.limits.body.max_observed_request_body_bytes,
         std::time::Duration::from_millis(streaming.body_read_timeout_ms),
+        &audit_ctx,
     )
     .await
     {
-        let mut response = response;
-        annotate_dispatch_response(
-            &mut response,
-            &audit_ctx,
-            crate::http::dispatch::DispatchOutcome::MaxForwards,
-            &[],
-        );
         return Ok(attach_streaming_limits(
             empty_interim_response(response),
             streaming,
@@ -226,8 +208,10 @@ async fn execute_reverse_request(
     .await?
     {
         ReverseModuleOutcome::Response(response) => {
+            let response =
+                crate::http::capture::stream::limit_response_body_for_plan(*response, &route.plan);
             return Ok(attach_streaming_limits(
-                empty_interim_response(*response),
+                empty_interim_response(response),
                 streaming,
             ));
         }
@@ -269,9 +253,22 @@ async fn execute_reverse_request(
     Ok(attach_streaming_limits(result, streaming))
 }
 
+fn debug_assert_reverse_route_target(route: &HttpRoute) {
+    debug_assert!(match &route.target {
+        crate::runtime::CompiledReverseRouteTarget::Upstream { .. }
+        | crate::runtime::CompiledReverseRouteTarget::Weighted { .. } =>
+            route.local_response.is_none() && route.ipc.is_none(),
+        crate::runtime::CompiledReverseRouteTarget::Ipc { .. } =>
+            route.local_response.is_none() && route.ipc.is_some(),
+        crate::runtime::CompiledReverseRouteTarget::LocalResponse { .. } =>
+            route.local_response.is_some() && route.ipc.is_none(),
+        crate::runtime::CompiledReverseRouteTarget::TlsPassthrough { .. } => false,
+    });
+}
+
 async fn complete_reverse_after_modules(
     input: ReversePostModuleInput<'_>,
-) -> Result<(ReverseInterimResponses, Response<Body>)> {
+) -> Result<(InterimList, Response<Body>)> {
     let ReversePostModuleInput {
         req,
         mut http_modules,
@@ -339,7 +336,17 @@ async fn complete_reverse_after_modules(
     })
     .await?
     {
-        ReverseCacheOutcome::Response(response) => return Ok(empty_interim_response(*response)),
+        ReverseCacheOutcome::Response(response) => {
+            let mut response = *response;
+            let export_session = state.export_session_for_plan(&route.plan, conn.remote_addr, host);
+            response = crate::http::capture::stream::emit_optional_response_for_export(
+                response,
+                &route.plan,
+                export_session.as_ref(),
+            )
+            .await;
+            return Ok(empty_interim_response(response));
+        }
         ReverseCacheOutcome::Continue(state) => *state,
     };
     let ReverseCacheState {
@@ -355,6 +362,7 @@ async fn complete_reverse_after_modules(
         attempts,
         first_request,
         template,
+        replay_recorder,
         mirror_upstreams,
     } = prepare_reverse_retry_dispatch(ReverseRetryPrepareInput {
         req,
@@ -388,6 +396,7 @@ async fn complete_reverse_after_modules(
             cache_collapse_guard,
             first_request,
             template,
+            replay_recorder,
             mirror_upstreams,
             attempts,
             route_timeout,
@@ -419,6 +428,7 @@ async fn complete_reverse_after_modules(
         cache_collapse_guard,
         first_request,
         template,
+        replay_recorder,
         mirror_upstreams,
         attempts,
         override_upstream,
@@ -439,11 +449,7 @@ async fn reverse_continue_response_rule(
 ) -> Result<std::result::Result<ReverseResponseRuleContinue, ReverseAttemptOutcome>> {
     let ReverseResponseRuleInput {
         response_rule,
-        request_method,
-        request_version,
-        proxy_name,
         http_modules,
-        audit_ctx,
         state,
         route,
         selected_upstream,
@@ -452,15 +458,14 @@ async fn reverse_continue_response_rule(
         started,
     } = input;
     match response_rule {
-        ResponseRuleDecision::Continue {
+        DispatchResponsePolicyOutcome::Continue {
             response,
-            route_headers,
+            headers,
             cache_bypass,
             policy_tags,
             suppress_retry,
             mirror,
         } => {
-            record_response_policy_action(audit_ctx.kind, "continue");
             if response.status().is_server_error() && attempt_idx + 1 < attempts && !suppress_retry
             {
                 if let Some(upstream) = selected_upstream {
@@ -482,60 +487,41 @@ async fn reverse_continue_response_rule(
                 reverse_retry_backoff(route).await;
                 return Ok(Err(ReverseAttemptOutcome::Retry(err)));
             }
-            Ok(Ok((
-                response,
-                route_headers,
-                cache_bypass,
-                policy_tags,
-                mirror,
-            )))
+            Ok(Ok((response, headers, cache_bypass, policy_tags, mirror)))
         }
-        ResponseRuleDecision::LocalResponse {
-            response,
-            route_headers,
-            policy_tags,
-        } => {
-            let response = http_modules.prepare_downstream_response(response).await?;
-            let mut response = finalize_response_with_headers(
-                request_method,
-                request_version,
-                proxy_name,
-                response,
-                route_headers.as_deref(),
-                false,
-            );
-            http_modules.on_logging(Some(response.status()), None).await;
-            annotate_dispatch_response(
-                &mut response,
-                audit_ctx,
-                crate::http::dispatch::DispatchOutcome::ResponseRuleLocalResponse,
-                policy_tags.as_ref(),
-            );
-            Ok(Err(ReverseAttemptOutcome::Response(Box::new(
-                empty_interim_response(response),
-            ))))
-        }
+        DispatchResponsePolicyOutcome::Response(response) => Ok(Err(
+            ReverseAttemptOutcome::Response(Box::new(empty_interim_response(response))),
+        )),
     }
 }
 
-fn build_reverse_attempt_request(
+async fn build_reverse_attempt_request(
     attempt_idx: usize,
     first_request: &mut Option<Request<Body>>,
     template: Option<&ReverseRequestTemplate>,
+    replay_recorder: Option<&ReverseReplayRecorder>,
 ) -> Result<Request<Body>> {
     if attempt_idx == 0 {
-        return match (template, first_request.take()) {
-            (Some(template), _) => template.build(),
-            (None, Some(req)) => Ok(req),
-            (None, None) => Err(anyhow!("missing reverse request for first attempt")),
+        return match first_request.take() {
+            Some(req) => Ok(req),
+            None => template
+                .ok_or_else(|| anyhow!("missing reverse request for first attempt"))?
+                .build(),
         };
     }
-    template
-        .ok_or_else(|| anyhow!("reverse retry template missing"))?
-        .build()
+    if let Some(template) = template {
+        return template.build();
+    }
+    if let Some(recorder) = replay_recorder
+        && let Some(template) = recorder.template().await
+    {
+        return template.build();
+    }
+    Err(anyhow!("reverse retry template missing or incomplete"))
 }
 
 async fn proxy_reverse_http_attempt(
+    pools: &crate::pool::PoolRegistry,
     req_for_upstream: Request<Body>,
     upstream_origin: &OriginEndpoint,
     request_version: http::Version,
@@ -544,9 +530,9 @@ async fn proxy_reverse_http_attempt(
     route_timeout: Duration,
 ) -> std::result::Result<
     Result<(
-        ReverseInterimResponses,
+        InterimList,
         Response<Body>,
-        Option<crate::tls::cert_info::UpstreamCertificateInfo>,
+        Option<qpx_core::tls::UpstreamCertificateInfo>,
     )>,
     tokio::time::error::Elapsed,
 > {
@@ -558,7 +544,7 @@ async fn proxy_reverse_http_attempt(
                 .map_err(|err| anyhow!("invalid ipc upstream url: {}", err))?;
             return Ok((
                 Vec::new(),
-                proxy_ipc(req_for_upstream, &url, proxy_name).await?,
+                proxy_ipc(pools, req_for_upstream, &url, proxy_name).await?,
                 None,
             ));
         }
@@ -569,11 +555,13 @@ async fn proxy_reverse_http_attempt(
                 | http::Version::HTTP_2
                 | http::Version::HTTP_3
         ) {
-            let proxied = proxy_http_with_interim(
+            let proxied = proxy_http_with_interim_timeout(
+                pools,
                 req_for_upstream,
                 upstream_origin,
                 proxy_name,
                 route.upstream_trust.as_deref(),
+                route_timeout,
             )
             .await?;
             return Ok((proxied.interim, proxied.response, proxied.upstream_cert));
@@ -581,6 +569,7 @@ async fn proxy_reverse_http_attempt(
         Ok((
             Vec::new(),
             proxy_http(
+                pools,
                 req_for_upstream,
                 upstream_origin,
                 proxy_name,

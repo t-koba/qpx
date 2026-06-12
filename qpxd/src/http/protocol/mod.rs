@@ -1,11 +1,9 @@
-pub mod address;
 pub mod base_fields;
 pub mod common;
 pub mod header_control;
 pub(crate) mod io_prefix;
 pub mod l7;
 pub mod preflight;
-pub mod semantics;
 #[cfg(feature = "http3")]
 pub mod sse;
 pub mod upgrade;

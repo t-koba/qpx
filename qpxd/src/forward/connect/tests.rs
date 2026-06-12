@@ -1,12 +1,13 @@
 use super::extended::normalize_h2_upstream_connect_headers;
 use super::*;
-use crate::tls::{TlsClientHelloInfo, UpstreamCertificateInfo};
+use crate::tls::TlsClientHelloInfo;
 use http::{HeaderMap, Uri};
 use qpx_core::config::{
     AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CertificateMatchConfig,
     Config, IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MatchConfig, MessagesConfig,
     RuleConfig, RuntimeConfig, SystemLogConfig, TlsFingerprintMatchConfig,
 };
+use qpx_core::tls::UpstreamCertificateInfo;
 
 fn connect_runtime() -> Runtime {
     Runtime::new(Config {

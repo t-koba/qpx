@@ -6,7 +6,6 @@ mod protocol;
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 mod deadline;
-#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 mod metrics;
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 pub(crate) mod streaming;
@@ -35,8 +34,6 @@ pub(crate) use metrics::{
 pub(crate) use streaming::{grpc_streaming_label, streaming_rpc_observer, streaming_rpc_protocol};
 
 #[cfg(test)]
-use crate::http::body::Body;
-#[cfg(test)]
 use base64::Engine;
 #[cfg(test)]
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -54,6 +51,8 @@ use local_response::{frame_grpc_message, frame_grpc_web_trailers};
 use protocol::{
     extract_connect_status_and_message, extract_grpc_status_and_message, extract_service_and_method,
 };
+#[cfg(test)]
+use qpx_http::body::Body;
 #[cfg(all(test, any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
 use streaming::ConnectFrameObserver;
 #[cfg(all(test, any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]

@@ -1,5 +1,5 @@
-use crate::http::body::Body;
 use hyper_util::rt::TokioIo;
+use qpx_http::body::Body;
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::timeout;

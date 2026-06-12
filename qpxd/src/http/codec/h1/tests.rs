@@ -199,6 +199,37 @@ async fn send_http1_no_body_status_removes_trailer_metadata() {
     assert!(text.ends_with("\r\n\r\n"));
 }
 
+#[tokio::test]
+async fn send_http1_response_stops_when_response_body_limit_is_exceeded() {
+    let (mut client, server) = tokio::io::duplex(4096);
+    let (read_half, mut write_half) = tokio::io::split(server);
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from("abcde").limit_bytes(4))
+        .expect("response");
+
+    let err = send_http1_response_with_interim(
+        &mut write_half,
+        Version::HTTP_11,
+        &Method::GET,
+        response,
+        &[],
+        true,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect_err("response body cap should fail the send");
+    drop(write_half);
+    drop(read_half);
+
+    assert!(err.to_string().contains("response body limit exceeded"));
+    let mut raw = Vec::new();
+    client.read_to_end(&mut raw).await.expect("read response");
+    let text = String::from_utf8(raw).expect("utf8");
+    assert!(text.starts_with("HTTP/1.1 200"));
+    assert!(!text.ends_with("abcde"));
+}
+
 #[test]
 fn request_transfer_encoding_allows_only_chunked_singleton() {
     let mut headers = HeaderMap::new();
@@ -224,7 +255,7 @@ async fn unsupported_expect_with_100_continue_does_not_send_interim_continue() {
         .expect("head");
     assert!(!parsed.send_continue);
     assert!(
-        crate::http::protocol::semantics::validate_expect_header(&parsed.headers).is_err(),
+        qpx_http::protocol::semantics::validate_expect_header(&parsed.headers).is_err(),
         "preflight must still reject the unsupported Expect token"
     );
 }

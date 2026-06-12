@@ -1,66 +1,60 @@
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 use tokio::sync::{Mutex, Semaphore};
 
-pub(super) type UpstreamProxySender = crate::http::protocol::common::Http1SendRequest;
+pub(super) type UpstreamProxySender = qpx_http::protocol::common::Http1SendRequest;
 
-static UPSTREAM_PROXY_MAX_CONCURRENT_PER_ENDPOINT: AtomicUsize = AtomicUsize::new(8);
+const DEFAULT_MAX_CONCURRENT_PER_ENDPOINT: usize = 8;
 
-pub(crate) fn set_upstream_proxy_max_concurrent_per_endpoint(value: usize) {
-    UPSTREAM_PROXY_MAX_CONCURRENT_PER_ENDPOINT.store(value.max(1), Ordering::Relaxed);
-}
-
-fn upstream_proxy_max_concurrent_per_endpoint() -> usize {
-    UPSTREAM_PROXY_MAX_CONCURRENT_PER_ENDPOINT
-        .load(Ordering::Relaxed)
-        .max(1)
-}
-
-pub(super) struct UpstreamProxySlot {
-    pub(super) senders: Mutex<Vec<UpstreamProxySender>>,
-    pub(super) semaphore: Arc<Semaphore>,
+pub(crate) struct UpstreamProxySlot {
+    pub(crate) senders: Mutex<Vec<UpstreamProxySender>>,
+    pub(crate) semaphore: Arc<Semaphore>,
 }
 
 type UpstreamProxySlotHandle = Arc<UpstreamProxySlot>;
-type UpstreamProxyMap = HashMap<String, UpstreamProxySlotHandle>;
-pub(super) struct UpstreamProxyPool {
-    shards: Vec<Mutex<UpstreamProxyMap>>,
+
+/// Per-runtime pool of reusable HTTP/1 upstream-proxy senders, keyed by endpoint.
+/// Owned by [`crate::pool::PoolRegistry`] (formerly a process-global `OnceLock`).
+pub(crate) struct UpstreamProxyPool {
+    shards: qpx_http::sharding::AsyncShardMap<String, UpstreamProxySlotHandle>,
+    max_concurrent_per_endpoint: AtomicUsize,
 }
 
-pub(super) fn upstream_proxy_pool() -> &'static UpstreamProxyPool {
-    static POOL: OnceLock<UpstreamProxyPool> = OnceLock::new();
-    POOL.get_or_init(|| UpstreamProxyPool::new(64))
+impl Default for UpstreamProxyPool {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl UpstreamProxyPool {
-    fn new(shards: usize) -> Self {
-        let shards = shards.max(1);
-        let mut out = Vec::with_capacity(shards);
-        for _ in 0..shards {
-            out.push(Mutex::new(HashMap::new()));
+    pub(crate) fn new() -> Self {
+        Self {
+            shards: qpx_http::sharding::AsyncShardMap::new(64),
+            max_concurrent_per_endpoint: AtomicUsize::new(DEFAULT_MAX_CONCURRENT_PER_ENDPOINT),
         }
-        Self { shards: out }
     }
 
-    fn shard_for(&self, key: &str) -> usize {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        (hasher.finish() as usize) % self.shards.len().max(1)
+    /// Applies the configured per-endpoint concurrency limit (used on build/reload).
+    pub(crate) fn set_max_concurrent_per_endpoint(&self, value: usize) {
+        self.max_concurrent_per_endpoint
+            .store(value.max(1), Ordering::Relaxed);
     }
 
-    pub(super) async fn slot_for(&self, key: &str) -> UpstreamProxySlotHandle {
-        let shard = self.shard_for(key);
-        let mut guard = self.shards[shard].lock().await;
+    pub(crate) fn max_concurrent_per_endpoint(&self) -> usize {
+        self.max_concurrent_per_endpoint
+            .load(Ordering::Relaxed)
+            .max(1)
+    }
+
+    pub(crate) async fn slot_for(&self, key: &str) -> UpstreamProxySlotHandle {
+        let limit = self.max_concurrent_per_endpoint();
+        let mut guard = self.shards.lock(key).await;
         guard
             .entry(key.to_string())
             .or_insert_with(|| {
                 Arc::new(UpstreamProxySlot {
                     senders: Mutex::new(Vec::new()),
-                    semaphore: Arc::new(Semaphore::new(
-                        upstream_proxy_max_concurrent_per_endpoint(),
-                    )),
+                    semaphore: Arc::new(Semaphore::new(limit)),
                 })
             })
             .clone()

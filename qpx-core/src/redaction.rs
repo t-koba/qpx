@@ -1,5 +1,6 @@
 use percent_encoding::percent_decode_str;
 
+/// Compiles a simple JSON object path such as `$.token.secret`.
 pub fn compile_json_redaction_path(path: &str) -> Result<Vec<String>, String> {
     let trimmed = path.trim();
     let Some(rest) = trimmed.strip_prefix("$.") else {
@@ -21,6 +22,7 @@ pub fn compile_json_redaction_path(path: &str) -> Result<Vec<String>, String> {
     Ok(parts)
 }
 
+/// Redacts configured query keys in a URI query string and query-like fragment.
 pub fn redact_uri_query_keys(uri: &str, query_keys: &[String]) -> String {
     let (before_fragment, fragment) = uri
         .split_once('#')

@@ -347,6 +347,8 @@ pub struct ResilienceRetryConfig {
     pub attempts: usize,
     #[serde(default = "default_retry_backoff")]
     pub backoff_ms: u64,
+    #[serde(default)]
+    pub retry_body_replay: bool,
     #[serde(default = "default_retry_body_threshold_bytes")]
     pub retry_body_threshold_bytes: usize,
     #[serde(default)]

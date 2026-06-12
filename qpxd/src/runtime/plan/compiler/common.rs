@@ -8,13 +8,13 @@ use crate::http::policy::response_policy::HttpResponseRuleEngine;
 use crate::policy_context::EffectivePolicyContext;
 use crate::rate_limit::{CompiledRateLimitPlan, RateLimitSet};
 use crate::runtime::RuntimeResources;
-use crate::tls::trust::CompiledUpstreamTlsTrust;
 use anyhow::{Result, anyhow};
 use qpx_core::config::{
     ActionConfig, ActionKind, DestinationResolutionOverrideConfig, GrpcConfig, IngressEdgeConfig,
     LocalResponseConfig, ReverseRouteConfig, SseStreamingPolicy, StreamingConfig,
     StreamingRequirement,
 };
+use qpx_core::tls::CompiledUpstreamTlsTrust;
 use std::sync::Arc;
 
 pub(super) struct ExecutionPlanInputs<'a> {
@@ -210,13 +210,9 @@ fn execution_plan_for_common(
                 .ok_or_else(|| anyhow!("http_guard_profile not found: {name}"))
         })
         .transpose()?;
-    if plan.guard.is_some() {
+    if let Some(guard) = plan.guard.as_ref() {
         plan.flags.insert(PlanFlags::HTTP_GUARD);
-        if plan
-            .guard
-            .as_ref()
-            .is_some_and(|guard| guard.may_require_request_body_buffering())
-        {
+        if guard.may_require_request_body_buffering() {
             plan.add_buffering_reason("http_guard.body");
         }
     }
@@ -269,27 +265,25 @@ fn execution_plan_for_common(
         .and_then(|http| HttpResponseRuleEngine::new(http.response_rules.as_slice()).transpose())
         .transpose()?
         .map(Arc::new);
-    if plan.response_rules.is_some() {
+    if let Some(rules) = plan.response_rules.clone() {
         plan.flags.insert(PlanFlags::RESPONSE_RULES);
-        if let Some(rules) = plan.response_rules.clone() {
-            if rules.any_rule_requires_response_body_observation()
-                || rules.any_rule_requires_response_size()
-                || rules.any_rule_requires_response_rpc_observation()
-            {
-                plan.flags.insert(PlanFlags::RESPONSE_BODY_OBSERVE);
-            }
-            if rules.any_rule_requires_response_body_observation() {
-                plan.add_buffering_reason("response_rules.response_body");
-            }
-            if rules.any_rule_requires_response_size_matcher() {
-                plan.add_buffering_reason("response_rules.response_size_exact_unknown");
-            }
-            if rules.any_rule_requires_response_rpc_observation() {
-                plan.add_buffering_reason("response_rules.rpc.body");
-            }
-            if rules.any_rule_requires_response_request_body_observation() {
-                plan.add_buffering_reason("response_rules.request_body");
-            }
+        if rules.any_rule_requires_response_body_observation()
+            || rules.any_rule_requires_response_size()
+            || rules.any_rule_requires_response_rpc_observation()
+        {
+            plan.flags.insert(PlanFlags::RESPONSE_BODY_OBSERVE);
+        }
+        if rules.any_rule_requires_response_body_observation() {
+            plan.add_buffering_reason("response_rules.response_body");
+        }
+        if rules.any_rule_requires_response_size_matcher() {
+            plan.add_buffering_reason("response_rules.response_size_exact_unknown");
+        }
+        if rules.any_rule_requires_response_rpc_observation() {
+            plan.add_buffering_reason("response_rules.rpc.body");
+        }
+        if rules.any_rule_requires_response_request_body_observation() {
+            plan.add_buffering_reason("response_rules.request_body");
         }
     }
     apply_module_flags(plan.modules.as_ref(), &mut plan.flags);

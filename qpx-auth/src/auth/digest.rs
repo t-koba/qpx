@@ -9,12 +9,12 @@ use sha2::Digest as _;
 #[cfg(feature = "digest-auth")]
 use std::collections::{HashMap, VecDeque};
 #[cfg(feature = "digest-auth")]
-use std::hash::{Hash, Hasher};
-#[cfg(feature = "digest-auth")]
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "digest-auth")]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "digest-auth")]
+use super::util::shard_index;
 #[cfg(feature = "digest-auth")]
 #[derive(Debug, Clone)]
 pub(super) struct NonceStore {
@@ -114,7 +114,7 @@ impl NonceStore {
         let nonce = Self::random_token()?;
         let opaque = Self::issue_opaque()?;
         let now = Instant::now();
-        let mut guard = self.shards[shard_for(&nonce, self.shards.len())]
+        let mut guard = self.shards[shard_index(&nonce, self.shards.len())]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Self::cleanup_expired_locked(&mut guard, self.ttl, now);
@@ -158,7 +158,7 @@ impl NonceStore {
         let Some(nc) = parse_nc(nc_hex) else {
             return NonceCheck::Invalid;
         };
-        let mut guard = self.shards[shard_for(nonce, self.shards.len())]
+        let mut guard = self.shards[shard_index(nonce, self.shards.len())]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Instant::now();
@@ -181,7 +181,7 @@ impl NonceStore {
     }
 
     pub(super) fn mark_digest_nc_used(&self, nonce: &str, nc: u32) -> bool {
-        let mut guard = self.shards[shard_for(nonce, self.shards.len())]
+        let mut guard = self.shards[shard_index(nonce, self.shards.len())]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Instant::now();
@@ -279,13 +279,6 @@ fn build_nonce_shards(count: usize) -> Arc<[Mutex<NonceStoreInner>]> {
         shards.push(Mutex::new(NonceStoreInner::default()));
     }
     shards.into()
-}
-
-#[cfg(feature = "digest-auth")]
-fn shard_for<T: Hash + ?Sized>(value: &T, shards: usize) -> usize {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    (hasher.finish() as usize) % shards.max(1)
 }
 
 #[cfg(feature = "digest-auth")]

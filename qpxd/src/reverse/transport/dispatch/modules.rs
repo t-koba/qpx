@@ -1,7 +1,6 @@
 use super::{ReverseModuleDispatch, ReverseModuleInput, ReverseModuleOutcome};
-use crate::http::dispatch::annotate_dispatch_response;
-use crate::http::protocol::header_control::apply_request_headers;
-use crate::http::protocol::l7::finalize_response_with_headers_in_place;
+use crate::http::dispatch::{ProxyKind, prepare_http_module_local_response};
+use crate::http::protocol::l7::apply_request_header_control_in_place;
 use crate::policy_context::strip_untrusted_identity_headers;
 use crate::reverse::transport::path_rewrite::apply_path_rewrite;
 use anyhow::Result;
@@ -31,12 +30,12 @@ pub(super) async fn prepare_reverse_modules(
     if let Some(rewrite) = route.path_rewrite.as_ref() {
         apply_path_rewrite(&mut req, rewrite);
     }
-    apply_request_headers(req.headers_mut(), route_headers);
+    apply_request_header_control_in_place(&mut req, route_headers);
     let request_cache_policy = route.plan.cache.as_ref().filter(|_| !cache_bypass).cloned();
     let mut http_modules = route.plan.modules.start(
         state.clone(),
         crate::http::modules::HttpModuleSessionInit {
-            proxy_kind: crate::http::dispatch::ProxyKind::Reverse,
+            proxy_kind: ProxyKind::Reverse,
             proxy_name,
             scope_name: reverse_name,
             route_name: route.name.as_deref(),
@@ -56,23 +55,15 @@ pub(super) async fn prepare_reverse_modules(
             })),
         ),
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
-            let mut response = http_modules.prepare_downstream_response(*response).await?;
-            let response_version = response.version();
-            finalize_response_with_headers_in_place(
+            let response = prepare_http_module_local_response(
+                &mut http_modules,
+                *response,
                 &audit_ctx.request_method,
-                response_version,
                 proxy_name,
-                &mut response,
                 route_headers,
-                false,
-            );
-            http_modules.on_logging(Some(response.status()), None).await;
-            annotate_dispatch_response(
-                &mut response,
                 audit_ctx,
-                crate::http::dispatch::DispatchOutcome::HttpModuleLocalResponse,
-                &[],
-            );
+            )
+            .await?;
             Ok(ReverseModuleOutcome::Response(Box::new(response)))
         }
     }

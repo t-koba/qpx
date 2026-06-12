@@ -1,7 +1,7 @@
-use crate::http::body::Body;
 use anyhow::Result;
 use hyper::{Request, StatusCode};
 use qpx_core::config::HttpGuardProfileConfig;
+use qpx_http::body::Body;
 use std::sync::Arc;
 
 mod json;

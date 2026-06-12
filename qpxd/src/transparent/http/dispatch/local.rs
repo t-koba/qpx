@@ -1,11 +1,11 @@
-use crate::http::body::Body;
 use crate::http::dispatch::{
-    DispatchAuditContext, DispatchWebsocketProxyInput, annotate_dispatch_response,
+    DispatchAuditContext, DispatchOutcome, DispatchWebsocketProxyInput, annotate_dispatch_response,
     emit_dispatch_websocket_response_preview, proxy_dispatch_websocket_http1,
 };
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use anyhow::Result;
 use hyper::{Request, StatusCode};
+use qpx_http::body::Body;
 use tokio::time::Duration;
 
 pub(super) struct TransparentWebsocketInput<'a> {
@@ -56,23 +56,17 @@ pub(super) async fn proxy_transparent_websocket(
     .await?;
     response = http_modules.on_upstream_response(response).await?;
     response = http_modules.prepare_downstream_response(response).await?;
-    emit_dispatch_websocket_response_preview(export_session, &response).await;
     let keep_upgrade = response.status() == StatusCode::SWITCHING_PROTOCOLS;
-    let response_version = response.version();
     finalize_response_with_headers_in_place(
         request_method,
-        response_version,
+        response.version(),
         proxy_name,
         &mut response,
         policy_headers,
         keep_upgrade,
     );
+    emit_dispatch_websocket_response_preview(export_session, &response).await;
     http_modules.on_logging(Some(response.status()), None).await;
-    annotate_dispatch_response(
-        &mut response,
-        audit,
-        crate::http::dispatch::DispatchOutcome::Allow,
-        &[],
-    );
+    annotate_dispatch_response(&mut response, audit, DispatchOutcome::Allow, &[]);
     Ok(response)
 }

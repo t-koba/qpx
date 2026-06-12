@@ -1,7 +1,7 @@
 use super::ClientConnInfo;
-use crate::http::body::Body;
 use hyper::Request;
 use qpx_core::ipc::meta::IpcRequestMeta;
+use qpx_http::body::Body;
 use std::collections::{HashMap, HashSet};
 
 fn is_hop_by_hop_header(name: &str) -> bool {

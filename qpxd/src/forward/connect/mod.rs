@@ -3,20 +3,21 @@ use crate::destination::DestinationInputs;
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
 use crate::forward::request::resolve_upstream;
-use crate::http::body::Body;
-use crate::http::dispatch::{DispatchConnectRuleContextInput, build_dispatch_connect_rule_context};
-use crate::http::local_response::build_local_response;
-use crate::http::protocol::address::parse_authority_host_port;
+use crate::http::dispatch::{
+    DispatchConnectRuleContextInput, DispatchOutcome, build_dispatch_connect_rule_context,
+};
+use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::{
     blocked_response as blocked, connect_established_response as connect_established,
     forbidden_response as forbidden, http_version_label,
     too_many_requests_response as too_many_requests,
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
-#[cfg(feature = "auth-basic")]
-use crate::policy_context::audit_facade;
-use crate::policy_context::{ext_authz_facade, identity_facade};
-use crate::rate_limit::RateLimitContext;
+use crate::policy_context::{
+    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, enforce_ext_authz,
+    prepare_ext_authz_allow_controls, resolve_identity, sanitize_headers_for_policy,
+};
+use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use crate::upstream::connect::connect_tunnel_target;
 use crate::upstream::io_copy::BandwidthThrottle;
@@ -24,6 +25,8 @@ use ::http::{Method, Request, Response, StatusCode};
 use anyhow::{Result, anyhow};
 use h2::ext::Protocol as H2Protocol;
 use qpx_core::config::ActionKind;
+use qpx_http::body::Body;
+use qpx_http::protocol::address::parse_authority_host_port;
 use std::net::SocketAddr;
 use tokio::task;
 use tokio::time::Duration;
@@ -74,13 +77,13 @@ pub(super) async fn handle_connect(
         .ok_or_else(|| anyhow!("invalid connect authority"))?;
     let audit_host = host.clone();
     let mut sanitized_headers = req.headers().clone();
-    identity_facade::sanitize_headers_for_policy(
+    sanitize_headers_for_policy(
         &state,
         &effective_policy,
         remote_addr.ip(),
         &mut sanitized_headers,
     )?;
-    let mut identity = identity_facade::resolve_identity(
+    let mut identity = resolve_identity(
         &state,
         &effective_policy,
         remote_addr.ip(),
@@ -111,6 +114,30 @@ pub(super) async fn handle_connect(
         headers: &sanitized_headers,
         identity: &identity,
     });
+    #[cfg(feature = "auth-basic")]
+    macro_rules! pre_access_response {
+        ($base:expr, $log_context:expr, $outcome:expr) => {{
+            let mut response = finalize_response_for_request(
+                &Method::CONNECT,
+                req_version,
+                proxy_name,
+                $base,
+                false,
+            );
+            ConnectAuditContext {
+                state: &state,
+                listener_name,
+                remote_ip: remote_addr.ip(),
+                audit_host: host.as_str(),
+                path: None,
+                matched_rule: None,
+                ext_authz_policy_id: None,
+                log_context: $log_context,
+            }
+            .annotate(&mut response, $outcome);
+            response
+        }};
+    }
 
     let (mut action, matched_rule) = match evaluate_forward_policy(
         &runtime,
@@ -129,80 +156,36 @@ pub(super) async fn handle_connect(
         #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Challenge(chal) => {
             let log_context = identity.to_log_context(None, None, None);
-            let response = proxy_auth_required(chal, state.messages.proxy_auth_required.as_str());
-            let mut response = finalize_response_for_request(
-                &Method::CONNECT,
-                req_version,
-                proxy_name,
-                response,
-                false,
-            );
-            audit_facade::attach_log_context(&mut response, &log_context);
-            audit_facade::emit_audit_log(
-                &state,
-                audit_facade::AuditRecord {
-                    kind: crate::http::dispatch::ProxyKind::Forward,
-                    name: listener_name,
-                    remote_ip: remote_addr.ip(),
-                    host: Some(host.as_str()),
-                    sni: Some(host.as_str()),
-                    method: Some("CONNECT"),
-                    path: None,
-                    outcome: crate::http::dispatch::DispatchOutcome::Challenge,
-                    status: Some(response.status().as_u16()),
-                    matched_rule: None,
-                    matched_route: None,
-                    ext_authz_policy_id: None,
-                },
+            return Ok(pre_access_response!(
+                proxy_auth_required(chal, state.messages.proxy_auth_required.as_str()),
                 &log_context,
-            );
-            return Ok(response);
+                DispatchOutcome::Challenge
+            ));
         }
         #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Forbidden => {
             let log_context = identity.to_log_context(None, None, None);
-            let mut response = finalize_response_for_request(
-                &Method::CONNECT,
-                req_version,
-                proxy_name,
+            return Ok(pre_access_response!(
                 forbidden(state.messages.forbidden.as_str()),
-                false,
-            );
-            audit_facade::attach_log_context(&mut response, &log_context);
-            audit_facade::emit_audit_log(
-                &state,
-                audit_facade::AuditRecord {
-                    kind: crate::http::dispatch::ProxyKind::Forward,
-                    name: listener_name,
-                    remote_ip: remote_addr.ip(),
-                    host: Some(host.as_str()),
-                    sni: Some(host.as_str()),
-                    method: Some("CONNECT"),
-                    path: None,
-                    outcome: crate::http::dispatch::DispatchOutcome::Forbidden,
-                    status: Some(response.status().as_u16()),
-                    matched_rule: None,
-                    matched_route: None,
-                    ext_authz_policy_id: None,
-                },
                 &log_context,
-            );
-            return Ok(response);
+                DispatchOutcome::Forbidden
+            ));
         }
     };
     let selected_plan = state
         .plan
         .ingress_edge_execution_plan(listener_name, matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled CONNECT listener execution plan not found"))?;
+    let matched_rule_name = matched_rule.as_deref();
     let request_limit_ctx =
-        RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule.as_deref(), None);
+        RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule_name, None);
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
     } = state.policy.rate_limiters.collect_checked_plan_request(
         &selected_plan.rate_limits,
         None,
-        crate::rate_limit::TransportScope::Connect,
+        TransportScope::Connect,
         &request_limit_ctx,
         1,
     )?;
@@ -215,10 +198,10 @@ pub(super) async fn handle_connect(
             false,
         ));
     }
-    let ext_authz = ext_authz_facade::enforce_ext_authz(
+    let ext_authz = enforce_ext_authz(
         &state,
         &effective_policy,
-        ext_authz_facade::ExtAuthzInput {
+        ExtAuthzInput {
             proxy_kind: crate::http::dispatch::ProxyKind::Forward,
             proxy_name,
             scope_name: listener_name,
@@ -229,7 +212,7 @@ pub(super) async fn handle_connect(
             method: Some("CONNECT"),
             path: None,
             uri: Some(authority.as_str()),
-            matched_rule: matched_rule.as_deref(),
+            matched_rule: matched_rule_name,
             matched_route: None,
             action: Some(&action),
             headers: Some(&sanitized_headers),
@@ -237,39 +220,29 @@ pub(super) async fn handle_connect(
         },
     )
     .await?;
-    let ext_authz_policy_id = match &ext_authz {
-        ext_authz_facade::ExtAuthzEnforcement::Continue(allow) => allow.policy_id.clone(),
-        ext_authz_facade::ExtAuthzEnforcement::Deny(deny) => deny.policy_id.clone(),
-    };
-    let ext_authz_policy_tags = match &ext_authz {
-        ext_authz_facade::ExtAuthzEnforcement::Continue(allow) => allow.policy_tags.clone(),
-        ext_authz_facade::ExtAuthzEnforcement::Deny(deny) => deny.policy_tags.clone(),
-    };
-    let mut log_context = identity.to_log_context(
-        matched_rule.as_deref(),
-        None,
-        ext_authz_policy_id.as_deref(),
-    );
+    let ext_authz_policy_id = ext_authz.policy_id().map(str::to_owned);
+    let ext_authz_policy_tags = ext_authz.policy_tags().to_vec();
+    let mut log_context =
+        identity.to_log_context(matched_rule_name, None, ext_authz_policy_id.as_deref());
     log_context.policy_tags = ext_authz_policy_tags;
     let audit = ConnectAuditContext {
         state: &state,
         listener_name,
         remote_ip: remote_addr.ip(),
         audit_host: audit_host.as_str(),
-        matched_rule: matched_rule.as_deref(),
+        path: None,
+        matched_rule: matched_rule_name,
         ext_authz_policy_id: ext_authz_policy_id.as_deref(),
         log_context: &log_context,
     };
     let (response_headers, timeout_override) = match ext_authz {
-        ext_authz_facade::ExtAuthzEnforcement::Continue(allow) => {
-            ext_authz_facade::validate_ext_authz_allow_mode(
-                &allow,
-                ext_authz_facade::ExtAuthzMode::ForwardConnect,
-            )?;
+        ExtAuthzEnforcement::Continue(allow) => {
+            let allow =
+                prepare_ext_authz_allow_controls(allow, ExtAuthzMode::ForwardConnect, None)?;
             if let Some(retry_after) = request_limits.merge_profile_and_check(
                 &state.policy.rate_limiters,
                 allow.rate_limit_profile.as_deref(),
-                crate::rate_limit::TransportScope::Connect,
+                TransportScope::Connect,
                 &request_limit_ctx,
                 1,
             )? {
@@ -281,19 +254,18 @@ pub(super) async fn handle_connect(
                     false,
                 ));
             }
-            ext_authz_facade::apply_ext_authz_action_overrides(&mut action, &allow);
+            allow.apply_action_overrides(&mut action);
             (allow.headers, allow.timeout_override)
         }
-        ext_authz_facade::ExtAuthzEnforcement::Deny(deny) => {
+        ExtAuthzEnforcement::Deny(deny) => {
             let mut response = if let Some(local) = deny.local_response.as_ref() {
-                finalize_response_with_headers(
+                finalized_local_response(
                     &Method::CONNECT,
                     req_version,
                     proxy_name,
-                    build_local_response(local)?,
+                    local,
                     deny.headers.as_deref(),
-                    false,
-                )
+                )?
             } else {
                 finalize_response_with_headers(
                     &Method::CONNECT,
@@ -307,9 +279,9 @@ pub(super) async fn handle_connect(
             audit.annotate(
                 &mut response,
                 if deny.local_response.is_some() {
-                    crate::http::dispatch::DispatchOutcome::ExtAuthzLocalResponse
+                    DispatchOutcome::ExtAuthzLocalResponse
                 } else {
-                    crate::http::dispatch::DispatchOutcome::ExtAuthzDeny
+                    DispatchOutcome::ExtAuthzDeny
                 },
             );
             return Ok(response);
@@ -318,52 +290,71 @@ pub(super) async fn handle_connect(
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
     });
-
-    match action.kind {
-        ActionKind::Block => {
+    macro_rules! connect_response {
+        ($base:expr, $outcome:expr) => {{
             let mut response = finalize_response_with_headers(
                 &Method::CONNECT,
                 req_version,
                 proxy_name,
-                blocked(state.messages.blocked.as_str()),
+                $base,
                 response_headers.as_deref(),
                 false,
             );
-            audit.annotate(&mut response, crate::http::dispatch::DispatchOutcome::Block);
-            Ok(response)
-        }
+            audit.annotate(&mut response, $outcome);
+            response
+        }};
+    }
+    macro_rules! blocked_connect_response {
+        () => {
+            connect_response!(
+                blocked(state.messages.blocked.as_str()),
+                DispatchOutcome::Block
+            )
+        };
+    }
+    macro_rules! too_many_connect_response {
+        () => {
+            connect_response!(too_many_requests(None), DispatchOutcome::ConcurrencyLimited)
+        };
+    }
+    macro_rules! proxy_error_connect_response {
+        () => {
+            connect_response!(
+                Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::from(state.messages.proxy_error.clone()))
+                    .unwrap_or_else(|_| Response::new(Body::empty())),
+                DispatchOutcome::Error
+            )
+        };
+    }
+    macro_rules! established_connect_response {
+        () => {
+            connect_response!(connect_established(), DispatchOutcome::Allow)
+        };
+    }
+
+    match action.kind {
+        ActionKind::Block => Ok(blocked_connect_response!()),
         ActionKind::Respond => {
             let local = action
                 .local_response
                 .as_ref()
                 .ok_or_else(|| anyhow!("respond action requires local_response"))?;
-            let mut response = finalize_response_with_headers(
+            let mut response = finalized_local_response(
                 &Method::CONNECT,
                 req_version,
                 proxy_name,
-                build_local_response(local)?,
+                local,
                 response_headers.as_deref(),
-                false,
-            );
-            audit.annotate(
-                &mut response,
-                crate::http::dispatch::DispatchOutcome::Respond,
-            );
+            )?;
+            audit.annotate(&mut response, DispatchOutcome::Respond);
             Ok(response)
         }
         ActionKind::Inspect => {
             #[cfg(not(feature = "mitm"))]
             {
-                let mut response = finalize_response_with_headers(
-                    &Method::CONNECT,
-                    req_version,
-                    proxy_name,
-                    blocked(state.messages.blocked.as_str()),
-                    response_headers.as_deref(),
-                    false,
-                );
-                audit.annotate(&mut response, crate::http::dispatch::DispatchOutcome::Block);
-                Ok(response)
+                Ok(blocked_connect_response!())
             }
 
             #[cfg(feature = "mitm")]
@@ -373,16 +364,7 @@ pub(super) async fn handle_connect(
                     .ok_or_else(|| anyhow!("listener not found"))?;
                 let tls_inspection = listener_cfg.tls_inspection.as_ref();
                 if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
-                    let mut response = finalize_response_with_headers(
-                        &Method::CONNECT,
-                        req_version,
-                        proxy_name,
-                        blocked(state.messages.blocked.as_str()),
-                        response_headers.as_deref(),
-                        false,
-                    );
-                    audit.annotate(&mut response, crate::http::dispatch::DispatchOutcome::Block);
-                    return Ok(response);
+                    return Ok(blocked_connect_response!());
                 }
                 let verify = tls_inspection
                     .map(|t| {
@@ -394,27 +376,13 @@ pub(super) async fn handle_connect(
                 let rate_limit_ctx = RateLimitContext::from_identity(
                     remote_addr.ip(),
                     &identity,
-                    matched_rule.as_deref(),
+                    matched_rule_name,
                     upstream.as_ref().map(|upstream| upstream.key()),
                 );
                 let concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_ctx)
                 {
                     Some(permits) => Some(permits),
-                    None => {
-                        let mut response = finalize_response_with_headers(
-                            &Method::CONNECT,
-                            req_version,
-                            proxy_name,
-                            too_many_requests(None),
-                            response_headers.as_deref(),
-                            false,
-                        );
-                        audit.annotate(
-                            &mut response,
-                            crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
-                        );
-                        return Ok(response);
-                    }
+                    None => return Ok(too_many_connect_response!()),
                 };
                 let upstream_connected = match connect_tunnel_target(
                     &host,
@@ -426,22 +394,7 @@ pub(super) async fn handle_connect(
                 .await
                 {
                     Ok(stream) => stream,
-                    Err(_) => {
-                        let mut response = finalize_response_with_headers(
-                            &Method::CONNECT,
-                            req_version,
-                            proxy_name,
-                            Response::builder()
-                                .status(StatusCode::BAD_GATEWAY)
-                                .body(Body::from(state.messages.proxy_error.clone()))
-                                .unwrap_or_else(|_| Response::new(Body::empty())),
-                            response_headers.as_deref(),
-                            false,
-                        );
-                        audit
-                            .annotate(&mut response, crate::http::dispatch::DispatchOutcome::Error);
-                        return Ok(response);
-                    }
+                    Err(_) => return Ok(proxy_error_connect_response!()),
                 };
                 let runtime_for_mitm = runtime.clone();
                 let listener_name_owned = listener_name.to_string();
@@ -475,16 +428,7 @@ pub(super) async fn handle_connect(
                         warn!(error = ?err, "mitm tunnel failed");
                     }
                 });
-                let mut response = finalize_response_with_headers(
-                    &Method::CONNECT,
-                    req_version,
-                    proxy_name,
-                    connect_established(),
-                    response_headers.as_deref(),
-                    false,
-                );
-                audit.annotate(&mut response, crate::http::dispatch::DispatchOutcome::Allow);
-                Ok(response)
+                Ok(established_connect_response!())
             }
         }
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {
@@ -492,26 +436,12 @@ pub(super) async fn handle_connect(
             let rate_limit_ctx = RateLimitContext::from_identity(
                 remote_addr.ip(),
                 &identity,
-                matched_rule.as_deref(),
+                matched_rule_name,
                 upstream.as_ref().map(|upstream| upstream.key()),
             );
             let concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_ctx) {
                 Some(permits) => Some(permits),
-                None => {
-                    let mut response = finalize_response_with_headers(
-                        &Method::CONNECT,
-                        req_version,
-                        proxy_name,
-                        too_many_requests(None),
-                        response_headers.as_deref(),
-                        false,
-                    );
-                    audit.annotate(
-                        &mut response,
-                        crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
-                    );
-                    return Ok(response);
-                }
+                None => return Ok(too_many_connect_response!()),
             };
             let connected = match connect_tunnel_target(
                 &host,
@@ -523,21 +453,7 @@ pub(super) async fn handle_connect(
             .await
             {
                 Ok(stream) => stream,
-                Err(_) => {
-                    let mut response = finalize_response_with_headers(
-                        &Method::CONNECT,
-                        req_version,
-                        proxy_name,
-                        Response::builder()
-                            .status(StatusCode::BAD_GATEWAY)
-                            .body(Body::from(state.messages.proxy_error.clone()))
-                            .unwrap_or_else(|_| Response::new(Body::empty())),
-                        response_headers.as_deref(),
-                        false,
-                    );
-                    audit.annotate(&mut response, crate::http::dispatch::DispatchOutcome::Error);
-                    return Ok(response);
-                }
+                Err(_) => return Ok(proxy_error_connect_response!()),
             };
             let throttle = BandwidthThrottle::with_context(
                 rate_limit_ctx,
@@ -576,16 +492,7 @@ pub(super) async fn handle_connect(
                     warn!(error = ?err, "tunnel failed");
                 }
             });
-            let mut response = finalize_response_with_headers(
-                &Method::CONNECT,
-                req_version,
-                proxy_name,
-                connect_established(),
-                response_headers.as_deref(),
-                false,
-            );
-            audit.annotate(&mut response, crate::http::dispatch::DispatchOutcome::Allow);
-            Ok(response)
+            Ok(established_connect_response!())
         }
     }
 }

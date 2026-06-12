@@ -6,8 +6,8 @@ use super::control::{
 };
 use super::transfer::FtpDataTransfer;
 use super::{OperationTimedOut, RequestBodyTooLarge};
-use crate::http::body::Body;
 use anyhow::{Result, anyhow};
+use qpx_http::body::Body;
 #[cfg(test)]
 use std::io::Read;
 use std::net::SocketAddr;

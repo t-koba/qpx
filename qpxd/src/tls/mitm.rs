@@ -1,8 +1,8 @@
-use crate::tls::cert_info::UpstreamCertificateInfo;
-use crate::tls::trust::CompiledUpstreamTlsTrust;
 use crate::upstream::connect::TunnelIo;
 use anyhow::{Result, anyhow};
+use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_core::tls::MitmConfig;
+use qpx_core::tls::UpstreamCertificateInfo;
 use std::sync::Arc;
 use tokio::time::{Duration, timeout};
 use tokio_rustls::TlsAcceptor;
@@ -48,19 +48,19 @@ pub(crate) async fn connect_mitm_upstream(
     timeout_dur: Duration,
     log_context: &'static str,
 ) -> Result<(
-    Arc<tokio::sync::Mutex<crate::http::protocol::common::Http1SendRequest>>,
+    Arc<tokio::sync::Mutex<qpx_http::protocol::common::Http1SendRequest>>,
     UpstreamCertificateInfo,
 )> {
     // For MITM traffic we force HTTP/1.1 upstream to keep Upgrade/WebSocket semantics working
     // and to avoid relying on HTTP/2 pseudo-header inference.
     let (server_tls, cert_info) = timeout(
         timeout_dur,
-        crate::tls::builder::connect_client_http1(host, upstream_io, verify_upstream, trust),
+        qpx_http::tls::builder::connect_client_http1(host, upstream_io, verify_upstream, trust),
     )
     .await??;
     let (sender, conn) = timeout(
         timeout_dur,
-        crate::http::protocol::common::handshake_http1(server_tls),
+        qpx_http::protocol::common::handshake_http1(server_tls),
     )
     .await??;
     tokio::spawn(async move {

@@ -1,14 +1,16 @@
-use anyhow::{Result, anyhow};
+use crate::H3Result as Result;
+use anyhow::anyhow;
 
 pub(crate) fn sanitize_interim_response_for_h3(head: &mut http::Response<()>) -> Result<()> {
     if !head.status().is_informational() {
         return Err(anyhow!(
             "interim HTTP/3 response status must be informational: {}",
             head.status()
-        ));
+        )
+        .into());
     }
     if head.status() == http::StatusCode::SWITCHING_PROTOCOLS {
-        return Err(anyhow!("HTTP/3 interim responses must not use 101"));
+        return Err(anyhow!("HTTP/3 interim responses must not use 101").into());
     }
     sanitize_h3_regular_headers(head.headers_mut());
     head.headers_mut().remove(http::header::CONTENT_LENGTH);
@@ -62,7 +64,7 @@ pub(crate) fn parse_content_length(headers: &http::HeaderMap) -> Result<Option<u
             .map_err(|err| anyhow!("invalid Content-Length header: {err}"))?
             .trim();
         if raw.is_empty() {
-            return Err(anyhow!("empty Content-Length header"));
+            return Err(anyhow!("empty Content-Length header").into());
         }
         for part in raw.split(',') {
             let next = part
@@ -71,7 +73,7 @@ pub(crate) fn parse_content_length(headers: &http::HeaderMap) -> Result<Option<u
                 .map_err(|err| anyhow!("invalid Content-Length value: {err}"))?;
             match parsed {
                 Some(existing) if existing != next => {
-                    return Err(anyhow!("conflicting Content-Length values"));
+                    return Err(anyhow!("conflicting Content-Length values").into());
                 }
                 Some(_) => {}
                 None => parsed = Some(next),

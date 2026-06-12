@@ -1,11 +1,11 @@
 use super::cluster::{
     ManagedUpstreamEndpoint, PassiveFailureKind, PassiveHealthPolicy, UpstreamProxyCluster,
-    now_millis,
 };
 use super::send::upstream_proxy_pool_key;
-use crate::tls::CompiledUpstreamTlsTrust;
+use crate::runtime::now_millis;
 use crate::upstream::http1::parse_upstream_proxy_endpoint;
 use arc_swap::ArcSwap;
+use qpx_core::tls::CompiledUpstreamTlsTrust;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::time::Duration;

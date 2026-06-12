@@ -1,4 +1,3 @@
-use crate::http::body::Body;
 use crate::http3::listener::{
     H3ConnInfo, H3ConnectKind, H3HttpResponse, H3Limits, H3RequestHandler,
 };
@@ -13,6 +12,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use hyper::{Request, Response, StatusCode};
 use qpx_core::config::{ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig};
+use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -142,6 +142,10 @@ impl H3RequestHandler for ForwardH3Handler {
             max_concurrent_streams_per_connection: limits.h3.max_h3_streams_per_connection,
             datagram_channel_capacity: limits.h3.datagram_channel_capacity,
             streaming,
+            request_body_drain: crate::http3::server::H3RequestBodyDrainControl {
+                config: limits.h3.request_body_drain,
+                semaphore: state.h3_request_body_drain_semaphore.clone(),
+            },
             read_timeout: Duration::from_millis(limits.timeouts.h3_read_timeout_ms),
             proxy_name: Arc::<str>::from(state.plan.identity.proxy_name.as_ref()),
             error_body: Arc::<str>::from(state.messages.proxy_error.as_str()),
@@ -154,6 +158,21 @@ impl H3RequestHandler for ForwardH3Handler {
 
     fn enable_datagram(&self) -> bool {
         true
+    }
+
+    fn request_streaming_limits(
+        &self,
+        req_head: &::http::Request<()>,
+        conn: &H3ConnInfo,
+        fallback: crate::runtime::ResolvedStreamingLimits,
+    ) -> crate::runtime::ResolvedStreamingLimits {
+        super::streaming::request_streaming_limits_for_head(
+            &self.runtime,
+            self.listener_name.as_ref(),
+            req_head,
+            conn.remote_addr,
+            fallback,
+        )
     }
 
     async fn handle_http(&self, req: Request<Body>, conn: H3ConnInfo) -> Response<Body> {
@@ -206,12 +225,11 @@ impl H3RequestHandler for ForwardH3Handler {
                     crate::http::codec::interim::take_interim_response_heads(&mut response)
                         .into_iter()
                         .filter_map(|head| {
-                            let status =
-                                crate::http::protocol::semantics::validate_http_status_class(
-                                    head.status,
-                                    "HTTP/3 interim response",
-                                )
-                                .ok()?;
+                            let status = qpx_http::protocol::semantics::validate_http_status_class(
+                                head.status,
+                                "HTTP/3 interim response",
+                            )
+                            .ok()?;
                             let mut response =
                                 ::http::Response::builder().status(status).body(()).ok()?;
                             *response.headers_mut() =

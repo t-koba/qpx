@@ -2,7 +2,6 @@ use super::transport::{ReverseConnInfo, handle_request_with_interim};
 use super::{
     ReloadableReverse, record_reverse_connection_filter_block, reverse_connection_filter_match,
 };
-use crate::http::body::Body;
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 use crate::http::codec::interim::{
     H2_PREFACE, serve_h2_with_interim_and_capacity, sniff_h2_preface,
@@ -11,6 +10,7 @@ use crate::tcp_bindings::filter::ConnectionFilterStage;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use anyhow::Result;
 use http::{Request, Response};
+use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 use std::convert::Infallible;

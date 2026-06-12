@@ -1,6 +1,6 @@
-use crate::http::body::Body;
 use crate::upstream::raw_http1::InterimResponseHead;
 use hyper::Response;
+use qpx_http::body::Body;
 
 pub(crate) type InterimList = Vec<InterimResponseHead>;
 

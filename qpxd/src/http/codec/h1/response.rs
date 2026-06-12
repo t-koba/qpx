@@ -1,5 +1,4 @@
 use super::{RESPONSE_WRITE_TIMEOUT, has_chunked_transfer_encoding, parse_declared_content_length};
-use crate::http::body::Body;
 use crate::http::codec::h1_common::serialize_headers;
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
@@ -8,6 +7,7 @@ use http::{Method, Response, StatusCode, Version};
 use hyper::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderValue, TRAILER, TRANSFER_ENCODING,
 };
+use qpx_http::body::Body;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, WriteHalf};
 use tokio::time::{Duration, timeout};
 
@@ -50,7 +50,7 @@ where
                 return Err(anyhow!("HTTP/1 interim responses must not use 101"));
             }
             let mut headers = head.headers.clone();
-            crate::http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
+            qpx_http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
             write_status_and_headers(
                 writer,
                 Version::HTTP_11,
@@ -265,7 +265,7 @@ where
     };
     write_all_with_timeout(writer, b"0\r\n").await?;
     if let Some(trailers) = trailers.as_mut() {
-        let _ = crate::http::protocol::semantics::sanitize_response_trailers(trailers);
+        let _ = qpx_http::protocol::semantics::sanitize_response_trailers(trailers);
         if emit_trailers && !trailers.is_empty() {
             serialize_headers(trailers, &mut Vec::new())?;
             let mut out = Vec::with_capacity(256);
@@ -303,7 +303,7 @@ where
 async fn read_response_body_chunk(
     body: &mut Body,
     body_read_timeout: Duration,
-) -> Result<Option<Result<Bytes, crate::http::body::BodyError>>> {
+) -> Result<Option<Result<Bytes, qpx_http::body::BodyError>>> {
     timeout(body_read_timeout, body.data())
         .await
         .map_err(|_| anyhow!("HTTP/1 response body read timed out"))
@@ -403,7 +403,7 @@ fn prepare_http1_trailer_metadata(
     let Some(trailers) = first_trailers else {
         return false;
     };
-    let _ = crate::http::protocol::semantics::sanitize_response_trailers(trailers);
+    let _ = qpx_http::protocol::semantics::sanitize_response_trailers(trailers);
     let Some(value) = serialize_trailer_field_names(trailers) else {
         return false;
     };

@@ -87,6 +87,7 @@ fn udp_session_handoff_round_trip_restores_connected_sockets() {
         .prepare_handoff(&test_config())
         .expect("prepare handoff")
         .expect("handoff");
+    // SAFETY: this test serializes environment mutation through the process test env lock.
     unsafe {
         std::env::set_var(
             UdpSessionRestoreState::handoff_env_key(),

@@ -1,8 +1,8 @@
-use crate::http::body::Body;
 use crate::policy_context::{AuditRecord, attach_log_context, emit_audit_log, merge_policy_tags};
 use crate::runtime::RuntimeState;
 use http::Method;
 use hyper::Response;
+use qpx_http::body::Body;
 use qpx_observability::access_log::RequestLogContext;
 use std::net::SocketAddr;
 use std::sync::Arc;

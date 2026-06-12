@@ -1,4 +1,5 @@
-use anyhow::{Result, anyhow};
+use crate::H3Result as Result;
+use anyhow::anyhow;
 use std::collections::HashSet;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -45,7 +46,7 @@ pub(crate) fn decode_settings_frame(payload: &[u8]) -> Result<PeerSettings> {
         let (value, used_value) = read_varint_slice(cursor)?;
         cursor = &cursor[used_value..];
         if !seen.insert(id) {
-            return Err(anyhow!("duplicate SETTINGS parameter 0x{id:x}"));
+            return Err(anyhow!("duplicate SETTINGS parameter 0x{id:x}").into());
         }
         apply_settings_parameter(&mut settings, id, value)?;
     }
@@ -63,7 +64,8 @@ where
     if len > max_payload_bytes as u64 {
         return Err(anyhow!(
             "HTTP/3 SETTINGS payload length {len} exceeds limit {max_payload_bytes}"
-        ));
+        )
+        .into());
     }
     let mut remaining = len;
     let mut seen = HashSet::new();
@@ -73,7 +75,7 @@ where
         let value =
             read_varint_from_payload(reader, &mut remaining, "SETTINGS parameter value").await?;
         if !seen.insert(id) {
-            return Err(anyhow!("duplicate SETTINGS parameter 0x{id:x}"));
+            return Err(anyhow!("duplicate SETTINGS parameter 0x{id:x}").into());
         }
         apply_settings_parameter(&mut settings, id, value)?;
     }
@@ -89,7 +91,7 @@ where
     R: AsyncRead + Unpin,
 {
     if *remaining == 0 {
-        return Err(anyhow!("truncated {label}"));
+        return Err(anyhow!("truncated {label}").into());
     }
     let first = reader.read_u8().await?;
     *remaining -= 1;
@@ -97,7 +99,7 @@ where
     let len = 1usize << prefix;
     let needed = (len - 1) as u64;
     if *remaining < needed {
-        return Err(anyhow!("truncated {label}"));
+        return Err(anyhow!("truncated {label}").into());
     }
     let mut value = (first & 0x3f) as u64;
     for _ in 1..len {
@@ -114,19 +116,19 @@ fn apply_settings_parameter(settings: &mut PeerSettings, id: u64, value: u64) ->
         SETTING_MAX_FIELD_SECTION_SIZE => settings.max_field_section_size = value,
         SETTING_ENABLE_CONNECT_PROTOCOL => {
             if value > 1 {
-                return Err(anyhow!("SETTINGS_ENABLE_CONNECT_PROTOCOL must be 0 or 1"));
+                return Err(anyhow!("SETTINGS_ENABLE_CONNECT_PROTOCOL must be 0 or 1").into());
             }
             settings.enable_extended_connect = value == 1;
         }
         SETTING_H3_DATAGRAM => {
             if value > 1 {
-                return Err(anyhow!("SETTINGS_H3_DATAGRAM must be 0 or 1"));
+                return Err(anyhow!("SETTINGS_H3_DATAGRAM must be 0 or 1").into());
             }
             settings.enable_datagram = value == 1;
         }
         SETTING_ENABLE_WEBTRANSPORT => {
             if value > 1 {
-                return Err(anyhow!("SETTINGS_ENABLE_WEBTRANSPORT must be 0 or 1"));
+                return Err(anyhow!("SETTINGS_ENABLE_WEBTRANSPORT must be 0 or 1").into());
             }
             settings.enable_webtransport = value == 1;
         }
@@ -134,7 +136,8 @@ fn apply_settings_parameter(settings: &mut PeerSettings, id: u64, value: u64) ->
         0x2..=0x5 => {
             return Err(anyhow!(
                 "reserved HTTP/2 SETTINGS parameter 0x{id:x} is invalid in HTTP/3"
-            ));
+            )
+            .into());
         }
         _ => {}
     }

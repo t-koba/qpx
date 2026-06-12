@@ -1,9 +1,10 @@
 use super::errors::HeaderDecodeError;
 use super::{DecodedRequestHead, DecodedResponseHead, HEADER_ENTRY_OVERHEAD};
+use crate::H3Result as Result;
 use crate::qpack_fields::{
     append_header, validate_h3_regular_field, validate_h3_response_field, validate_h3_trailer_field,
 };
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use bytes::Bytes;
 use http::{HeaderMap, Method, Uri};
 use std::sync::Arc;

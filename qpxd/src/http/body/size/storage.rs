@@ -42,7 +42,13 @@ pub(super) struct ObservedBodyTrailers(pub(super) HeaderMap);
 
 impl Drop for ObservedBodyFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                qpx_http::body::metrics::spool_cleanup_error();
+            }
+        }
     }
 }
 
@@ -52,6 +58,22 @@ impl ObservedBodyBytes {
             ObservedBodyStorage::Memory(chunks) => Ok(bytes_prefix_from_chunks(chunks, max_bytes)),
             ObservedBodyStorage::File(file) => {
                 read_observed_body_spool_prefix_async(file.path.clone(), self.len, max_bytes).await
+            }
+        }
+    }
+
+    pub(super) async fn read_prefix_chunks_async(&self, max_bytes: usize) -> Result<Vec<Bytes>> {
+        match &self.storage {
+            ObservedBodyStorage::Memory(chunks) => Ok(bytes_prefix_chunks(chunks, max_bytes)),
+            ObservedBodyStorage::File(file) => {
+                let prefix =
+                    read_observed_body_spool_prefix_async(file.path.clone(), self.len, max_bytes)
+                        .await?;
+                Ok(if prefix.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![prefix]
+                })
             }
         }
     }
@@ -255,6 +277,27 @@ pub(super) fn bytes_prefix_from_chunks(chunks: &[Bytes], max_bytes: usize) -> By
         remaining -= take;
     }
     Bytes::from(out)
+}
+
+pub(super) fn bytes_prefix_chunks(chunks: &[Bytes], max_bytes: usize) -> Vec<Bytes> {
+    if max_bytes == 0 || chunks.is_empty() {
+        return Vec::new();
+    }
+    let mut remaining = max_bytes;
+    let mut out = Vec::new();
+    for chunk in chunks {
+        if remaining == 0 {
+            break;
+        }
+        let take = chunk.len().min(remaining);
+        if take == chunk.len() {
+            out.push(chunk.clone());
+        } else {
+            out.push(chunk.slice(..take));
+        }
+        remaining -= take;
+    }
+    out
 }
 
 #[cfg(test)]

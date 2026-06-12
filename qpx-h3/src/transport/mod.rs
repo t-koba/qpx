@@ -1,8 +1,10 @@
+use crate::H3Result as Result;
 use crate::protocol::{FRAME_DATA, FRAME_HEADERS};
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use std::time::Duration;
 
 mod datagram;
+mod metrics;
 mod request_stream;
 mod split;
 mod streams;
@@ -53,7 +55,8 @@ fn enforce_body_frame(
     {
         return Err(anyhow!(
             "HTTP/3 request body exceeds max_request_body_bytes ({max_request_body_bytes})"
-        ));
+        )
+        .into());
     }
     if let Some(declared_content_length) = declared_content_length
         && *received_body_bytes as u64 > declared_content_length
@@ -61,7 +64,7 @@ fn enforce_body_frame(
         return Err(anyhow!(
             "HTTP/3 {message_name} body exceeds Content-Length: Content-Length={declared_content_length}, received={}",
             *received_body_bytes
-        ));
+        ).into());
     }
     Ok(())
 }
@@ -77,7 +80,7 @@ fn enforce_body_content_length_complete(
     if received_body_bytes as u64 != declared_content_length {
         return Err(anyhow!(
             "HTTP/3 {message_name} body length mismatch: Content-Length={declared_content_length}, received={received_body_bytes}"
-        ));
+        ).into());
     }
     Ok(())
 }
@@ -90,6 +93,7 @@ fn declared_response_body_length(
     if head_request
         || response.status().is_informational()
         || response.status() == http::StatusCode::NO_CONTENT
+        || response.status() == http::StatusCode::RESET_CONTENT
         || response.status() == http::StatusCode::NOT_MODIFIED
     {
         Ok(Some(0))
@@ -112,7 +116,8 @@ fn enforce_response_content_length_send(
         return Err(anyhow!(
             "HTTP/3 response body exceeds Content-Length: Content-Length={declared}, sent={}",
             state.sent_body_bytes
-        ));
+        )
+        .into());
     }
     Ok(())
 }
@@ -124,7 +129,8 @@ fn enforce_response_content_length_complete(state: &ResponseSendState) -> Result
         return Err(anyhow!(
             "HTTP/3 response body length mismatch: Content-Length={declared}, sent={}",
             state.sent_body_bytes
-        ));
+        )
+        .into());
     }
     Ok(())
 }

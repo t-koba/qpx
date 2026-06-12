@@ -23,7 +23,7 @@ pub(super) struct UpstreamConnectUdpParams<'a> {
     pub(super) target_port: u16,
     pub(super) proxy_name: &'a str,
     pub(super) verify_upstream: bool,
-    pub(super) trust: Option<&'a crate::tls::CompiledUpstreamTlsTrust>,
+    pub(super) trust: Option<&'a qpx_core::tls::CompiledUpstreamTlsTrust>,
     pub(super) timeout_dur: Duration,
     pub(super) datagram_channel_capacity: usize,
 }

@@ -1,4 +1,3 @@
-use crate::http::body::Body;
 use crate::http::policy::response_policy::HttpResponseRuleEngine;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
@@ -6,6 +5,7 @@ use crate::runtime::{CompiledListenerSettings, ExecutionPlan, Runtime, RuntimeSt
 use hyper::Response;
 use qpx_core::config::{ActionConfig, CachePolicyConfig};
 use qpx_core::rules::{CandidateRequestObservationRequirements, CompiledHeaderControl};
+use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -15,9 +15,9 @@ pub enum PrepareOutcome<P> {
     Prepared(Box<P>),
 }
 
-pub enum AccessOutcome<A> {
-    Response(Box<Response<Body>>),
-    Continue(Box<A>),
+pub(crate) enum PolicyStage<D> {
+    Decision(D),
+    Observe(CandidateRequestObservationRequirements),
 }
 
 pub(crate) struct RequestContext {

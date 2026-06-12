@@ -1,12 +1,12 @@
 use super::super::destination::{ConnectTarget, connect_target_stream};
-use crate::http::body::Body;
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
 use crate::runtime::Runtime;
-use crate::tls::CompiledUpstreamTlsTrust;
 use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream, prewarm_mitm_cert};
 use anyhow::{Context, Result};
 use hyper::Request;
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_http::body::Body;
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 use qpx_observability::handler_fn;
 use std::convert::Infallible;

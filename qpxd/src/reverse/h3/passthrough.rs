@@ -242,14 +242,21 @@ async fn handle_client_packet(
 
     let now = Instant::now();
     let now_ms = instant_to_millis(ctx.run_started, now);
-    if let Some(socket) = existing_passthrough_session_socket(&ctx, client_addr, payload, now_ms)? {
-        socket.send(payload).await?;
+    if let Some((session_id, socket)) =
+        existing_passthrough_session_socket(&ctx, client_addr, payload, now_ms)?
+    {
+        if let Err(err) = socket.send(payload).await {
+            cleanup_passthrough_session(ctx.sessions.as_ref(), session_id);
+            return Err(err.into());
+        }
         return Ok(());
     }
-    if let Some(socket) =
+    if let Some((session_id, socket)) =
         create_passthrough_session(&mut ctx, client_addr, payload, now, now_ms).await?
+        && let Err(err) = socket.send(payload).await
     {
-        socket.send(payload).await?;
+        cleanup_passthrough_session(ctx.sessions.as_ref(), session_id);
+        return Err(err.into());
     }
     Ok(())
 }
@@ -259,7 +266,7 @@ fn existing_passthrough_session_socket(
     client_addr: SocketAddr,
     payload: &[u8],
     now_ms: u64,
-) -> Result<Option<Arc<UdpSocket>>> {
+) -> Result<Option<(u64, Arc<UdpSocket>)>> {
     let (id, session, needs_index_update) = {
         let Some((id, session)) = ctx
             .sessions
@@ -281,7 +288,7 @@ fn existing_passthrough_session_socket(
             ctx.sessions.observe_client_packet(id, payload);
         }
     }
-    Ok(Some(upstream_socket))
+    Ok(Some((id, upstream_socket)))
 }
 
 async fn create_passthrough_session(
@@ -290,7 +297,7 @@ async fn create_passthrough_session(
     payload: &[u8],
     now: Instant,
     now_ms: u64,
-) -> Result<Option<Arc<UdpSocket>>> {
+) -> Result<Option<(u64, Arc<UdpSocket>)>> {
     if payload.len() < ctx.min_client_bytes {
         return Ok(None);
     }
@@ -317,7 +324,7 @@ async fn create_passthrough_session(
     *ctx.next_session_id = ctx.next_session_id.wrapping_add(1);
 
     let mut created = false;
-    let socket = {
+    let (socket_session_id, socket) = {
         ctx.sessions.drain_session_touches(ctx.touch_rx);
         while ctx.sessions.session_count() >= ctx.max_sessions {
             let Some(evicted) = ctx.sessions.evict_oldest() else {
@@ -325,11 +332,11 @@ async fn create_passthrough_session(
             };
             let _ = evicted.close_tx.send(true);
         }
-        if let Some((_, existing)) = ctx
+        if let Some((existing_id, existing)) = ctx
             .sessions
             .find_session_for_client_packet(client_addr, payload)
         {
-            existing.socket.clone()
+            (existing_id, existing.socket.clone())
         } else {
             let session = Arc::new(PassthroughSession::new(
                 socket.clone(),
@@ -343,7 +350,7 @@ async fn create_passthrough_session(
             ctx.sessions.insert_new(session_id, session);
             created = true;
             ctx.sessions.observe_client_packet(session_id, payload);
-            socket
+            (session_id, socket)
         }
     };
 
@@ -365,7 +372,13 @@ async fn create_passthrough_session(
             session.attach_relay_task(relay_task);
         }
     }
-    Ok(Some(socket))
+    Ok(Some((socket_session_id, socket)))
+}
+
+fn cleanup_passthrough_session(sessions: &SharedSessionIndex, session_id: u64) {
+    if let Some(session) = sessions.remove_session(session_id) {
+        let _ = session.close_tx.send(true);
+    }
 }
 
 fn run_started_from_exported_elapsed(exported_elapsed_ms: u64) -> Instant {
@@ -513,7 +526,6 @@ fn spawn_passthrough_upstream_relay(ctx: PassthroughRelayContext) -> JoinHandle<
     tokio::spawn(async move {
         let mut recv_buf = vec![0u8; 65535];
         let mut close_rx = session.close_tx.subscribe();
-        let client_addr_rx = client_addr_rx;
         loop {
             let n = tokio::select! {
                 changed = close_rx.changed() => {

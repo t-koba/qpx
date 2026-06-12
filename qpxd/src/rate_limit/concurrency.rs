@@ -1,6 +1,6 @@
 // Extracted from rate_limit.rs; public surface is re-exported by mod.rs.
 use super::RateLimitContext;
-use super::key::{KeyKind, LimiterKey, make_limiter_key, shard_count_for_key_kind, shard_for_key};
+use super::key::{KeyKind, LimiterKey, make_limiter_key, shard_count_for_key_kind};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -66,7 +66,7 @@ impl ConcurrencyLimiter {
         ctx: &RateLimitContext,
     ) -> Option<ConcurrencyPermit> {
         let key = self.make_key(ctx);
-        let shard = shard_for_key(&key, self.shard_mask);
+        let shard = qpx_http::sharding::masked(&key, self.shard_mask);
         let mut inner = self.shards[shard]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

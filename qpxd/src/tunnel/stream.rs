@@ -1,6 +1,4 @@
 use async_trait::async_trait;
-#[cfg(feature = "http3-backend-h3")]
-use bytes::Buf;
 use bytes::Bytes;
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -159,13 +157,15 @@ impl TunnelHalfWrite for qpx_h3::StreamSend {
 }
 
 #[cfg(feature = "http3-backend-h3")]
-fn h3_recv_data(
-    result: std::result::Result<Option<impl Buf>, ::h3::error::StreamError>,
-) -> io::Result<Option<Bytes>> {
-    let Some(mut chunk) = result.map_err(io_other)? else {
-        return Ok(None);
-    };
-    Ok(Some(chunk.copy_to_bytes(chunk.remaining())))
+fn h3_recv_data<B>(
+    result: std::result::Result<Option<B>, ::h3::error::StreamError>,
+) -> io::Result<Option<Bytes>>
+where
+    B: bytes::Buf,
+{
+    result
+        .map(|chunk| chunk.map(crate::http3::h3_buf_to_bytes))
+        .map_err(io_other)
 }
 
 #[cfg(feature = "http3-backend-h3")]
@@ -174,7 +174,7 @@ fn h3_result<T>(result: std::result::Result<T, ::h3::error::StreamError>) -> io:
 }
 
 #[cfg(feature = "http3-backend-qpx")]
-fn qpx_result<T>(result: anyhow::Result<T>) -> io::Result<T> {
+fn qpx_result<T>(result: qpx_h3::H3Result<T>) -> io::Result<T> {
     result.map_err(io_other)
 }
 

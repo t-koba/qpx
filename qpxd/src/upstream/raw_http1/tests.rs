@@ -7,11 +7,11 @@ use super::{
     RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, parse_declared_content_length,
     send_http1_request_with_interim,
 };
-use crate::http::body::Body;
-use crate::http::body::to_bytes;
 use bytes::{Bytes, BytesMut};
 use hyper::header::{CONTENT_LENGTH, HeaderName, HeaderValue, TRANSFER_ENCODING};
 use hyper::{HeaderMap, Method, Request, StatusCode, Version};
+use qpx_http::body::Body;
+use qpx_http::body::to_bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Duration;

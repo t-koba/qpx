@@ -63,6 +63,7 @@ impl QuinnBrokerRestoreSet {
         let Some(raw) = std::env::var_os(ENV_INHERITED_QUIC_BROKERS) else {
             return Ok(None);
         };
+        // SAFETY: this runs during single-threaded startup handoff before worker tasks read env.
         unsafe {
             std::env::remove_var(ENV_INHERITED_QUIC_BROKERS);
         }
@@ -272,7 +273,6 @@ pub(crate) fn prepare_quic_broker_handoff(
     #[cfg(not(any(unix, windows)))]
     {
         let _ = handles;
-        let _ = _config;
         Err(anyhow!(
             "QUIC broker handoff is only supported on unix and windows"
         ))

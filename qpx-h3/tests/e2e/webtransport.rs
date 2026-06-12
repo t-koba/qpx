@@ -37,12 +37,11 @@ async fn webtransport_routes_associated_streams_and_datagrams() -> Result<()> {
         .ok_or_else(|| anyhow!("missing WebTransport request echo"))?;
     assert_eq!(echoed, Bytes::from_static(b"request-stream"));
 
-    stream
+    let datagrams = stream
         .datagrams
         .as_mut()
-        .ok_or_else(|| anyhow!("missing WebTransport datagrams"))?
-        .sender
-        .send_datagram(Bytes::from_static(b"wt-dgram"))?;
+        .ok_or_else(|| anyhow!("missing WebTransport datagrams"))?;
+    send_test_datagram(datagrams, Bytes::from_static(b"wt-dgram"))?;
     let echoed_datagram = timeout(
         TEST_TIMEOUT,
         stream

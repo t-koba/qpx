@@ -49,6 +49,8 @@ pub struct CgiResponse {
     pub body: Bytes,
 }
 
+pub type CgiResponseHead = (u16, Vec<(String, String)>, usize);
+
 impl CgiResponse {
     /// Serialize this response into raw CGI output (Status header + headers + body).
     pub fn to_cgi_output(&self) -> Bytes {
@@ -73,6 +75,17 @@ impl CgiResponse {
 
     /// Parse CGI output (stdout) into a CgiResponse.
     pub fn parse_cgi_output(data: &[u8]) -> Result<Self> {
+        let (status, headers, body_start) = Self::parse_cgi_head(data)?;
+        let body = Bytes::copy_from_slice(&data[body_start..]);
+        Ok(CgiResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    /// Parse the CGI response header block without materializing the body.
+    pub fn parse_cgi_head(data: &[u8]) -> Result<CgiResponseHead> {
         let header_end = find_header_end(data)
             .ok_or_else(|| anyhow::anyhow!("CGI output missing header terminator"))?;
         let header_section = std::str::from_utf8(&data[..header_end])?;
@@ -113,12 +126,7 @@ impl CgiResponse {
                 return Err(anyhow::anyhow!("CGI output contains malformed header line"));
             }
         }
-        let body = Bytes::copy_from_slice(&data[body_start..]);
-        Ok(CgiResponse {
-            status,
-            headers,
-            body,
-        })
+        Ok((status, headers, body_start))
     }
 }
 

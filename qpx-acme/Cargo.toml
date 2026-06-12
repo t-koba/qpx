@@ -3,6 +3,10 @@ name = "qpx-acme"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 default = []
@@ -11,6 +15,7 @@ http3 = ["dep:quinn"]
 [dependencies]
 qpx-core = { path = "../qpx-core", default-features = false, features = ["tls-rustls"] }
 anyhow.workspace = true
+thiserror.workspace = true
 arc-swap.workspace = true
 bytes.workspace = true
 hyper.workspace = true

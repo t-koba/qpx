@@ -43,17 +43,19 @@ async fn response_rule_can_bypass_cache_without_replacing_response() {
     .expect("apply");
 
     match decision {
-        ResponseRuleDecision::Continue {
+        ListenerResponsePolicyDecision::Continue {
             response,
-            route_headers,
+            headers,
             cache_bypass,
             ..
         } => {
             assert_eq!(response.status(), StatusCode::OK);
-            assert!(route_headers.is_none());
+            assert!(headers.is_none());
             assert!(cache_bypass);
         }
-        ResponseRuleDecision::LocalResponse { .. } => panic!("expected continued response"),
+        ListenerResponsePolicyDecision::LocalResponse { .. } => {
+            panic!("expected continued response")
+        }
     }
 }
 
@@ -116,10 +118,10 @@ async fn response_rule_matches_actual_chunked_response_size() {
     .expect("apply");
 
     match decision {
-        ResponseRuleDecision::LocalResponse { response, .. } => {
+        ListenerResponsePolicyDecision::LocalResponse { response, .. } => {
             assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
         }
-        ResponseRuleDecision::Continue { .. } => panic!("expected local response"),
+        ListenerResponsePolicyDecision::Continue { .. } => panic!("expected local response"),
     }
 }
 
@@ -230,10 +232,10 @@ async fn response_rule_matches_destination_and_upstream_cert_context() {
     .expect("apply");
 
     match decision {
-        ResponseRuleDecision::LocalResponse { response, .. } => {
+        ListenerResponsePolicyDecision::LocalResponse { response, .. } => {
             assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
         }
-        ResponseRuleDecision::Continue { .. } => panic!("expected local response"),
+        ListenerResponsePolicyDecision::Continue { .. } => panic!("expected local response"),
     }
 }
 
@@ -297,9 +299,9 @@ async fn response_rule_matches_client_cert_context() {
     .expect("apply");
 
     match decision {
-        ResponseRuleDecision::LocalResponse { response, .. } => {
+        ListenerResponsePolicyDecision::LocalResponse { response, .. } => {
             assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
         }
-        ResponseRuleDecision::Continue { .. } => panic!("expected local response"),
+        ListenerResponsePolicyDecision::Continue { .. } => panic!("expected local response"),
     }
 }

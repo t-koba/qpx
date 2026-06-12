@@ -1,3 +1,4 @@
+mod metrics;
 mod relay;
 pub(crate) mod stream;
 

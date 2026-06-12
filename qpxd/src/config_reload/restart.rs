@@ -83,14 +83,8 @@ impl ConfigReloadHandler {
             }
         };
 
-        let old_upstream_limit = current.runtime.upstream_proxy_max_concurrent_per_endpoint;
-        crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
-            next_state
-                .plan
-                .limits
-                .upstream
-                .upstream_proxy_max_concurrent_per_endpoint,
-        );
+        // Pool limits are owned per-runtime: `new_runtime`'s `PoolRegistry` already has
+        // the new config's limits applied at build time, so no global toggle is needed.
         let new_proxy = match ProxyTasks::start(
             &new_config,
             new_runtime.clone(),
@@ -102,9 +96,6 @@ impl ConfigReloadHandler {
         ) {
             Ok(tasks) => tasks,
             Err(err) => {
-                crate::upstream::pool::set_upstream_proxy_max_concurrent_per_endpoint(
-                    old_upstream_limit,
-                );
                 warn!(error = ?err, "config reload start failed; keeping old proxy tasks");
                 return Ok(());
             }
@@ -114,7 +105,7 @@ impl ConfigReloadHandler {
         if let Err(err) = old_proxy.stop_all().await {
             warn!(error = ?err, "old proxy tasks failed while draining after reload");
         }
-        crate::upstream::origin::clear_direct_origin_connection_pools();
+        // `new_runtime` owns freshly built connection pools, so there is nothing to flush.
         log_runtime_ready(&new_runtime);
         let _ = refresh_watches(watcher, watched, watch_sources);
         info!("config reloaded; listener/reverse server set restarted");

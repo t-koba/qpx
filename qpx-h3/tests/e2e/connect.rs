@@ -35,12 +35,11 @@ async fn extended_connect_relays_bytes_and_datagrams() -> Result<()> {
         .ok_or_else(|| anyhow!("missing extended CONNECT echo"))?;
     assert_eq!(echoed, Bytes::from_static(b"ping"));
 
-    stream
+    let datagrams = stream
         .datagrams
         .as_mut()
-        .ok_or_else(|| anyhow!("missing extended CONNECT datagrams"))?
-        .sender
-        .send_datagram(Bytes::from_static(b"dg"))?;
+        .ok_or_else(|| anyhow!("missing extended CONNECT datagrams"))?;
+    send_test_datagram(datagrams, Bytes::from_static(b"dg"))?;
     let echoed_datagram = timeout(
         TEST_TIMEOUT,
         stream
@@ -105,12 +104,14 @@ async fn connect_udp_relays_capsules_and_datagrams() -> Result<()> {
         b"capsule-payload"
     );
 
-    stream
+    let datagrams = stream
         .datagrams
         .as_mut()
-        .ok_or_else(|| anyhow!("missing CONNECT-UDP datagrams"))?
-        .sender
-        .send_datagram(Bytes::from(connect_udp_payload(b"datagram-payload")))?;
+        .ok_or_else(|| anyhow!("missing CONNECT-UDP datagrams"))?;
+    send_test_datagram(
+        datagrams,
+        Bytes::from(connect_udp_payload(b"datagram-payload")),
+    )?;
     let echoed_datagram = timeout(
         TEST_TIMEOUT,
         stream

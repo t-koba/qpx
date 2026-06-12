@@ -7,7 +7,6 @@ use super::util::{
 use anyhow::{Result, anyhow};
 use http::header::HeaderName;
 use hyper::HeaderMap;
-use metrics::counter;
 use qpx_core::config::{AssertionClaimsMapConfig, SignedAssertionConfig};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -91,11 +90,7 @@ impl CompiledSignedAssertion {
                     error = ?err,
                     "signed assertion verification failed"
                 );
-                counter!(
-                    "qpx_signed_assertion_verification_failed_total",
-                    "source" => self.name.clone(),
-                )
-                .increment(1);
+                super::metrics::signed_assertion_verification_failed(self.name.as_str());
                 Err(anyhow!("invalid signed assertion {}: {err}", self.name))
             }
         }

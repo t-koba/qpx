@@ -5,7 +5,6 @@ use super::protocol::{
     detect_rpc_protocol, extract_rpc_status_and_message, extract_service_and_method,
     infer_request_streaming, infer_response_streaming, response_content_type,
 };
-use crate::http::body::Body;
 use crate::http::body::size::{
     ObservedBodyReader, observed_request_body_reader, observed_request_size,
     observed_request_trailers, observed_response_body_reader, observed_response_size,
@@ -13,7 +12,7 @@ use crate::http::body::size::{
 };
 use anyhow::Result;
 use http::{HeaderMap, Request, Response};
-use metrics::counter;
+use qpx_http::body::Body;
 
 const CONNECT_STATUS_BODY_PREFIX_BYTES: usize = 16 * 1024;
 
@@ -59,20 +58,7 @@ pub(crate) fn inspect_request(
         if let (Some(protocol), Some(summary)) = (protocol.as_deref(), request_summary.as_ref())
             && matches!(protocol, "grpc" | "grpc_web")
         {
-            counter!(
-                "qpx_grpc_messages_total",
-                "direction" => "request",
-                "listener" => "unknown",
-                "protocol" => protocol.to_string()
-            )
-            .increment(summary.message_count as u64);
-            counter!(
-                "qpx_grpc_message_bytes_total",
-                "direction" => "request",
-                "listener" => "unknown",
-                "protocol" => protocol.to_string()
-            )
-            .increment(summary.message_bytes);
+            super::metrics::emit_inspected_body_metrics("request", "unknown", protocol, summary);
         }
         let streaming = infer_request_streaming(
             protocol.as_deref(),
@@ -163,31 +149,12 @@ pub(crate) fn inspect_response(
         if let (Some(protocol), Some(summary)) = (protocol.as_deref(), body_summary.as_ref())
             && matches!(protocol, "grpc" | "grpc_web")
         {
-            counter!(
-                "qpx_grpc_messages_total",
-                "direction" => "response",
-                "listener" => "unknown",
-                "protocol" => protocol.to_string()
-            )
-            .increment(summary.message_count as u64);
-            counter!(
-                "qpx_grpc_message_bytes_total",
-                "direction" => "response",
-                "listener" => "unknown",
-                "protocol" => protocol.to_string()
-            )
-            .increment(summary.message_bytes);
+            super::metrics::emit_inspected_body_metrics("response", "unknown", protocol, summary);
         }
         if let (Some(protocol), Some(status)) = (protocol.as_deref(), status.as_deref())
             && matches!(protocol, "grpc" | "grpc_web")
         {
-            counter!(
-                "qpx_grpc_status_total",
-                "listener" => "unknown",
-                "protocol" => protocol.to_string(),
-                "status" => status.to_string()
-            )
-            .increment(1);
+            super::metrics::emit_inspected_status("unknown", protocol, status);
         }
 
         RpcMatchContext {

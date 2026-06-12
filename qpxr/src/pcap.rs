@@ -46,7 +46,9 @@ pub(crate) fn build_pcap_preface() -> Result<Vec<u8>> {
         options: vec![SectionHeaderOption::UserApplication(Cow::Borrowed("qpxr"))],
     };
 
-    let interfaces = [
+    let mut out = Vec::new();
+    Block::SectionHeader(section).write_to::<LittleEndian, _>(&mut out)?;
+    for iface in [
         ("client-proxy-tls", "Client <-> Proxy encrypted bytes"),
         ("proxy-server-tls", "Proxy <-> Server encrypted bytes"),
         ("client-server", "Decrypted plaintext (client <-> server)"),
@@ -59,12 +61,7 @@ pub(crate) fn build_pcap_preface() -> Result<Vec<u8>> {
             InterfaceDescriptionOption::IfName(Cow::Borrowed(name)),
             InterfaceDescriptionOption::IfDescription(Cow::Borrowed(desc)),
         ],
-    })
-    .collect::<Vec<_>>();
-
-    let mut out = Vec::new();
-    Block::SectionHeader(section).write_to::<LittleEndian, _>(&mut out)?;
-    for iface in interfaces {
+    }) {
         Block::InterfaceDescription(iface).write_to::<LittleEndian, _>(&mut out)?;
     }
     Ok(out)
@@ -131,12 +128,11 @@ fn to_ipv4(ip: IpAddr, seed: &str) -> Ipv4Addr {
 fn synthetic_ipv4(seed: &str) -> Ipv4Addr {
     let mut hasher = DefaultHasher::new();
     seed.hash(&mut hasher);
-    let value = hasher.finish();
     Ipv4Addr::new(
         198,
         18,
-        ((value >> 8) & 0xff) as u8,
-        ((value >> 16) & 0xff) as u8,
+        ((hasher.finish() >> 8) & 0xff) as u8,
+        ((hasher.finish() >> 16) & 0xff) as u8,
     )
 }
 

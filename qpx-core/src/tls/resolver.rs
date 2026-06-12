@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use lru::LruCache;
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 use rustls::ServerConfig;
@@ -10,16 +10,22 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
 
+use super::TlsResult as Result;
 use super::ca::CaStore;
 
+/// Runtime TLS MITM materials: CA, dynamic resolver, and server config.
 #[derive(Clone)]
 pub struct MitmConfig {
+    /// CA store used to issue per-host certificates.
     pub ca: CaStore,
+    /// Dynamic resolver that caches generated per-host certificates.
     pub resolver: Arc<DynamicCertResolver>,
+    /// Rustls server config using `resolver`.
     pub server_config: Arc<ServerConfig>,
 }
 
 impl CaStore {
+    /// Builds a dynamic MITM server configuration backed by this CA.
     pub fn mitm_config(&self) -> Result<MitmConfig> {
         let resolver = Arc::new(DynamicCertResolver::new(self.clone()));
         let mut config = ServerConfig::builder()
@@ -34,6 +40,7 @@ impl CaStore {
     }
 }
 
+/// Rustls certificate resolver that signs and caches leaf certificates on demand.
 #[derive(Clone)]
 pub struct DynamicCertResolver {
     ca: CaStore,
@@ -106,6 +113,7 @@ impl DynamicCertResolver {
         Ok(Arc::new(CertifiedKey::new(cert_chain, signing_key)))
     }
 
+    /// Generates and caches a certificate for `server_name` before handshake use.
     pub fn prewarm_server_name(&self, server_name: &str) -> bool {
         let server_name = if server_name.trim().is_empty() {
             "unknown"

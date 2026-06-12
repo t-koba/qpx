@@ -33,7 +33,7 @@ fn private_redirect_detection_handles_nat64_embedded_ipv4() {
     assert!(redirect_ip_is_private(IpAddr::V6(
         "64:ff9b:1::0a00:1".parse().unwrap()
     )));
-    assert!(!redirect_ip_is_private(IpAddr::V6(
+    assert!(redirect_ip_is_private(IpAddr::V6(
         "64:ff9b::0808:0808".parse().unwrap()
     )));
 }
@@ -52,6 +52,18 @@ fn private_redirect_detection_rejects_non_global_special_ranges() {
     assert!(redirect_ip_is_private(IpAddr::V6(Ipv6Addr::LOCALHOST)));
     assert!(redirect_ip_is_private(IpAddr::V6(
         "2001:db8::1".parse().unwrap()
+    )));
+    assert!(redirect_ip_is_private(IpAddr::V6(
+        "100::1".parse().unwrap()
+    )));
+    assert!(redirect_ip_is_private(IpAddr::V6(
+        "2001:1::1".parse().unwrap()
+    )));
+    assert!(redirect_ip_is_private(IpAddr::V6(
+        "2002:0a00:0001::1".parse().unwrap()
+    )));
+    assert!(!redirect_ip_is_private(IpAddr::V6(
+        "2606:4700:4700::1111".parse().unwrap()
     )));
     assert!(!redirect_ip_is_private(IpAddr::V4(Ipv4Addr::new(
         8, 8, 8, 8

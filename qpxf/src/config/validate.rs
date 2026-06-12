@@ -3,6 +3,9 @@ use std::net::SocketAddr;
 
 use super::{BackendConfig, QpxfConfig};
 
+const MAX_WASM_MODULE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_WASM_MEMORY_MB: u64 = 4096;
+
 impl QpxfConfig {
     pub fn validate(&self) -> Result<()> {
         if self.workers == 0 {
@@ -60,6 +63,41 @@ impl QpxfConfig {
                     })?;
                 }
                 BackendConfig::Wasm(config) => {
+                    if config.timeout_ms == 0 {
+                        return Err(anyhow!("handlers[{idx}] wasm timeout_ms must be >= 1"));
+                    }
+                    if config.max_module_bytes == 0 {
+                        return Err(anyhow!(
+                            "handlers[{idx}] wasm max_module_bytes must be >= 1"
+                        ));
+                    }
+                    if config.max_module_bytes > MAX_WASM_MODULE_BYTES {
+                        return Err(anyhow!(
+                            "handlers[{idx}] wasm max_module_bytes must be <= {MAX_WASM_MODULE_BYTES}"
+                        ));
+                    }
+                    if config.max_memory_mb > MAX_WASM_MEMORY_MB {
+                        return Err(anyhow!(
+                            "handlers[{idx}] wasm max_memory_mb must be <= {MAX_WASM_MEMORY_MB}"
+                        ));
+                    }
+                    let max_memory_bytes = config
+                        .max_memory_mb
+                        .checked_mul(1024)
+                        .and_then(|value| value.checked_mul(1024))
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "handlers[{idx}] wasm max_memory_mb is too large to convert to bytes"
+                            )
+                        })?;
+                    if max_memory_bytes == 0 {
+                        return Err(anyhow!("handlers[{idx}] wasm max_memory_mb must be >= 1"));
+                    }
+                    if max_memory_bytes > usize::MAX as u64 {
+                        return Err(anyhow!(
+                            "handlers[{idx}] wasm max_memory_mb exceeds this platform's addressable memory limit"
+                        ));
+                    }
                     if let Some(pool) = config.pool.as_ref() {
                         if pool.max_instances == 0 {
                             return Err(anyhow!(
@@ -77,6 +115,16 @@ impl QpxfConfig {
                         || config.max_stderr_bytes == 0
                     {
                         return Err(anyhow!("handlers[{idx}] wasm byte limits must be >= 1"));
+                    }
+                    for key in config.env.keys() {
+                        if key.trim().is_empty() {
+                            return Err(anyhow!("handlers[{idx}] wasm env keys must not be empty"));
+                        }
+                        if crate::executor::cgi::cgi_env_passthrough_is_reserved(key) {
+                            return Err(anyhow!(
+                                "handlers[{idx}] wasm env must not include CGI reserved variable {key}"
+                            ));
+                        }
                     }
                 }
                 BackendConfig::Cgi(config) => {

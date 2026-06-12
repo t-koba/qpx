@@ -1,10 +1,11 @@
-use crate::http::body::Body;
 use crate::http3::codec::{prepare_h3_response_head, sanitize_interim_response_for_h3};
+use crate::http3::response_error::H3ResponseSendError;
 use crate::http3::stream_limits::timeout_or_deadline;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
 use hyper::Response;
+use qpx_http::body::Body;
 use std::future::Future;
 use tokio::time::{Duration, Instant, timeout};
 
@@ -61,29 +62,35 @@ enum QpxResponseWriter<'a> {
 impl QpxResponseWriter<'_> {
     async fn send_response_head(&mut self, response: &http::Response<()>) -> Result<()> {
         match self {
-            Self::Full(stream) => stream.send_response_head(response).await,
-            Self::Send(stream) => stream.send_response_head(response).await,
+            Self::Full(stream) => stream
+                .send_response_head(response)
+                .await
+                .map_err(Into::into),
+            Self::Send(stream) => stream
+                .send_response_head(response)
+                .await
+                .map_err(Into::into),
         }
     }
 
     async fn send_data(&mut self, payload: Bytes) -> Result<()> {
         match self {
-            Self::Full(stream) => stream.send_data(payload).await,
-            Self::Send(stream) => stream.send_data(payload).await,
+            Self::Full(stream) => stream.send_data(payload).await.map_err(Into::into),
+            Self::Send(stream) => stream.send_data(payload).await.map_err(Into::into),
         }
     }
 
     async fn send_trailers(&mut self, trailers: &HeaderMap) -> Result<()> {
         match self {
-            Self::Full(stream) => stream.send_trailers(trailers).await,
-            Self::Send(stream) => stream.send_trailers(trailers).await,
+            Self::Full(stream) => stream.send_trailers(trailers).await.map_err(Into::into),
+            Self::Send(stream) => stream.send_trailers(trailers).await.map_err(Into::into),
         }
     }
 
     async fn finish(&mut self) -> Result<()> {
         match self {
-            Self::Full(stream) => stream.finish().await,
-            Self::Send(stream) => stream.finish().await,
+            Self::Full(stream) => stream.finish().await.map_err(Into::into),
+            Self::Send(stream) => stream.finish().await.map_err(Into::into),
         }
     }
 
@@ -127,6 +134,10 @@ pub(crate) async fn send_qpx_response_stream(
     )
     .await
     .map(|_summary| ())
+    .map_err(|err| {
+        crate::http3::response_error::emit_h3_response_send_error("qpx_h3", &err);
+        err.into_inner()
+    })
 }
 
 pub(crate) async fn send_qpx_response_stream_observed(
@@ -134,7 +145,7 @@ pub(crate) async fn send_qpx_response_stream_observed(
     response: Response<Body>,
     request_method: &http::Method,
     options: QpxResponseSendOptions<'_>,
-) -> Result<Option<crate::http::rpc::FramedBodySummary>> {
+) -> std::result::Result<Option<crate::http::rpc::FramedBodySummary>, H3ResponseSendError> {
     send_qpx_response_stream_observed_inner(
         QpxResponseWriter::Full(req_stream),
         response,
@@ -149,7 +160,7 @@ pub(crate) async fn send_qpx_response_stream_observed_to_send(
     response: Response<Body>,
     request_method: &http::Method,
     options: QpxResponseSendOptions<'_>,
-) -> Result<Option<crate::http::rpc::FramedBodySummary>> {
+) -> std::result::Result<Option<crate::http::rpc::FramedBodySummary>, H3ResponseSendError> {
     send_qpx_response_stream_observed_inner(
         QpxResponseWriter::Send(req_stream),
         response,
@@ -164,23 +175,18 @@ async fn send_qpx_response_stream_observed_inner(
     response: Response<Body>,
     request_method: &http::Method,
     options: QpxResponseSendOptions<'_>,
-) -> Result<Option<crate::http::rpc::FramedBodySummary>> {
+) -> std::result::Result<Option<crate::http::rpc::FramedBodySummary>, H3ResponseSendError> {
     let (parts, mut body) = response.into_parts();
-    let mut grpc_observer = options
-        .observe_grpc_messages
-        .then(|| {
-            crate::http::rpc::streaming_rpc_observer(
-                &parts.headers,
-                options.fallback_grpc_protocol,
-                options.max_grpc_message_bytes,
-                options.max_grpc_web_trailer_bytes,
-            )
-        })
-        .flatten();
-    let grpc_protocol = grpc_observer
-        .as_ref()
-        .map(|observer| observer.protocol().to_string());
-    let prepared = prepare_h3_response_head(&parts, request_method)?;
+    let mut grpc_observer = crate::http3::response_rpc::H3ResponseRpcObserver::new(
+        &parts.headers,
+        options.fallback_grpc_protocol,
+        options.max_grpc_message_bytes,
+        options.max_grpc_web_trailer_bytes,
+        options.observe_grpc_messages,
+        options.listener_name,
+    );
+    let prepared = prepare_h3_response_head(&parts, request_method)
+        .map_err(H3ResponseSendError::before_response_head)?;
     let (body_read_timeout, body_send_timeout, stream_deadline) = response_stream_timeouts(
         &parts.headers,
         options.body_read_timeout,
@@ -188,11 +194,11 @@ async fn send_qpx_response_stream_observed_inner(
         options.grpc_stream_deadline,
         options.sse_policy,
     );
-    let mut sse_observer = options
-        .listener_name
-        .filter(|_| crate::http::modules::is_event_stream_headers(&parts.headers))
-        .map(|_| crate::http::protocol::sse::SseEventObserver::new());
-    let sse_started = Instant::now();
+    let mut sse_observer = crate::http3::response_sse::H3SseResponseObserver::new(
+        &parts.headers,
+        options.listener_name,
+        options.sse_policy,
+    );
     if let Err(err) = qpx_timeout_result(
         req_stream.send_response_head(&prepared.head),
         body_send_timeout,
@@ -203,15 +209,10 @@ async fn send_qpx_response_stream_observed_inner(
     .await
     {
         req_stream.abort_message_stream();
-        return Err(err);
+        return Err(H3ResponseSendError::before_response_head(err));
     }
     if !prepared.body_allowed {
-        if options.observe_grpc_messages
-            && let (Some(listener), Some(protocol)) =
-                (options.listener_name, grpc_protocol.as_deref())
-        {
-            crate::http::rpc::emit_grpc_status_metric(listener, protocol, &parts.headers, None);
-        }
+        grpc_observer.emit_status_without_body(&parts.headers);
         if let Err(err) = qpx_timeout_result(
             req_stream.finish(),
             body_send_timeout,
@@ -222,12 +223,19 @@ async fn send_qpx_response_stream_observed_inner(
         .await
         {
             req_stream.abort_message_stream();
-            return Err(err);
+            return Err(H3ResponseSendError::after_response_head(err));
         }
         return Ok(None);
     }
 
     let mut bytes_sent = 0usize;
+    let mut body_started = false;
+    macro_rules! abort_body_error {
+        ($err:expr) => {{
+            req_stream.abort_message_stream();
+            return Err(qpx_response_send_error_for_body(body_started, $err));
+        }};
+    }
     loop {
         let read_started = Instant::now();
         let chunk = match timeout_or_deadline(
@@ -248,13 +256,8 @@ async fn send_qpx_response_stream_observed_inner(
                 chunk
             }
             Err(err) => {
-                if sse_observer.is_some()
-                    && let Some(listener) = options.listener_name
-                {
-                    crate::http::protocol::sse::emit_sse_idle_disconnect(listener, "unknown");
-                }
-                req_stream.abort_message_stream();
-                return Err(err);
+                sse_observer.record_read_error(&err);
+                abort_body_error!(err);
             }
         };
         let Some(chunk) = chunk else {
@@ -263,20 +266,17 @@ async fn send_qpx_response_stream_observed_inner(
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(err) => {
-                req_stream.abort_message_stream();
-                return Err(err.into());
+                abort_body_error!(err.into());
             }
         };
         let next = match bytes_sent.checked_add(chunk.len()) {
             Some(next) => next,
             None => {
-                req_stream.abort_message_stream();
-                return Err(anyhow!("qpx-h3 response body length overflow"));
+                abort_body_error!(anyhow!("qpx-h3 response body length overflow"));
             }
         };
         if next > options.max_body_bytes {
-            req_stream.abort_message_stream();
-            return Err(anyhow!(
+            abort_body_error!(anyhow!(
                 "qpx-h3 response body exceeds configured limit: {} bytes",
                 options.max_body_bytes
             ));
@@ -284,18 +284,12 @@ async fn send_qpx_response_stream_observed_inner(
         if let Some(content_length) = prepared.content_length
             && next as u64 > content_length
         {
-            req_stream.abort_message_stream();
-            return Err(anyhow!("qpx-h3 response body exceeds Content-Length"));
+            abort_body_error!(anyhow!("qpx-h3 response body exceeds Content-Length"));
         }
-        if let Some(observer) = grpc_observer.as_mut()
-            && let Err(err) = observer.feed(chunk.as_ref())
-        {
-            req_stream.abort_message_stream();
-            return Err(anyhow!(err));
+        if let Err(err) = grpc_observer.feed(chunk.as_ref()) {
+            abort_body_error!(err);
         }
-        if let Some(observer) = sse_observer.as_mut() {
-            observer.feed(chunk.as_ref());
-        }
+        sse_observer.feed_chunk(chunk.as_ref());
         bytes_sent = next;
         if let Err(err) = qpx_timeout_result(
             req_stream.send_data(chunk),
@@ -306,25 +300,17 @@ async fn send_qpx_response_stream_observed_inner(
         )
         .await
         {
-            req_stream.abort_message_stream();
-            return Err(err);
+            abort_body_error!(err);
         }
+        body_started = true;
     }
 
-    if let (Some(listener), Some(observer)) = (options.listener_name, sse_observer.as_ref()) {
-        crate::http::protocol::sse::emit_sse_summary(
-            listener,
-            "unknown",
-            &observer.summary(),
-            sse_started.elapsed(),
-        );
-    }
+    sse_observer.finish();
 
     if let Some(content_length) = prepared.content_length
         && content_length != bytes_sent as u64
     {
-        req_stream.abort_message_stream();
-        return Err(anyhow!(
+        abort_body_error!(anyhow!(
             "qpx-h3 response Content-Length mismatch: expected {content_length}, got {bytes_sent}"
         ));
     }
@@ -340,13 +326,12 @@ async fn send_qpx_response_stream_observed_inner(
     {
         Ok(trailers) => trailers,
         Err(err) => {
-            req_stream.abort_message_stream();
-            return Err(err);
+            abort_body_error!(err);
         }
     };
     let mut trailers_for_status = trailers.clone();
     if let Some(mut trailers) = trailers {
-        crate::http::protocol::semantics::sanitize_response_trailers(&mut trailers);
+        qpx_http::protocol::semantics::sanitize_response_trailers(&mut trailers);
         if let Err(err) = qpx_timeout_result(
             req_stream.send_trailers(&trailers),
             body_send_timeout,
@@ -357,40 +342,14 @@ async fn send_qpx_response_stream_observed_inner(
         .await
         {
             req_stream.abort_message_stream();
-            return Err(err);
+            return Err(H3ResponseSendError::after_trailers_started(err));
         }
     }
-    let summary = if let Some(observer) = grpc_observer {
-        let protocol = observer.protocol().to_string();
-        let summary = match observer.finish().map_err(|err| anyhow!(err)) {
-            Ok(summary) => summary,
-            Err(err) => {
-                req_stream.abort_message_stream();
-                return Err(err);
-            }
-        };
-        if trailers_for_status.is_none() {
-            trailers_for_status = summary.trailers().cloned();
+    let summary = match grpc_observer.finish(&parts.headers, &mut trailers_for_status) {
+        Ok(summary) => summary,
+        Err(err) => {
+            abort_body_error!(err);
         }
-        if options.observe_grpc_messages
-            && let Some(listener) = options.listener_name
-        {
-            crate::http::rpc::emit_grpc_body_metrics(
-                "response",
-                listener,
-                protocol.as_str(),
-                &summary,
-            );
-            crate::http::rpc::emit_grpc_status_metric(
-                listener,
-                protocol.as_str(),
-                &parts.headers,
-                trailers_for_status.as_ref(),
-            );
-        }
-        Some(summary)
-    } else {
-        None
     };
     if let Err(err) = qpx_timeout_result(
         req_stream.finish(),
@@ -401,10 +360,20 @@ async fn send_qpx_response_stream_observed_inner(
     )
     .await
     {
-        req_stream.abort_message_stream();
-        return Err(err);
+        abort_body_error!(err);
     }
     Ok(summary)
+}
+
+fn qpx_response_send_error_for_body(
+    body_started: bool,
+    source: anyhow::Error,
+) -> H3ResponseSendError {
+    if body_started {
+        H3ResponseSendError::after_body_started(source)
+    } else {
+        H3ResponseSendError::after_response_head(source)
+    }
 }
 
 fn response_stream_timeouts(

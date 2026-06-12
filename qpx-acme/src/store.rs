@@ -3,6 +3,7 @@ use rustls::sign::CertifiedKey;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// TLS certificate store populated by ACME renewals.
 pub struct AcmeCertStore {
     by_sni: ArcSwap<HashMap<String, Arc<CertifiedKey>>>,
 }
@@ -14,6 +15,7 @@ impl AcmeCertStore {
         }
     }
 
+    /// Returns a certificate for the given SNI name.
     pub fn get(&self, sni: &str) -> Option<Arc<CertifiedKey>> {
         self.by_sni.load().get(&sni.to_ascii_lowercase()).cloned()
     }
@@ -26,6 +28,7 @@ impl AcmeCertStore {
 }
 
 #[cfg(feature = "http3")]
+/// QUIC certificate store populated by ACME renewals.
 pub struct AcmeQuicCertStore {
     by_sni: ArcSwap<HashMap<String, Arc<quinn::rustls::sign::CertifiedKey>>>,
 }
@@ -38,6 +41,7 @@ impl AcmeQuicCertStore {
         }
     }
 
+    /// Returns a QUIC certificate for the given SNI name.
     pub fn get(&self, sni: &str) -> Option<Arc<quinn::rustls::sign::CertifiedKey>> {
         self.by_sni.load().get(&sni.to_ascii_lowercase()).cloned()
     }

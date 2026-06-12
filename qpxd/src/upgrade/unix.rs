@@ -33,6 +33,7 @@ impl UpgradeTrigger {
 }
 
 pub(crate) fn request_upgrade(pid: u32) -> Result<()> {
+    // SAFETY: kill is called with a pid supplied by the operator and a fixed signal.
     let rc = unsafe { libc::kill(pid as i32, libc::SIGUSR2) };
     if rc != 0 {
         return Err(anyhow!(
@@ -88,13 +89,16 @@ pub(crate) async fn spawn_upgraded_child(
     }
 
     let mut pipe_fds = [0; 2];
+    // SAFETY: pipe_fds points to two valid i32 slots for libc to initialize.
     if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
         return Err(anyhow!(
             "failed to create upgrade readiness pipe: {}",
             std::io::Error::last_os_error()
         ));
     }
+    // SAFETY: pipe succeeded and ownership of this read fd is transferred exactly once.
     let read_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
+    // SAFETY: pipe succeeded and ownership of this write fd is transferred exactly once.
     let write_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
     set_cloexec(write_fd.as_raw_fd(), false)?;
 
@@ -175,6 +179,7 @@ pub(crate) fn take_ready_notifier_from_env() -> Result<Option<ReadyNotifier>> {
     let Some(raw) = std::env::var_os(ENV_READY_FD) else {
         return Ok(None);
     };
+    // SAFETY: upgrade handoff env is consumed during startup before concurrent env access.
     unsafe {
         std::env::remove_var(ENV_READY_FD);
     }
@@ -184,6 +189,7 @@ pub(crate) fn take_ready_notifier_from_env() -> Result<Option<ReadyNotifier>> {
         .context("invalid upgrade ready fd")?;
     set_cloexec(fd, true)?;
     Ok(Some(ReadyNotifier {
+        // SAFETY: fd came from our trusted handoff env and ownership is transferred here.
         fd: unsafe { OwnedFd::from_raw_fd(fd) },
     }))
 }
@@ -201,6 +207,7 @@ impl ReadyNotifier {
 }
 
 fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {
+    // SAFETY: fcntl with F_GETFD does not mutate memory and fd validity is checked by libc.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         return Err(anyhow!(
@@ -213,6 +220,7 @@ fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {
     } else {
         flags & !libc::FD_CLOEXEC
     };
+    // SAFETY: fcntl with F_SETFD only updates flags for the provided fd.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, next) } < 0 {
         return Err(anyhow!(
             "failed to set fd flags: {}",
@@ -235,11 +243,15 @@ mod tests {
             let _guard = crate::test_env_lock().lock().expect("env lock");
 
             let mut pipe_fds = [0; 2];
+            // SAFETY: pipe_fds points to two valid i32 slots for libc to initialize.
             assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+            // SAFETY: pipe succeeded and ownership of this read fd is transferred once.
             let read_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
+            // SAFETY: pipe succeeded and ownership of this write fd is transferred once.
             let write_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
             let write_raw = write_fd.into_raw_fd();
 
+            // SAFETY: test holds the process-wide env lock while mutating the environment.
             unsafe {
                 std::env::set_var(ENV_READY_FD, write_raw.to_string());
             }

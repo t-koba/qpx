@@ -1,8 +1,8 @@
-use crate::http::body::Body;
 use crate::http::protocol::common::bad_request_response as bad_request;
 use crate::http::protocol::l7::finalize_response_for_request;
-use crate::http::protocol::semantics::validate_incoming_request;
 use hyper::{Method, Request, Response, StatusCode};
+use qpx_http::body::Body;
+use qpx_http::protocol::semantics::validate_incoming_request;
 
 pub(crate) enum ConnectPolicy<'a> {
     Allow,

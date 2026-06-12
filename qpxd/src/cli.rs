@@ -30,6 +30,8 @@ pub(crate) enum Command {
     Explain {
         #[arg(short, long, required = true, num_args = 1..)]
         config: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = ExplainFormat::Text)]
+        format: ExplainFormat,
         #[arg(long)]
         edge: Option<String>,
         #[arg(long)]
@@ -77,6 +79,12 @@ pub(crate) enum InitTemplate {
 pub(crate) enum SchemaFormat {
     Json,
     Yaml,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum ExplainFormat {
+    Text,
+    Json,
 }
 
 pub(crate) struct MatchConfigRequest {

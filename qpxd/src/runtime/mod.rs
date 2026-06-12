@@ -22,15 +22,15 @@ pub mod views;
 pub use cache_rt::CacheRuntime;
 pub use config_rt::{MessageTexts, RuntimeResources};
 pub use obs_rt::ObsRuntime;
-pub(crate) use obs_rt::metric_names;
+pub(crate) use obs_rt::{MetricNames, metric_names};
 #[cfg(test)]
 pub(crate) use plan::CompiledPlaintextCapturePlan;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(crate) use plan::CompiledTlsPassthroughRoute;
 pub(crate) use plan::{
     CompiledCapturePlan, CompiledEdge, CompiledListenerSettings, CompiledReverseEdge,
-    CompiledReverseRoute, CompiledReverseRouteTarget, ExecutionPlan, PlanFlags,
-    ResolvedStreamingLimits,
+    CompiledReverseRoute, CompiledReverseRouteTarget, CompiledTransparentEdge, ExecutionPlan,
+    PlanFlags, ResolvedStreamingLimits,
 };
 pub(crate) use plan::{PlanCompiler, RuntimePlan};
 pub use policy_rt::PolicyRuntime;
@@ -59,6 +59,8 @@ pub(crate) fn std_deadline_after(duration: Duration) -> StdInstant {
         .unwrap_or(now)
 }
 
+pub(crate) use qpx_http::now_millis;
+
 #[derive(Clone)]
 pub struct Runtime {
     state: Arc<ArcSwap<RuntimeState>>,
@@ -71,11 +73,14 @@ pub struct RuntimeState {
     pub messages: MessageTexts,
     pub ftp_semaphore: Arc<Semaphore>,
     pub connection_semaphore: Arc<Semaphore>,
+    pub h3_request_body_drain_semaphore: Arc<Semaphore>,
     pub upstreams: HashMap<String, String>,
     pub security: SecurityRuntime,
     pub policy: PolicyRuntime,
     pub cache: CacheRuntime,
     pub observability: ObsRuntime,
+    /// Per-runtime connection pools (carried across reloads by [`Runtime::swap`]).
+    pub(crate) pools: Arc<crate::pool::PoolRegistry>,
 }
 
 impl Runtime {
@@ -108,7 +113,12 @@ impl Runtime {
         RuntimeState::acceptor_view_from_arc(self.state())
     }
 
-    pub fn swap(&self, new_state: RuntimeState) {
+    pub fn swap(&self, mut new_state: RuntimeState) {
+        // Connection pools are process-lived caches: carry the existing registry across
+        // the reload so pooled connections survive, but adopt the new config's limits.
+        let carried = self.state().pools.clone();
+        carried.copy_limits_from(&new_state.pools);
+        new_state.pools = carried;
         self.state.store(Arc::new(new_state));
     }
 }
@@ -144,44 +154,46 @@ impl RuntimeState {
     ) -> Result<Self> {
         let resources =
             RuntimeResources::build_with_http_module_registry(config, http_module_registry)?;
-        #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
-        crate::upstream::origin::configure_h3_origin_pool(
-            resources
-                .operational
-                .runtime
-                .h3_origin_pool_max_connections_per_origin,
-            resources
-                .operational
-                .runtime
-                .h3_origin_pool_max_inflight_streams_per_connection,
-        );
-        #[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
-        crate::forward::h3::configure_qpx_h3_upstream_session_pool(
-            resources
-                .operational
-                .runtime
-                .h3_origin_pool_max_connections_per_origin,
-            resources
-                .operational
-                .runtime
-                .h3_origin_pool_max_inflight_streams_per_connection,
-        );
         let plan = Arc::new(PlanCompiler { config: &resources }.compile()?);
         let security = SecurityRuntime::build(&resources)?;
         let policy = PolicyRuntime::build(&resources)?;
         let cache = CacheRuntime::build(&resources)?;
         let observability = ObsRuntime::build(&resources)?;
+        let pools = Arc::new(crate::pool::PoolRegistry::new());
+        pools.apply_limits(crate::pool::PoolLimits {
+            upstream_proxy_max_concurrent_per_endpoint: resources
+                .operational
+                .runtime
+                .upstream_proxy_max_concurrent_per_endpoint,
+            h3_origin_max_connections_per_origin: resources
+                .operational
+                .runtime
+                .h3_origin_pool_max_connections_per_origin,
+            h3_origin_max_inflight_streams_per_connection: resources
+                .operational
+                .runtime
+                .h3_origin_pool_max_inflight_streams_per_connection,
+        });
         Ok(Self {
             plan,
             messages: resources.messages.clone(),
             ftp_semaphore: resources.ftp_semaphore.clone(),
             connection_semaphore: resources.connection_semaphore.clone(),
+            h3_request_body_drain_semaphore: Arc::new(Semaphore::new(
+                resources
+                    .operational
+                    .runtime
+                    .h3_request_body_drain
+                    .max_concurrent
+                    .max(1),
+            )),
             upstreams: resources.upstreams.clone(),
             resources,
             security,
             policy,
             cache,
             observability,
+            pools,
         })
     }
 
@@ -276,8 +288,7 @@ impl RuntimeState {
         }
         #[cfg(not(feature = "mitm"))]
         {
-            let _ = listener;
-            let _ = host;
+            let _ = (listener, host);
             false
         }
     }

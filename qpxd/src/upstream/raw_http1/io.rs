@@ -13,7 +13,7 @@ pub(super) async fn read_crlf_line<S>(
     stream: &mut S,
     buf: &mut BytesMut,
     read_timeout: Duration,
-    sender: &crate::http::body::Sender,
+    sender: &qpx_http::body::Sender,
 ) -> Result<Vec<u8>>
 where
     S: AsyncRead + Unpin,
@@ -32,7 +32,7 @@ pub(super) async fn read_trailer_headers<S>(
     stream: &mut S,
     buf: &mut BytesMut,
     read_timeout: Duration,
-    sender: &crate::http::body::Sender,
+    sender: &qpx_http::body::Sender,
 ) -> Result<Option<HeaderMap>>
 where
     S: AsyncRead + Unpin,
@@ -62,7 +62,7 @@ pub(super) async fn fill_buffer<S>(
     buf: &mut BytesMut,
     min_len: usize,
     read_timeout: Duration,
-    sender: Option<&crate::http::body::Sender>,
+    sender: Option<&qpx_http::body::Sender>,
 ) -> Result<()>
 where
     S: AsyncRead + Unpin,
@@ -82,7 +82,7 @@ pub(super) async fn fill_buffer_capped<S>(
     min_len: usize,
     max_len: usize,
     read_timeout: Duration,
-    sender: Option<&crate::http::body::Sender>,
+    sender: Option<&qpx_http::body::Sender>,
 ) -> Result<()>
 where
     S: AsyncRead + Unpin,
@@ -103,7 +103,7 @@ pub(super) async fn read_buf_with_timeout<S>(
     stream: &mut S,
     buf: &mut BytesMut,
     read_timeout: Duration,
-    sender: Option<&crate::http::body::Sender>,
+    sender: Option<&qpx_http::body::Sender>,
 ) -> Result<usize>
 where
     S: AsyncRead + Unpin,
@@ -129,7 +129,7 @@ pub(super) async fn read_limited_with_timeout<S>(
     stream: &mut S,
     buf: &mut [u8],
     read_timeout: Duration,
-    sender: Option<&crate::http::body::Sender>,
+    sender: Option<&qpx_http::body::Sender>,
 ) -> Result<usize>
 where
     S: AsyncRead + Unpin,

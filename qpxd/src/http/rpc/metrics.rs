@@ -1,9 +1,46 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
 use super::frame::FramedBodySummary;
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 use super::protocol::{extract_grpc_status_and_message, normalize_connect_code};
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 use http::HeaderMap;
-use metrics::{counter, histogram};
+use metrics::counter;
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+use metrics::histogram;
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 use std::time::Duration;
+
+pub(crate) fn emit_inspected_body_metrics(
+    direction: &'static str,
+    listener: &str,
+    protocol: &str,
+    summary: &FramedBodySummary,
+) {
+    counter!(
+        "qpx_grpc_messages_total",
+        "direction" => direction,
+        "listener" => listener.to_string(),
+        "protocol" => protocol.to_string()
+    )
+    .increment(summary.message_count as u64);
+    counter!(
+        "qpx_grpc_message_bytes_total",
+        "direction" => direction,
+        "listener" => listener.to_string(),
+        "protocol" => protocol.to_string()
+    )
+    .increment(summary.message_bytes);
+}
+
+pub(crate) fn emit_inspected_status(listener: &str, protocol: &str, status: &str) {
+    counter!(
+        "qpx_grpc_status_total",
+        "listener" => listener.to_string(),
+        "protocol" => protocol.to_string(),
+        "status" => status.to_string()
+    )
+    .increment(1);
+}
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 pub(crate) fn emit_grpc_deadline_exceeded_metric(listener: &str, protocol: &str) {
@@ -95,6 +132,7 @@ pub(crate) fn emit_grpc_status_metric(
     }
 }
 
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 fn extract_connect_stream_status_and_message(
     trailers: Option<&HeaderMap>,
 ) -> (Option<String>, Option<String>) {

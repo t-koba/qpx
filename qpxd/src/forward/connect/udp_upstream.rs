@@ -30,7 +30,7 @@ pub(in crate::forward) fn build_upstream_connect_udp_uri(
             }
         }
         let (connect_host, connect_port) =
-            crate::http::protocol::address::parse_authority_host_port(authority, 443)
+            qpx_http::protocol::address::parse_authority_host_port(authority, 443)
                 .ok_or_else(|| anyhow!("invalid CONNECT-UDP upstream authority"))?;
         let request_scheme = if scheme == "h3" { "https" } else { scheme };
         let path_and_query = UriTemplate::parse(path_query_tmpl)?.expand(|name| match name {
@@ -76,7 +76,7 @@ pub(in crate::forward) fn build_upstream_connect_udp_uri(
         return Ok((host, port, uri));
     }
 
-    let (host, port) = crate::http::protocol::address::parse_authority_host_port(upstream, 443)
+    let (host, port) = qpx_http::protocol::address::parse_authority_host_port(upstream, 443)
         .ok_or_else(|| anyhow!("invalid CONNECT-UDP upstream authority"))?;
     let authority = format_proxy_authority(host.as_str(), port);
     let path_and_query = format!("/.well-known/masque/udp/{encoded_host}/{target_port}/");
@@ -103,7 +103,7 @@ pub(in crate::forward) fn parse_connect_udp_upstream(upstream: &str) -> Result<(
                 ));
             }
         }
-        return crate::http::protocol::address::parse_authority_host_port(authority, 443)
+        return qpx_http::protocol::address::parse_authority_host_port(authority, 443)
             .ok_or_else(|| anyhow!("invalid CONNECT-UDP upstream authority"));
     }
     if upstream.contains("://") {
@@ -123,7 +123,7 @@ pub(in crate::forward) fn parse_connect_udp_upstream(upstream: &str) -> Result<(
         return Ok((host.to_string(), port));
     }
 
-    crate::http::protocol::address::parse_authority_host_port(upstream, 443)
+    qpx_http::protocol::address::parse_authority_host_port(upstream, 443)
         .ok_or_else(|| anyhow!("invalid CONNECT-UDP upstream authority"))
 }
 

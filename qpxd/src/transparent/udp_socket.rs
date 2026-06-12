@@ -52,6 +52,7 @@ fn enable_original_dst_cmsgs(socket: &Socket, addr: SocketAddr) -> Result<()> {
     } else {
         (libc::SOL_IPV6, libc::IPV6_RECVORIGDSTADDR)
     };
+    // SAFETY: fd is a live UDP socket and value points to a valid c_int option value.
     let ret = unsafe {
         libc::setsockopt(
             fd,
@@ -102,14 +103,17 @@ fn recvmsg_with_original_dst(
     use std::mem::{size_of, zeroed};
     use std::os::fd::AsRawFd;
 
+    // SAFETY: sockaddr_storage is plain old data and zero is a valid initial value.
     let mut src_storage: libc::sockaddr_storage = unsafe { zeroed() };
     let mut iov = libc::iovec {
         iov_base: buf.as_mut_ptr().cast(),
         iov_len: buf.len(),
     };
+    // SAFETY: CMSG_SPACE is a pure size calculation for the supplied payload size.
     let mut control = [0u8; unsafe {
         libc::CMSG_SPACE(size_of::<libc::sockaddr_in6>() as libc::c_uint) as usize
     }];
+    // SAFETY: msghdr is fully initialized below before recvmsg observes it.
     let mut msg: libc::msghdr = unsafe { zeroed() };
     msg.msg_name = (&mut src_storage as *mut libc::sockaddr_storage).cast();
     msg.msg_namelen = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
@@ -128,6 +132,7 @@ fn recvmsg_with_original_dst(
         msg.msg_controllen = control.len();
     }
 
+    // SAFETY: msg references valid source, iovec, and control buffers for this call.
     let n = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut msg, 0) };
     if n < 0 {
         return Err(std::io::Error::last_os_error());
@@ -139,10 +144,13 @@ fn recvmsg_with_original_dst(
         )
     })?;
     let mut original_dst = None;
+    // SAFETY: msg was initialized by recvmsg and control buffer remains alive.
     let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg as *const libc::msghdr) };
     while !cmsg.is_null() {
+        // SAFETY: cmsg was produced by CMSG_FIRSTHDR/NXTHDR for this msghdr.
         let cmsg_ref = unsafe { &*cmsg };
         if cmsg_ref.cmsg_level == libc::SOL_IP && cmsg_ref.cmsg_type == libc::IP_ORIGDSTADDR {
+            // SAFETY: kernel labels this control message as sockaddr_in original destination.
             let addr = unsafe { &*(libc::CMSG_DATA(cmsg).cast::<libc::sockaddr_in>()) };
             original_dst = Some(SocketAddr::from(std::net::SocketAddrV4::new(
                 std::net::Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
@@ -151,6 +159,7 @@ fn recvmsg_with_original_dst(
             break;
         }
         if cmsg_ref.cmsg_level == libc::SOL_IPV6 && cmsg_ref.cmsg_type == libc::IPV6_ORIGDSTADDR {
+            // SAFETY: kernel labels this control message as sockaddr_in6 original destination.
             let addr = unsafe { &*(libc::CMSG_DATA(cmsg).cast::<libc::sockaddr_in6>()) };
             original_dst = Some(SocketAddr::from(std::net::SocketAddrV6::new(
                 std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr),
@@ -160,6 +169,7 @@ fn recvmsg_with_original_dst(
             )));
             break;
         }
+        // SAFETY: cmsg belongs to msg and iteration stops when libc returns null.
         cmsg = unsafe { libc::CMSG_NXTHDR(&msg as *const libc::msghdr, cmsg) };
     }
     if original_dst == local_addr {
@@ -176,6 +186,7 @@ fn socket_addr_from_storage(
     if len as usize >= std::mem::size_of::<libc::sockaddr_in>()
         && storage.ss_family == libc::AF_INET as libc::sa_family_t
     {
+        // SAFETY: family and length prove storage contains a sockaddr_in.
         let addr =
             unsafe { &*(storage as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
         return Some(SocketAddr::from(std::net::SocketAddrV4::new(
@@ -186,6 +197,7 @@ fn socket_addr_from_storage(
     if len as usize >= std::mem::size_of::<libc::sockaddr_in6>()
         && storage.ss_family == libc::AF_INET6 as libc::sa_family_t
     {
+        // SAFETY: family and length prove storage contains a sockaddr_in6.
         let addr =
             unsafe { &*(storage as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>() };
         return Some(SocketAddr::from(std::net::SocketAddrV6::new(

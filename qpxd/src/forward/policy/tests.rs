@@ -285,11 +285,11 @@ async fn staged_policy_does_not_request_body_for_later_size_rule_after_header_ma
     .expect("policy");
 
     match decision {
-        ForwardPolicyEvaluation::Decision(ForwardPolicyDecision::Allow(policy)) => {
+        PolicyStage::Decision(ForwardPolicyDecision::Allow(policy)) => {
             assert!(matches!(policy.action.kind, ActionKind::Direct));
             assert_eq!(policy.matched_rule.as_deref(), Some("method-first"));
         }
-        ForwardPolicyEvaluation::Observe(_) => {
+        PolicyStage::Observe(_) => {
             panic!("later request_size rule should not force observation")
         }
         _ => panic!("unexpected policy decision"),

@@ -62,6 +62,8 @@ impl FastCgiConnectionPool {
         &self,
         request: FastCgiStreamingStdin,
     ) -> Result<()> {
+        let started = std::time::Instant::now();
+        let _active = crate::metrics::BackendActiveGuard::new("fastcgi");
         let _permit = self
             .semaphore
             .acquire()
@@ -71,12 +73,20 @@ impl FastCgiConnectionPool {
         let result = run_fastcgi_on_stream_streaming_stdin(&mut stream, request).await;
         if result.is_ok() {
             self.put(stream).await;
+            crate::metrics::backend_request("fastcgi", "ok");
         }
+        if result.is_err() {
+            crate::metrics::backend_request("fastcgi", "error");
+            crate::metrics::pool_discard("fastcgi", "request_error");
+            crate::metrics::broken_response("fastcgi", "request_error");
+        }
+        crate::metrics::response_wait("fastcgi", started.elapsed());
         result
     }
 
     async fn take(&self) -> Result<BoxedIo> {
         if let Some(stream) = self.idle.lock().await.pop() {
+            crate::metrics::pool_reuse("fastcgi");
             return Ok(stream);
         }
         connect_backend(self.address.as_str()).await
@@ -86,6 +96,8 @@ impl FastCgiConnectionPool {
         let mut idle = self.idle.lock().await;
         if idle.len() < self.max_idle {
             idle.push(stream);
+        } else {
+            crate::metrics::pool_discard("fastcgi", "idle_full");
         }
     }
 }

@@ -1,18 +1,16 @@
 use super::super::resolve_upstream;
 use super::local::{
-    ForwardWebsocketInput, ensure_forward_host_header, forward_http_authority,
-    forward_websocket_connect_authority, forward_websocket_host_header, proxy_forward_websocket,
+    ForwardWebsocketInput, ensure_forward_host_header, forward_authority, proxy_forward_websocket,
 };
 use super::request_dispatch_cache::prepare_forward_cache_keys;
 use super::types::{
     ForwardDispatchPrepareInput, ForwardDispatchPrepareOutcome, ForwardDispatchReady,
 };
-use crate::http::dispatch::{DispatchError, annotate_dispatch_response};
-use crate::http::protocol::common::too_many_requests_response as too_many_requests;
-use crate::http::protocol::l7::{
-    finalize_response_for_request, finalize_response_with_headers_in_place,
-    prepare_request_with_headers_in_place,
+use crate::http::dispatch::{
+    DispatchError, ProxyKind, concurrency_limited_response_for_parts,
+    prepare_http_module_local_response,
 };
+use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::http::protocol::websocket::is_websocket_upgrade;
 use crate::policy_context::strip_untrusted_identity_headers;
 use tokio::time::Duration;
@@ -51,7 +49,7 @@ pub(super) async fn prepare_forward_dispatch(
     let mut http_modules = selected_plan.modules.start(
         state.clone(),
         crate::http::modules::HttpModuleSessionInit {
-            proxy_kind: crate::http::dispatch::ProxyKind::Forward,
+            proxy_kind: ProxyKind::Forward,
             proxy_name,
             scope_name: listener_name,
             route_name: None,
@@ -65,23 +63,17 @@ pub(super) async fn prepare_forward_dispatch(
     if let crate::http::modules::RequestHeadersOutcome::Respond(response) =
         http_modules.on_request_headers(&mut req).await?
     {
-        let mut response = http_modules.prepare_downstream_response(*response).await?;
-        let response_version = response.version();
-        finalize_response_with_headers_in_place(
+        let response = prepare_http_module_local_response(
+            &mut http_modules,
+            *response,
             request_method,
-            response_version,
             proxy_name,
-            &mut response,
             headers,
-            false,
-        );
-        http_modules.on_logging(Some(response.status()), None).await;
-        annotate_dispatch_response(
-            &mut response,
             audit,
-            crate::http::dispatch::DispatchOutcome::HttpModuleLocalResponse,
-            &[],
-        );
+        )
+        .await?;
+        let response =
+            crate::http::capture::stream::limit_response_body_for_plan(response, selected_plan);
         return Ok(ForwardDispatchPrepareOutcome::Response(Box::new(response)));
     }
     let (request_headers_snapshot, cache_lookup_key, cache_target_key) =
@@ -90,19 +82,14 @@ pub(super) async fn prepare_forward_dispatch(
         .map_err(|err| DispatchError::UpstreamUnavailable(err.to_string()))?;
     request_limit_ctx.upstream = upstream.as_ref().map(|upstream| upstream.key().to_string());
     let Some(_concurrency_permits) = request_limits.acquire_concurrency(&request_limit_ctx) else {
-        let mut response = finalize_response_for_request(
+        let response = concurrency_limited_response_for_parts(
             req.method(),
             req.version(),
             proxy_name,
-            too_many_requests(None),
-            false,
+            audit.clone(),
         );
-        annotate_dispatch_response(
-            &mut response,
-            audit,
-            crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
-            &[],
-        );
+        let response =
+            crate::http::capture::stream::limit_response_body_for_plan(response, selected_plan);
         return Err(DispatchError::RateLimited {
             response: Box::new(response),
         });
@@ -110,11 +97,11 @@ pub(super) async fn prepare_forward_dispatch(
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
     });
-    let http_authority = forward_http_authority(host);
+    let http_authority = forward_authority(host, None);
     let export_session = state.export_session_for_plan(selected_plan, remote_addr, &http_authority);
     if websocket {
-        let connect_authority = forward_websocket_connect_authority(host);
-        let host_header = forward_websocket_host_header(host);
+        let connect_authority = forward_authority(host, Some(80));
+        let host_header = forward_authority(host, None);
         let response = proxy_forward_websocket(ForwardWebsocketInput {
             req,
             upstream: upstream.as_ref(),
@@ -136,7 +123,7 @@ pub(super) async fn prepare_forward_dispatch(
         .await?;
         return Ok(ForwardDispatchPrepareOutcome::Response(Box::new(response)));
     }
-    Ok(ForwardDispatchPrepareOutcome::Ready(Box::new(
+    Ok(ForwardDispatchPrepareOutcome::Prepared(Box::new(
         ForwardDispatchReady {
             req,
             http_modules,

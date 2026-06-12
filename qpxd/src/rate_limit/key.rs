@@ -1,8 +1,6 @@
 // Extracted from rate_limit.rs; public surface is re-exported by mod.rs.
 use crate::policy_context::ResolvedIdentity;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,15 +102,6 @@ pub(super) fn make_limiter_key(key_kind: KeyKind, ctx: &RateLimitContext) -> Lim
         KeyKind::Route => LimiterKey::Text(text_key(ctx.route.as_deref(), MISSING_ROUTE)),
         KeyKind::Upstream => LimiterKey::Text(text_key(ctx.upstream.as_deref(), MISSING_UPSTREAM)),
     }
-}
-
-pub(super) fn shard_for_key(key: &LimiterKey, shard_mask: usize) -> usize {
-    if shard_mask == 0 {
-        return 0;
-    }
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
-    (hasher.finish() as usize) & shard_mask
 }
 
 pub(super) fn normalized_groups_key(groups: &[String]) -> Option<String> {

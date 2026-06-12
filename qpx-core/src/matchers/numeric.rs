@@ -1,4 +1,6 @@
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
+
+use super::Result;
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledNumericMatcher {
@@ -44,7 +46,7 @@ pub(super) fn match_optional_numeric(
 fn parse_numeric_range(raw: &str) -> Result<NumericRange> {
     let raw = raw.trim();
     if raw.is_empty() {
-        return Err(anyhow!("empty numeric matcher"));
+        return Err(anyhow!("empty numeric matcher").into());
     }
     if let Some(rest) = raw.strip_prefix(">=") {
         return Ok(NumericRange {
@@ -76,7 +78,7 @@ fn parse_numeric_range(raw: &str) -> Result<NumericRange> {
         let start = parse_numeric_value(start)?;
         let end = parse_numeric_value(end)?;
         if start > end {
-            return Err(anyhow!("numeric range start must be <= end"));
+            return Err(anyhow!("numeric range start must be <= end").into());
         }
         return Ok(NumericRange {
             min: Some(start),
@@ -102,7 +104,7 @@ fn parse_numeric_value(raw: &str) -> Result<u64> {
         .trim()
         .parse::<u64>()
         .map_err(|_| anyhow!("invalid numeric matcher"))?;
-    value
+    Ok(value
         .checked_mul(scale)
-        .ok_or_else(|| anyhow!("numeric matcher overflow"))
+        .ok_or_else(|| anyhow!("numeric matcher overflow"))?)
 }

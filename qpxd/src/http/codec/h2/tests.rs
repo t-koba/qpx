@@ -1,6 +1,6 @@
-use crate::http::body::to_bytes;
 use crate::http::codec::h2::*;
 use hyper::StatusCode;
+use qpx_http::body::to_bytes;
 use qpx_observability::RequestHandler;
 use std::future::poll_fn;
 use std::net::SocketAddr;
@@ -301,6 +301,70 @@ async fn send_h2_response_with_interim_rejects_content_length_mismatch() {
     let err = response_future.await.expect_err("response should reset");
     assert!(err.is_reset());
     assert_eq!(err.reason(), Some(Reason::PROTOCOL_ERROR));
+}
+
+#[tokio::test]
+async fn send_h2_response_resets_when_response_body_limit_is_exceeded() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().expect("addr");
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        let mut conn = h2::server::handshake(socket).await.expect("handshake");
+        if let Some(result) = conn.accept().await {
+            let (_request, respond) = result.expect("request");
+            let response = Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from("abcde").limit_bytes(4))
+                .expect("response");
+            let err = send_h2_response_with_interim(
+                respond,
+                response,
+                &[],
+                &hyper::Method::GET,
+                false,
+                H2_BODY_IDLE_TIMEOUT,
+            )
+            .await
+            .expect_err("response body cap should fail the send");
+            let _ = result_tx.send(err.to_string());
+        }
+    });
+
+    let socket = TcpStream::connect(addr).await.expect("connect");
+    let (client, connection) = h2::client::handshake(socket).await.expect("handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let mut client = client.ready().await.expect("ready");
+    let request = ::http::Request::builder()
+        .method("GET")
+        .uri("https://reverse_edges.test/limited")
+        .body(())
+        .expect("request");
+    let (response_future, _) = client.send_request(request, true).expect("send");
+    match response_future.await {
+        Ok(response) => {
+            let mut body = response.into_body();
+            let body_err = body
+                .data()
+                .await
+                .expect("body result")
+                .expect_err("body should reset");
+            assert!(body_err.is_reset());
+            assert_eq!(body_err.reason(), Some(Reason::CANCEL));
+        }
+        Err(err) => {
+            assert!(
+                err.is_reset() || err.is_io(),
+                "unexpected H2 response error after body cap: {err}"
+            );
+        }
+    }
+
+    let server_err = result_rx.await.expect("server result");
+    assert!(server_err.contains("response body limit exceeded"));
 }
 
 #[tokio::test]

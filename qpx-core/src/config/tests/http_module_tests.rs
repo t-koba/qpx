@@ -256,6 +256,37 @@ fn load_config_rejects_cache_purge_invalid_response_header_value() {
 }
 
 #[test]
+fn load_config_rejects_cache_purge_invalid_allowed_peer() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("invalid-cache-purge-peer.yaml");
+    write_config(
+        &cfg,
+        r#"edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  cache:
+    enabled: true
+  default_action:
+    type: direct
+  http_modules:
+  - type: cache_purge
+    settings:
+      allowed_peers:
+      - not-a-cidr"#,
+    )
+    .expect("write");
+
+    let err = load_config(&cfg).expect_err("invalid cache_purge peer should fail");
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        err.to_string().contains("allowed_peers[] has invalid CIDR"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn load_config_rejects_invalid_subrequest_template_syntax() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");

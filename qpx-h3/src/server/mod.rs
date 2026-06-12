@@ -11,6 +11,7 @@ use connection::{
 };
 use registry::{ShardedWebTransportSessionRegistry, WebTransportSessionRegistry};
 
+use crate::H3Result as Result;
 use crate::protocol::{PeerControlState, PriorityUpdates};
 use crate::qpack::{
     DEFAULT_DYNAMIC_TABLE_CAPACITY, DEFAULT_ENCODER_STREAM_BUFFER_BYTES,
@@ -19,7 +20,6 @@ use crate::qpack::{
 use crate::transport::{
     BidiStream, DatagramDispatch, OpenStreams, RequestStream, StreamDatagrams, UniRecvStream,
 };
-use anyhow::Result;
 use async_trait::async_trait;
 use helpers::{close_connection, extract_peer_certificates, extract_tls_sni, send_simple_response};
 use std::net::SocketAddr;
@@ -30,19 +30,26 @@ use tracing::warn;
 
 const DEFAULT_MAX_FIELD_SECTION_SIZE: u64 = 256 * 1024;
 
+/// HTTP/3 backend capability level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupportLevel {
+    /// Streaming server support.
     StreamingServer,
 }
 
+/// Extended CONNECT protocol selected for a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Protocol {
+    /// CONNECT-UDP.
     ConnectUdp,
+    /// WebTransport over HTTP/3.
     WebTransport,
+    /// Other extended CONNECT protocol token.
     Other(String),
 }
 
 impl Protocol {
+    /// Returns the protocol token.
     pub fn as_str(&self) -> &str {
         match self {
             Self::ConnectUdp => "connect-udp",
@@ -52,39 +59,67 @@ impl Protocol {
     }
 }
 
+/// Peer connection metadata.
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
+    /// Remote peer socket address.
     pub remote_addr: SocketAddr,
+    /// Destination listener port.
     pub dst_port: u16,
+    /// TLS SNI value, if present.
     pub tls_sni: Option<Arc<str>>,
+    /// TLS peer certificate chain, if present.
     pub peer_certificates: Option<Arc<Vec<Vec<u8>>>>,
 }
 
+/// Accepted WebTransport session.
 pub struct WebTransportSession {
+    /// Session stream identifier.
     pub session_id: u64,
+    /// Stream opener for associated streams.
     pub opener: OpenStreams,
+    /// Session datagrams.
     pub datagrams: Option<StreamDatagrams>,
+    /// Incoming associated bidirectional streams.
     pub bidi_streams: mpsc::Receiver<BidiStream>,
+    /// Incoming associated unidirectional streams.
     pub uni_streams: mpsc::Receiver<UniRecvStream>,
 }
 
+/// HTTP/3 server settings.
 #[derive(Debug, Clone)]
 pub struct Settings {
+    /// Enables extended CONNECT.
     pub enable_extended_connect: bool,
+    /// Enables HTTP datagrams.
     pub enable_datagram: bool,
+    /// Enables WebTransport.
     pub enable_webtransport: bool,
+    /// QPACK dynamic table capacity.
     pub qpack_max_table_capacity: usize,
+    /// Maximum QPACK blocked streams.
     pub qpack_max_blocked_streams: u64,
+    /// Maximum simultaneous WebTransport sessions.
     pub max_webtransport_sessions: u64,
+    /// Maximum request body size.
     pub max_request_body_bytes: usize,
+    /// Maximum concurrent request streams.
     pub max_concurrent_streams_per_connection: usize,
+    /// Read timeout.
     pub read_timeout: Duration,
+    /// Maximum field section size.
     pub max_field_section_size: u64,
+    /// Maximum frame payload size.
     pub max_frame_payload_bytes: usize,
+    /// Maximum control frame payload size.
     pub max_control_frame_payload_bytes: usize,
+    /// Maximum QPACK encoder stream buffer size.
     pub max_encoder_stream_buffer_bytes: usize,
+    /// Datagram channel capacity.
     pub datagram_channel_capacity: usize,
+    /// WebTransport datagram channel capacity.
     pub webtransport_datagram_channel_capacity: usize,
+    /// WebTransport associated stream channel capacity.
     pub webtransport_stream_channel_capacity: usize,
 }
 
@@ -111,21 +146,29 @@ impl Default for Settings {
     }
 }
 
+/// Incoming HTTP/3 request.
 #[derive(Debug, Clone)]
 pub struct Request {
+    /// Request head without body.
     pub head: http::Request<()>,
+    /// Extended CONNECT protocol, if any.
     pub protocol: Option<Protocol>,
+    /// Priority update observer for this request.
     pub priority_updates: PriorityUpdates,
 }
 
 #[async_trait]
+/// Request handler used by [`serve_connection`].
 pub trait RequestHandler: Clone + Send + Sync + 'static {
+    /// Returns per-connection settings.
     fn settings(&self) -> Settings;
 
+    /// Returns the Via received-by value.
     fn via_received_by(&self) -> String {
         "qpx-h3".to_string()
     }
 
+    /// Handles a regular HTTP/3 request.
     async fn handle_request(
         &self,
         request: Request,
@@ -133,6 +176,7 @@ pub trait RequestHandler: Clone + Send + Sync + 'static {
         stream: RequestStream,
     ) -> Result<()>;
 
+    /// Handles an extended CONNECT stream.
     async fn handle_connect_stream(
         &self,
         _req_head: http::Request<()>,
@@ -152,6 +196,7 @@ pub trait RequestHandler: Clone + Send + Sync + 'static {
         req_stream.finish().await
     }
 
+    /// Handles a WebTransport CONNECT stream.
     async fn handle_webtransport_connect(
         &self,
         _req_head: http::Request<()>,
@@ -171,6 +216,7 @@ pub trait RequestHandler: Clone + Send + Sync + 'static {
     }
 }
 
+/// Serves one incoming QUIC connection as HTTP/3.
 pub async fn serve_connection<H: RequestHandler>(
     connecting: quinn::Incoming,
     dst_port: u16,

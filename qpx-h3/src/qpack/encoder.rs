@@ -3,7 +3,8 @@ use super::dynamic_table::{DecoderState, DynamicTable};
 use super::errors::FieldDecodeError;
 use super::static_table::static_field;
 use super::{DEFAULT_DYNAMIC_TABLE_CAPACITY, DEFAULT_MAX_BLOCKED_STREAMS, HEADER_ENTRY_OVERHEAD};
-use anyhow::{Result, anyhow};
+use crate::H3Result as Result;
+use anyhow::anyhow;
 
 pub(super) enum EncoderInstruction {
     SetDynamicTableCapacity(usize),
@@ -23,7 +24,7 @@ pub(super) fn decode_field_section_prefix(
     cursor: &mut &[u8],
     total_inserted: usize,
     max_table_capacity: usize,
-) -> Result<FieldSectionPrefix, FieldDecodeError> {
+) -> std::result::Result<FieldSectionPrefix, FieldDecodeError> {
     let encoded_insert_count = decode_prefixed_int(cursor, 8)
         .map_err(FieldDecodeError::from)?
         .1 as usize;
@@ -52,7 +53,7 @@ pub(super) fn decode_required_insert_count(
     encoded_insert_count: usize,
     total_inserted: usize,
     max_table_capacity: usize,
-) -> Result<usize, FieldDecodeError> {
+) -> std::result::Result<usize, FieldDecodeError> {
     if encoded_insert_count == 0 {
         return Ok(0);
     }

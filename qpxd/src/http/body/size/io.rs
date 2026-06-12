@@ -9,7 +9,7 @@ use tokio::time::timeout;
 pub(super) async fn read_body_data(
     body: &mut Body,
     read_timeout: Duration,
-) -> Result<Option<Result<Bytes, crate::http::body::BodyError>>> {
+) -> Result<Option<Result<Bytes, qpx_http::body::BodyError>>> {
     timeout(read_timeout, body.data())
         .await
         .map_err(|_| anyhow!("observed body read timed out"))

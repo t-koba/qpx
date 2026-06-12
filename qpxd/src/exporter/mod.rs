@@ -1,22 +1,20 @@
-use crate::http::body::Body;
 use crate::http::body::size::{
-    observed_request_prefix_bytes_async, observed_response_prefix_bytes_async,
+    observed_request_prefix_chunks_async, observed_response_prefix_chunks_async,
 };
 use crate::http::protocol::common::http_version_label;
 use anyhow::Result;
 use bytes::Bytes;
 use hyper::{Request, Response};
-use metrics::counter;
 use qpx_core::config::ExporterConfig;
 use qpx_core::exporter::{CaptureDirection, CaptureEvent, CapturePlane, unix_timestamp_nanos};
 use qpx_core::shm_ring::ShmRingBuffer;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use qpx_http::body::Body;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tracing::warn;
 
+mod metrics;
 mod redaction;
 #[cfg(test)]
 mod tests;
@@ -161,11 +159,7 @@ fn sample_allows(
     if sample_percent == 0 {
         return false;
     }
-    let mut hasher = DefaultHasher::new();
-    session_id.hash(&mut hasher);
-    client.hash(&mut hasher);
-    server.hash(&mut hasher);
-    hasher.finish() % 100 < sample_percent as u64
+    qpx_http::sharding::modulo(&(session_id, client, server), 100) < sample_percent as usize
 }
 
 impl ExportSession {
@@ -187,8 +181,7 @@ impl ExportSession {
             return;
         }
         if self.tx.capacity() == 0 {
-            counter!("qpx_exporter_events_dropped_total").increment(1);
-            return;
+            return metrics::increment(metrics::EVENTS_DROPPED);
         }
         let direction = bool_to_direction(client_to_server);
         let payload = self
@@ -209,8 +202,7 @@ impl ExportSession {
             return;
         }
         if self.tx.capacity() == 0 {
-            counter!("qpx_exporter_events_dropped_total").increment(1);
-            return;
+            return metrics::increment(metrics::EVENTS_DROPPED);
         }
         if self.redaction.is_noop()
             && self
@@ -229,8 +221,7 @@ impl ExportSession {
             return;
         }
         if self.tx.capacity() == 0 {
-            counter!("qpx_exporter_events_dropped_total").increment(1);
-            return;
+            return metrics::increment(metrics::EVENTS_DROPPED);
         }
         for chunk in payload.chunks(self.max_chunk_bytes.max(1)) {
             let event = CaptureEvent::new(
@@ -250,8 +241,7 @@ impl ExportSession {
             return;
         }
         if self.tx.capacity() == 0 {
-            counter!("qpx_exporter_events_dropped_total").increment(1);
-            return;
+            return metrics::increment(metrics::EVENTS_DROPPED);
         }
         let chunk_size = self.max_chunk_bytes.max(1);
         if payload.len() <= chunk_size {
@@ -285,10 +275,10 @@ impl ExportSession {
     fn enqueue_event(&self, event: CaptureEvent) {
         match self.tx.try_send(event) {
             Ok(()) => {
-                counter!("qpx_exporter_events_enqueued_total").increment(1);
+                metrics::increment(metrics::EVENTS_ENQUEUED);
             }
             Err(_) => {
-                counter!("qpx_exporter_events_dropped_total").increment(1);
+                metrics::increment(metrics::EVENTS_DROPPED);
             }
         }
     }
@@ -319,20 +309,20 @@ async fn run_export_loop(
             match ring.try_push_vectored(&[prefix.as_slice(), payload]) {
                 Ok(true) => {
                     // Success!
-                    counter!("qpx_exporter_events_sent_total").increment(1);
-                    counter!("qpx_exporter_bytes_sent_total").increment(wire_len as u64);
+                    metrics::increment(metrics::EVENTS_SENT);
+                    metrics::increment_by(metrics::BYTES_SENT, wire_len as u64);
                     break;
                 }
                 Ok(false) => {
                     // Buffer is full.
                     if lossy {
                         // In lossy mode, we just drop the event to prioritize performance.
-                        counter!("qpx_exporter_events_dropped_total").increment(1);
+                        metrics::increment(metrics::EVENTS_DROPPED);
                         break;
                     } else {
                         // Lossless mode. Wait and try again.
                         // Note: This backpressures the mpsc channel, which backpressures the proxy pipeline.
-                        counter!("qpx_exporter_write_blocked_total").increment(1);
+                        metrics::increment(metrics::WRITE_BLOCKED);
                         if let Err(e) = ring.wait_for_space(wire_len).await {
                             warn!(error = ?e, "fatal error waiting for shared memory ring space");
                             break;
@@ -381,7 +371,7 @@ pub(crate) fn serialize_request_preview_async(
     let uri = req.uri().clone();
     let version = req.version();
     let headers = req.headers().clone();
-    let body = observed_request_prefix_bytes_async(req, PREVIEW_BODY_BYTES);
+    let body = observed_request_prefix_chunks_async(req, PREVIEW_BODY_BYTES);
     async move {
         let mut out = String::new();
         out.push_str(method.as_str());
@@ -407,8 +397,8 @@ pub(crate) fn serialize_request_preview_async(
             out.push_str("\r\n");
         }
         out.push_str("\r\n");
-        if let Some(body) = body.await {
-            out.push_str(std::str::from_utf8(body.as_ref()).unwrap_or("<non-utf8 body>"));
+        if let Some(chunks) = body.await {
+            push_utf8_preview_chunks(&mut out, &chunks);
         }
         out.into_bytes()
     }
@@ -420,7 +410,7 @@ pub(crate) fn serialize_response_preview_async(
     let version = response.version();
     let status = response.status();
     let headers = response.headers().clone();
-    let body = observed_response_prefix_bytes_async(response, PREVIEW_BODY_BYTES);
+    let body = observed_response_prefix_chunks_async(response, PREVIEW_BODY_BYTES);
     async move {
         let mut out = String::new();
         out.push_str(http_version_label(version));
@@ -444,10 +434,16 @@ pub(crate) fn serialize_response_preview_async(
             out.push_str("\r\n");
         }
         out.push_str("\r\n");
-        if let Some(body) = body.await {
-            out.push_str(std::str::from_utf8(body.as_ref()).unwrap_or("<non-utf8 body>"));
+        if let Some(chunks) = body.await {
+            push_utf8_preview_chunks(&mut out, &chunks);
         }
         out.into_bytes()
+    }
+}
+
+fn push_utf8_preview_chunks(out: &mut String, chunks: &[Bytes]) {
+    for chunk in chunks {
+        out.push_str(std::str::from_utf8(chunk.as_ref()).unwrap_or("<non-utf8 body>"));
     }
 }
 

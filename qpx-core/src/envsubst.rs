@@ -1,30 +1,51 @@
-use anyhow::{Result, anyhow};
 use regex::Regex;
 use std::env;
+use thiserror::Error;
 
+type Result<T> = std::result::Result<T, EnvSubstError>;
+
+/// Error returned while expanding `${VAR}` expressions.
+#[derive(Debug, Error)]
+pub enum EnvSubstError {
+    /// Regex compilation failed.
+    #[error("failed to compile environment substitution pattern")]
+    Pattern(#[from] regex::Error),
+    /// The regex matched without a full capture.
+    #[error("envsubst capture error")]
+    Capture,
+    /// The variable-name capture was missing.
+    #[error("envsubst variable capture missing")]
+    VariableCaptureMissing,
+    /// A variable was missing and no default was provided.
+    #[error("missing environment variable: {0}")]
+    MissingVariable(String),
+}
+
+/// Expands `${NAME}` and `${NAME:-default}` expressions using process env.
 pub fn expand_env(input: &str) -> Result<String> {
     expand_env_with(input, |key| env::var(key).ok())
 }
 
-fn expand_env_with(input: &str, mut lookup: impl FnMut(&str) -> Option<String>) -> Result<String> {
+pub(crate) fn expand_env_with(
+    input: &str,
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> Result<String> {
     let re = Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")?;
     let mut out = String::with_capacity(input.len());
     let mut last = 0;
     for caps in re.captures_iter(input) {
-        let m = caps
-            .get(0)
-            .ok_or_else(|| anyhow!("envsubst capture error"))?;
+        let m = caps.get(0).ok_or(EnvSubstError::Capture)?;
         out.push_str(&input[last..m.start()]);
         let key = caps
             .get(1)
-            .ok_or_else(|| anyhow!("envsubst variable capture missing"))?
+            .ok_or(EnvSubstError::VariableCaptureMissing)?
             .as_str();
         let default = caps.get(2).map(|m| m.as_str());
         let value = match lookup(key) {
             Some(v) => v,
             None => match default {
                 Some(d) => d.to_string(),
-                None => return Err(anyhow!("missing environment variable: {}", key)),
+                None => return Err(EnvSubstError::MissingVariable(key.to_string())),
             },
         };
         out.push_str(&value);

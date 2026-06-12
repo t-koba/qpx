@@ -26,6 +26,8 @@ runtime:
     flush_policy: low_latency
     idle_timeout_ms: 300000
     max_stream_duration_ms: 3600000
+    max_line_bytes: 8192
+    max_event_id_bytes: 256
 ```
 
 ## Listener And Route Overrides
@@ -49,6 +51,8 @@ edges:
     flush_policy: low_latency
     idle_timeout_ms: 300000
     max_stream_duration_ms: 3600000
+    max_line_bytes: 8192
+    max_event_id_bytes: 256
   routes:
   - name: ml-inference
     match:
@@ -163,7 +167,12 @@ SSE observability emits:
 - `qpx_sse_events_total`
 - `qpx_sse_bytes_total`
 - `qpx_sse_stream_duration_seconds`
+- `qpx_sse_streams_active`
+- `qpx_sse_first_event_latency_seconds`
+- `qpx_sse_inter_event_latency_seconds`
 - `qpx_sse_idle_disconnects_total`
+- `qpx_sse_idle_timeouts_total`
+- `qpx_sse_max_duration_exceeded_total`
 - `qpx_sse_reconnections_total`
 
 `qpx_upstream_slow_body_total` increments when a streamed response body read
@@ -174,6 +183,8 @@ Body buffering observability emits:
 - `qpx_body_buffering_events_total{direction,reason}`
 - `qpx_body_buffering_bytes_total{direction,reason}`
 - `qpx_body_spooled_bytes_total{direction,reason}`
+- `qpx_body_spool_errors_total{direction,reason,error}`
+- `qpx_body_spool_cleanup_errors_total{direction,reason,error}`
 - `qpx_body_mirror_drops_total{mirror,reason}`
 - `qpx_cache_writeback_body_bytes_total`
 
@@ -193,6 +204,24 @@ The metadata commit happens only after the backend body write succeeds. Custom
 cache backends must implement `put_object_stream`; the trait default fails
 closed so a custom backend cannot accidentally reintroduce hidden full-object
 materialization.
+
+Tunnel observability emits the common tunnel metric family across TCP CONNECT,
+WebSocket upgrade tunnels, HTTP/2 and HTTP/3 extended CONNECT, and
+WebTransport bidi streams:
+
+- `qpx_tunnel_active{protocol,listener,route}`
+- `qpx_tunnel_bytes_total{protocol,listener,route,direction}`
+- `qpx_tunnel_duration_seconds{protocol,listener,route,close_reason}`
+- `qpx_tunnel_resets_total{protocol,listener,route,reason}`
+- `qpx_tunnel_idle_timeouts_total{protocol,listener,route}`
+- `qpx_tunnel_low_speed_timeouts_total{protocol,listener,route}`
+- `qpx_tunnel_backpressure_seconds_total{protocol,listener,route,direction}`
+
+Generic stream aliases (`qpx_streams_active`, `qpx_stream_bytes_total`,
+`qpx_stream_duration_seconds`, `qpx_stream_resets_total`,
+`qpx_stream_idle_timeouts_total`, and `qpx_stream_backpressure_seconds_total`)
+use the same low-cardinality `protocol`, `listener`, `route`, `direction`, and
+`reason` vocabulary for dashboards that combine tunnel and non-tunnel streams.
 
 ## Troubleshooting
 

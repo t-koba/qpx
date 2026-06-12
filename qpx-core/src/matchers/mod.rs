@@ -1,3 +1,7 @@
+//! Compiled rule matchers and prefilter hints.
+
+#![allow(missing_docs)]
+
 mod compile;
 mod destination;
 mod eval;
@@ -21,6 +25,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 pub use trace::{MatchMode, MatchReason, MatchTrace};
+
+type Result<T> = std::result::Result<T, MatchCompileError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum MatchCompileError {
+    #[error(transparent)]
+    Backend(#[from] anyhow::Error),
+}
 
 #[derive(Debug, Clone)]
 pub struct CompiledMatch {

@@ -3,11 +3,10 @@ use super::path_rewrite::apply_path_rewrite;
 use super::response_rules::{ResponseRuleInput, apply_response_rules};
 use super::*;
 use crate::destination::DestinationMetadata;
-use crate::http::body::to_bytes;
+use crate::http::policy::response_policy::ListenerResponsePolicyDecision;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::runtime::Runtime;
 use crate::test_util::{decode_gzip, spawn_static_http_server};
-use crate::tls::UpstreamCertificateInfo;
 use http::{Method, header::CONTENT_LENGTH};
 use qpx_core::config::{
     AccessLogConfig, AuditLogConfig, AuthConfig, CertificateMatchConfig, Config,
@@ -15,10 +14,13 @@ use qpx_core::config::{
     HeaderControl, HttpPolicyConfig, HttpResponseCacheEffectsConfig, HttpResponseEffectsConfig,
     HttpResponseRuleConfig, IdentityConfig, LocalResponseConfig, MatchConfig, MessagesConfig,
     NamedSetConfig, NamedSetKind, PolicyContextConfig, RateLimitConfig, RateLimitProfileConfig,
-    ReverseEdgeConfig, ReverseRouteConfig, RpcMatchConfig, RuntimeConfig, StreamingRequirement,
-    SystemLogConfig, UnknownLengthExactSizePolicy, UpstreamConfig,
+    ReverseEdgeConfig, ReverseRouteConfig, RpcMatchConfig, RuntimeConfig, StreamingConfig,
+    StreamingRequirement, SystemLogConfig, UnknownLengthExactSizePolicy, UpstreamConfig,
 };
 use qpx_core::prefilter::MatchPrefilterContext;
+use qpx_core::rules::CompiledHeaderControl;
+use qpx_core::tls::UpstreamCertificateInfo;
+use qpx_http::body::to_bytes;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use rcgen::generate_simple_self_signed;
 use regex::Regex;

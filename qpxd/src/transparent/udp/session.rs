@@ -308,10 +308,10 @@ impl SessionIndex {
         Some(session)
     }
 
-    fn register_cids(&mut self, session_id: u64, cids: Vec<QuicConnectionId>) {
-        if cids.is_empty() {
-            return;
-        }
+    fn register_cids<I>(&mut self, session_id: u64, cids: I)
+    where
+        I: IntoIterator<Item = QuicConnectionId>,
+    {
         let Some(session) = self.sessions.get(&session_id) else {
             return;
         };
@@ -343,10 +343,7 @@ impl SessionIndex {
             .and_then(|s| s.server_cid_len())
         else {
             if let Some(long) = parse_quic_long_header(packet) {
-                self.register_cids(
-                    session_id,
-                    [long.dcid, long.scid].into_iter().flatten().collect(),
-                );
+                self.register_cids(session_id, [long.dcid, long.scid].into_iter().flatten());
                 if long.scid_len > 0
                     && let Some(session) = self.sessions.get(&session_id)
                 {
@@ -357,17 +354,14 @@ impl SessionIndex {
         };
 
         if let Some(long) = parse_quic_long_header(packet) {
-            self.register_cids(
-                session_id,
-                [long.dcid, long.scid].into_iter().flatten().collect(),
-            );
+            self.register_cids(session_id, [long.dcid, long.scid].into_iter().flatten());
             if long.scid_len > 0
                 && let Some(session) = self.sessions.get(&session_id)
             {
                 session.set_client_cid_len(long.scid_len);
             }
         } else if let Some(cid) = parse_quic_short_dcid(packet, server_cid_len) {
-            self.register_cids(session_id, vec![cid]);
+            self.register_cids(session_id, std::iter::once(cid));
         }
     }
 
@@ -377,10 +371,7 @@ impl SessionIndex {
             .get(&session_id)
             .and_then(|s| s.client_cid_len());
         if let Some(long) = parse_quic_long_header(packet) {
-            self.register_cids(
-                session_id,
-                [long.dcid, long.scid].into_iter().flatten().collect(),
-            );
+            self.register_cids(session_id, [long.dcid, long.scid].into_iter().flatten());
             if let Some(session) = self.sessions.get(&session_id) {
                 if long.scid_len > 0 {
                     session.set_server_cid_len(long.scid_len);
@@ -393,7 +384,7 @@ impl SessionIndex {
         } else if let Some(len) = client_cid_len
             && let Some(cid) = parse_quic_short_dcid(packet, len)
         {
-            self.register_cids(session_id, vec![cid]);
+            self.register_cids(session_id, std::iter::once(cid));
         }
     }
 

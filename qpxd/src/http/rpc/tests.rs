@@ -33,6 +33,19 @@ fn parses_grpc_frame_across_chunk_boundaries() {
     assert_eq!(summary.message_bytes, 5);
 }
 
+#[test]
+fn grpc_observer_parses_five_byte_header_split_one_byte_at_a_time() {
+    let mut body = frame_grpc_message(Bytes::from_static(b"hello"));
+    body.extend_from_slice(&frame_grpc_message(Bytes::from_static(b"world")));
+    let mut observer = GrpcFrameObserver::new(None);
+    for byte in body {
+        observer.feed(&[byte]).expect("feed byte");
+    }
+    let summary = observer.finish().expect("summary");
+    assert_eq!(summary.message_count, 2);
+    assert_eq!(summary.message_bytes, 10);
+}
+
 #[tokio::test]
 async fn buffered_grpc_request_precomputes_rpc_summary() {
     let mut body = frame_grpc_message(Bytes::from_static(b"hello"));
@@ -179,6 +192,30 @@ fn connect_streaming_observer_treats_compressed_end_stream_as_metadata() {
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 #[test]
+fn connect_streaming_observer_reassembles_eos_metadata_split_one_byte_at_a_time() {
+    let mut body = Vec::new();
+    body.push(0x02);
+    body.extend_from_slice(&(r#"{"code":"ok","message":"done"}"#.len() as u32).to_be_bytes());
+    body.extend_from_slice(br#"{"code":"ok","message":"done"}"#);
+
+    let mut observer = ConnectFrameObserver::new(Some(8), Some(64));
+    for byte in body {
+        observer.feed(&[byte]).expect("feed byte");
+    }
+    let summary = observer.finish().expect("summary");
+    assert_eq!(summary.message_count, 0);
+    assert_eq!(
+        summary
+            .trailers
+            .as_ref()
+            .and_then(|trailers| trailers.get("connect-code"))
+            .and_then(|value| value.to_str().ok()),
+        Some("ok")
+    );
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[test]
 fn connect_streaming_observer_rejects_unknown_envelope_bits() {
     let mut observer = ConnectFrameObserver::new(None, None);
     let err = observer
@@ -197,6 +234,28 @@ fn grpc_web_text_observer_decodes_incrementally() {
     let summary = observer.finish().expect("summary");
     assert_eq!(summary.message_count, 1);
     assert_eq!(summary.message_bytes, 5);
+}
+
+#[test]
+fn grpc_web_text_observer_parses_base64_quantum_split_one_byte_at_a_time() {
+    let mut body = frame_grpc_message(Bytes::from_static(b"hello"));
+    body.extend_from_slice(&frame_grpc_web_trailers(b"grpc-status: 0\r\n"));
+    let encoded = BASE64.encode(body);
+    let mut observer = GrpcFrameObserver::grpc_web(true, None, None);
+    for byte in encoded.bytes() {
+        observer.feed(&[byte]).expect("feed base64 byte");
+    }
+    let summary = observer.finish().expect("summary");
+    assert_eq!(summary.message_count, 1);
+    assert_eq!(summary.message_bytes, 5);
+    assert_eq!(
+        summary
+            .trailers
+            .as_ref()
+            .and_then(|trailers| trailers.get("grpc-status"))
+            .and_then(|value| value.to_str().ok()),
+        Some("0")
+    );
 }
 
 #[test]
@@ -374,7 +433,7 @@ async fn grpc_web_local_response_emits_trailer_frame() {
         b"",
     )
     .expect("response");
-    let bytes = crate::http::body::to_bytes(response.into_body())
+    let bytes = qpx_http::body::to_bytes(response.into_body())
         .await
         .expect("body");
     let mut observer = GrpcFrameObserver::grpc_web(false, None, None);
@@ -401,7 +460,7 @@ async fn grpc_web_deadline_response_uses_body_trailer_frame() {
             .and_then(|value| value.to_str().ok()),
         Some("application/grpc-web+proto")
     );
-    let bytes = crate::http::body::to_bytes(response.into_body())
+    let bytes = qpx_http::body::to_bytes(response.into_body())
         .await
         .expect("body");
     let mut observer = GrpcFrameObserver::grpc_web(false, None, None);
@@ -429,7 +488,7 @@ async fn connect_deadline_response_uses_json_error_body() {
             .and_then(|value| value.to_str().ok()),
         Some("application/json")
     );
-    let bytes = crate::http::body::to_bytes(response.into_body())
+    let bytes = qpx_http::body::to_bytes(response.into_body())
         .await
         .expect("body");
     let text = std::str::from_utf8(&bytes).expect("utf8");

@@ -291,6 +291,8 @@ impl Executor for CgiExecutor {
         let script_label = prepared_script.label_path().to_path_buf();
 
         let done = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let _active = crate::metrics::BackendActiveGuard::new("cgi");
             async fn pump_reader<R: tokio::io::AsyncRead + Unpin>(
                 mut reader: R,
                 tx: mpsc::Sender<Bytes>,
@@ -379,10 +381,16 @@ impl Executor for CgiExecutor {
                             exit_code = exit_status.code(),
                             "CGI script exited with error"
                         );
+                        crate::metrics::backend_request("cgi", "error");
+                        crate::metrics::broken_response("cgi", "exit_status");
+                    } else {
+                        crate::metrics::backend_request("cgi", "ok");
                     }
+                    crate::metrics::response_wait("cgi", started.elapsed());
                     Ok(())
                 }
                 Err(e) => {
+                    let err_text = e.to_string();
                     let _ = child.start_kill();
                     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
                     stdin_task.abort();
@@ -391,6 +399,14 @@ impl Executor for CgiExecutor {
                     let _ = stdin_task.await;
                     let _ = stdout_task.await;
                     let _ = stderr_task.await;
+                    if err_text.contains("timed out") {
+                        crate::metrics::backend_request("cgi", "timeout");
+                        crate::metrics::timeout("cgi", "request");
+                    } else {
+                        crate::metrics::backend_request("cgi", "error");
+                        crate::metrics::broken_response("cgi", "request_error");
+                    }
+                    crate::metrics::response_wait("cgi", started.elapsed());
                     Err(e)
                 }
             }

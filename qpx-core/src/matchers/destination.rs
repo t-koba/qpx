@@ -1,8 +1,8 @@
 use crate::config::{DestinationDimensionMatchConfig, DestinationMatchConfig};
 use crate::prefilter::{StringInterner, TextPatternMatcher, compile_text_patterns};
 use crate::rules::RuleMatchContext;
-use anyhow::Result;
 
+use super::Result;
 use super::identity::match_optional_text;
 use super::numeric::{CompiledNumericMatcher, compile_numeric_matchers, match_optional_numeric};
 

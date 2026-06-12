@@ -13,6 +13,7 @@ libfuzzer-sys = "0.4"
 qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
 qpx-h3 = { path = "../qpx-h3" }
 qpxd = { path = "../qpxd" }
+serde_yaml = { package = "serde_norway", version = "0.9" }
 tempfile = "3"
 
 [[bin]]
@@ -46,6 +47,83 @@ bench = false
 [[bin]]
 name = "client_hello_sniff"
 path = "fuzz_targets/client_hello_sniff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ftp_response_parser"
+path = "fuzz_targets/ftp_response_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_meta_frame"
+path = "fuzz_targets/ipc_meta_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sse_event_observer"
+path = "fuzz_targets/sse_event_observer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_frame_observer"
+path = "fuzz_targets/grpc_frame_observer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_web_binary_frame_observer"
+path = "fuzz_targets/grpc_web_binary_frame_observer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_web_text_base64_observer"
+path = "fuzz_targets/grpc_web_text_base64_observer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connect_frame_observer"
+path = "fuzz_targets/connect_frame_observer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "datagram_capsule_parser"
+path = "fuzz_targets/datagram_capsule_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "streaming_requirement_config_validator"
+path = "fuzz_targets/streaming_requirement_config_validator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_canonical_loader"
+path = "fuzz_targets/config_canonical_loader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reverse_target_input_deserializer"
+path = "fuzz_targets/reverse_target_input_deserializer.rs"
 test = false
 doc = false
 bench = false

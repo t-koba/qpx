@@ -3,6 +3,10 @@ name = "qpxd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 default = [
@@ -18,17 +22,21 @@ tls-rustls = [
   "dep:rustls",
   "dep:tokio-rustls",
   "qpx-core/tls-rustls",
+  "qpx-http/tls-rustls",
+  "qpxd-cache/tls-rustls",
 ]
 tls-native = [
   "dep:native-tls",
   "dep:tokio-native-tls",
   "qpx-core/tls-native",
+  "qpx-http/tls-native",
+  "qpxd-cache/tls-native",
 ]
 
 # QUIC/HTTP/3 requires rustls (via quinn).
-http3 = ["dep:quinn"]
-http3-backend-h3 = ["http3", "tls-rustls", "dep:quinn", "dep:h3", "dep:h3-quinn", "dep:h3-datagram"]
-http3-backend-qpx = ["http3", "tls-rustls", "dep:quinn", "dep:qpx-h3"]
+http3 = ["dep:quinn", "qpx-http/http3"]
+http3-backend-h3 = ["http3", "tls-rustls", "dep:quinn", "dep:h3", "dep:h3-quinn", "dep:h3-datagram", "qpx-http/http3-backend-h3"]
+http3-backend-qpx = ["http3", "tls-rustls", "dep:quinn", "dep:qpx-h3", "qpx-http/http3-backend-qpx"]
 
 # TLS MITM inspection requires rustls.
 mitm = ["tls-rustls"]
@@ -40,6 +48,8 @@ auth-ldap = ["auth-basic", "qpx-auth/ldap-auth"]
 
 [dependencies]
 qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
+qpx-http = { path = "../qpx-http" }
+qpxd-cache = { path = "../qpxd-cache" }
 qpx-auth = { path = "../qpx-auth", default-features = false, optional = true }
 qpx-acme = { path = "../qpx-acme", optional = true }
 qpx-observability = { path = "../qpx-observability" }
@@ -67,6 +77,7 @@ crossbeam-channel.workspace = true
 notify.workspace = true
 async-trait.workspace = true
 dirs-next.workspace = true
+zeroize.workspace = true
 
 # TLS
 rustls = { workspace = true, optional = true }
@@ -91,6 +102,7 @@ h3-datagram = { workspace = true, optional = true }
 
 # Async runtime
 tokio.workspace = true
+tokio-util.workspace = true
 socket2.workspace = true
 
 # Policy assertion verification and certificate/key parsing used by qpxd itself.

@@ -3,7 +3,6 @@ use super::{
     decide_connect_action_from_tls_metadata, listener_requires_upstream_cert_preview,
     listener_upstream_trust, resolve_upstream,
 };
-use crate::http::body::Body;
 #[cfg(feature = "mitm")]
 use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
 #[cfg(feature = "mitm")]
@@ -12,7 +11,6 @@ use crate::http::protocol::io_prefix::PrefixedIo;
 #[cfg(feature = "mitm")]
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::runtime::{PlanFlags, Runtime};
-use crate::tls::client::preview_tls_certificate_with_options;
 #[cfg(feature = "mitm")]
 use crate::tls::mitm::prewarm_mitm_cert;
 #[cfg(feature = "mitm")]
@@ -31,6 +29,8 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_core::config::{ActionConfig, ActionKind};
+use qpx_http::body::Body;
+use qpx_http::tls::client::preview_tls_certificate_with_options;
 #[cfg(feature = "mitm")]
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 #[cfg(feature = "mitm")]
@@ -38,7 +38,6 @@ use qpx_observability::handler_fn;
 #[cfg(feature = "mitm")]
 use std::convert::Infallible;
 use std::net::SocketAddr;
-#[cfg(feature = "mitm")]
 use std::sync::Arc;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
@@ -72,103 +71,43 @@ pub(super) async fn tunnel_connect(
     let upstream_timeout =
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms);
     let upgraded = timeout(upgrade_wait, crate::http::protocol::upgrade::on(&mut req)).await??;
-    let (client_io, client_hello, mut action) =
+    let (client_io, client_hello, action) =
         prepare_connect_client_io(upgraded, &runtime, &ctx).await?;
+    let listener_upstream_trust = listener_upstream_trust(listener_cfg)?;
+    let (action, server) = prepare_connect_upstream_after_preview(
+        &runtime,
+        listener_cfg,
+        &ctx,
+        client_hello.as_ref(),
+        action,
+        Some(server),
+        upstream_timeout,
+        listener_upstream_trust.clone(),
+    )
+    .await?;
     let TunnelConnectContext {
         remote_addr,
         listener_name,
         host,
         port,
-        authority,
-        sanitized_headers,
-        identity,
-        initial_action,
+        authority: _,
+        sanitized_headers: _,
+        identity: _,
+        initial_action: _,
         matched_rule,
         verify_upstream,
         _concurrency_permits,
         throttle,
     } = ctx;
-    let mut server = Some(server);
-    let listener_upstream_trust = listener_upstream_trust(listener_cfg)?;
-
-    if let Some(client_hello) = client_hello.as_ref()
-        && listener_requires_upstream_cert_preview(listener_cfg)
-        && matches!(
-            action.kind,
-            ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
-        )
-    {
-        let preview_verify = listener_cfg
-            .tls_inspection
-            .as_ref()
-            .map(|cfg| {
-                cfg.verify_upstream
-                    && !state.tls_verify_exception_matches(listener_name.as_str(), host.as_str())
-            })
-            .unwrap_or(true);
-        let preview_server = server
-            .take()
-            .ok_or_else(|| anyhow!("CONNECT upstream tunnel missing before cert preview"))?;
-        match preview_tls_certificate_with_options(
-            host.as_str(),
-            preview_server.io,
-            preview_verify,
-            listener_upstream_trust.as_deref(),
-        )
-        .await
-        {
-            Ok(upstream_cert) => {
-                action = decide_connect_action_from_tls_metadata(ConnectPolicyInput {
-                    runtime: &runtime,
-                    listener_name: listener_name.as_str(),
-                    remote_addr,
-                    host: host.as_str(),
-                    port,
-                    authority: authority.as_str(),
-                    sanitized_headers: &sanitized_headers,
-                    identity: &identity,
-                    client_hello,
-                    upstream_cert: Some(&upstream_cert),
-                })
-                .await?;
-            }
-            Err(err) => {
-                if listener_upstream_trust.is_some() {
-                    return Err(err);
-                }
-                warn!(error = ?err, "forward CONNECT upstream certificate preview failed");
-            }
-        }
-    }
-
-    let reconnect_needed = server.is_none() || action != initial_action;
-    if reconnect_needed
-        && matches!(
-            action.kind,
-            ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
-        )
-    {
-        let upstream = resolve_upstream(&action, &state, listener_name.as_str())?;
-        server = Some(
-            connect_tunnel_target(
-                host.as_str(),
-                port,
-                upstream.as_ref(),
-                state.plan.identity.proxy_name.as_ref(),
-                upstream_timeout,
-            )
-            .await?,
-        );
-    }
+    #[cfg(not(feature = "mitm"))]
+    let _ = (&host, port);
 
     match action.kind {
         ActionKind::Block | ActionKind::Respond => Ok(()),
         ActionKind::Inspect => {
             #[cfg(not(feature = "mitm"))]
             {
-                let _ = verify_upstream;
-                let _ = client_io;
-                let _ = server;
+                let _ = (verify_upstream, client_io, server);
                 Ok(())
             }
 
@@ -293,6 +232,93 @@ pub(super) async fn tunnel_connect(
             Ok(())
         }
     }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CONNECT preview keeps derived tunnel facts explicit without widening shared state"
+)]
+async fn prepare_connect_upstream_after_preview(
+    runtime: &Runtime,
+    listener_cfg: &crate::runtime::CompiledListenerSettings,
+    ctx: &TunnelConnectContext,
+    client_hello: Option<&TlsClientHelloInfo>,
+    mut action: ActionConfig,
+    mut server: Option<ConnectedTunnel>,
+    upstream_timeout: Duration,
+    listener_upstream_trust: Option<Arc<qpx_core::tls::CompiledUpstreamTlsTrust>>,
+) -> Result<(ActionConfig, Option<ConnectedTunnel>)> {
+    let state = runtime.state();
+    if let Some(client_hello) = client_hello
+        && listener_requires_upstream_cert_preview(listener_cfg)
+        && connect_action_uses_upstream(&action)
+    {
+        let preview_verify = listener_cfg
+            .tls_inspection
+            .as_ref()
+            .map(|cfg| {
+                cfg.verify_upstream
+                    && !state
+                        .tls_verify_exception_matches(ctx.listener_name.as_str(), ctx.host.as_str())
+            })
+            .unwrap_or(true);
+        let preview_server = server
+            .take()
+            .ok_or_else(|| anyhow!("CONNECT upstream tunnel missing before cert preview"))?;
+        match preview_tls_certificate_with_options(
+            ctx.host.as_str(),
+            preview_server.io,
+            preview_verify,
+            listener_upstream_trust.as_deref(),
+        )
+        .await
+        {
+            Ok(upstream_cert) => {
+                action = decide_connect_action_from_tls_metadata(ConnectPolicyInput {
+                    runtime,
+                    listener_name: ctx.listener_name.as_str(),
+                    remote_addr: ctx.remote_addr,
+                    host: ctx.host.as_str(),
+                    port: ctx.port,
+                    authority: ctx.authority.as_str(),
+                    sanitized_headers: &ctx.sanitized_headers,
+                    identity: &ctx.identity,
+                    client_hello,
+                    upstream_cert: Some(&upstream_cert),
+                })
+                .await?;
+            }
+            Err(err) => {
+                if listener_upstream_trust.is_some() {
+                    return Err(err);
+                }
+                warn!(error = ?err, "forward CONNECT upstream certificate preview failed");
+            }
+        }
+    }
+
+    let reconnect_needed = server.is_none() || action != ctx.initial_action;
+    if reconnect_needed && connect_action_uses_upstream(&action) {
+        let upstream = resolve_upstream(&action, &state, ctx.listener_name.as_str())?;
+        server = Some(
+            connect_tunnel_target(
+                ctx.host.as_str(),
+                ctx.port,
+                upstream.as_ref(),
+                state.plan.identity.proxy_name.as_ref(),
+                upstream_timeout,
+            )
+            .await?,
+        );
+    }
+    Ok((action, server))
+}
+
+fn connect_action_uses_upstream(action: &ActionConfig) -> bool {
+    matches!(
+        action.kind,
+        ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
+    )
 }
 
 pub(super) async fn prepare_connect_client_io<I>(

@@ -39,6 +39,9 @@ edges:
       methods:
       - PURGE
       - DELETE
+      allowed_peers:
+      - 127.0.0.1/32
+      - ::1/128
       response_status: 202
       response_body: cache purge queued
       response_headers:

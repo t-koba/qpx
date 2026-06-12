@@ -1,0 +1,11 @@
+qpx-core
+qpx-auth
+qpx-h3
+qpx-wasm
+qpx-acme
+qpx-observability
+qpxd
+qpxr
+qpxc
+qpxf
+xtask

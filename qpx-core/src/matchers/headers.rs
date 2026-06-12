@@ -1,8 +1,10 @@
 use crate::config::HeaderMatch;
 use crate::prefilter::StringInterner;
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use regex::Regex;
 use std::sync::Arc;
+
+use super::Result;
 
 #[derive(Debug, Clone)]
 pub(super) struct HeaderMatcherFast {

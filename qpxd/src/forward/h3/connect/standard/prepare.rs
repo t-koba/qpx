@@ -1,14 +1,14 @@
 use super::super::super::backend_h3::ForwardH3Handler;
 use super::super::parse::{format_authority, validate_h3_connect_head};
 use super::target::{H3ConnectTargetInput, prepare_h3_connect_target};
-use super::{
-    H3ConnectPreparation, H3PolicyResponseContext, PreparedH3Connect, send_h3_policy_response,
-};
+use super::{H3PolicyResponseContext, PreparedH3Connect, send_h3_policy_response};
 use crate::destination::DestinationInputs;
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
-use crate::http::dispatch::{DispatchConnectRuleContextInput, build_dispatch_connect_rule_context};
-use crate::http::local_response::build_local_response;
+use crate::http::dispatch::{
+    DispatchConnectRuleContextInput, DispatchOutcome, build_dispatch_connect_rule_context,
+};
+use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::{
     blocked_response as blocked, forbidden_response as forbidden, http_version_label,
     too_many_requests_response as too_many_requests,
@@ -18,11 +18,10 @@ use crate::http3::codec::h1_headers_to_http;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_static_response};
 use crate::policy_context::{
-    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, apply_ext_authz_action_overrides,
-    enforce_ext_authz, resolve_identity, sanitize_headers_for_policy,
-    validate_ext_authz_allow_mode,
+    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, enforce_ext_authz,
+    prepare_ext_authz_allow_controls, resolve_identity, sanitize_headers_for_policy,
 };
-use crate::rate_limit::RateLimitContext;
+use crate::rate_limit::{RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
 use qpx_core::config::{ActionKind, ConnectUdpConfig};
 use tracing::warn;
@@ -33,7 +32,7 @@ pub(crate) async fn prepare_h3_connect_request(
     handler: &ForwardH3Handler,
     conn: &H3ConnInfo,
     connect_udp_cfg: Option<&ConnectUdpConfig>,
-) -> Result<H3ConnectPreparation> {
+) -> Result<Option<Box<PreparedH3Connect>>> {
     let state = handler.runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let max_h3_response_body_bytes = state.plan.limits.body.max_h3_response_body_bytes;
@@ -53,7 +52,7 @@ pub(crate) async fn prepare_h3_connect_request(
     })
     .await?
     else {
-        return Ok(H3ConnectPreparation::Responded);
+        return Ok(None);
     };
     let req_authority = target.req_authority;
     let host = target.host;
@@ -61,6 +60,18 @@ pub(crate) async fn prepare_h3_connect_request(
     let authority_host_for_validation = target.authority_host_for_validation;
     let authority_port_for_validation = target.authority_port_for_validation;
     let auth_uri = target.auth_uri;
+    macro_rules! reject_bad_request {
+        ($message:expr) => {
+            send_h3_static_response(
+                req_stream,
+                ::http::StatusCode::BAD_REQUEST,
+                $message,
+                &http::Method::CONNECT,
+                proxy_name,
+                max_h3_response_body_bytes,
+            )
+        };
+    }
 
     let headers = match h1_headers_to_http(req_head.headers()) {
         Ok(headers) => headers,
@@ -70,16 +81,8 @@ pub(crate) async fn prepare_h3_connect_request(
             } else {
                 b"invalid CONNECT headers".as_slice()
             };
-            send_h3_static_response(
-                req_stream,
-                ::http::StatusCode::BAD_REQUEST,
-                message,
-                &http::Method::CONNECT,
-                proxy_name,
-                max_h3_response_body_bytes,
-            )
-            .await?;
-            return Ok(H3ConnectPreparation::Responded);
+            reject_bad_request!(message).await?;
+            return Ok(None);
         }
     };
 
@@ -100,16 +103,8 @@ pub(crate) async fn prepare_h3_connect_request(
         } else {
             b"bad CONNECT request".as_slice()
         };
-        send_h3_static_response(
-            req_stream,
-            ::http::StatusCode::BAD_REQUEST,
-            message,
-            &http::Method::CONNECT,
-            proxy_name,
-            max_h3_response_body_bytes,
-        )
-        .await?;
-        return Ok(H3ConnectPreparation::Responded);
+        reject_bad_request!(message).await?;
+        return Ok(None);
     }
 
     let base_plan = state
@@ -173,6 +168,34 @@ pub(crate) async fn prepare_h3_connect_request(
             )
         };
     }
+    macro_rules! respond_with_policy {
+        ($response:expr, $outcome:expr, $matched_rule:expr, $ext_authz_policy_id:expr, $log_context:expr) => {{
+            send_policy!(
+                $response,
+                $outcome,
+                $matched_rule,
+                $ext_authz_policy_id,
+                $log_context
+            )
+            .await?;
+            return Ok(None);
+        }};
+    }
+    #[cfg(feature = "auth-basic")]
+    macro_rules! respond_with_unmatched_policy {
+        ($response:expr, $outcome:expr, $log_context:expr) => {{ respond_with_policy!($response, $outcome, None, None, $log_context) }};
+    }
+    macro_rules! rate_limited_response {
+        ($retry_after:expr) => {
+            finalize_response_for_request(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
+                proxy_name,
+                too_many_requests(Some($retry_after)),
+                false,
+            )
+        };
+    }
     let ctx = build_dispatch_connect_rule_context(DispatchConnectRuleContextInput {
         remote_ip: conn.remote_addr.ip(),
         port,
@@ -213,15 +236,7 @@ pub(crate) async fn prepare_h3_connect_request(
                 proxy_auth_required(challenge, state.messages.proxy_auth_required.as_str()),
                 false,
             );
-            send_policy!(
-                response,
-                crate::http::dispatch::DispatchOutcome::Challenge,
-                None,
-                None,
-                &log_context
-            )
-            .await?;
-            return Ok(H3ConnectPreparation::Responded);
+            respond_with_unmatched_policy!(response, DispatchOutcome::Challenge, &log_context);
         }
         #[cfg(feature = "auth-basic")]
         Ok(crate::forward::ForwardPolicyDecision::Forbidden) => {
@@ -233,15 +248,7 @@ pub(crate) async fn prepare_h3_connect_request(
                 forbidden(state.messages.forbidden.as_str()),
                 false,
             );
-            send_policy!(
-                response,
-                crate::http::dispatch::DispatchOutcome::Forbidden,
-                None,
-                None,
-                &log_context
-            )
-            .await?;
-            return Ok(H3ConnectPreparation::Responded);
+            respond_with_unmatched_policy!(response, DispatchOutcome::Forbidden, &log_context);
         }
         Err(err) => {
             if is_connect_udp {
@@ -261,48 +268,37 @@ pub(crate) async fn prepare_h3_connect_request(
                 max_h3_response_body_bytes,
             )
             .await?;
-            return Ok(H3ConnectPreparation::Responded);
+            return Ok(None);
         }
     };
     let selected_plan = state
         .plan
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled HTTP/3 CONNECT listener execution plan not found"))?;
+    let matched_rule_name = matched_rule.as_deref();
 
-    let request_limit_ctx = RateLimitContext::from_identity(
-        conn.remote_addr.ip(),
-        &identity,
-        matched_rule.as_deref(),
-        None,
-    );
+    let request_limit_ctx =
+        RateLimitContext::from_identity(conn.remote_addr.ip(), &identity, matched_rule_name, None);
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
     } = state.policy.rate_limiters.collect_checked_plan_request(
         &selected_plan.rate_limits,
         None,
-        crate::rate_limit::TransportScope::Connect,
+        TransportScope::Connect,
         &request_limit_ctx,
         1,
     )?;
     if let Some(retry_after) = retry_after {
-        let log_context = identity.to_log_context(matched_rule.as_deref(), None, None);
-        let response = finalize_response_for_request(
-            &http::Method::CONNECT,
-            http::Version::HTTP_3,
-            proxy_name,
-            too_many_requests(Some(retry_after)),
-            false,
-        );
-        send_policy!(
+        let log_context = identity.to_log_context(matched_rule_name, None, None);
+        let response = rate_limited_response!(retry_after);
+        respond_with_policy!(
             response,
-            crate::http::dispatch::DispatchOutcome::RateLimited,
-            matched_rule.as_deref(),
+            DispatchOutcome::RateLimited,
+            matched_rule_name,
             None,
             &log_context
-        )
-        .await?;
-        return Ok(H3ConnectPreparation::Responded);
+        );
     }
 
     let ext_authz = enforce_ext_authz(
@@ -319,7 +315,7 @@ pub(crate) async fn prepare_h3_connect_request(
             method: Some("CONNECT"),
             path: audit_path.as_deref(),
             uri: Some(auth_uri.as_str()),
-            matched_rule: matched_rule.as_deref(),
+            matched_rule: matched_rule_name,
             matched_route: None,
             action: Some(&action),
             headers: Some(&sanitized_headers),
@@ -327,61 +323,44 @@ pub(crate) async fn prepare_h3_connect_request(
         },
     )
     .await?;
-    let ext_authz_policy_id = match &ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => allow.policy_id.clone(),
-        ExtAuthzEnforcement::Deny(deny) => deny.policy_id.clone(),
-    };
-    let ext_authz_policy_tags = match &ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => allow.policy_tags.clone(),
-        ExtAuthzEnforcement::Deny(deny) => deny.policy_tags.clone(),
-    };
-    let mut log_context = identity.to_log_context(
-        matched_rule.as_deref(),
-        None,
-        ext_authz_policy_id.as_deref(),
-    );
+    let ext_authz_policy_id = ext_authz.policy_id().map(str::to_owned);
+    let ext_authz_policy_tags = ext_authz.policy_tags().to_vec();
+    let mut log_context =
+        identity.to_log_context(matched_rule_name, None, ext_authz_policy_id.as_deref());
     log_context.policy_tags = ext_authz_policy_tags;
     let (response_headers, timeout_override, rate_limit_profile) = match ext_authz {
         ExtAuthzEnforcement::Continue(allow) => {
-            validate_ext_authz_allow_mode(&allow, ExtAuthzMode::ForwardConnect)?;
+            let allow =
+                prepare_ext_authz_allow_controls(allow, ExtAuthzMode::ForwardConnect, None)?;
             let rate_limit_profile = allow.rate_limit_profile.clone();
             if let Some(retry_after) = request_limits.merge_profile_and_check(
                 &state.policy.rate_limiters,
                 rate_limit_profile.as_deref(),
-                crate::rate_limit::TransportScope::Connect,
+                TransportScope::Connect,
                 &request_limit_ctx,
                 1,
             )? {
-                let response = finalize_response_for_request(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name,
-                    too_many_requests(Some(retry_after)),
-                    false,
-                );
-                send_policy!(
+                let response = rate_limited_response!(retry_after);
+                respond_with_policy!(
                     response,
-                    crate::http::dispatch::DispatchOutcome::RateLimited,
-                    matched_rule.as_deref(),
+                    DispatchOutcome::RateLimited,
+                    matched_rule_name,
                     ext_authz_policy_id.as_deref(),
                     &log_context
-                )
-                .await?;
-                return Ok(H3ConnectPreparation::Responded);
+                );
             }
-            apply_ext_authz_action_overrides(&mut action, &allow);
+            allow.apply_action_overrides(&mut action);
             (allow.headers, allow.timeout_override, rate_limit_profile)
         }
         ExtAuthzEnforcement::Deny(deny) => {
             let response = if let Some(local) = deny.local_response.as_ref() {
-                finalize_response_with_headers(
+                finalized_local_response(
                     &http::Method::CONNECT,
                     http::Version::HTTP_3,
                     proxy_name,
-                    build_local_response(local)?,
+                    local,
                     deny.headers.as_deref(),
-                    false,
-                )
+                )?
             } else {
                 finalize_response_with_headers(
                     &http::Method::CONNECT,
@@ -392,19 +371,17 @@ pub(crate) async fn prepare_h3_connect_request(
                     false,
                 )
             };
-            send_policy!(
+            respond_with_policy!(
                 response,
                 if deny.local_response.is_some() {
-                    crate::http::dispatch::DispatchOutcome::ExtAuthzLocalResponse
+                    DispatchOutcome::ExtAuthzLocalResponse
                 } else {
-                    crate::http::dispatch::DispatchOutcome::ExtAuthzDeny
+                    DispatchOutcome::ExtAuthzDeny
                 },
-                matched_rule.as_deref(),
+                matched_rule_name,
                 ext_authz_policy_id.as_deref(),
                 &log_context
-            )
-            .await?;
-            return Ok(H3ConnectPreparation::Responded);
+            );
         }
     };
 
@@ -418,59 +395,52 @@ pub(crate) async fn prepare_h3_connect_request(
                 response_headers.as_deref(),
                 false,
             );
-            send_policy!(
+            respond_with_policy!(
                 response,
-                crate::http::dispatch::DispatchOutcome::Block,
-                matched_rule.as_deref(),
+                DispatchOutcome::Block,
+                matched_rule_name,
                 ext_authz_policy_id.as_deref(),
                 &log_context
-            )
-            .await?;
-            return Ok(H3ConnectPreparation::Responded);
+            );
         }
         ActionKind::Respond => {
             let local = action
                 .local_response
                 .as_ref()
                 .ok_or_else(|| anyhow!("respond action requires local_response"))?;
-            let response = finalize_response_with_headers(
+            let response = finalized_local_response(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name,
-                build_local_response(local)?,
+                local,
                 response_headers.as_deref(),
-                false,
-            );
-            send_policy!(
+            )?;
+            respond_with_policy!(
                 response,
-                crate::http::dispatch::DispatchOutcome::Respond,
-                matched_rule.as_deref(),
+                DispatchOutcome::Respond,
+                matched_rule_name,
                 ext_authz_policy_id.as_deref(),
                 &log_context
-            )
-            .await?;
-            return Ok(H3ConnectPreparation::Responded);
+            );
         }
         ActionKind::Inspect => {}
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {}
     }
 
-    Ok(H3ConnectPreparation::Continue(Box::new(
-        PreparedH3Connect {
-            authority: format_authority(&host, port),
-            host,
-            port,
-            action,
-            response_headers,
-            log_context,
-            matched_rule,
-            ext_authz_policy_id,
-            audit_path,
-            timeout_override,
-            rate_limit_profile,
-            rate_limit_context: request_limit_ctx,
-            sanitized_headers,
-            identity,
-        },
-    )))
+    Ok(Some(Box::new(PreparedH3Connect {
+        authority: format_authority(&host, port),
+        host,
+        port,
+        action,
+        response_headers,
+        log_context,
+        matched_rule,
+        ext_authz_policy_id,
+        audit_path,
+        timeout_override,
+        rate_limit_profile,
+        rate_limit_context: request_limit_ctx,
+        sanitized_headers,
+        identity,
+    })))
 }

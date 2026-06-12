@@ -18,8 +18,7 @@ impl UdpBindings {
     pub(crate) fn prepare_handoff(&self, config: &Config) -> Result<UdpBindingHandoff> {
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = self;
-            let _ = config;
+            let _ = (self, config);
             return Err(anyhow!(
                 "binary upgrade handoff is only supported on unix and windows"
             ));
@@ -92,8 +91,7 @@ impl UdpBindings {
 
             #[cfg(not(feature = "http3"))]
             {
-                let _ = self;
-                let _ = config;
+                let _ = (self, config);
                 Ok(UdpBindingHandoff {
                     env_value: serde_json::to_string(&InheritedUdpBindings::default())
                         .context("failed to serialize inherited udp bindings")?,
@@ -196,7 +194,6 @@ impl UdpBindings {
 
             #[cfg(not(feature = "http3"))]
             {
-                let _ = self;
                 let path = crate::windows_handoff::create_handoff_path(config, "udp-bindings")?;
                 crate::windows_handoff::write_json_file(
                     path.as_path(),

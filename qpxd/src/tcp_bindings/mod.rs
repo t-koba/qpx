@@ -266,6 +266,7 @@ impl TcpBindings {
         let Some(raw) = std::env::var_os(ENV_INHERITED_TCP_BINDINGS) else {
             return Ok(None);
         };
+        // SAFETY: inherited binding env is consumed during startup before concurrent env access.
         unsafe {
             std::env::remove_var(ENV_INHERITED_TCP_BINDINGS);
         }

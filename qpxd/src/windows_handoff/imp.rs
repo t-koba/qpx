@@ -69,6 +69,7 @@ pub(crate) fn write_json_file(path: &Path, value: &impl Serialize) -> Result<()>
         .write(true)
         .open(&tmp)
         .with_context(|| format!("failed to create handoff file {}", tmp.display()))?;
+    set_owner_only_acl(&tmp)?;
     use std::io::Write;
     file.write_all(&serialized)
         .with_context(|| format!("failed to write handoff file {}", tmp.display()))?;
@@ -127,9 +128,56 @@ fn ensure_secure_handoff_dir(dir: &Path) -> Result<()> {
                 })?;
                 let meta = std::fs::symlink_metadata(&current)?;
                 reject_reparse_point(&current, &meta)?;
+                set_owner_only_acl(&current)?;
             }
             Err(err) => return Err(err.into()),
         }
+    }
+    set_owner_only_acl(dir)?;
+    Ok(())
+}
+
+fn set_owner_only_acl(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+    };
+
+    let sddl_text = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)";
+    let sddl: Vec<u16> = sddl_text.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated and `descriptor` is an out pointer freed with LocalFree.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(anyhow!(
+            "failed to build owner-only handoff security descriptor: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `path_wide` is NUL-terminated and `descriptor` is a valid security descriptor.
+    let ok = unsafe { SetFileSecurityW(path_wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor) };
+    // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe {
+        let _ = LocalFree(descriptor.cast());
+    }
+    if ok == 0 {
+        return Err(anyhow!(
+            "failed to set owner-only handoff ACL on {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
 }
@@ -159,6 +207,7 @@ fn ensure_winsock_started() -> Result<()> {
     static START: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     match START.get_or_init(|| {
         let mut data = MaybeUninit::<WSADATA>::uninit();
+        // SAFETY: data points to valid writable WSADATA storage for WSAStartup.
         let rc = unsafe { WSAStartup(makeword(2, 2), data.as_mut_ptr()) };
         if rc == 0 {
             Ok(())
@@ -176,6 +225,7 @@ fn makeword(low: u8, high: u8) -> u16 {
 }
 
 fn protocol_info_to_bytes(info: &WSAPROTOCOL_INFOW) -> Vec<u8> {
+    // SAFETY: info is a valid WSAPROTOCOL_INFOW reference and we copy its raw bytes.
     unsafe {
         std::slice::from_raw_parts(
             (info as *const WSAPROTOCOL_INFOW).cast::<u8>(),
@@ -194,6 +244,7 @@ fn protocol_info_from_bytes(bytes: &[u8]) -> Result<WSAPROTOCOL_INFOW> {
         ));
     }
     let mut info = MaybeUninit::<WSAPROTOCOL_INFOW>::uninit();
+    // SAFETY: bytes length was checked to exactly fill WSAPROTOCOL_INFOW.
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), info.as_mut_ptr().cast::<u8>(), bytes.len());
         Ok(info.assume_init())
@@ -206,6 +257,7 @@ pub(crate) fn duplicate_socket_for_child<T: AsRawSocket>(
 ) -> Result<Vec<u8>> {
     ensure_winsock_started()?;
     let mut info = MaybeUninit::<WSAPROTOCOL_INFOW>::zeroed();
+    // SAFETY: info points to valid writable protocol-info storage and socket is live.
     let rc = unsafe {
         WSADuplicateSocketW(
             socket.as_raw_socket() as usize,
@@ -219,6 +271,7 @@ pub(crate) fn duplicate_socket_for_child<T: AsRawSocket>(
             std::io::Error::last_os_error()
         ));
     }
+    // SAFETY: WSADuplicateSocketW returned success and initialized info.
     let info = unsafe { info.assume_init() };
     Ok(protocol_info_to_bytes(&info))
 }
@@ -226,6 +279,7 @@ pub(crate) fn duplicate_socket_for_child<T: AsRawSocket>(
 fn recreate_socket(bytes: &[u8]) -> Result<RawSocket> {
     ensure_winsock_started()?;
     let info = protocol_info_from_bytes(bytes)?;
+    // SAFETY: info was decoded from WSADuplicateSocketW bytes and parameters follow Winsock.
     let socket = unsafe {
         WSASocketW(
             FROM_PROTOCOL_INFO,
@@ -246,6 +300,7 @@ fn recreate_socket(bytes: &[u8]) -> Result<RawSocket> {
 }
 
 pub(crate) fn adopt_tcp_listener(bytes: &[u8]) -> Result<TcpListener> {
+    // SAFETY: recreate_socket returns a valid socket handle and ownership moves to TcpListener.
     let listener = unsafe { TcpListener::from_raw_socket(recreate_socket(bytes)?) };
     listener
         .set_nonblocking(true)
@@ -254,6 +309,7 @@ pub(crate) fn adopt_tcp_listener(bytes: &[u8]) -> Result<TcpListener> {
 }
 
 pub(crate) fn adopt_udp_socket(bytes: &[u8]) -> Result<UdpSocket> {
+    // SAFETY: recreate_socket returns a valid socket handle and ownership moves to UdpSocket.
     let socket = unsafe { UdpSocket::from_raw_socket(recreate_socket(bytes)?) };
     socket
         .set_nonblocking(true)
@@ -279,6 +335,7 @@ impl EventHandle {
 impl Drop for EventHandle {
     fn drop(&mut self) {
         if !self.0.is_null() {
+            // SAFETY: EventHandle owns this non-null HANDLE and closes it exactly once.
             unsafe {
                 let _ = CloseHandle(self.0);
             }
@@ -288,6 +345,7 @@ impl Drop for EventHandle {
 
 pub(crate) fn create_upgrade_event(pid: u32) -> Result<EventHandle> {
     let name = upgrade_event_name(pid);
+    // SAFETY: name is null-terminated and remaining arguments are valid CreateEventW values.
     let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
     if handle.is_null() {
         return Err(anyhow!(
@@ -300,6 +358,7 @@ pub(crate) fn create_upgrade_event(pid: u32) -> Result<EventHandle> {
 
 pub(crate) fn open_upgrade_event(pid: u32) -> Result<EventHandle> {
     let name = upgrade_event_name(pid);
+    // SAFETY: name is null-terminated and access flags are valid for OpenEventW.
     let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, 0, name.as_ptr()) };
     if handle.is_null() {
         return Err(anyhow!(
@@ -311,6 +370,7 @@ pub(crate) fn open_upgrade_event(pid: u32) -> Result<EventHandle> {
 }
 
 pub(crate) fn signal_event(event: &EventHandle) -> Result<()> {
+    // SAFETY: EventHandle owns a valid event HANDLE while borrowed here.
     if unsafe { SetEvent(event.raw()) } == 0 {
         return Err(anyhow!(
             "SetEvent failed: {}",
@@ -321,6 +381,7 @@ pub(crate) fn signal_event(event: &EventHandle) -> Result<()> {
 }
 
 pub(crate) fn reset_event(event: &EventHandle) -> Result<()> {
+    // SAFETY: EventHandle owns a valid event HANDLE while borrowed here.
     if unsafe { ResetEvent(event.raw()) } == 0 {
         return Err(anyhow!(
             "ResetEvent failed: {}",
@@ -332,6 +393,7 @@ pub(crate) fn reset_event(event: &EventHandle) -> Result<()> {
 
 pub(crate) fn wait_for_event_raw(handle: HANDLE, timeout: Duration) -> Result<bool> {
     let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+    // SAFETY: caller passes a waitable HANDLE; timeout is clamped to DWORD range.
     match unsafe { WaitForSingleObject(handle, timeout_ms) } {
         WAIT_OBJECT_0 => Ok(true),
         WAIT_TIMEOUT => Ok(false),

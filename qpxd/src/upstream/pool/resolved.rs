@@ -1,10 +1,10 @@
 use super::cluster::UpstreamProxyCluster;
 use super::cluster::{ManagedUpstreamEndpoint, PassiveFailureKind, PassiveHealthPolicy};
-use crate::tls::CompiledUpstreamTlsTrust;
 use crate::upstream::http1::{UpstreamProxyEndpoint, parse_upstream_proxy_endpoint};
 use anyhow::Result;
 use hyper::StatusCode;
 use qpx_core::config::UpstreamConfig;
+use qpx_core::tls::CompiledUpstreamTlsTrust;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

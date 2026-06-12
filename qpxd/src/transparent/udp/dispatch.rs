@@ -1,28 +1,28 @@
 use super::session::SharedSessionIndex;
 use super::{
     TransparentUdpSession, TransparentUdpSessionInit, UNSPECIFIED_V4, UNSPECIFIED_V6,
-    extract_quic_client_hello_info_with_fingerprints, looks_like_quic_initial,
     spawn_transparent_udp_relay,
 };
-use crate::destination::DestinationInputs;
+use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::policy_context::{
-    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode,
-    apply_ext_authz_action_overrides, emit_audit_log, enforce_ext_authz, resolve_identity,
-    validate_ext_authz_allow_mode,
+    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, emit_audit_log,
+    enforce_ext_authz, prepare_ext_authz_allow_controls,
 };
-use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
-use crate::runtime::PlanFlags;
+use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use crate::transparent::destination::ConnectTarget;
 use anyhow::{Result, anyhow};
 use qpx_core::config::ActionKind;
-use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
+
+mod rule_eval;
+
+use self::rule_eval::{UdpRuleEvaluation, prepare_udp_rule_evaluation};
 
 pub(super) struct NewUdpSessionContext<'a> {
     pub(super) listener_socket: Arc<UdpSocket>,
@@ -35,6 +35,24 @@ pub(super) struct NewUdpSessionContext<'a> {
     pub(super) packet: &'a [u8],
     pub(super) run_started: Instant,
     pub(super) idle_timeout: Duration,
+}
+
+struct StartUdpSessionInput<'a> {
+    listener_socket: Arc<UdpSocket>,
+    sessions: Arc<SharedSessionIndex>,
+    session_id: u64,
+    client_addr: SocketAddr,
+    connect_target: ConnectTarget,
+    authority: String,
+    matched_rule: Option<&'a str>,
+    rate_limit_profile: Option<String>,
+    request_limits: AppliedRateLimits,
+    rate_limit_ctx: RateLimitContext,
+    concurrency_permits: crate::rate_limit::ConcurrencyPermits,
+    packet: &'a [u8],
+    run_started: Instant,
+    idle_timeout: Duration,
+    upstream_timeout: Duration,
 }
 
 pub(super) async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Result<&'static str> {
@@ -62,125 +80,28 @@ pub(super) async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Res
         .get(listener_name)
         .ok_or_else(|| anyhow!("rule engine not found"))?;
 
-    let is_quic = looks_like_quic_initial(packet);
-    let include_fingerprints = state
-        .plan
-        .transparent_edge(listener_name)
-        .map(|edge| edge.flags.contains(PlanFlags::TLS_FINGERPRINT))
-        .unwrap_or(false)
-        || state
-            .policy
-            .connection_filters_by_listener
-            .get(listener_name)
-            .map(|engine| engine.any_rule_requires_tls_fingerprint())
-            .unwrap_or(false);
-    let client_hello = is_quic
-        .then(|| extract_quic_client_hello_info_with_fingerprints(packet, include_fingerprints))
-        .flatten();
-    let sni = client_hello.as_ref().and_then(|hello| hello.sni.clone());
-
-    let connect_target = match original_target {
-        Some(target) => ConnectTarget::Socket(target),
-        None => match sni.clone() {
-            Some(host) => ConnectTarget::HostPort(host, 443),
-            None => {
-                return Ok("blocked");
-            }
-        },
-    };
-
-    let host_for_match_owned = match &connect_target {
-        ConnectTarget::HostPort(host, _) => Some(host.clone()),
-        ConnectTarget::Socket(addr) => Some(addr.ip().to_string()),
-    };
-    let authority = connect_target.authority();
-    let scheme = if is_quic { "quic" } else { "udp" };
-    let identity = resolve_identity(&state, &effective_policy, client_addr.ip(), None, None)?;
-    let destination = state.classify_destination(
-        &DestinationInputs {
-            host: host_for_match_owned.as_deref(),
-            ip: match &connect_target {
-                ConnectTarget::Socket(addr) => Some(addr.ip()),
-                ConnectTarget::HostPort(_, _) => host_for_match_owned
-                    .as_deref()
-                    .and_then(|value| value.parse().ok()),
-            },
-            sni: sni.as_deref(),
-            scheme: Some(scheme),
-            port: Some(connect_target.port()),
-            alpn: client_hello
-                .as_ref()
-                .and_then(|hello| hello.alpn.as_deref()),
-            ja3: client_hello.as_ref().and_then(|hello| hello.ja3.as_deref()),
-            ja4: client_hello.as_ref().and_then(|hello| hello.ja4.as_deref()),
-            ..Default::default()
-        },
+    let UdpRuleEvaluation {
+        connect_target,
+        host_for_match_owned,
+        authority,
+        identity,
+        sni,
+        outcome,
+        request_limit_ctx,
+        mut request_limits,
+    } = match prepare_udp_rule_evaluation(
+        &state,
+        engine,
+        listener_name,
+        &effective_policy,
+        client_addr,
+        original_target,
+        packet,
         base_plan.destination_resolution.as_ref(),
-    );
-
-    let ctx = RuleMatchContext {
-        src_ip: Some(client_addr.ip()),
-        dst_port: Some(connect_target.port()),
-        host: host_for_match_owned.as_deref(),
-        sni: sni.as_deref(),
-        authority: Some(authority.as_str()),
-        scheme: Some(scheme),
-        http_version: client_hello.as_ref().and_then(|hello| {
-            hello.alpn.as_deref().and_then(|alpn| {
-                if alpn.starts_with("h3") {
-                    Some("HTTP/3")
-                } else {
-                    None
-                }
-            })
-        }),
-        alpn: client_hello
-            .as_ref()
-            .and_then(|hello| hello.alpn.as_deref()),
-        tls_version: client_hello
-            .as_ref()
-            .and_then(|hello| hello.tls_version.as_deref()),
-        destination_category: destination.category.as_deref(),
-        destination_category_source: destination.category_source.as_deref(),
-        destination_category_confidence: destination.category_confidence.map(u64::from),
-        destination_reputation: destination.reputation.as_deref(),
-        destination_reputation_source: destination.reputation_source.as_deref(),
-        destination_reputation_confidence: destination.reputation_confidence.map(u64::from),
-        destination_application: destination.application.as_deref(),
-        destination_application_source: destination.application_source.as_deref(),
-        destination_application_confidence: destination.application_confidence.map(u64::from),
-        ja3: client_hello.as_ref().and_then(|hello| hello.ja3.as_deref()),
-        ja4: client_hello.as_ref().and_then(|hello| hello.ja4.as_deref()),
-        request_size: Some(packet.len() as u64),
-        user: identity.user.as_deref(),
-        user_groups: &identity.groups,
-        device_id: identity.device_id.as_deref(),
-        posture: &identity.posture,
-        tenant: identity.tenant.as_deref(),
-        auth_strength: identity.auth_strength.as_deref(),
-        idp: identity.idp.as_deref(),
-        ..Default::default()
+    )? {
+        Some(evaluation) => evaluation,
+        None => return Ok("blocked"),
     };
-    let outcome = engine.evaluate_ref(&ctx);
-    let request_limit_ctx =
-        RateLimitContext::from_identity(client_addr.ip(), &identity, outcome.matched_rule, None);
-    let selected_plan = state
-        .plan
-        .ingress_edge_execution_plan(listener_name, outcome.matched_rule)
-        .ok_or_else(|| anyhow!("compiled transparent UDP execution plan not found"))?;
-    let crate::rate_limit::RequestLimitAcquire {
-        limits: mut request_limits,
-        retry_after,
-    } = state.policy.rate_limiters.collect_checked_plan_request(
-        &selected_plan.rate_limits,
-        None,
-        crate::rate_limit::TransportScope::Udp,
-        &request_limit_ctx,
-        1,
-    )?;
-    if retry_after.is_some() {
-        return Ok("blocked");
-    }
 
     let auth_required = outcome.auth.map(|a| !a.require.is_empty()).unwrap_or(false);
     if auth_required || matches!(outcome.action.kind, ActionKind::Block) {
@@ -188,14 +109,14 @@ pub(super) async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Res
         emit_audit_log(
             &state,
             AuditRecord {
-                kind: crate::http::dispatch::ProxyKind::Transparent,
+                kind: ProxyKind::Transparent,
                 name: listener_name,
                 remote_ip: client_addr.ip(),
                 host: host_for_match_owned.as_deref(),
                 sni: sni.as_deref(),
                 method: None,
                 path: None,
-                outcome: crate::http::dispatch::DispatchOutcome::Block,
+                outcome: DispatchOutcome::Block,
                 status: None,
                 matched_rule: outcome.matched_rule,
                 matched_route: None,
@@ -210,7 +131,7 @@ pub(super) async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Res
         &state,
         &effective_policy,
         ExtAuthzInput {
-            proxy_kind: crate::http::dispatch::ProxyKind::Transparent,
+            proxy_kind: ProxyKind::Transparent,
             proxy_name: state.plan.identity.proxy_name.as_ref(),
             scope_name: listener_name,
             remote_ip: client_addr.ip(),
@@ -228,30 +149,42 @@ pub(super) async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Res
         },
     )
     .await?;
-    let ext_authz_policy_id = match &ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => allow.policy_id.clone(),
-        ExtAuthzEnforcement::Deny(deny) => deny.policy_id.clone(),
-    };
-    let ext_authz_policy_tags = match &ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => allow.policy_tags.clone(),
-        ExtAuthzEnforcement::Deny(deny) => deny.policy_tags.clone(),
-    };
-    let rate_limit_profile = match &ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => allow.rate_limit_profile.clone(),
-        ExtAuthzEnforcement::Deny(_) => None,
-    };
+    let ext_authz_policy_id = ext_authz.policy_id().map(str::to_owned);
+    let ext_authz_policy_tags = ext_authz.policy_tags().to_vec();
+    let rate_limit_profile;
     let mut log_context =
         identity.to_log_context(outcome.matched_rule, None, ext_authz_policy_id.as_deref());
     log_context.policy_tags = ext_authz_policy_tags;
+    let emit_decision_audit = |audit_outcome| {
+        emit_audit_log(
+            &state,
+            AuditRecord {
+                kind: ProxyKind::Transparent,
+                name: listener_name,
+                remote_ip: client_addr.ip(),
+                host: host_for_match_owned.as_deref(),
+                sni: sni.as_deref(),
+                method: None,
+                path: None,
+                outcome: audit_outcome,
+                status: None,
+                matched_rule: outcome.matched_rule,
+                matched_route: None,
+                ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+            },
+            &log_context,
+        );
+    };
     let mut action = outcome.action.clone();
     let timeout_override = match ext_authz {
         ExtAuthzEnforcement::Continue(allow) => {
-            validate_ext_authz_allow_mode(&allow, ExtAuthzMode::TransparentUdp)?;
+            let allow =
+                prepare_ext_authz_allow_controls(allow, ExtAuthzMode::TransparentUdp, None)?;
             if request_limits
                 .merge_profile_and_check(
                     &state.policy.rate_limiters,
                     allow.rate_limit_profile.as_deref(),
-                    crate::rate_limit::TransportScope::Udp,
+                    TransportScope::Udp,
                     &request_limit_ctx,
                     1,
                 )?
@@ -259,28 +192,12 @@ pub(super) async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Res
             {
                 return Ok("blocked");
             }
-            apply_ext_authz_action_overrides(&mut action, &allow);
+            rate_limit_profile = allow.rate_limit_profile.clone();
+            allow.apply_action_overrides(&mut action);
             allow.timeout_override
         }
         ExtAuthzEnforcement::Deny(_) => {
-            emit_audit_log(
-                &state,
-                AuditRecord {
-                    kind: crate::http::dispatch::ProxyKind::Transparent,
-                    name: listener_name,
-                    remote_ip: client_addr.ip(),
-                    host: host_for_match_owned.as_deref(),
-                    sni: sni.as_deref(),
-                    method: None,
-                    path: None,
-                    outcome: crate::http::dispatch::DispatchOutcome::ExtAuthzDeny,
-                    status: None,
-                    matched_rule: outcome.matched_rule,
-                    matched_route: None,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
-                },
-                &log_context,
-            );
+            emit_decision_audit(DispatchOutcome::ExtAuthzDeny);
             return Ok("blocked");
         }
     };
@@ -289,24 +206,7 @@ pub(super) async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Res
         action.kind,
         ActionKind::Inspect | ActionKind::Respond | ActionKind::Block
     ) {
-        emit_audit_log(
-            &state,
-            AuditRecord {
-                kind: crate::http::dispatch::ProxyKind::Transparent,
-                name: listener_name,
-                remote_ip: client_addr.ip(),
-                host: host_for_match_owned.as_deref(),
-                sni: sni.as_deref(),
-                method: None,
-                path: None,
-                outcome: crate::http::dispatch::DispatchOutcome::Block,
-                status: None,
-                matched_rule: outcome.matched_rule,
-                matched_route: None,
-                ext_authz_policy_id: ext_authz_policy_id.as_deref(),
-            },
-            &log_context,
-        );
+        emit_decision_audit(DispatchOutcome::Block);
         return Ok("blocked");
     }
 
@@ -320,73 +220,88 @@ pub(super) async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Res
         Some(permits) => permits,
         None => return Ok("blocked"),
     };
-    let udp = Arc::new(
-        connect_udp_target(
-            &connect_target,
-            timeout_override.unwrap_or_else(|| {
-                Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
-            }),
-        )
-        .await?,
-    );
+    let upstream_timeout = timeout_override.unwrap_or_else(|| {
+        Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
+    });
+    let started = start_udp_session(StartUdpSessionInput {
+        listener_socket,
+        sessions,
+        session_id,
+        client_addr,
+        connect_target,
+        authority,
+        matched_rule: outcome.matched_rule,
+        rate_limit_profile,
+        request_limits,
+        rate_limit_ctx,
+        concurrency_permits,
+        packet,
+        run_started,
+        idle_timeout,
+        upstream_timeout,
+    })
+    .await?;
+    if !started {
+        return Ok("blocked");
+    }
+    emit_decision_audit(DispatchOutcome::Allow);
+    Ok("tunneled")
+}
+
+async fn start_udp_session(input: StartUdpSessionInput<'_>) -> Result<bool> {
+    let udp = Arc::new(connect_udp_target(&input.connect_target, input.upstream_timeout).await?);
     let (close_tx, _close_rx) = watch::channel(false);
-    let target_key = authority.clone();
-    let now_ms = run_started.elapsed().as_millis() as u64;
     let session = Arc::new(TransparentUdpSession::new(TransparentUdpSessionInit {
         socket: udp.clone(),
         close_tx,
-        client_addr,
-        target_key: target_key.clone(),
-        matched_rule: outcome.matched_rule.map(str::to_string),
-        rate_limit_profile,
-        seen_ms: now_ms,
-        limits: request_limits.clone(),
-        rate_limit_ctx: rate_limit_ctx.clone(),
-        concurrency_permits,
+        client_addr: input.client_addr,
+        target_key: input.authority,
+        matched_rule: input.matched_rule.map(str::to_string),
+        rate_limit_profile: input.rate_limit_profile,
+        seen_ms: input.run_started.elapsed().as_millis() as u64,
+        limits: input.request_limits.clone(),
+        rate_limit_ctx: input.rate_limit_ctx.clone(),
+        concurrency_permits: input.concurrency_permits,
     }));
-    sessions.insert(session_id, session.clone());
-    sessions.observe_client_packet(session_id, packet);
-
+    input.sessions.insert(input.session_id, session.clone());
+    input
+        .sessions
+        .observe_client_packet(input.session_id, input.packet);
     let relay_task = spawn_transparent_udp_relay(
-        listener_socket.clone(),
-        sessions.clone(),
-        session_id,
+        input.listener_socket,
+        input.sessions.clone(),
+        input.session_id,
         session.clone(),
         udp.clone(),
-        idle_timeout,
-        run_started,
+        input.idle_timeout,
+        input.run_started,
     );
     session.attach_relay_task(relay_task);
-
-    if let Ok(delay) =
-        apply_udp_bandwidth_controls(&rate_limit_ctx, &request_limits, packet.len() as u64)
-    {
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
+    let delay = match apply_udp_bandwidth_controls(
+        &input.rate_limit_ctx,
+        &input.request_limits,
+        input.packet.len() as u64,
+    ) {
+        Ok(delay) => delay,
+        Err(()) => {
+            cleanup_new_udp_session(&input.sessions, input.session_id);
+            return Ok(false);
         }
-    } else {
-        return Ok("blocked");
+    };
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
     }
-    udp.send(packet).await?;
-    emit_audit_log(
-        &state,
-        AuditRecord {
-            kind: crate::http::dispatch::ProxyKind::Transparent,
-            name: listener_name,
-            remote_ip: client_addr.ip(),
-            host: host_for_match_owned.as_deref(),
-            sni: sni.as_deref(),
-            method: None,
-            path: None,
-            outcome: crate::http::dispatch::DispatchOutcome::Allow,
-            status: None,
-            matched_rule: outcome.matched_rule,
-            matched_route: None,
-            ext_authz_policy_id: ext_authz_policy_id.as_deref(),
-        },
-        &log_context,
-    );
-    Ok("tunneled")
+    if let Err(err) = udp.send(input.packet).await {
+        cleanup_new_udp_session(&input.sessions, input.session_id);
+        return Err(err.into());
+    }
+    Ok(true)
+}
+
+fn cleanup_new_udp_session(sessions: &SharedSessionIndex, session_id: u64) {
+    if let Some(session) = sessions.remove_session(session_id) {
+        let _ = session.close_tx.send(true);
+    }
 }
 
 async fn connect_udp_target(target: &ConnectTarget, timeout_dur: Duration) -> Result<UdpSocket> {

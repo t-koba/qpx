@@ -108,19 +108,22 @@ main() {
   link_or_copy "$QPXD_BUILD_BIN" "$QPXD_BIN"
   link_or_copy "$QPXF_BUILD_BIN" "$QPXF_BIN"
 
-  cargo build -q -p qpxd --locked --no-default-features --features tls-native --target-dir "$NATIVE_TARGET_DIR"
-
   if [ ! -x "$QPXD_BIN" ]; then
     echo "missing built qpxd binary: $QPXD_BIN" >&2
-    exit 1
-  fi
-  if [ ! -x "$QPXD_NATIVE_BIN" ]; then
-    echo "missing built native qpxd binary: $QPXD_NATIVE_BIN" >&2
     exit 1
   fi
   if [ ! -x "$QPXF_BIN" ]; then
     echo "missing built qpxf binary: $QPXF_BIN" >&2
     exit 1
+  fi
+
+  if [ "$(uname -s)" != "Darwin" ]; then
+    cargo build -q -p qpxd --locked --no-default-features --features tls-native --target-dir "$NATIVE_TARGET_DIR"
+
+    if [ ! -x "$QPXD_NATIVE_BIN" ]; then
+      echo "missing built native qpxd binary: $QPXD_NATIVE_BIN" >&2
+      exit 1
+    fi
   fi
 
   generate_sample_cert

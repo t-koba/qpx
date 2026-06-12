@@ -314,7 +314,7 @@ fn is_supported_https_svc_param(key: u16) -> bool {
 pub(super) fn h3_upstream_for_logical_origin(logical_host: &str, logical_port: u16) -> String {
     format!(
         "h3://{}",
-        crate::http::protocol::address::format_authority_host_port(logical_host, logical_port)
+        qpx_http::protocol::address::format_authority_host_port(logical_host, logical_port)
     )
 }
 

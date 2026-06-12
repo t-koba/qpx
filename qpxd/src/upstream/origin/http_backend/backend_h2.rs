@@ -1,16 +1,16 @@
-use crate::http::body::Body;
 use crate::http::codec::h2::{
     h1_headers_to_http, h2_response_to_hyper_with_inflight, http_headers_to_h1,
     parse_declared_content_length,
 };
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
-use crate::tls::UpstreamCertificateInfo;
 use crate::upstream::raw_http1::Http1ResponseWithInterim;
 use ::http::{Request as Http1Request, Response as Http1Response};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use hyper::header::HOST;
 use hyper::{Request, Uri};
+use qpx_core::tls::UpstreamCertificateInfo;
+use qpx_http::body::Body;
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -145,7 +145,7 @@ async fn stream_request_body_to_h2(
         ));
     }
     if let Some(trailers) = trailers {
-        crate::http::protocol::semantics::validate_request_trailers(&trailers)
+        qpx_http::protocol::semantics::validate_request_trailers(&trailers)
             .map_err(|err| anyhow!("{}", err))?;
         send_stream.send_trailers(http_headers_to_h1(&trailers)?)?;
     } else {
@@ -182,7 +182,7 @@ async fn recv_h2_response_with_interim(
 
         match event {
             H2ResponseEvent::Informational(response) => {
-                let status = crate::http::protocol::semantics::validate_http_status_class(
+                let status = qpx_http::protocol::semantics::validate_http_status_class(
                     response.status(),
                     "HTTP/2 upstream interim response",
                 )?;

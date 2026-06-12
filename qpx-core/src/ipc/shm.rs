@@ -1,11 +1,87 @@
 use crate::shm_ring::ShmRingBuffer;
-use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
+
+type Result<T> = std::result::Result<T, IpcShmError>;
+
+#[derive(Debug, Error)]
+pub enum IpcShmError {
+    #[error("path is not a directory: {path}")]
+    NotDirectory { path: PathBuf },
+    #[error("failed to create directory {path}")]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to inspect directory {path}")]
+    InspectPath {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[cfg(unix)]
+    #[error("refusing IPC SHM symlink component not owned by root or current user: {path}")]
+    UntrustedSymlinkOwner { path: PathBuf },
+    #[cfg(unix)]
+    #[error("failed to resolve directory {path}")]
+    ResolveSymlink {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[cfg(unix)]
+    #[error("failed to inspect resolved directory {path}")]
+    InspectResolvedPath {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[cfg(unix)]
+    #[error("IPC SHM symlink target is not a directory: {path}")]
+    SymlinkTargetNotDirectory { path: PathBuf },
+    #[cfg(not(unix))]
+    #[error("refusing IPC SHM symlink component: {path}")]
+    SymlinkUnsupported { path: PathBuf },
+    #[cfg(unix)]
+    #[error("refusing IPC SHM ancestor directory not owned by root or current user: {path}")]
+    UntrustedAncestorOwner { path: PathBuf },
+    #[cfg(unix)]
+    #[error("refusing attacker-writable IPC SHM ancestor directory: {path}")]
+    AttackerWritableAncestor { path: PathBuf },
+    #[cfg(unix)]
+    #[error("refusing group-writable IPC SHM ancestor directory not owned by current user: {path}")]
+    GroupWritableAncestor { path: PathBuf },
+    #[cfg(unix)]
+    #[error("failed to set permissions on directory {path}")]
+    SetPermissions {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("IPC SHM token is too long")]
+    TokenTooLong,
+    #[error("IPC SHM token must be ASCII")]
+    TokenNotAscii,
+    #[error("IPC SHM token contains forbidden path characters")]
+    TokenForbiddenPathChars,
+    #[error("IPC SHM token has unexpected format")]
+    TokenUnexpectedFormat,
+    #[error("IPC SHM token contains invalid characters")]
+    TokenInvalidChars,
+    #[error("failed to create or open IPC SHM ring {path}")]
+    Ring {
+        path: PathBuf,
+        #[source]
+        source: anyhow::Error,
+    },
+}
 
 static ACTIVE_IPC_SHM_TOKENS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -49,17 +125,25 @@ pub fn ensure_secure_dir(dir: &Path) -> Result<()> {
                     continue;
                 }
                 if !meta.is_dir() {
-                    return Err(anyhow!("path is not a directory: {}", current.display()));
+                    return Err(IpcShmError::NotDirectory {
+                        path: current.clone(),
+                    });
                 }
                 reject_untrusted_dir_component(&current, &meta)?;
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current).map_err(|err| {
-                    anyhow!("failed to create directory {}: {err}", current.display())
+                fs::create_dir(&current).map_err(|source| IpcShmError::CreateDir {
+                    path: current.clone(),
+                    source,
                 })?;
                 set_private_dir_permissions(&current)?;
             }
-            Err(err) => return Err(err.into()),
+            Err(source) => {
+                return Err(IpcShmError::InspectPath {
+                    path: current.clone(),
+                    source,
+                });
+            }
         }
     }
     Ok(())
@@ -69,26 +153,24 @@ pub fn ensure_secure_dir(dir: &Path) -> Result<()> {
 fn resolve_trusted_symlink_component(path: &Path, meta: &fs::Metadata) -> Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
-        return Err(anyhow!(
-            "refusing IPC SHM symlink component not owned by root or current user: {}",
-            path.display()
-        ));
+        return Err(IpcShmError::UntrustedSymlinkOwner {
+            path: path.to_path_buf(),
+        });
     }
-    let resolved = fs::canonicalize(path)
-        .map_err(|err| anyhow!("failed to resolve directory {}: {err}", path.display()))?;
-    let resolved_meta = fs::metadata(&resolved).map_err(|err| {
-        anyhow!(
-            "failed to inspect resolved directory {}: {err}",
-            resolved.display()
-        )
+    let resolved = fs::canonicalize(path).map_err(|source| IpcShmError::ResolveSymlink {
+        path: path.to_path_buf(),
+        source,
     })?;
+    let resolved_meta =
+        fs::metadata(&resolved).map_err(|source| IpcShmError::InspectResolvedPath {
+            path: resolved.clone(),
+            source,
+        })?;
     if !resolved_meta.is_dir() {
-        return Err(anyhow!(
-            "IPC SHM symlink target is not a directory: {}",
-            resolved.display()
-        ));
+        return Err(IpcShmError::SymlinkTargetNotDirectory { path: resolved });
     }
     reject_untrusted_dir_component(&resolved, &resolved_meta)?;
     Ok(resolved)
@@ -96,10 +178,9 @@ fn resolve_trusted_symlink_component(path: &Path, meta: &fs::Metadata) -> Result
 
 #[cfg(not(unix))]
 fn resolve_trusted_symlink_component(path: &Path, _meta: &fs::Metadata) -> Result<PathBuf> {
-    Err(anyhow!(
-        "refusing IPC SHM symlink component: {}",
-        path.display()
-    ))
+    Err(IpcShmError::SymlinkUnsupported {
+        path: path.to_path_buf(),
+    })
 }
 
 #[cfg(unix)]
@@ -112,24 +193,22 @@ fn reject_untrusted_dir_component(path: &Path, meta: &fs::Metadata) -> Result<()
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let sticky_bit = libc::S_ISVTX;
     let sticky = mode & sticky_bit != 0;
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
-        return Err(anyhow!(
-            "refusing IPC SHM ancestor directory not owned by root or current user: {}",
-            path.display()
-        ));
+        return Err(IpcShmError::UntrustedAncestorOwner {
+            path: path.to_path_buf(),
+        });
     }
     if mode & 0o002 != 0 && !sticky {
-        return Err(anyhow!(
-            "refusing attacker-writable IPC SHM ancestor directory: {}",
-            path.display()
-        ));
+        return Err(IpcShmError::AttackerWritableAncestor {
+            path: path.to_path_buf(),
+        });
     }
     if !sticky && mode & 0o020 != 0 && meta.uid() != euid {
-        return Err(anyhow!(
-            "refusing group-writable IPC SHM ancestor directory not owned by current user: {}",
-            path.display()
-        ));
+        return Err(IpcShmError::GroupWritableAncestor {
+            path: path.to_path_buf(),
+        });
     }
     Ok(())
 }
@@ -142,11 +221,11 @@ fn reject_untrusted_dir_component(_path: &Path, _meta: &fs::Metadata) -> Result<
 #[cfg(unix)]
 fn set_private_dir_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|err| {
-        anyhow!(
-            "failed to set permissions on directory {}: {err}",
-            path.display()
-        )
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
+        IpcShmError::SetPermissions {
+            path: path.to_path_buf(),
+            source,
+        }
     })
 }
 
@@ -165,22 +244,22 @@ pub fn ipc_shm_dir() -> Result<PathBuf> {
 
 pub fn validate_ipc_shm_token(token: &str, expected_prefix: &str) -> Result<()> {
     if token.len() > 255 {
-        return Err(anyhow!("IPC SHM token is too long"));
+        return Err(IpcShmError::TokenTooLong);
     }
     if !token.is_ascii() {
-        return Err(anyhow!("IPC SHM token must be ASCII"));
+        return Err(IpcShmError::TokenNotAscii);
     }
     if token.contains('/') || token.contains('\\') || token.contains("..") {
-        return Err(anyhow!("IPC SHM token contains forbidden path characters"));
+        return Err(IpcShmError::TokenForbiddenPathChars);
     }
     if !token.starts_with(expected_prefix) || !token.ends_with(".shm") {
-        return Err(anyhow!("IPC SHM token has unexpected format"));
+        return Err(IpcShmError::TokenUnexpectedFormat);
     }
     if !token
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
     {
-        return Err(anyhow!("IPC SHM token contains invalid characters"));
+        return Err(IpcShmError::TokenInvalidChars);
     }
     Ok(())
 }
@@ -196,7 +275,11 @@ pub fn create_or_open_ipc_ring(
     size_bytes: usize,
 ) -> Result<(PathBuf, ShmRingBuffer)> {
     let path = ipc_shm_path(token, expected_prefix)?;
-    let ring = ShmRingBuffer::create_or_open(&path, size_bytes)?;
+    let ring =
+        ShmRingBuffer::create_or_open(&path, size_bytes).map_err(|source| IpcShmError::Ring {
+            path: path.clone(),
+            source: source.into(),
+        })?;
     register_active_ipc_shm_token(token);
     Ok((path, ring))
 }

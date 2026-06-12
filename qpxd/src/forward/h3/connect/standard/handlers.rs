@@ -1,10 +1,9 @@
 use super::super::super::backend_h3::ForwardH3Handler;
 use super::established::{EstablishedH3Connect, finish_h3_connect};
 use super::{
-    H3ConnectPreparation, H3PolicyResponseContext, PreparedH3Connect, prepare_h3_connect_request,
-    send_h3_policy_response,
+    H3PolicyResponseContext, PreparedH3Connect, prepare_h3_connect_request, send_h3_policy_response,
 };
-use crate::http::body::Body;
+use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::{
     blocked_response as blocked, too_many_requests_response as too_many_requests,
 };
@@ -15,6 +14,7 @@ use crate::upstream::connect::connect_tunnel_target;
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::ActionKind;
+use qpx_http::body::Body;
 use tokio::time::Duration;
 use tracing::warn;
 
@@ -33,8 +33,8 @@ pub(crate) async fn handle_h3_connect(
     )
     .await?
     {
-        H3ConnectPreparation::Continue(prepared) => *prepared,
-        H3ConnectPreparation::Responded => return Ok(()),
+        Some(prepared) => *prepared,
+        None => return Ok(()),
     };
 
     let state = handler.runtime.state();
@@ -70,9 +70,9 @@ pub(crate) async fn handle_h3_connect(
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
     });
     macro_rules! send_policy {
-        ($req_stream:expr, $response:expr, $outcome:expr) => {
+        ($response:expr, $outcome:expr) => {
             send_h3_policy_response(
-                $req_stream,
+                &mut req_stream,
                 $response,
                 H3PolicyResponseContext {
                     request_method: &http::Method::CONNECT,
@@ -89,43 +89,40 @@ pub(crate) async fn handle_h3_connect(
             )
         };
     }
+    macro_rules! send_finalized {
+        ($base:expr, $outcome:expr) => {
+            send_policy!(
+                finalize_response_with_headers(
+                    &http::Method::CONNECT,
+                    http::Version::HTTP_3,
+                    proxy_name.as_str(),
+                    $base,
+                    response_headers.as_deref(),
+                    false,
+                ),
+                $outcome
+            )
+        };
+    }
+    macro_rules! send_blocked {
+        () => {
+            send_finalized!(
+                blocked(state.messages.blocked.as_str()),
+                DispatchOutcome::Block
+            )
+        };
+    }
     match action.kind {
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy | ActionKind::Inspect => {}
         _ => {
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                blocked(state.messages.blocked.as_str()),
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(
-                &mut req_stream,
-                response,
-                crate::http::dispatch::DispatchOutcome::Block
-            )
-            .await?;
+            send_blocked!().await?;
             return Ok(());
         }
     }
     if matches!(action.kind, ActionKind::Inspect) {
         #[cfg(not(feature = "mitm"))]
         {
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                blocked(state.messages.blocked.as_str()),
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(
-                &mut req_stream,
-                response,
-                crate::http::dispatch::DispatchOutcome::Block
-            )
-            .await?;
+            send_blocked!().await?;
             return Ok(());
         }
 
@@ -135,147 +132,13 @@ pub(crate) async fn handle_h3_connect(
                 .ingress_edge_settings(handler.listener_name.as_ref())
                 .and_then(|l| l.tls_inspection.as_ref());
             if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
-                let response = finalize_response_with_headers(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name.as_str(),
-                    blocked(state.messages.blocked.as_str()),
-                    response_headers.as_deref(),
-                    false,
-                );
-                send_policy!(
-                    &mut req_stream,
-                    response,
-                    crate::http::dispatch::DispatchOutcome::Block
-                )
-                .await?;
+                send_blocked!().await?;
                 return Ok(());
             }
             if state.security.destination.tls.mitm.is_none() {
-                let response = finalize_response_with_headers(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name.as_str(),
-                    blocked(state.messages.blocked.as_str()),
-                    response_headers.as_deref(),
-                    false,
-                );
-                send_policy!(
-                    &mut req_stream,
-                    response,
-                    crate::http::dispatch::DispatchOutcome::Block
-                )
-                .await?;
+                send_blocked!().await?;
                 return Ok(());
             }
-
-            let upstream = match crate::forward::request::resolve_upstream(
-                &action,
-                &state,
-                handler.listener_name.as_ref(),
-            ) {
-                Ok(upstream) => upstream,
-                Err(err) => {
-                    warn!(error = ?err, "forward HTTP/3 CONNECT upstream resolution failed");
-                    let response = finalize_response_with_headers(
-                        &http::Method::CONNECT,
-                        http::Version::HTTP_3,
-                        proxy_name.as_str(),
-                        Response::builder()
-                            .status(StatusCode::BAD_GATEWAY)
-                            .body(Body::from(state.messages.proxy_error.clone()))?,
-                        response_headers.as_deref(),
-                        false,
-                    );
-                    send_policy!(
-                        &mut req_stream,
-                        response,
-                        crate::http::dispatch::DispatchOutcome::Error
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
-            rate_limit_context.upstream =
-                upstream.as_ref().map(|upstream| upstream.key().to_string());
-            let _concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_context)
-            {
-                Some(permits) => permits,
-                None => {
-                    let response = finalize_response_with_headers(
-                        &http::Method::CONNECT,
-                        http::Version::HTTP_3,
-                        proxy_name.as_str(),
-                        too_many_requests(None),
-                        response_headers.as_deref(),
-                        false,
-                    );
-                    send_policy!(
-                        &mut req_stream,
-                        response,
-                        crate::http::dispatch::DispatchOutcome::ConcurrencyLimited
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
-            let upstream_connected = match connect_tunnel_target(
-                &host,
-                port,
-                upstream.as_ref(),
-                proxy_name.as_str(),
-                upstream_timeout,
-            )
-            .await
-            {
-                Ok(stream) => stream.io,
-                Err(err) => {
-                    warn!(
-                        error = ?err,
-                        upstream = upstream.as_ref().map(|u| u.endpoint().cache_key()),
-                        "forward HTTP/3 CONNECT tunnel establish failed"
-                    );
-                    let response = finalize_response_with_headers(
-                        &http::Method::CONNECT,
-                        http::Version::HTTP_3,
-                        proxy_name.as_str(),
-                        Response::builder()
-                            .status(StatusCode::BAD_GATEWAY)
-                            .body(Body::from(state.messages.proxy_error.clone()))?,
-                        response_headers.as_deref(),
-                        false,
-                    );
-                    send_policy!(
-                        &mut req_stream,
-                        response,
-                        crate::http::dispatch::DispatchOutcome::Error
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
-            finish_h3_connect(EstablishedH3Connect {
-                req_stream,
-                handler,
-                conn,
-                proxy_name,
-                host,
-                port,
-                authority,
-                action,
-                response_headers,
-                log_context,
-                matched_rule,
-                ext_authz_policy_id,
-                audit_path,
-                upstream_timeout,
-                tunnel_idle_timeout,
-                sanitized_headers,
-                identity,
-                server: upstream_connected,
-            })
-            .await?;
-            return Ok(());
         }
     }
 
@@ -287,20 +150,11 @@ pub(crate) async fn handle_h3_connect(
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 CONNECT upstream resolution failed");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
+            send_finalized!(
                 Response::builder()
                     .status(StatusCode::BAD_GATEWAY)
                     .body(Body::from(state.messages.proxy_error.clone()))?,
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(
-                &mut req_stream,
-                response,
-                crate::http::dispatch::DispatchOutcome::Error
+                DispatchOutcome::Error
             )
             .await?;
             return Ok(());
@@ -310,20 +164,7 @@ pub(crate) async fn handle_h3_connect(
     let _concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_context) {
         Some(permits) => permits,
         None => {
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                too_many_requests(None),
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(
-                &mut req_stream,
-                response,
-                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited
-            )
-            .await?;
+            send_finalized!(too_many_requests(None), DispatchOutcome::ConcurrencyLimited).await?;
             return Ok(());
         }
     };
@@ -343,20 +184,11 @@ pub(crate) async fn handle_h3_connect(
                 upstream = upstream.as_ref().map(|u| u.endpoint().cache_key()),
                 "forward HTTP/3 CONNECT tunnel establish failed"
             );
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
+            send_finalized!(
                 Response::builder()
                     .status(StatusCode::BAD_GATEWAY)
                     .body(Body::from(state.messages.proxy_error.clone()))?,
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(
-                &mut req_stream,
-                response,
-                crate::http::dispatch::DispatchOutcome::Error
+                DispatchOutcome::Error
             )
             .await?;
             return Ok(());

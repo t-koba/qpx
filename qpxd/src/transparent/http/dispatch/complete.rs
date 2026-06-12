@@ -1,28 +1,31 @@
 use super::super::{ConnectTarget, resolve_upstream};
-use super::access::{TransparentAccessInput, enforce_transparent_access_control};
 use super::local::{TransparentWebsocketInput, proxy_transparent_websocket};
-use super::types::{TransparentAccessOutcome, TransparentPreparedRequest};
-use crate::http::body::Body;
+use super::types::TransparentPreparedRequest;
+use crate::http::body::size::limit_request_body;
+use crate::http::capture::stream::emit_optional_response_for_export;
 use crate::http::dispatch::{
-    DispatchAuditContext, DispatchResponsePolicyInput, DispatchResponsePolicyOutcome,
-    annotate_dispatch_response, apply_dispatch_response_policy, record_upstream_request_duration,
+    DispatchAuditContext, DispatchOutcome, DispatchResponsePolicyInput,
+    DispatchResponsePolicyOutcome, ProxyKind, annotate_dispatch_response,
+    annotated_max_forwards_response, apply_dispatch_response_policy,
+    concurrency_limited_response_for_parts as concurrency_limited_response,
+    prepare_http_module_local_response, record_upstream_request_duration,
+    request_body_too_large_response as body_too_large_response,
 };
 use crate::http::policy::response_policy::ResponseBodyObservationLimits;
 use crate::http::policy::rule_context::{
     ResponseRuleContextInput, build_response_rule_match_context,
 };
-use crate::http::protocol::common::too_many_requests_response as too_many_requests;
 use crate::http::protocol::l7::{
-    finalize_response_for_request, finalize_response_with_headers_in_place,
-    handle_max_forwards_in_place, prepare_request_with_headers_in_place,
+    finalize_response_with_headers_in_place, prepare_request_with_headers_in_place,
 };
 use crate::http::protocol::websocket::is_websocket_upgrade;
 use crate::policy_context::strip_untrusted_identity_headers;
 use crate::rate_limit::RateLimitContext;
 use crate::upstream::http1::proxy_http1_request_with_interim;
 use anyhow::Result;
-use hyper::{Request, Response, StatusCode};
+use hyper::Request;
 use qpx_core::prefilter::MatchPrefilterContext;
+use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::Duration;
 
@@ -56,156 +59,161 @@ pub(super) async fn complete_transparent_request(
     let matched_rule = prepared_policy.matched_rule;
     let mut request_limits = limits.request_limits;
     let request_limit_ctx = limits.request_limit_ctx;
-    let max_observed_request_body_bytes = limits.max_observed_request_body_bytes;
-    let body_read_timeout = limits.body_read_timeout;
     let mut request_rpc = observation.request_rpc;
-    let response_request_observation = observation.response_request_observation;
-    let request_body_observed = observation.request_body_observed;
-    let request_rpc_observed = observation.request_rpc_observed;
     let proxy_name = proxy_name.as_str();
     let listener_name = listener_name.as_str();
     let request_method = req.method().clone();
     let request_version = req.version();
-    let access = match enforce_transparent_access_control(TransparentAccessInput {
-        state: state.clone(),
-        proxy_name,
-        listener_name,
-        remote_addr,
-        connect_target: &connect_target,
-        host_for_match: &host_for_match,
-        base: &base,
-        effective_policy: &effective_policy,
-        destination: &destination,
-        identity: &identity,
-        sanitized_headers: &sanitized_headers,
-        request_method: request_method.clone(),
-        request_version,
-        request_uri: base.request_uri.clone(),
-        policy,
-        early_response,
-        matched_rule: matched_rule.clone(),
-        request_limits: &mut request_limits,
-        request_limit_ctx: &request_limit_ctx,
-    })
-    .await?
-    {
-        TransparentAccessOutcome::Response(response) => return Ok(*response),
-        TransparentAccessOutcome::Continue(access) => *access,
-    };
-    let mut policy = access.policy;
-    let timeout_override = access.timeout_override;
-    let audit = access.audit;
-
-    if !response_request_observation.is_empty()
-        && ((response_request_observation.needs_body && !request_body_observed)
-            || (response_request_observation.needs_rpc && !request_rpc_observed))
-    {
-        let observation_plan =
-            crate::http::body::observation::RequestObservationPlan::from_requirements(
-                response_request_observation,
-            );
-        req = match observation_plan
-            .observe_request(req, max_observed_request_body_bytes, body_read_timeout)
-            .await
-        {
-            Ok(req) => req,
-            Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
-                let mut response = finalize_response_for_request(
-                    &base.method,
-                    request_version,
-                    proxy_name,
-                    Response::builder()
-                        .status(StatusCode::PAYLOAD_TOO_LARGE)
-                        .body(Body::from("request body too large"))?,
-                    false,
-                );
+    let remote_ip = remote_addr.ip();
+    // `policy` and `early_response` are mutually exclusive listener-policy
+    // outcomes; ext_authz is enforced only when a policy proceeded.
+    let mut policy = policy;
+    let base_headers = policy.as_mut().and_then(|policy| policy.headers.take());
+    let decision =
+        crate::http::dispatch::enforce_http_access(crate::http::dispatch::HttpAccessInput {
+            state: &state,
+            policy: &effective_policy,
+            kind: ProxyKind::Transparent,
+            mode: crate::policy_context::ExtAuthzMode::TransparentHttp,
+            enforce_ext_authz: policy.is_some(),
+            proxy_name,
+            scope_name: listener_name,
+            remote_addr,
+            dst_port: Some(connect_target.port()),
+            host: host_for_match.as_deref(),
+            sni: None,
+            request_method: &request_method,
+            request_version,
+            path: base.path.as_deref(),
+            uri: Some(base.request_uri.as_str()),
+            matched_rule: matched_rule.as_deref(),
+            matched_route: None,
+            action: policy.as_ref().map(|policy| &policy.action),
+            sanitized_headers: &sanitized_headers,
+            identity: &identity,
+            destination: &destination,
+            base_headers,
+            request_limit: Some((
+                &mut request_limits,
+                &request_limit_ctx,
+                &state.policy.rate_limiters,
+            )),
+            default_deny_response: crate::http::protocol::common::forbidden_response(
+                state.messages.forbidden.as_str(),
+            ),
+        })
+        .await?;
+    let (mut policy, audit, timeout_override) = match decision {
+        crate::http::dispatch::HttpAccessDecision::Blocked { response, .. } => {
+            return Ok(crate::http::capture::stream::limit_response_body_for_plan(
+                *response,
+                &selected_plan,
+            ));
+        }
+        crate::http::dispatch::HttpAccessDecision::Allow(allowed) => {
+            let crate::http::dispatch::HttpAccessAllowed { audit, controls } = *allowed;
+            if let Some(mut response) = early_response {
                 annotate_dispatch_response(
                     &mut response,
                     &audit,
-                    crate::http::dispatch::DispatchOutcome::Error,
+                    DispatchOutcome::EarlyResponse,
                     &[],
                 );
-                return Ok(response);
+                return Ok(crate::http::capture::stream::limit_response_body_for_plan(
+                    *response,
+                    &selected_plan,
+                ));
+            }
+            let Some(mut policy) = policy else {
+                return Err(anyhow::anyhow!(
+                    "transparent policy missing after early response handling"
+                ));
+            };
+            let timeout_override = controls.as_ref().and_then(|allow| allow.timeout_override);
+            if let Some(allow) = controls {
+                policy.headers = allow.headers.clone();
+                allow.apply_action_overrides(&mut policy.action);
+            }
+            (policy, audit, timeout_override)
+        }
+    };
+    let (observed_req, needs_rpc) =
+        match crate::http::body::observation::observe_missing_request_requirements(
+            req,
+            observation.response_request_observation,
+            observation.request_body_observed,
+            observation.request_rpc_observed,
+            limits.max_observed_request_body_bytes,
+            limits.body_read_timeout,
+        )
+        .await
+        {
+            Ok(observed) => observed,
+            Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
+                return body_too_large_response(
+                    &request_method,
+                    request_version,
+                    proxy_name,
+                    Some(&audit),
+                );
             }
             Err(err) => return Err(err),
         };
-        if observation_plan.needs_rpc {
-            request_rpc = Some(crate::http::rpc::inspect_request(&req).await);
-        }
+    req = observed_req;
+    if needs_rpc {
+        request_rpc = Some(crate::http::rpc::inspect_request(&req).await);
     }
-
-    if let Some(response) = handle_max_forwards_in_place(
+    req = match limit_request_body(req, selected_plan.streaming.max_request_body_bytes) {
+        Ok(req) => req,
+        Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
+            return body_too_large_response(
+                &request_method,
+                request_version,
+                proxy_name,
+                Some(&audit),
+            );
+        }
+        Err(err) => return Err(err),
+    };
+    if let Some(response) = annotated_max_forwards_response(
         &mut req,
         proxy_name,
         state.plan.limits.general.trace_reflect_all_headers,
         state.plan.limits.body.max_observed_request_body_bytes,
         std::time::Duration::from_millis(selected_plan.streaming.body_read_timeout_ms),
+        &audit,
     )
     .await
     {
-        let mut response = response;
-        annotate_dispatch_response(
-            &mut response,
-            &audit,
-            crate::http::dispatch::DispatchOutcome::MaxForwards,
-            &[],
-        );
         return Ok(response);
     }
-    strip_untrusted_identity_headers(
-        &state,
-        &effective_policy,
-        remote_addr.ip(),
-        req.headers_mut(),
-    )?;
+    strip_untrusted_identity_headers(&state, &effective_policy, remote_ip, req.headers_mut())?;
     let websocket = is_websocket_upgrade(req.headers());
-    prepare_request_with_headers_in_place(
-        &mut req,
-        proxy_name,
-        policy.headers.as_deref(),
-        websocket,
-    );
-    let mut http_modules = selected_plan.modules.start(
-        state.clone(),
-        crate::http::modules::HttpModuleSessionInit {
-            proxy_kind: crate::http::dispatch::ProxyKind::Transparent,
-            proxy_name,
-            scope_name: listener_name,
-            route_name: None,
-            remote_ip: remote_addr.ip(),
-            sni: None,
-            identity_user: identity.user.as_deref(),
-            cache_policy: None,
-            cache_default_scheme: None,
-        },
-    );
+    let policy_headers = policy.headers.as_deref();
+    prepare_request_with_headers_in_place(&mut req, proxy_name, policy_headers, websocket);
+    let module_init = transparent_module_init(proxy_name, listener_name, remote_ip, &identity);
+    let mut http_modules = selected_plan.modules.start(state.clone(), module_init);
     match http_modules.on_request_headers(&mut req).await? {
         crate::http::modules::RequestHeadersOutcome::Continue => {}
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
-            let mut response = http_modules.prepare_downstream_response(*response).await?;
-            let response_version = response.version();
-            finalize_response_with_headers_in_place(
+            let response = prepare_http_module_local_response(
+                &mut http_modules,
+                *response,
                 &request_method,
-                response_version,
                 proxy_name,
-                &mut response,
-                policy.headers.as_deref(),
-                false,
-            );
-            http_modules.on_logging(Some(response.status()), None).await;
-            annotate_dispatch_response(
-                &mut response,
+                policy_headers,
                 &audit,
-                crate::http::dispatch::DispatchOutcome::HttpModuleLocalResponse,
-                &[],
-            );
-            return Ok(response);
+            )
+            .await?;
+            return Ok(crate::http::capture::stream::limit_response_body_for_plan(
+                response,
+                &selected_plan,
+            ));
         }
     }
-
     let upstream = resolve_upstream(&policy.action, &state, &listener_cfg)?;
     let rate_limit_ctx = RateLimitContext::from_identity(
-        remote_addr.ip(),
+        remote_ip,
         &identity,
         matched_rule.as_deref(),
         upstream.as_ref().map(|upstream| upstream.key()),
@@ -213,29 +221,21 @@ pub(super) async fn complete_transparent_request(
     let _concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_ctx) {
         Some(permits) => permits,
         None => {
-            let mut response = finalize_response_for_request(
+            let response = concurrency_limited_response(
                 req.method(),
                 req.version(),
                 proxy_name,
-                too_many_requests(None),
-                false,
-            );
-            annotate_dispatch_response(
-                &mut response,
-                &audit,
-                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited,
-                &[],
+                audit.clone(),
             );
             return Ok(response);
         }
     };
-    let upstream_timeout = timeout_override.unwrap_or_else(|| {
-        Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
-    });
-    let upgrade_wait_timeout =
-        Duration::from_millis(state.plan.limits.timeouts.upgrade_wait_timeout_ms);
-    let tunnel_idle_timeout =
-        Duration::from_millis(state.plan.limits.timeouts.tunnel_idle_timeout_ms);
+    let ms = Duration::from_millis;
+    let timeouts = &state.plan.limits.timeouts;
+    let upstream_timeout =
+        timeout_override.unwrap_or_else(|| ms(timeouts.upstream_http_timeout_ms));
+    let upgrade_wait_timeout = ms(timeouts.upgrade_wait_timeout_ms);
+    let tunnel_idle_timeout = ms(timeouts.tunnel_idle_timeout_ms);
     let authority = connect_target.authority();
     let export_session =
         state.export_session_for_plan(&selected_plan, remote_addr, authority.as_str());
@@ -251,12 +251,11 @@ pub(super) async fn complete_transparent_request(
             export_session: export_session.as_ref(),
             request_method: &request_method,
             proxy_name,
-            policy_headers: policy.headers.as_deref(),
+            policy_headers,
             audit: &audit,
         })
         .await;
     }
-
     proxy_transparent_http1(
         req,
         upstream.as_ref(),
@@ -282,6 +281,25 @@ pub(super) async fn complete_transparent_request(
         },
     )
     .await
+}
+
+fn transparent_module_init<'a>(
+    proxy_name: &'a str,
+    listener_name: &'a str,
+    remote_ip: std::net::IpAddr,
+    identity: &'a crate::policy_context::ResolvedIdentity,
+) -> crate::http::modules::HttpModuleSessionInit<'a> {
+    crate::http::modules::HttpModuleSessionInit {
+        proxy_kind: ProxyKind::Transparent,
+        proxy_name,
+        scope_name: listener_name,
+        route_name: None,
+        remote_ip,
+        sni: None,
+        identity_user: identity.user.as_deref(),
+        cache_policy: None,
+        cache_default_scheme: None,
+    }
 }
 
 pub(super) struct TransparentResponsePolicyInput<'a> {
@@ -313,33 +331,13 @@ pub(super) async fn proxy_transparent_http1(
 ) -> Result<hyper::Response<Body>> {
     let upstream_started = std::time::Instant::now();
     http_modules.on_upstream_request(&mut req).await?;
-    if let Some(session) = export_session {
-        let preview = crate::exporter::serialize_request_preview_async(&req).await;
-        session.emit_plaintext(true, &preview);
-        if let Some(sample_bytes) = input.selected_plan.capture_stream_sample_bytes() {
-            req = crate::http::capture::stream::sample_request_body_for_export(
-                req,
-                sample_bytes,
-                input.selected_plan.streaming.body_channel_capacity,
-                std::time::Duration::from_millis(
-                    input.selected_plan.streaming.body_read_timeout_ms,
-                ),
-                session.clone(),
-                true,
-            );
-        } else if let Some(max_capture_bytes) = input.selected_plan.capture_full_body_bytes() {
-            req = crate::http::capture::stream::capture_request_body_for_export(
-                req,
-                max_capture_bytes,
-                input.selected_plan.streaming.body_channel_capacity,
-                std::time::Duration::from_millis(
-                    input.selected_plan.streaming.body_read_timeout_ms,
-                ),
-                session.clone(),
-                true,
-            );
-        }
-    }
+    req = crate::http::capture::stream::emit_request_for_export(
+        req,
+        input.selected_plan,
+        export_session,
+        true,
+    )
+    .await;
     let proxied_result =
         proxy_http1_request_with_interim(req, upstream, authority, upstream_timeout).await;
     record_upstream_request_duration(input.audit.kind, upstream_started.elapsed());
@@ -376,7 +374,7 @@ pub(super) async fn proxy_transparent_http1(
         candidates: response_candidates,
         rule_context: build_response_rule_match_context(ResponseRuleContextInput {
             base: input.base,
-            headers: &response_headers,
+            headers: Some(&response_headers),
             destination: input.destination,
             identity: input.identity,
             response_status,
@@ -388,7 +386,7 @@ pub(super) async fn proxy_transparent_http1(
         headers: input.headers.as_ref().cloned(),
         request_rpc: input.request_rpc,
         body_observation: ResponseBodyObservationLimits {
-            max_body_bytes: input.selected_plan.body_observation_limit(
+            max_body_bytes: input.selected_plan.response_body_observation_limit(
                 input
                     .state
                     .plan
@@ -409,10 +407,10 @@ pub(super) async fn proxy_transparent_http1(
         },
         http_modules,
         audit: input.audit,
+        local_response_outcome: crate::http::dispatch::DispatchOutcome::ResponseLocalResponse,
         request_method: input.request_method,
         request_version: input.request_version,
         proxy_name: input.proxy_name,
-        pre_finalize_local_response: true,
     })
     .await?
     {
@@ -428,38 +426,19 @@ pub(super) async fn proxy_transparent_http1(
             *input.headers = updated_headers;
             policy_tags
         }
-        DispatchResponsePolicyOutcome::Response(response) => return Ok(response),
+        DispatchResponsePolicyOutcome::Response(response) => {
+            return Ok(emit_optional_response_for_export(
+                response,
+                input.selected_plan,
+                export_session,
+            )
+            .await);
+        }
     };
     response = http_modules.prepare_downstream_response(response).await?;
-    if let Some(session) = export_session {
-        let preview = crate::exporter::serialize_response_preview_async(&response).await;
-        session.emit_plaintext(false, &preview);
-        if let Some(sample_bytes) = input.selected_plan.capture_stream_sample_bytes() {
-            response = crate::http::capture::stream::sample_response_body_for_export(
-                response,
-                sample_bytes,
-                input.selected_plan.streaming.body_channel_capacity,
-                std::time::Duration::from_millis(
-                    input.selected_plan.streaming.body_read_timeout_ms,
-                ),
-                session.clone(),
-            );
-        } else if let Some(max_capture_bytes) = input.selected_plan.capture_full_body_bytes() {
-            response = crate::http::capture::stream::capture_response_body_for_export(
-                response,
-                max_capture_bytes,
-                input.selected_plan.streaming.body_channel_capacity,
-                std::time::Duration::from_millis(
-                    input.selected_plan.streaming.body_read_timeout_ms,
-                ),
-                session.clone(),
-            );
-        }
-    }
-    let response_version = response.version();
     finalize_response_with_headers_in_place(
         input.request_method,
-        response_version,
+        response.version(),
         input.proxy_name,
         &mut response,
         input.headers.as_ref().map(|headers| headers.as_ref()),
@@ -469,8 +448,10 @@ pub(super) async fn proxy_transparent_http1(
     annotate_dispatch_response(
         &mut response,
         input.audit,
-        crate::http::dispatch::DispatchOutcome::Allow,
+        DispatchOutcome::Allow,
         &response_policy_tags,
     );
+    response =
+        emit_optional_response_for_export(response, input.selected_plan, export_session).await;
     Ok(response)
 }

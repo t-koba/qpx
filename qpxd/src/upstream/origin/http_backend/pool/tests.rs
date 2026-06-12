@@ -1,5 +1,5 @@
 use super::*;
-use crate::tls::UpstreamCertificateInfo;
+use qpx_core::tls::UpstreamCertificateInfo;
 use tokio::io::duplex;
 
 fn test_https_origin_slot() -> HttpsOriginSlot {

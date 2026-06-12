@@ -1,3 +1,12 @@
+//! Serde-facing canonical configuration data transfer objects.
+//!
+//! These structs mirror the YAML schema one-to-one. Field-level user
+//! documentation is generated from `canonical/schema.rs` and the configuration
+//! guide, so this module keeps the Rust DTOs compact instead of duplicating the
+//! full schema prose on every public field.
+
+#![allow(missing_docs)]
+
 mod cache;
 mod canonical;
 mod core;
@@ -20,10 +29,11 @@ pub use self::canonical::{
     TrafficConfig, canonical_schema_value,
 };
 pub use self::core::{
-    DatagramOverflowStrategyConfig, GrpcConfig, IdentityConfig, MAX_GRPC_STREAM_DURATION_MS,
-    MAX_GRPC_WEB_TRAILER_BYTES, MAX_OBSERVED_BODY_BYTES, MAX_REVERSE_RETRY_TEMPLATE_BODY_BYTES,
-    MAX_SSE_STREAM_DURATION_MS, MessagesConfig, RuntimeConfig, SseFlushPolicy, SseStreamingPolicy,
-    StreamingConfig, StreamingRequirement, UnknownLengthExactSizePolicy,
+    DatagramOverflowStrategyConfig, GrpcConfig, H3RequestBodyDrainConfig, H3RequestBodyDrainMode,
+    IdentityConfig, MAX_GRPC_STREAM_DURATION_MS, MAX_GRPC_WEB_TRAILER_BYTES,
+    MAX_OBSERVED_BODY_BYTES, MAX_REVERSE_RETRY_TEMPLATE_BODY_BYTES, MAX_SSE_EVENT_ID_BYTES,
+    MAX_SSE_LINE_BYTES, MAX_SSE_STREAM_DURATION_MS, MessagesConfig, RuntimeConfig, SseFlushPolicy,
+    SseStreamingPolicy, StreamingConfig, StreamingRequirement, UnknownLengthExactSizePolicy,
 };
 pub use self::http::{
     CachePurgeModuleConfig, HeaderCaptureConfig, HttpGuardJsonConfig, HttpGuardLimitsConfig,

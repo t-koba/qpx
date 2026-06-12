@@ -1,5 +1,4 @@
 use super::connect;
-use crate::http::body::Body;
 use crate::http::dispatcher::attach_interim_response_heads;
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
 use crate::http::protocol::common::resolve_named_upstream;
@@ -9,6 +8,7 @@ use anyhow::{Result, anyhow};
 #[cfg(feature = "auth-basic")]
 use hyper::StatusCode;
 use hyper::{Method, Request, Response};
+use qpx_http::body::Body;
 use std::sync::Arc;
 
 mod dispatch;

@@ -1,8 +1,8 @@
-use crate::http::body::Body;
 use ::http::{Request as Http1Request, Response as Http1Response};
 use anyhow::{Result, anyhow};
 use http::header::COOKIE;
 use hyper::{Request, Uri};
+use qpx_http::body::Body;
 
 pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
     let mut headers = http::HeaderMap::new();
@@ -51,7 +51,7 @@ pub(crate) fn sanitize_interim_response_for_h3(
     if response.status() == http::StatusCode::SWITCHING_PROTOCOLS {
         return Err(anyhow!("HTTP/3 interim responses must not use 101"));
     }
-    crate::http::protocol::semantics::sanitize_interim_response_headers(response.headers_mut());
+    qpx_http::protocol::semantics::sanitize_interim_response_headers(response.headers_mut());
     Ok(response)
 }
 
@@ -93,10 +93,8 @@ pub(crate) fn prepare_h3_response_head(
     parts: &http::response::Parts,
     request_method: &http::Method,
 ) -> Result<PreparedH3ResponseHead> {
-    let status = crate::http::protocol::semantics::validate_http_status_class(
-        parts.status,
-        "HTTP/3 response",
-    )?;
+    let status =
+        qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/3 response")?;
     let mut headers = parts.headers.clone();
     let no_body = *request_method == http::Method::HEAD
         || parts.status.is_informational()
@@ -105,12 +103,12 @@ pub(crate) fn prepare_h3_response_head(
         || parts.status == http::StatusCode::RESET_CONTENT;
     let content_length = if no_body {
         if *request_method == http::Method::HEAD {
-            crate::http::protocol::semantics::strip_message_body_framing_headers(&mut headers);
+            qpx_http::protocol::semantics::strip_message_body_framing_headers(&mut headers);
             if parse_content_length_fields(&headers).is_err() {
                 headers.remove(http::header::CONTENT_LENGTH);
             }
         } else {
-            crate::http::protocol::semantics::strip_message_body_headers(&mut headers);
+            qpx_http::protocol::semantics::strip_message_body_headers(&mut headers);
         }
         parse_content_length_fields(&headers).ok().flatten()
     } else {

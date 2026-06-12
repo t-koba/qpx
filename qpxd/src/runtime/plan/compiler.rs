@@ -4,7 +4,7 @@ use crate::policy_context::EffectivePolicyContext;
 use crate::rate_limit::{CompiledRateLimitPlan, RateLimitSet};
 use crate::runtime::RuntimeResources;
 use anyhow::Result;
-use qpx_core::config::{IngressEdgeMode, ReverseRouteTargetConfig};
+use qpx_core::config::{IngressEdgeMode, ReverseEdgeConfig, ReverseRouteTargetConfig};
 use qpx_core::matchers::CompiledMatch;
 use qpx_core::prefilter::StringInterner;
 use std::sync::Arc;
@@ -217,90 +217,11 @@ impl<'a> PlanCompiler<'a> {
         }
 
         for reverse_edges in self.config.operational.reverse_edge_configs() {
-            let routes = reverse_edges
-                .routes
-                .iter()
-                .enumerate()
-                .map(|(idx, route)| {
-                    let (matcher, hint) = CompiledMatch::compile(&route.r#match, &mut interner)?;
-                    let mut plan =
-                        execution_plan_for_reverse_route(self.config, reverse_edges, route)?;
-                    apply_matcher_flags(&matcher, &mut plan);
-                    validate_streaming_required_route(
-                        route.streaming_requirement.as_ref(),
-                        &matcher,
-                        &plan,
-                    )?;
-                    validate_unknown_length_exact_size_policy(
-                        route.streaming_requirement.as_ref(),
-                        &plan,
-                        self.config.operational.runtime.unknown_length_exact_size,
-                    )?;
-                    let id = Arc::<str>::from(route_id(idx, route.name.as_deref()));
-                    Ok(CompiledReverseRoute {
-                        id: id.clone(),
-                        name: id,
-                        matcher,
-                        hint,
-                        target: compile_reverse_route_target(&route.target),
-                        plan,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let tls_passthrough_routes = reverse_edges
-                .tls_passthrough_routes
-                .iter()
-                .enumerate()
-                .map(|(idx, route)| {
-                    let (matcher, tls_passthrough_hint) =
-                        CompiledMatch::compile_tls_passthrough(&route.r#match, &mut interner)?;
-                    #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
-                    let _ = tls_passthrough_hint;
-                    Ok(CompiledTlsPassthroughRoute {
-                        id: Arc::from(format!("tls_passthrough[{idx}]")),
-                        name: Arc::from(format!("tls_passthrough[{idx}]")),
-                        matcher,
-                        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
-                        hint: tls_passthrough_hint,
-                        target: CompiledReverseRouteTarget::TlsPassthrough {
-                            upstreams: route
-                                .upstreams
-                                .iter()
-                                .map(|upstream| Arc::from(upstream.as_str()))
-                                .collect::<Vec<_>>()
-                                .into(),
-                            lb: Arc::from(route.lb.as_str()),
-                        },
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let flags = tls_passthrough_routes.iter().fold(
-                routes.iter().fold(PlanFlags::empty(), |flags, route| {
-                    flags.union(route.plan.flags)
-                }),
-                |mut flags, route| {
-                    if route.matcher.requires_tls_fingerprint() {
-                        flags.insert(PlanFlags::TLS_FINGERPRINT);
-                    }
-                    flags
-                },
-            );
-            let streaming = resolve_streaming_limits(
-                &self.config.operational.runtime,
-                reverse_edges.streaming.as_ref(),
-                None,
-                reverse_edges.grpc.as_ref(),
-                None,
-                reverse_edges.sse.as_ref(),
-                None,
-            );
-            edges.push(CompiledEdge::Reverse(CompiledReverseEdge {
-                name: Arc::from(reverse_edges.name.as_str()),
-                flags,
-                streaming,
-                routes: routes.into(),
-                tls_passthrough_routes: tls_passthrough_routes.into(),
-            }));
+            edges.push(CompiledEdge::Reverse(compile_reverse_edge(
+                self.config,
+                reverse_edges,
+                &mut interner,
+            )?));
         }
 
         Ok(RuntimePlan {
@@ -308,114 +229,143 @@ impl<'a> PlanCompiler<'a> {
             identity: CompiledRuntimeIdentity {
                 proxy_name: Arc::from(self.config.operational.identity.proxy_name.as_str()),
             },
-            limits: CompiledRuntimeLimits {
-                general: GeneralLimits {
-                    reuse_port: self.config.operational.runtime.reuse_port,
-                    trace_enabled: self.config.operational.runtime.trace_enabled,
-                    trace_reflect_all_headers: self
-                        .config
-                        .operational
-                        .runtime
-                        .trace_reflect_all_headers,
-                    max_concurrent_connections: self
-                        .config
-                        .operational
-                        .runtime
-                        .max_concurrent_connections,
-                },
-                timeouts: TimeoutLimits {
-                    upstream_http_timeout_ms: self
-                        .config
-                        .operational
-                        .runtime
-                        .upstream_http_timeout_ms,
-                    tls_peek_timeout_ms: self.config.operational.runtime.tls_peek_timeout_ms,
-                    http_header_read_timeout_ms: self
-                        .config
-                        .operational
-                        .runtime
-                        .http_header_read_timeout_ms,
-                    upgrade_wait_timeout_ms: self
-                        .config
-                        .operational
-                        .runtime
-                        .upgrade_wait_timeout_ms,
-                    tunnel_idle_timeout_ms: self.config.operational.runtime.tunnel_idle_timeout_ms,
-                    h3_read_timeout_ms: self.config.operational.runtime.h3_read_timeout_ms,
-                },
-                body: BodyLimits {
-                    max_observed_request_body_bytes: self
-                        .config
-                        .operational
-                        .runtime
-                        .max_observed_request_body_bytes,
-                    max_observed_response_body_bytes: self
-                        .config
-                        .operational
-                        .runtime
-                        .max_observed_response_body_bytes,
-                    max_h3_request_body_bytes: self
-                        .config
-                        .operational
-                        .runtime
-                        .max_h3_request_body_bytes,
-                    max_h3_response_body_bytes: self
-                        .config
-                        .operational
-                        .runtime
-                        .max_h3_response_body_bytes,
-                    body_channel_capacity: self.config.operational.runtime.body_channel_capacity,
-                },
-                grpc: GrpcLimits {
-                    max_grpc_message_bytes: self.config.operational.runtime.max_grpc_message_bytes,
-                    max_grpc_web_trailer_bytes: self
-                        .config
-                        .operational
-                        .runtime
-                        .max_grpc_web_trailer_bytes,
-                    max_grpc_stream_duration_ms: self
-                        .config
-                        .operational
-                        .runtime
-                        .max_grpc_stream_duration_ms,
-                },
-                h3: H3ChannelLimits {
-                    max_h3_streams_per_connection: self
-                        .config
-                        .operational
-                        .runtime
-                        .max_h3_streams_per_connection,
-                    datagram_channel_capacity: self
-                        .config
-                        .operational
-                        .runtime
-                        .datagram_channel_capacity,
-                    webtransport_datagram_channel_capacity: self
-                        .config
-                        .operational
-                        .runtime
-                        .webtransport_datagram_channel_capacity,
-                    webtransport_stream_channel_capacity: self
-                        .config
-                        .operational
-                        .runtime
-                        .webtransport_stream_channel_capacity,
-                },
-                upstream: UpstreamLimits {
-                    upstream_proxy_max_concurrent_per_endpoint: self
-                        .config
-                        .operational
-                        .runtime
-                        .upstream_proxy_max_concurrent_per_endpoint,
-                    max_reverse_retry_template_body_bytes: self
-                        .config
-                        .operational
-                        .runtime
-                        .max_reverse_retry_template_body_bytes,
-                },
-                sse: self.config.operational.runtime.sse,
-            },
+            limits: compile_runtime_limits(self.config),
         })
+    }
+}
+
+fn compile_reverse_edge(
+    config: &RuntimeResources,
+    reverse_edges: &ReverseEdgeConfig,
+    interner: &mut StringInterner,
+) -> Result<CompiledReverseEdge> {
+    let routes = reverse_edges
+        .routes
+        .iter()
+        .enumerate()
+        .map(|(idx, route)| {
+            let (matcher, hint) = CompiledMatch::compile(&route.r#match, interner)?;
+            let mut plan = execution_plan_for_reverse_route(config, reverse_edges, route)?;
+            apply_matcher_flags(&matcher, &mut plan);
+            validate_streaming_required_route(
+                route.streaming_requirement.as_ref(),
+                &matcher,
+                &plan,
+            )?;
+            validate_unknown_length_exact_size_policy(
+                route.streaming_requirement.as_ref(),
+                &plan,
+                config.operational.runtime.unknown_length_exact_size,
+            )?;
+            let id = Arc::<str>::from(route_id(idx, route.name.as_deref()));
+            Ok(CompiledReverseRoute {
+                id: id.clone(),
+                name: id,
+                matcher,
+                hint,
+                target: compile_reverse_route_target(&route.target),
+                plan,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let tls_passthrough_routes = reverse_edges
+        .tls_passthrough_routes
+        .iter()
+        .enumerate()
+        .map(|(idx, route)| {
+            let (matcher, tls_passthrough_hint) =
+                CompiledMatch::compile_tls_passthrough(&route.r#match, interner)?;
+            #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
+            let _ = tls_passthrough_hint;
+            Ok(CompiledTlsPassthroughRoute {
+                id: Arc::from(format!("tls_passthrough[{idx}]")),
+                name: Arc::from(format!("tls_passthrough[{idx}]")),
+                matcher,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+                hint: tls_passthrough_hint,
+                target: CompiledReverseRouteTarget::TlsPassthrough {
+                    upstreams: route
+                        .upstreams
+                        .iter()
+                        .map(|upstream| Arc::from(upstream.as_str()))
+                        .collect::<Vec<_>>()
+                        .into(),
+                    lb: Arc::from(route.lb.as_str()),
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let flags = tls_passthrough_routes.iter().fold(
+        routes.iter().fold(PlanFlags::empty(), |flags, route| {
+            flags.union(route.plan.flags)
+        }),
+        |mut flags, route| {
+            if route.matcher.requires_tls_fingerprint() {
+                flags.insert(PlanFlags::TLS_FINGERPRINT);
+            }
+            flags
+        },
+    );
+    let streaming = resolve_streaming_limits(
+        &config.operational.runtime,
+        reverse_edges.streaming.as_ref(),
+        None,
+        reverse_edges.grpc.as_ref(),
+        None,
+        reverse_edges.sse.as_ref(),
+        None,
+    );
+    Ok(CompiledReverseEdge {
+        name: Arc::from(reverse_edges.name.as_str()),
+        flags,
+        streaming,
+        routes: routes.into(),
+        tls_passthrough_routes: tls_passthrough_routes.into(),
+    })
+}
+
+fn compile_runtime_limits(config: &RuntimeResources) -> CompiledRuntimeLimits {
+    let runtime = &config.operational.runtime;
+    CompiledRuntimeLimits {
+        general: GeneralLimits {
+            reuse_port: runtime.reuse_port,
+            trace_enabled: runtime.trace_enabled,
+            trace_reflect_all_headers: runtime.trace_reflect_all_headers,
+            max_concurrent_connections: runtime.max_concurrent_connections,
+        },
+        timeouts: TimeoutLimits {
+            upstream_http_timeout_ms: runtime.upstream_http_timeout_ms,
+            tls_peek_timeout_ms: runtime.tls_peek_timeout_ms,
+            http_header_read_timeout_ms: runtime.http_header_read_timeout_ms,
+            upgrade_wait_timeout_ms: runtime.upgrade_wait_timeout_ms,
+            tunnel_idle_timeout_ms: runtime.tunnel_idle_timeout_ms,
+            h3_read_timeout_ms: runtime.h3_read_timeout_ms,
+        },
+        body: BodyLimits {
+            max_observed_request_body_bytes: runtime.max_observed_request_body_bytes,
+            max_observed_response_body_bytes: runtime.max_observed_response_body_bytes,
+            max_h3_request_body_bytes: runtime.max_h3_request_body_bytes,
+            max_h3_response_body_bytes: runtime.max_h3_response_body_bytes,
+            body_channel_capacity: runtime.body_channel_capacity,
+        },
+        grpc: GrpcLimits {
+            max_grpc_message_bytes: runtime.max_grpc_message_bytes,
+            max_grpc_web_trailer_bytes: runtime.max_grpc_web_trailer_bytes,
+            max_grpc_stream_duration_ms: runtime.max_grpc_stream_duration_ms,
+        },
+        h3: H3ChannelLimits {
+            max_h3_streams_per_connection: runtime.max_h3_streams_per_connection,
+            datagram_channel_capacity: runtime.datagram_channel_capacity,
+            webtransport_datagram_channel_capacity: runtime.webtransport_datagram_channel_capacity,
+            webtransport_stream_channel_capacity: runtime.webtransport_stream_channel_capacity,
+            request_body_drain: runtime.h3_request_body_drain,
+        },
+        upstream: UpstreamLimits {
+            upstream_proxy_max_concurrent_per_endpoint: runtime
+                .upstream_proxy_max_concurrent_per_endpoint,
+            max_reverse_retry_template_body_bytes: runtime.max_reverse_retry_template_body_bytes,
+        },
+        sse: runtime.sse,
     }
 }
 

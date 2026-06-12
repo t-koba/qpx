@@ -31,6 +31,7 @@ mod load_merge_tests;
 mod observability_tests;
 mod reverse_tests;
 mod runtime_resolution_tests;
+mod sample_config_tests;
 mod schema_tests;
 mod streaming_limits_tests;
 mod validation_tests;

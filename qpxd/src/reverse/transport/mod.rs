@@ -1,44 +1,29 @@
 use super::router::{ReverseRouter, normalize_host_for_match};
-use crate::http::body::Body;
+use crate::http::dispatcher::InterimList;
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http::protocol::preflight::{
     ConnectPolicy, PreflightOptions, PreflightOutcome, preflight_validate,
 };
 use crate::runtime::Runtime;
-use crate::tls::UpstreamCertificateInfo;
-use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::Result;
 use hyper::{Request, Response, StatusCode};
-use qpx_core::rules::CompiledHeaderControl;
+use qpx_core::tls::UpstreamCertificateInfo;
+use qpx_http::body::Body;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tracing::warn;
 
 mod destination;
 mod dispatch;
+mod metrics;
 mod mirrors;
 mod path_rewrite;
 mod request_template;
 mod response_rules;
 
 use self::dispatch::dispatch_reverse_request;
-
-enum ResponseRuleDecision {
-    Continue {
-        response: Response<Body>,
-        route_headers: Option<Arc<CompiledHeaderControl>>,
-        cache_bypass: bool,
-        suppress_retry: bool,
-        mirror: Option<bool>,
-        policy_tags: Arc<[String]>,
-    },
-    LocalResponse {
-        response: Response<Body>,
-        route_headers: Option<Arc<CompiledHeaderControl>>,
-        policy_tags: Arc<[String]>,
-    },
-}
+pub(super) use self::mirrors::prune_mirror_permits;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReverseConnInfo {
@@ -73,9 +58,9 @@ impl ReverseConnInfo {
             .as_deref()
             .and_then(|certs| certs.first())
             .map(|cert| {
-                Arc::new(crate::tls::cert_info::extract_upstream_certificate_info(
-                    Some(cert.as_slice()),
-                ))
+                Arc::new(qpx_core::tls::extract_upstream_certificate_info(Some(
+                    cert.as_slice(),
+                )))
             });
         Self {
             remote_addr,
@@ -88,9 +73,7 @@ impl ReverseConnInfo {
     }
 }
 
-pub(crate) type ReverseInterimResponses = Vec<InterimResponseHead>;
-
-fn empty_interim_response(response: Response<Body>) -> (ReverseInterimResponses, Response<Body>) {
+fn empty_interim_response(response: Response<Body>) -> (InterimList, Response<Body>) {
     (Vec::new(), response)
 }
 
@@ -112,7 +95,7 @@ pub(super) async fn handle_request_with_interim(
     req: Request<Body>,
     reverse: super::ReloadableReverse,
     conn: ReverseConnInfo,
-) -> Result<(ReverseInterimResponses, Response<Body>), Infallible> {
+) -> Result<(InterimList, Response<Body>), Infallible> {
     let runtime = reverse.runtime.clone();
     let state = runtime.state();
     let request_method = req.method().clone();
@@ -139,7 +122,7 @@ pub(crate) async fn handle_request_inner(
     reverse: super::ReloadableReverse,
     runtime: Runtime,
     conn: ReverseConnInfo,
-) -> Result<(ReverseInterimResponses, Response<Body>)> {
+) -> Result<(InterimList, Response<Body>)> {
     let dispatch_view = runtime.dispatch_view();
     let proxy_name = dispatch_view.plan.identity.proxy_name.as_ref();
     if let PreflightOutcome::Reject(response) = preflight_validate(

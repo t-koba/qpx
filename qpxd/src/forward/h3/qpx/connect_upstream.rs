@@ -1,8 +1,8 @@
 mod pool;
 
+pub(crate) use self::pool::QpxH3UpstreamSessionPool;
 use self::pool::{QpxH3UpstreamSessionKey, open_pooled_qpx_h3_extended_connect_stream};
 use super::super::connect::parse::{H3ConnectProtocol, validate_h3_connect_pseudo_headers};
-use crate::http::body::Body;
 use crate::http::protocol::common::connect_established_response as connect_established;
 use crate::http::protocol::l7::{
     finalize_response_with_headers, prepare_request_with_headers_in_place,
@@ -10,17 +10,8 @@ use crate::http::protocol::l7::{
 use crate::http3::codec::http_headers_to_h1;
 use anyhow::{Result, anyhow};
 use qpx_core::rules::CompiledHeaderControl;
+use qpx_http::body::Body;
 use tokio::time::Duration;
-
-pub(super) fn configure_qpx_h3_upstream_session_pool(
-    max_sessions_per_key: usize,
-    max_inflight_streams_per_session: usize,
-) {
-    pool::configure_qpx_h3_upstream_session_pool(
-        max_sessions_per_key,
-        max_inflight_streams_per_session,
-    );
-}
 
 pub(super) struct OpenUpstreamQpxExtendedConnectInput<'a> {
     pub(super) req_head: &'a http::Request<()>,
@@ -28,7 +19,7 @@ pub(super) struct OpenUpstreamQpxExtendedConnectInput<'a> {
     pub(super) proxy_name: &'a str,
     pub(super) upstream: Option<&'a str>,
     pub(super) verify_upstream: bool,
-    pub(super) trust: Option<&'a crate::tls::CompiledUpstreamTlsTrust>,
+    pub(super) trust: Option<&'a qpx_core::tls::CompiledUpstreamTlsTrust>,
     pub(super) protocol: qpx_h3::Protocol,
     pub(super) enable_datagram: bool,
     pub(super) timeout_dur: Duration,
@@ -41,12 +32,9 @@ pub(super) fn validate_qpx_connect_head(
     authority_port: u16,
     protocol: Option<&qpx_h3::Protocol>,
 ) -> Result<()> {
-    crate::http::protocol::semantics::validate_h2_h3_request_headers(
-        http::Version::HTTP_3,
-        headers,
-    )
-    .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
-    crate::http::protocol::semantics::validate_expect_header(headers)
+    qpx_http::protocol::semantics::validate_h2_h3_request_headers(http::Version::HTTP_3, headers)
+        .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
+    qpx_http::protocol::semantics::validate_expect_header(headers)
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
     crate::http3::codec::parse_content_length_fields(headers)
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
@@ -78,7 +66,7 @@ pub(super) fn build_qpx_connect_success_head(
         header_control,
         false,
     );
-    let status = crate::http::protocol::semantics::validate_http_status_class(
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
         response.status(),
         "QPX HTTP/3 extended CONNECT response",
     )?;
@@ -88,6 +76,7 @@ pub(super) fn build_qpx_connect_success_head(
 }
 
 pub(super) async fn open_upstream_qpx_extended_connect_stream(
+    pools: &crate::pool::PoolRegistry,
     input: OpenUpstreamQpxExtendedConnectInput<'_>,
 ) -> Result<qpx_h3::ExtendedConnectStream> {
     let OpenUpstreamQpxExtendedConnectInput {
@@ -115,23 +104,31 @@ pub(super) async fn open_upstream_qpx_extended_connect_stream(
         connect_host: connect_host.clone(),
         connect_port,
         verify_upstream,
-        trust_key: trust.map(crate::tls::CompiledUpstreamTlsTrust::pool_key),
+        trust_key: trust.map(qpx_core::tls::CompiledUpstreamTlsTrust::pool_key),
         enable_datagram,
         enable_webtransport,
     };
-    open_pooled_qpx_h3_extended_connect_stream(key, trust, request, Some(protocol), timeout_dur)
-        .await
+    open_pooled_qpx_h3_extended_connect_stream(
+        &pools.qpx_h3,
+        key,
+        trust,
+        request,
+        Some(protocol),
+        timeout_dur,
+    )
+    .await
 }
 
 pub(super) async fn open_upstream_qpx_connect_udp_stream(
+    pools: &crate::pool::PoolRegistry,
     upstream: &str,
-    target_host: &str,
-    target_port: u16,
+    target: (&str, u16),
     proxy_name: &str,
     verify_upstream: bool,
-    trust: Option<&crate::tls::CompiledUpstreamTlsTrust>,
+    trust: Option<&qpx_core::tls::CompiledUpstreamTlsTrust>,
     timeout_dur: Duration,
 ) -> Result<qpx_h3::ExtendedConnectStream> {
+    let (target_host, target_port) = target;
     let (upstream_host, upstream_port, uri) =
         crate::forward::connect::udp_upstream::build_upstream_connect_udp_uri(
             upstream,
@@ -154,11 +151,12 @@ pub(super) async fn open_upstream_qpx_connect_udp_stream(
         connect_host: upstream_host.clone(),
         connect_port: upstream_port,
         verify_upstream,
-        trust_key: trust.map(crate::tls::CompiledUpstreamTlsTrust::pool_key),
+        trust_key: trust.map(qpx_core::tls::CompiledUpstreamTlsTrust::pool_key),
         enable_datagram: true,
         enable_webtransport: false,
     };
     let stream = open_pooled_qpx_h3_extended_connect_stream(
+        &pools.qpx_h3,
         key,
         trust,
         request,
@@ -219,12 +217,12 @@ async fn parse_qpx_extended_connect_upstream(
             let port = parsed.port().unwrap_or(443);
             return Ok((host.to_string(), port));
         }
-        return crate::http::protocol::address::parse_authority_host_port(upstream, 443)
+        return qpx_http::protocol::address::parse_authority_host_port(upstream, 443)
             .ok_or_else(|| anyhow!("invalid extended CONNECT upstream authority"));
     }
     let authority = uri
         .authority()
         .ok_or_else(|| anyhow!("extended CONNECT missing authority"))?;
-    crate::http::protocol::address::parse_authority_host_port(authority.as_str(), 443)
+    qpx_http::protocol::address::parse_authority_host_port(authority.as_str(), 443)
         .ok_or_else(|| anyhow!("invalid extended CONNECT authority"))
 }

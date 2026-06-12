@@ -148,8 +148,7 @@ pub(crate) async fn run_event_ingest_loop(mut ring: ShmRingBuffer, hub: Exporter
                     dst,
                     sequence_number,
                 };
-                let worker = (index as usize) % job_txs.len();
-                if job_txs[worker]
+                if job_txs[(index as usize) % job_txs.len()]
                     .send((job, event.payload.clone()))
                     .await
                     .is_err()

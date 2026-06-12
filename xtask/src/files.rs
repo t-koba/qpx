@@ -38,7 +38,10 @@ pub(crate) fn is_test_file(path: &Path) -> bool {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| {
-                name.ends_with("_test.rs") || name.ends_with("_tests.rs") || name == "tests.rs"
+                name.ends_with("_test.rs")
+                    || name.ends_with("_tests.rs")
+                    || name == "tests.rs"
+                    || name == "test_util.rs"
             })
 }
 

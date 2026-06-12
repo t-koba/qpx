@@ -29,6 +29,8 @@ pub(super) async fn relay_qpx_extended_connect_stream(
             .with_activity(activity.clone()),
     );
     let datagram_relay = async {
+        let mut upstream_datagram_scratch = BytesMut::new();
+        let mut downstream_datagram_scratch = BytesMut::new();
         loop {
             tokio::select! {
                 down_payload = async {
@@ -42,11 +44,13 @@ pub(super) async fn relay_qpx_extended_connect_stream(
                         break;
                     };
                     if let Some(datagrams) = upstream_datagrams.as_mut()
-                        && let Err(err) = datagrams.sender.send_datagram(payload)
+                        && let Err(err) = datagrams
+                            .sender
+                            .send_unprefixed_datagram_with_scratch(payload, &mut upstream_datagram_scratch)
                     {
                         warn!(error = ?err, "forward HTTP/3 qpx-h3 upstream datagram send failed");
                     }
-                    activity.touch().await;
+                    activity.touch();
                 }
                 up_payload = async {
                     if let Some(datagrams) = upstream_datagrams.as_mut() {
@@ -59,11 +63,13 @@ pub(super) async fn relay_qpx_extended_connect_stream(
                         break;
                     };
                     if let Some(datagrams) = downstream_datagrams.as_mut()
-                        && let Err(err) = datagrams.sender.send_datagram(payload)
+                        && let Err(err) = datagrams
+                            .sender
+                            .send_unprefixed_datagram_with_scratch(payload, &mut downstream_datagram_scratch)
                     {
                         warn!(error = ?err, "forward HTTP/3 qpx-h3 downstream datagram send failed");
                     }
-                    activity.touch().await;
+                    activity.touch();
                 }
             }
         }
@@ -96,8 +102,7 @@ pub(super) async fn relay_qpx_connect_udp_stream(
     let mut capsule_buf = CapsuleBuffer::new();
     let datagram_prefix = datagrams
         .as_ref()
-        .map(|datagrams| datagrams.sender.datagram_prefix())
-        .transpose()?;
+        .map(|datagrams| datagrams.sender.datagram_prefix());
     let datagram_prefix_len = datagram_prefix.as_ref().map_or(0, Bytes::len);
     let mut udp_buf = BytesMut::with_capacity(65_536 + datagram_prefix_len + 1);
     if let Some(prefix) = datagram_prefix.as_ref() {
@@ -235,6 +240,8 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
     let idle_timeout = Duration::from_secs(connect_udp_cfg.idle_timeout_secs.max(1));
     let idle_deadline = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_deadline);
+    let mut upstream_datagram_scratch = BytesMut::new();
+    let mut downstream_datagram_scratch = BytesMut::new();
 
     loop {
         tokio::select! {
@@ -298,7 +305,10 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                 .await?;
                 let mut sent = false;
                 if let Some(datagrams) = upstream_datagrams.as_mut()
-                    && datagrams.sender.send_datagram(payload).is_ok()
+                    && datagrams
+                        .sender
+                        .send_unprefixed_datagram_with_scratch(payload, &mut upstream_datagram_scratch)
+                        .is_ok()
                 {
                     sent = true;
                 }
@@ -334,7 +344,10 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                 .await?;
                 let mut sent = false;
                 if let Some(datagrams) = downstream_datagrams.as_mut()
-                    && datagrams.sender.send_datagram(payload).is_ok()
+                    && datagrams
+                        .sender
+                        .send_unprefixed_datagram_with_scratch(payload, &mut downstream_datagram_scratch)
+                        .is_ok()
                 {
                     sent = true;
                 }

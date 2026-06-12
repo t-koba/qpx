@@ -2,7 +2,6 @@
 use super::RateLimitContext;
 use super::key::{
     KeyKind, LimiterKey, make_limiter_key, max_entries_for_key_kind, shard_count_for_key_kind,
-    shard_for_key,
 };
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -122,7 +121,7 @@ impl QuotaLimiter {
         let limit = self.request_limit?;
         let now = Instant::now();
         let key = self.make_key(ctx);
-        let shard = shard_for_key(&key, self.shard_mask);
+        let shard = qpx_http::sharding::masked(&key, self.shard_mask);
         let mut inner = self.shards[shard]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -148,7 +147,7 @@ impl QuotaLimiter {
         };
         let now = Instant::now();
         let key = self.make_key(ctx);
-        let shard = shard_for_key(&key, self.shard_mask);
+        let shard = qpx_http::sharding::masked(&key, self.shard_mask);
         let mut inner = self.shards[shard]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

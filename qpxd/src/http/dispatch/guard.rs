@@ -1,11 +1,11 @@
 use super::{DispatchAuditContext, DispatchOutcome, annotate_dispatch_response};
 use crate::destination::DestinationMetadata;
-use crate::http::body::Body;
 use crate::http::policy::guard::CompiledHttpGuardProfile;
 use crate::http::policy::rule_context::attach_destination_trace;
 use crate::http::protocol::l7::finalize_response_for_request;
 use anyhow::Result;
 use hyper::{Request, Response};
+use qpx_http::body::Body;
 
 pub(crate) struct DispatchGuardInput<'a> {
     pub(crate) profile: Option<&'a CompiledHttpGuardProfile>,
@@ -42,12 +42,7 @@ pub(crate) fn evaluate_http_guard(
                 .body(Body::from(reject.body))?,
             false,
         );
-        annotate_dispatch_response(
-            &mut response,
-            &audit,
-            DispatchOutcome::GuardReject.audit_outcome(),
-            &[],
-        );
+        annotate_dispatch_response(&mut response, &audit, DispatchOutcome::GuardReject, &[]);
         Ok(Some(response))
     }
 }

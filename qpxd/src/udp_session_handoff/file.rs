@@ -45,6 +45,7 @@ pub(super) fn ensure_secure_handoff_dir(dir: &Path) -> Result<()> {
 fn resolve_trusted_handoff_symlink(path: &Path, meta: &fs::Metadata) -> Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow!(
@@ -90,6 +91,7 @@ fn reject_untrusted_handoff_ancestor(path: &Path, meta: &fs::Metadata) -> Result
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let sticky_bit = libc::S_ISVTX;
     let sticky = mode & sticky_bit != 0;
+    // SAFETY: geteuid has no preconditions and only reads the current process credentials.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != 0 && meta.uid() != euid {
         return Err(anyhow!(

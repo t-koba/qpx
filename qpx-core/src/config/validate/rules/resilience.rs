@@ -116,6 +116,24 @@ pub(crate) fn validate_sse_policy_fields(sse: &SseStreamingPolicy, context: &str
             "{context} sse.idle_timeout_ms must be <= sse.max_stream_duration_ms"
         ));
     }
+    if sse.max_line_bytes == 0 {
+        return Err(anyhow!("{context} sse.max_line_bytes must be >= 1"));
+    }
+    if sse.max_line_bytes > crate::config::MAX_SSE_LINE_BYTES {
+        return Err(anyhow!(
+            "{context} sse.max_line_bytes must be <= {}",
+            crate::config::MAX_SSE_LINE_BYTES
+        ));
+    }
+    if sse.max_event_id_bytes == 0 {
+        return Err(anyhow!("{context} sse.max_event_id_bytes must be >= 1"));
+    }
+    if sse.max_event_id_bytes > crate::config::MAX_SSE_EVENT_ID_BYTES {
+        return Err(anyhow!(
+            "{context} sse.max_event_id_bytes must be <= {}",
+            crate::config::MAX_SSE_EVENT_ID_BYTES
+        ));
+    }
     Ok(())
 }
 

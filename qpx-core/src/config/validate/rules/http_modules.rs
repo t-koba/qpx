@@ -76,6 +76,11 @@ pub(crate) fn validate_http_modules(modules: &[HttpModuleConfig], context: &str)
                 for method in &config.methods {
                     validate_http_token(method, format!("{module_context} methods[]").as_str())?;
                 }
+                for peer in &config.allowed_peers {
+                    peer.parse::<cidr::IpCidr>().map_err(|_| {
+                        anyhow!("{module_context} allowed_peers[] has invalid CIDR: {peer}")
+                    })?;
+                }
                 if !(200..=599).contains(&config.response_status) {
                     return Err(anyhow!(
                         "{module_context} response_status must be in 200..=599"

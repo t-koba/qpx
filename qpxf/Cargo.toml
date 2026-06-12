@@ -3,6 +3,10 @@ name = "qpxf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 default = ["wasm"]
@@ -22,6 +26,8 @@ clap.workspace = true
 http.workspace = true
 dirs-next.workspace = true
 libc.workspace = true
+memchr.workspace = true
+metrics.workspace = true
 
 qpx-wasm = { path = "../qpx-wasm", optional = true }
 qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }

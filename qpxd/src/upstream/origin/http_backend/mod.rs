@@ -1,16 +1,16 @@
-use crate::http::body::Body;
 use anyhow::Result;
 use hyper::header::{HOST, HeaderValue};
 use hyper::{Request, Response, Uri};
+use qpx_http::body::Body;
 use tokio::net::TcpStream;
 #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 use tracing::warn;
 
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
-use crate::tls::CompiledUpstreamTlsTrust;
 use crate::upstream::raw_http1::{
     Http1ConnectionRecycler, Http1ResponseWithInterim, send_http1_request_with_interim_reusable,
 };
+use qpx_core::tls::CompiledUpstreamTlsTrust;
 
 use super::OriginEndpoint;
 use super::dispatch::{OriginScheme, origin_scheme};
@@ -19,35 +19,28 @@ use super::ipc_backend::proxy_ipc_with_interim;
 mod backend_h2;
 #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 mod h3_pool;
+mod metrics;
 mod pool;
 mod shared;
 
 use self::backend_h2::{prepare_proxy_h2_request, send_h2_request_with_sender};
-pub(crate) use self::pool::clear_direct_origin_connection_pools;
-use self::pool::{
-    HttpsConnectionAcquisition, acquire_https_connection, https_origin_pool_key, https_origin_slot,
-    plain_http_origin_pool_key, plain_http_origin_slot,
-};
-pub(crate) use self::shared::{shared_reverse_http_client, shared_reverse_https_client};
-
 #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
-pub(crate) fn configure_h3_origin_pool(
-    max_connections_per_origin: usize,
-    max_inflight_streams_per_connection: usize,
-) {
-    h3_pool::configure_h3_origin_pool(
-        max_connections_per_origin,
-        max_inflight_streams_per_connection,
-    );
-}
+pub(crate) use self::h3_pool::H3OriginPool;
+pub(crate) use self::pool::DirectOriginPools;
+use self::pool::{
+    HttpsConnectionAcquisition, acquire_https_connection, https_origin_pool_key,
+    plain_http_origin_pool_key,
+};
+pub(crate) use self::shared::shared_reverse_https_request;
 
 pub(crate) async fn proxy_http(
+    pools: &crate::pool::PoolRegistry,
     req: Request<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<Response<Body>> {
-    let mut proxied = proxy_http_with_interim(req, origin, proxy_name, trust).await?;
+    let mut proxied = proxy_http_with_interim(pools, req, origin, proxy_name, trust).await?;
     if !proxied.interim.is_empty() {
         proxied.response.extensions_mut().insert(proxied.interim);
     }
@@ -55,43 +48,68 @@ pub(crate) async fn proxy_http(
 }
 
 pub(crate) async fn proxy_http_with_interim(
+    pools: &crate::pool::PoolRegistry,
     req: Request<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<Http1ResponseWithInterim> {
+    proxy_http_with_interim_timeout(
+        pools,
+        req,
+        origin,
+        proxy_name,
+        trust,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+}
+
+pub(crate) async fn proxy_http_with_interim_timeout(
+    pools: &crate::pool::PoolRegistry,
+    req: Request<Body>,
+    origin: &OriginEndpoint,
+    proxy_name: &str,
+    trust: Option<&CompiledUpstreamTlsTrust>,
+    timeout_dur: std::time::Duration,
+) -> Result<Http1ResponseWithInterim> {
     match origin_scheme(origin)? {
-        OriginScheme::Http | OriginScheme::Ws => proxy_plain_http(req, origin, proxy_name).await,
-        OriginScheme::Https | OriginScheme::Wss => {
-            proxy_https(req, origin, proxy_name, trust).await
+        OriginScheme::Http | OriginScheme::Ws => {
+            proxy_plain_http(pools, req, origin, proxy_name).await
         }
-        OriginScheme::H3 => proxy_h3(req, origin, proxy_name, trust).await,
+        OriginScheme::Https | OriginScheme::Wss => {
+            proxy_https_with_options(pools, req, origin, proxy_name, trust, true, timeout_dur).await
+        }
+        OriginScheme::H3 => proxy_h3(pools, req, origin, proxy_name, trust, timeout_dur).await,
         OriginScheme::Ipc | OriginScheme::IpcUnix => {
-            proxy_ipc_with_interim(req, origin, proxy_name).await
+            proxy_ipc_with_interim(pools, req, origin, proxy_name).await
         }
     }
 }
 
 async fn proxy_h3(
+    pools: &crate::pool::PoolRegistry,
     req: Request<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
+    timeout_dur: std::time::Duration,
 ) -> Result<Http1ResponseWithInterim> {
     #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
     {
         h3_pool::proxy_h3_origin(
+            &pools.h3_origin,
             req,
             origin,
             proxy_name,
             trust,
-            std::time::Duration::from_secs(30),
+            timeout_dur,
         )
         .await
     }
     #[cfg(not(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx"))))]
     {
-        let _ = (req, origin, proxy_name, trust);
+        let _ = (pools, req, origin, proxy_name, trust, timeout_dur);
         Err(anyhow::anyhow!(
             "h3 upstream origins require the http3-backend-h3 feature"
         ))
@@ -105,6 +123,7 @@ async fn open_plain_http_origin_stream(connect_authority: &str) -> Result<TcpStr
 }
 
 async fn proxy_plain_http(
+    pools: &crate::pool::PoolRegistry,
     req: Request<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
@@ -112,7 +131,7 @@ async fn proxy_plain_http(
     let default_port = origin.default_port_hint();
     let connect_authority = origin.connect_authority(default_port)?;
     let host_authority = origin.host_header_authority(default_port)?;
-    let slot = plain_http_origin_slot(plain_http_origin_pool_key(
+    let slot = pools.direct_origin.plain_slot(plain_http_origin_pool_key(
         connect_authority.as_str(),
         host_authority.as_str(),
     ));
@@ -129,22 +148,17 @@ async fn proxy_plain_http(
     .await
 }
 
-async fn proxy_https(
-    req: Request<Body>,
-    origin: &OriginEndpoint,
-    proxy_name: &str,
-    trust: Option<&CompiledUpstreamTlsTrust>,
-) -> Result<Http1ResponseWithInterim> {
-    proxy_https_with_options(req, origin, proxy_name, trust, true).await
-}
-
 async fn proxy_https_with_options(
+    pools: &crate::pool::PoolRegistry,
     req: Request<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
     verify_upstream_cert: bool,
+    timeout_dur: std::time::Duration,
 ) -> Result<Http1ResponseWithInterim> {
+    #[cfg(not(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx"))))]
+    let _ = timeout_dur;
     #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
     if verify_upstream_cert
         && trust.is_none()
@@ -153,11 +167,12 @@ async fn proxy_https_with_options(
     {
         let h3_req = h3_pool::clone_empty_body_request(&req)?;
         match h3_pool::proxy_h3_origin(
+            &pools.h3_origin,
             h3_req,
             &h3_origin,
             proxy_name,
             None,
-            std::time::Duration::from_secs(30),
+            timeout_dur,
         )
         .await
         {
@@ -180,7 +195,7 @@ async fn proxy_https_with_options(
         verify_upstream_cert,
         trust,
     );
-    let slot = https_origin_slot(pool_key);
+    let slot = pools.direct_origin.https_slot(pool_key);
 
     let proxied = match acquire_https_connection(
         &slot,

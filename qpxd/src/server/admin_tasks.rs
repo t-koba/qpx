@@ -30,11 +30,16 @@ impl AdminTasks {
                 })?;
                 let http_state = acme_state.clone();
                 let http01_task = tokio::spawn(async move {
-                    qpx_acme::run_http01_server_with_std_listener(http_listener, http_state).await
+                    qpx_acme::run_http01_server_with_std_listener(http_listener, http_state)
+                        .await
+                        .map_err(anyhow::Error::from)
                 });
                 let manager_state = acme_state.clone();
-                let manager_task =
-                    tokio::spawn(async move { qpx_acme::run_manager(manager_state).await });
+                let manager_task = tokio::spawn(async move {
+                    qpx_acme::run_manager(manager_state)
+                        .await
+                        .map_err(anyhow::Error::from)
+                });
                 (Some(http01_task), Some(manager_task))
             } else {
                 (None, None)

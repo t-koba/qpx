@@ -49,11 +49,22 @@ jobs:
         run: |
           set -euo pipefail
           for target in \
-            shm_ring_ops \
-            proxy_v2_parser \
+            client_hello_sniff \
+            config_canonical_loader \
+            connect_frame_observer \
+            datagram_capsule_parser \
+            ftp_response_parser \
+            grpc_frame_observer \
+            grpc_web_binary_frame_observer \
+            grpc_web_text_base64_observer \
             http1_request_head \
+            ipc_meta_frame \
+            proxy_v2_parser \
             qpack_decoder \
-            client_hello_sniff; do
+            reverse_target_input_deserializer \
+            shm_ring_ops \
+            sse_event_observer \
+            streaming_requirement_config_validator; do
             echo "::group::cargo fuzz run ${target}"
             (cd fuzz && env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR cargo fuzz run "${target}" --target x86_64-unknown-linux-gnu -- -max_total_time=15)
             echo "::endgroup::"

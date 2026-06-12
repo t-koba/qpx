@@ -82,9 +82,20 @@ impl Executor for FastCgiExecutor {
             });
             tokio::select! {
                 result = timeout(timeout_dur, future) => {
-                    result.context("fastcgi backend request timed out")??;
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => return Err(err).context("fastcgi backend request failed"),
+                        Err(_) => {
+                            crate::metrics::backend_request("fastcgi", "timeout");
+                            crate::metrics::timeout("fastcgi", "request");
+                            return Err(anyhow!("fastcgi backend request timed out"));
+                        }
+                    }
                 }
-                _ = &mut abort_rx => return Ok(()),
+                _ = &mut abort_rx => {
+                    crate::metrics::backend_request("fastcgi", "aborted");
+                    return Ok(());
+                }
             }
             Ok(())
         });
@@ -171,6 +182,8 @@ impl PersistentExecutor {
         let max_stdin = self.max_stdin_bytes;
         let max_stdout = self.max_stdout_bytes;
         let done = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let _active = crate::metrics::BackendActiveGuard::new("scgi");
             let permit = semaphore
                 .acquire_owned()
                 .await
@@ -191,23 +204,62 @@ impl PersistentExecutor {
                 );
                 tokio::select! {
                     result = timeout(timeout_dur, future) => {
-                        result.context("persistent backend request timed out")??;
+                        match result {
+                            Ok(Ok(())) => {
+                                crate::metrics::backend_request("scgi", "ok");
+                            }
+                            Ok(Err(err)) => {
+                                crate::metrics::backend_request("scgi", "error");
+                                crate::metrics::broken_response("scgi", "request_error");
+                                return Err(err).context("persistent backend request failed");
+                            }
+                            Err(_) => {
+                                crate::metrics::backend_request("scgi", "timeout");
+                                crate::metrics::timeout("scgi", "request");
+                                return Err(anyhow!("persistent backend request timed out"));
+                            }
+                        }
                     }
-                    _ = &mut abort_rx => return Ok(()),
+                    _ = &mut abort_rx => {
+                        crate::metrics::backend_request("scgi", "aborted");
+                        return Ok(());
+                    }
                 }
             } else {
                 tokio::select! {
-                    result = ensure_unknown_scgi_stdin_is_empty(&mut stdin_rx) => result?,
-                    _ = &mut abort_rx => return Ok(()),
+                    result = ensure_unknown_scgi_stdin_is_empty(&mut stdin_rx) => {
+                        if let Err(err) = result {
+                            crate::metrics::backend_request("scgi", "error");
+                            crate::metrics::broken_response("scgi", "invalid_stdin");
+                            return Err(err);
+                        }
+                    }
+                    _ = &mut abort_rx => {
+                        crate::metrics::backend_request("scgi", "aborted");
+                        return Ok(());
+                    }
                 };
                 let body = PersistentStdinBody::Memory(Bytes::new());
                 let env = build_gateway_env(&req, Some(0));
                 let future = run_scgi_streaming(address.as_str(), env, body, max_stdout, stdout_tx);
-                timeout(timeout_dur, future)
-                    .await
-                    .context("persistent backend request timed out")??;
+                match timeout(timeout_dur, future).await {
+                    Ok(Ok(())) => {
+                        crate::metrics::backend_request("scgi", "ok");
+                    }
+                    Ok(Err(err)) => {
+                        crate::metrics::backend_request("scgi", "error");
+                        crate::metrics::broken_response("scgi", "request_error");
+                        return Err(err).context("persistent backend request failed");
+                    }
+                    Err(_) => {
+                        crate::metrics::backend_request("scgi", "timeout");
+                        crate::metrics::timeout("scgi", "request");
+                        return Err(anyhow!("persistent backend request timed out"));
+                    }
+                }
             }
             drop(stderr_tx);
+            crate::metrics::response_wait("scgi", started.elapsed());
             Ok(())
         });
 

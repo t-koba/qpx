@@ -40,9 +40,16 @@ impl Daemon {
             Command::Schema { format } => print_config_schema(format),
             Command::Explain {
                 config,
+                format,
                 edge,
                 route,
-            } => explain_config(config, edge, route, self.http_module_registry.clone()),
+            } => explain_config(
+                config,
+                format,
+                edge,
+                route,
+                self.http_module_registry.clone(),
+            ),
             Command::Match {
                 config,
                 edge,

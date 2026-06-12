@@ -58,13 +58,11 @@ async fn response_rule_can_force_local_response_and_merge_headers() {
     .expect("apply");
 
     match decision {
-        ResponseRuleDecision::LocalResponse {
-            response,
-            route_headers,
-            ..
+        ListenerResponsePolicyDecision::LocalResponse {
+            response, headers, ..
         } => {
             assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
-            let headers = route_headers.expect("merged headers");
+            let headers = headers.expect("merged headers");
             assert!(
                 headers
                     .response_set()
@@ -78,7 +76,7 @@ async fn response_rule_can_force_local_response_and_merge_headers() {
                     .any(|(name, value)| name == "x-rule" && value == "local")
             );
         }
-        ResponseRuleDecision::Continue { .. } => panic!("expected local response"),
+        ListenerResponsePolicyDecision::Continue { .. } => panic!("expected local response"),
     }
 }
 
@@ -149,10 +147,10 @@ async fn response_rule_matches_request_derived_rpc_fields() {
     .expect("apply");
 
     match decision {
-        ResponseRuleDecision::LocalResponse { response, .. } => {
+        ListenerResponsePolicyDecision::LocalResponse { response, .. } => {
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
         }
-        ResponseRuleDecision::Continue { .. } => panic!("expected local response"),
+        ListenerResponsePolicyDecision::Continue { .. } => panic!("expected local response"),
     }
 }
 

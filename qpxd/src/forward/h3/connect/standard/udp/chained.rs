@@ -1,7 +1,8 @@
 use crate::http3::datagram::H3StreamDatagrams;
+use crate::http3::h3_buf_to_bytes;
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 use anyhow::{Result, anyhow};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use qpx_core::config::ConnectUdpConfig;
 use tokio::time::{Duration, sleep, timeout};
 
@@ -30,9 +31,8 @@ pub(super) async fn relay_h3_connect_udp_stream_chained(
             }
             recv = downstream_recv.recv_data() => {
                 match recv? {
-                    Some(mut bytes) => {
-                        let remaining = bytes.remaining();
-                        let bytes = bytes.copy_to_bytes(remaining);
+                    Some(chunk) => {
+                        let bytes = h3_buf_to_bytes(chunk);
                         apply_connect_udp_bandwidth_controls(
                             &rate_limit_ctx,
                             &request_limits,
@@ -49,9 +49,8 @@ pub(super) async fn relay_h3_connect_udp_stream_chained(
             }
             recv = upstream_recv.recv_data() => {
                 match recv? {
-                    Some(mut bytes) => {
-                        let remaining = bytes.remaining();
-                        let bytes = bytes.copy_to_bytes(remaining);
+                    Some(chunk) => {
+                        let bytes = h3_buf_to_bytes(chunk);
                         apply_connect_udp_bandwidth_controls(
                             &rate_limit_ctx,
                             &request_limits,

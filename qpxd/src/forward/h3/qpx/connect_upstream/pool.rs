@@ -1,22 +1,20 @@
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock};
 use tokio::net::lookup_host;
-use tokio::sync::{Mutex, Notify};
-use tokio::time::{Duration, Instant, timeout};
+use tokio::sync::Mutex;
+use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 const QPX_H3_UPSTREAM_SESSION_POOL_SHARDS: usize = 64;
 const MAX_QPX_H3_UPSTREAM_SESSIONS: usize = 1024;
 const DEFAULT_QPX_H3_UPSTREAM_SESSIONS_PER_KEY: usize = 4;
 const DEFAULT_QPX_H3_INFLIGHT_STREAMS_PER_SESSION: usize = 64;
 
-static QPX_H3_UPSTREAM_SESSION_POOL: LazyLock<QpxH3UpstreamSessionPool> =
-    LazyLock::new(QpxH3UpstreamSessionPool::new);
-
-struct QpxH3UpstreamSessionPool {
+/// Per-runtime pool of upstream qpx-h3 CONNECT sessions (datagram / WebTransport).
+/// Owned by [`crate::pool::PoolRegistry`] (formerly a process-global `LazyLock`).
+pub(crate) struct QpxH3UpstreamSessionPool {
     shards: Vec<QpxH3UpstreamSessionPoolShard>,
     max_sessions_per_key: AtomicUsize,
     max_inflight_streams_per_session: AtomicUsize,
@@ -24,7 +22,7 @@ struct QpxH3UpstreamSessionPool {
 
 struct QpxH3UpstreamSessionPoolShard {
     sessions: Mutex<HashMap<QpxH3UpstreamSessionKey, Vec<PooledQpxH3Session>>>,
-    connecting: Mutex<HashMap<QpxH3UpstreamSessionKey, Arc<Notify>>>,
+    connecting: crate::pool::SingleFlight<QpxH3UpstreamSessionKey>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -42,24 +40,32 @@ struct PooledQpxH3Session {
     created_at: Instant,
 }
 
-pub(super) fn configure_qpx_h3_upstream_session_pool(
-    max_sessions_per_key: usize,
-    max_inflight_streams_per_session: usize,
-) {
-    QPX_H3_UPSTREAM_SESSION_POOL
-        .max_sessions_per_key
-        .store(max_sessions_per_key.max(1), Ordering::Relaxed);
-    QPX_H3_UPSTREAM_SESSION_POOL
-        .max_inflight_streams_per_session
-        .store(max_inflight_streams_per_session.max(1), Ordering::Relaxed);
-}
-
 impl QpxH3UpstreamSessionPool {
-    fn new() -> Self {
+    pub(crate) fn set_limits(
+        &self,
+        max_sessions_per_key: usize,
+        max_inflight_streams_per_session: usize,
+    ) {
+        self.max_sessions_per_key
+            .store(max_sessions_per_key.max(1), Ordering::Relaxed);
+        self.max_inflight_streams_per_session
+            .store(max_inflight_streams_per_session.max(1), Ordering::Relaxed);
+    }
+
+    pub(crate) fn max_sessions_per_key(&self) -> usize {
+        self.max_sessions_per_key.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn max_inflight_streams_per_session(&self) -> usize {
+        self.max_inflight_streams_per_session
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn new() -> Self {
         let shards = (0..QPX_H3_UPSTREAM_SESSION_POOL_SHARDS)
             .map(|_| QpxH3UpstreamSessionPoolShard {
                 sessions: Mutex::new(HashMap::new()),
-                connecting: Mutex::new(HashMap::new()),
+                connecting: crate::pool::SingleFlight::new(),
             })
             .collect();
         Self {
@@ -72,9 +78,7 @@ impl QpxH3UpstreamSessionPool {
     }
 
     fn shard_for(&self, key: &QpxH3UpstreamSessionKey) -> &QpxH3UpstreamSessionPoolShard {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        &self.shards[(hasher.finish() as usize) % self.shards.len().max(1)]
+        &self.shards[qpx_http::sharding::modulo(key, self.shards.len())]
     }
 
     fn max_keys_per_shard(&self) -> usize {
@@ -86,10 +90,10 @@ impl QpxH3UpstreamSessionPool {
     async fn acquire(
         &self,
         key: QpxH3UpstreamSessionKey,
-        trust: Option<&crate::tls::CompiledUpstreamTlsTrust>,
+        trust: Option<&qpx_core::tls::CompiledUpstreamTlsTrust>,
         timeout_dur: Duration,
     ) -> Result<qpx_h3::ClientSession> {
-        loop {
+        let connecting_guard = loop {
             let max_sessions_per_key = self.max_sessions_per_key.load(Ordering::Relaxed);
             let max_inflight_streams_per_session = self
                 .max_inflight_streams_per_session
@@ -130,22 +134,23 @@ impl QpxH3UpstreamSessionPool {
                 ));
             }
 
-            let notify = {
-                let shard = self.shard_for(&key);
-                let mut connecting = shard.connecting.lock().await;
-                if let Some(notify) = connecting.get(&key) {
-                    Some(notify.clone())
-                } else {
-                    connecting.insert(key.clone(), Arc::new(Notify::new()));
-                    None
+            match self.shard_for(&key).connecting.join(&key).await {
+                crate::pool::FlightRole::Follower(notify) => {
+                    // Bounded wait (normalized with the HTTP/3 origin pool): wake on the
+                    // leader's completion or the connect timeout, then retry the lookup.
+                    let deadline = Instant::now() + timeout_dur;
+                    timeout_at(deadline, notify.notified()).await.map_err(|_| {
+                        anyhow!(
+                            "qpx-h3 upstream session pool connect wait timed out for {}:{}",
+                            key.connect_host,
+                            key.connect_port
+                        )
+                    })?;
+                    continue;
                 }
-            };
-            if let Some(notify) = notify {
-                notify.notified().await;
-                continue;
+                crate::pool::FlightRole::Leader(guard) => break guard,
             }
-            break;
-        }
+        };
 
         let max_sessions_per_key = self.max_sessions_per_key.load(Ordering::Relaxed);
         let max_inflight_streams_per_session = self
@@ -161,7 +166,7 @@ impl QpxH3UpstreamSessionPool {
         {
             Ok(session) => session,
             Err(err) => {
-                self.finish_connecting(&key).await;
+                connecting_guard.finish().await;
                 return Err(err);
             }
         };
@@ -180,15 +185,8 @@ impl QpxH3UpstreamSessionPool {
             least_loaded_qpx_h3_session(entry.as_slice(), max_inflight_streams_per_session)
                 .unwrap_or(session);
         drop(sessions);
-        self.finish_connecting(&key).await;
+        connecting_guard.finish().await;
         Ok(session)
-    }
-
-    async fn finish_connecting(&self, key: &QpxH3UpstreamSessionKey) {
-        let shard = self.shard_for(key);
-        if let Some(notify) = shard.connecting.lock().await.remove(key) {
-            notify.notify_waiters();
-        }
     }
 
     async fn forget(&self, key: &QpxH3UpstreamSessionKey) {
@@ -199,7 +197,7 @@ impl QpxH3UpstreamSessionPool {
 
 async fn connect_qpx_h3_upstream_session(
     key: &QpxH3UpstreamSessionKey,
-    trust: Option<&crate::tls::CompiledUpstreamTlsTrust>,
+    trust: Option<&qpx_core::tls::CompiledUpstreamTlsTrust>,
     timeout_dur: Duration,
     max_inflight_streams_per_session: usize,
 ) -> Result<qpx_h3::ClientSession> {
@@ -243,6 +241,7 @@ async fn connect_qpx_h3_upstream_session(
         timeout_dur,
     )
     .await
+    .map_err(Into::into)
 }
 
 fn qpx_h3_upstream_session_settings(
@@ -276,24 +275,9 @@ fn evict_qpx_h3_upstream_session_if_full(
     inserting_key: &QpxH3UpstreamSessionKey,
     max_keys: usize,
 ) {
-    if sessions.contains_key(inserting_key) || sessions.len() < max_keys {
-        return;
-    }
-    let Some(oldest_key) = sessions
-        .iter()
-        .filter_map(|(key, entries)| {
-            entries
-                .iter()
-                .map(|entry| entry.created_at)
-                .min()
-                .map(|created_at| (key.clone(), created_at))
-        })
-        .min_by_key(|(_, created_at)| *created_at)
-        .map(|(key, _)| key.clone())
-    else {
-        return;
-    };
-    sessions.remove(&oldest_key);
+    crate::pool::evict_oldest_if_full(sessions, inserting_key, max_keys, |entries| {
+        entries.iter().map(|entry| entry.created_at).min()
+    });
 }
 
 fn least_loaded_qpx_h3_session(
@@ -315,28 +299,29 @@ fn least_busy_qpx_h3_session(entries: &[PooledQpxH3Session]) -> Option<qpx_h3::C
 }
 
 pub(super) async fn open_pooled_qpx_h3_extended_connect_stream(
+    pool: &QpxH3UpstreamSessionPool,
     key: QpxH3UpstreamSessionKey,
-    trust: Option<&crate::tls::CompiledUpstreamTlsTrust>,
+    trust: Option<&qpx_core::tls::CompiledUpstreamTlsTrust>,
     request: http::Request<()>,
     protocol: Option<qpx_h3::Protocol>,
     timeout_dur: Duration,
 ) -> Result<qpx_h3::ExtendedConnectStream> {
     let mut last_err = None;
     for attempt in 0..2 {
-        let session = QPX_H3_UPSTREAM_SESSION_POOL
-            .acquire(key.clone(), trust, timeout_dur)
-            .await?;
+        let session = pool.acquire(key.clone(), trust, timeout_dur).await?;
         match session
             .open_extended_connect_stream(request.clone(), protocol.clone(), timeout_dur)
             .await
         {
             Ok(stream) => return Ok(stream),
             Err(err) if attempt == 0 && session.is_closed() => {
-                QPX_H3_UPSTREAM_SESSION_POOL.forget(&key).await;
+                pool.forget(&key).await;
                 last_err = Some(err);
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(err.into()),
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow!("failed to open qpx-h3 upstream stream")))
+    Err(last_err
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow!("failed to open qpx-h3 upstream stream")))
 }

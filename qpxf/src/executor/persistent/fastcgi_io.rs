@@ -124,7 +124,7 @@ pub(super) async fn run_fastcgi_on_stream_streaming_stdin(
         request.output_channels.stdout,
         request.output_channels.stderr,
     );
-    let _ = tokio::try_join!(write_body, read_response)?;
+    tokio::try_join!(write_body, read_response)?;
     Ok(())
 }
 

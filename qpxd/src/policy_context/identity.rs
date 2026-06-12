@@ -227,7 +227,7 @@ impl CompiledIdentityHeaders {
         })
     }
 
-    fn all_names(&self) -> Vec<HeaderName> {
+    fn all_names(&self) -> impl Iterator<Item = &HeaderName> {
         [
             self.user.as_ref(),
             self.groups.as_ref(),
@@ -239,8 +239,6 @@ impl CompiledIdentityHeaders {
         ]
         .into_iter()
         .flatten()
-        .cloned()
-        .collect()
     }
 }
 

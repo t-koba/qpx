@@ -1,11 +1,11 @@
 use super::*;
-use crate::http::body::to_bytes;
 use crate::test_util::{decode_gzip, spawn_static_http_server};
 use qpx_core::config::{
     AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config, IdentityConfig,
     IngressEdgeConfig, IngressEdgeMode, MessagesConfig, RuntimeConfig, StreamingRequirement,
     SystemLogConfig,
 };
+use qpx_http::body::to_bytes;
 use std::net::{IpAddr, Ipv4Addr};
 
 #[tokio::test]

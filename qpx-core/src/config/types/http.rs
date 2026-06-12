@@ -55,6 +55,8 @@ pub struct ResponseCompressionModuleConfig {
     pub zstd_level: i32,
     #[serde(default = "default_http_compression_worker_count")]
     pub worker_count: usize,
+    #[serde(default)]
+    pub low_latency_flush: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -124,6 +126,10 @@ fn default_subrequest_deny_private_ip_redirects() -> bool {
 pub struct CachePurgeModuleConfig {
     #[serde(default = "default_http_cache_purge_methods")]
     pub methods: Vec<String>,
+    #[serde(default = "crate::config::defaults::default_true")]
+    pub require_identity: bool,
+    #[serde(default)]
+    pub allowed_peers: Vec<String>,
     #[serde(default = "default_http_cache_purge_response_status")]
     pub response_status: u16,
     #[serde(default)]

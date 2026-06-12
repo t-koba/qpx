@@ -1,5 +1,4 @@
 use super::parse_declared_content_length;
-use crate::http::body::Body;
 use crate::http::codec::h1_common::serialize_headers;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
@@ -7,6 +6,7 @@ use hyper::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, TRAILER, TRANSFER_ENCODING,
 };
 use hyper::{Request, Version};
+use qpx_http::body::Body;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::Duration;
 
@@ -164,7 +164,7 @@ where
                 "request trailers require Trailer metadata before forwarding"
             ));
         }
-        crate::http::protocol::semantics::validate_request_trailers(&trailers)
+        qpx_http::protocol::semantics::validate_request_trailers(&trailers)
             .map_err(|err| anyhow!("invalid HTTP/1 request trailers: {err:?}"))?;
         let mut trailer_block = Vec::with_capacity(256);
         serialize_headers(&trailers, &mut trailer_block)?;
@@ -175,7 +175,7 @@ where
 }
 
 fn announced_request_trailer_names(trailers: &HeaderMap) -> Option<String> {
-    if crate::http::protocol::semantics::validate_request_trailers(trailers).is_err() {
+    if qpx_http::protocol::semantics::validate_request_trailers(trailers).is_err() {
         return None;
     }
     let mut names = Vec::new();

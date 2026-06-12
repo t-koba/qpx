@@ -1,11 +1,12 @@
+use super::ConnectionPool;
 use super::resolved::{EndpointConcurrencyPermit, ResolvedUpstreamProxy};
-use crate::tls::CompiledUpstreamTlsTrust;
+use crate::runtime::now_millis;
 use crate::upstream::http1::{UpstreamProxyEndpoint, parse_upstream_proxy_endpoint};
 use crate::upstream::origin::discover_origin_endpoints;
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
-use metrics::counter;
 use qpx_core::config::{ResilienceConfig, UpstreamConfig};
+use qpx_core::tls::CompiledUpstreamTlsTrust;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -130,12 +131,7 @@ impl ManagedUpstreamEndpoint {
         self.reset_passive_counters();
         self.note_adaptive_success();
         if recovered {
-            counter!(
-                crate::runtime::metric_names()
-                    .forward_upstream_proxy_probe_success_total
-                    .clone()
-            )
-            .increment(1);
+            super::metrics::probe_success();
         }
     }
 
@@ -203,13 +199,7 @@ impl ManagedUpstreamEndpoint {
         let until = now_millis().saturating_add(scaled_ms);
         self.unhealthy_until_ms.fetch_max(until, Ordering::Relaxed);
         self.reset_adaptive_stats();
-        counter!(
-            crate::runtime::metric_names()
-                .forward_upstream_proxy_ejections_total
-                .clone(),
-            "reason" => reason.as_label()
-        )
-        .increment(1);
+        super::metrics::ejection(reason.as_label());
     }
 
     fn reset_passive_counters(&self) {
@@ -510,6 +500,15 @@ impl UpstreamProxyCluster {
     }
 }
 
+impl ConnectionPool<ResolvedUpstreamProxy> for Arc<UpstreamProxyCluster> {
+    type Acquire = ();
+    type Error = anyhow::Error;
+
+    fn acquire_connection(&self, (): Self::Acquire) -> Result<ResolvedUpstreamProxy> {
+        self.select()
+    }
+}
+
 async fn refresh_dynamic_endpoints(
     discovery: &DynamicDiscovery,
 ) -> Result<(Vec<UpstreamProxyEndpoint>, Duration)> {
@@ -535,11 +534,4 @@ fn upstream_proxy_endpoint_identity(endpoint: &UpstreamProxyEndpoint) -> String 
         endpoint.logical_authority.as_deref().unwrap_or_default(),
         proxy_authorization
     )
-}
-pub(super) fn now_millis() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    now.as_millis() as u64
 }

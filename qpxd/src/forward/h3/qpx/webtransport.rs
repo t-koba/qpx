@@ -1,6 +1,6 @@
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -165,7 +165,7 @@ async fn relay_uni_stream(
         tokio::time::timeout(idle_timeout, send.send_chunk(chunk))
             .await
             .map_err(|_| anyhow!("forward HTTP/3 WebTransport stream send timeout"))??;
-        activity.touch().await;
+        activity.touch();
     }
     tokio::time::timeout(idle_timeout, send.finish())
         .await
@@ -201,6 +201,8 @@ async fn relay_request_stream(ctx: WebTransportRequestRelayContext) -> Result<()
     let (mut upstream_send, mut upstream_recv) = upstream.split();
     let mut downstream_eof = false;
     let mut upstream_eof = false;
+    let mut upstream_datagram_scratch = BytesMut::new();
+    let mut downstream_datagram_scratch = BytesMut::new();
 
     loop {
         tokio::select! {
@@ -218,7 +220,7 @@ async fn relay_request_stream(ctx: WebTransportRequestRelayContext) -> Result<()
                         tokio::time::timeout(idle_timeout, upstream_send.send_data(chunk))
                             .await
                             .map_err(|_| anyhow!("forward HTTP/3 WebTransport request send timeout"))??;
-                        activity.touch().await;
+                        activity.touch();
                     }
                     None => {
                         downstream_eof = true;
@@ -245,7 +247,7 @@ async fn relay_request_stream(ctx: WebTransportRequestRelayContext) -> Result<()
                         tokio::time::timeout(idle_timeout, downstream_send.send_data(chunk))
                             .await
                             .map_err(|_| anyhow!("forward HTTP/3 WebTransport request send timeout"))??;
-                        activity.touch().await;
+                        activity.touch();
                     }
                     None => {
                         upstream_eof = true;
@@ -278,8 +280,10 @@ async fn relay_request_stream(ctx: WebTransportRequestRelayContext) -> Result<()
                         payload.len(),
                     )
                     .await?;
-                    datagrams.sender.send_datagram(payload)?;
-                    activity.touch().await;
+                    datagrams
+                        .sender
+                        .send_unprefixed_datagram_with_scratch(payload, &mut upstream_datagram_scratch)?;
+                    activity.touch();
                 }
             }
             up_payload = async {
@@ -302,8 +306,10 @@ async fn relay_request_stream(ctx: WebTransportRequestRelayContext) -> Result<()
                         payload.len(),
                     )
                     .await?;
-                    datagrams.sender.send_datagram(payload)?;
-                    activity.touch().await;
+                    datagrams
+                        .sender
+                        .send_unprefixed_datagram_with_scratch(payload, &mut downstream_datagram_scratch)?;
+                    activity.touch();
                 }
             }
         }
@@ -505,6 +511,7 @@ async fn open_webtransport_bidi_with_timeout(
     tokio::time::timeout(idle_timeout, opener.open_webtransport_bidi(session_id))
         .await
         .map_err(|_| anyhow!("forward HTTP/3 WebTransport bidi open timeout"))?
+        .map_err(Into::into)
 }
 
 async fn open_webtransport_uni_with_timeout(
@@ -515,6 +522,7 @@ async fn open_webtransport_uni_with_timeout(
     tokio::time::timeout(idle_timeout, opener.open_webtransport_uni(session_id))
         .await
         .map_err(|_| anyhow!("forward HTTP/3 WebTransport uni open timeout"))?
+        .map_err(Into::into)
 }
 
 async fn apply_webtransport_bandwidth_controls(

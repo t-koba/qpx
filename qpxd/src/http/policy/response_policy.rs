@@ -1,4 +1,3 @@
-use crate::http::body::Body;
 use crate::http::body::observation::ResponseObservationPlan;
 use crate::http::body::size::observed_response_size;
 use crate::http::local_response::build_local_response;
@@ -11,6 +10,7 @@ use qpx_core::prefilter::{MatchPrefilterContext, MatchPrefilterIndex, StringInte
 use qpx_core::rules::{
     CandidateRequestObservationRequirements, CompiledHeaderControl, RuleMatchContext,
 };
+use qpx_http::body::Body;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -202,34 +202,42 @@ impl HttpResponseRuleEngine {
     }
 
     pub(crate) fn any_rule_requires_response_request_body_observation(&self) -> bool {
-        self.rules
-            .iter()
-            .any(|rule| rule.matcher.requires_response_request_body_observation())
+        self.any_rule_requires(|rule| rule.matcher.requires_response_request_body_observation())
+    }
+
+    pub(crate) fn any_rule_requires_response_request_rpc_context(&self) -> bool {
+        self.any_rule_requires(|rule| rule.matcher.requires_response_request_rpc_context())
     }
 
     pub(crate) fn any_rule_requires_response_body_observation(&self) -> bool {
-        self.rules
-            .iter()
-            .any(|rule| rule.matcher.requires_response_body_observation())
+        self.any_rule_requires(|rule| rule.matcher.requires_response_body_observation())
     }
 
     pub(crate) fn any_rule_requires_response_size(&self) -> bool {
-        self.rules
-            .iter()
-            .any(|rule| rule.matcher.requires_response_size())
+        self.any_rule_requires(|rule| rule.matcher.requires_response_size())
     }
 
     pub(crate) fn any_rule_requires_response_size_matcher(&self) -> bool {
-        self.rules
-            .iter()
-            .any(|rule| rule.matcher.requires_response_size_matcher())
+        self.any_rule_requires(|rule| rule.matcher.requires_response_size_matcher())
     }
 
     pub(crate) fn any_rule_requires_response_rpc_observation(&self) -> bool {
-        self.rules
-            .iter()
-            .any(|rule| rule.matcher.requires_response_rpc_observation())
+        self.any_rule_requires(|rule| rule.matcher.requires_response_rpc_observation())
     }
+
+    fn any_rule_requires(&self, f: impl Fn(&CompiledHttpResponseRule) -> bool) -> bool {
+        self.rules.iter().any(f)
+    }
+}
+
+pub(crate) fn response_request_obs(
+    engine: Option<&HttpResponseRuleEngine>,
+    candidates: &ResponseRuleCandidates,
+    ctx: &RuleMatchContext<'_>,
+) -> CandidateRequestObservationRequirements {
+    engine.map_or_else(CandidateRequestObservationRequirements::default, |engine| {
+        engine.request_observation_requirements_for_candidates(candidates, ctx)
+    })
 }
 
 pub(crate) async fn apply_listener_response_policy(
@@ -275,10 +283,9 @@ pub(crate) async fn apply_listener_response_policy(
         ResponseObservationPlan::default()
     };
     if !body_observation.force_body {
-        let early_headers = response.headers().clone();
         let mut early_ctx = ctx;
         early_ctx.response_status = Some(response.status().as_u16());
-        early_ctx.headers = Some(&early_headers);
+        early_ctx.headers = Some(response.headers());
         if let Some(request_rpc) = request_rpc {
             early_ctx.rpc_protocol = request_rpc.protocol.as_deref();
             early_ctx.rpc_service = request_rpc.service.as_deref();

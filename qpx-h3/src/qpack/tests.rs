@@ -109,13 +109,7 @@ fn dynamic_qpack_indexed_field_decodes_after_insert() {
         .unwrap();
 
     let mut payload = Vec::new();
-    encode_header_prefix(
-        &mut payload,
-        1,
-        1,
-        state.table.total_inserted(),
-        DEFAULT_DYNAMIC_TABLE_CAPACITY,
-    );
+    encode_header_prefix(&mut payload, 1, 1, DEFAULT_DYNAMIC_TABLE_CAPACITY);
     encode_prefixed_int(&mut payload, 6, 0b10, 0);
 
     let decoded = state.decode_field_lines(&payload).unwrap();
@@ -143,13 +137,7 @@ fn dynamic_qpack_name_reference_decodes_after_insert() {
         .unwrap();
 
     let mut payload = Vec::new();
-    encode_header_prefix(
-        &mut payload,
-        1,
-        1,
-        state.table.total_inserted(),
-        DEFAULT_DYNAMIC_TABLE_CAPACITY,
-    );
+    encode_header_prefix(&mut payload, 1, 1, DEFAULT_DYNAMIC_TABLE_CAPACITY);
     encode_prefixed_int(&mut payload, 4, 0b0100, 0);
     encode_string(&mut payload, 8, 0, b"next");
 
@@ -168,7 +156,7 @@ fn missing_dynamic_refs_report_blocking_state() {
         u64::MAX,
     );
     let mut payload = Vec::new();
-    encode_header_prefix(&mut payload, 1, 1, 0, DEFAULT_DYNAMIC_TABLE_CAPACITY);
+    encode_header_prefix(&mut payload, 1, 1, DEFAULT_DYNAMIC_TABLE_CAPACITY);
     encode_prefixed_int(&mut payload, 6, 0b10, 0);
 
     match state.decode_field_lines(&payload) {
@@ -210,7 +198,7 @@ fn encoded_insert_count_underflow_is_malformed() {
 #[test]
 fn field_prefix_roundtrip() {
     let mut payload = Vec::new();
-    encode_header_prefix(&mut payload, 10, 5, 12, DEFAULT_DYNAMIC_TABLE_CAPACITY);
+    encode_header_prefix(&mut payload, 10, 5, DEFAULT_DYNAMIC_TABLE_CAPACITY);
     let mut cursor = payload.as_slice();
     let decoded =
         decode_field_section_prefix(&mut cursor, 13, DEFAULT_DYNAMIC_TABLE_CAPACITY).unwrap();

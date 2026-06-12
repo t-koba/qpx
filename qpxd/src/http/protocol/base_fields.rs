@@ -1,7 +1,7 @@
-use crate::http::protocol::address::parse_authority_host_port;
 use crate::http::protocol::common::http_version_label;
 use hyper::{Method, Request};
 use qpx_core::rules::RuleMatchContext;
+use qpx_http::protocol::address::parse_authority_host_port;
 use std::net::IpAddr;
 
 #[derive(Default)]

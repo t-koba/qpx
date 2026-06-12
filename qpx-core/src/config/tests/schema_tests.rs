@@ -3,6 +3,10 @@ use super::*;
 #[test]
 fn canonical_schema_http_module_matches_serde_envelope() {
     let schema = canonical_schema_value();
+    assert_eq!(
+        schema.pointer("/required"),
+        Some(&serde_json::json!(["edges"]))
+    );
     let http_module = schema
         .pointer("/$defs/httpModule")
         .expect("httpModule schema");
@@ -74,6 +78,18 @@ fn canonical_schema_exposes_streaming_grpc_and_sse_knobs() {
             .pointer("/$defs/sseStreamingPolicy/properties/max_stream_duration_ms/maximum")
             .and_then(serde_json::Value::as_u64),
         Some(MAX_SSE_STREAM_DURATION_MS)
+    );
+    assert_eq!(
+        schema
+            .pointer("/$defs/sseStreamingPolicy/properties/max_line_bytes/maximum")
+            .and_then(serde_json::Value::as_u64),
+        Some(MAX_SSE_LINE_BYTES as u64)
+    );
+    assert_eq!(
+        schema
+            .pointer("/$defs/sseStreamingPolicy/properties/max_event_id_bytes/maximum")
+            .and_then(serde_json::Value::as_u64),
+        Some(MAX_SSE_EVENT_ID_BYTES as u64)
     );
 
     let edges = schema

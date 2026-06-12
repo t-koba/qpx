@@ -2,7 +2,6 @@ use super::super::connect::parse::parse_connect_udp_target;
 use super::connect::{handle_qpx_connect_stream, handle_qpx_traditional_connect_stream};
 use super::response::{send_qpx_response_stream, send_qpx_static_response};
 use super::webtransport_dispatch::handle_qpx_webtransport_connect as dispatch_qpx_webtransport_connect;
-use crate::http::body::Body;
 use crate::http::body::size::set_observed_request_size;
 use crate::http3::codec::h3_request_to_hyper;
 use crate::runtime::{ResolvedStreamingLimits, Runtime};
@@ -10,6 +9,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use hyper::{Response, StatusCode};
 use qpx_core::config::ConnectUdpConfig;
+use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tracing::warn;
@@ -53,13 +53,17 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
         request: qpx_h3::Request,
         conn: qpx_h3::ConnectionInfo,
         req_stream: qpx_h3::RequestStream,
-    ) -> Result<()> {
+    ) -> qpx_h3::H3Result<()> {
         if request.head.method() == http::Method::CONNECT {
-            return self.handle_connect(request, conn, req_stream).await;
+            return self
+                .handle_connect(request, conn, req_stream)
+                .await
+                .map_err(Into::into);
         }
 
         self.handle_http_request(request, conn.remote_addr, req_stream)
             .await
+            .map_err(Into::into)
     }
 
     async fn handle_webtransport_connect(
@@ -68,9 +72,10 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
         req_stream: qpx_h3::RequestStream,
         conn: qpx_h3::ConnectionInfo,
         session: qpx_h3::WebTransportSession,
-    ) -> Result<()> {
+    ) -> qpx_h3::H3Result<()> {
         self.handle_qpx_webtransport_connect(req_head, req_stream, conn, session)
             .await
+            .map_err(Into::into)
     }
 
     async fn handle_connect_stream(
@@ -80,12 +85,28 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
         conn: qpx_h3::ConnectionInfo,
         protocol: qpx_h3::Protocol,
         datagrams: Option<qpx_h3::StreamDatagrams>,
-    ) -> Result<()> {
-        handle_qpx_connect_stream(self, req_head, req_stream, conn, protocol, datagrams).await
+    ) -> qpx_h3::H3Result<()> {
+        handle_qpx_connect_stream(self, req_head, req_stream, conn, protocol, datagrams)
+            .await
+            .map_err(Into::into)
     }
 }
 
 impl ForwardQpxHandler {
+    fn request_streaming_limits(
+        &self,
+        req_head: &http::Request<()>,
+        remote_addr: std::net::SocketAddr,
+    ) -> ResolvedStreamingLimits {
+        super::super::streaming::request_streaming_limits_for_head(
+            &self.runtime,
+            self.listener_name.as_ref(),
+            req_head,
+            remote_addr,
+            self.listener_streaming_limits(),
+        )
+    }
+
     async fn handle_http_request(
         &self,
         request: qpx_h3::Request,
@@ -98,7 +119,7 @@ impl ForwardQpxHandler {
         }
         let grpc_protocol = crate::http::rpc::streaming_rpc_protocol(&request_headers, None);
         let grpc_started = Instant::now();
-        let listener_streaming = self.listener_streaming_limits();
+        let listener_streaming = self.request_streaming_limits(&request.head, remote_addr);
         let grpc_deadline = grpc_protocol.as_deref().map(|protocol| {
             crate::http::rpc::resolve_rpc_deadline(
                 &request_headers,
@@ -215,7 +236,13 @@ impl ForwardQpxHandler {
             },
         );
         let response_summary = if relay_done {
-            response_fut.await?
+            match response_fut.await {
+                Ok(summary) => summary,
+                Err(err) => {
+                    crate::http3::response_error::emit_h3_response_send_error("qpx_h3", &err);
+                    return Err(err.into_inner());
+                }
+            }
         } else {
             let (response_result, relay_result) = tokio::join!(response_fut, relay_fut);
             request_summary = match relay_result {
@@ -226,7 +253,13 @@ impl ForwardQpxHandler {
                     return Err(err);
                 }
             };
-            response_result?
+            match response_result {
+                Ok(summary) => summary,
+                Err(err) => {
+                    crate::http3::response_error::emit_h3_response_send_error("qpx_h3", &err);
+                    return Err(err.into_inner());
+                }
+            }
         };
         if response_streaming.observe_grpc_messages
             && let Some(protocol) = grpc_protocol.as_deref()
@@ -291,12 +324,12 @@ impl ForwardQpxHandler {
                 .await;
         }
 
-        crate::http::protocol::semantics::validate_h2_h3_request_headers(
+        qpx_http::protocol::semantics::validate_h2_h3_request_headers(
             http::Version::HTTP_3,
             request.head.headers(),
         )
         .map_err(|err| anyhow!("invalid CONNECT-UDP headers: {err}"))?;
-        crate::http::protocol::semantics::validate_expect_header(request.head.headers())
+        qpx_http::protocol::semantics::validate_expect_header(request.head.headers())
             .map_err(|err| anyhow!("invalid CONNECT-UDP headers: {err}"))?;
 
         let capsule = request
@@ -358,7 +391,7 @@ impl ForwardQpxHandler {
             self.runtime.state().plan.identity.proxy_name.as_ref(),
             Response::builder()
                 .status(status)
-                .body(crate::http::body::Body::from(body))?,
+                .body(qpx_http::body::Body::from(body))?,
             false,
         );
         send_qpx_response_stream(

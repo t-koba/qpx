@@ -4,10 +4,10 @@
     feature = "mitm"
 ))]
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
-use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use quinn::crypto::rustls::QuicServerConfig;
 use quinn::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use rcgen::generate_simple_self_signed;
 use std::fs;
@@ -15,7 +15,6 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -23,8 +22,12 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 pub mod common;
+mod h3_client_support;
+mod yaml_support;
 
-use common::QpxdHandle;
+use common::{QpxdHandle, pick_free_tcp_port, spawn_qpxd, temp_dir};
+use h3_client_support::{build_h3_test_client_config, build_quinn_client_endpoint};
+use yaml_support::yaml_quote_path;
 
 type PerfOperation =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
@@ -38,6 +41,56 @@ struct PerfThresholds {
 fn benchmark_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+const PORT_PICK_ATTEMPTS: usize = 256;
+
+fn spawn_qpxd_on_random_tcp_udp_ports(
+    config_path: &Path,
+    log_path: PathBuf,
+    make_config: impl Fn(u16, u16) -> String,
+) -> Result<(u16, u16, QpxdHandle)> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for _ in 0..PORT_PICK_ATTEMPTS {
+        let tcp_port = pick_free_tcp_port()?;
+        let udp_port = pick_free_udp_port()?;
+        fs::write(config_path, make_config(tcp_port, udp_port))?;
+        match spawn_qpxd(config_path, tcp_port, log_path.clone()) {
+            Ok(handle) => return Ok((tcp_port, udp_port, handle)),
+            Err(err) => {
+                let log_retryable = fs::read_to_string(&log_path)
+                    .ok()
+                    .map(|value| is_retryable_bind_error_text(&value))
+                    .unwrap_or(false);
+                let err_retryable = is_retryable_bind_error_text(&err.to_string());
+                if log_retryable || err_retryable {
+                    last_err = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        anyhow!(
+            "failed to start qpxd after {} tcp/udp port attempts",
+            PORT_PICK_ATTEMPTS
+        )
+    }))
+}
+
+fn pick_free_udp_port() -> Result<u16> {
+    let socket = std::net::UdpSocket::bind(("127.0.0.1", 0))?;
+    Ok(socket.local_addr()?.port())
+}
+
+fn is_retryable_bind_error_text(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("address already in use")
+        || message.contains("eaddrinuse")
+        || message.contains("permission denied")
+        || message.contains("operation not permitted")
+        || message.contains("os error 1")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -170,14 +223,14 @@ async fn run_connect_udp_round() -> Result<()> {
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)?;
     let cfg = dir.join("forward-connect-udp.yaml");
-    let tcp_port = pick_free_tcp_port()?;
-    let udp_port = pick_free_tcp_port()?;
     let target_port = pick_free_tcp_port()?;
-    let state_dir_yaml = yaml_quote_path(&state_dir);
-    fs::write(
+    let (_tcp_port, udp_port, _qpxd) = spawn_qpxd_on_random_tcp_udp_ports(
         &cfg,
-        format!(
-            r#"edges:
+        dir.join("forward-connect-udp.log"),
+        |tcp_port, udp_port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
+            format!(
+                r#"edges:
 - kind: forward
   name: forward-h3
   listen: 127.0.0.1:{tcp_port}
@@ -196,9 +249,9 @@ state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,
-        ),
+            )
+        },
     )?;
-    let _qpxd = spawn_qpxd(&cfg, tcp_port, dir.join("forward-connect-udp.log"))?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -256,13 +309,13 @@ async fn run_extended_connect_round() -> Result<()> {
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)?;
     let cfg = dir.join("forward-qpx-extended-connect.yaml");
-    let tcp_port = pick_free_tcp_port()?;
-    let udp_port = pick_free_tcp_port()?;
-    let state_dir_yaml = yaml_quote_path(&state_dir);
-    fs::write(
+    let (_tcp_port, udp_port, _qpxd) = spawn_qpxd_on_random_tcp_udp_ports(
         &cfg,
-        format!(
-            r#"edges:
+        dir.join("forward-qpx-extended-connect.log"),
+        |tcp_port, udp_port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
+            format!(
+                r#"edges:
 - kind: forward
   name: forward-h3
   listen: 127.0.0.1:{tcp_port}
@@ -281,9 +334,9 @@ state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,
-        ),
+            )
+        },
     )?;
-    let _qpxd = spawn_qpxd(&cfg, tcp_port, dir.join("forward-qpx-extended-connect.log"))?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -334,7 +387,10 @@ runtime:
         .datagrams
         .as_mut()
         .ok_or_else(|| anyhow!("missing extended CONNECT datagrams"))?;
-    datagrams.sender.send_datagram(Bytes::from_static(b"dg"))?;
+    datagrams.sender.send_unprefixed_datagram_with_scratch(
+        Bytes::from_static(b"dg"),
+        &mut bytes::BytesMut::new(),
+    )?;
     let echoed_datagram = timeout(Duration::from_secs(5), datagrams.receiver.recv())
         .await
         .map_err(|_| anyhow!("timed out waiting for extended CONNECT datagram"))?
@@ -353,13 +409,13 @@ async fn run_webtransport_round() -> Result<()> {
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)?;
     let cfg = dir.join("forward-qpx-webtransport.yaml");
-    let tcp_port = pick_free_tcp_port()?;
-    let udp_port = pick_free_tcp_port()?;
-    let state_dir_yaml = yaml_quote_path(&state_dir);
-    fs::write(
+    let (_tcp_port, udp_port, _qpxd) = spawn_qpxd_on_random_tcp_udp_ports(
         &cfg,
-        format!(
-            r#"edges:
+        dir.join("forward-qpx-webtransport.log"),
+        |tcp_port, udp_port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
+            format!(
+                r#"edges:
 - kind: forward
   name: forward-h3
   listen: 127.0.0.1:{tcp_port}
@@ -378,9 +434,9 @@ state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false"#,
-        ),
+            )
+        },
     )?;
-    let _qpxd = spawn_qpxd(&cfg, tcp_port, dir.join("forward-qpx-webtransport.log"))?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -433,9 +489,10 @@ runtime:
         .datagrams
         .as_mut()
         .ok_or_else(|| anyhow!("missing WebTransport datagrams"))?;
-    datagrams
-        .sender
-        .send_datagram(Bytes::from_static(b"wt-dgram"))?;
+    datagrams.sender.send_unprefixed_datagram_with_scratch(
+        Bytes::from_static(b"wt-dgram"),
+        &mut bytes::BytesMut::new(),
+    )?;
     let echoed_datagram = timeout(Duration::from_secs(5), datagrams.receiver.recv())
         .await
         .map_err(|_| anyhow!("timed out waiting for WebTransport datagram echo"))?
@@ -527,8 +584,8 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
         _request: qpx_h3::Request,
         _conn: qpx_h3::ConnectionInfo,
         _stream: qpx_h3::RequestStream,
-    ) -> Result<()> {
-        anyhow::bail!("unexpected buffered request")
+    ) -> std::result::Result<(), qpx_h3::H3Error> {
+        Err(anyhow!("unexpected buffered request").into())
     }
 
     async fn handle_connect_stream(
@@ -538,10 +595,10 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
         _conn: qpx_h3::ConnectionInfo,
         protocol: qpx_h3::Protocol,
         mut datagrams: Option<qpx_h3::StreamDatagrams>,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), qpx_h3::H3Error> {
         match protocol {
             qpx_h3::Protocol::Other(name) if name == "websocket" => {}
-            other => return Err(anyhow!("unexpected protocol: {other:?}")),
+            other => return Err(anyhow!("unexpected protocol: {other:?}").into()),
         }
         req_stream
             .send_response_head(&ok_qpx_response_head(false))
@@ -566,7 +623,7 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
             .as_mut()
             .expect("checked above")
             .sender
-            .send_datagram(payload)?;
+            .send_unprefixed_datagram_with_scratch(payload, &mut bytes::BytesMut::new())?;
         req_stream.finish().await
     }
 }
@@ -592,8 +649,8 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
         _request: qpx_h3::Request,
         _conn: qpx_h3::ConnectionInfo,
         _stream: qpx_h3::RequestStream,
-    ) -> Result<()> {
-        anyhow::bail!("unexpected buffered request")
+    ) -> std::result::Result<(), qpx_h3::H3Error> {
+        Err(anyhow!("unexpected buffered request").into())
     }
 
     async fn handle_webtransport_connect(
@@ -602,7 +659,7 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
         mut req_stream: qpx_h3::RequestStream,
         _conn: qpx_h3::ConnectionInfo,
         session: qpx_h3::WebTransportSession,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), qpx_h3::H3Error> {
         let qpx_h3::WebTransportSession {
             session_id,
             mut opener,
@@ -649,7 +706,7 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
             .as_mut()
             .expect("checked above")
             .sender
-            .send_datagram(payload)?;
+            .send_unprefixed_datagram_with_scratch(payload, &mut bytes::BytesMut::new())?;
 
         let bidi = timeout(Duration::from_secs(5), bidi_streams.recv())
             .await
@@ -676,7 +733,10 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
 
 async fn start_qpx_h3_server<H: qpx_h3::RequestHandler>(
     handler: H,
-) -> Result<(SocketAddr, JoinHandle<Result<()>>)> {
+) -> Result<(
+    SocketAddr,
+    JoinHandle<std::result::Result<(), qpx_h3::H3Error>>,
+)> {
     let server_config = build_qpx_h3_server_config()?;
     let endpoint = quinn::Endpoint::server(server_config, SocketAddr::from(([127, 0, 0, 1], 0)))?;
     let addr = endpoint.local_addr()?;
@@ -758,102 +818,4 @@ async fn shutdown_qpx_extended_stream(mut stream: qpx_h3::ExtendedConnectStream)
     stream.driver.abort();
     let _ = stream.driver.await;
     Ok(())
-}
-
-fn temp_dir(prefix: &str) -> Result<PathBuf> {
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("{prefix}.{suffix}"));
-    fs::create_dir_all(&dir).with_context(|| format!("create temp dir {}", dir.display()))?;
-    Ok(dir)
-}
-
-fn yaml_quote_path(path: &Path) -> String {
-    let mut out = String::with_capacity(path.as_os_str().len() + 2);
-    out.push('\'');
-    for ch in path.to_string_lossy().chars() {
-        if ch == '\'' {
-            out.push_str("''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
-fn pick_free_tcp_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).context("pick free tcp port")?;
-    Ok(listener.local_addr()?.port())
-}
-
-fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Result<QpxdHandle> {
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_qpxd"));
-    let log = fs::File::create(&log_path).context("create qpxd log")?;
-    let log_err = log.try_clone().context("clone qpxd log")?;
-
-    let mut cmd = Command::new(bin);
-    cmd.arg("run")
-        .arg("--config")
-        .arg(config_path)
-        .env("RUST_LOG", "warn")
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-    let mut child = cmd.spawn().context("spawn qpxd")?;
-    wait_for_qpxd(&mut child, ready_port, &log_path)?;
-    Ok(QpxdHandle::new(child))
-}
-
-fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<()> {
-    let started = Instant::now();
-    let addr: SocketAddr = format!("127.0.0.1:{ready_port}").parse()?;
-    while started.elapsed() < Duration::from_secs(5) {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
-            return Ok(());
-        }
-        if let Some(status) = child.try_wait().context("qpxd wait")? {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(anyhow!(
-                "qpxd exited early: {status} (log: {})",
-                log_path.display()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    Err(anyhow!(
-        "timed out waiting for qpxd to listen on {addr} (log: {})",
-        log_path.display()
-    ))
-}
-
-fn build_quinn_client_endpoint() -> Result<quinn::Endpoint> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
-    quinn::Endpoint::client(addr)
-        .map_err(|err| anyhow!(err))
-        .context("bind quinn client endpoint")
-}
-
-fn build_h3_test_client_config(ca_cert_pem: &Path) -> Result<quinn::ClientConfig> {
-    let mut roots = quinn::rustls::RootCertStore::empty();
-    let certs = qpx_core::tls::load_cert_chain(ca_cert_pem)?;
-    let (added, _) = roots.add_parsable_certificates(certs);
-    if added == 0 {
-        return Err(anyhow!("no certs loaded from {}", ca_cert_pem.display()));
-    }
-
-    let provider = quinn::rustls::crypto::ring::default_provider();
-    let mut tls = quinn::rustls::ClientConfig::builder_with_provider(provider.into())
-        .with_protocol_versions(&[&quinn::rustls::version::TLS13])
-        .map_err(|_| anyhow!("failed to configure h3 client tls versions"))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![b"h3".to_vec()];
-    let quic_crypto =
-        QuicClientConfig::try_from(tls).map_err(|_| anyhow!("failed to build h3 client crypto"))?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic_crypto)))
 }

@@ -247,6 +247,14 @@ pub(super) fn default_sse_max_stream_duration_ms() -> u64 {
     3_600_000
 }
 
+pub(super) fn default_sse_max_line_bytes() -> usize {
+    8 * 1024
+}
+
+pub(super) fn default_sse_max_event_id_bytes() -> usize {
+    256
+}
+
 pub(super) fn default_http_compression_zstd_level() -> i32 {
     3
 }
@@ -340,6 +348,14 @@ pub(super) fn default_runtime_tunnel_idle_timeout_ms() -> u64 {
 
 pub(super) fn default_runtime_h3_read_timeout_ms() -> u64 {
     10_000
+}
+
+pub(super) fn default_runtime_h3_request_body_drain_max_concurrent() -> usize {
+    1024
+}
+
+pub(super) fn default_runtime_h3_request_body_drain_timeout_ms() -> u64 {
+    30_000
 }
 
 pub(super) fn default_runtime_datagram_channel_capacity() -> usize {

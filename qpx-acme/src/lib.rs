@@ -1,3 +1,7 @@
+//! ACME certificate provisioning and HTTP-01 challenge support.
+
+#![warn(missing_docs)]
+
 mod provisioner;
 mod store;
 
@@ -7,7 +11,7 @@ pub use store::AcmeCertStore;
 pub use store::AcmeQuicCertStore;
 use store::Http01TokenStore;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt as _, Empty, Full};
@@ -20,18 +24,38 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 type Http01Body = BoxBody<Bytes, std::convert::Infallible>;
+/// Result type used by ACME operations.
+pub type AcmeResult<T> = std::result::Result<T, AcmeError>;
 const ACME_HTTP01_MAX_CONCURRENCY: usize = 128;
 const ACME_HTTP01_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const ACME_HTTP01_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Error returned by ACME operations.
+#[derive(Debug, Error)]
+pub enum AcmeError {
+    /// ACME backend operation failed.
+    #[error("ACME operation failed")]
+    Backend(#[source] anyhow::Error),
+}
+
+impl From<anyhow::Error> for AcmeError {
+    fn from(source: anyhow::Error) -> Self {
+        Self::Backend(source)
+    }
+}
+
+/// Provides the current operational config to ACME renewal tasks.
 pub trait ConfigProvider: Send + Sync {
+    /// Returns the current operational configuration.
     fn current_operational_config(&self) -> Arc<Config>;
 }
+/// Runtime state shared by ACME provisioning and HTTP-01 challenge serving.
 pub struct AcmeRuntime {
     pub(crate) operational_config_provider: Arc<dyn ConfigProvider>,
     pub(crate) directory_url: String,
@@ -49,19 +73,22 @@ pub struct AcmeRuntime {
 
 static STATE: OnceLock<Arc<AcmeRuntime>> = OnceLock::new();
 
+/// Returns the global TLS certificate store when ACME is initialized.
 pub fn cert_store() -> Option<&'static AcmeCertStore> {
     STATE.get().map(|s| s.store.as_ref())
 }
 
 #[cfg(feature = "http3")]
+/// Returns the global QUIC certificate store when ACME is initialized.
 pub fn quic_cert_store() -> Option<&'static AcmeQuicCertStore> {
     STATE.get().map(|s| s.quic_store.as_ref())
 }
 
+/// Initializes ACME runtime state from configuration.
 pub fn init(
     config: &Config,
     config_provider: Arc<dyn ConfigProvider>,
-) -> Result<Option<Arc<AcmeRuntime>>> {
+) -> AcmeResult<Option<Arc<AcmeRuntime>>> {
     let Some(acme) = config.acme.as_ref().filter(|a| a.enabled) else {
         return Ok(None);
     };
@@ -106,7 +133,8 @@ pub fn init(
     provisioner::preload_certs(rt.as_ref())?;
     Ok(Some(rt))
 }
-pub async fn run_http01_server(state: Arc<AcmeRuntime>) -> Result<()> {
+/// Runs the HTTP-01 challenge server using the configured listener address.
+pub async fn run_http01_server(state: Arc<AcmeRuntime>) -> AcmeResult<()> {
     let addr = state.http01_listen;
     let listener = TcpListener::bind(addr)
         .await
@@ -114,10 +142,11 @@ pub async fn run_http01_server(state: Arc<AcmeRuntime>) -> Result<()> {
     run_http01_server_with_listener(listener, state).await
 }
 
+/// Runs the HTTP-01 challenge server using an inherited standard listener.
 pub async fn run_http01_server_with_std_listener(
     listener: std::net::TcpListener,
     state: Arc<AcmeRuntime>,
-) -> Result<()> {
+) -> AcmeResult<()> {
     listener
         .set_nonblocking(true)
         .context("failed to set inherited acme http-01 listener nonblocking")?;
@@ -129,7 +158,7 @@ pub async fn run_http01_server_with_std_listener(
 async fn run_http01_server_with_listener(
     listener: TcpListener,
     state: Arc<AcmeRuntime>,
-) -> Result<()> {
+) -> AcmeResult<()> {
     let addr = listener.local_addr().unwrap_or(state.http01_listen);
     let tokens = state.tokens.clone();
     let concurrency = Arc::new(Semaphore::new(ACME_HTTP01_MAX_CONCURRENCY));
@@ -178,45 +207,41 @@ fn empty_body() -> Http01Body {
     Empty::<Bytes>::new().boxed()
 }
 
-fn full_body(body: impl Into<Bytes>) -> Http01Body {
-    Full::new(body.into()).boxed()
+fn empty_response(status: StatusCode) -> Response<Http01Body> {
+    let mut response = Response::new(empty_body());
+    *response.status_mut() = status;
+    response
 }
 
 fn handle_http01(req: Request<Incoming>, tokens: &Http01TokenStore) -> Response<Http01Body> {
     if req.method() != Method::GET && req.method() != Method::HEAD {
-        return Response::builder()
-            .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(empty_body())
-            .unwrap();
+        return empty_response(StatusCode::METHOD_NOT_ALLOWED);
     }
-    let path = req.uri().path();
-    let prefix = "/.well-known/acme-challenge/";
-    if !path.starts_with(prefix) {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(empty_body())
-            .unwrap();
-    }
-    let token = &path[prefix.len()..];
+    let Some(token) = req
+        .uri()
+        .path()
+        .strip_prefix("/.well-known/acme-challenge/")
+    else {
+        return empty_response(StatusCode::NOT_FOUND);
+    };
     if token.is_empty() || token.contains('/') {
-        return Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(empty_body())
-            .unwrap();
+        return empty_response(StatusCode::BAD_REQUEST);
     }
     match tokens.get(token) {
-        Some(key_auth) => Response::builder()
-            .status(StatusCode::OK)
-            .header(http::header::CONTENT_TYPE, "text/plain")
-            .body(if req.method() == Method::HEAD {
+        Some(key_auth) => {
+            let body = if req.method() == Method::HEAD {
                 empty_body()
             } else {
-                full_body(key_auth)
-            })
-            .unwrap(),
-        None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(empty_body())
-            .unwrap(),
+                Full::new(key_auth.into()).boxed()
+            };
+            let mut response = Response::new(body);
+            *response.status_mut() = StatusCode::OK;
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/plain"),
+            );
+            response
+        }
+        None => empty_response(StatusCode::NOT_FOUND),
     }
 }

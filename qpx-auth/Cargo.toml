@@ -3,18 +3,23 @@ name = "qpx-auth"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 default = ["ldap-auth", "digest-auth"]
 
-auth-core = ["dep:base64", "dep:ring"]
+auth-core = ["dep:base64", "dep:ring", "dep:sha2"]
 basic-auth = ["auth-core"]
-digest-auth = ["auth-core", "dep:sha2"]
+digest-auth = ["auth-core"]
 ldap-auth = ["basic-auth", "dep:ldap3", "dep:tokio", "ldap3/tls-rustls-ring"]
 
 [dependencies]
 qpx-core = { path = "../qpx-core", default-features = false }
 anyhow.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 http.workspace = true
 lru.workspace = true
@@ -23,3 +28,4 @@ base64 = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+zeroize.workspace = true

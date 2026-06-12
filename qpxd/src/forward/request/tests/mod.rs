@@ -1,5 +1,4 @@
 use super::*;
-use crate::http::body::to_bytes;
 use crate::runtime::Runtime;
 use crate::test_util::{decode_gzip, spawn_static_http_server};
 use http::StatusCode;
@@ -10,6 +9,7 @@ use qpx_core::config::{
     LocalResponseConfig, MatchConfig, MessagesConfig, PolicyContextConfig, RpcMatchConfig,
     RuleConfig, RuntimeConfig, StreamingRequirement, SystemLogConfig, UnknownLengthExactSizePolicy,
 };
+use qpx_http::body::to_bytes;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

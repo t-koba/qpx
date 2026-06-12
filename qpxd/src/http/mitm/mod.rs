@@ -1,11 +1,11 @@
-use crate::http::body::Body;
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
 use crate::http::protocol::preflight::{PreflightOptions, PreflightOutcome, preflight_validate};
 use crate::runtime::Runtime;
-use crate::tls::UpstreamCertificateInfo;
 use anyhow::Result;
 use hyper::client::conn::http1::SendRequest;
 use hyper::{Request, Response};
+use qpx_core::tls::UpstreamCertificateInfo;
+use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;

@@ -1,9 +1,11 @@
-use anyhow::Result;
 use ldap3::{LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
 use qpx_core::config::LdapConfig;
 use std::fmt::Write as _;
 use tokio::time::{Duration, timeout};
 
+use super::AuthResult;
+
+/// LDAP authenticator configured from qpx auth settings.
 #[derive(Debug, Clone)]
 pub struct LdapAuthenticator {
     config: LdapConfig,
@@ -18,11 +20,12 @@ impl LdapAuthenticator {
         }
     }
 
+    /// Authenticates a username/password pair and returns LDAP groups on success.
     pub async fn authenticate(
         &self,
         username: &str,
         password: &str,
-    ) -> Result<Option<Vec<String>>> {
+    ) -> AuthResult<Option<Vec<String>>> {
         if username.is_empty() || password.is_empty() {
             return Ok(None);
         }

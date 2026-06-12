@@ -1,4 +1,3 @@
-use metrics::counter;
 use qpx_core::config::{EndpointLifecycleConfig, HealthCheckConfig, HttpHealthCheckConfig};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -9,6 +8,7 @@ use crate::upstream::origin::OriginEndpoint;
 mod probe;
 
 pub(super) use self::probe::probe_upstream;
+pub(super) use crate::runtime::now_millis;
 
 const ADAPTIVE_MIN_SAMPLES: u32 = 8;
 const ADAPTIVE_MAX_SAMPLES: u32 = 32;
@@ -185,7 +185,7 @@ impl UpstreamEndpoint {
 
     pub(super) fn from_origin(origin: OriginEndpoint) -> Self {
         Self {
-            target: origin.label(),
+            target: origin.label().to_string(),
             origin,
             failures: AtomicU32::new(0),
             unhealthy_until_ms: AtomicU64::new(0),
@@ -221,12 +221,7 @@ impl UpstreamEndpoint {
         self.note_adaptive_success();
         if recovered {
             self.begin_recovery_window(lifecycle);
-            counter!(
-                crate::runtime::metric_names()
-                    .reverse_upstream_probe_success_total
-                    .clone()
-            )
-            .increment(1);
+            super::metrics::upstream_probe_success();
         }
     }
 
@@ -246,12 +241,7 @@ impl UpstreamEndpoint {
         self.note_adaptive_success();
         if recovered {
             self.begin_recovery_window(lifecycle);
-            counter!(
-                crate::runtime::metric_names()
-                    .reverse_upstream_probe_success_total
-                    .clone()
-            )
-            .increment(1);
+            super::metrics::upstream_probe_success();
         }
     }
 
@@ -321,13 +311,7 @@ impl UpstreamEndpoint {
         let until = now_millis().saturating_add(scaled_ms);
         self.unhealthy_until_ms.fetch_max(until, Ordering::Relaxed);
         self.reset_adaptive_stats();
-        counter!(
-            crate::runtime::metric_names()
-                .reverse_upstream_ejections_total
-                .clone(),
-            "reason" => reason.as_label()
-        )
-        .increment(1);
+        super::metrics::upstream_ejection(reason.as_label());
     }
 
     pub(super) fn begin_recovery_window(&self, lifecycle: &EndpointLifecycleRuntime) {
@@ -489,14 +473,6 @@ fn passive_failure_reason(kind: PassiveFailureKind) -> EjectionReason {
         PassiveFailureKind::ConnectError => EjectionReason::ConnectError,
         PassiveFailureKind::Reset => EjectionReason::Reset,
     }
-}
-
-pub(super) fn now_millis() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    now.as_millis() as u64
 }
 
 #[cfg(test)]

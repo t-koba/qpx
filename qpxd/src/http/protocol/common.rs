@@ -1,31 +1,29 @@
-use crate::http::body::Body;
+use crate::upstream::pool::ConnectionPool;
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::TokioExecutor;
 use qpx_core::config::ActionConfig;
+use qpx_http::body::Body;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
 
 pub(crate) fn blocked_response(message: &str) -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::FORBIDDEN)
-        .body(Body::from(message.to_owned()))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
+    text_response(StatusCode::FORBIDDEN, message.to_owned())
 }
 
 pub(crate) fn forbidden_response(message: &str) -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::FORBIDDEN)
-        .body(Body::from(message.to_owned()))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
+    text_response(StatusCode::FORBIDDEN, message.to_owned())
 }
 
 pub(crate) fn bad_request_response(message: impl Into<String>) -> Response<Body> {
+    text_response(StatusCode::BAD_REQUEST, message.into())
+}
+
+fn text_response(status: StatusCode, message: String) -> Response<Body> {
     Response::builder()
-        .status(StatusCode::BAD_REQUEST)
-        .body(Body::from(message.into()))
+        .status(status)
+        .body(Body::from(message))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
@@ -34,7 +32,7 @@ pub(crate) fn connect_established_response() -> Response<Body> {
         .status(StatusCode::OK)
         .body(Body::empty())
         .unwrap_or_else(|_| Response::new(Body::empty()));
-    crate::http::protocol::semantics::strip_message_body_headers(response.headers_mut());
+    qpx_http::protocol::semantics::strip_message_body_headers(response.headers_mut());
     response
 }
 
@@ -62,8 +60,6 @@ pub(crate) fn http_version_label(version: http::Version) -> &'static str {
     }
 }
 
-pub type Http1SendRequest = hyper::client::conn::http1::SendRequest<Body>;
-
 pub(crate) fn shared_http_client() -> &'static Client<HttpConnector, Body> {
     static CLIENT: OnceLock<Client<HttpConnector, Body>> = OnceLock::new();
     CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build(HttpConnector::new()))
@@ -73,23 +69,6 @@ pub(crate) async fn request_with_shared_client(
     req: http::Request<Body>,
 ) -> Result<Response<Body>, hyper_util::client::legacy::Error> {
     Ok(shared_http_client().request(req).await?.map(Body::from))
-}
-
-pub(crate) async fn handshake_http1<T>(
-    io: T,
-) -> Result<
-    (
-        Http1SendRequest,
-        hyper::client::conn::http1::Connection<TokioIo<T>, Body>,
-    ),
-    hyper::Error,
->
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    hyper::client::conn::http1::Builder::new()
-        .handshake(TokioIo::new(io))
-        .await
 }
 
 pub(crate) fn resolve_named_upstream(
@@ -122,7 +101,7 @@ pub(crate) fn resolve_named_upstream(
             )?));
         }
         if let Some(cluster) = state.resources.upstream_proxies.get(upstream_name) {
-            return Ok(Some(cluster.select()?));
+            return Ok(Some(cluster.acquire_connection(())?));
         }
         return Err(anyhow!(
             "unknown upstream reference: {} (define it in top-level upstreams[])",

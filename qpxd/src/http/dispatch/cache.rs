@@ -1,6 +1,4 @@
 use super::{DispatchAuditContext, DispatchOutcome, annotate_dispatch_response};
-use crate::cache::CacheRequestKey;
-use crate::http::body::Body;
 use crate::http::capture::cache_flow::{
     CacheWritebackContext, process_upstream_response_for_cache,
 };
@@ -8,18 +6,39 @@ use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use anyhow::Result;
 use hyper::{Method, Request, Response};
 use qpx_core::rules::CompiledHeaderControl;
+use qpx_http::body::Body;
+use qpxd_cache::CacheRequestKey;
 
 pub(crate) enum DispatchCacheLookupOutcome {
-    Response(Response<Body>),
-    Continue(Option<crate::cache::RevalidationState>),
+    // Both payloads are large (`Response<Body>` and a `RevalidationState` embedding a
+    // `CachedResponseEnvelope`); box them so the variants stay balanced, matching
+    // `DispatchCacheCollapseOutcome` below.
+    Response(Box<Response<Body>>),
+    Continue(Option<Box<qpxd_cache::RevalidationState>>),
 }
 
 pub(crate) enum DispatchCacheCollapseOutcome {
     Response(Box<Response<Body>>),
     Continue {
-        revalidation_state: Option<Box<crate::cache::RevalidationState>>,
-        guard: Option<crate::cache::RequestCollapseGuard>,
+        revalidation_state: Option<Box<qpxd_cache::RevalidationState>>,
+        guard: Option<qpxd_cache::RequestCollapseGuard>,
     },
+}
+
+pub(crate) fn dispatch_cache_collapse_continue(
+    revalidation_state: Option<qpxd_cache::RevalidationState>,
+    guard: Option<qpxd_cache::RequestCollapseGuard>,
+) -> DispatchCacheCollapseOutcome {
+    DispatchCacheCollapseOutcome::Continue {
+        revalidation_state: revalidation_state.map(Box::new),
+        guard,
+    }
+}
+
+pub(crate) fn dispatch_cache_collapse_response(
+    response: Response<Body>,
+) -> DispatchCacheCollapseOutcome {
+    DispatchCacheCollapseOutcome::Response(Box::new(response))
 }
 
 pub(crate) fn prepare_dispatch_cache_keys(
@@ -47,8 +66,8 @@ pub(crate) struct DispatchCacheWriteInput<'a> {
     pub(crate) request_headers_snapshot: Option<&'a http::HeaderMap>,
     pub(crate) cache_target_key: Option<&'a CacheRequestKey>,
     pub(crate) cache_lookup_key: Option<&'a CacheRequestKey>,
-    pub(crate) revalidation_state: Option<crate::cache::RevalidationState>,
-    pub(crate) request_collapse_guard: Option<crate::cache::RequestCollapseGuard>,
+    pub(crate) revalidation_state: Option<qpxd_cache::RevalidationState>,
+    pub(crate) request_collapse_guard: Option<qpxd_cache::RequestCollapseGuard>,
     pub(crate) request_method: &'a Method,
     pub(crate) response_delay_secs: u64,
     pub(crate) state: &'a crate::runtime::RuntimeState,
@@ -57,6 +76,7 @@ pub(crate) struct DispatchCacheWriteInput<'a> {
 pub(crate) struct DispatchCachedResponseInput<'a> {
     pub(crate) response: Response<Body>,
     pub(crate) outcome: DispatchOutcome,
+    pub(crate) plan: &'a crate::runtime::ExecutionPlan,
     pub(crate) request_method: &'a Method,
     pub(crate) response_version: Option<http::Version>,
     pub(crate) proxy_name: &'a str,
@@ -71,6 +91,7 @@ pub(crate) async fn finalize_dispatch_cached_response(
     let DispatchCachedResponseInput {
         response,
         outcome,
+        plan,
         request_method,
         response_version,
         proxy_name,
@@ -90,11 +111,14 @@ pub(crate) async fn finalize_dispatch_cached_response(
     );
     http_modules.on_logging(Some(response.status()), None).await;
     annotate_dispatch_response(&mut response, audit, outcome, &[]);
-    Ok(response)
+    Ok(crate::http::capture::stream::limit_response_body_for_plan(
+        response, plan,
+    ))
 }
 
 pub(crate) async fn finalize_dispatch_stale_if_error_response(
-    revalidation_state: Option<&crate::cache::RevalidationState>,
+    revalidation_state: Option<&qpxd_cache::RevalidationState>,
+    plan: &crate::runtime::ExecutionPlan,
     request_method: &Method,
     proxy_name: &str,
     headers: Option<&CompiledHeaderControl>,
@@ -104,13 +128,14 @@ pub(crate) async fn finalize_dispatch_stale_if_error_response(
     let Some(state) = revalidation_state else {
         return Ok(None);
     };
-    let Some(stale) = crate::cache::maybe_build_stale_if_error_response(state).await else {
+    let Some(stale) = qpxd_cache::maybe_build_stale_if_error_response(state).await else {
         return Ok(None);
     };
     Ok(Some(
         finalize_dispatch_cached_response(DispatchCachedResponseInput {
             response: stale,
             outcome: crate::http::dispatch::DispatchOutcome::StaleIfError,
+            plan,
             request_method,
             response_version: None,
             proxy_name,
@@ -156,7 +181,7 @@ pub(crate) async fn write_dispatch_cache_result(
         .await;
     }
 
-    crate::cache::maybe_invalidate(
+    qpxd_cache::maybe_invalidate(
         input.request_method,
         input.response.status(),
         input.response.headers(),

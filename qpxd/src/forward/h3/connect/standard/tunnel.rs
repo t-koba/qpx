@@ -1,14 +1,11 @@
 use crate::forward::connect::{ConnectPolicyInput, decide_connect_action_from_client_hello};
 #[cfg(feature = "mitm")]
-use crate::http::body::Body;
-#[cfg(feature = "mitm")]
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 #[cfg(feature = "mitm")]
 use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
+use crate::http3::h3_buf_to_bytes;
 use crate::http3::server::H3ServerRequestStream;
 use crate::runtime::PlanFlags;
-#[cfg(feature = "mitm")]
-use crate::tls::CompiledUpstreamTlsTrust;
 #[cfg(feature = "mitm")]
 use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream, prewarm_mitm_cert};
 use crate::tls::{
@@ -16,10 +13,14 @@ use crate::tls::{
 };
 use crate::upstream::connect::TunnelIo;
 use anyhow::Result;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 #[cfg(feature = "mitm")]
 use hyper::Request;
 use qpx_core::config::{ActionConfig, ActionKind};
+#[cfg(feature = "mitm")]
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+#[cfg(feature = "mitm")]
+use qpx_http::body::Body;
 #[cfg(feature = "mitm")]
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 #[cfg(feature = "mitm")]
@@ -149,16 +150,16 @@ async fn sniff_h3_connect_client_hello(
             Ok(recv) => recv?,
             Err(_) => return Ok(out),
         };
-        let Some(mut bytes) = recv else {
+        let Some(chunk) = recv else {
             return Ok(out);
         };
-        let remaining = bytes.remaining();
+        let bytes = h3_buf_to_bytes(chunk);
+        let remaining = bytes.len();
         if remaining == 0 {
             return Ok(out);
         }
         let take = (MAX_H3_CONNECT_PEEK_BYTES - out.len()).min(remaining);
-        let bytes = bytes.copy_to_bytes(take);
-        out.extend_from_slice(bytes.as_ref());
+        out.extend_from_slice(&bytes[..take]);
         if out.len() >= MAX_H3_CONNECT_PEEK_BYTES {
             return Ok(out);
         }
@@ -283,7 +284,7 @@ pub(super) async fn mitm_h3_connect_stream(input: MitmH3ConnectInput) -> Result<
         Ok::<(), anyhow::Error>(())
     };
 
-    let _ = tokio::try_join!(mitm_fut, bridge)?;
+    tokio::try_join!(mitm_fut, bridge)?;
     Ok(())
 }
 

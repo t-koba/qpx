@@ -193,6 +193,16 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
     if runtime.h3_read_timeout_ms == 0 {
         return Err(anyhow!("runtime.h3_read_timeout_ms must be >= 1"));
     }
+    if runtime.h3_request_body_drain.max_concurrent == 0 {
+        return Err(anyhow!(
+            "runtime.h3_request_body_drain.max_concurrent must be >= 1"
+        ));
+    }
+    if runtime.h3_request_body_drain.timeout_ms == 0 {
+        return Err(anyhow!(
+            "runtime.h3_request_body_drain.timeout_ms must be >= 1"
+        ));
+    }
     if runtime.body_channel_capacity == 0 {
         return Err(anyhow!("runtime.body_channel_capacity must be >= 1"));
     }

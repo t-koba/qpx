@@ -1,11 +1,9 @@
 use lru::LruCache;
-use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "digest-auth")]
-use super::digest::sha256_hex;
+use super::util::shard_index;
 
 #[derive(Debug, Clone)]
 pub(super) struct LdapCache {
@@ -55,7 +53,7 @@ impl LdapCache {
 
     pub(super) fn get(&self, username: &str, password: &str) -> Option<Vec<String>> {
         let key = cache_key(username, password);
-        let mut guard = self.shards[shard_for(&key, self.shards.len())]
+        let mut guard = self.shards[shard_index(&key, self.shards.len())]
             .lock()
             .ok()?;
         let now = Instant::now();
@@ -73,7 +71,7 @@ impl LdapCache {
 
     pub(super) fn put(&self, username: &str, password: &str, groups: Vec<String>) {
         let key = cache_key(username, password);
-        if let Ok(mut guard) = self.shards[shard_for(&key, self.shards.len())].lock() {
+        if let Ok(mut guard) = self.shards[shard_index(&key, self.shards.len())].lock() {
             let now = Instant::now();
             guard.prune(now, self.ttl);
             guard.entries.put(
@@ -146,22 +144,14 @@ fn nonzero_capacity(value: usize) -> NonZeroUsize {
     }
 }
 
-fn shard_for<T: Hash + ?Sized>(value: &T, shards: usize) -> usize {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    (hasher.finish() as usize) % shards.max(1)
-}
-
-#[cfg(feature = "digest-auth")]
 fn password_cache_hash_hex(input: &[u8]) -> String {
-    sha256_hex(input)
-}
+    use sha2::{Digest, Sha256};
 
-#[cfg(not(feature = "digest-auth"))]
-fn password_cache_hash_hex(input: &[u8]) -> String {
-    use std::hash::{Hash as _, Hasher as _};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    input.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let digest = Sha256::digest(input);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }

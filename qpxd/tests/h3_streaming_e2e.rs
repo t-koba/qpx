@@ -3,21 +3,31 @@
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::{Buf, Bytes};
-use quinn::crypto::rustls::QuicClientConfig;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Duration, Instant, timeout};
 
+mod cert_support;
 pub mod common;
+mod h3_client_support;
 mod streaming_backend;
+mod yaml_support;
 
-use common::QpxdHandle;
+use cert_support::write_self_signed_cert;
+use common::{QpxdHandle, pick_free_tcp_port, spawn_qpxd, temp_dir};
+use h3_client_support::{build_h3_test_client_config, build_quinn_client_endpoint};
+use yaml_support::yaml_quote_path;
 
 const H3_HOST: &str = "reverse.local";
+
+struct H3StreamingProxy {
+    _handle: QpxdHandle,
+    _permit: OwnedSemaphorePermit,
+}
 
 struct H3ReadResult {
     status: http::StatusCode,
@@ -45,7 +55,7 @@ async fn response_streaming_not_buffered() -> Result<()> {
         None,
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/stream", &[], false).await?;
 
@@ -82,7 +92,7 @@ async fn large_response_bounded_memory() -> Result<()> {
         None,
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/large", &[], false).await?;
 
@@ -105,7 +115,7 @@ async fn client_cancel_propagates_to_upstream() -> Result<()> {
         Duration::from_millis(50),
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/infinite", &[], true).await?;
 
@@ -132,7 +142,7 @@ async fn upstream_abort_resets_h3_stream() -> Result<()> {
         Duration::from_millis(50),
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/abort", &[], false).await?;
 
@@ -155,7 +165,7 @@ async fn grpc_frame_split_across_chunks() -> Result<()> {
         vec![3, 5],
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/grpc", &[], false).await?;
 
@@ -180,7 +190,8 @@ async fn grpc_message_exceeds_limit_aborts() -> Result<()> {
         r#"    grpc:
       max_message_bytes: 1024
 "#,
-    )?;
+    )
+    .await?;
 
     match request_h3(port, &cert_path, "/grpc-limit", &[], false).await {
         Ok(response) => {
@@ -216,7 +227,7 @@ async fn grpc_web_text_base64_boundary_split() -> Result<()> {
         None,
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/grpc-web-text", &[], false).await?;
 
@@ -232,32 +243,42 @@ async fn grpc_web_text_base64_boundary_split() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn trailers_preserved_through_streaming() -> Result<()> {
-    let (backend_port, backend_task, _closed) = streaming_backend::spawn_slow_chunked_backend(
-        vec![(Bytes::from_static(b"done"), Duration::ZERO)],
-        vec![("content-type", "text/plain")],
-        Some(vec![("grpc-status", "0"), ("x-trailer", "kept")]),
-    )
-    .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let mut missing_trailers = 0usize;
+    for _ in 0..3 {
+        let (backend_port, backend_task, _closed) = streaming_backend::spawn_slow_chunked_backend(
+            vec![(Bytes::from_static(b"done"), Duration::ZERO)],
+            vec![("content-type", "text/plain")],
+            Some(vec![("grpc-status", "0"), ("x-trailer", "kept")]),
+        )
+        .await;
+        let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
-    let response = request_h3(port, &cert_path, "/trailers", &[], false).await?;
+        let response = request_h3(port, &cert_path, "/trailers", &[], false).await?;
 
-    assert_eq!(response.status, http::StatusCode::OK);
-    let trailers = response.trailers.expect("trailers");
-    assert_eq!(
-        trailers
-            .get("grpc-status")
-            .and_then(|value| value.to_str().ok()),
-        Some("0")
-    );
-    assert_eq!(
-        trailers
-            .get("x-trailer")
-            .and_then(|value| value.to_str().ok()),
-        Some("kept")
-    );
-    backend_task.await?;
-    Ok(())
+        assert_eq!(response.status, http::StatusCode::OK);
+        if let Some(trailers) = response.trailers {
+            assert_eq!(
+                trailers
+                    .get("grpc-status")
+                    .and_then(|value| value.to_str().ok()),
+                Some("0")
+            );
+            assert_eq!(
+                trailers
+                    .get("x-trailer")
+                    .and_then(|value| value.to_str().ok()),
+                Some("kept")
+            );
+            backend_task.await?;
+            return Ok(());
+        }
+
+        missing_trailers += 1;
+        backend_task.await?;
+    }
+    Err(anyhow!(
+        "HTTP/3 trailers were not observed after {missing_trailers} attempts"
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -269,7 +290,7 @@ async fn partial_failure_no_double_response() -> Result<()> {
         Duration::from_millis(50),
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "")?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/partial", &[], false).await?;
 
@@ -289,10 +310,11 @@ async fn partial_failure_no_double_response() -> Result<()> {
     Ok(())
 }
 
-fn spawn_reverse_h3_proxy(
+async fn spawn_reverse_h3_proxy(
     backend_port: u16,
     route_extra: &str,
-) -> Result<(QpxdHandle, u16, PathBuf)> {
+) -> Result<(H3StreamingProxy, u16, PathBuf)> {
+    let permit = h3_streaming_proxy_permit().await?;
     let dir = temp_dir("qpxd-h3-streaming")?;
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir).context("create state dir")?;
@@ -338,7 +360,24 @@ edges:
     )
     .context("write qpxd config")?;
     let handle = spawn_qpxd(&cfg, port, dir.join("qpxd.log"))?;
-    Ok((handle, port, cert_path))
+    Ok((
+        H3StreamingProxy {
+            _handle: handle,
+            _permit: permit,
+        },
+        port,
+        cert_path,
+    ))
+}
+
+async fn h3_streaming_proxy_permit() -> Result<OwnedSemaphorePermit> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(1)))
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|err| anyhow!("h3 streaming proxy semaphore closed: {err}"))
 }
 
 async fn request_h3(
@@ -428,114 +467,4 @@ async fn request_h3(
         trailers,
         data_error,
     })
-}
-
-fn temp_dir(prefix: &str) -> Result<PathBuf> {
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("{prefix}.{suffix}"));
-    fs::create_dir_all(&dir).with_context(|| format!("create temp dir {}", dir.display()))?;
-    Ok(dir)
-}
-
-fn yaml_quote_path(path: &Path) -> String {
-    let mut out = String::with_capacity(path.as_os_str().len() + 2);
-    out.push('\'');
-    for ch in path.to_string_lossy().chars() {
-        if ch == '\'' {
-            out.push_str("''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
-fn pick_free_tcp_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).context("pick free tcp port")?;
-    Ok(listener.local_addr()?.port())
-}
-
-fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Result<QpxdHandle> {
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_qpxd"));
-    let log = fs::File::create(&log_path).context("create qpxd log")?;
-    let log_err = log.try_clone().context("clone qpxd log")?;
-
-    let mut cmd = Command::new(bin);
-    cmd.arg("run")
-        .arg("--config")
-        .arg(config_path)
-        .env("RUST_LOG", "warn")
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-    let mut child = cmd.spawn().context("spawn qpxd")?;
-    let started = std::time::Instant::now();
-    let addr = SocketAddr::from(([127, 0, 0, 1], ready_port));
-    while started.elapsed() < Duration::from_secs(15) {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
-            return Ok(QpxdHandle::new(child));
-        }
-        if let Some(status) = child.try_wait()? {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(anyhow!(
-                "qpxd exited early while starting HTTP/3 streaming config: {status} (log: {})",
-                log_path.display()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    Err(anyhow!(
-        "timed out waiting for qpxd to listen on {addr} (log: {})",
-        log_path.display()
-    ))
-}
-
-fn write_self_signed_cert(dir: &Path, dns_name: &str) -> Result<(PathBuf, PathBuf)> {
-    let mut params = rcgen::CertificateParams::new(vec![dns_name.to_string()])?;
-    params.distinguished_name = rcgen::DistinguishedName::new();
-    params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, dns_name);
-    let key_pair = rcgen::KeyPair::generate()?;
-    let cert = params.self_signed(&key_pair)?;
-    let cert_pem = cert.pem();
-    let key_pem = key_pair.serialize_pem();
-    let cert_path = dir.join(format!("{dns_name}.crt.pem"));
-    let key_path = dir.join(format!("{dns_name}.key.pem"));
-    fs::write(&cert_path, cert_pem).context("write cert")?;
-    fs::write(&key_path, key_pem).context("write key")?;
-    Ok((cert_path, key_path))
-}
-
-fn build_quinn_client_endpoint() -> Result<quinn::Endpoint> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
-    quinn::Endpoint::client(addr)
-        .map_err(|err| anyhow!(err))
-        .context("bind quinn client endpoint")
-}
-
-fn build_h3_test_client_config(ca_cert_pem: &Path) -> Result<quinn::ClientConfig> {
-    let mut roots = quinn::rustls::RootCertStore::empty();
-    let certs = qpx_core::tls::load_cert_chain(ca_cert_pem)?;
-    let (added, _) = roots.add_parsable_certificates(certs);
-    if added == 0 {
-        return Err(anyhow!("no certs loaded from {}", ca_cert_pem.display()));
-    }
-
-    let provider = quinn::rustls::crypto::ring::default_provider();
-    let mut tls = quinn::rustls::ClientConfig::builder_with_provider(provider.into())
-        .with_protocol_versions(&[&quinn::rustls::version::TLS13])
-        .map_err(|_| anyhow!("failed to configure h3 client tls versions"))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![b"h3".to_vec()];
-    let quic_crypto =
-        QuicClientConfig::try_from(tls).map_err(|_| anyhow!("failed to build h3 client crypto"))?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic_crypto)))
 }

@@ -1,16 +1,16 @@
-use crate::http::body::Body;
 use crate::http::body::size::set_observed_request_size;
 use crate::http3::codec::{h3_request_to_hyper, sanitize_interim_response_for_h3};
 use crate::http3::datagram::{DatagramRegistration, H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::server::{
-    H3IncomingBodyCompletion, H3IncomingBodyOptions, H3ResponseSendOptions, H3ServerRequestStream,
-    H3ServerSendStream, h3_incoming_body, send_h3_response, send_h3_response_observed,
-    send_h3_static_response,
+    H3IncomingBodyCompletion, H3IncomingBodyOptions, H3RequestBodyDrainControl,
+    H3ResponseSendOptions, H3ServerRequestStream, H3ServerSendStream, h3_incoming_body,
+    send_h3_response, send_h3_response_observed, send_h3_static_response,
 };
 use crate::runtime::ResolvedStreamingLimits;
 use anyhow::Result;
 use async_trait::async_trait;
 use hyper::{Request, Response};
+use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -28,6 +28,7 @@ pub(crate) struct H3Limits {
     pub(crate) max_concurrent_streams_per_connection: usize,
     pub(crate) datagram_channel_capacity: usize,
     pub(crate) streaming: ResolvedStreamingLimits,
+    pub(crate) request_body_drain: H3RequestBodyDrainControl,
     pub(crate) read_timeout: Duration,
     pub(crate) proxy_name: Arc<str>,
     pub(crate) error_body: Arc<str>,
@@ -121,6 +122,15 @@ impl H3HttpResponse {
 pub(crate) trait H3RequestHandler: Clone + Send + Sync + 'static {
     fn limits(&self) -> H3Limits;
 
+    fn request_streaming_limits(
+        &self,
+        _req_head: &::http::Request<()>,
+        _conn: &H3ConnInfo,
+        fallback: ResolvedStreamingLimits,
+    ) -> ResolvedStreamingLimits {
+        fallback
+    }
+
     fn enable_extended_connect(&self) -> bool {
         false
     }
@@ -165,7 +175,7 @@ async fn handle_stream<H: H3RequestHandler>(
         .parse::<http::Method>()
         .unwrap_or(http::Method::GET);
 
-    if let Err(err) = crate::http::protocol::semantics::validate_h2_h3_request_headers(
+    if let Err(err) = qpx_http::protocol::semantics::validate_h2_h3_request_headers(
         http::Version::HTTP_3,
         req_head.headers(),
     ) {
@@ -232,12 +242,15 @@ async fn handle_stream<H: H3RequestHandler>(
         }
     }
 
+    let request_streaming =
+        handler.request_streaming_limits(&req_head, &conn_info, limits.streaming);
+
     if let Some(content_length) = declared_content_length
-        && content_length > limits.streaming.max_request_body_bytes as u64
+        && content_length > request_streaming.max_request_body_bytes as u64
     {
         warn!(
             content_length,
-            limit = limits.streaming.max_request_body_bytes,
+            limit = request_streaming.max_request_body_bytes,
             "HTTP/3 request content-length exceeds configured limit"
         );
         if let Err(err) = send_h3_static_response(
@@ -265,17 +278,17 @@ async fn handle_stream<H: H3RequestHandler>(
         crate::http::rpc::resolve_rpc_deadline(
             &request_headers,
             protocol,
-            Duration::from_millis(limits.streaming.max_grpc_stream_duration_ms),
+            Duration::from_millis(request_streaming.max_grpc_stream_duration_ms),
             grpc_started,
         )
     });
 
     let (mut send_stream, recv_stream) = req_stream.split();
-    let request_read_timeout = Duration::from_millis(limits.streaming.body_read_timeout_ms);
-    let max_request_body_bytes = limits.streaming.max_request_body_bytes;
+    let request_read_timeout = Duration::from_millis(request_streaming.body_read_timeout_ms);
+    let max_request_body_bytes = request_streaming.max_request_body_bytes;
     let listener_name = limits.listener_name.clone();
-    let max_grpc_message_bytes = limits.streaming.max_grpc_message_bytes;
-    let max_grpc_web_trailer_bytes = limits.streaming.max_grpc_web_trailer_bytes;
+    let max_grpc_message_bytes = request_streaming.max_grpc_message_bytes;
+    let max_grpc_web_trailer_bytes = request_streaming.max_grpc_web_trailer_bytes;
     let (body, request_body_completion) = h3_incoming_body(
         recv_stream,
         H3IncomingBodyOptions {
@@ -287,7 +300,8 @@ async fn handle_stream<H: H3RequestHandler>(
             max_grpc_message_bytes: Some(max_grpc_message_bytes),
             max_grpc_web_trailer_bytes: Some(max_grpc_web_trailer_bytes),
             grpc_stream_deadline: grpc_deadline.map(|deadline| deadline.instant()),
-            observe_grpc_messages: limits.streaming.observe_grpc_messages,
+            observe_grpc_messages: request_streaming.observe_grpc_messages,
+            drain_control: limits.request_body_drain.clone(),
         },
     );
     let mut request_body = Some(request_body_completion);
@@ -456,6 +470,7 @@ async fn handle_stream<H: H3RequestHandler>(
             }
         }
         Err(err) => {
+            crate::http3::response_error::emit_h3_response_send_error("h3", &err);
             warn!(error = ?err, "HTTP/3 response stream failed");
             if err.can_send_error_response() {
                 let _ = send_h3_static_response(

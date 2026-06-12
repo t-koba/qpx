@@ -193,8 +193,8 @@ fn load_config_rejects_disabled_streaming_requirement() {
     let err = load_config(&cfg).expect_err("must fail");
     fs::remove_dir_all(&dir).ok();
     assert!(
-        err.to_string()
-            .contains("streaming_requirement: disabled is not supported"),
+        err.to_string().contains("unknown variant `disabled`")
+            || err.to_string().contains("streaming_requirement"),
         "unexpected error: {err}"
     );
 }

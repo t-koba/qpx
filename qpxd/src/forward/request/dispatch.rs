@@ -1,21 +1,22 @@
-use crate::http::body::Body;
-use crate::http::body::size::observed_request_size;
+use crate::http::body::size::{limit_request_body, observed_request_size};
 use crate::http::dispatch::{
-    DispatchAuditContext, DispatchError, DispatchGuardInput, DispatchRateLimitInput,
-    DispatchRequestPrepareInput, PreparedDispatchRequest, annotate_dispatch_response,
-    evaluate_http_guard, prepare_dispatch_request, rate_limit_response,
+    DispatchAuditContext, DispatchAuditInput, DispatchError, DispatchGuardInput,
+    DispatchRequestPrepareInput, PreparedDispatchRequest, ProxyKind,
+    annotated_max_forwards_response, build_dispatch_audit_context, evaluate_http_guard,
+    prepare_dispatch_request, rate_limit_response_for_parts, request_body_too_large_response,
 };
+use crate::http::pipeline::PolicyStage;
+use crate::http::policy::response_policy::response_request_obs;
 use crate::http::policy::rule_context::{
     RequestRuleContextInput, build_request_rule_match_context,
 };
 use crate::http::protocol::base_fields::BaseRequestFields;
-use crate::http::protocol::l7::finalize_response_for_request;
-use crate::rate_limit::RateLimitContext;
+use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use anyhow::anyhow;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Request, Response};
+use qpx_http::body::Body;
 use tokio::time::{Duration, timeout};
-mod access;
 mod http_execute;
 mod local;
 mod policy;
@@ -25,9 +26,8 @@ mod request_dispatch_upstream;
 mod target;
 mod types;
 
-use self::access::{ForwardAccessInput, enforce_forward_access_control};
 use self::http_execute::{ForwardPreparedHttpInput, execute_forward_http_after_prepare};
-use self::local::{handle_forward_ftp, handle_forward_local_action, handle_forward_max_forwards};
+use self::local::{handle_forward_ftp, handle_forward_local_action};
 use self::policy::{build_forward_rate_limit_audit_context, evaluate_forward_policy_outcome};
 use self::prepare::prepare_forward_dispatch;
 use self::target::{
@@ -67,11 +67,26 @@ async fn execute_forward_request(
     }
 }
 
-fn spawn_drain_local_response_request_body(mut body: Body, body_read_timeout: Duration) {
+fn spawn_drain_local_response_request_body(
+    mut body: Body,
+    body_read_timeout: Duration,
+    max_drain_bytes: usize,
+) {
     tokio::spawn(async move {
+        let mut drained = 0usize;
         loop {
             match timeout(body_read_timeout, body.data()).await {
-                Ok(Some(Ok(_))) => {}
+                Ok(Some(Ok(chunk))) => {
+                    drained = drained.saturating_add(chunk.len());
+                    if drained > max_drain_bytes {
+                        tracing::debug!(
+                            drained,
+                            max_drain_bytes,
+                            "local response request body drain exceeded limit"
+                        );
+                        return;
+                    }
+                }
                 Ok(Some(Err(err))) => {
                     tracing::debug!(error = ?err, "local response request body drain failed");
                     return;
@@ -115,8 +130,7 @@ async fn prepare_forward_request(
     let is_ftp_request = base
         .scheme
         .as_deref()
-        .map(|scheme| scheme.eq_ignore_ascii_case("ftp"))
-        .unwrap_or(false);
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ftp"));
     let host = match resolve_forward_target_or_response(
         &req,
         &base,
@@ -126,7 +140,13 @@ async fn prepare_forward_request(
         is_ftp_request,
     )? {
         Ok(host) => host,
-        Err(response) => return Ok(ForwardPrepareOutcome::Response(Box::new(response))),
+        Err(response) => {
+            let response = crate::http::capture::stream::limit_response_body_for_plan(
+                response,
+                &compiled_edge.default_plan,
+            );
+            return Ok(ForwardPrepareOutcome::Response(Box::new(response)));
+        }
     };
     let engine = state
         .policy
@@ -139,12 +159,15 @@ async fn prepare_forward_request(
         .as_deref()
         .map(|engine| engine.candidate_profile(prefilter_ctx.clone()))
         .unwrap_or_default();
+    let edge_body_limit = state.plan.limits.body.max_observed_request_body_bytes;
     let max_observed_request_body_bytes = http_guard
         .and_then(|profile| profile.request_body_observation_cap())
-        .map(|cap| cap.min(state.plan.limits.body.max_observed_request_body_bytes))
-        .unwrap_or(state.plan.limits.body.max_observed_request_body_bytes);
+        .unwrap_or(edge_body_limit)
+        .min(edge_body_limit);
     let max_observed_request_body_bytes =
-        compiled_edge.body_observation_limit(max_observed_request_body_bytes);
+        compiled_edge.request_body_observation_limit(max_observed_request_body_bytes);
+    let body_read_timeout =
+        Duration::from_millis(compiled_edge.default_plan.streaming.body_read_timeout_ms);
     let request_version_for_observation = req.version();
     let PreparedDispatchRequest {
         req: prepared_req,
@@ -160,9 +183,7 @@ async fn prepare_forward_request(
         defer_policy_observation: true,
         http_guard,
         max_observed_request_body_bytes,
-        read_timeout: Duration::from_millis(
-            compiled_edge.default_plan.streaming.body_read_timeout_ms,
-        ),
+        read_timeout: body_read_timeout,
         request_method: &base.method,
         request_version: request_version_for_observation,
         proxy_name,
@@ -173,7 +194,13 @@ async fn prepare_forward_request(
     .await?
     {
         Ok(prepared) => prepared,
-        Err(response) => return Ok(ForwardPrepareOutcome::Response(Box::new(response))),
+        Err(response) => {
+            let response = crate::http::capture::stream::limit_response_body_for_plan(
+                response,
+                &compiled_edge.default_plan,
+            );
+            return Ok(ForwardPrepareOutcome::Response(Box::new(response)));
+        }
     };
     req = prepared_req;
     let mut request_body_observed = initial_observation_plan.needs_body;
@@ -190,31 +217,45 @@ async fn prepare_forward_request(
         req: &req,
         destination: &destination,
         proxy_name,
-        audit: DispatchAuditContext::new(
-            state.clone(),
-            crate::http::dispatch::ProxyKind::Forward,
-            listener_name,
+        audit: build_dispatch_audit_context(DispatchAuditInput {
+            state: state.clone(),
+            kind: ProxyKind::Forward,
+            scope_name: listener_name,
             remote_addr,
-            req.method().clone(),
-            path.map(str::to_string),
-            identity.to_log_context(None, None, None),
-        )
-        .with_host(Some(host.host.clone())),
+            host: Some(host.host.clone()),
+            sni: None,
+            request_method: req.method().clone(),
+            path: path.map(str::to_string),
+            matched_rule: None,
+            matched_route: None,
+            identity: &identity,
+            destination: &destination,
+            ext_authz: None,
+        }),
     })
     .await?
     {
+        let response = crate::http::capture::stream::limit_response_body_for_plan(
+            response,
+            &compiled_edge.default_plan,
+        );
         return Ok(ForwardPrepareOutcome::Response(Box::new(response)));
     }
-    let ctx = build_request_rule_match_context(RequestRuleContextInput {
-        base: &base,
-        headers: &sanitized_headers,
-        destination: &destination,
-        identity: &identity,
-        request_size: observed_request_size(&req),
-        rpc: request_rpc.as_ref(),
-        client_cert: None,
-        upstream_cert: None,
-    });
+    macro_rules! forward_rule_ctx {
+        ($identity:expr, $request_rpc:expr) => {
+            build_request_rule_match_context(RequestRuleContextInput {
+                base: &base,
+                headers: &sanitized_headers,
+                destination: &destination,
+                identity: $identity,
+                request_size: observed_request_size(&req),
+                rpc: $request_rpc,
+                client_cert: None,
+                upstream_cert: None,
+            })
+        };
+    }
+    let ctx = forward_rule_ctx!(&identity, request_rpc.as_ref());
     let policy_response = ForwardPolicyResponseInput {
         #[cfg(feature = "auth-basic")]
         state: &state,
@@ -231,42 +272,41 @@ async fn prepare_forward_request(
         request_version: req.version(),
         path,
     };
-    let mut policy_outcome = evaluate_forward_policy_outcome(ForwardPolicyOutcomeInput {
-        runtime: &runtime,
-        listener_name,
-        ctx,
-        sanitized_headers: &sanitized_headers,
-        response: policy_response,
-        auth_method: req.method().as_str(),
-        auth_uri: base.request_uri.as_str(),
-        stage_observation: true,
-    })
-    .await?;
-    if let ForwardPolicyOutcome::Observe(requirements) = policy_outcome {
+    macro_rules! evaluate_policy {
+        ($ctx:expr, $stage_observation:expr) => {
+            evaluate_forward_policy_outcome(ForwardPolicyOutcomeInput {
+                runtime: &runtime,
+                listener_name,
+                ctx: $ctx,
+                sanitized_headers: &sanitized_headers,
+                response: policy_response,
+                auth_method: req.method().as_str(),
+                auth_uri: base.request_uri.as_str(),
+                stage_observation: $stage_observation,
+            })
+        };
+    }
+    let mut policy_outcome = evaluate_policy!(ctx, true).await?;
+    if let PolicyStage::Observe(requirements) = policy_outcome {
         let observation_plan =
             crate::http::body::observation::RequestObservationPlan::from_requirements(requirements);
         req = match observation_plan
-            .observe_request(
-                req,
-                max_observed_request_body_bytes,
-                Duration::from_millis(compiled_edge.default_plan.streaming.body_read_timeout_ms),
-            )
+            .observe_request(req, max_observed_request_body_bytes, body_read_timeout)
             .await
         {
             Ok(req) => req,
             Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
-                return Ok(ForwardPrepareOutcome::Response(Box::new(
-                    finalize_response_for_request(
-                        &base.method,
-                        request_version_for_observation,
-                        proxy_name,
-                        Response::builder()
-                            .status(StatusCode::PAYLOAD_TOO_LARGE)
-                            .body(Body::from("request body too large"))
-                            .map_err(anyhow::Error::from)?,
-                        false,
-                    ),
-                )));
+                let response = request_body_too_large_response(
+                    &base.method,
+                    request_version_for_observation,
+                    proxy_name,
+                    None,
+                )?;
+                let response = crate::http::capture::stream::limit_response_body_for_plan(
+                    response,
+                    &compiled_edge.default_plan,
+                );
+                return Ok(ForwardPrepareOutcome::Response(Box::new(response)));
             }
             Err(err) => return Err(err.into()),
         };
@@ -275,27 +315,8 @@ async fn prepare_forward_request(
             request_rpc_observed = true;
         }
         request_body_observed |= observation_plan.needs_body;
-        let ctx = build_request_rule_match_context(RequestRuleContextInput {
-            base: &base,
-            headers: &sanitized_headers,
-            destination: &destination,
-            identity: &identity,
-            request_size: observed_request_size(&req),
-            rpc: request_rpc.as_ref(),
-            client_cert: None,
-            upstream_cert: None,
-        });
-        policy_outcome = evaluate_forward_policy_outcome(ForwardPolicyOutcomeInput {
-            runtime: &runtime,
-            listener_name,
-            ctx,
-            sanitized_headers: &sanitized_headers,
-            response: policy_response,
-            auth_method: req.method().as_str(),
-            auth_uri: base.request_uri.as_str(),
-            stage_observation: false,
-        })
-        .await?;
+        let ctx = forward_rule_ctx!(&identity, request_rpc.as_ref());
+        policy_outcome = evaluate_policy!(ctx, false).await?;
     }
     let ForwardAllowedPolicy {
         action,
@@ -303,42 +324,23 @@ async fn prepare_forward_request(
         matched_rule,
         identity,
     } = match policy_outcome {
-        #[cfg(feature = "auth-basic")]
-        ForwardPolicyOutcome::Rejected(err) => {
-            return Err(err);
-        }
-        ForwardPolicyOutcome::Allow(allowed) => *allowed,
-        ForwardPolicyOutcome::Observe(_) => {
+        PolicyStage::Decision(allowed) => *allowed,
+        PolicyStage::Observe(_) => {
             return Err(anyhow!(
                 "forward policy still requires request body observation after observation pass"
             )
             .into());
         }
     };
-    let response_request_observation = response_engine
-        .as_deref()
-        .map(|engine| {
-            let ctx = build_request_rule_match_context(RequestRuleContextInput {
-                base: &base,
-                headers: &sanitized_headers,
-                destination: &destination,
-                identity: &identity,
-                request_size: observed_request_size(&req),
-                rpc: request_rpc.as_ref(),
-                client_cert: None,
-                upstream_cert: None,
-            });
-            engine.request_observation_requirements_for_candidates(
-                &response_candidates_for_request,
-                &ctx,
-            )
-        })
-        .unwrap_or_default();
+    let ctx = forward_rule_ctx!(&identity, request_rpc.as_ref());
+    let response_request_observation = response_request_obs(
+        response_engine.as_deref(),
+        &response_candidates_for_request,
+        &ctx,
+    );
     let selected_plan = compiled_edge
         .execution_plan_for_rule(matched_rule.as_deref())
         .clone();
-    let body_read_timeout =
-        Duration::from_millis(compiled_edge.default_plan.streaming.body_read_timeout_ms);
     let cache_policy = selected_plan.cache.clone();
     let request_limit_ctx =
         RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule.as_deref(), None);
@@ -348,23 +350,27 @@ async fn prepare_forward_request(
     } = state.policy.rate_limiters.collect_checked_plan_request(
         &selected_plan.rate_limits,
         None,
-        crate::rate_limit::TransportScope::Request,
+        TransportScope::Request,
         &request_limit_ctx,
         1,
     )?;
     if let Some(retry_after) = retry_after {
+        let response = rate_limit_response_for_parts(
+            req.method(),
+            req.version(),
+            proxy_name,
+            Some(retry_after),
+            build_forward_rate_limit_audit_context(
+                state.clone(),
+                policy_response,
+                req.method(),
+                matched_rule.as_deref(),
+            ),
+        );
+        let response =
+            crate::http::capture::stream::limit_response_body_for_plan(response, &selected_plan);
         return Err(DispatchError::RateLimited {
-            response: Box::new(rate_limit_response(DispatchRateLimitInput {
-                req: &req,
-                proxy_name,
-                retry_after: Some(retry_after),
-                audit: build_forward_rate_limit_audit_context(
-                    state.clone(),
-                    policy_response,
-                    req.method(),
-                    matched_rule.as_deref(),
-                ),
-            })),
+            response: Box::new(response),
         });
     }
     Ok(ForwardPrepareOutcome::Prepared(Box::new(
@@ -423,11 +429,7 @@ async fn complete_forward_request(
         observation,
         mode,
     } = prepared;
-    let Some(runtime) = context.runtime else {
-        return Err(DispatchError::Internal(anyhow::anyhow!(
-            "forward prepared request missing runtime"
-        )));
-    };
+    let runtime = context.runtime.ok_or_else(missing_forward_runtime)?;
     let state = context.state;
     let proxy_name = context.proxy_name;
     let listener_name = context.listener_name;
@@ -457,36 +459,73 @@ async fn complete_forward_request(
     let listener_name = listener_name.as_str();
     let request_method = req.method().clone();
     let client_version = req.version();
-    let access = match enforce_forward_access_control(ForwardAccessInput {
-        state: state.clone(),
-        effective_policy: &effective_policy,
-        proxy_name,
-        listener_name,
-        remote_addr,
-        host: &host,
-        base: &base,
-        destination: &destination,
-        identity: &identity,
-        sanitized_headers: &sanitized_headers,
-        request_method: request_method.clone(),
-        request_version: client_version,
-        action,
-        headers,
-        matched_rule: matched_rule.clone(),
-        cache_policy,
-        request_limits: &mut request_limits,
-        request_limit_ctx: &request_limit_ctx,
-    })
-    .await?
-    {
-        ForwardAccessOutcome::Response(response) => return Ok(*response),
-        ForwardAccessOutcome::Continue(access) => *access,
+    let mut action = action;
+    let mut headers = headers;
+    let mut cache_policy = cache_policy;
+    let decision =
+        crate::http::dispatch::enforce_http_access(crate::http::dispatch::HttpAccessInput {
+            state: &state,
+            policy: &effective_policy,
+            kind: ProxyKind::Forward,
+            mode: crate::policy_context::ExtAuthzMode::ForwardHttp,
+            enforce_ext_authz: true,
+            proxy_name,
+            scope_name: listener_name,
+            remote_addr,
+            dst_port: host.port,
+            host: Some(host.host.as_str()),
+            sni: None,
+            request_method: &request_method,
+            request_version: client_version,
+            path: base.path.as_deref(),
+            uri: Some(base.request_uri.as_str()),
+            matched_rule: matched_rule.as_deref(),
+            matched_route: None,
+            action: Some(&action),
+            sanitized_headers: &sanitized_headers,
+            identity: &identity,
+            destination: &destination,
+            base_headers: headers.take(),
+            request_limit: Some((
+                &mut request_limits,
+                &request_limit_ctx,
+                &state.policy.rate_limiters,
+            )),
+            default_deny_response: crate::http::protocol::common::forbidden_response(
+                state.messages.forbidden.as_str(),
+            ),
+        })
+        .await?;
+    let (audit, timeout_override) = match decision {
+        crate::http::dispatch::HttpAccessDecision::Blocked {
+            response,
+            rate_limited,
+        } => {
+            let response = crate::http::capture::stream::limit_response_body_for_plan(
+                *response,
+                &selected_plan,
+            );
+            return Err(if rate_limited {
+                DispatchError::RateLimited {
+                    response: Box::new(response),
+                }
+            } else {
+                DispatchError::ExtAuthzDenied {
+                    response: Box::new(response),
+                }
+            });
+        }
+        crate::http::dispatch::HttpAccessDecision::Allow(allowed) => {
+            let crate::http::dispatch::HttpAccessAllowed { audit, controls } = *allowed;
+            let timeout_override = controls.as_ref().and_then(|allow| allow.timeout_override);
+            if let Some(allow) = controls {
+                headers = allow.headers.clone();
+                cache_policy = (!allow.cache_bypass).then_some(cache_policy).flatten();
+                allow.apply_action_overrides(&mut action);
+            }
+            (audit, timeout_override)
+        }
     };
-    let action = access.action;
-    let headers = access.headers;
-    let cache_policy = access.cache_policy;
-    let timeout_override = access.timeout_override;
-    let audit = access.audit;
 
     if let Some(response) = handle_forward_local_action(
         &req,
@@ -496,9 +535,21 @@ async fn complete_forward_request(
         headers.as_deref(),
         &audit,
     )? {
-        spawn_drain_local_response_request_body(req.into_body(), body_read_timeout);
+        spawn_drain_local_response_request_body(
+            req.into_body(),
+            body_read_timeout,
+            selected_plan.streaming.max_request_body_bytes,
+        );
         return Ok(response);
     }
+
+    req = match limit_request_body(req, selected_plan.streaming.max_request_body_bytes) {
+        Ok(req) => req,
+        Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
+            return forward_payload_too_large_response(&base, client_version, proxy_name, &audit);
+        }
+        Err(err) => return Err(err.into()),
+    };
 
     if is_ftp_request {
         let response = handle_forward_ftp(
@@ -514,50 +565,39 @@ async fn complete_forward_request(
         return Ok(response);
     }
 
-    if !response_request_observation.is_empty()
-        && ((response_request_observation.needs_body && !request_body_observed)
-            || (response_request_observation.needs_rpc && !request_rpc_observed))
-    {
-        let observation_plan =
-            crate::http::body::observation::RequestObservationPlan::from_requirements(
-                response_request_observation,
-            );
-        req = match observation_plan
-            .observe_request(req, max_observed_request_body_bytes, body_read_timeout)
-            .await
+    let (observed_req, needs_rpc) =
+        match crate::http::body::observation::observe_missing_request_requirements(
+            req,
+            response_request_observation,
+            request_body_observed,
+            request_rpc_observed,
+            max_observed_request_body_bytes,
+            body_read_timeout,
+        )
+        .await
         {
-            Ok(req) => req,
+            Ok(observed) => observed,
             Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
-                let mut response = finalize_response_for_request(
-                    &base.method,
+                return forward_payload_too_large_response(
+                    &base,
                     client_version,
                     proxy_name,
-                    Response::builder()
-                        .status(StatusCode::PAYLOAD_TOO_LARGE)
-                        .body(Body::from("request body too large"))
-                        .map_err(anyhow::Error::from)?,
-                    false,
-                );
-                annotate_dispatch_response(
-                    &mut response,
                     &audit,
-                    crate::http::dispatch::DispatchOutcome::Error,
-                    &[],
                 );
-                return Ok(response);
             }
             Err(err) => return Err(err.into()),
         };
-        if observation_plan.needs_rpc {
-            request_rpc = Some(crate::http::rpc::inspect_request(&req).await);
-        }
+    req = observed_req;
+    if needs_rpc {
+        request_rpc = Some(crate::http::rpc::inspect_request(&req).await);
     }
-    if let Some(response) = handle_forward_max_forwards(
+    if let Some(response) = annotated_max_forwards_response(
         &mut req,
-        &state,
         proxy_name,
-        &audit,
+        state.plan.limits.general.trace_reflect_all_headers,
+        state.plan.limits.body.max_observed_request_body_bytes,
         Duration::from_millis(selected_plan.streaming.body_read_timeout_ms),
+        &audit,
     )
     .await
     {
@@ -584,8 +624,14 @@ async fn complete_forward_request(
     })
     .await?
     {
-        ForwardDispatchPrepareOutcome::Response(response) => return Ok(*response),
-        ForwardDispatchPrepareOutcome::Ready(ready) => *ready,
+        ForwardDispatchPrepareOutcome::Response(response) => {
+            let response = crate::http::capture::stream::limit_response_body_for_plan(
+                *response,
+                &selected_plan,
+            );
+            return Ok(response);
+        }
+        ForwardDispatchPrepareOutcome::Prepared(ready) => *ready,
     };
     execute_forward_http_after_prepare(ForwardPreparedHttpInput {
         ready,
@@ -610,4 +656,22 @@ async fn complete_forward_request(
     })
     .await
     .map_err(DispatchError::from)
+}
+
+fn missing_forward_runtime() -> DispatchError {
+    DispatchError::Internal(anyhow::anyhow!("forward prepared request missing runtime"))
+}
+
+fn forward_payload_too_large_response(
+    base: &BaseRequestFields,
+    client_version: http::Version,
+    proxy_name: &str,
+    audit: &DispatchAuditContext,
+) -> std::result::Result<Response<Body>, DispatchError> {
+    Ok(request_body_too_large_response(
+        &base.method,
+        client_version,
+        proxy_name,
+        Some(audit),
+    )?)
 }

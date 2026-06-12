@@ -13,7 +13,7 @@ pub enum DestinationEvidenceSourceKind {
     Heuristic,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationConflictMode {
     PreferPrecedence,
@@ -21,14 +21,14 @@ pub enum DestinationConflictMode {
     RequireAgreement,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationMergeMode {
     FirstWins,
     StrongestPerDimension,
 }
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct DestinationMinConfidenceConfig {
     #[serde(default)]
@@ -39,7 +39,7 @@ pub struct DestinationMinConfidenceConfig {
     pub application: Option<u8>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct DestinationResolutionPolicyConfig {
     #[serde(default = "default_destination_resolution_precedence")]
@@ -63,7 +63,7 @@ impl Default for DestinationResolutionPolicyConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct DestinationResolutionOverrideConfig {
     #[serde(default)]

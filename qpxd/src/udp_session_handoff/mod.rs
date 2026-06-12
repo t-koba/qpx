@@ -112,6 +112,7 @@ impl UdpSessionRestoreState {
         let Some(raw) = std::env::var_os(ENV_INHERITED_UDP_SESSIONS) else {
             return Ok(None);
         };
+        // SAFETY: the process environment is mutated only during controlled handoff bootstrap.
         unsafe {
             std::env::remove_var(ENV_INHERITED_UDP_SESSIONS);
         }

@@ -1,4 +1,5 @@
-use anyhow::{Result, anyhow};
+use crate::H3Result as Result;
+use anyhow::anyhow;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -64,7 +65,7 @@ pub(crate) fn decode(input: &[u8]) -> Result<Vec<u8>> {
             state = next;
             if let Some(symbol) = nodes[state].symbol {
                 if symbol == 256 {
-                    return Err(anyhow!("EOS symbol is not valid inside HPACK Huffman data"));
+                    return Err(anyhow!("EOS symbol is not valid inside HPACK Huffman data").into());
                 }
                 out.push(symbol as u8);
                 state = 0;
@@ -75,7 +76,7 @@ pub(crate) fn decode(input: &[u8]) -> Result<Vec<u8>> {
     }
 
     if state != 0 && !(pending_bits <= 7 && pending_all_ones) {
-        return Err(anyhow!("invalid HPACK Huffman padding"));
+        return Err(anyhow!("invalid HPACK Huffman padding").into());
     }
 
     Ok(out)

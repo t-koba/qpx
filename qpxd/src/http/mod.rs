@@ -4,6 +4,7 @@ pub mod codec;
 pub mod dispatch;
 pub mod dispatcher;
 pub mod local_response;
+pub(crate) mod metrics;
 #[cfg(feature = "mitm")]
 pub mod mitm;
 pub mod modules;

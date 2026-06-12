@@ -1,16 +1,17 @@
-use crate::http::body::Body;
 use crate::http::protocol::common::request_with_shared_client;
+use crate::http::protocol::header_control::set_proxy_authorization_header;
 use crate::http::protocol::websocket::spawn_upgrade_tunnel;
-use crate::tls::CompiledUpstreamTlsTrust;
-use crate::tls::client::connect_tls_http1_with_options;
 use crate::upstream::origin::OriginEndpoint;
 use crate::upstream::pool::send_via_upstream_proxy;
 use crate::upstream::raw_http1::{Http1ResponseWithInterim, send_http1_request_with_interim};
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use hyper::header::{CONNECTION, HOST, HeaderValue, PROXY_AUTHORIZATION, UPGRADE};
+use hyper::header::{CONNECTION, HOST, HeaderValue, UPGRADE};
 use hyper::{Request, Response, Uri};
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_http::body::Body;
+use qpx_http::tls::client::connect_tls_http1_with_options;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::{Instant, timeout};
@@ -156,7 +157,7 @@ pub(crate) fn parse_upstream_proxy_endpoint(upstream: &str) -> Result<UpstreamPr
             .port_or_known_default()
             .ok_or_else(|| anyhow!("upstream proxy missing port"))?;
         let authority =
-            crate::http::protocol::address::format_authority_host_port(host.as_str(), port);
+            qpx_http::protocol::address::format_authority_host_port(host.as_str(), port);
         let proxy_authorization = if !url.username().is_empty() || url.password().is_some() {
             let creds = format!("{}:{}", url.username(), url.password().unwrap_or(""));
             let encoded = BASE64.encode(creds);
@@ -169,10 +170,10 @@ pub(crate) fn parse_upstream_proxy_endpoint(upstream: &str) -> Result<UpstreamPr
         (scheme, authority, host, proxy_authorization)
     } else {
         let (host, port) =
-            crate::http::protocol::address::parse_authority_host_port(upstream.trim(), 80)
+            qpx_http::protocol::address::parse_authority_host_port(upstream.trim(), 80)
                 .ok_or_else(|| anyhow!("invalid upstream proxy authority: {}", upstream))?;
         let authority =
-            crate::http::protocol::address::format_authority_host_port(host.as_str(), port);
+            qpx_http::protocol::address::format_authority_host_port(host.as_str(), port);
         (
             UpstreamProxyScheme::Http,
             authority,
@@ -194,7 +195,7 @@ pub(crate) async fn open_upstream_proxy_sender(
     timeout_dur: Option<Duration>,
     context: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
-) -> Result<crate::http::protocol::common::Http1SendRequest> {
+) -> Result<qpx_http::protocol::common::Http1SendRequest> {
     let tcp = match timeout_dur {
         Some(dur) => timeout(dur, TcpStream::connect(endpoint.authority.as_str())).await??,
         None => TcpStream::connect(endpoint.authority.as_str()).await?,
@@ -203,9 +204,9 @@ pub(crate) async fn open_upstream_proxy_sender(
         UpstreamProxyScheme::Http => {
             let (sender, conn) = match timeout_dur {
                 Some(dur) => {
-                    timeout(dur, crate::http::protocol::common::handshake_http1(tcp)).await??
+                    timeout(dur, qpx_http::protocol::common::handshake_http1(tcp)).await??
                 }
-                None => crate::http::protocol::common::handshake_http1(tcp).await?,
+                None => qpx_http::protocol::common::handshake_http1(tcp).await?,
             };
             let authority = endpoint.authority.clone();
             let context = context.to_string();
@@ -236,9 +237,9 @@ pub(crate) async fn open_upstream_proxy_sender(
             };
             let (sender, conn) = match timeout_dur {
                 Some(dur) => {
-                    timeout(dur, crate::http::protocol::common::handshake_http1(tls)).await??
+                    timeout(dur, qpx_http::protocol::common::handshake_http1(tls)).await??
                 }
-                None => crate::http::protocol::common::handshake_http1(tls).await?,
+                None => qpx_http::protocol::common::handshake_http1(tls).await?,
             };
             let authority = endpoint.authority.clone();
             let context = context.to_string();
@@ -261,14 +262,14 @@ pub(crate) async fn open_http1_sender(
     authority: &str,
     timeout_dur: Option<Duration>,
     context: &str,
-) -> Result<crate::http::protocol::common::Http1SendRequest> {
+) -> Result<qpx_http::protocol::common::Http1SendRequest> {
     let stream = match timeout_dur {
         Some(dur) => timeout(dur, TcpStream::connect(authority)).await??,
         None => TcpStream::connect(authority).await?,
     };
     let (sender, conn) = match timeout_dur {
-        Some(dur) => timeout(dur, crate::http::protocol::common::handshake_http1(stream)).await??,
-        None => crate::http::protocol::common::handshake_http1(stream).await?,
+        Some(dur) => timeout(dur, qpx_http::protocol::common::handshake_http1(stream)).await??,
+        None => qpx_http::protocol::common::handshake_http1(stream).await?,
     };
     let authority = authority.to_string();
     let context = context.to_string();
@@ -304,10 +305,7 @@ pub(crate) async fn proxy_websocket_http1(
 
     let mut sender = if let Some(upstream_proxy) = upstream_proxy {
         let endpoint = upstream_proxy.endpoint();
-        req.headers_mut().remove(PROXY_AUTHORIZATION);
-        if let Some(value) = endpoint.proxy_authorization.as_ref() {
-            req.headers_mut().insert(PROXY_AUTHORIZATION, value.clone());
-        }
+        set_proxy_authorization_header(req.headers_mut(), endpoint.proxy_authorization.as_ref());
         let sender = open_upstream_proxy_sender(
             endpoint,
             Some(timeout_dur),
@@ -359,11 +357,12 @@ pub(crate) async fn proxy_http1_request(
     upstream_proxy: Option<&crate::upstream::pool::ResolvedUpstreamProxy>,
     direct_authority: &str,
     timeout_dur: Duration,
+    proxy_pool: &crate::upstream::pool::UpstreamProxyPool,
 ) -> Result<Response<Body>> {
     ensure_absolute_uri(&mut req, "http", direct_authority)?;
     *req.version_mut() = http::Version::HTTP_11;
     if let Some(upstream) = upstream_proxy {
-        return send_via_upstream_proxy(req, upstream, timeout_dur).await;
+        return send_via_upstream_proxy(req, upstream, timeout_dur, proxy_pool).await;
     }
     Ok(timeout(timeout_dur, request_with_shared_client(req)).await??)
 }

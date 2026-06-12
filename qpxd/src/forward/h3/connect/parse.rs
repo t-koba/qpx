@@ -22,9 +22,9 @@ pub(super) fn validate_h3_connect_head(
     authority_port: u16,
     allow_extended_connect: bool,
 ) -> Result<()> {
-    crate::http::protocol::semantics::validate_h2_h3_connect_headers(headers)
+    qpx_http::protocol::semantics::validate_h2_h3_connect_headers(headers)
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
-    crate::http::protocol::semantics::validate_expect_header(headers)
+    qpx_http::protocol::semantics::validate_expect_header(headers)
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
     let protocol = if allow_extended_connect {
         match req_head.extensions().get::<::h3::ext::Protocol>().copied() {
@@ -89,7 +89,7 @@ pub(in crate::forward) fn validate_h3_connect_pseudo_headers(
             return Err(anyhow!("Host header must not be empty"));
         }
         let (host_name, host_port) =
-            crate::http::protocol::address::parse_authority_host_port(raw, authority_port)
+            qpx_http::protocol::address::parse_authority_host_port(raw, authority_port)
                 .ok_or_else(|| anyhow!("invalid Host header"))?;
         if host_port != authority_port || !host_name.eq_ignore_ascii_case(authority_host) {
             return Err(anyhow!("Host header does not match CONNECT authority"));
@@ -126,7 +126,7 @@ pub(in crate::forward) fn parse_connect_authority_with_default(
     authority: &str,
     default_port: Option<u16>,
 ) -> Result<(String, u16)> {
-    crate::http::protocol::address::parse_authority_host_port_with_default(authority, default_port)
+    qpx_http::protocol::address::parse_authority_host_port_with_default(authority, default_port)
         .ok_or_else(|| anyhow!("invalid CONNECT authority"))
 }
 
@@ -245,12 +245,12 @@ fn parse_connect_udp_target_from_template(
             .ok_or_else(|| anyhow!("CONNECT-UDP requires :authority"))?;
         let default_port = default_port_for_scheme(template_scheme);
         let (template_host, template_port) =
-            crate::http::protocol::address::parse_authority_host_port(
+            qpx_http::protocol::address::parse_authority_host_port(
                 template_authority,
                 default_port,
             )
             .ok_or_else(|| anyhow!("invalid CONNECT-UDP uri_template authority"))?;
-        let (req_host, req_port) = crate::http::protocol::address::parse_authority_host_port(
+        let (req_host, req_port) = qpx_http::protocol::address::parse_authority_host_port(
             req_authority.as_str(),
             default_port,
         )

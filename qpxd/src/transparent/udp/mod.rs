@@ -1,6 +1,6 @@
 #[cfg(test)]
 use super::quic::extract_quic_client_hello_info;
-use super::quic::{extract_quic_client_hello_info_with_fingerprints, looks_like_quic_initial};
+use crate::http::metrics as http_metrics;
 use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
 use crate::udp_session_handoff::{
@@ -9,7 +9,6 @@ use crate::udp_session_handoff::{
 };
 use crate::udp_socket_handoff::duplicate_tokio_udp_socket;
 use anyhow::{Context, Result, anyhow};
-use metrics::{counter, histogram};
 use qpx_core::config::IngressEdgeConfig;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -212,13 +211,11 @@ pub(super) async fn run_transparent_udp_listener(
                 };
 
                 let state = runtime.state();
-                counter!(
-                    state.observability.metric_names.transparent_requests_total.clone(),
-                    "result" => result
-                )
-                .increment(1);
-                histogram!(state.observability.metric_names.transparent_latency_ms.clone())
-                    .record(started.elapsed().as_secs_f64() * 1000.0);
+                http_metrics::transparent_request(
+                    &state.observability.metric_names,
+                    result,
+                    started.elapsed(),
+                );
             }
         }
     }

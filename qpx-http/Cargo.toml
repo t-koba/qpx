@@ -1,0 +1,41 @@
+[package]
+name = "qpx-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Markers mirroring qpxd's HTTP/3 backend gates so shared `#[cfg(feature = ...)]`
+# code (e.g. h2/h3 header validation) resolves consistently. Forwarded by qpxd.
+http3 = []
+http3-backend-h3 = ["http3"]
+http3-backend-qpx = ["http3"]
+# TLS client backends for the shared connection builder, forwarded by qpxd.
+tls-rustls = ["dep:rustls", "dep:tokio-rustls", "qpx-core/tls-rustls"]
+tls-native = ["dep:native-tls", "dep:tokio-native-tls", "qpx-core/tls-native"]
+
+[dependencies]
+qpx-core = { path = "../qpx-core", default-features = false }
+tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "rt", "macros"] }
+anyhow.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tokio-util.workspace = true
+metrics.workspace = true
+h2.workspace = true
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+native-tls = { workspace = true, optional = true }
+tokio-native-tls = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time", "net", "io-util"] }
+rcgen = { workspace = true }

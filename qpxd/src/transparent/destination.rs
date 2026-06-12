@@ -1,5 +1,3 @@
-use crate::http::body::Body;
-use crate::http::protocol::address::parse_authority_host_port;
 use crate::http::protocol::common::resolve_named_upstream;
 use crate::upstream::connect::{ConnectedTunnel, connect_tunnel_target};
 use crate::xdp;
@@ -7,6 +5,8 @@ use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use hyper::Request;
 use qpx_core::config::{ActionConfig, IngressEdgeConfig, OriginalDstSource};
+use qpx_http::body::Body;
+use qpx_http::protocol::address::parse_authority_host_port;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -236,6 +236,7 @@ fn original_dst_socket_linux(stream: &tokio::net::TcpStream) -> Result<SocketAdd
     // IPv4 (iptables / SO_ORIGINAL_DST).
     let mut addr4: MaybeUninit<sockaddr_in> = MaybeUninit::uninit();
     let mut len4 = std::mem::size_of::<sockaddr_in>() as socklen_t;
+    // SAFETY: fd is a live socket and addr4/len4 point to valid writable storage.
     let ret4 = unsafe {
         getsockopt(
             fd,
@@ -252,6 +253,7 @@ fn original_dst_socket_linux(stream: &tokio::net::TcpStream) -> Result<SocketAdd
                 len4
             ));
         }
+        // SAFETY: getsockopt returned success and a full sockaddr_in length.
         let addr = unsafe { addr4.assume_init() };
         let ip = std::net::Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
         let port = u16::from_be(addr.sin_port);
@@ -263,6 +265,7 @@ fn original_dst_socket_linux(stream: &tokio::net::TcpStream) -> Result<SocketAdd
     const IP6T_SO_ORIGINAL_DST: i32 = 80;
     let mut addr6: MaybeUninit<sockaddr_in6> = MaybeUninit::uninit();
     let mut len6 = std::mem::size_of::<sockaddr_in6>() as socklen_t;
+    // SAFETY: fd is a live socket and addr6/len6 point to valid writable storage.
     let ret6 = unsafe {
         getsockopt(
             fd,
@@ -286,6 +289,7 @@ fn original_dst_socket_linux(stream: &tokio::net::TcpStream) -> Result<SocketAdd
             len6
         ));
     }
+    // SAFETY: getsockopt returned success and a full sockaddr_in6 length.
     let addr = unsafe { addr6.assume_init() };
     let ip = std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr);
     let port = u16::from_be(addr.sin6_port);

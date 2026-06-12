@@ -1,6 +1,6 @@
 use super::super::super::backend_h3::ForwardH3Handler;
 use super::{
-    H3ConnectPreparation, H3PolicyResponseContext, build_h3_connect_success_response,
+    H3PolicyResponseContext, build_h3_connect_success_response,
     normalize_h3_upstream_connect_headers, prepare_h3_connect_request,
     recv_upstream_h3_response_with_interim, send_h3_policy_response,
 };
@@ -9,20 +9,22 @@ mod upstream;
 
 use self::chained::{apply_connect_udp_bandwidth_controls, relay_h3_connect_udp_stream_chained};
 use self::upstream::{UpstreamConnectUdpParams, open_upstream_connect_udp_stream};
-use crate::http::body::Body;
+use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::capsule::{
     CapsuleBuffer, decode_quic_varint, encode_datagram_capsule_context_header,
 };
 use crate::http3::datagram::H3StreamDatagrams;
+use crate::http3::h3_buf_to_bytes;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::H3ServerRequestStream;
 use crate::policy_context::{AuditRecord, emit_audit_log};
-use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
+use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use hyper::{Response, StatusCode};
 use qpx_core::config::ConnectUdpConfig;
+use qpx_http::body::Body;
 use std::net::SocketAddr;
 use tokio::net::{UdpSocket, lookup_host};
 use tokio::time::{Duration, timeout};
@@ -45,8 +47,8 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
     )
     .await?
     {
-        H3ConnectPreparation::Continue(prepared) => *prepared,
-        H3ConnectPreparation::Responded => return Ok(()),
+        Some(prepared) => *prepared,
+        None => return Ok(()),
     };
 
     let state = handler.runtime.state();
@@ -70,10 +72,11 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         .plan
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled HTTP/3 CONNECT-UDP execution plan not found"))?;
+    let matched_rule_name = matched_rule.as_deref();
     let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
         &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
-        crate::rate_limit::TransportScope::Http3Datagram,
+        TransportScope::Http3Datagram,
     )?;
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
@@ -91,10 +94,63 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
                     host: host.as_str(),
                     path: audit_path.as_deref(),
                     outcome: $outcome,
-                    matched_rule: matched_rule.as_deref(),
+                    matched_rule: matched_rule_name,
                     ext_authz_policy_id: ext_authz_policy_id.as_deref(),
                     log_context: &log_context,
                 },
+            )
+        };
+    }
+    macro_rules! send_proxy_error {
+        () => {
+            send_policy!(
+                finalize_response_with_headers(
+                    &http::Method::CONNECT,
+                    http::Version::HTTP_3,
+                    proxy_name.as_str(),
+                    Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(Body::from(state.messages.proxy_error.clone()))?,
+                    response_headers.as_deref(),
+                    false,
+                ),
+                DispatchOutcome::Error
+            )
+        };
+    }
+    macro_rules! send_upstream_connect_udp_failed {
+        () => {
+            send_policy!(
+                finalize_response_with_headers(
+                    &http::Method::CONNECT,
+                    http::Version::HTTP_3,
+                    proxy_name.as_str(),
+                    Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(Body::from(
+                            state.messages.upstream_connect_udp_failed.clone(),
+                        ))?,
+                    response_headers.as_deref(),
+                    false,
+                ),
+                DispatchOutcome::Error
+            )
+        };
+    }
+    macro_rules! send_concurrency_limited {
+        () => {
+            send_policy!(
+                finalize_response_with_headers(
+                    &http::Method::CONNECT,
+                    http::Version::HTTP_3,
+                    proxy_name.as_str(),
+                    Response::builder()
+                        .status(StatusCode::TOO_MANY_REQUESTS)
+                        .body(Body::from("too many requests"))?,
+                    response_headers.as_deref(),
+                    false,
+                ),
+                DispatchOutcome::ConcurrencyLimited
             )
         };
     }
@@ -109,17 +165,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
                 error = ?err,
                 "forward HTTP/3 CONNECT-UDP upstream resolution failed"
             );
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
+            send_proxy_error!().await?;
             return Ok(());
         }
     };
@@ -129,21 +175,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
     let _concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_context) {
         Some(permits) => permits,
         None => {
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::TOO_MANY_REQUESTS)
-                    .body(Body::from("too many requests"))?,
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(
-                response,
-                crate::http::dispatch::DispatchOutcome::ConcurrencyLimited
-            )
-            .await?;
+            send_concurrency_limited!().await?;
             return Ok(());
         }
     };
@@ -187,19 +219,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
                     upstream = %upstream_target,
                     "failed to establish CONNECT-UDP upstream chain"
                 );
-                let response = finalize_response_with_headers(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name.as_str(),
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::from(
-                            state.messages.upstream_connect_udp_failed.clone(),
-                        ))?,
-                    response_headers.as_deref(),
-                    false,
-                );
-                send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
+                send_upstream_connect_udp_failed!().await?;
                 return Ok(());
             }
         };
@@ -223,16 +243,16 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         emit_audit_log(
             &state,
             AuditRecord {
-                kind: crate::http::dispatch::ProxyKind::Forward,
+                kind: ProxyKind::Forward,
                 name: handler.listener_name.as_ref(),
                 remote_ip: conn.remote_addr.ip(),
                 host: Some(host.as_str()),
                 sni: Some(host.as_str()),
                 method: Some("CONNECT"),
                 path: audit_path.as_deref(),
-                outcome: crate::http::dispatch::DispatchOutcome::Allow,
+                outcome: DispatchOutcome::Allow,
                 status: Some(StatusCode::OK.as_u16()),
-                matched_rule: matched_rule.as_deref(),
+                matched_rule: matched_rule_name,
                 matched_route: None,
                 ext_authz_policy_id: ext_authz_policy_id.as_deref(),
             },
@@ -265,48 +285,18 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         Ok(Ok(mut addrs)) => match addrs.next() {
             Some(addr) => addr,
             None => {
-                let response = finalize_response_with_headers(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name.as_str(),
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::from(state.messages.proxy_error.clone()))?,
-                    response_headers.as_deref(),
-                    false,
-                );
-                send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
+                send_proxy_error!().await?;
                 return Ok(());
             }
         },
         Ok(Err(err)) => {
             warn!(error = ?err, "forward HTTP/3 CONNECT-UDP DNS resolution failed");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
+            send_proxy_error!().await?;
             return Ok(());
         }
         Err(_) => {
             warn!("forward HTTP/3 CONNECT-UDP DNS resolution timed out");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
+            send_proxy_error!().await?;
             return Ok(());
         }
     };
@@ -320,17 +310,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         Ok(udp) => udp,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 CONNECT-UDP bind failed");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
+            send_proxy_error!().await?;
             return Ok(());
         }
     };
@@ -338,32 +318,12 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
             warn!(error = ?err, "forward HTTP/3 CONNECT-UDP connect failed");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
+            send_proxy_error!().await?;
             return Ok(());
         }
         Err(_) => {
             warn!("forward HTTP/3 CONNECT-UDP connect timed out");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
-                response_headers.as_deref(),
-                false,
-            );
-            send_policy!(response, crate::http::dispatch::DispatchOutcome::Error).await?;
+            send_proxy_error!().await?;
             return Ok(());
         }
     }
@@ -377,16 +337,16 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
     emit_audit_log(
         &state,
         AuditRecord {
-            kind: crate::http::dispatch::ProxyKind::Forward,
+            kind: ProxyKind::Forward,
             name: handler.listener_name.as_ref(),
             remote_ip: conn.remote_addr.ip(),
             host: Some(host.as_str()),
             sni: Some(host.as_str()),
             method: Some("CONNECT"),
             path: audit_path.as_deref(),
-            outcome: crate::http::dispatch::DispatchOutcome::Allow,
+            outcome: DispatchOutcome::Allow,
             status: Some(StatusCode::OK.as_u16()),
-            matched_rule: matched_rule.as_deref(),
+            matched_rule: matched_rule_name,
             matched_route: None,
             ext_authz_policy_id: ext_authz_policy_id.as_deref(),
         },
@@ -436,9 +396,8 @@ async fn relay_h3_connect_udp_stream(
             }
             recv = req_recv.recv_data() => {
                 match recv? {
-                    Some(mut bytes) => {
-                        let remaining = bytes.remaining();
-                        let bytes = bytes.copy_to_bytes(remaining);
+                    Some(chunk) => {
+                        let bytes = h3_buf_to_bytes(chunk);
                         capsule_buf.push(bytes, connect_udp_cfg.max_capsule_buffer_bytes)?;
                         while let Some((capsule_type, payload)) = capsule_buf.take_next()? {
                             if capsule_type != 0 {
