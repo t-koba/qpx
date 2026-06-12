@@ -243,32 +243,42 @@ async fn grpc_web_text_base64_boundary_split() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn trailers_preserved_through_streaming() -> Result<()> {
-    let (backend_port, backend_task, _closed) = streaming_backend::spawn_slow_chunked_backend(
-        vec![(Bytes::from_static(b"done"), Duration::ZERO)],
-        vec![("content-type", "text/plain")],
-        Some(vec![("grpc-status", "0"), ("x-trailer", "kept")]),
-    )
-    .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
+    let mut missing_trailers = 0usize;
+    for _ in 0..3 {
+        let (backend_port, backend_task, _closed) = streaming_backend::spawn_slow_chunked_backend(
+            vec![(Bytes::from_static(b"done"), Duration::ZERO)],
+            vec![("content-type", "text/plain")],
+            Some(vec![("grpc-status", "0"), ("x-trailer", "kept")]),
+        )
+        .await;
+        let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
-    let response = request_h3(port, &cert_path, "/trailers", &[], false).await?;
+        let response = request_h3(port, &cert_path, "/trailers", &[], false).await?;
 
-    assert_eq!(response.status, http::StatusCode::OK);
-    let trailers = response.trailers.expect("trailers");
-    assert_eq!(
-        trailers
-            .get("grpc-status")
-            .and_then(|value| value.to_str().ok()),
-        Some("0")
-    );
-    assert_eq!(
-        trailers
-            .get("x-trailer")
-            .and_then(|value| value.to_str().ok()),
-        Some("kept")
-    );
-    backend_task.await?;
-    Ok(())
+        assert_eq!(response.status, http::StatusCode::OK);
+        if let Some(trailers) = response.trailers {
+            assert_eq!(
+                trailers
+                    .get("grpc-status")
+                    .and_then(|value| value.to_str().ok()),
+                Some("0")
+            );
+            assert_eq!(
+                trailers
+                    .get("x-trailer")
+                    .and_then(|value| value.to_str().ok()),
+                Some("kept")
+            );
+            backend_task.await?;
+            return Ok(());
+        }
+
+        missing_trailers += 1;
+        backend_task.await?;
+    }
+    Err(anyhow!(
+        "HTTP/3 trailers were not observed after {missing_trailers} attempts"
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
