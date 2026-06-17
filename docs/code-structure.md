@@ -32,7 +32,7 @@ qpxc              client: streams PCAPNG from qpxr to Wireshark or stdout
 ```
 
 `qpxd` is the main network proxy. It forwards requests to `qpxf` over the
-QPX-IPC protocol using reverse-route `ipc:` targets. QPX-IPC uses a
+QPX-IPC protocol using reverse-route `target.type: ipc` targets. QPX-IPC uses a
 shared-memory ring buffer for body transfer when both processes share a Unix
 host with owner-only SHM file permissions, and falls back to a plain TCP/Unix
 stream otherwise. `qpxr` and `qpxc` are post-capture tooling and never
@@ -113,7 +113,7 @@ internal compatibility re-exports.
 | `policy_context/` | trusted identity (`identity/`), `signed_assertion/` JWS/JWT verification, `ext_authz/` external authorization, audit records, crypto helpers |
 | `destination/` | destination intelligence: category/reputation/application classification |
 | `rate_limit/` | sharded token buckets for requests/traffic/sessions |
-| `ipc_client/` | QPX-IPC client for `ipc:` routes (SHM and TCP body transfer, idle pool) |
+| `ipc_client/` | QPX-IPC client for `target.type: ipc` routes (SHM and TCP body transfer, idle pool) |
 | `exporter/` | capture event producer + plaintext redaction before enqueue |
 | `runtime/` | runtime state container, hot-reload (`config_rt/`), compiled `plan/` (routes, modules, streaming validation) |
 | `cli_render/` | `qpxd explain` / `qpxd match` rendering (text + JSON) |

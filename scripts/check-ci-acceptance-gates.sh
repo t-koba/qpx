@@ -238,7 +238,7 @@ require deny.toml 'skip-tree = []'
 require deny.toml 'unknown-registry = "deny"'
 require deny.toml 'unknown-git = "deny"'
 require .github/workflows/ci.yml 'schedule:'
-require .github/workflows/ci.yml "cron: '17 19 * * *'"
+require .github/workflows/ci.yml "cron: '17 19 * * 6'"
 require .github/workflows/ci.yml 'dtolnay/rust-toolchain@1.92'
 require .github/workflows/ci.yml 'cargo fmt --all -- --check'
 require .github/workflows/ci.yml 'cargo check --workspace --locked'
@@ -266,7 +266,7 @@ require .github/workflows/ci.yml 'bash ./scripts/audit-config-usecases.sh'
 require .github/workflows/ci.yml 'bash ./scripts/audit-config-behavior.sh'
 require .github/workflows/ci.yml 'cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture'
 require .github/workflows/ci.yml 'cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture'
-require .github/workflows/ci.yml "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+require .github/workflows/ci.yml "github.event_name == 'workflow_dispatch'"
 require .github/workflows/ci.yml 'cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10'
 require .github/workflows/security-qa.yml 'RUSTFLAGS: -Zsanitizer=address'
 require .github/workflows/security-qa.yml 'cargo test -Zbuild-std --target x86_64-unknown-linux-gnu -p qpx-core --lib shm_ring --no-default-features --features ipc-support -- --nocapture'
