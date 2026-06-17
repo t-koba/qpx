@@ -147,9 +147,9 @@ HTTP/3 backend selection is a build-time `qpxd` feature choice. YAML does not se
 - `transparent-mitm-selective.yaml`: transparent mode with selective TLS MITM.
 
 ### 12-ipc-gateway (`config/usecases/12-ipc-gateway`)
-- `qpx.yaml`: `qpxd` reverse proxy sample routing to a `qpxf` function executor via QPX-IPC (`ipc:` route). `listen` is overridable with `QPX_IPC_GATEWAY_LISTEN`.
+- `qpx.yaml`: `qpxd` reverse proxy sample routing to a `qpxf` function executor via QPX-IPC (`target.type: ipc`). `listen` is overridable with `QPX_IPC_GATEWAY_LISTEN`.
 - `qpxf.yaml`: `qpxf` executor sample (CGI/WASM handlers) backed by repo-local fixture handlers so `qpxf check` and sample e2e work out of the box; override `QPXF_SAMPLE_CGI_ROOT` / `QPXF_SAMPLE_WASM_MODULE` for your own handlers.
-- `qpx-tcp.yaml`: `qpxd` reverse proxy sample using `ipc.mode: tcp`. `listen` is overridable with `QPX_IPC_GATEWAY_TCP_LISTEN`.
+- `qpx-tcp.yaml`: `qpxd` reverse proxy sample using `target.mode: tcp` on an IPC target. `listen` is overridable with `QPX_IPC_GATEWAY_TCP_LISTEN`.
 - `qpxf-tcp.yaml`: `qpxf` TCP listener sample (`allow_insecure_tcp: true`) aligned with `qpx-tcp.yaml` for loopback smoke tests; tighten `host:` / `path_regex:` after validation if needed.
 - `qpxf-fastcgi.yaml`: `qpxf` backend sample for pooled FastCGI responders and concurrency-limited SCGI responders. `qpxf check` validates routing and backend settings without connecting to the external responder.
 
@@ -221,7 +221,7 @@ cargo build -p qpxd -p qpxf
 - `action.local_response.rpc` emits protocol-correct local responses for `grpc`, `connect`, and `grpc_web` on request rules. Response-stage policy uses the same payload shape under `http.response_rules[].effects.local_response.rpc`.
 - HTTP modules use a fixed envelope: `type`, optional `id`, optional `order`, and module-specific `settings`. Built-ins keep their knobs under `settings`, such as compression `max_body_bytes` / `content_types`, subrequest `allowed_schemes` / `allowed_hosts` / `max_response_bytes` / header capture, and cache purge `methods` / `response_*`. See `http-modules-advanced.yaml`.
 - Encrypted capture can be enabled globally in `telemetry.exporter.capture`; plaintext capture is targeted on an edge/route with `capture.plaintext`. Plaintext body capture requires `capture.plaintext.max_body_bytes`; redaction supports `headers`, `query_keys`, and simple JSON paths such as `$.password`.
-- On `ipc` routes, `ipc.mode: shm` (default) uses a shared-memory ring for body transfer and requires `qpxd` and `qpxf` on the same Unix host with owner-only SHM file permissions. Use `ipc.mode: tcp` for cross-host, Windows, or other non-Unix deployments.
+- On `target.type: ipc` routes, `mode: shm` (default) uses a shared-memory ring for body transfer and requires `qpxd` and `qpxf` on the same Unix host with owner-only SHM file permissions. Use `mode: tcp` for cross-host, Windows, or other non-Unix deployments.
 - `identity_sources[].type: signed_assertion` locally verifies JWS/JWT assertions. Use `assertion.secret_env` for HS* algorithms or `assertion.public_key_env` for RS*/ES* algorithms, then map claims into subject fields.
 - `named_sets` can be backed by inline `values` or `file`. For destination intelligence, use `type: domain|cidr|string|regex` and prefix the set name with `category:`, `reputation:`, or `application:`. `qpxd` also watches `named_sets[].file` targets during hot reload.
 - `tls_trust` / `upstream_trust` are available on named upstreams, reverse routes, and TLS inspection. They enforce upstream pinning, issuer/SAN constraints, and optional per-upstream mTLS client cert selection via `client_cert` / `client_key`.
@@ -232,3 +232,12 @@ cargo build -p qpxd -p qpxf
 - Reverse-route retry/ejection/concurrency policy is expressed with `resilience`; named upstreams use the same `resilience` surface.
 - Response-stage rules live under `edges[].http.response_rules` and `edges[kind=reverse].routes[].http.response_rules`, and the same response-aware policy surface is enforced in forward, MITM, transparent HTTP, and reverse HTTP paths.
 - Multi-file config merge has fixed semantics. Named collections append across files and are then validated for duplicate names: `edges`, `upstreams`, `caches`, `http.guard_profiles`, `http.module_chains`, `traffic.rate_limit_profiles`, `security.identity_sources`, `security.named_sets`, `security.upstream_trust_profiles`, `security.decisions.ext_authz`, and `security.auth.users`. Scalar settings and ordinary objects are overlaid by later files.
+
+## Related docs
+
+- [`docs/config-schema.md`](../docs/config-schema.md) — canonical schema and validation workflow.
+- [`docs/streaming-config.md`](../docs/streaming-config.md) — streaming requirements, buffering boundaries, and metrics.
+- [`docs/function-executor.md`](../docs/function-executor.md) — `qpxf` and QPX-IPC.
+- [`docs/capture-pipeline.md`](../docs/capture-pipeline.md) — capture exporter, `qpxr`, and `qpxc`.
+- [`docs/http-modules.md`](../docs/http-modules.md) — built-in and custom HTTP modules.
+- [`docs/operations.md`](../docs/operations.md) — reload, upgrade, runtime tuning, and security QA.

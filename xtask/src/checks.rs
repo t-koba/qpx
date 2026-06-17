@@ -2968,7 +2968,9 @@ fn phase4_ci_acceptance_violations(
         "cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture",
         "cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture",
         "cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10",
-        "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'",
+        "schedule:",
+        "cron: '17 19 * * 6'",
+        "github.event_name == 'workflow_dispatch'",
     ] {
         if !ci.contains(required) {
             violations.push("ci.yml missing Phase 4 required job or command");
@@ -5145,7 +5147,9 @@ mod tests {
             cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
             cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture
             cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10
-            github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+            schedule:
+            cron: '17 19 * * 6'
+            github.event_name == 'workflow_dispatch'
         "#;
         let security = r#"
             RUSTFLAGS: -Zsanitizer=address

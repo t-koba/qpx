@@ -116,8 +116,8 @@ pcap-file = "2"
 etherparse = "0.13"
 
 # WASM
-wasmtime = { version = "44.0.2", default-features = false, features = ["async", "cache", "cranelift", "parallel-compilation", "runtime", "std", "wat"] }
-wasmtime-wasi = { version = "44.0.2", default-features = false, features = ["p1"] }
+wasmtime = { version = "44.0.3", default-features = false, features = ["async", "cache", "cranelift", "parallel-compilation", "runtime", "std", "wat"] }
+wasmtime-wasi = { version = "44.0.3", default-features = false, features = ["p1"] }
 
 # CLI
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }

@@ -1,73 +1,188 @@
 # qpx
 
-Quick HTTP proxy and server in Rust. Supports forward, reverse, and transparent proxy modes with HTTP/1.1, HTTP/2, HTTP/3, TLS inspection (MITM), and a function executor for CGI scripts and WASM modules.
+Quick HTTP proxy and server in Rust. qpx supports forward, reverse, and
+transparent proxy modes with HTTP/1.1, HTTP/2, HTTP/3, TLS inspection, caching,
+policy enforcement, observability, PCAPNG capture, and a separate function
+executor for CGI / WASM / FastCGI / SCGI workloads.
 
-qpx is a policy enforcement point, protocol gateway, and observability edge. It is not intended to be the primary enterprise authentication authority: production identity should normally come from an external IdP, mTLS gateway, signed assertion, or `ext_authz`, with qpx enforcing policy from that trusted context. Built-in auth is primarily for lab, small deployment, and local edge use cases.
-
-qpx uses bounded, backpressure-aware body streams for HTTP/3 request and response relay. Streaming-aware policies cover gRPC, gRPC-Web, Connect, and SSE without requiring qpx to become an application authentication authority. Buffering modules must opt in explicitly and can be rejected by route-level streaming requirements.
-
-qpx treats `text/event-stream` as latency-sensitive streaming traffic: response buffering and compression are disabled by default, and SSE streams get dedicated idle timeout and observability.
-
-qpx runs continuous performance regression tests. These CI results are used to detect large regressions, not to claim absolute throughput. Release-grade comparative benchmarks require dedicated hardware.
+qpx is a traffic-processing edge and policy enforcement point. In production,
+identity should normally arrive from an external IdP, mTLS gateway, signed
+assertion, or `ext_authz`; qpx enforces policy from that trusted context.
+Built-in Basic/Digest/LDAP auth is kept for labs, small deployments, and local
+edge use.
 
 ## Features
 
-- **Forward proxy** — HTTP/HTTPS with rules, optional built-in auth (Basic/Digest/LDAP), upstream chaining, FTP-over-HTTP gateway, WebSocket upgrade.
-- **Reverse proxy** — route by Host/SNI/path/src_ip, TLS termination, TLS passthrough by SNI, retry, health checks, header rewrite, path rewrite (strip/add/regex), canary traffic splitting, request mirroring, HTTP/3 termination, function executor forwarding (`ipc:` routes).
-- **Enterprise policy inputs** — trusted headers, mTLS subject mapping, signed JWS/JWT assertion verification, `ext_authz`, named sets/external feeds, and destination intelligence (`category` / `reputation` / `application`).
-- **HTTP modules** — public in-process request/response module API for edge and reverse-route module chains, with built-in `response_compression` (`gzip` / `br` / `zstd`), internal subrequests, and first-class cache purge.
-- **ACME / Let's Encrypt** — automatic certificate issuance/renewal (HTTP-01) for reverse TLS termination (`qpxd` feature `acme`, enabled by default; requires `tls-rustls`).
-- **Function executor** — `qpxf` is a hardened executor for CGI scripts (path containment, concurrent I/O, size limits) and optional WASM modules via `qpx-wasm` (`wasmtime` with memory limits, epoch-based timeout). `qpxd` communicates with `qpxf` over the QPX-IPC protocol via reverse-route `ipc:` targets.
-- **Transparent proxy** — Linux `SO_ORIGINAL_DST` or protocol metadata routing (SNI, Host), with optional TLS MITM inspection.
-- **TLS inspection (MITM)** — dynamic per-connection certificate impersonation via built-in CA (requires `tls-rustls` build).
-- **HTTP/3 (QUIC)** — build-time backend split. `http3-backend-h3` is the default upstream-`h3` backend for standard HTTP/3, CONNECT-UDP / MASQUE, and generic extended CONNECT. `http3-backend-qpx` enables the clean-room `qpx-h3` backend for the full QPX-owned advanced HTTP/3 surface, including CONNECT-UDP / MASQUE, generic extended CONNECT, and WebTransport relay (requires `tls-rustls`).
-- **Caching** — RFC 9111 + RFC 5861 (`stale-while-revalidate`, `stale-if-error`) proxy cache with in-memory, Redis, and HTTP object-storage backends.
-- **PCAPNG capture pipeline** — `qpxd` emits decrypted traffic events; `qpxr` writes PCAPNG; `qpxc` streams to Wireshark.
-- **XDP / PROXY protocol** — PROXY v2 metadata for forwarding original client addresses from L4 frontends.
-- **Observability** — structured logging, Prometheus metrics endpoint, optional OpenTelemetry tracing (OTLP/Jaeger).
+- **Forward proxy**: HTTP/HTTPS, CONNECT, rules, optional built-in auth,
+  upstream proxy chaining, FTP-over-HTTP, WebSocket upgrade, HTTP/3
+  CONNECT-UDP / MASQUE, and generic extended CONNECT.
+- **Reverse proxy**: Host/SNI/path/src_ip routing, TLS termination, TLS
+  passthrough, retry, health checks, header/path rewrite, canary splitting,
+  mirroring, HTTP/3 termination, HTTP/3 passthrough, and `qpxf` IPC targets.
+- **Transparent proxy**: Linux `SO_ORIGINAL_DST` plus metadata fallback
+  routing, with optional TLS MITM inspection.
+- **Policy inputs**: trusted headers, mTLS subject mapping, signed JWS/JWT
+  assertions, external authorization, named sets/external feeds, destination
+  intelligence, and advanced HTTP/TLS/certificate/RPC matchers.
+- **Streaming-aware HTTP policy**: bounded body streams, explicit buffering
+  opt-in, gRPC / gRPC-Web / Connect observation, SSE low-latency defaults, and
+  `qpxd explain` visibility into buffering cost.
+- **HTTP modules**: built-in response compression, internal subrequests, cache
+  purge endpoints, and a public in-process module API.
+- **Caching**: RFC 9111 + RFC 5861 proxy cache with in-memory, Redis, and HTTP
+  object-storage backends.
+- **Capture and observability**: structured logs, Prometheus metrics, optional
+  OpenTelemetry, shared-memory capture export from `qpxd`, PCAPNG generation by
+  `qpxr`, and client streaming by `qpxc`.
+- **ACME**: HTTP-01 certificate issuance/renewal for reverse TLS termination
+  when `qpxd` is built with `acme` and `tls-rustls`.
 
-## Build
-
-qpx supports two TLS backends, selectable at build time:
-
-- `tls-rustls` (default backend): required for HTTP/3 (`http3`) and TLS inspection (`mitm`).
-- `tls-native`: uses `native-tls`/`tokio-native-tls` (HTTP/3 and TLS inspection are unavailable).
-
-`qpxd` default features are `tls-rustls`, `http3-backend-h3`, `mitm`, `acme`, `auth-digest`, and `auth-ldap`, which includes local Basic/Digest auth and LDAP TLS support. Use `--no-default-features` with `auth-basic`, `auth-digest`, or `auth-ldap` when you need a smaller authentication build. TLS backend selection does not enable LDAP by itself outside the default feature set. `http3` is an internal umbrella feature activated by `http3-backend-h3` (default) or `http3-backend-qpx`; when both are enabled by aggregate builds, the QPX backend is the active backend. `acme` is isolated in `qpx-acme`, can be disabled independently, and still requires `tls-rustls` when enabled.
-
-Choose the HTTP/3 backend by required behavior, not by listener YAML. Backend choice is build-time only.
-
-- `http3-backend-h3`: choose this for standard HTTP/3 request/response, CONNECT-UDP / MASQUE datagram relay, chained upstream HTTP/3 proxying, and non-WebTransport extended CONNECT.
-- `http3-backend-qpx`: choose this when you need the clean-room backend or the full QPX-owned advanced HTTP/3 surface. It covers streaming HTTP/3 request/response relay, reverse HTTP/3 terminate, CONNECT-UDP / MASQUE datagram relay, generic extended CONNECT, and WebTransport relay. HTTP/3 request and response bodies are relayed as bounded streams. Individual modules may opt into buffering depending on their body mode.
-- Reverse HTTP/3 passthrough is backend-neutral. It stays in `qpxd` as raw UDP/QUIC session routing and works with either backend.
+## Quick Start
 
 ```bash
-# Default workspace build. qpxd includes tls-rustls + http3-backend-h3 + mitm + acme.
+# Build the workspace. qpxd defaults to tls-rustls + http3-backend-h3 + mitm
+# + acme + auth-digest + auth-ldap.
 cargo build --release
 
-# Clean-room HTTP/3 backend with full advanced HTTP/3 coverage
+# Run the daemon.
+cargo run -p qpxd -- run --config config/qpx.example.yaml
+
+# Validate config without starting listeners.
+cargo run -p qpxd -- check --config config/qpx.example.yaml
+
+# Print the machine-readable current config schema.
+cargo run -p qpxd -- schema --format json
+
+# Render the compiled runtime plan.
+cargo run -p qpxd -- explain --config config/qpx.example.yaml
+```
+
+Start with [`config/usecases/01-getting-started`](config/usecases/01-getting-started)
+for small runnable profiles. The full sample index is
+[`config/README.md`](config/README.md).
+
+<details>
+<summary>Build features</summary>
+
+`qpxd` default features are `tls-rustls`, `http3-backend-h3`, `mitm`, `acme`,
+`auth-digest`, and `auth-ldap`.
+
+- `tls-rustls` is the default TLS backend and is required by HTTP/3, MITM, and
+  ACME.
+- `tls-native` uses `native-tls` / `tokio-native-tls`; HTTP/3 and MITM are not
+  available with this backend.
+- `http3-backend-h3` is the default upstream-`h3` backend for standard HTTP/3,
+  CONNECT, CONNECT-UDP / MASQUE, upstream HTTP/3 proxying, and non-WebTransport
+  extended CONNECT.
+- `http3-backend-qpx` enables the clean-room `qpx-h3` backend and the full
+  QPX-owned advanced HTTP/3 surface, including WebTransport relay.
+- Reverse HTTP/3 passthrough is backend-neutral because it is raw UDP/QUIC
+  session routing inside `qpxd`.
+
+```bash
+# Clean-room HTTP/3 backend.
 cargo build --release -p qpxd --no-default-features --features tls-rustls,http3-backend-qpx
 
-# Native TLS backend
+# Native TLS backend.
 cargo build --release -p qpxd --no-default-features --features tls-native
 cargo build --release -p qpxr --no-default-features --features tls-native
 cargo build --release -p qpxc --no-default-features --features tls-native
 
-# Minimal build (no TLS backends)
+# Minimal qpxd build with no TLS backend.
 cargo build --release -p qpxd --no-default-features
-cargo build --release -p qpxr --no-default-features
-cargo build --release -p qpxc --no-default-features
 ```
 
-Current HTTP/3 backend split:
+</details>
 
-- `http3-backend-h3`: standard request/response, CONNECT, CONNECT-UDP / MASQUE datagram relay, chained upstream CONNECT-UDP, and non-WebTransport extended CONNECT.
-- `http3-backend-qpx`: standard request/response, reverse terminate, CONNECT-UDP / MASQUE datagram relay, generic extended CONNECT, and WebTransport relay over extended CONNECT.
-- `http3-backend-qpx` is the only backend that provides the full QPX-owned advanced HTTP/3 surface without relying on upstream `h3` behavior beyond its public API.
+<details>
+<summary>CLI surface</summary>
 
-## Platform support
+`qpxd` subcommands:
 
-CI runs native build/test coverage on Linux, Windows, macOS Intel, and macOS Apple Silicon, and also preflights the release-target build matrix for Linux musl `x86_64` / `aarch64`, macOS `x86_64` / `aarch64`, and Windows `x86_64`. Release binaries are published for:
+- `run --config <file>...`
+- `check --config <file>...`
+- `init <reverse-basic|forward-egress|transparent-linux|ipc-gateway|trusted-identity-ext-authz>`
+- `schema --format <json|yaml>`
+- `explain --config <file>... [--format <text|json>] [--edge <name>] [--route <name>]`
+- `match --config <file>... --edge <name> [--src-ip <ip>] [--dst-port <port>] [--sni <name>] [--host <name>] [--method <method>] [--path <path>]`
+- `gen-ca --state-dir <dir>` when built with `tls-rustls`
+- `upgrade --pid <pid>`
+
+`run`, `check`, `explain`, and `match` accept repeated `--config` arguments.
+Files are merged in order; later files override earlier scalar/object values,
+while named collections append and are then checked for duplicate names.
+
+</details>
+
+## Configuration
+
+qpx uses one current canonical YAML schema. Unknown keys are rejected so typos do
+not silently become defaults. Use `qpxd schema` for the machine-readable schema
+and `qpxd check` for deployment validation.
+
+The schema is edge-oriented:
+
+- `runtime`: process and protocol limits
+- `telemetry`: logs, metrics, OpenTelemetry, ACME, capture exporter
+- `security`: auth, identity sources, named sets, destination intelligence,
+  trust profiles, and external authorization decisions
+- `http`: reusable HTTP policy, guard profiles, and module chains
+- `traffic`: reusable rate-limit profiles
+- `caches`: cache backend definitions
+- `edges[]`: forward, reverse, and transparent entry points
+
+Reverse routes use one typed `target`: `upstream`, `weighted`, `ipc`,
+`local_response`, or `tls_passthrough`.
+
+<details>
+<summary>Important config notes</summary>
+
+- Forward and transparent samples default to `default_action: block` except for
+  loopback-only local-dev and test-fixture profiles.
+- Include composition uses `include:`; included files are merged depth-first and
+  the including file wins.
+- Transport-aware shaping uses `rate_limit` / `rate_limit_profiles` with
+  `apply_to`, `requests`, `traffic`, and `sessions`.
+- Response-stage policy lives under `edges[].http.response_rules` and reverse
+  route `http.response_rules`.
+- `connection_filter` is a low-cost early-drop DSL on `edges[]`. It requires
+  `match:` and only supports `action.type: block`.
+- Streaming behavior can be tuned under `runtime`, `edges[].streaming` /
+  `grpc` / `sse`, and reverse route `streaming` / `grpc` / `sse`.
+- `streaming_requirement: required` rejects buffering features; `preferred`
+  makes buffering an explicit opt-in.
+- Exact size matching for unknown-length bodies additionally requires
+  `runtime.unknown_length_exact_size: buffer`.
+
+See [`docs/config-schema.md`](docs/config-schema.md),
+[`docs/streaming-config.md`](docs/streaming-config.md), and
+[`config/README.md`](config/README.md).
+
+</details>
+
+## Components
+
+| Binary | Role |
+|---|---|
+| `qpxd` | Proxy daemon and policy runtime |
+| `qpxf` | QPX-IPC function executor for CGI / WASM / FastCGI / SCGI |
+| `qpxr` | Shared-memory capture reader and PCAPNG stream/server |
+| `qpxc` | PCAPNG stream client and Wireshark/extcap bridge |
+
+Detailed component guides:
+
+- [`docs/function-executor.md`](docs/function-executor.md)
+- [`docs/capture-pipeline.md`](docs/capture-pipeline.md)
+- [`docs/http-modules.md`](docs/http-modules.md)
+- [`docs/operations.md`](docs/operations.md)
+
+## Platform Support
+
+CI runs native build/test coverage on Linux, Windows, macOS Intel, and macOS
+Apple Silicon, and preflights the release-target matrix for Linux musl
+`x86_64` / `aarch64`, macOS `x86_64` / `aarch64`, and Windows `x86_64`.
+
+Release binaries are published for:
 
 | Target | Notes |
 |---|---|
@@ -77,681 +192,57 @@ CI runs native build/test coverage on Linux, Windows, macOS Intel, and macOS App
 | `aarch64-apple-darwin` | macOS Apple Silicon |
 | `x86_64-pc-windows-msvc` | Windows |
 
-Other Unix systems (FreeBSD, etc.) are not tested and not guaranteed to work.
+<details>
+<summary>Platform-specific behavior</summary>
 
-**Platform-specific behavior:**
+- Transparent original-destination recovery uses Linux `SO_ORIGINAL_DST`; on
+  non-Linux it falls back to TLS SNI, HTTP `Host`, or PROXY metadata.
+- Practical transparent interception requires Linux packet redirection through
+  iptables/nftables or an L4 frontend.
+- `tls-native` builds depend on the platform TLS stack. Linux requires OpenSSL
+  development headers.
+- Redis cache `redis+unix://` endpoints require Unix domain sockets; on Windows
+  use `redis://` or `rediss://`.
 
-- Transparent original-destination recovery uses Linux `SO_ORIGINAL_DST`; on non-Linux it falls back to TLS SNI / HTTP `Host` / PROXY metadata.
-- Transparent proxy mode is practical only on Linux, where iptables/nftables can redirect traffic to the listener. macOS and Windows lack an equivalent redirection mechanism.
-- `tls-native` builds depend on the platform TLS stack. Linux requires OpenSSL development headers (`libssl-dev` on Debian/Ubuntu, `openssl-devel` on RHEL/Fedora). The default `tls-rustls` build has no system dependencies.
-- Redis cache `redis+unix://` endpoints require Unix domain sockets; on Windows use `redis://` or `rediss://`.
+</details>
 
-## CLI
-
-```bash
-# Run the proxy daemon
-cargo run -p qpxd -- run --config config/qpx.example.yaml
-
-# Validate config without starting listeners
-cargo run -p qpxd -- check --config config/qpx.example.yaml
-
-# Generate a CA key pair for TLS inspection
-# Writes ca.crt and ca.key into the specified directory.
-# (rustls backend only)
-cargo run -p qpxd -- gen-ca --state-dir ~/.local/share/qpx
-```
-
-`run` and `check` accept one or more `--config` arguments. When multiple files are provided, they are merged in order and later files override earlier ones.
-
-`check` loads and validates the merged config, including `include` resolution, environment expansion, unknown-key rejection, and reverse runtime compilation. Use it in CI or pre-deploy hooks.
-
-## Capture pipeline
-
-The capture pipeline consists of three components:
-
-| Binary | Role |
-|--------|------|
-| `qpxd` (daemon) | Traffic processing and TLS termination/decryption; writes capture events to a shared-memory ring |
-| `qpxr` (reader) | Reads the shared-memory ring written by `qpxd`, generates PCAPNG files, and serves live/history streams |
-| `qpxc` (client) | Connects to `qpxr` and relays PCAPNG to Wireshark (extcap) or a simple packet viewer |
-
-**Recommended topology:** `qpxd` and `qpxr` run on the same host; remote analysis machines connect via `qpxc` only.
+## Tests
 
 ```bash
-# 1) Start the reader (reads the shared-memory capture ring, serves PCAPNG streams)
-#    --shm-path and --shm-size-mb must match exporter.shm_path / exporter.shm_size_mb in qpxd config.
-#    When omitted, both sides use the same platform-private default path
-#    (for example $XDG_RUNTIME_DIR/qpx/capture.shm or ~/.qpx/run/capture.shm).
-export QPX_EXPORTER_TOKEN='local-dev-token'
-cargo run -p qpxr -- \
-  --stream-listen 127.0.0.1:19101 \
-  --token-env QPX_EXPORTER_TOKEN \
-  --save-dir /tmp/qpx-pcapng
-
-# 2) Start the daemon (writes capture events to the SHM ring)
-cargo run -p qpxd -- run --config config/usecases/07-observability-debug/observability-high-detail.yaml
-
-# 3) Stream via client (also usable as a Wireshark extcap FIFO)
-cargo run -p qpxc -- \
-  --endpoint 127.0.0.1:19101 --mode live \
-  --token-env QPX_EXPORTER_TOKEN \
-  > /tmp/qpx-live.pcapng
-```
-
-### Capture security profiles
-
-- **Local debug:** Loopback bind with `--token-env` (as shown above).
-- **Low-security lab use:** Loopback bind without auth only when `--unsafe-allow-insecure` is explicitly passed.
-- **Production (recommended):** Start `qpxr` with TLS + token (optionally mTLS + allowlist); connect `qpxc` with the same credentials.
-  - `qpxr` **refuses** unauthenticated loopback listeners and **refuses** non-loopback listeners without TLS unless `--unsafe-allow-insecure` is explicitly passed.
-
-**Example (TLS + token + allowlist):**
-
-```bash
-export QPX_EXPORTER_TOKEN='...'
-
-# Reader (server)
-cargo run -p qpxr -- \
-  --stream-listen 0.0.0.0:19101 \
-  --tls-cert /etc/qpxr/tls/server.crt --tls-key /etc/qpxr/tls/server.key \
-  --token-env QPX_EXPORTER_TOKEN \
-  --stream-allow 10.0.0.0/8
-
-# Client
-cargo run -p qpxc -- \
-  --endpoint qpxr.example.internal:19101 --mode follow \
-  --tls --tls-server-name qpxr.example.internal \
-  --token-env QPX_EXPORTER_TOKEN \
-  > /tmp/qpx-live.pcapng
-```
-
-For `tls-native` builds, use `qpxr --tls-pkcs12` and `qpxc --tls-client-pkcs12` instead of PEM `--tls-cert/--tls-key` and `--tls-client-cert/--tls-client-key`.
-
-**`qpxd` exporter config (`telemetry.exporter`):**
-
-```yaml
-telemetry:
-  exporter:
-    enabled: true
-    shm_path: ""        # SHM file path. Empty = platform-private default path.
-    shm_size_mb: 16     # Must match qpxr --shm-size-mb (default: 16).
-    lossy: false        # true = drop events when ring is full; false = block with backpressure.
-    max_queue_events: 4096
-    capture:
-      plaintext: true
-      encrypted: true
-      max_chunk_bytes: 16384
-      redact:
-        headers: [authorization, cookie, set-cookie, proxy-authorization]
-        query_keys: [token, password, session, access_token]
-        json_paths: ["$.password", "$.access_token"]
-```
-
-`qpxr` reads the same ring using `--shm-path` / `--shm-size-mb` (both default to the same values). When running `qpxd` and `qpxr` on the same host with default paths, no explicit path configuration is needed.
-
-For targeted plaintext debugging, attach `capture` to an edge or reverse route. Body capture is explicit and requires `max_body_bytes`:
-
-```yaml
-capture:
-  plaintext:
-    enabled: true
-    headers: true
-    body: full
-    sample_percent: 10
-    max_body_bytes: 16384
-    redact:
-      headers: [authorization, cookie, set-cookie]
-      query_keys: [token, password, session]
-      json_paths: ["$.password", "$.access_token"]
-```
-
-## Function executor (`qpxf`)
-
-`qpxf` is a hardened function executor that runs alongside `qpxd`. `qpxd` routes requests to `qpxf` over the QPX-IPC protocol with reverse routes that set `ipc:`. `qpxf` owns the IPC server, routing, and CGI process management; its optional WASM runtime lives in the separate `qpx-wasm` crate behind the `wasm` feature.
-
-For local deployments, `qpxf` defaults to a user-scoped `unix://` socket. Any TCP listener, including loopback, requires `allow_insecure_tcp=true`.
-
-`qpxf` supports four execution backends:
-
-| Backend | Description |
-|---------|-------------|
-| CGI scripts | Spawns external processes (RFC 3875). Path containment, symlink-escape prevention, concurrent I/O with deadlock prevention, configurable size limits. |
-| WASM modules | Executes WASI-compatible modules via `qpx-wasm` (`wasmtime` + `wasmtime-wasi`). Module/stdin/stdout/stderr size caps, memory limits via `ResourceLimiter`, request wall-clock timeout, stderr capture, and optional executor pool/prewarm settings. Prewarm validates modules during executor construction. |
-| FastCGI | Sends CGI-shaped requests to a persistent FastCGI responder over TCP or `unix://`, with a per-backend connection pool (`pool.max_concurrency`, `pool.max_idle`), timeout, stdin/stdout/stderr limits, and optional `script_name_prefixes` for deterministic `SCRIPT_NAME` / `PATH_INFO` splitting. Pooled connections are reused only after a complete FastCGI end request; broken responders are discarded. |
-| SCGI | Sends CGI-shaped requests to an SCGI responder over TCP or `unix://` using per-request connections, with per-backend concurrency, timeout, stdin/stdout/stderr limits. Non-empty stdin requires a valid `Content-Length` so qpxf can construct the SCGI netstring without buffering the full upload. |
-
-The default `qpxf` build enables the `wasm` feature, which pulls in `qpx-wasm`. Use `cargo build -p qpxf --no-default-features` for a CGI-only build.
-
-For `ipc:` routes, `ipc.mode` controls how request/response bodies are transferred:
-
-| `ipc.mode` | Body transfer | When to use |
-|--------------------|--------------|-------------|
-| `shm` (default) | shared-memory ring buffer | `qpxd` and `qpxf` on the same Unix host with owner-only SHM file permissions |
-| `tcp` | streamed over the connection | cross-host, Windows, or other non-Unix deployments |
-
-```yaml
-# reverse route config in qpxd
-routes:
-  - match: { path: ["/cgi-bin/*"] }
-    ipc:
-      mode: shm          # "shm" for same-host Unix deployments, or "tcp"
-      address: "${QPXF_UNIX_LISTEN}"
-      timeout_ms: 30000
-```
-
-```bash
-# Validate the paired qpxf sample, including CGI/WASM handler initialization
-cargo run -p qpxf -- check --config config/usecases/12-ipc-gateway/qpxf.yaml
-
-# Start the executor (Unix sockets are the default and recommended transport)
-qpxf_runtime="${XDG_RUNTIME_DIR:-$HOME/.qpx/run}"
-install -d -m 700 "$qpxf_runtime"
-export QPXF_UNIX_LISTEN="unix://$qpxf_runtime/qpxf.sock"
-cargo run -p qpxf -- --listen "$QPXF_UNIX_LISTEN" --config config/usecases/12-ipc-gateway/qpxf.yaml
-
-# Start qpxd routed to it
-cargo run -p qpxd -- run --config config/usecases/12-ipc-gateway/qpx.yaml
-```
-
-The `12-ipc-gateway` sample pair ships with repo-local CGI/WASM fixture handlers so the sample can be checked and smoke-tested as-is. Override `QPXF_SAMPLE_CGI_ROOT` / `QPXF_SAMPLE_WASM_MODULE` to point at your own handlers.
-
-See `config/usecases/12-ipc-gateway/` for sample configs.
-
-## Configuration
-
-- **Canonical samples** (use-case oriented): `config/usecases/`
-- **Shared fragments** for include composition: `config/fragments/`
-- **Full index and usage guidance**: [`config/README.md`](config/README.md)
-- **Full example config**: [`config/qpx.example.yaml`](config/qpx.example.yaml)
-
-The YAML schema is canonical and edge-oriented. Runtime tuning stays under `runtime`, observability belongs under `telemetry`, auth and policy inputs belong under `security`, reusable HTTP policy belongs under `http`, traffic shaping belongs under `traffic`, cache backends are listed under `caches`, and forward / reverse / transparent entry points are declared in `edges[]`. Reverse routes use a typed `target` object (`upstream`, `weighted`, `ipc`, `local_response`, or `tls_passthrough`) instead of mutually exclusive target fields.
-
-Two control-plane surfaces matter for the current schema:
-
-- Transport-aware shaping uses `rate_limit` / `rate_limit_profiles` with `apply_to`, `requests`, `traffic`, and `sessions`. This is the canonical surface for request, CONNECT, UDP, HTTP/3 datagram, and WebTransport shaping; WebTransport can be scoped at `webtransport`, `webtransport_bidi`, `webtransport_uni`, `webtransport_datagram`, or the `*_downstream` / `*_upstream` variants for direction-specific traffic/quota control.
-- Response-stage HTTP policy uses `edges[].http.response_rules` and reverse route `http.response_rules`. Reverse route retry/ejection/concurrency policy is expressed with route-level `resilience`.
-- RPC-aware policy is part of the same rule surface. `match.rpc.*` and `action.local_response.rpc` cover `gRPC`, `Connect`, and `gRPC-Web` without a separate protocol-specific config tree.
-
-> **Security note:** Forward and transparent samples default to `default_action: block` to prevent accidental open-proxy deployments. Explicit exceptions are `*-local-dev-direct.yaml` and `config/usecases/99-test-fixtures/*` (loopback-only dev/test profiles).
-
-### Include composition
-
-Configs can compose shared fragments via `include`:
-
-```yaml
-include:
-  - config/fragments/base-observability.yaml
-  - config/fragments/forward-listener.yaml
-```
-
-Included files are merged depth-first. The main config's values take precedence over included values.
-When multiple top-level `--config` files are passed to `qpxd`, they are merged in the same way and later files win.
-
-### Reverse route target forms
-
-Reverse routes use exactly one typed `target`:
-
-- `target.type: upstream` with literal `http://` / `https://` / `ws://` / `wss://` URLs or names from top-level `upstreams`
-- `target.type: weighted` with weighted backend groups
-- `target.type: ipc` for QPX-IPC forwarding to `qpxf`
-- `target.type: local_response`
-- `target.type: tls_passthrough`
-
-### Connection filters
-
-`connection_filter` is a separate early-drop surface on `edges[]`.
-
-- It runs before full HTTP parsing and can reject unwanted traffic at accept time or, when TLS/QUIC metadata is available, at ClientHello time.
-- `connection_filter` requires `match:` and only accepts `action.type: block`.
-- It is intentionally limited to low-cost transport/TLS inputs such as `src_ip`, `dst_port`, `sni`, `alpn`, `tls_version`, and `tls_fingerprint.ja3` / `tls_fingerprint.ja4`.
-- It does not accept higher-level HTTP matchers such as `host`, `method`, `path`, `headers`, `identity`, request/response sizes, or destination-intelligence fields.
-- Drops emit audit event `connection_filter_drop`.
-
-See [`config/usecases/08-performance-and-xdp/connection-filter-early-drop.yaml`](config/usecases/08-performance-and-xdp/connection-filter-early-drop.yaml) and [`config/qpx.example.yaml`](config/qpx.example.yaml).
-
-### Destination resolution
-
-Destination intelligence arbitration is configured once and then optionally overridden by scope:
-
-- `security.destination.defaults`
-- `edges[].destination_resolution`
-- `edges[kind=reverse].routes[].destination_resolution`
-
-Use it to define evidence precedence (`cert` / `sni` / `host` / `ip` / `tls_fingerprint` / `heuristic`), conflict handling, merge mode, and minimum confidence thresholds for category / reputation / application classification.
-
-See [`config/usecases/02-secure-egress/forward-destination-intelligence-and-trust.yaml`](config/usecases/02-secure-egress/forward-destination-intelligence-and-trust.yaml).
-
-### HTTP guard profiles
-
-`http.guard_profiles` is the lightweight request-hardening surface for bounded parser work and protocol safety.
-
-- Define reusable profiles at top level.
-- Attach them with `edges[].http_guard_profile` or `edges[kind=reverse].routes[].http_guard_profile`.
-- The current runtime enforces path/query/header/body limits, JSON depth / field count, multipart part/name/file limits, and basic smuggling / invalid-framing checks.
-
-See [`config/usecases/03-service-publishing/reverse-http-guard-lite.yaml`](config/usecases/03-service-publishing/reverse-http-guard-lite.yaml) and [`config/qpx.example.yaml`](config/qpx.example.yaml).
-
-### RPC-aware policy
-
-`gRPC`, `Connect`, and `gRPC-Web` are matched through the shared `match.rpc.*` surface on request rules and `http.response_rules`.
-
-- `match.rpc.protocol` selects `grpc`, `connect`, or `grpc_web`.
-- `match.rpc.service` / `match.rpc.method` use the canonical `/Service/Method` path split.
-- `match.rpc.status`, `match.rpc.message`, `match.rpc.message_size`, and `match.rpc.trailers` apply on the response stage.
-- `action.local_response.rpc` emits protocol-correct local replies for the same three protocols.
-- HTTP/3 streaming paths parse gRPC, gRPC-Web, and Connect envelopes incrementally for message counts, message-byte totals, status metrics, and stream duration metrics. gRPC-Web trailer bytes use `max_grpc_web_trailer_bytes`, separate from message-byte limits.
-
-Streaming behavior can be tuned globally under `runtime`, at listener level with `edges[].streaming` / `edges[].grpc` / `edges[].sse`, and at reverse-route level with `edges[kind=reverse].routes[].streaming` / `grpc` / `sse`. Route values override listener values, which override runtime defaults.
-
-```yaml
-runtime:
-  body_channel_capacity: 16
-  h3_origin_pool_max_connections_per_origin: 4
-  h3_origin_pool_max_inflight_streams_per_connection: 128
-  max_grpc_message_bytes: 4194304
-  max_grpc_web_trailer_bytes: 65536
-  max_grpc_stream_duration_ms: 300000
-  sse:
-    disable_compression: true
-    flush_policy: low_latency
-    idle_timeout_ms: 300000
-    max_stream_duration_ms: 3600000
-```
-
-By default, routes stay streaming-first and qpx rejects features that would
-require full body buffering unless the route or listener explicitly opts into
-that cost with `streaming_requirement: preferred`. Use
-`streaming_requirement: required` to reject buffering features even when they
-are added later. Body-mode compatibility is:
-
-- `headers_only`: streaming safe.
-- `streaming`: streaming safe transform.
-- Plaintext capture `body: stream_sample`: streaming safe; only the configured prefix is sampled.
-- Plaintext capture `body: full`: streaming safe pass-through capture; it must still be explicitly bounded with `max_body_bytes`.
-- `request_body_buffered`, `response_body_buffered`, and `request_and_response_body_buffered`: incompatible with `streaming_requirement: required`.
-
-Without explicit `preferred`, qpx rejects policy predicates that semantically
-need complete body observation, including `request_size`, `response_size`, RPC
-message/status/trailer predicates that require full request or response
-inspection, buffering HTTP guard profiles, retry templates, and buffering
-response rules. `required`
-uses the same boundary as a hard no-buffering assertion. `qpxd explain` prints
-`buffering.because` for each compiled route/action, using labels such as
-`rpc.body`, `request.size_exact_unknown`, and `retry.body_template`.
-Runtime metrics `qpx_body_buffering_bytes_total` and
-`qpx_body_spooled_bytes_total` expose the actual buffering cost by direction and
-reason.
-
-Unknown-length exact size matching is additionally guarded by
-`runtime.unknown_length_exact_size`, which defaults to `reject`. Set it to
-`buffer` only when the deployment intentionally accepts EOF read/spool/replay
-for exact `request_size` / `response_size` predicates without `Content-Length`.
-
-See [`docs/streaming-config.md`](docs/streaming-config.md) and [`config/usecases/03-service-publishing/reverse-rpc-aware-policy.yaml`](config/usecases/03-service-publishing/reverse-rpc-aware-policy.yaml).
-
-### HTTP modules
-
-HTTP request/response modules are configured on canonical edges and routes:
-
-- `edges[].http_modules` applies to forward, transparent HTTP, and MITM HTTP paths.
-- `edges[kind=reverse].routes[].http_modules` applies per reverse route.
-
-Built-in modules:
-
-- `response_compression`: downstream response compression for `gzip`, `br`, and `zstd`. Use `min_body_bytes`, `max_body_bytes`, `content_types`, and per-algorithm levels (`gzip_level`, `brotli_level`, `zstd_level`) to tune when and how compression runs. Compression happens after cache writeback, so cached objects remain identity-encoded while clients receive compressed responses when `Accept-Encoding` allows it.
-- `subrequest`: internal absolute-URL subrequest at `request_headers` or `response_headers` phase. Subrequests must declare `allowed_schemes`, `allowed_hosts`, and `max_response_bytes`; redirects are denied by default and allowed redirects are still checked for private IP destinations. Templates require an explicit encoding context such as `url`, `pathsegment`, `header`, or `host`; raw expansion is rejected. Supported variables include `request.path`, `request.query`, `request.query.<key>`, `request.header.<name>`, `request.host`, `request.sni`, and `identity.user`. Use `pass_headers`, `request_headers`, `copy_response_headers_to_request`, `copy_response_headers_to_response`, and `response_mode` to shape what the sidecar call sees and how its result feeds back into the main transaction.
-- `cache_purge`: first-class HTTP purge endpoint for the configured cache key. Use `methods`, `response_status`, `response_body`, and `response_headers` to tailor the purge endpoint response. Requires `cache.enabled: true` on the listener or reverse route where it is used.
-
-Every module spec also accepts:
-
-- `id`: stable operator label for logs and debugging.
-- `order`: execution order; lower numbers run earlier.
-
-Custom in-process modules:
-
-- `qpxd` is now a library as well as a daemon binary. External Rust binaries can register custom module factories and then run the normal CLI/event loop.
-- Config is open by `type:`. `qpx-core` loads unknown module types without rejecting them, and `qpxd` resolves them against the runtime registry.
-- Public API surface is `qpxd::Daemon::builder()` plus `qpxd::module_api::{HttpModuleFactory, HttpModule, HttpModuleCapabilities, HttpModuleStage, HttpModuleEvent, ModuleStages, HttpModuleContext, HttpModuleRequestView, Body}`.
-- Modules declare capabilities so qpxd compiles stage-indexed chains and only calls modules for the stages they need. Built-in compression runs only on downstream responses, request-phase subrequests run only on request headers, and response-phase subrequests request a frozen request view only for routes that need it.
-- Modules implement one `call(stage, ctx, event)` entrypoint. Request events carry borrowed in-place requests; response events carry owned responses. Response-phase hooks can read the frozen request view from `HttpModuleContext::frozen_request()`.
-
-`qpxd explain` prints compiled module details, including subrequest template summaries, allowlists, redirect policy, and response-size caps. `qpxd match` evaluates the same compiled matchers used by dispatch and reports match reasons for reverse routes, TLS passthrough routes, forward rules, and transparent rules; use `--dst-port` when validating port-based rules.
-
-Minimal example:
-
-```rust
-use anyhow::Result;
-use async_trait::async_trait;
-use qpxd::module_api::{
-    Body, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
-    HttpModuleFactory, HttpModuleStage, ModuleStages,
-};
-use qpxd::{Daemon, HttpModuleConfig};
-use hyper::Response;
-use std::sync::Arc;
-
-#[derive(serde::Deserialize)]
-struct AddHeaderConfig {
-    header_name: String,
-    header_value: String,
-}
-
-struct AddHeaderFactory;
-struct AddHeader {
-    name: http::HeaderName,
-    value: http::HeaderValue,
-}
-
-impl HttpModuleFactory for AddHeaderFactory {
-    fn build(&self, spec: &HttpModuleConfig) -> Result<Arc<dyn HttpModule>> {
-        let cfg: AddHeaderConfig = spec.parse_settings()?;
-        Ok(Arc::new(AddHeader {
-            name: cfg.header_name.parse()?,
-            value: cfg.header_value.parse()?,
-        }))
-    }
-}
-
-#[async_trait]
-impl HttpModule for AddHeader {
-    fn capabilities(&self) -> HttpModuleCapabilities {
-        HttpModuleCapabilities::headers_only(ModuleStages::DOWNSTREAM_RESPONSE)
-    }
-
-    async fn call<'a>(
-        &self,
-        stage: HttpModuleStage,
-        _ctx: &mut HttpModuleContext,
-        event: HttpModuleEvent<'a>,
-    ) -> Result<HttpModuleEvent<'a>> {
-        let HttpModuleStage::DownstreamResponse = stage else {
-            return Ok(event);
-        };
-        let HttpModuleEvent::DownstreamResponse(mut response) = event else {
-            anyhow::bail!("invalid downstream response event");
-        };
-        response.headers_mut().insert(self.name.clone(), self.value.clone());
-        Ok(HttpModuleEvent::DownstreamResponse(response))
-    }
-}
-
-fn main() -> Result<()> {
-    Daemon::builder()
-        .register_http_module("add_header", AddHeaderFactory)?
-        .build()
-        .run_cli()
-}
-```
-
-Example:
-
-```yaml
-edges:
-  - kind: forward
-    name: forward
-    listen: 127.0.0.1:18080
-    default_action: { type: direct }
-    cache:
-      enabled: true
-      backend: edge-cache
-    http_modules:
-      - type: cache_purge
-      - type: response_compression
-        settings:
-          min_body_bytes: 512
-          gzip: true
-          brotli: true
-          zstd: true
-
-  - kind: reverse
-    name: api
-    listen: 127.0.0.1:18443
-    routes:
-      - match:
-          host: [api.example.com]
-        target:
-          type: upstream
-          upstreams:
-            - https://127.0.0.1:9443
-        http_modules:
-          - type: subrequest
-            settings:
-              name: authz
-              phase: request_headers
-              url: http://127.0.0.1:19091/check?path={request.path:urlquery}
-              max_response_bytes: 65536
-              allowed_schemes: [http]
-              allowed_hosts: [127.0.0.1]
-              response_mode: return_on_error
-```
-
-See [`config/usecases/07-observability-debug/http-modules-advanced.yaml`](config/usecases/07-observability-debug/http-modules-advanced.yaml) and [`config/qpx.example.yaml`](config/qpx.example.yaml) for a fuller built-in-module sample with `id`, `order`, compression tuning, subrequest header capture, and cache purge response customization.
-
-### Environment variable substitution
-
-All string values support `${VAR}` and `${VAR:-default}` expansion at load time. Use this for credentials, hostnames, and environment-specific paths:
-
-```yaml
-state_dir: "${QPX_STATE_DIR:-/var/lib/qpx}"
-
-telemetry:
-  metrics:
-    listen: "${QPX_METRICS_LISTEN:-127.0.0.1:9901}"
-
-edges:
-  - kind: reverse
-    name: edge
-    listen: "${QPX_REVERSE_LISTEN:-127.0.0.1:8443}"
-    tls:
-      certificates:
-        - sni: "app.example.com"
-          cert: "${QPX_TLS_CERT:-/etc/qpx/tls/server.crt}"
-          key: "${QPX_TLS_KEY:-/etc/qpx/tls/server.key}"
-```
-
-### Hot reload
-
-`qpxd` watches every configured `--config` file, all resolved `include` targets, and any `named_sets[].file` inputs. On compatible changes it rebuilds the in-memory runtime state in place. When listener/reverse bind shape or acceptor startup settings change, it gracefully stops the old accept loops and restarts the listener/reverse server set in-process instead of requiring a full daemon restart.
-
-The repo keeps both hot-reload paths under CI:
-
-- `scripts/e2e-control-plane.sh` exercises in-place reload and listener/reverse server-set restart on Linux CI.
-- `scripts/e2e-control-plane.ps1` exercises the same reload behavior on Windows CI.
-- `scripts/e2e-control-plane-soak.sh` keeps loopback traffic flowing while reload, restart-required reload, and binary upgrade happen on Linux CI.
-
-Reload constraints:
-- Restart is required for `state_dir`, `system_log`, `access_log`, `audit_log`, `acme`, `otel`, `metrics`, or `identity.metrics_prefix` changes.
-- Process runtime sizing still requires restart: `worker_threads` and `max_blocking_threads`.
-- Listener/reverse startup changes trigger an in-process server-set restart: `acceptor_tasks_per_listener`, `reuse_port`, `tcp_backlog`, listener names/listen addresses/mode/XDP/HTTP3 settings, and reverse names/listen addresses/TLS or HTTP/3 startup settings.
-- Existing accepted TCP connections continue draining on the old runtime generation while the replacement listener/reverse set starts with the new config.
-
-### Binary upgrade
-
-`qpxd` supports zero-downtime binary replacement for the listener socket layer.
-
-- On Unix, send `SIGUSR2` to the parent process.
-- On Windows, run `qpxd upgrade --pid <parent-pid>`.
-
-The parent process will:
-
-- hand the active TCP listening sockets for forward listeners, transparent listeners, reverse TCP listeners, `metrics.listen`, and ACME `http01_listen` to the child
-- hand the active UDP listening sockets for forward HTTP/3, reverse HTTP/3, and transparent UDP/QUIC listeners to the child
-- spawn the same executable with the same CLI args and wait until the child signals readiness
-- stop accepting new TCP connections in the parent and drain already accepted TCP sessions before exit
-
-Notes:
-- This is a binary handoff path, not a config reload path. Use normal file-watching reload for compatible config edits.
-- Existing TCP sessions stay on the old generation; new TCP accepts move to the child after readiness.
-- UDP/QUIC listener sockets are inherited by the child as well, so binary replacement no longer depends on rebinding those ports.
-- Existing transparent UDP sessions and reverse HTTP/3 passthrough sessions are exported to the child together with their connected upstream UDP sockets, so those flows continue on the replacement process without reopening the upstream path.
-- Forward HTTP/3 sessions and reverse HTTP/3 terminate sessions stay on the parent generation behind a parent-child QUIC broker. The child receives new QUIC handshakes immediately after readiness, while established QUIC sessions continue draining on the old generation until it exits.
-- To keep broker routing deterministic during the handoff window, server-side QUIC active migration is disabled on HTTP/3 listeners.
-- Unix uses inherited file descriptors for TCP/UDP listeners and QUIC broker control sockets.
-- Windows uses `WSADuplicateSocketW` manifests for TCP/UDP listener and live UDP session handoff, plus loopback TCP rendezvous for readiness and QUIC broker control.
-- `scripts/e2e-control-plane.sh` exercises the Unix `qpxd upgrade --pid <parent-pid>` handoff path end-to-end on CI Linux.
-- `scripts/e2e-control-plane.ps1` exercises the Windows `qpxd upgrade --pid <parent-pid>` handoff path end-to-end on CI.
-- `scripts/e2e-control-plane-soak.sh` verifies that live loopback traffic survives reload/restart/upgrade sequencing without failed requests.
-
-### Code Quality And Safety
-
-qpx treats parser, TLS sniffing, shared-memory capture, and policy matching code
-as security-sensitive components. CI gates formatting, typos, sensitive artifact
-checks, documentation warnings, unused dependency checks, sample configuration
-validation, e2e tests, multi-platform builds, feature-matrix clippy, RustSec
-audit, CodeQL, AddressSanitizer smoke tests, and fuzz smoke tests.
-
-### Continuous Security QA
-
-The repo's CI keeps several security-focused gates beyond normal unit/integration testing:
-
-- CodeQL analyzes both GitHub Actions and Rust sources.
-- `security-qa.yml` runs AddressSanitizer smoke on shared-memory ring and upgrade readiness code paths.
-- `security-qa.yml` also runs short `cargo-fuzz` jobs for shared-memory ring operations, PROXY v2 parsing, HTTP/1 request-head parsing, QPACK decoding, and TLS ClientHello sniffing.
-
-### Trusted Identity And External Authz
-
-Enterprise deployments can bind trusted identity sources and external authorization through `policy_context` on listeners, reverse proxies, and reverse routes:
-
-```yaml
-policy_context:
-  identity_sources: ["corp-access-proxy"]
-  ext_authz: central-policy
-```
-
-See [`config/usecases/02-secure-egress/forward-trusted-identity-ext-authz.yaml`](config/usecases/02-secure-egress/forward-trusted-identity-ext-authz.yaml), [`config/qpx.example.yaml`](config/qpx.example.yaml), and [`docs/enterprise-edge-scope.md`](docs/enterprise-edge-scope.md) for the full model.
-
-`identity_sources[].type: signed_assertion` verifies JWS/JWT style assertions locally with `assertion.secret_env` or `assertion.public_key_env` and maps claims into `user`, `groups`, `device_id`, `tenant`, `auth_strength`, and `idp`. `ext_authz` allow responses share the same decision surface across forward, reverse, transparent, and MITM paths, including `override_upstream`, `timeout_override_ms`, `cache_bypass`, `mirror_upstreams`, `rate_limit_profile`, `force_inspect`, `force_tunnel`, and `policy_tags`; `timeout_ms` covers both response headers and body, and `max_response_bytes` caps the authorization response body before JSON parsing.
-
-Policy inputs include trusted headers, mTLS subject mapping, signed assertions, external authorization, named sets, external feeds, and destination intelligence. Optional built-in proxy authentication supports local Basic/Digest and LDAP.
-
-Built-in auth and identity mapping also expose a few advanced knobs that are easy to miss:
-
-- `auth.users[].ha1` accepts a precomputed SHA-256 Digest HA1, so you can enable Digest auth without storing a cleartext password.
-- `auth.ldap` supports `user_filter`, `group_filter`, and `group_attr` when you need to align LDAP lookup shape with your directory schema.
-- `identity_sources[].type: mtls_subject` can derive the user from `map.user_from_san_uri_prefix` and/or `map.user_from_subject_cn`.
-- `identity_sources[].type: signed_assertion` can derive the user from `sub` with `assertion.claims.user_from_sub`, and can split packed group claims with `assertion.claims.groups_separator`.
-
-Destination intelligence is driven by `named_sets` plus host, destination IP, SNI, ALPN, TLS fingerprint, and upstream certificate metadata. Prefix set names with `category:`, `reputation:`, or `application:` and match them later with `destination.category`, `destination.reputation`, or `destination.application`, using each dimension's `value`, `source`, and `confidence` fields when you need to distinguish host-driven vs heuristic-derived classifications.
-
-Advanced rule matchers also include `http_version`, `tls_version`, `tls_fingerprint`, `request_size`, `response_size`, `upstream_cert`, and, on reverse TLS-terminated requests, `client_cert`.
-
-Upstream trust is configurable per chained upstream, reverse route, and transparent TLS inspection path with `tls_trust` / `upstream_trust`. Policy supports pinning (`pin_sha256`), issuer and SAN constraints, and per-upstream mTLS client certificate selection via `client_cert` / `client_key`.
-
-See [`config/usecases/02-secure-egress/forward-local-auth-basic-digest.yaml`](config/usecases/02-secure-egress/forward-local-auth-basic-digest.yaml), [`config/usecases/02-secure-egress/forward-ldap-group-policy.yaml`](config/usecases/02-secure-egress/forward-ldap-group-policy.yaml), [`config/usecases/02-secure-egress/forward-signed-assertion-policy.yaml`](config/usecases/02-secure-egress/forward-signed-assertion-policy.yaml), [`config/usecases/02-secure-egress/forward-destination-intelligence-and-trust.yaml`](config/usecases/02-secure-egress/forward-destination-intelligence-and-trust.yaml), [`config/usecases/03-service-publishing/reverse-mtls-identity-routing.yaml`](config/usecases/03-service-publishing/reverse-mtls-identity-routing.yaml), and [`config/qpx.example.yaml`](config/qpx.example.yaml).
-
-### Local response policy
-
-```yaml
-edges:
-  - kind: forward
-    name: forward
-    listen: "127.0.0.1:8080"
-    default_action: { type: direct }
-    rules:
-      - name: block-ads
-        match:
-          host: ["*.doubleclick.net", "*.googlesyndication.com"]
-        action:
-          type: respond
-          local_response:
-            status: 403
-            content_type: "text/plain; charset=utf-8"
-            body: "blocked by policy"
-```
-
-See also: `config/usecases/06-local-response/`
-
-## End-to-end tests
-
-```bash
-cargo build -p qpxd
+cargo build -p qpxd -p qpxf
+./scripts/check-config-samples.sh
 ./scripts/e2e-config-samples.sh
 ./scripts/e2e-http2.sh
 ./scripts/e2e-local-response.sh
 ```
 
-**Operational helper:**
-
-- `scripts/irq-affinity-plan.sh` — Linux IRQ/CPU affinity planner for NIC queue distribution (see [`docs/multicore-xdp-scaling.md`](docs/multicore-xdp-scaling.md))
+CI also gates formatting, documentation warnings, unused dependency checks,
+feature-matrix clippy, RustSec audit, CodeQL, AddressSanitizer smoke tests, fuzz
+smoke tests, multi-platform builds, and end-to-end reload/upgrade paths.
 
 ## Documentation
 
-- [`config/README.md`](config/README.md) — configuration sample index and usage guide
-- [`docs/code-structure.md`](docs/code-structure.md) — source-level module index
-- [`docs/enterprise-edge-scope.md`](docs/enterprise-edge-scope.md) — product boundary and enterprise cloud edge positioning
-- [`docs/interoperability-matrix.md`](docs/interoperability-matrix.md) — protocol interoperability and release benchmark lanes
-- [`docs/rfc911x-compliance.md`](docs/rfc911x-compliance.md) — RFC compliance notes and verification
-- [`docs/local-response-and-routing.md`](docs/local-response-and-routing.md) — local response and routing guide
-- [`docs/multicore-xdp-scaling.md`](docs/multicore-xdp-scaling.md) — multicore and XDP scaling guide
-- [`docs/usecase-inventory.md`](docs/usecase-inventory.md) — `config/usecases/` capability inventory
-
-## Operational notes
-
-<details>
-<summary>Transparent mode</summary>
-
-- Linux uses `SO_ORIGINAL_DST`; macOS/Windows fall back to protocol metadata routing (TLS SNI for HTTPS, `Host` header for HTTP).
-- The transparent path applies L7 rules for HTTP and supports opt-in TLS MITM for HTTPS flows.
-- `xdp.metadata_mode: proxy-v2` allows transparent destination recovery from PROXY metadata (useful with XDP/L4 frontends).
-
-</details>
-
-<details>
-<summary>RFC alignment hardening</summary>
-
-- Host/authority validation enforced (duplicate/missing/mismatch rejected with `400`).
-- No-body response rules enforced for `HEAD`, `1xx`, `204`, `304`, and successful `CONNECT`.
-- `Via` is version-aware (`1.1`, `2`, `3`) per proxied hop.
-- Reverse TLS enforces SNI vs Host/authority match by default (`enforce_sni_host_match: true`).
-- `Proxy-Authorization`, `Proxy-Authenticate`, and `Proxy-Authentication-Info` are stripped from forwarded hops.
-- QUIC 0-RTT is disabled by default in HTTP/3 listeners.
-
-</details>
-
-<details>
-<summary>XDP metadata integration</summary>
-
-- Forward/reverse/transparent listeners can consume PROXY v2 metadata (`xdp.enabled: true`, `metadata_mode: proxy-v2`).
-- Source address metadata is used for rule evaluation (`src_ip`) on forward listeners.
-- Reverse route matcher supports `src_ip` / `dst_port` / `host` / `sni` / `method` / `path` / `headers`.
-- When `xdp.enabled: true`, `trusted_peers` is required and metadata is accepted only from trusted peer CIDRs.
-
-</details>
-
-<details>
-<summary>Runtime multicore scaling</summary>
-
-- `runtime.worker_threads` and `runtime.max_blocking_threads` tune Tokio parallelism.
-- `runtime.max_ftp_concurrency` caps concurrent FTP-over-HTTP operations.
-- `runtime.acceptor_tasks_per_listener` + `runtime.reuse_port` enable multi-socket accept fan-out.
-- `runtime.tcp_backlog` controls listen queue depth.
-- `runtime.max_h3_streams_per_connection` caps concurrent HTTP/3 streams and associated WebTransport sessions per QUIC connection.
-- `runtime.upstream_http_timeout_ms` is the default dial/request timeout for upstream HTTP and reverse route proxying.
-- `runtime.max_h3_request_body_bytes` / `runtime.max_h3_response_body_bytes` bound HTTP/3 body buffering.
-- `runtime.max_observed_request_body_bytes` / `runtime.max_observed_response_body_bytes` are hard caps for policy, guard, RPC, and response-rule body observation before buffering; the default is 8 MiB per direction.
-- `runtime.trace_enabled` controls whether local `TRACE` loop-back handling is available at all.
-- `runtime.trace_reflect_all_headers` controls whether `TRACE` loop-back reflects every request header or uses the safer default that strips hop-by-hop, auth, forwarding, and tracing headers.
-
-</details>
-
-<details>
-<summary>Metrics, identity, and messages</summary>
-
-- **Metrics:** `metrics.listen` and `metrics.path` configure the Prometheus scrape endpoint. Non-loopback binding requires explicit `metrics.allow` CIDR allowlist.
-- **Identity:** `identity.proxy_name` (Via hop entries), `identity.auth_realm` (auth challenges), `identity.metrics_prefix` (metric name prefix), `identity.generated_user_agent` (optional User-Agent for proxy-originated requests; keep it low-information, e.g. product name only).
-- **Messages:** `messages.*` controls fixed response bodies for policy/error paths (e.g., `blocked`, `forbidden`, proxy errors, cache miss, FTP method errors).
-
-</details>
-
-<details>
-<summary>WebSocket and header control</summary>
-
-- Forward proxy and transparent HTTP path support WebSocket upgrade proxying (`101` + upgraded stream tunnel).
-- Header control applies to both request and response headers in forward and transparent modes.
-- Request headers (including `User-Agent`) can be explicitly set/add/remove/regex-rewritten via rule `headers`.
-- `respond` + `local_response` can return policy pages directly without forwarding upstream.
-
-</details>
+- [`config/README.md`](config/README.md): configuration sample index and usage
+  guide
+- [`docs/config-schema.md`](docs/config-schema.md): schema rules and validation
+  workflow
+- [`docs/code-structure.md`](docs/code-structure.md): source-level module index
+- [`docs/operations.md`](docs/operations.md): reload, binary upgrade, runtime
+  tuning, and operational safeguards
+- [`docs/function-executor.md`](docs/function-executor.md): `qpxf` and QPX-IPC
+  guide
+- [`docs/capture-pipeline.md`](docs/capture-pipeline.md): capture exporter,
+  `qpxr`, and `qpxc`
+- [`docs/http-modules.md`](docs/http-modules.md): built-in and custom HTTP
+  modules
+- [`docs/enterprise-edge-scope.md`](docs/enterprise-edge-scope.md): enterprise
+  cloud-edge positioning
+- [`docs/rfc911x-compliance.md`](docs/rfc911x-compliance.md): RFC compliance
+  notes and verification
+- [`docs/interoperability-matrix.md`](docs/interoperability-matrix.md):
+  protocol interoperability lanes
+- [`docs/usecase-inventory.md`](docs/usecase-inventory.md): `config/usecases/`
+  capability inventory
 
 ## License
 
