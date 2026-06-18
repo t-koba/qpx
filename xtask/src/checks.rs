@@ -2856,6 +2856,8 @@ const PLAN_P3_FUZZ_TARGETS: &[&str] = &[
     "grpc_frame_observer",
     "grpc_web_binary_frame_observer",
     "grpc_web_text_base64_observer",
+    "h3_content_length_state",
+    "h3_trailer_sanitizer",
     "http1_request_head",
     "ipc_meta_frame",
     "proxy_v2_parser",
@@ -2986,6 +2988,8 @@ fn phase4_ci_acceptance_violations(
         "grpc_frame_observer",
         "grpc_web_binary_frame_observer",
         "grpc_web_text_base64_observer",
+        "h3_content_length_state",
+        "h3_trailer_sanitizer",
         "reverse_target_input_deserializer",
         "sse_event_observer",
         "streaming_requirement_config_validator",
@@ -3280,6 +3284,62 @@ pub(crate) fn check_raw_metric_macro_baseline(root: &Path) -> Result<()> {
         "raw metric macro baseline: {} / {}",
         count, RAW_METRIC_MACRO_MAX
     );
+    Ok(())
+}
+
+const METRIC_CARDINALITY_FORBIDDEN_LABELS: &[&str] = &[
+    "path",
+    "full_path",
+    "authority",
+    "peer_ip",
+    "user_id",
+    "user",
+    "grpc_service",
+    "grpc_method",
+    "connect_procedure",
+    "header",
+    "header_value",
+];
+
+fn metric_cardinality_policy_violations_for_file(path: &Path, content: &str) -> Vec<String> {
+    METRIC_CARDINALITY_FORBIDDEN_LABELS
+        .iter()
+        .filter_map(|label| {
+            let needle = format!("\"{label}\" =>");
+            content
+                .contains(&needle)
+                .then(|| format!("{} uses forbidden metric label {label}", path.display()))
+        })
+        .collect()
+}
+
+pub(crate) fn check_metric_cardinality_policy(root: &Path) -> Result<()> {
+    let mut violations = Vec::new();
+    for crate_dir in rust_workspace_crates() {
+        let src = root.join(crate_dir).join("src");
+        if !src.is_dir() {
+            continue;
+        }
+        for path in rust_files_under(&src)? {
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if name != "metrics.rs" {
+                continue;
+            }
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            violations.extend(metric_cardinality_policy_violations_for_file(
+                &path, &content,
+            ));
+        }
+    }
+    if !violations.is_empty() {
+        bail!(
+            "metrics cardinality policy violations:\n{}",
+            violations.join("\n")
+        );
+    }
     Ok(())
 }
 
@@ -3882,6 +3942,35 @@ mod tests {
             "#,
         );
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn metric_cardinality_policy_flags_forbidden_labels() {
+        let path = Path::new("qpxd/src/metrics.rs");
+        assert_eq!(
+            metric_cardinality_policy_violations_for_file(
+                path,
+                r#"
+                match label {
+                    "route" => allowed,
+                    "grpc_method" => forbidden,
+                    "header_value" => forbidden,
+                }
+                "grpc_method" // documentation alone is ignored
+                "#,
+            ),
+            [
+                "qpxd/src/metrics.rs uses forbidden metric label grpc_method",
+                "qpxd/src/metrics.rs uses forbidden metric label header_value",
+            ]
+        );
+        assert!(
+            metric_cardinality_policy_violations_for_file(
+                path,
+                r#""listener" => a, "route" => b, "protocol" => c, "stage" => d"#
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -5158,6 +5247,8 @@ mod tests {
             grpc_frame_observer
             grpc_web_binary_frame_observer
             grpc_web_text_base64_observer
+            h3_content_length_state
+            h3_trailer_sanitizer
             reverse_target_input_deserializer
             sse_event_observer
             streaming_requirement_config_validator
@@ -5241,6 +5332,8 @@ mod tests {
                 "security-qa workflow missing fuzz target grpc_frame_observer",
                 "security-qa workflow missing fuzz target grpc_web_binary_frame_observer",
                 "security-qa workflow missing fuzz target grpc_web_text_base64_observer",
+                "security-qa workflow missing fuzz target h3_content_length_state",
+                "security-qa workflow missing fuzz target h3_trailer_sanitizer",
                 "security-qa workflow missing fuzz target http1_request_head",
                 "security-qa workflow missing fuzz target ipc_meta_frame",
                 "security-qa workflow missing fuzz target proxy_v2_parser",

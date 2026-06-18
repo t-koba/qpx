@@ -1,7 +1,22 @@
 # Rust build artifacts
 /target/
 /fuzz/target/
-/fuzz/corpus/
+/fuzz/corpus/*
+!/fuzz/corpus/grpc_web_text_base64_observer/
+/fuzz/corpus/grpc_web_text_base64_observer/*
+!/fuzz/corpus/grpc_web_text_base64_observer/split_trailer_frame
+!/fuzz/corpus/h3_trailer_sanitizer/
+/fuzz/corpus/h3_trailer_sanitizer/*
+!/fuzz/corpus/h3_trailer_sanitizer/trailer_forbidden_fields
+!/fuzz/corpus/sse_event_observer/
+/fuzz/corpus/sse_event_observer/*
+!/fuzz/corpus/sse_event_observer/long_line
+!/fuzz/corpus/h3_content_length_state/
+/fuzz/corpus/h3_content_length_state/*
+!/fuzz/corpus/h3_content_length_state/content_length_mismatch
+!/fuzz/corpus/datagram_capsule_parser/
+/fuzz/corpus/datagram_capsule_parser/*
+!/fuzz/corpus/datagram_capsule_parser/split_capsule_header
 
 # Editor / OS files
 .DS_Store

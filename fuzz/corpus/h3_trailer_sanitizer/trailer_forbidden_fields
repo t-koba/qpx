@@ -1,0 +1,3 @@
+content-length: 0
+authorization: bearer token
+x-checksum: ok

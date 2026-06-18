@@ -1,9 +1,14 @@
 use super::*;
-use crate::cli_render::{render_explain_plan, render_match_plan};
+use crate::cli_render::{render_explain_plan, render_explain_plan_json, render_match_plan};
+use crate::http::modules::{
+    BodyAccess, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
+    HttpModuleFactory, HttpModuleStage, ModuleStages,
+};
 use crate::runtime::{RuntimePlan, RuntimeState};
 use crate::startup::init_template_yaml;
 use anyhow::Result;
 use std::fs;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn render_test_match_plan(
@@ -126,6 +131,153 @@ edges:
     assert!(output.contains("      mode: explicit"));
     assert!(output.contains("        - request.size_exact_unknown"));
     assert!(!output.contains("        - capture.body_full"));
+}
+
+#[test]
+fn explain_json_contract_covers_current_execution_plan_shape() {
+    let state = runtime_state_from_yaml(
+        "json-contract",
+        r#"runtime:
+  body_channel_capacity: 32
+edges:
+- kind: reverse
+  name: public-http
+  listen: 127.0.0.1:18080
+  routes:
+  - name: app
+    streaming_requirement: required
+    match:
+      host: [app.local]
+    target:
+      type: local_response
+      response:
+        status: 204
+    http_modules:
+    - type: response_compression
+    capture:
+      plaintext:
+        enabled: true
+        headers: true
+        body: stream_sample
+        body_sample_bytes: 128
+"#,
+    );
+    let output = render_explain_plan_json(state.plan.as_ref(), Some("public-http"), Some("app"))
+        .expect("json explain");
+    let value: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+
+    assert!(value.get("schema_version").is_none());
+    assert_eq!(
+        value.pointer("/edges/0/edge").and_then(|v| v.as_str()),
+        Some("public-http")
+    );
+    assert_eq!(
+        value.pointer("/edges/0/kind").and_then(|v| v.as_str()),
+        Some("reverse")
+    );
+    assert_eq!(
+        value
+            .pointer("/edges/0/routes/0/execution_plan/streaming/body_channel_capacity")
+            .and_then(|v| v.as_u64()),
+        Some(32)
+    );
+    assert_eq!(
+        value
+            .pointer("/edges/0/routes/0/execution_plan/module_body_mode")
+            .and_then(|v| v.as_str()),
+        Some("stream_transform")
+    );
+    assert_eq!(
+        value
+            .pointer("/edges/0/routes/0/execution_plan/buffering/required")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        value
+            .pointer("/edges/0/routes/0/target/status")
+            .and_then(|v| v.as_u64()),
+        Some(204)
+    );
+    let details = value
+        .pointer("/edges/0/routes/0/execution_plan/module_details/0/details")
+        .and_then(|v| v.as_array())
+        .expect("module details");
+    assert!(
+        details
+            .iter()
+            .any(|value| value == "body_mode=stream_transform")
+    );
+    assert!(details.iter().any(|value| value == "streaming_safe=true"));
+    assert_eq!(
+        value
+            .pointer("/edges/0/routes/0/execution_plan/capture/plaintext/body")
+            .and_then(|v| v.as_str()),
+        Some("stream_sample")
+    );
+
+    let forward_state = runtime_state_from_yaml(
+        "json-local-response",
+        r#"edges:
+- kind: forward
+  name: local-forward
+  listen: 127.0.0.1:18081
+  default_action:
+    type: respond
+    local_response:
+      status: 418
+      body: teapot
+"#,
+    );
+    let output = render_explain_plan_json(forward_state.plan.as_ref(), Some("local-forward"), None)
+        .expect("json explain");
+    let value: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+    assert_eq!(
+        value
+            .pointer("/edges/0/default_action/execution_plan/local_response/status")
+            .and_then(|v| v.as_u64()),
+        Some(418)
+    );
+}
+
+#[test]
+fn streaming_required_rejects_buffering_required_http_module() {
+    let config = load_config_from_yaml(
+        "buffering-module-required",
+        r#"edges:
+- kind: reverse
+  name: public-http
+  listen: 127.0.0.1:18080
+  routes:
+  - name: app
+    streaming_requirement: required
+    match:
+      host: [app.local]
+    target:
+      type: upstream
+      upstreams: [http://127.0.0.1:8080]
+    http_modules:
+    - type: buffering_test
+"#,
+    );
+    let mut builder = crate::http::modules::HttpModuleRegistry::builder();
+    builder
+        .register_factory("buffering_test", BufferingTestModuleFactory)
+        .expect("register");
+    let registry = Arc::new(builder.build());
+    let err = match RuntimeState::build_with_http_module_registry(config, registry) {
+        Ok(_) => panic!("buffering module must fail required route"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("streaming_requirement: required"),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("requires body buffering")
+            || err.to_string().contains("can buffer bodies"),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]
@@ -354,6 +506,11 @@ fn runtime_state_from_template(template: InitTemplate) -> RuntimeState {
 }
 
 fn runtime_state_from_yaml(name: &str, yaml: &str) -> RuntimeState {
+    let loaded = load_config_from_yaml(name, yaml);
+    RuntimeState::build(loaded).expect("runtime builds")
+}
+
+fn load_config_from_yaml(name: &str, yaml: &str) -> qpx_core::config::Config {
     let mut path = std::env::temp_dir();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -363,7 +520,7 @@ fn runtime_state_from_yaml(name: &str, yaml: &str) -> RuntimeState {
     fs::write(&path, yaml).expect("write config");
     let loaded = qpx_core::config::load_config(&path).expect("config loads");
     let _ = fs::remove_file(path);
-    RuntimeState::build(loaded).expect("runtime builds")
+    loaded
 }
 
 fn temp_config_path(template: InitTemplate) -> std::path::PathBuf {
@@ -378,4 +535,32 @@ fn temp_config_path(template: InitTemplate) -> std::path::PathBuf {
         now
     ));
     path
+}
+
+struct BufferingTestModuleFactory;
+
+impl HttpModuleFactory for BufferingTestModuleFactory {
+    fn build(&self, _spec: &qpx_core::config::HttpModuleConfig) -> Result<Arc<dyn HttpModule>> {
+        Ok(Arc::new(BufferingTestModule))
+    }
+}
+
+struct BufferingTestModule;
+
+#[async_trait::async_trait]
+impl HttpModule for BufferingTestModule {
+    fn capabilities(&self) -> HttpModuleCapabilities {
+        let mut capabilities = HttpModuleCapabilities::headers_only(ModuleStages::REQUEST_HEADERS);
+        capabilities.body_access = BodyAccess::RequestBodyBuffered { max_bytes: 1024 };
+        capabilities
+    }
+
+    async fn call<'a>(
+        &self,
+        _stage: HttpModuleStage,
+        _ctx: &mut HttpModuleContext,
+        event: HttpModuleEvent<'a>,
+    ) -> Result<HttpModuleEvent<'a>> {
+        Ok(event)
+    }
 }

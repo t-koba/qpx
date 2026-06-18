@@ -203,6 +203,7 @@ fn report_perf(
         req_per_sec,
         p95.as_millis()
     );
+    write_perf_artifact(label, total_requests, elapsed, req_per_sec, p95)?;
 
     assert!(
         req_per_sec >= thresholds.min_req_per_sec,
@@ -216,6 +217,79 @@ fn report_perf(
         thresholds.max_p95.as_millis()
     );
     Ok(())
+}
+
+fn write_perf_artifact(
+    label: &str,
+    total_requests: usize,
+    elapsed: Duration,
+    req_per_sec: f64,
+    p95: Duration,
+) -> Result<()> {
+    let Some(path) = std::env::var_os("QPX_PERF_SMOKE_JSON") else {
+        return Ok(());
+    };
+    let _guard = perf_artifact_lock().lock().expect("perf artifact lock");
+    let record = serde_json::json!({
+        "bench": canonical_perf_bench_label(label),
+        "legacy_bench": label,
+        "first_byte_ms": serde_json::Value::Null,
+        "p95_chunk_gap_ms": serde_json::Value::Null,
+        "total_ms": elapsed.as_secs_f64() * 1000.0,
+        "rss_peak_mb": serde_json::Value::Null,
+        "cpu_ms": serde_json::Value::Null,
+        "bytes": serde_json::Value::Null,
+        "commit": perf_commit(),
+        "total_requests": total_requests,
+        "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+        "req_per_sec": req_per_sec,
+        "p95_ms": p95.as_secs_f64() * 1000.0,
+    });
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| {
+            anyhow!(
+                "open perf artifact {}: {err}",
+                PathBuf::from(&path).display()
+            )
+        })?;
+    use std::io::Write as _;
+    writeln!(file, "{}", serde_json::to_string(&record)?)
+        .map_err(|err| anyhow!("write perf artifact: {err}"))?;
+    Ok(())
+}
+
+fn perf_artifact_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+fn canonical_perf_bench_label(label: &str) -> &str {
+    match label {
+        "forward_h3_connect_udp" => "connect_streaming_messages",
+        "forward_h3_extended_connect" => "connect_streaming_messages",
+        "forward_h3_webtransport" => "connect_streaming_messages",
+        other => other,
+    }
+}
+
+fn perf_commit() -> String {
+    if let Ok(value) = std::env::var("GITHUB_SHA")
+        && !value.trim().is_empty()
+    {
+        return value;
+    }
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 async fn run_connect_udp_round() -> Result<()> {
