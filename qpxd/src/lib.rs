@@ -198,6 +198,41 @@ pub mod fuzz_support {
         let _ = buffer.push(bytes::Bytes::copy_from_slice(bytes), 256 * 1024);
         while let Ok(Some((_kind, _payload))) = buffer.take_next() {}
     }
+
+    #[cfg(feature = "http3")]
+    pub fn parse_h3_content_length_state(bytes: &[u8]) {
+        let mut headers = http::HeaderMap::new();
+        for value in bytes.split(|byte| *byte == b'\n').take(16) {
+            if value.is_empty() {
+                continue;
+            }
+            if let Ok(value) = http::HeaderValue::from_bytes(value) {
+                headers.append(http::header::CONTENT_LENGTH, value);
+            }
+        }
+        let _ = crate::http3::codec::parse_content_length_fields(&headers);
+    }
+
+    #[cfg(feature = "http3")]
+    pub fn sanitize_h3_trailers(bytes: &[u8]) {
+        let mut trailers = http::HeaderMap::new();
+        for line in bytes.split(|byte| *byte == b'\n').take(32) {
+            let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+                continue;
+            };
+            let name = &line[..colon];
+            let value = line[colon + 1..].trim_ascii_start();
+            let Ok(name) = http::header::HeaderName::from_bytes(name) else {
+                continue;
+            };
+            let Ok(value) = http::HeaderValue::from_bytes(value) else {
+                continue;
+            };
+            trailers.append(name, value);
+        }
+        let _ = qpx_http::protocol::semantics::validate_request_trailers(&trailers);
+        let _ = qpx_http::protocol::semantics::sanitize_response_trailers(&mut trailers);
+    }
 }
 
 pub fn main_entry() -> anyhow::Result<()> {

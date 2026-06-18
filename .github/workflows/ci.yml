@@ -4,7 +4,7 @@ on:
   push:
   pull_request:
   schedule:
-    - cron: '17 19 * * 6'
+    - cron: '17 19 * * *'
   workflow_dispatch:
 
 permissions:
@@ -166,16 +166,29 @@ jobs:
       - name: perf smoke (release)
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
+          QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-smoke.jsonl
+        run: |
+          mkdir -p target/perf
+          cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
       - name: advanced transport perf (release)
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture
+          QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/advanced-transport-perf.jsonl
+        run: |
+          mkdir -p target/perf
+          cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture
+      - name: upload perf smoke artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qpx-perf-smoke-jsonl
+          path: target/perf/*.jsonl
+          if-no-files-found: ignore
 
   nightly_perf_bench:
     name: nightly perf bench
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -183,7 +196,17 @@ jobs:
       - name: criterion streaming throughput bench
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10
+        run: |
+          mkdir -p target/perf
+          printf '{"bench":"criterion_streaming_throughput","first_byte_ms":null,"p95_chunk_gap_ms":null,"total_ms":null,"rss_peak_mb":null,"cpu_ms":null,"bytes":null,"commit":"%s"}\n' "${GITHUB_SHA:-unknown}" > target/perf/nightly-criterion.jsonl
+          cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10
+      - name: upload nightly perf artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qpx-nightly-perf-jsonl
+          path: target/perf/*.jsonl
+          if-no-files-found: ignore
 
   config_samples:
     name: config samples

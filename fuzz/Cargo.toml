@@ -108,6 +108,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h3_content_length_state"
+path = "fuzz_targets/h3_content_length_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h3_trailer_sanitizer"
+path = "fuzz_targets/h3_trailer_sanitizer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "streaming_requirement_config_validator"
 path = "fuzz_targets/streaming_requirement_config_validator.rs"
 test = false

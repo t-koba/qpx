@@ -80,6 +80,24 @@ General HTTP usually works with the defaults. Increase
 `body_channel_capacity` only when upstream and downstream flow control can
 benefit from more in-flight chunks.
 
+## Body Channel Capacity Tuning
+
+`body_channel_capacity` bounds in-flight body chunks per streaming body channel.
+The default `16` is intentionally conservative. Tune it per listener or route
+when a workload has a clear latency, memory, or throughput profile:
+
+| Workload | Starting range | Guidance |
+| --- | ---: | --- |
+| Low-latency SSE | `4-16` | Keep queues short so heartbeat and event latency stay visible. |
+| General HTTP | `16` | Prefer the default until perf smoke or production metrics show pressure. |
+| Large download | `32-128` | More in-flight chunks can help when both sides have healthy flow control. |
+| Many slow downstream clients | `4-16` | Avoid large queues that turn client slowness into memory growth. |
+| High-throughput internal network | `64-256` | Validate with the `body_channel_capacity_sweep` perf lane before rollout. |
+
+If memory grows under streaming load, lower `body_channel_capacity` before
+lowering body size limits. If throughput stalls without memory pressure, sweep
+capacity values on the same runner and compare p95 chunk gap and total time.
+
 For gRPC unary traffic, keep short body timeouts and the default capacity. For
 gRPC streaming, use a larger capacity, set `max_stream_duration_ms` to the
 expected call duration, and rely on `grpc-timeout` to propagate tighter client

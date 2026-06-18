@@ -11,6 +11,14 @@ assertion, or `ext_authz`; qpx enforces policy from that trusted context.
 Built-in Basic/Digest/LDAP auth is kept for labs, small deployments, and local
 edge use.
 
+qpx is a policy enforcement point, protocol gateway, and observability edge. It is not intended to be the primary enterprise authentication authority: production identity should normally come from an external IdP, mTLS gateway, signed assertion, or `ext_authz`, with qpx enforcing policy from that trusted context. Built-in auth is primarily for lab, small deployment, and local edge use cases.
+
+qpx uses bounded, backpressure-aware body streams for HTTP/3 request and response relay. Streaming-aware policies cover gRPC, gRPC-Web, Connect, and SSE without requiring qpx to become an application authentication authority. Buffering modules must opt in explicitly and can be rejected by route-level streaming requirements.
+
+qpx treats `text/event-stream` as latency-sensitive streaming traffic: response buffering and compression are disabled by default, and SSE streams get dedicated idle timeout and observability.
+
+qpx runs continuous performance regression tests. These CI results are used to detect large regressions, not to claim absolute throughput. Release-grade comparative benchmarks require dedicated hardware.
+
 ## Features
 
 - **Forward proxy**: HTTP/HTTPS, CONNECT, rules, optional built-in auth,
