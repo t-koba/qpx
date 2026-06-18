@@ -166,14 +166,14 @@ jobs:
       - name: perf smoke (release)
         env:
           RUSTFLAGS: "-D warnings"
-          QPX_PERF_SMOKE_JSON: target/perf/perf-smoke.jsonl
+          QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-smoke.jsonl
         run: |
           mkdir -p target/perf
           cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
       - name: advanced transport perf (release)
         env:
           RUSTFLAGS: "-D warnings"
-          QPX_PERF_SMOKE_JSON: target/perf/advanced-transport-perf.jsonl
+          QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/advanced-transport-perf.jsonl
         run: |
           mkdir -p target/perf
           cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture

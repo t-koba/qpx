@@ -230,6 +230,7 @@ fn write_perf_artifact(
         return Ok(());
     };
     let _guard = perf_artifact_lock().lock().expect("perf artifact lock");
+    let path = PathBuf::from(path);
     let record = serde_json::json!({
         "bench": canonical_perf_bench_label(label),
         "legacy_bench": label,
@@ -245,16 +246,17 @@ fn write_perf_artifact(
         "req_per_sec": req_per_sec,
         "p95_ms": p95.as_secs_f64() * 1000.0,
     });
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|err| anyhow!("create perf artifact dir {}: {err}", parent.display()))?;
+    }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|err| {
-            anyhow!(
-                "open perf artifact {}: {err}",
-                PathBuf::from(&path).display()
-            )
-        })?;
+        .map_err(|err| anyhow!("open perf artifact {}: {err}", path.display()))?;
     use std::io::Write as _;
     writeln!(file, "{}", serde_json::to_string(&record)?)
         .map_err(|err| anyhow!("write perf artifact: {err}"))?;

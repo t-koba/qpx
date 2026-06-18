@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+/qpxd/target/
 /fuzz/target/
 /fuzz/corpus/*
 !/fuzz/corpus/grpc_web_text_base64_observer/

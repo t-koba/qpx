@@ -172,6 +172,7 @@ fn write_perf_artifact(
         return Ok(());
     };
     let _guard = perf_artifact_lock().lock().expect("perf artifact lock");
+    let path = PathBuf::from(path);
     let record = serde_json::json!({
         "bench": canonical_perf_bench_label(label),
         "legacy_bench": label,
@@ -189,11 +190,17 @@ fn write_perf_artifact(
         "p95_ms": p95.as_secs_f64() * 1000.0,
         "p99_ms": p99.as_secs_f64() * 1000.0,
     });
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create perf artifact dir {}", parent.display()))?;
+    }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .with_context(|| format!("open perf artifact {}", PathBuf::from(path).display()))?;
+        .with_context(|| format!("open perf artifact {}", path.display()))?;
     writeln!(file, "{}", serde_json::to_string(&record)?).context("write perf artifact")?;
     Ok(())
 }
