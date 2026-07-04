@@ -275,8 +275,8 @@ fn workspace_lint_posture_violations(cargo: &toml::Value) -> Vec<String> {
         .and_then(toml::Value::as_table)
         .and_then(|package| package.get("rust-version"))
         .and_then(toml::Value::as_str);
-    if rust_version != Some("1.92") {
-        violations.push("workspace.package.rust-version must be 1.92".to_string());
+    if rust_version != Some("1.96") {
+        violations.push("workspace.package.rust-version must be 1.96".to_string());
     }
     let Some(lints) = workspace.get("lints").and_then(toml::Value::as_table) else {
         violations.push("Cargo.toml missing [workspace.lints]".to_string());
@@ -2925,7 +2925,7 @@ fn phase4_ci_acceptance_violations(
 ) -> Vec<&'static str> {
     let mut violations = Vec::new();
     for required in [
-        "dtolnay/rust-toolchain@1.92",
+        "dtolnay/rust-toolchain@1.96",
         "cargo fmt --all -- --check",
         "cargo check --workspace --locked",
         "cargo build --workspace --all-targets --locked",
@@ -5202,7 +5202,7 @@ mod tests {
     #[test]
     fn phase4_ci_acceptance_gate_rejects_missing_required_workflow_commands() {
         let ci = r#"
-            dtolnay/rust-toolchain@1.92
+            dtolnay/rust-toolchain@1.96
             cargo fmt --all -- --check
             cargo check --workspace --locked
             cargo build --workspace --all-targets --locked
@@ -5433,7 +5433,7 @@ mod tests {
         let good: toml::Value = toml::from_str(
             r#"
             [workspace.package]
-            rust-version = "1.92"
+            rust-version = "1.96"
 
             [workspace.lints.rust]
             dead_code = "deny"
@@ -5464,7 +5464,7 @@ mod tests {
         assert_eq!(
             workspace_lint_posture_violations(&bad),
             [
-                "workspace.package.rust-version must be 1.92",
+                "workspace.package.rust-version must be 1.96",
                 "workspace rust lint dead_code must be deny",
                 "workspace rust lint unsafe_op_in_unsafe_fn must be deny",
                 "workspace rust lint unused must be deny",

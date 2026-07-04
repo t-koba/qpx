@@ -37,7 +37,7 @@ check_deny_skip_baseline() {
   fi
 }
 
-require Cargo.toml 'rust-version = "1.92"'
+require Cargo.toml 'rust-version = "1.96"'
 require Cargo.toml 'dead_code = "deny"'
 require Cargo.toml 'unused = "deny"'
 require Cargo.toml 'unsafe_op_in_unsafe_fn = "deny"'
@@ -242,7 +242,7 @@ require deny.toml 'unknown-registry = "deny"'
 require deny.toml 'unknown-git = "deny"'
 require .github/workflows/ci.yml 'schedule:'
 require .github/workflows/ci.yml "cron: '17 19 * * *'"
-require .github/workflows/ci.yml 'dtolnay/rust-toolchain@1.92'
+require .github/workflows/ci.yml 'dtolnay/rust-toolchain@1.96'
 require .github/workflows/ci.yml 'cargo fmt --all -- --check'
 require .github/workflows/ci.yml 'cargo check --workspace --locked'
 require .github/workflows/ci.yml 'cargo build --workspace --all-targets --locked'

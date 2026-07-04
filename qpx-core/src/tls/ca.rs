@@ -530,7 +530,7 @@ fn open_windows_ca_material(path: &Path, create_new: bool) -> std::io::Result<fs
     options
         .read(true)
         .write(true)
-        .custom_access(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC);
+        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC);
     if create_new {
         options.create_new(true);
     }
