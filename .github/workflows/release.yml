@@ -11,6 +11,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 jobs:
   build:
@@ -36,7 +37,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96
         with:
           targets: ${{ matrix.target }}
 
@@ -75,7 +76,7 @@ jobs:
           mkdir -p "$RELEASE_NAME"
           
           # Generate licenses for the full workspace using our pinned config/lockfile.
-          cargo about generate --config about.toml --workspace --locked licenses/about.hbs > THIRDPARTY.md
+          cargo about generate --fail --config about.toml --workspace --locked licenses/about.hbs > THIRDPARTY.md
 
           # Copy binaries
           cp "target/${{ matrix.target }}/release/${BINARY_NAME}${EXT}" "$RELEASE_NAME/"

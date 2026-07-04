@@ -2777,9 +2777,18 @@ pub(crate) fn check_phase4_ci_acceptance_gates(root: &Path) -> Result<()> {
     let security = fs::read_to_string(root.join(".github/workflows/security-qa.yml"))?;
     let codeql = fs::read_to_string(root.join(".github/workflows/codeql.yml"))?;
     let structure = fs::read_to_string(root.join(".github/workflows/structure.yml"))?;
+    let release = fs::read_to_string(root.join(".github/workflows/release.yml"))?;
+    let about = fs::read_to_string(root.join("about.toml"))?;
     let public_api = fs::read_to_string(root.join("scripts/check-public-api.sh"))?;
-    let violations =
-        phase4_ci_acceptance_violations(&ci, &security, &codeql, &structure, &public_api);
+    let violations = phase4_ci_acceptance_violations(
+        &ci,
+        &security,
+        &codeql,
+        &structure,
+        &release,
+        &about,
+        &public_api,
+    );
     if !violations.is_empty() {
         bail!(
             "Phase 4 CI acceptance gate violations:\n{}",
@@ -2961,6 +2970,8 @@ fn phase4_ci_acceptance_violations(
     security: &str,
     codeql: &str,
     structure: &str,
+    release: &str,
+    about: &str,
     public_api: &str,
 ) -> Vec<&'static str> {
     let mut violations = Vec::new();
@@ -3038,6 +3049,32 @@ fn phase4_ci_acceptance_violations(
                 .push("structure.yml must run acceptance, structure, and budget gates together");
             break;
         }
+    }
+    for required in [
+        "workflow_dispatch:",
+        "tags:",
+        "v*",
+        "dtolnay/rust-toolchain@1.96",
+        "tool: cargo-about",
+        "cross build --workspace --release --locked --target ${{ matrix.target }} --features \"${QPXD_SAMPLE_RUSTLS_FEATURES}\"",
+        "cargo build --workspace --release --locked --target ${{ matrix.target }} --features \"${QPXD_SAMPLE_RUSTLS_FEATURES}\"",
+        "cargo about generate --fail --config about.toml --workspace --locked licenses/about.hbs > THIRDPARTY.md",
+        "softprops/action-gh-release@v3",
+        "files: ${{ env.ASSET }}",
+    ] {
+        if !release.contains(required) {
+            violations.push("release.yml missing release build, package, or publish gate");
+            break;
+        }
+    }
+    for forbidden in ["no-clearly-defined", "filter-noassertion"] {
+        if about.contains(forbidden) {
+            violations.push("about.toml contains obsolete cargo-about config key");
+            break;
+        }
+    }
+    if !about.contains("\"MIT-0\"") {
+        violations.push("about.toml missing MIT-0 license allowance");
     }
     for required in [
         "check_crate qpx-core",
@@ -5290,9 +5327,30 @@ mod tests {
         "#;
         let codeql = "github/codeql-action/init@v4\ngithub/codeql-action/analyze@v4";
         let structure = "bash ./scripts/check-ci-acceptance-gates.sh\ncargo xtask structure\ncargo xtask budget";
+        let release = r#"
+            workflow_dispatch:
+            tags:
+            v*
+            dtolnay/rust-toolchain@1.96
+            tool: cargo-about
+            cross build --workspace --release --locked --target ${{ matrix.target }} --features "${QPXD_SAMPLE_RUSTLS_FEATURES}"
+            cargo build --workspace --release --locked --target ${{ matrix.target }} --features "${QPXD_SAMPLE_RUSTLS_FEATURES}"
+            cargo about generate --fail --config about.toml --workspace --locked licenses/about.hbs > THIRDPARTY.md
+            softprops/action-gh-release@v3
+            files: ${{ env.ASSET }}
+        "#;
+        let about = r#"
+            accepted = [
+                "MIT",
+                "MIT-0",
+            ]
+        "#;
         let public_api = "check_crate qpx-core\ncheck_crate qpx-auth\ncheck_crate qpx-h3\ncheck_crate qpx-acme\ncheck_crate qpx-observability";
         assert!(
-            phase4_ci_acceptance_violations(ci, security, codeql, structure, public_api).is_empty()
+            phase4_ci_acceptance_violations(
+                ci, security, codeql, structure, release, about, public_api
+            )
+            .is_empty()
         );
 
         assert_eq!(
@@ -5301,6 +5359,8 @@ mod tests {
                 "cargo fuzz run \"${target}\"",
                 "github/codeql-action/init@v4",
                 "cargo xtask structure",
+                "softprops/action-gh-release@v3",
+                "no-clearly-defined = true",
                 "check_crate qpx-core",
             ),
             [
@@ -5308,6 +5368,9 @@ mod tests {
                 "security-qa.yml missing ASAN or fuzz smoke coverage",
                 "codeql.yml missing CodeQL init/analyze",
                 "structure.yml must run acceptance, structure, and budget gates together",
+                "release.yml missing release build, package, or publish gate",
+                "about.toml contains obsolete cargo-about config key",
+                "about.toml missing MIT-0 license allowance",
                 "public API script missing library crate snapshot check",
             ]
         );
