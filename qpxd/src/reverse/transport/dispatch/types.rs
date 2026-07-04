@@ -77,7 +77,7 @@ pub(super) struct ReverseAccessControl {
     pub(super) override_upstream: Option<String>,
     pub(super) route_timeout: Duration,
     pub(super) cache_bypass: bool,
-    pub(super) ext_authz_mirror_upstreams: Vec<String>,
+    pub(super) decision_service_mirror_upstreams: Vec<String>,
     pub(super) request_limit_ctx: RateLimitContext,
     pub(super) request_limits: crate::rate_limit::AppliedRateLimits,
 }
@@ -166,7 +166,7 @@ pub(super) struct ReverseRetryPrepareInput<'a> {
     pub(super) request_method: &'a Method,
     pub(super) seed: u64,
     pub(super) sticky_seed: u64,
-    pub(super) ext_authz_mirror_upstreams: Vec<String>,
+    pub(super) decision_service_mirror_upstreams: Vec<String>,
     pub(super) route_timeout: Duration,
     pub(super) proxy_name: &'a str,
 }
@@ -255,7 +255,7 @@ pub(super) struct ReversePostModuleInput<'a> {
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
     pub(super) route_headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) override_upstream: Option<&'a str>,
-    pub(super) ext_authz_mirror_upstreams: Vec<String>,
+    pub(super) decision_service_mirror_upstreams: Vec<String>,
     pub(super) seed: u64,
     pub(super) sticky_seed: u64,
     pub(super) route_timeout: Duration,

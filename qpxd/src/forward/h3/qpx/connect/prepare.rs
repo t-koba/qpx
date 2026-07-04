@@ -30,7 +30,7 @@ pub(super) struct PreparedQpxConnect {
     pub(super) response_headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) log_context: RequestLogContext,
     pub(super) matched_rule: Option<String>,
-    pub(super) ext_authz_policy_id: Option<String>,
+    pub(super) decision_service_policy_id: Option<String>,
     pub(super) audit_path: Option<String>,
     pub(super) timeout_override: Option<Duration>,
     pub(super) rate_limit_profile: Option<String>,

@@ -20,8 +20,9 @@ use crate::http::protocol::common::{
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
-    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, enforce_ext_authz,
-    prepare_ext_authz_allow_controls, resolve_identity, sanitize_headers_for_policy,
+    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
+    enforce_decision_service, prepare_decision_service_allow_controls, resolve_identity,
+    sanitize_headers_for_policy,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
@@ -123,14 +124,14 @@ pub(super) async fn handle_qpx_webtransport_connect(
         path: audit_path.as_deref(),
     };
     macro_rules! return_with_policy {
-        ($response:expr, $outcome:expr, $matched_rule:expr, $ext_authz_policy_id:expr, $log_context:expr) => {{
+        ($response:expr, $outcome:expr, $matched_rule:expr, $decision_service_policy_id:expr, $log_context:expr) => {{
             policy_responder
                 .send(
                     &mut req_stream,
                     $response,
                     $outcome,
                     $matched_rule,
-                    $ext_authz_policy_id,
+                    $decision_service_policy_id,
                     $log_context,
                 )
                 .await?;
@@ -142,7 +143,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
         ($response:expr, $outcome:expr, $log_context:expr) => {{ return_with_policy!($response, $outcome, None, None, $log_context) }};
     }
     macro_rules! return_rate_limited {
-        ($retry_after:expr, $matched_rule:expr, $ext_authz_policy_id:expr, $log_context:expr) => {{
+        ($retry_after:expr, $matched_rule:expr, $decision_service_policy_id:expr, $log_context:expr) => {{
             return_with_policy!(
                 finalize_response_for_request(
                     &http::Method::CONNECT,
@@ -153,7 +154,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 ),
                 DispatchOutcome::RateLimited,
                 $matched_rule,
-                $ext_authz_policy_id,
+                $decision_service_policy_id,
                 $log_context
             );
         }};
@@ -248,10 +249,11 @@ pub(super) async fn handle_qpx_webtransport_connect(
         return_rate_limited!(Some(retry_after), matched_rule_name, None, &log_context);
     }
 
-    let ext_authz = enforce_ext_authz(
+    let decision_service = enforce_decision_service(
         &state,
         &effective_policy,
-        ExtAuthzInput {
+        DecisionServiceInput {
+            mode: DecisionServiceMode::ForwardConnect,
             proxy_kind: ProxyKind::Forward,
             proxy_name: proxy_name.as_str(),
             scope_name: handler.listener_name.as_ref(),
@@ -270,15 +272,21 @@ pub(super) async fn handle_qpx_webtransport_connect(
         },
     )
     .await?;
-    let ext_authz_policy_id = ext_authz.policy_id().map(str::to_owned);
-    let ext_authz_policy_tags = ext_authz.policy_tags().to_vec();
-    let mut log_context =
-        identity.to_log_context(matched_rule_name, None, ext_authz_policy_id.as_deref());
-    log_context.policy_tags = ext_authz_policy_tags;
-    let (response_headers, timeout_override, rate_limit_profile) = match ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => {
-            let allow =
-                prepare_ext_authz_allow_controls(allow, ExtAuthzMode::ForwardConnect, None)?;
+    let decision_service_policy_id = decision_service.policy_id().map(str::to_owned);
+    let decision_service_policy_tags = decision_service.policy_tags().to_vec();
+    let mut log_context = identity.to_log_context(
+        matched_rule_name,
+        None,
+        decision_service_policy_id.as_deref(),
+    );
+    log_context.policy_tags = decision_service_policy_tags;
+    let (response_headers, timeout_override, rate_limit_profile) = match decision_service {
+        DecisionServiceEnforcement::Continue(allow) => {
+            let allow = prepare_decision_service_allow_controls(
+                allow,
+                DecisionServiceMode::ForwardConnect,
+                None,
+            )?;
             let rate_limit_profile = allow.rate_limit_profile.clone();
             if let Some(retry_after) = request_limits.merge_profile_and_check(
                 &state.policy.rate_limiters,
@@ -290,14 +298,14 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 return_rate_limited!(
                     Some(retry_after),
                     matched_rule_name,
-                    ext_authz_policy_id.as_deref(),
+                    decision_service_policy_id.as_deref(),
                     &log_context
                 );
             }
             allow.apply_action_overrides(&mut action);
             (allow.headers, allow.timeout_override, rate_limit_profile)
         }
-        ExtAuthzEnforcement::Deny(deny) => {
+        DecisionServiceEnforcement::Deny(deny) => {
             let response = if let Some(local) = deny.local_response.as_ref() {
                 finalized_local_response(
                     &http::Method::CONNECT,
@@ -319,12 +327,12 @@ pub(super) async fn handle_qpx_webtransport_connect(
             return_with_policy!(
                 response,
                 if deny.local_response.is_some() {
-                    DispatchOutcome::ExtAuthzLocalResponse
+                    DispatchOutcome::DecisionServiceLocalResponse
                 } else {
-                    DispatchOutcome::ExtAuthzDeny
+                    DispatchOutcome::DecisionServiceDeny
                 },
                 matched_rule_name,
-                ext_authz_policy_id.as_deref(),
+                decision_service_policy_id.as_deref(),
                 &log_context
             );
         }
@@ -344,7 +352,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 response,
                 DispatchOutcome::Block,
                 matched_rule_name,
-                ext_authz_policy_id.as_deref(),
+                decision_service_policy_id.as_deref(),
                 &log_context
             );
         }
@@ -364,7 +372,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 response,
                 DispatchOutcome::Respond,
                 matched_rule_name,
-                ext_authz_policy_id.as_deref(),
+                decision_service_policy_id.as_deref(),
                 &log_context
             );
         }
@@ -380,7 +388,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
             return_rate_limited!(
                 None,
                 matched_rule_name,
-                ext_authz_policy_id.as_deref(),
+                decision_service_policy_id.as_deref(),
                 &log_context
             );
         }
@@ -431,7 +439,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 response,
                 DispatchOutcome::Error,
                 matched_rule_name,
-                ext_authz_policy_id.as_deref(),
+                decision_service_policy_id.as_deref(),
                 &log_context
             );
         }
@@ -447,7 +455,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
         host: host.as_str(),
         audit_path: audit_path.as_deref(),
         matched_rule: matched_rule_name,
-        ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+        decision_service_policy_id: decision_service_policy_id.as_deref(),
         log_context: &log_context,
         response_headers: response_headers.as_deref(),
         request_limit_ctx,

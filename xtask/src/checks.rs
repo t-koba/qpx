@@ -1,6 +1,5 @@
 use crate::budget::{LocBudget, TotalLocBudgets};
 use crate::files::{has_cfg_test, is_test_file, rust_files_under};
-use crate::function_lengths::function_length_warnings;
 use crate::visitors::{FinalizeVisitor, PanicVisitor, UnwrapVisitor};
 use anyhow::{Context, Result, anyhow, bail};
 use std::borrow::Cow;
@@ -27,7 +26,6 @@ const DISPATCH_PARALLEL_FILE_BASELINES: &[(&str, usize)] = &[
     ("types.rs", 3),
     ("outcome.rs", 2),
 ];
-
 fn rust_workspace_crates() -> impl Iterator<Item = &'static str> {
     include_str!("../workspace-crates.txt").lines()
 }
@@ -749,29 +747,6 @@ fn visit_production_sources(
     Ok(())
 }
 
-pub(crate) fn check_function_lengths(root: &Path) -> Result<()> {
-    const WARN_OVER_LINES: usize = 200;
-    let mut warnings = Vec::new();
-    for path in rust_files_under(root.join("qpxd/src").as_path())? {
-        if is_test_file(&path) {
-            continue;
-        }
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        let rel = rel_path(root, &path);
-        warnings.extend(function_length_warnings(
-            rel.as_ref(),
-            content.as_str(),
-            WARN_OVER_LINES,
-        ));
-    }
-    for warning in &warnings {
-        eprintln!("{warning}");
-    }
-    eprintln!("long function advisory count: {}", warnings.len());
-    Ok(())
-}
-
 pub(crate) fn check_dispatch_dependency_direction(root: &Path) -> Result<()> {
     let dispatch_dir = root.join("qpxd/src/http/dispatch");
     if !dispatch_dir.is_dir() {
@@ -803,7 +778,7 @@ pub(crate) fn check_dispatch_dependency_direction(root: &Path) -> Result<()> {
         );
     }
     let acceptance = fs::read_to_string(root.join("scripts/check-ci-acceptance-gates.sh"))?;
-    for needle in "fn policy_id(&self) -> Option<&str>;fn policy_tags(&self) -> &[String];build_dispatch_audit_context;apply_ext_authz_http_access;apply_dispatch_response_policy;dispatch_cache_collapse_continue;finalize_dispatch_collapsed_cache_decision;check_dispatch_limit_response_commonality;check_dispatch_annotated_local_response_commonality;check_response_capture_after_finalize;check_proxy_authorization_header_boundary;check_reverse_response_rules_dispatch_boundary;check_h3_origin_pool_load_semantics;check_qpxf_cgi_header_parser_zero_copy;check_qpx_h3_static_response_boundary;check_rpc_frame_boundary_tests;finalize_response_headers_common;finalize_response_with_headers_in_place;set_proxy_authorization_header;trait HeaderTransform;trait ResponseTransform;MIRROR_MAX_INFLIGHT_PER_ENDPOINT;EXT_AUTHZ_RESPONSE_BUFFERS;request_side_fail_closed;send_prefixed_datagram;validate_secure_file_handle".split(';') {
+    for needle in "fn policy_id(&self) -> Option<&str>;fn policy_tags(&self) -> &[String];build_dispatch_audit_context;apply_decision_service_http_access;apply_dispatch_response_policy;dispatch_cache_collapse_continue;finalize_dispatch_collapsed_cache_decision;check_dispatch_limit_response_commonality;check_dispatch_annotated_local_response_commonality;check_response_capture_after_finalize;check_proxy_authorization_header_boundary;check_reverse_response_rules_dispatch_boundary;check_h3_origin_pool_load_semantics;check_qpxf_cgi_header_parser_zero_copy;check_qpx_h3_static_response_boundary;check_rpc_frame_boundary_tests;finalize_response_headers_common;finalize_response_with_headers_in_place;set_proxy_authorization_header;trait HeaderTransform;trait ResponseTransform;MIRROR_MAX_INFLIGHT_PER_ENDPOINT;collect_decision_service_response_body;request_side_fail_closed;send_prefixed_datagram;validate_secure_file_handle".split(';') {
         if !acceptance.contains(needle) {
             bail!("CI acceptance gate is missing required check: {needle}");
         }
@@ -829,7 +804,7 @@ pub(crate) fn check_phase3_architecture_baselines(root: &Path) -> Result<()> {
     check_h3_open_queue_backpressure_baseline(root)?;
     check_h3_origin_pool_load_semantics(root)?;
     check_reverse_mirror_spawn_backpressure(root)?;
-    check_ext_authz_response_buffering(root)?;
+    check_decision_service_response_buffering(root)?;
     check_response_compression_worker_backpressure(root)?;
     check_reverse_retry_template_bounded_body(root)?;
     check_http_module_body_mode_contract(root)?;
@@ -956,22 +931,22 @@ fn check_dispatch_access_commonality_baseline(root: &Path) -> Result<()> {
 
 fn dispatch_access_commonality_violations(content: &str) -> Vec<&'static str> {
     let mut violations = Vec::new();
-    // The combined stage wraps audit construction and ext_authz application;
+    // The combined stage wraps audit construction and decision_service application;
     // dispatchers may either call it or use the two shared primitives, but
     // must never hand-roll the sequence.
     let uses_combined_stage = content.contains("enforce_http_access(");
     if !uses_combined_stage && !content.contains("build_dispatch_audit_context(") {
         violations.push("missing build_dispatch_audit_context");
     }
-    if !uses_combined_stage && !content.contains("apply_ext_authz_http_access(") {
-        violations.push("missing apply_ext_authz_http_access");
+    if !uses_combined_stage && !content.contains("apply_decision_service_http_access(") {
+        violations.push("missing apply_decision_service_http_access");
     }
     for forbidden in [
         "DispatchAuditContext::new(",
         ".policy_id()",
         ".policy_tags()",
-        "ExtAuthzEnforcement::Continue",
-        "ExtAuthzEnforcement::Deny",
+        "DecisionServiceEnforcement::Continue",
+        "DecisionServiceEnforcement::Deny",
     ] {
         if content.contains(forbidden) {
             violations.push(forbidden);
@@ -1797,13 +1772,13 @@ fn reverse_mirror_spawn_backpressure_violations(content: &str) -> Vec<&'static s
     violations
 }
 
-fn check_ext_authz_response_buffering(root: &Path) -> Result<()> {
-    let rel = "qpxd/src/policy_context/ext_authz.rs";
+fn check_decision_service_response_buffering(root: &Path) -> Result<()> {
+    let rel = "qpxd/src/policy_context/decision_service.rs";
     let content = fs::read_to_string(root.join(rel))?;
-    let violations = ext_authz_response_buffering_violations(&content);
+    let violations = decision_service_response_buffering_violations(&content);
     if !violations.is_empty() {
         bail!(
-            "ext_authz response buffering baseline exceeded:\n{}",
+            "decision_service response buffering baseline exceeded:\n{}",
             violations
                 .into_iter()
                 .map(|violation| format!("{rel}: {violation}"))
@@ -1814,27 +1789,30 @@ fn check_ext_authz_response_buffering(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ext_authz_response_buffering_violations(content: &str) -> Vec<&'static str> {
+fn decision_service_response_buffering_violations(content: &str) -> Vec<&'static str> {
     let mut violations = Vec::new();
     for needle in [
-        "EXT_AUTHZ_INLINE_RESPONSE_BYTES",
-        "EXT_AUTHZ_RESPONSE_BUFFERS",
-        "struct ExtAuthzBodyBuffer",
-        "heap: Option<Vec<u8>>",
-        "collect_ext_authz_response_body(",
+        "collect_decision_service_response_body(",
+        "Result<Vec<u8>>",
+        "let mut out = Vec::new();",
         "while let Some(frame) = body.frame().await",
-        "out.extend(&data)?",
+        ".checked_add(data.len())",
+        "next > max_bytes",
+        "out.extend_from_slice(&data);",
     ] {
         if !content.contains(needle) {
-            violations.push("missing inline-first bounded ext_authz response collector");
+            violations.push("missing cancellable bounded decision_service response collector");
             break;
         }
     }
     if content.contains("to_bytes_limited(") {
-        violations.push("ext_authz response collector uses to_bytes_limited");
+        violations.push("decision_service response collector uses to_bytes_limited");
     }
     if content.contains(".collect().await") {
-        violations.push("ext_authz response collector uses collect().await");
+        violations.push("decision_service response collector uses collect().await");
+    }
+    if content.contains("spawn_blocking") || content.contains("SyncIoBridge") {
+        violations.push("decision_service response collector uses non-cancellable blocking parser");
     }
     violations
 }
@@ -4091,20 +4069,20 @@ mod tests {
     fn phase3_dispatch_access_gate_requires_shared_helpers() {
         assert!(
             dispatch_access_commonality_violations(
-                "build_dispatch_audit_context(input); apply_ext_authz_http_access(input);"
+                "build_dispatch_audit_context(input); apply_decision_service_http_access(input);"
             )
             .is_empty()
         );
         assert_eq!(
             dispatch_access_commonality_violations(
-                "DispatchAuditContext::new(state); decision.policy_id(); ExtAuthzEnforcement::Deny(deny);"
+                "DispatchAuditContext::new(state); decision.policy_id(); DecisionServiceEnforcement::Deny(deny);"
             ),
             [
                 "missing build_dispatch_audit_context",
-                "missing apply_ext_authz_http_access",
+                "missing apply_decision_service_http_access",
                 "DispatchAuditContext::new(",
                 ".policy_id()",
-                "ExtAuthzEnforcement::Deny",
+                "DecisionServiceEnforcement::Deny",
             ]
         );
     }
@@ -4733,18 +4711,17 @@ mod tests {
     }
 
     #[test]
-    fn phase3_ext_authz_gate_rejects_collecting_response_body() {
+    fn phase3_decision_service_gate_rejects_collecting_response_body() {
         assert!(
-            ext_authz_response_buffering_violations(
+            decision_service_response_buffering_violations(
                 r#"
-                const EXT_AUTHZ_INLINE_RESPONSE_BYTES: usize = 4096;
-                static EXT_AUTHZ_RESPONSE_BUFFERS: LazyLock<Mutex<Vec<Vec<u8>>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-                struct ExtAuthzBodyBuffer { inline: [u8; EXT_AUTHZ_INLINE_RESPONSE_BYTES], inline_len: usize, heap: Option<Vec<u8>> }
-                async fn collect_ext_authz_response_body(mut body: Body) -> Result<ExtAuthzBodyBuffer> {
-                    let mut out = ExtAuthzBodyBuffer::new();
+                async fn collect_decision_service_response_body(mut body: Body, max_bytes: usize) -> Result<Vec<u8>> {
+                    let mut out = Vec::new();
                     while let Some(frame) = body.frame().await {
                         let data = frame?.into_data().unwrap();
-                        out.extend(&data)?;
+                        let next = out.len().checked_add(data.len()).unwrap();
+                        if next > max_bytes { return Err(anyhow!("too large")); }
+                        out.extend_from_slice(&data);
                     }
                     Ok(out)
                 }
@@ -4753,36 +4730,50 @@ mod tests {
             .is_empty()
         );
         assert_eq!(
-            ext_authz_response_buffering_violations(
+            decision_service_response_buffering_violations(
                 r#"
-                async fn collect_ext_authz_response_body(body: Body) -> Result<Bytes> {
+                async fn collect_decision_service_response_body(body: Body) -> Result<Bytes> {
                     crate::http::body::to_bytes_limited(body, 1024).await
                 }
                 "#,
             ),
             [
-                "missing inline-first bounded ext_authz response collector",
-                "ext_authz response collector uses to_bytes_limited",
+                "missing cancellable bounded decision_service response collector",
+                "decision_service response collector uses to_bytes_limited",
             ]
         );
         assert_eq!(
-            ext_authz_response_buffering_violations(
+            decision_service_response_buffering_violations(
                 r#"
-                const EXT_AUTHZ_INLINE_RESPONSE_BYTES: usize = 4096;
-                static EXT_AUTHZ_RESPONSE_BUFFERS: LazyLock<Mutex<Vec<Vec<u8>>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-                struct ExtAuthzBodyBuffer { inline: [u8; EXT_AUTHZ_INLINE_RESPONSE_BYTES], inline_len: usize, heap: Option<Vec<u8>> }
-                async fn collect_ext_authz_response_body(mut body: Body) -> Result<ExtAuthzBodyBuffer> {
+                async fn collect_decision_service_response_body(mut body: Body, max_bytes: usize) -> Result<Vec<u8>> {
                     let bytes = body.collect().await?.to_bytes();
-                    let mut out = ExtAuthzBodyBuffer::new();
+                    let mut out = Vec::new();
                     while let Some(frame) = body.frame().await {
                         let data = frame?.into_data().unwrap();
-                        out.extend(&data)?;
+                        let next = out.len().checked_add(data.len()).unwrap();
+                        if next > max_bytes { return Err(anyhow!("too large")); }
+                        out.extend_from_slice(&data);
                     }
                     Ok(out)
                 }
                 "#,
             ),
-            ["ext_authz response collector uses collect().await"]
+            ["decision_service response collector uses collect().await"]
+        );
+        assert_eq!(
+            decision_service_response_buffering_violations(
+                r#"
+                async fn parse_decision_service_response_body(body: Body) {
+                    tokio::task::spawn_blocking(move || {
+                        let bridge = SyncIoBridge::new(reader);
+                    });
+                }
+                "#,
+            ),
+            [
+                "missing cancellable bounded decision_service response collector",
+                "decision_service response collector uses non-cancellable blocking parser",
+            ]
         );
     }
 
@@ -5480,27 +5471,6 @@ mod tests {
                 "workspace clippy lint undocumented_unsafe_blocks must be deny",
             ]
         );
-    }
-
-    #[test]
-    fn long_function_length_check_is_advisory() {
-        let root = std::env::temp_dir().join(format!(
-            "qpx-xtask-long-function-advisory-{}",
-            std::process::id()
-        ));
-        let src = root.join("qpxd/src");
-        std::fs::create_dir_all(&src).expect("create temp qpxd/src");
-        let mut content = String::from("pub fn intentionally_long_for_advisory() {\n");
-        for _ in 0..220 {
-            content.push_str("    let _value = 1;\n");
-        }
-        content.push_str("}\n");
-        std::fs::write(src.join("lib.rs"), content).expect("write temp source");
-
-        let result = check_function_lengths(&root);
-
-        std::fs::remove_dir_all(&root).expect("remove temp root");
-        assert!(result.is_ok());
     }
 
     #[test]

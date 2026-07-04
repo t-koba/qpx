@@ -14,7 +14,7 @@ validate a concrete config file.
 - `runtime`: process/runtime protocol limits.
 - `telemetry`: logging, metrics, OpenTelemetry, ACME, and capture exporter.
 - `security`: built-in auth, identity sources, named sets, destination
-  intelligence, upstream trust profiles, and external authorization decisions.
+  intelligence, upstream trust profiles, and decision service contracts.
 - `http`: reusable HTTP policy, guard profiles, and module chains.
 - `traffic`: reusable `rate_limit_profiles`.
 - `caches`: cache backend definitions.

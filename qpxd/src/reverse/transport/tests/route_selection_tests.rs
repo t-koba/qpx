@@ -113,7 +113,7 @@ async fn route_match_uses_actual_chunked_request_size() {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: Vec::new(),
+                services: Vec::new(),
             },
             destination: Default::default(),
             named_sets: Vec::new(),
@@ -252,7 +252,7 @@ async fn selected_body_dependent_route_enforces_route_request_limit_after_observ
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: Vec::new(),
+                services: Vec::new(),
             },
             destination: Default::default(),
             named_sets: Vec::new(),
@@ -410,7 +410,7 @@ async fn route_match_uses_destination_category() {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: Vec::new(),
+                services: Vec::new(),
             },
             destination: Default::default(),
             named_sets: vec![NamedSetConfig {

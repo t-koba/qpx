@@ -21,8 +21,8 @@ pub(crate) enum DispatchError {
         response: Box<Response<Body>>,
     },
 
-    #[error("ext-authz denied")]
-    ExtAuthzDenied { response: Box<Response<Body>> },
+    #[error("decision service denied")]
+    DecisionServiceDenied { response: Box<Response<Body>> },
 
     #[error("upstream unavailable: {0}")]
     UpstreamUnavailable(String),
@@ -39,7 +39,7 @@ impl DispatchError {
             Self::PolicyDenied { response, .. } => Ok(*response),
             #[cfg(feature = "auth-basic")]
             Self::AuthRequired { response, .. } => Ok(*response),
-            Self::ExtAuthzDenied { response } => Ok(*response),
+            Self::DecisionServiceDenied { response } => Ok(*response),
             Self::UpstreamUnavailable(message) => Err(anyhow::anyhow!(message)),
             Self::Internal(err) => Err(err),
         }

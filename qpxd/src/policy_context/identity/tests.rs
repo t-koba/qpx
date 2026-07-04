@@ -66,29 +66,29 @@ fn runtime_with_sources(sources: Vec<IdentitySourceConfig>) -> RuntimeState {
 fn merged_deduplicates_sources() {
     let base = PolicyContextConfig {
         identity_sources: vec!["a".into(), "b".into()],
-        ext_authz: None,
+        decision_service: None,
     };
     let overlay = PolicyContextConfig {
         identity_sources: vec!["b".into(), "c".into()],
-        ext_authz: None,
+        decision_service: None,
     };
     let merged = EffectivePolicyContext::merged(Some(&base), Some(&overlay));
     assert_eq!(merged.identity_sources, vec!["a", "b", "c"]);
 }
 
 #[test]
-fn merged_overlay_ext_authz() {
+fn merged_overlay_decision_service() {
     let base = PolicyContextConfig {
         identity_sources: Vec::new(),
-        ext_authz: Some("base".into()),
+        decision_service: Some("base".into()),
     };
     let overlay = PolicyContextConfig {
         identity_sources: Vec::new(),
-        ext_authz: Some("overlay".into()),
+        decision_service: Some("overlay".into()),
     };
     assert_eq!(
         EffectivePolicyContext::merged(Some(&base), Some(&overlay))
-            .ext_authz
+            .decision_service
             .as_deref(),
         Some("overlay")
     );
@@ -98,7 +98,7 @@ fn merged_overlay_ext_authz() {
 fn from_single_none() {
     let policy = EffectivePolicyContext::from_single(None);
     assert!(policy.identity_sources.is_empty());
-    assert!(policy.ext_authz.is_none());
+    assert!(policy.decision_service.is_none());
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn sanitize_strips_untrusted_headers() {
     let state = runtime_with_sources(vec![trusted_headers_source("headers", vec!["10.0.0.0/8"])]);
     let policy = EffectivePolicyContext {
         identity_sources: vec!["headers".into()],
-        ext_authz: None,
+        decision_service: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert("x-user", "alice".parse().unwrap());
@@ -128,7 +128,7 @@ fn sanitize_strips_global_untrusted_headers_even_when_policy_does_not_use_source
     )]);
     let policy = EffectivePolicyContext {
         identity_sources: Vec::new(),
-        ext_authz: None,
+        decision_service: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert("x-user", "alice".parse().unwrap());
@@ -152,7 +152,7 @@ fn sanitize_preserves_trusted_headers() {
     )]);
     let policy = EffectivePolicyContext {
         identity_sources: vec!["headers".into()],
-        ext_authz: None,
+        decision_service: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert("x-user", "alice".parse().unwrap());
@@ -174,7 +174,7 @@ fn sanitize_strips_header_untrusted_by_any_declaring_source() {
     ]);
     let policy = EffectivePolicyContext {
         identity_sources: vec!["trusted-for-peer".into()],
-        ext_authz: None,
+        decision_service: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert("x-user", "alice".parse().unwrap());
@@ -196,7 +196,7 @@ fn sanitize_empty_headers() {
     )]);
     let policy = EffectivePolicyContext {
         identity_sources: vec!["headers".into()],
-        ext_authz: None,
+        decision_service: None,
     };
     let mut headers = HeaderMap::new();
     sanitize_headers_for_policy(
@@ -217,7 +217,7 @@ fn resolve_identity_extracts_trusted_headers() {
     )]);
     let policy = EffectivePolicyContext {
         identity_sources: vec!["headers".into()],
-        ext_authz: None,
+        decision_service: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert("x-user", "alice".parse().unwrap());

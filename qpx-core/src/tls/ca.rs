@@ -157,13 +157,13 @@ fn write_text_file(path: &Path, contents: &str, owner_only_acl: bool) -> Result<
     };
     validate_windows_ca_material_handle(&file, path)?;
     if owner_only_acl {
-        set_owner_only_acl(path)?;
+        set_owner_only_acl(&file, path)?;
     }
     file.set_len(0)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     if owner_only_acl {
-        set_owner_only_acl(path)?;
+        set_owner_only_acl(&file, path)?;
     }
     Ok(())
 }
@@ -196,7 +196,7 @@ fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     ensure_path_not_symlink(path, "ca key")?;
     let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
     validate_windows_ca_material_handle(&file, path)?;
-    set_owner_only_acl(path)
+    set_owner_only_acl(&file, path)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -426,15 +426,16 @@ fn reject_untrusted_state_ancestor(path: &Path, _meta: &fs::Metadata) -> Result<
 }
 
 #[cfg(windows)]
-fn set_owner_only_acl(path: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
+fn set_owner_only_acl(file: &fs::File, path: &Path) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
-        SetNamedSecurityInfoW,
+        SetSecurityInfo,
     };
     use windows_sys::Win32::Security::{
-        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
     };
 
     // Protected DACL: LocalSystem, Administrators and the current owner get full access.
@@ -493,13 +494,12 @@ fn set_owner_only_acl(path: &Path) -> Result<()> {
         )
         .into());
     }
-    let mut path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: path_wide is NUL-terminated and DACL belongs to the live descriptor.
+    // SAFETY: the file handle is open and validated by the caller; DACL belongs to the live descriptor.
     let status = unsafe {
-        SetNamedSecurityInfoW(
-            path_wide.as_mut_ptr(),
+        SetSecurityInfo(
+            file.as_raw_handle(),
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             dacl,

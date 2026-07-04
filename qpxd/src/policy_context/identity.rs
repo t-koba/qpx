@@ -27,7 +27,7 @@ use super::util::{
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EffectivePolicyContext {
     pub(crate) identity_sources: Vec<String>,
-    pub(crate) ext_authz: Option<String>,
+    pub(crate) decision_service: Option<String>,
 }
 
 impl EffectivePolicyContext {
@@ -48,12 +48,12 @@ impl EffectivePolicyContext {
                 }
             }
         }
-        let ext_authz = overlay
-            .and_then(|policy| policy.ext_authz.clone())
-            .or_else(|| base.and_then(|policy| policy.ext_authz.clone()));
+        let decision_service = overlay
+            .and_then(|policy| policy.decision_service.clone())
+            .or_else(|| base.and_then(|policy| policy.decision_service.clone()));
         Self {
             identity_sources,
-            ext_authz,
+            decision_service,
         }
     }
 }
@@ -110,7 +110,7 @@ impl ResolvedIdentity {
         &self,
         matched_rule: Option<&str>,
         matched_route: Option<&str>,
-        ext_authz_policy_id: Option<&str>,
+        decision_service_policy_id: Option<&str>,
     ) -> RequestLogContext {
         RequestLogContext {
             subject: self.user.clone(),
@@ -122,7 +122,7 @@ impl ResolvedIdentity {
             idp: self.idp.clone(),
             identity_source: self.identity_source.clone(),
             policy_tags: Vec::new(),
-            ext_authz_policy_id: ext_authz_policy_id.map(str::to_string),
+            decision_service_policy_id: decision_service_policy_id.map(str::to_string),
             matched_rule: matched_rule.map(str::to_string),
             matched_route: matched_route.map(str::to_string),
             destination_trace: None,

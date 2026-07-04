@@ -1,13 +1,13 @@
 use super::{
     AccessLogConfig, AcmeConfig, AuditLogConfig, AuthConfig, CacheBackendConfig, CachePolicyConfig,
-    CapturePolicyConfig, DestinationResolutionConfig, DestinationResolutionOverrideConfig,
-    EdgeConfig, ExporterConfig, ExtAuthzConfig, FtpConfig, GrpcConfig, HeaderControl,
-    HealthCheckConfig, Http3IngressEdgeConfig, HttpGuardProfileConfig, HttpModuleConfig,
-    HttpPolicyConfig, IdentityConfig, IdentitySourceConfig, IngressEdgeConfig, IngressEdgeMode,
-    IpcBodyLimitConfig, IpcMode, IpcUpstreamConfig, LocalResponseConfig, MatchConfig,
-    MessagesConfig, NamedSetConfig, OriginalDstConfig, RateLimitConfig, RateLimitProfileConfig,
-    ResilienceConfig, ReverseAffinityConfig, ReverseEdgeConfig, ReverseHttp3Config,
-    ReverseRouteBackendConfig, ReverseRouteConfig, ReverseRouteMirrorConfig,
+    CapturePolicyConfig, DecisionServiceConfig, DestinationResolutionConfig,
+    DestinationResolutionOverrideConfig, EdgeConfig, ExporterConfig, FtpConfig, GrpcConfig,
+    HeaderControl, HealthCheckConfig, Http3IngressEdgeConfig, HttpGuardProfileConfig,
+    HttpModuleConfig, HttpPolicyConfig, IdentityConfig, IdentitySourceConfig, IngressEdgeConfig,
+    IngressEdgeMode, IpcBodyLimitConfig, IpcMode, IpcUpstreamConfig, LocalResponseConfig,
+    MatchConfig, MessagesConfig, NamedSetConfig, OriginalDstConfig, RateLimitConfig,
+    RateLimitProfileConfig, ResilienceConfig, ReverseAffinityConfig, ReverseEdgeConfig,
+    ReverseHttp3Config, ReverseRouteBackendConfig, ReverseRouteConfig, ReverseRouteMirrorConfig,
     ReverseRouteTargetConfig, ReverseTlsConfig, ReverseTlsPassthroughRouteConfig, RuleConfig,
     SseStreamingPolicy, StreamingConfig, StreamingRequirement, TlsInspectionConfig,
     TlsPassthroughMatchConfig, UpstreamConfig, UpstreamTlsTrustConfig,
@@ -173,7 +173,7 @@ pub struct SecurityConfig {
 #[serde(deny_unknown_fields)]
 pub struct DecisionConfig {
     #[serde(default)]
-    pub ext_authz: Vec<ExtAuthzConfig>,
+    pub services: Vec<DecisionServiceConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]

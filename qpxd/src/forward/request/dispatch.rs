@@ -230,7 +230,7 @@ async fn prepare_forward_request(
             matched_route: None,
             identity: &identity,
             destination: &destination,
-            ext_authz: None,
+            decision_service: None,
         }),
     })
     .await?
@@ -467,8 +467,8 @@ async fn complete_forward_request(
             state: &state,
             policy: &effective_policy,
             kind: ProxyKind::Forward,
-            mode: crate::policy_context::ExtAuthzMode::ForwardHttp,
-            enforce_ext_authz: true,
+            mode: crate::policy_context::DecisionServiceMode::ForwardHttp,
+            enforce_decision_service: true,
             proxy_name,
             scope_name: listener_name,
             remote_addr,
@@ -510,7 +510,7 @@ async fn complete_forward_request(
                     response: Box::new(response),
                 }
             } else {
-                DispatchError::ExtAuthzDenied {
+                DispatchError::DecisionServiceDenied {
                     response: Box::new(response),
                 }
             });

@@ -99,7 +99,7 @@ pub(super) fn build_transparent_prepared(
                 matched_route: None,
                 identity: &identity,
                 destination: &destination,
-                ext_authz: None,
+                decision_service: None,
             }),
         );
         let response =

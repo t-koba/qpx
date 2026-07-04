@@ -9,12 +9,14 @@ use crate::upstream::raw_http1::{
 use anyhow::{Result, anyhow};
 use hyper::header::{HOST, HeaderValue};
 use hyper::{Request, Response, Uri};
+use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
-pub(crate) async fn shared_reverse_https_request(
+pub(crate) async fn shared_reverse_https_request_with_trust(
     pools: &crate::pool::PoolRegistry,
     req: Request<Body>,
+    trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<Response<Body>> {
     let target = absolute_request_target(req.uri())?;
     let authority =
@@ -24,10 +26,10 @@ pub(crate) async fn shared_reverse_https_request(
         authority.as_str(),
         target.host.as_str(),
         true,
-        None,
+        trust,
     ));
 
-    match acquire_https_connection(&slot, authority.as_str(), target.host.as_str(), true, None)
+    match acquire_https_connection(&slot, authority.as_str(), target.host.as_str(), true, trust)
         .await?
     {
         HttpsConnectionAcquisition::H2Ready { shared, ready } => {

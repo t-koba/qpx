@@ -27,7 +27,7 @@ fn connect_runtime() -> Runtime {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: Vec::new(),
+                services: Vec::new(),
             },
             destination: Default::default(),
             named_sets: Vec::new(),
@@ -137,7 +137,7 @@ async fn connect_upstream_cert_policy_can_block_after_client_hello() {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: Vec::new(),
+                services: Vec::new(),
             },
             destination: Default::default(),
             named_sets: Vec::new(),

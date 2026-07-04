@@ -42,7 +42,7 @@ pub struct RequestLogContext {
     /// Policy tags associated with the decision.
     pub policy_tags: Vec<String>,
     /// External authorization policy identifier.
-    pub ext_authz_policy_id: Option<String>,
+    pub decision_service_policy_id: Option<String>,
     /// Matched forward rule.
     pub matched_rule: Option<String>,
     /// Matched reverse route.
@@ -195,8 +195,8 @@ where
                                 if let Some(route) = ctx.matched_route.as_deref() {
                                     span.record("qpx.matched_route", route);
                                 }
-                                if let Some(policy_id) = ctx.ext_authz_policy_id.as_deref() {
-                                    span.record("qpx.ext_authz_policy_id", policy_id);
+                                if let Some(policy_id) = ctx.decision_service_policy_id.as_deref() {
+                                    span.record("qpx.decision_service_policy_id", policy_id);
                                 }
                                 if !ctx.policy_tags.is_empty() {
                                     let policy_tags = joined_or_empty(&ctx.policy_tags);
@@ -296,9 +296,9 @@ where
                             .and_then(|ctx| ctx.identity_source.as_deref())
                             .unwrap_or(""),
                         policy_tags = %policy_tags,
-                        ext_authz_policy_id = req_ctx
+                        decision_service_policy_id = req_ctx
                             .as_ref()
-                            .and_then(|ctx| ctx.ext_authz_policy_id.as_deref())
+                            .and_then(|ctx| ctx.decision_service_policy_id.as_deref())
                             .unwrap_or(""),
                         matched_rule = req_ctx
                             .as_ref()
@@ -428,7 +428,7 @@ where
                 "qpx.matched_rule" = tracing::field::Empty,
                 "qpx.matched_route" = tracing::field::Empty,
                 "qpx.policy_tags" = tracing::field::Empty,
-                "qpx.ext_authz_policy_id" = tracing::field::Empty,
+                "qpx.decision_service_policy_id" = tracing::field::Empty,
                 "http.response.status_code" = tracing::field::Empty,
             );
             let parent = crate::extract_trace_context(req.headers());

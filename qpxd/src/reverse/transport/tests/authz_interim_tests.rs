@@ -1,8 +1,8 @@
 use super::*;
 
 #[tokio::test]
-async fn reverse_ext_authz_rate_limit_profile_is_enforced() {
-    let authz_addr = spawn_ext_authz_server(
+async fn reverse_decision_service_rate_limit_profile_is_enforced() {
+    let authz_addr = spawn_decision_service_server(
         r#"{"decision":"allow","rate_limit_profile":"reverse-profile"}"#.to_string(),
         2,
     )
@@ -47,7 +47,7 @@ async fn reverse_ext_authz_rate_limit_profile_is_enforced() {
             affinity: None,
             policy_context: Some(PolicyContextConfig {
                 identity_sources: Vec::new(),
-                ext_authz: Some("authz".to_string()),
+                decision_service: Some("authz".to_string()),
             }),
             http: None,
             http_guard_profile: None,
@@ -78,15 +78,10 @@ async fn reverse_ext_authz_rate_limit_profile_is_enforced() {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: vec![ExtAuthzConfig {
-                    name: "authz".to_string(),
-                    kind: Default::default(),
-                    endpoint: format!("http://{}", authz_addr),
-                    timeout_ms: 1_000,
-                    max_response_bytes: 1024 * 1024,
-                    send: ExtAuthzSendConfig::default(),
-                    on_error: Default::default(),
-                }],
+                services: vec![test_decision_service_config(
+                    "authz",
+                    format!("http://{}", authz_addr),
+                )],
             },
             destination: Default::default(),
             named_sets: Vec::new(),
@@ -242,7 +237,7 @@ async fn handle_request_with_interim_returns_early_hints_for_h3_downstream() {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: Vec::new(),
+                services: Vec::new(),
             },
             destination: Default::default(),
             named_sets: Vec::new(),

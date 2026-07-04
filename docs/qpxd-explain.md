@@ -48,7 +48,7 @@ Top-level shape:
 
 Common `execution_plan` fields:
 
-- `flags`: compiled execution flags such as `auth`, `ext_authz`,
+- `flags`: compiled execution flags such as `auth`, `decision_service`,
   `cache_lookup`, `response_rules`, `request_modules`, `response_modules`,
   `capture_plaintext`, `capture_body`, `retry_body_buffer`, `mirroring`,
   `websocket`, `ipc`, and `frozen_request`.

@@ -208,7 +208,7 @@ Conceptually:
 request metadata
   + transport metadata
   + trusted identity context
-  + optional external authz decision
+  + optional decision service result
   -> qpx rule engine
   -> enforcement action
   -> audit / telemetry
@@ -262,6 +262,7 @@ The external decision should be constrained to a small result surface:
 - `policy_tags`
 
 This keeps the data plane simple and avoids turning `qpx` into an application auth framework.
+If `capability.effects` is omitted, `qpx` treats the service as allow-only; every other effect must be explicitly listed.
 
 ## 8. Implemented configuration model
 
@@ -331,24 +332,48 @@ security:
 
 This makes the trust boundary explicit and prevents overloading `auth:` with unrelated concerns.
 
-### 8.3 External authorization hook
+### 8.3 Decision service hook
 
-Use an optional decision hook:
+Use an optional schema-mapped decision hook:
 
 ```yaml
 security:
   decisions:
-    ext_authz:
+    services:
       - name: central-policy
-        kind: http
         endpoint: "https://policy.example.com/check"
         timeout_ms: 300
         max_response_bytes: 1048576
-        send:
-          request: true
-          identity: true
+        contract:
+          driver: schema_mapped_http
+          profile_id: acme.policy.v1
+          contract_id: central-policy-v1
+          schemas: {}
+        capability:
+          effects: ["allow"]
+        pep_signal:
           selected_headers: ["user-agent", "content-type"]
-        on_error: deny
+        request_mapping:
+          - target_document: decision_request
+            target: /subject/user
+            source: $.pep_signal.identity.user
+            optional: true
+          - target_document: decision_request
+            target: /resource/host
+            source: $.pep_signal.request.host
+            optional: true
+          - target_document: decision_request
+            target: /action/method
+            source: $.pep_signal.request.method
+            optional: true
+        response_mapping:
+          - target_document: enforceable_effect
+            target: /decision
+            source: $.decision_response.decision
+          - target_document: enforceable_effect
+            target: /policy_id
+            source: $.decision_response.policy_id
+            optional: true
 ```
 
 Per-edge or per-route use:
@@ -361,7 +386,7 @@ edges:
     default_action: { type: block }
     policy_context:
       identity_sources: ["corp-access-proxy"]
-      ext_authz: central-policy
+      decision_service: central-policy
 
   - kind: reverse
     name: apps
@@ -373,7 +398,7 @@ edges:
         match:
           host: ["finance.example.com"]
         policy_context:
-          ext_authz: central-policy
+          decision_service: central-policy
         target:
           type: upstream
           upstreams: ["http://10.0.0.20:8080"]
@@ -423,7 +448,7 @@ telemetry:
       - device_id
       - posture
       - idp
-      - ext_authz_policy_id
+      - decision_service_policy_id
       - matched_rule
 ```
 

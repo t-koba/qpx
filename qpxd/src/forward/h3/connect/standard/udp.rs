@@ -61,7 +61,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         response_headers,
         log_context,
         matched_rule,
-        ext_authz_policy_id,
+        decision_service_policy_id,
         audit_path,
         timeout_override,
         rate_limit_profile,
@@ -95,7 +95,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
                     path: audit_path.as_deref(),
                     outcome: $outcome,
                     matched_rule: matched_rule_name,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+                    decision_service_policy_id: decision_service_policy_id.as_deref(),
                     log_context: &log_context,
                 },
             )
@@ -254,7 +254,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
                 status: Some(StatusCode::OK.as_u16()),
                 matched_rule: matched_rule_name,
                 matched_route: None,
-                ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+                decision_service_policy_id: decision_service_policy_id.as_deref(),
             },
             &log_context,
         );
@@ -348,7 +348,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
             status: Some(StatusCode::OK.as_u16()),
             matched_rule: matched_rule_name,
             matched_route: None,
-            ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+            decision_service_policy_id: decision_service_policy_id.as_deref(),
         },
         &log_context,
     );

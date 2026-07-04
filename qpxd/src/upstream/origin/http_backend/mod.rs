@@ -31,7 +31,7 @@ use self::pool::{
     HttpsConnectionAcquisition, acquire_https_connection, https_origin_pool_key,
     plain_http_origin_pool_key,
 };
-pub(crate) use self::shared::shared_reverse_https_request;
+pub(crate) use self::shared::shared_reverse_https_request_with_trust;
 
 pub(crate) async fn proxy_http(
     pools: &crate::pool::PoolRegistry,

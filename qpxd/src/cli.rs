@@ -72,7 +72,7 @@ pub(crate) enum InitTemplate {
     ForwardEgress,
     TransparentLinux,
     IpcGateway,
-    TrustedIdentityExtAuthz,
+    TrustedIdentityDecisionService,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 
 use crate::config::types::{
-    ActionKind, CachePolicyConfig, ExtAuthzConfig, IdentitySourceConfig, IdentitySourceKind,
+    ActionKind, CachePolicyConfig, DecisionServiceConfig, IdentitySourceConfig, IdentitySourceKind,
     MatchConfig, PolicyContextConfig, RuleConfig,
 };
 
@@ -142,7 +142,7 @@ pub(crate) fn validate_lb_config(lb: &str, context: &str) -> Result<()> {
 pub(crate) fn validate_policy_context_refs(
     policy: Option<&PolicyContextConfig>,
     identity_sources: &[IdentitySourceConfig],
-    ext_authz: &[ExtAuthzConfig],
+    decision_service: &[DecisionServiceConfig],
     context: &str,
     allow_mtls_identity: bool,
 ) -> Result<()> {
@@ -172,16 +172,19 @@ pub(crate) fn validate_policy_context_refs(
             ));
         }
     }
-    if let Some(ext_authz_name) = policy.ext_authz.as_deref() {
-        if ext_authz_name.trim().is_empty() {
+    if let Some(decision_service_name) = policy.decision_service.as_deref() {
+        if decision_service_name.trim().is_empty() {
             return Err(anyhow!(
-                "{context} policy_context.ext_authz must not be empty when set"
+                "{context} policy_context.decision_service must not be empty when set"
             ));
         }
-        if !ext_authz.iter().any(|cfg| cfg.name == ext_authz_name) {
+        if !decision_service
+            .iter()
+            .any(|cfg| cfg.name == decision_service_name)
+        {
             return Err(anyhow!(
-                "{context} policy_context references unknown ext_authz: {}",
-                ext_authz_name
+                "{context} policy_context references unknown decision_service: {}",
+                decision_service_name
             ));
         }
     }

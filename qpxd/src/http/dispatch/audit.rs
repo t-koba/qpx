@@ -22,7 +22,7 @@ pub(crate) struct DispatchAuditContext {
     pub(crate) path: Option<String>,
     pub(crate) matched_rule: Option<String>,
     pub(crate) matched_route: Option<String>,
-    pub(crate) ext_authz_policy_id: Option<String>,
+    pub(crate) decision_service_policy_id: Option<String>,
     pub(crate) log_context: RequestLogContext,
 }
 
@@ -47,7 +47,7 @@ impl DispatchAuditContext {
             path,
             matched_rule: None,
             matched_route: None,
-            ext_authz_policy_id: None,
+            decision_service_policy_id: None,
             log_context,
         }
     }
@@ -72,8 +72,11 @@ impl DispatchAuditContext {
         self
     }
 
-    pub(crate) fn with_ext_authz_policy_id(mut self, ext_authz_policy_id: Option<String>) -> Self {
-        self.ext_authz_policy_id = ext_authz_policy_id;
+    pub(crate) fn with_decision_service_policy_id(
+        mut self,
+        decision_service_policy_id: Option<String>,
+    ) -> Self {
+        self.decision_service_policy_id = decision_service_policy_id;
         self
     }
 }
@@ -102,7 +105,7 @@ pub(crate) fn annotate_dispatch_response(
             status: Some(response.status().as_u16()),
             matched_rule: ctx.matched_rule.as_deref(),
             matched_route: ctx.matched_route.as_deref(),
-            ext_authz_policy_id: ctx.ext_authz_policy_id.as_deref(),
+            decision_service_policy_id: ctx.decision_service_policy_id.as_deref(),
         },
         &annotated_context,
     );

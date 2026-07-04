@@ -28,7 +28,7 @@ pub(super) struct QpxWebTransportEstablishedContext<'a> {
     pub(super) host: &'a str,
     pub(super) audit_path: Option<&'a str>,
     pub(super) matched_rule: Option<&'a str>,
-    pub(super) ext_authz_policy_id: Option<&'a str>,
+    pub(super) decision_service_policy_id: Option<&'a str>,
     pub(super) log_context: &'a RequestLogContext,
     pub(super) response_headers: Option<&'a CompiledHeaderControl>,
     pub(super) request_limit_ctx: RateLimitContext,
@@ -52,7 +52,7 @@ pub(super) async fn relay_established_webtransport(
         host,
         audit_path,
         matched_rule,
-        ext_authz_policy_id,
+        decision_service_policy_id,
         log_context,
         response_headers,
         request_limit_ctx,
@@ -130,7 +130,7 @@ pub(super) async fn relay_established_webtransport(
             host,
             audit_path,
             matched_rule,
-            ext_authz_policy_id,
+            decision_service_policy_id,
             log_context,
         },
     );
@@ -229,7 +229,7 @@ struct AllowAuditContext<'a> {
     host: &'a str,
     audit_path: Option<&'a str>,
     matched_rule: Option<&'a str>,
-    ext_authz_policy_id: Option<&'a str>,
+    decision_service_policy_id: Option<&'a str>,
     log_context: &'a RequestLogContext,
 }
 
@@ -253,7 +253,7 @@ fn emit_allow_audit(
             status: Some(StatusCode::OK.as_u16()),
             matched_rule: ctx.matched_rule,
             matched_route: None,
-            ext_authz_policy_id: ctx.ext_authz_policy_id,
+            decision_service_policy_id: ctx.decision_service_policy_id,
         },
         ctx.log_context,
     );

@@ -121,7 +121,7 @@ telemetry:
     - auth_strength
     - idp
     - identity_source
-    - ext_authz_policy_id
+    - decision_service_policy_id
     - matched_rule
     - matched_route
   metrics:
@@ -243,18 +243,31 @@ security:
     pin_sha256:
     - '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
   decisions:
-    ext_authz:
+    services:
     - name: central-policy
       endpoint: http://127.0.0.1:18080/check
       timeout_ms: 300
       max_response_bytes: 1048576
-      send:
-        request: true
-        identity: true
+      contract:
+        driver: schema_mapped_http
+        profile_id: qpx.generic.v1
+        schemas: {}
+      capability:
+        effects:
+        - allow
+        - rate_limit_profile
+      pep_signal:
         selected_headers:
         - user-agent
         - content-type
-      on_error: deny
+      response_mapping:
+      - target_document: enforceable_effect
+        target: /decision
+        source: $.decision_response.decision
+      - target_document: enforceable_effect
+        target: /rate_limit_profile
+        source: $.decision_response.rate_limit_profile
+        optional: true
 http:
   guard_profiles:
   - name: strict-json-api

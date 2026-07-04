@@ -130,12 +130,12 @@ pub(super) fn default_local_response_status() -> u16 {
     200
 }
 
-pub(super) fn default_ext_authz_timeout_ms() -> u64 {
+pub(super) fn default_decision_service_timeout_ms() -> u64 {
     300
 }
 
-pub(super) fn default_ext_authz_max_response_bytes() -> usize {
-    1024 * 1024
+pub(super) fn default_decision_service_max_response_bytes() -> usize {
+    64 * 1024
 }
 
 pub(super) fn default_reverse_enforce_sni_host_match() -> bool {

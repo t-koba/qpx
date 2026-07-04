@@ -191,8 +191,8 @@ fn execution_plan_for_common(
     if !plan.policy_context.identity_sources.is_empty() {
         plan.flags.insert(PlanFlags::IDENTITY_SOURCES);
     }
-    if plan.policy_context.ext_authz.is_some() {
-        plan.flags.insert(PlanFlags::EXT_AUTHZ);
+    if plan.policy_context.decision_service.is_some() {
+        plan.flags.insert(PlanFlags::DECISION_SERVICE);
     }
     if plan.destination_resolution.is_some() {
         plan.flags.insert(PlanFlags::DESTINATION_INTEL);

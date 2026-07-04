@@ -106,7 +106,7 @@ fn runtime_plan_marks_policy_context_features() {
     let mut route = reverse_route("default");
     route.policy_context = Some(PolicyContextConfig {
         identity_sources: vec!["trusted_headers".to_string()],
-        ext_authz: Some("opa".to_string()),
+        decision_service: Some("opa".to_string()),
     });
     let mut config = base_config();
     push_reverse(&mut config, reverse_edge(route));
@@ -114,7 +114,7 @@ fn runtime_plan_marks_policy_context_features() {
     let flags = single_reverse_route_flags(config);
 
     assert!(flags.contains(PlanFlags::IDENTITY_SOURCES));
-    assert!(flags.contains(PlanFlags::EXT_AUTHZ));
+    assert!(flags.contains(PlanFlags::DECISION_SERVICE));
 }
 
 #[test]

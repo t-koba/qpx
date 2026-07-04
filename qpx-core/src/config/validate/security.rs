@@ -3,9 +3,10 @@ use cidr::IpCidr;
 use std::collections::HashSet;
 
 use super::super::types::{
-    AuthConfig, DestinationResolutionConfig, DestinationResolutionOverrideConfig, ExtAuthzConfig,
-    HttpGuardProfileConfig, IdentitySourceConfig, IdentitySourceKind, NamedSetConfig,
-    RateLimitProfileConfig, SignedAssertionConfig, UpstreamTlsTrustProfileConfig,
+    AuthConfig, DecisionServiceConfig, DestinationResolutionConfig,
+    DestinationResolutionOverrideConfig, HttpGuardProfileConfig, IdentitySourceConfig,
+    IdentitySourceKind, NamedSetConfig, RateLimitProfileConfig, SignedAssertionConfig,
+    UpstreamTlsTrustProfileConfig,
 };
 use super::rules::{validate_header_name, validate_rate_limit_config};
 use super::upstreams::validate_upstream_tls_trust_config;
@@ -510,41 +511,375 @@ pub(super) fn validate_upstream_trust_profile_ref(
     Ok(())
 }
 
-pub(super) fn validate_ext_authz_configs(ext_authz: &[ExtAuthzConfig]) -> Result<()> {
+pub(super) fn validate_decision_service_configs(
+    decision_service: &[DecisionServiceConfig],
+    upstream_trust_profiles: &HashSet<String>,
+    upstream_trust_profile_configs: &[UpstreamTlsTrustProfileConfig],
+) -> Result<()> {
     let mut names = HashSet::new();
-    for cfg in ext_authz {
+    for cfg in decision_service {
         if cfg.name.trim().is_empty() {
-            return Err(anyhow!("ext_authz[].name must not be empty"));
+            return Err(anyhow!("decisions.services[].name must not be empty"));
         }
         if !names.insert(cfg.name.clone()) {
-            return Err(anyhow!("duplicate ext_authz name: {}", cfg.name));
+            return Err(anyhow!("duplicate decisions.services name: {}", cfg.name));
         }
         if cfg.timeout_ms == 0 {
-            return Err(anyhow!("ext_authz {} timeout_ms must be >= 1", cfg.name));
+            return Err(anyhow!(
+                "decision_service {} timeout_ms must be >= 1",
+                cfg.name
+            ));
         }
         if cfg.max_response_bytes == 0 {
             return Err(anyhow!(
-                "ext_authz {} max_response_bytes must be >= 1",
+                "decision_service {} max_response_bytes must be >= 1",
                 cfg.name
             ));
         }
         let endpoint = cfg.endpoint.trim();
         if endpoint.is_empty() {
-            return Err(anyhow!("ext_authz {} endpoint must not be empty", cfg.name));
-        }
-        let url = url::Url::parse(endpoint)
-            .map_err(|e| anyhow!("ext_authz {} endpoint is invalid: {}", cfg.name, e))?;
-        if url.scheme() != "http" && url.scheme() != "https" {
             return Err(anyhow!(
-                "ext_authz {} endpoint must use http or https",
+                "decision_service {} endpoint must not be empty",
                 cfg.name
             ));
         }
-        for header in &cfg.send.selected_headers {
+        let url = url::Url::parse(endpoint)
+            .map_err(|e| anyhow!("decision_service {} endpoint is invalid: {}", cfg.name, e))?;
+        if url.scheme() != "http" && url.scheme() != "https" {
+            return Err(anyhow!(
+                "decision_service {} endpoint must use http or https",
+                cfg.name
+            ));
+        }
+        if cfg.contract.profile_id.trim().is_empty() {
+            return Err(anyhow!(
+                "decision_service {} contract.profile_id must not be empty",
+                cfg.name
+            ));
+        }
+        if let Some(contract_id) = cfg.contract.contract_id.as_deref()
+            && contract_id.trim().is_empty()
+        {
+            return Err(anyhow!(
+                "decision_service {} contract.contract_id must not be empty when set",
+                cfg.name
+            ));
+        }
+        if !cfg.schema_resolution.trusted_registries.is_empty() {
+            return Err(anyhow!(
+                "decision_service {} schema_resolution.trusted_registries is not supported in v1",
+                cfg.name
+            ));
+        }
+        if cfg.schema_resolution.local_bundle.is_none()
+            && (cfg.contract.schemas.remote.decision_request.is_some()
+                || cfg.contract.schemas.remote.decision_response.is_some()
+                || cfg.contract.schemas.remote.auth_context.is_some()
+                || cfg.contract.schemas.remote.audit_context.is_some())
+        {
+            return Err(anyhow!(
+                "decision_service {} schema_resolution.local_bundle is required for remote schemas",
+                cfg.name
+            ));
+        }
+        validate_schema_ref(
+            cfg.contract.schemas.remote.decision_request.as_ref(),
+            &format!("decision_service {} remote.decision_request", cfg.name),
+        )?;
+        validate_schema_ref(
+            cfg.contract.schemas.remote.decision_response.as_ref(),
+            &format!("decision_service {} remote.decision_response", cfg.name),
+        )?;
+        validate_schema_ref(
+            cfg.contract.schemas.remote.auth_context.as_ref(),
+            &format!("decision_service {} remote.auth_context", cfg.name),
+        )?;
+        validate_schema_ref(
+            cfg.contract.schemas.remote.audit_context.as_ref(),
+            &format!("decision_service {} remote.audit_context", cfg.name),
+        )?;
+        validate_schema_ref(
+            cfg.contract.schemas.qpx.pep_signal.as_ref(),
+            &format!("decision_service {} qpx.pep_signal", cfg.name),
+        )?;
+        validate_schema_ref(
+            cfg.contract.schemas.qpx.effect_capability.as_ref(),
+            &format!("decision_service {} qpx.effect_capability", cfg.name),
+        )?;
+        validate_schema_ref(
+            cfg.contract.schemas.qpx.enforceable_effect.as_ref(),
+            &format!("decision_service {} qpx.enforceable_effect", cfg.name),
+        )?;
+        validate_schema_ref(
+            cfg.contract.schemas.qpx.local_response.as_ref(),
+            &format!("decision_service {} qpx.local_response", cfg.name),
+        )?;
+        validate_schema_ref(
+            cfg.contract.schemas.qpx.audit_event.as_ref(),
+            &format!("decision_service {} qpx.audit_event", cfg.name),
+        )?;
+        validate_decision_service_capability_names(cfg)?;
+        if cfg
+            .policy_composition
+            .external_allow_can_override_local_deny
+            || !cfg.policy_composition.external_deny_can_stop_local_allow
+        {
+            return Err(anyhow!(
+                "decision_service {} policy_composition overrides are not supported in v1",
+                cfg.name
+            ));
+        }
+        validate_mapping_rules(
+            &cfg.request_mapping,
+            &format!("decision_service {} request_mapping", cfg.name),
+        )?;
+        validate_mapping_rules(
+            &cfg.response_mapping,
+            &format!("decision_service {} response_mapping", cfg.name),
+        )?;
+        for header in &cfg.pep_signal.selected_headers {
             validate_header_name(
                 header,
-                &format!("ext_authz {} send.selected_headers", cfg.name),
+                &format!("decision_service {} pep_signal.selected_headers", cfg.name),
             )?;
+        }
+        for header in &cfg.pep_signal.sensitive_headers {
+            validate_header_name(
+                header,
+                &format!("decision_service {} pep_signal.sensitive_headers", cfg.name),
+            )?;
+        }
+        for header in &cfg.capability.constraints.allowed_request_headers_to_add {
+            validate_header_name(
+                header,
+                &format!(
+                    "decision_service {} capability.constraints.allowed_request_headers_to_add",
+                    cfg.name
+                ),
+            )?;
+        }
+        for header in &cfg.capability.constraints.allowed_response_headers_to_add {
+            validate_header_name(
+                header,
+                &format!(
+                    "decision_service {} capability.constraints.allowed_response_headers_to_add",
+                    cfg.name
+                ),
+            )?;
+        }
+        if let Some(max) = cfg.capability.constraints.max_timeout_override_ms
+            && max == 0
+        {
+            return Err(anyhow!(
+                "decision_service {} capability.constraints.max_timeout_override_ms must be >= 1",
+                cfg.name
+            ));
+        }
+        if let Some(max_entries) = cfg.cache.max_entries
+            && max_entries == 0
+        {
+            return Err(anyhow!(
+                "decision_service {} cache.max_entries must be >= 1",
+                cfg.name
+            ));
+        }
+        if let Some(ttl_ms) = cfg.cache.ttl_ms
+            && ttl_ms == 0
+        {
+            return Err(anyhow!(
+                "decision_service {} cache.ttl_ms must be >= 1",
+                cfg.name
+            ));
+        }
+        if let Some(env) = cfg.auth.bearer_token_env.as_deref()
+            && env.trim().is_empty()
+        {
+            return Err(anyhow!(
+                "decision_service {} auth.bearer_token_env must not be empty when set",
+                cfg.name
+            ));
+        }
+        if cfg.auth.bearer_token_env.is_some() && url.scheme() != "https" {
+            return Err(anyhow!(
+                "decision_service {} auth.bearer_token_env requires an https endpoint",
+                cfg.name
+            ));
+        }
+        if let Some(mtls) = cfg.auth.mtls.as_ref() {
+            let context = format!("decision_service {} auth.mtls", cfg.name);
+            let profile = mtls.upstream_trust_profile.as_deref();
+            let Some(profile_name) = profile.map(str::trim).filter(|value| !value.is_empty())
+            else {
+                return Err(anyhow!("{context}.upstream_trust_profile is required"));
+            };
+            validate_upstream_trust_profile_ref(
+                profile,
+                upstream_trust_profiles,
+                context.as_str(),
+            )?;
+            let Some(profile_config) = upstream_trust_profile_configs
+                .iter()
+                .find(|profile| profile.name == profile_name)
+            else {
+                return Err(anyhow!(
+                    "{context} references unknown upstream_trust_profile: {profile_name}"
+                ));
+            };
+            let has_client_cert = profile_config
+                .trust
+                .client_cert
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+            let has_client_key = profile_config
+                .trust
+                .client_key
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+            if !has_client_cert || !has_client_key {
+                return Err(anyhow!(
+                    "{context}.upstream_trust_profile must configure client_cert and client_key"
+                ));
+            }
+            if url.scheme() != "https" {
+                return Err(anyhow!(
+                    "decision_service {} auth.mtls requires an https endpoint",
+                    cfg.name
+                ));
+            }
+        }
+        if let Some(hms) = cfg.auth.http_message_signatures.as_ref() {
+            if url.scheme() != "https" {
+                return Err(anyhow!(
+                    "decision_service {} auth.http_message_signatures requires an https endpoint",
+                    cfg.name
+                ));
+            }
+            if hms.key_id.trim().is_empty() {
+                return Err(anyhow!(
+                    "decision_service {} auth.http_message_signatures.key_id must not be empty",
+                    cfg.name
+                ));
+            }
+            if hms.secret_env.is_some() == hms.private_key_env.is_some() {
+                return Err(anyhow!(
+                    "decision_service {} auth.http_message_signatures must set exactly one of secret_env or private_key_env",
+                    cfg.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_decision_service_capability_names(cfg: &DecisionServiceConfig) -> Result<()> {
+    const MODES: &[&str] = &[
+        "forward_http",
+        "forward_connect",
+        "forward_mitm_http",
+        "reverse_http",
+        "transparent_http",
+        "transparent_tls",
+        "transparent_udp",
+    ];
+    const PHASES: &[&str] = &["request_headers_after_route"];
+    const EFFECTS: &[&str] = &[
+        "allow",
+        "deny",
+        "local_response",
+        "challenge",
+        "inject_headers",
+        "override_upstream",
+        "timeout_override",
+        "cache_bypass",
+        "mirror_upstreams",
+        "rate_limit_profile",
+        "force_inspect",
+        "force_tunnel",
+    ];
+    validate_string_set_members(
+        &cfg.capability.modes,
+        MODES,
+        &format!("decision_service {} capability.modes", cfg.name),
+    )?;
+    validate_string_set_members(
+        &cfg.capability.phases,
+        PHASES,
+        &format!("decision_service {} capability.phases", cfg.name),
+    )?;
+    validate_string_set_members(
+        &cfg.capability.effects,
+        EFFECTS,
+        &format!("decision_service {} capability.effects", cfg.name),
+    )
+}
+
+fn validate_string_set_members(values: &[String], allowed: &[&str], context: &str) -> Result<()> {
+    let mut seen = HashSet::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(anyhow!("{context} entries must not be empty"));
+        }
+        let normalized = value.to_ascii_lowercase();
+        if !allowed.contains(&normalized.as_str()) {
+            return Err(anyhow!("{context} contains unsupported value: {value}"));
+        }
+        if !seen.insert(normalized) {
+            return Err(anyhow!("{context} contains duplicate value: {value}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_schema_ref(
+    schema: Option<&super::super::types::DecisionServiceSchemaRefConfig>,
+    context: &str,
+) -> Result<()> {
+    let Some(schema) = schema else {
+        return Ok(());
+    };
+    if schema.id.trim().is_empty() {
+        return Err(anyhow!("{context}.id must not be empty"));
+    }
+    if !schema.digest.starts_with("sha256:") || schema.digest.len() != "sha256:".len() + 64 {
+        return Err(anyhow!("{context}.digest must be sha256:<64 hex chars>"));
+    }
+    if !schema
+        .digest
+        .strip_prefix("sha256:")
+        .unwrap_or_default()
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(anyhow!("{context}.digest must be sha256:<64 hex chars>"));
+    }
+    Ok(())
+}
+
+fn validate_mapping_rules(
+    rules: &[super::super::types::DecisionServiceMappingRuleConfig],
+    context: &str,
+) -> Result<()> {
+    let mut targets = HashSet::new();
+    for (idx, rule) in rules.iter().enumerate() {
+        let context = format!("{context}[{idx}]");
+        if rule.source.is_some() == rule.literal.is_some() {
+            return Err(anyhow!(
+                "{context} must set exactly one of source or literal"
+            ));
+        }
+        if let Some(source) = rule.source.as_deref()
+            && source.trim().is_empty()
+        {
+            return Err(anyhow!("{context}.source must not be empty when set"));
+        }
+        if !rule.target.starts_with('/') {
+            return Err(anyhow!("{context}.target must be a JSON Pointer"));
+        }
+        if !targets.insert((rule.target_document.clone(), rule.target.clone())) {
+            return Err(anyhow!("{context}.target duplicates another mapping rule"));
         }
     }
     Ok(())

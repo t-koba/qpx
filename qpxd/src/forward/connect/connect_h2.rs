@@ -24,8 +24,9 @@ use crate::http::protocol::l7::{
     finalize_response_with_headers,
 };
 use crate::policy_context::{
-    ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, enforce_ext_authz,
-    prepare_ext_authz_allow_controls, resolve_identity, sanitize_headers_for_policy,
+    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
+    enforce_decision_service, prepare_decision_service_allow_controls, resolve_identity,
+    sanitize_headers_for_policy,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
@@ -158,7 +159,7 @@ pub(super) async fn handle_h2_extended_connect(
                 audit_host: host.as_str(),
                 path: Some(path.as_str()),
                 matched_rule: None,
-                ext_authz_policy_id: None,
+                decision_service_policy_id: None,
                 log_context: $log_context,
             }
             .annotate(&mut response, $outcome);
@@ -224,10 +225,11 @@ pub(super) async fn handle_h2_extended_connect(
             false,
         ));
     }
-    let ext_authz = enforce_ext_authz(
+    let decision_service = enforce_decision_service(
         &state,
         &effective_policy,
-        ExtAuthzInput {
+        DecisionServiceInput {
+            mode: DecisionServiceMode::ForwardConnect,
             proxy_kind: ProxyKind::Forward,
             proxy_name,
             scope_name: listener_name,
@@ -246,11 +248,14 @@ pub(super) async fn handle_h2_extended_connect(
         },
     )
     .await?;
-    let ext_authz_policy_id = ext_authz.policy_id().map(str::to_owned);
-    let ext_authz_policy_tags = ext_authz.policy_tags().to_vec();
-    let mut log_context =
-        identity.to_log_context(matched_rule_name, None, ext_authz_policy_id.as_deref());
-    log_context.policy_tags = ext_authz_policy_tags;
+    let decision_service_policy_id = decision_service.policy_id().map(str::to_owned);
+    let decision_service_policy_tags = decision_service.policy_tags().to_vec();
+    let mut log_context = identity.to_log_context(
+        matched_rule_name,
+        None,
+        decision_service_policy_id.as_deref(),
+    );
+    log_context.policy_tags = decision_service_policy_tags;
     let audit = ConnectAuditContext {
         state: &state,
         listener_name,
@@ -258,13 +263,16 @@ pub(super) async fn handle_h2_extended_connect(
         audit_host: host.as_str(),
         path: Some(path.as_str()),
         matched_rule: matched_rule_name,
-        ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+        decision_service_policy_id: decision_service_policy_id.as_deref(),
         log_context: &log_context,
     };
-    let (response_headers, timeout_override) = match ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => {
-            let allow =
-                prepare_ext_authz_allow_controls(allow, ExtAuthzMode::ForwardConnect, None)?;
+    let (response_headers, timeout_override) = match decision_service {
+        DecisionServiceEnforcement::Continue(allow) => {
+            let allow = prepare_decision_service_allow_controls(
+                allow,
+                DecisionServiceMode::ForwardConnect,
+                None,
+            )?;
             if let Some(retry_after) = request_limits.merge_profile_and_check(
                 &state.policy.rate_limiters,
                 allow.rate_limit_profile.as_deref(),
@@ -283,7 +291,7 @@ pub(super) async fn handle_h2_extended_connect(
             allow.apply_action_overrides(&mut action);
             (allow.headers, allow.timeout_override)
         }
-        ExtAuthzEnforcement::Deny(deny) => {
+        DecisionServiceEnforcement::Deny(deny) => {
             let mut response = if let Some(local) = deny.local_response.as_ref() {
                 finalized_local_response(
                     &Method::CONNECT,
@@ -305,9 +313,9 @@ pub(super) async fn handle_h2_extended_connect(
             audit.annotate(
                 &mut response,
                 if deny.local_response.is_some() {
-                    DispatchOutcome::ExtAuthzLocalResponse
+                    DispatchOutcome::DecisionServiceLocalResponse
                 } else {
-                    DispatchOutcome::ExtAuthzDeny
+                    DispatchOutcome::DecisionServiceDeny
                 },
             );
             return Ok(response);

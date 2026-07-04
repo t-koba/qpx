@@ -78,8 +78,8 @@ pub(crate) fn init_template_yaml(template: InitTemplate) -> &'static str {
             include_str!("../config-templates/transparent-linux.yaml")
         }
         InitTemplate::IpcGateway => include_str!("../config-templates/ipc-gateway.yaml"),
-        InitTemplate::TrustedIdentityExtAuthz => {
-            include_str!("../config-templates/trusted-identity-ext-authz.yaml")
+        InitTemplate::TrustedIdentityDecisionService => {
+            include_str!("../config-templates/trusted-identity-decision-service.yaml")
         }
     }
 }

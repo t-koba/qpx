@@ -215,7 +215,7 @@ fn should_append_sequence(path: &[String]) -> bool {
         [section, subsection, key]
             if matches!(
                 (section.as_str(), subsection.as_str(), key.as_str()),
-                ("security", "decisions", "ext_authz")
+                ("security", "decisions", "services")
                     | ("security", "auth", "users")
             )
     )

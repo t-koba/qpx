@@ -140,7 +140,7 @@ pub(super) fn finalize_forward_policy_response(
             status: Some(response.status().as_u16()),
             matched_rule: None,
             matched_route: None,
-            ext_authz_policy_id: None,
+            decision_service_policy_id: None,
         },
         &log_context,
     );
@@ -166,6 +166,6 @@ pub(super) fn build_forward_rate_limit_audit_context(
         matched_route: None,
         identity: policy.identity,
         destination: policy.destination,
-        ext_authz: None,
+        decision_service: None,
     })
 }

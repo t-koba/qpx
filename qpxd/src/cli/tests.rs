@@ -26,7 +26,7 @@ fn init_templates_are_valid_canonical_configs() {
         InitTemplate::ForwardEgress,
         InitTemplate::TransparentLinux,
         InitTemplate::IpcGateway,
-        InitTemplate::TrustedIdentityExtAuthz,
+        InitTemplate::TrustedIdentityDecisionService,
     ] {
         let path = temp_config_path(template);
         fs::write(&path, init_template_yaml(template)).expect("write template config");

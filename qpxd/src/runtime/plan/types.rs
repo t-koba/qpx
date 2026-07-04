@@ -366,7 +366,7 @@ pub struct PlanFlags(u64);
 impl PlanFlags {
     pub const AUTH: Self = Self(1 << 0);
     pub const IDENTITY_SOURCES: Self = Self(1 << 1);
-    pub const EXT_AUTHZ: Self = Self(1 << 2);
+    pub const DECISION_SERVICE: Self = Self(1 << 2);
     pub const DESTINATION_INTEL: Self = Self(1 << 3);
     pub const HTTP_GUARD: Self = Self(1 << 4);
     pub const CACHE_LOOKUP: Self = Self(1 << 5);

@@ -66,7 +66,7 @@ pub(super) async fn complete_transparent_request(
     let request_version = req.version();
     let remote_ip = remote_addr.ip();
     // `policy` and `early_response` are mutually exclusive listener-policy
-    // outcomes; ext_authz is enforced only when a policy proceeded.
+    // outcomes; decision_service is enforced only when a policy proceeded.
     let mut policy = policy;
     let base_headers = policy.as_mut().and_then(|policy| policy.headers.take());
     let decision =
@@ -74,8 +74,8 @@ pub(super) async fn complete_transparent_request(
             state: &state,
             policy: &effective_policy,
             kind: ProxyKind::Transparent,
-            mode: crate::policy_context::ExtAuthzMode::TransparentHttp,
-            enforce_ext_authz: policy.is_some(),
+            mode: crate::policy_context::DecisionServiceMode::TransparentHttp,
+            enforce_decision_service: policy.is_some(),
             proxy_name,
             scope_name: listener_name,
             remote_addr,

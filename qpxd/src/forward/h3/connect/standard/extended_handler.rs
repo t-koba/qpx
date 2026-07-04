@@ -68,7 +68,7 @@ pub(crate) async fn handle_h3_extended_connect(
         response_headers,
         log_context,
         matched_rule,
-        ext_authz_policy_id,
+        decision_service_policy_id,
         audit_path,
         timeout_override,
         rate_limit_profile,
@@ -103,7 +103,7 @@ pub(crate) async fn handle_h3_extended_connect(
                     path: audit_path.as_deref(),
                     outcome: $outcome,
                     matched_rule: matched_rule_name,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+                    decision_service_policy_id: decision_service_policy_id.as_deref(),
                     log_context: &log_context,
                 },
             )

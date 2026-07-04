@@ -8,11 +8,11 @@ use crate::forward::{
 };
 use crate::http::body::size::observed_request_size;
 use crate::http::dispatch::{
-    DispatchAuditInput, DispatchGuardInput, DispatchOutcome, DispatchRequestPrepareInput,
-    ExtAuthzHttpAccessInput, ExtAuthzHttpAccessOutcome, PreparedDispatchRequest, ProxyKind,
-    annotate_dispatch_response, annotated_local_response, apply_ext_authz_http_access,
-    build_dispatch_audit_context, evaluate_http_guard, prepare_dispatch_request,
-    rate_limit_response_for_parts, request_body_too_large_response,
+    DecisionServiceHttpAccessInput, DecisionServiceHttpAccessOutcome, DispatchAuditInput,
+    DispatchGuardInput, DispatchOutcome, DispatchRequestPrepareInput, PreparedDispatchRequest,
+    ProxyKind, annotate_dispatch_response, annotated_local_response,
+    apply_decision_service_http_access, build_dispatch_audit_context, evaluate_http_guard,
+    prepare_dispatch_request, rate_limit_response_for_parts, request_body_too_large_response,
 };
 use crate::http::pipeline::PolicyStage;
 use crate::http::policy::response_policy::response_request_obs;
@@ -23,7 +23,7 @@ use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::http::protocol::common::{blocked_response as blocked, forbidden_response as forbidden};
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http::protocol::websocket::is_websocket_upgrade;
-use crate::policy_context::{ExtAuthzInput, ExtAuthzMode, enforce_ext_authz};
+use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
@@ -164,7 +164,7 @@ pub(super) async fn dispatch_mitm_request(
             matched_route: None,
             identity: &identity,
             destination: &destination,
-            ext_authz: None,
+            decision_service: None,
         }),
     })
     .await?
@@ -341,12 +341,13 @@ pub(super) async fn dispatch_mitm_request(
         &request_limit_ctx,
         1,
     )?;
-    let ext_authz = if early_response.is_none() {
+    let decision_service = if early_response.is_none() {
         Some(
-            enforce_ext_authz(
+            enforce_decision_service(
                 &state,
                 &effective_policy,
-                ExtAuthzInput {
+                DecisionServiceInput {
+                    mode: DecisionServiceMode::ForwardMitmHttp,
                     proxy_kind: ProxyKind::Forward,
                     proxy_name,
                     scope_name: route.listener_name,
@@ -382,7 +383,7 @@ pub(super) async fn dispatch_mitm_request(
         matched_route: None,
         identity: &identity,
         destination: &destination,
-        ext_authz: ext_authz.as_ref(),
+        decision_service: decision_service.as_ref(),
     });
     let annotate_with_tags =
         |response: &mut Response<Body>, outcome: DispatchOutcome, extra_policy_tags: &[String]| {
@@ -392,10 +393,10 @@ pub(super) async fn dispatch_mitm_request(
         annotate_with_tags(response, outcome, &[]);
     };
     let mut timeout_override = None;
-    if let Some(ext_authz) = ext_authz {
-        match apply_ext_authz_http_access(ExtAuthzHttpAccessInput {
-            enforcement: ext_authz,
-            mode: ExtAuthzMode::ForwardMitmHttp,
+    if let Some(decision_service) = decision_service {
+        match apply_decision_service_http_access(DecisionServiceHttpAccessInput {
+            enforcement: decision_service,
+            mode: DecisionServiceMode::ForwardMitmHttp,
             base_headers: headers,
             request_limit: Some((
                 &mut request_limits,
@@ -407,11 +408,11 @@ pub(super) async fn dispatch_mitm_request(
             default_deny_response: forbidden(state.messages.forbidden.as_str()),
             audit: &audit,
         })? {
-            ExtAuthzHttpAccessOutcome::Continue(allow) => {
+            DecisionServiceHttpAccessOutcome::Continue(allow) => {
                 headers = allow.headers;
                 timeout_override = allow.timeout_override;
             }
-            ExtAuthzHttpAccessOutcome::Blocked(response, _) => {
+            DecisionServiceHttpAccessOutcome::Blocked(response, _) => {
                 return Ok(crate::http::capture::stream::limit_response_body_for_plan(
                     response,
                     selected_plan,

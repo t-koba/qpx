@@ -18,7 +18,7 @@ impl WebTransportPolicyResponder<'_> {
         response: Response<qpx_http::body::Body>,
         outcome: crate::http::dispatch::DispatchOutcome,
         matched_rule: Option<&str>,
-        ext_authz_policy_id: Option<&str>,
+        decision_service_policy_id: Option<&str>,
         log_context: &RequestLogContext,
     ) -> Result<()> {
         send_qpx_policy_response(
@@ -32,7 +32,7 @@ impl WebTransportPolicyResponder<'_> {
                 path: self.path,
                 outcome,
                 matched_rule,
-                ext_authz_policy_id,
+                decision_service_policy_id,
                 log_context,
             },
         )

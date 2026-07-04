@@ -96,9 +96,13 @@ security:
     headers:
       user: x-user
   decisions:
-    ext_authz:
+    services:
     - name: authz-a
       endpoint: http://127.0.0.1:19091/check
+      contract:
+        driver: schema_mapped_http
+        profile_id: test
+        schemas: {}
 traffic:
   rate_limit_profiles:
   - name: burst-a
@@ -129,9 +133,13 @@ security:
     headers:
       user: x-user
   decisions:
-    ext_authz:
+    services:
     - name: authz-b
       endpoint: http://127.0.0.1:19092/check
+      contract:
+        driver: schema_mapped_http
+        profile_id: test
+        schemas: {}
 traffic:
   rate_limit_profiles:
   - name: burst-b
@@ -145,7 +153,7 @@ traffic:
     assert_eq!(loaded.caches.len(), 2);
     assert_eq!(loaded.http.module_chains.len(), 2);
     assert_eq!(loaded.security.identity_sources.len(), 2);
-    assert_eq!(loaded.security.decisions.ext_authz.len(), 2);
+    assert_eq!(loaded.security.decisions.services.len(), 2);
     assert_eq!(loaded.traffic.rate_limit_profiles.len(), 2);
 
     write_config(

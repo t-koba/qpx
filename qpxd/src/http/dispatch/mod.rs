@@ -4,8 +4,8 @@ pub(crate) mod audit_builder;
 pub(crate) mod cache;
 pub(crate) mod cache_decision;
 pub(crate) mod connect_policy;
+pub(crate) mod decision_service_access;
 pub(crate) mod error;
-pub(crate) mod ext_authz_access;
 pub(crate) mod guard;
 pub(crate) mod limit_response;
 pub(crate) mod metrics;
@@ -33,10 +33,11 @@ pub(crate) use cache_decision::{
 pub(crate) use connect_policy::{
     DispatchConnectRuleContextInput, build_dispatch_connect_rule_context,
 };
-pub(crate) use error::DispatchError;
-pub(crate) use ext_authz_access::{
-    ExtAuthzHttpAccessInput, ExtAuthzHttpAccessOutcome, apply_ext_authz_http_access,
+pub(crate) use decision_service_access::{
+    DecisionServiceHttpAccessInput, DecisionServiceHttpAccessOutcome,
+    apply_decision_service_http_access,
 };
+pub(crate) use error::DispatchError;
 pub(crate) use guard::{DispatchGuardInput, evaluate_http_guard};
 pub(crate) use limit_response::{
     concurrency_limited_response_for_parts, rate_limit_response_for_parts,

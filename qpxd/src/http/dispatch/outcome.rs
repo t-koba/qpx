@@ -23,8 +23,8 @@ pub(crate) enum DispatchOutcome {
     ResponseLocalResponse,
     ResponseRuleLocalResponse,
     StaleIfError,
-    ExtAuthzDeny,
-    ExtAuthzLocalResponse,
+    DecisionServiceDeny,
+    DecisionServiceLocalResponse,
 }
 
 impl DispatchOutcome {
@@ -52,8 +52,8 @@ impl DispatchOutcome {
             Self::ResponseLocalResponse => "response_local_response",
             Self::ResponseRuleLocalResponse => "response_rule_local_response",
             Self::StaleIfError => "stale_if_error",
-            Self::ExtAuthzDeny => "ext_authz_deny",
-            Self::ExtAuthzLocalResponse => "ext_authz_local_response",
+            Self::DecisionServiceDeny => "decision_service_deny",
+            Self::DecisionServiceLocalResponse => "decision_service_local_response",
         }
     }
 }

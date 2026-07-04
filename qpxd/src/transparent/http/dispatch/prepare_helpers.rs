@@ -76,7 +76,7 @@ pub(super) fn guard_input<'a>(
             matched_route: None,
             identity,
             destination,
-            ext_authz: None,
+            decision_service: None,
         }),
     }
 }

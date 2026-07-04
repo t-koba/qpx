@@ -11,16 +11,21 @@ security:
       auth_strength: mTLS
       idp: partner-ca
   decisions:
-    ext_authz:
+    services:
     - name: partner-policy
       endpoint: http://127.0.0.1:19445/check
       timeout_ms: 300
-      send:
-        request: true
-        identity: true
+      contract:
+        driver: schema_mapped_http
+        profile_id: qpx.generic.v1
+        schemas: {}
+      pep_signal:
         selected_headers:
         - user-agent
-      on_error: deny
+      response_mapping:
+      - target_document: enforceable_effect
+        target: /decision
+        source: $.decision_response.decision
 edges:
 - kind: reverse
   name: partner-api
@@ -43,7 +48,7 @@ edges:
         auth_strength:
         - mTLS
     policy_context:
-      ext_authz: partner-policy
+      decision_service: partner-policy
     headers:
       request_set:
         X-Client-Auth: mtls

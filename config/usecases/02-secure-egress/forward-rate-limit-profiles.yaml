@@ -1,17 +1,30 @@
 state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 security:
   decisions:
-    ext_authz:
+    services:
     - name: rate-aware-policy
       endpoint: http://127.0.0.1:19091/check
       timeout_ms: 300
-      send:
-        request: true
-        identity: true
+      contract:
+        driver: schema_mapped_http
+        profile_id: qpx.generic.v1
+        schemas: {}
+      capability:
+        effects:
+        - allow
+        - rate_limit_profile
+      pep_signal:
         selected_headers:
         - user-agent
         - content-type
-      on_error: deny
+      response_mapping:
+      - target_document: enforceable_effect
+        target: /decision
+        source: $.decision_response.decision
+      - target_document: enforceable_effect
+        target: /rate_limit_profile
+        source: $.decision_response.rate_limit_profile
+        optional: true
 traffic:
   rate_limit_profiles:
   - name: subject-burst
@@ -114,4 +127,4 @@ edges:
     sessions:
       max_concurrency: 100
   policy_context:
-    ext_authz: rate-aware-policy
+    decision_service: rate-aware-policy

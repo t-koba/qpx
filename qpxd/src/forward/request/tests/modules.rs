@@ -26,7 +26,7 @@ async fn forward_http_module_compresses_responses() {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: Vec::new(),
+                services: Vec::new(),
             },
             destination: Default::default(),
             named_sets: Vec::new(),
@@ -140,7 +140,7 @@ async fn forward_http_module_subrequest_can_short_circuit() {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: Vec::new(),
+                services: Vec::new(),
             },
             destination: Default::default(),
             named_sets: Vec::new(),
@@ -309,7 +309,7 @@ async fn forward_custom_http_module_registry_adds_response_header() {
                 auth: AuthConfig::default(),
                 identity_sources: Vec::new(),
                 decisions: qpx_core::config::DecisionConfig {
-                    ext_authz: Vec::new(),
+                    services: Vec::new(),
                 },
                 destination: Default::default(),
                 named_sets: Vec::new(),
