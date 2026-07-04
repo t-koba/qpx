@@ -2869,6 +2869,7 @@ fn public_api_snapshot_script_violations(content: &str) -> Vec<String> {
     ];
     let mut violations = Vec::new();
     let mut seen = BTreeMap::<String, String>::new();
+    let hash_vars = public_api_hash_variables(content);
     for line in content.lines().map(str::trim) {
         let Some(rest) = line.strip_prefix("check_crate ") else {
             continue;
@@ -2887,7 +2888,7 @@ fn public_api_snapshot_script_violations(content: &str) -> Vec<String> {
             ));
             continue;
         }
-        if !is_sha256_hex(hash) {
+        if !is_sha256_hex(hash) && !is_valid_public_api_hash_var(hash, &hash_vars) {
             violations.push(format!(
                 "check_crate {crate_name} expected hash must be 64 hex chars"
             ));
@@ -2910,6 +2911,45 @@ fn public_api_snapshot_script_violations(content: &str) -> Vec<String> {
         }
     }
     violations
+}
+
+fn public_api_hash_variables(content: &str) -> BTreeMap<String, bool> {
+    let mut vars = BTreeMap::new();
+    for line in content.lines().map(str::trim) {
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !is_shell_identifier(name) {
+            continue;
+        }
+        let valid = is_sha256_hex(value);
+        vars.entry(name.to_string())
+            .and_modify(|current| *current &= valid)
+            .or_insert(valid);
+    }
+    vars
+}
+
+fn is_valid_public_api_hash_var(hash: &str, vars: &BTreeMap<String, bool>) -> bool {
+    let Some(name) = hash
+        .strip_prefix('"')
+        .and_then(|hash| hash.strip_suffix('"'))
+    else {
+        return false;
+    };
+    let Some(name) = name.strip_prefix('$') else {
+        return false;
+    };
+    vars.get(name).copied().unwrap_or(false)
+}
+
+fn is_shell_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -5281,6 +5321,18 @@ mod tests {
             check_crate qpx-observability {hash}\n"
         );
         assert!(public_api_snapshot_script_violations(&good).is_empty());
+
+        let variable_good = format!(
+            "\
+            qpx_core_api_hash={hash}\n\
+            qpx_h3_api_hash={hash}\n\
+            check_crate qpx-core \"$qpx_core_api_hash\"\n\
+            check_crate qpx-auth {hash}\n\
+            check_crate qpx-h3 \"$qpx_h3_api_hash\"\n\
+            check_crate qpx-acme {hash}\n\
+            check_crate qpx-observability {hash}\n"
+        );
+        assert!(public_api_snapshot_script_violations(&variable_good).is_empty());
 
         let bad = format!(
             "\
