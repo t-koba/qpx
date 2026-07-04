@@ -51,7 +51,7 @@ Current workspace total LOC advisory baseline:
 
 | Class | Current | Advisory Baseline |
 |---|---:|---:|
-| Production Rust | 108,283 | 108,283 |
+| Production Rust | 108,297 | 108,297 |
 | Test Rust | 33,077 | 33,077 |
 | Markdown docs | 2,386 | 2,386 |
 

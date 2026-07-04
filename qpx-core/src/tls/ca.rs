@@ -138,17 +138,15 @@ fn write_text_file(path: &Path, contents: &str, owner_only_acl: bool) -> Result<
     use std::io::Write;
 
     ensure_path_not_symlink(path, "MITM CA material")?;
-    let mut file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+    let mut file = match open_windows_ca_material(path, false) {
         Ok(file) => {
             validate_windows_ca_material_handle(&file, path)?;
             file
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => fs::OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(path)
-            .with_context(|| format!("failed to create MITM CA material {}", path.display()))?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            open_windows_ca_material(path, true)
+                .with_context(|| format!("failed to create MITM CA material {}", path.display()))?
+        }
         Err(err) => {
             return Err(
                 anyhow!("failed to open MITM CA material {}: {err}", path.display()).into(),
@@ -194,7 +192,7 @@ fn enforce_private_key_permissions(path: &Path) -> Result<()> {
 #[cfg(windows)]
 fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     ensure_path_not_symlink(path, "ca key")?;
-    let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let file = open_windows_ca_material(path, false)?;
     validate_windows_ca_material_handle(&file, path)?;
     set_owner_only_acl(&file, path)
 }
@@ -519,6 +517,24 @@ fn set_owner_only_acl(file: &fs::File, path: &Path) -> Result<()> {
         .into());
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn open_windows_ca_material(path: &Path, create_new: bool) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC,
+    };
+
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .custom_access(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC);
+    if create_new {
+        options.create_new(true);
+    }
+    options.open(path)
 }
 
 #[cfg(windows)]

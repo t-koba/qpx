@@ -13,7 +13,7 @@ use syn::{GenericArgument, PathArguments, ReturnType, Type, Visibility};
 const LIBRARY_ANYHOW_BOUNDARY_MAX: usize = 0;
 const RAW_METRIC_MACRO_MAX: usize = 0;
 const TEST_HELPER_DUPLICATE_MAX: usize = 0;
-const DEPENDENCY_DUPLICATE_NAME_MAX: usize = 35;
+const DEPENDENCY_DUPLICATE_NAME_MAX: usize = 33;
 const DENY_SKIP_ENTRY_MAX: usize = 53;
 const POOL_STRUCT_BASELINE_MAX: usize = 7;
 const QPXD_TLS_TYPE_BASELINE_MAX: usize = 1;
