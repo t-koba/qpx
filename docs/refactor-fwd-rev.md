@@ -10,7 +10,7 @@ orchestration.
 Forward and reverse both run this high-level sequence:
 
 1. derive request identity, destination metadata, and audit context;
-2. apply ext_authz, HTTP guards, request rate limits, and concurrency limits;
+2. apply decision_service, HTTP guards, request rate limits, and concurrency limits;
 3. prepare request headers and local module responses;
 4. perform cache lookup and collapsed response handling when configured;
 5. choose an upstream target and stream the request body;
@@ -20,7 +20,7 @@ Forward and reverse both run this high-level sequence:
 The following code is already shared or should remain shared:
 
 - `qpxd/src/http/dispatch/audit_builder.rs` for audit context construction;
-- `qpxd/src/http/dispatch/ext_authz_access.rs` for ext_authz allow/deny handling;
+- `qpxd/src/http/dispatch/decision_service_access.rs` for decision_service allow/deny handling;
 - `qpxd/src/http/dispatch/cache_decision.rs` and `cache.rs` for cache hit and
   stale-if-error finalization;
 - `qpxd/src/http/dispatch/limit_response.rs` for rate/concurrency limit

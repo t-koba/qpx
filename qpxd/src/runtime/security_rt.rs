@@ -1,6 +1,7 @@
-use crate::policy_context::{CompiledExtAuthz, CompiledIdentitySource};
+use crate::policy_context::{CompiledDecisionService, CompiledIdentitySource};
 use crate::runtime::auth::Authenticator;
 use anyhow::Result;
+use qpx_core::config::UpstreamTlsTrustConfig;
 use qpx_core::tls::CaStore;
 #[cfg(feature = "mitm")]
 use qpx_core::tls::{MitmConfig, load_or_generate_ca};
@@ -40,7 +41,7 @@ pub struct IdentitySourceRuntime {
 
 #[derive(Clone)]
 pub struct DecisionRuntime {
-    pub(crate) ext_authz: HashMap<String, Arc<CompiledExtAuthz>>,
+    pub(crate) services: HashMap<String, Arc<CompiledDecisionService>>,
 }
 
 #[derive(Clone)]
@@ -71,16 +72,20 @@ impl SecurityRuntime {
                 ))
             })
             .collect::<Result<HashMap<_, _>>>()?;
-        let ext_authz = config
+        let decision_service_trust_profiles = decision_service_trust_profiles(config);
+        let services = config
             .operational
             .security
             .decisions
-            .ext_authz
+            .services
             .iter()
             .map(|cfg| {
                 Ok((
                     cfg.name.clone(),
-                    Arc::new(CompiledExtAuthz::from_config(cfg)?),
+                    Arc::new(CompiledDecisionService::from_config(
+                        cfg,
+                        &decision_service_trust_profiles,
+                    )?),
                 ))
             })
             .collect::<Result<HashMap<_, _>>>()?;
@@ -145,7 +150,7 @@ impl SecurityRuntime {
             identity_sources: IdentitySourceRuntime {
                 sources: identity_sources,
             },
-            decisions: DecisionRuntime { ext_authz },
+            decisions: DecisionRuntime { services },
             destination: DestinationPolicyRuntime { tls },
         })
     }
@@ -159,6 +164,18 @@ impl SecurityRuntime {
             .map(|set| set.is_match(host))
             .unwrap_or(false)
     }
+}
+
+fn decision_service_trust_profiles(
+    config: &RuntimeResources,
+) -> HashMap<String, UpstreamTlsTrustConfig> {
+    config
+        .operational
+        .security
+        .upstream_trust_profiles
+        .iter()
+        .map(|profile| (profile.name.clone(), profile.trust.clone()))
+        .collect()
 }
 
 fn auth_audit_redact_query_keys(config: &RuntimeResources) -> Vec<String> {

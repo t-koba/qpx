@@ -117,7 +117,7 @@ async fn run_qpx_traditional_connect_tunnel(
         response_headers,
         log_context,
         matched_rule,
-        ext_authz_policy_id,
+        decision_service_policy_id,
         audit_path,
         timeout_override,
         rate_limit_profile,
@@ -150,7 +150,7 @@ async fn run_qpx_traditional_connect_tunnel(
                     path: audit_path.as_deref(),
                     outcome: $outcome,
                     matched_rule: matched_rule_name,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+                    decision_service_policy_id: decision_service_policy_id.as_deref(),
                     log_context: &log_context,
                 },
             )
@@ -261,7 +261,7 @@ async fn run_qpx_traditional_connect_tunnel(
             status: Some(StatusCode::OK.as_u16()),
             matched_rule: matched_rule_name,
             matched_route: None,
-            ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+            decision_service_policy_id: decision_service_policy_id.as_deref(),
         },
         &log_context,
     );
@@ -308,7 +308,7 @@ async fn handle_qpx_extended_connect_stream(
         response_headers,
         log_context,
         matched_rule,
-        ext_authz_policy_id,
+        decision_service_policy_id,
         audit_path,
         timeout_override,
         rate_limit_profile,
@@ -341,7 +341,7 @@ async fn handle_qpx_extended_connect_stream(
                     path: audit_path.as_deref(),
                     outcome: $outcome,
                     matched_rule: matched_rule_name,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+                    decision_service_policy_id: decision_service_policy_id.as_deref(),
                     log_context: &log_context,
                 },
             )
@@ -444,7 +444,7 @@ async fn handle_qpx_extended_connect_stream(
         response_headers: response_headers.as_deref(),
         audit_path: audit_path.as_deref(),
         matched_rule: matched_rule_name,
-        ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+        decision_service_policy_id: decision_service_policy_id.as_deref(),
         log_context: &log_context,
         tunnel_idle_timeout,
     })
@@ -463,7 +463,7 @@ struct FinishQpxExtendedConnectInput<'a> {
     response_headers: Option<&'a qpx_core::rules::CompiledHeaderControl>,
     audit_path: Option<&'a str>,
     matched_rule: Option<&'a str>,
-    ext_authz_policy_id: Option<&'a str>,
+    decision_service_policy_id: Option<&'a str>,
     log_context: &'a qpx_observability::access_log::RequestLogContext,
     tunnel_idle_timeout: Duration,
 }
@@ -483,7 +483,7 @@ async fn finish_qpx_extended_connect_stream(
         response_headers,
         audit_path,
         matched_rule,
-        ext_authz_policy_id,
+        decision_service_policy_id,
         log_context,
         tunnel_idle_timeout,
     } = input;
@@ -541,7 +541,7 @@ async fn finish_qpx_extended_connect_stream(
             status: Some(StatusCode::OK.as_u16()),
             matched_rule,
             matched_route: None,
-            ext_authz_policy_id,
+            decision_service_policy_id,
         },
         log_context,
     );

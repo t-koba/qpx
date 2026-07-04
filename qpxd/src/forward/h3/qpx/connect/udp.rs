@@ -38,7 +38,7 @@ pub(super) async fn run_connect_udp_relay(
         response_headers,
         log_context,
         matched_rule,
-        ext_authz_policy_id,
+        decision_service_policy_id,
         audit_path,
         timeout_override,
         rate_limit_profile,
@@ -66,7 +66,7 @@ pub(super) async fn run_connect_udp_relay(
         host: host.as_str(),
         audit_path: audit_path.as_deref(),
         matched_rule: matched_rule_name,
-        ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+        decision_service_policy_id: decision_service_policy_id.as_deref(),
         log_context: &log_context,
         send_timeouts: (
             Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
@@ -86,7 +86,7 @@ pub(super) async fn run_connect_udp_relay(
                     path: audit_path.as_deref(),
                     outcome: $outcome,
                     matched_rule: matched_rule_name,
-                    ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+                    decision_service_policy_id: decision_service_policy_id.as_deref(),
                     log_context: &log_context,
                 },
             )
@@ -216,7 +216,7 @@ struct ConnectUdpSuccessContext<'a> {
     host: &'a str,
     audit_path: Option<&'a str>,
     matched_rule: Option<&'a str>,
-    ext_authz_policy_id: Option<&'a str>,
+    decision_service_policy_id: Option<&'a str>,
     log_context: &'a qpx_observability::access_log::RequestLogContext,
     send_timeouts: (Duration, Duration),
 }
@@ -317,7 +317,7 @@ async fn send_connect_udp_success_head(
             status: Some(StatusCode::OK.as_u16()),
             matched_rule: ctx.matched_rule,
             matched_route: None,
-            ext_authz_policy_id: ctx.ext_authz_policy_id,
+            decision_service_policy_id: ctx.decision_service_policy_id,
         },
         ctx.log_context,
     );

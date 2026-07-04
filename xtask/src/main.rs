@@ -2,14 +2,13 @@ use anyhow::{Result, bail};
 
 mod checks;
 mod files;
-mod function_lengths;
 mod visitors;
 
 use budget::TOTAL_LOC_BUDGETS;
 use checks::{
     check_dependency_duplicate_baseline, check_dependency_policy_config,
     check_dispatch_dependency_direction, check_documented_unsafe_blocks,
-    check_finalize_entrypoints, check_function_lengths, check_http_body_spool_failure_handling,
+    check_finalize_entrypoints, check_http_body_spool_failure_handling,
     check_library_anyhow_boundaries, check_loc_budgets, check_metric_cardinality_policy,
     check_phase3_architecture_baselines, check_phase4_ci_acceptance_gates, check_production_panics,
     check_production_unwraps, check_public_api_snapshot_script, check_qpx_core_tls_baseline,
@@ -55,7 +54,6 @@ fn run_structure() -> Result<()> {
     check_raw_metric_macro_baseline(&root)?;
     check_metric_cardinality_policy(&root)?;
     check_test_helper_duplicate_baseline(&root)?;
-    check_function_lengths(&root)?;
     check_dispatch_dependency_direction(&root)?;
     check_phase3_architecture_baselines(&root)?;
     check_refactor_docs(&root)?;

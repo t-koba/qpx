@@ -22,7 +22,7 @@ async fn request_size_rule_uses_actual_chunked_body_size() {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: Vec::new(),
+                services: Vec::new(),
             },
             destination: Default::default(),
             named_sets: Vec::new(),
@@ -161,7 +161,7 @@ async fn forward_request_preserves_upstream_early_hints() {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: Vec::new(),
+                services: Vec::new(),
             },
             destination: Default::default(),
             named_sets: Vec::new(),

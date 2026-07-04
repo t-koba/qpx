@@ -76,7 +76,7 @@ pub(super) async fn send_qpx_policy_response(
         path,
         outcome,
         matched_rule,
-        ext_authz_policy_id,
+        decision_service_policy_id,
         log_context,
     } = ctx;
     emit_audit_log(
@@ -93,7 +93,7 @@ pub(super) async fn send_qpx_policy_response(
             status: Some(response.status().as_u16()),
             matched_rule,
             matched_route: None,
-            ext_authz_policy_id,
+            decision_service_policy_id,
         },
         log_context,
     );
@@ -115,7 +115,7 @@ pub(super) struct QpxPolicyResponseContext<'a> {
     pub(super) path: Option<&'a str>,
     pub(super) outcome: DispatchOutcome,
     pub(super) matched_rule: Option<&'a str>,
-    pub(super) ext_authz_policy_id: Option<&'a str>,
+    pub(super) decision_service_policy_id: Option<&'a str>,
     pub(super) log_context: &'a RequestLogContext,
 }
 

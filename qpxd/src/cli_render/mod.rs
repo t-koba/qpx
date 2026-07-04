@@ -530,8 +530,8 @@ fn append_plan_flag_entries(output: &mut String, flags: runtime::PlanFlags) {
     );
     append_flag(
         output,
-        "ext_authz",
-        flags.contains(runtime::PlanFlags::EXT_AUTHZ),
+        "decision_service",
+        flags.contains(runtime::PlanFlags::DECISION_SERVICE),
     );
     append_flag(
         output,
@@ -594,7 +594,7 @@ fn flag_names(flags: runtime::PlanFlags) -> Vec<&'static str> {
     [
         ("auth", runtime::PlanFlags::AUTH),
         ("identity_sources", runtime::PlanFlags::IDENTITY_SOURCES),
-        ("ext_authz", runtime::PlanFlags::EXT_AUTHZ),
+        ("decision_service", runtime::PlanFlags::DECISION_SERVICE),
         ("destination_intel", runtime::PlanFlags::DESTINATION_INTEL),
         ("http_guard", runtime::PlanFlags::HTTP_GUARD),
         ("cache_lookup", runtime::PlanFlags::CACHE_LOOKUP),

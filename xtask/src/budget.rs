@@ -31,9 +31,9 @@ fn parse_loc_budget_line(line_no: usize, line: &'static str) -> Result<LocBudget
 }
 
 pub(crate) const TOTAL_LOC_BUDGETS: TotalLocBudgets = TotalLocBudgets {
-    production_rust: 108_912,
-    test_rust: 32_227,
-    docs_markdown: 2_467,
+    production_rust: 108_297,
+    test_rust: 33_077,
+    docs_markdown: 2_386,
 };
 
 pub(crate) struct TotalLocBudgets {

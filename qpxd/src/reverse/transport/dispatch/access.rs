@@ -1,11 +1,11 @@
 use super::{ReverseAccessControl, ReverseAccessInput, ReverseAccessOutcome};
 use crate::http::dispatch::{
-    DispatchAuditContext, DispatchAuditInput, DispatchGuardInput, DispatchOutcome,
-    ExtAuthzHttpAccessInput, ExtAuthzHttpAccessOutcome, ProxyKind, annotated_local_response,
-    apply_ext_authz_http_access, build_dispatch_audit_context, evaluate_http_guard,
+    DecisionServiceHttpAccessInput, DecisionServiceHttpAccessOutcome, DispatchAuditContext,
+    DispatchAuditInput, DispatchGuardInput, DispatchOutcome, ProxyKind, annotated_local_response,
+    apply_decision_service_http_access, build_dispatch_audit_context, evaluate_http_guard,
     rate_limit_response_for_parts,
 };
-use crate::policy_context::{ExtAuthzInput, ExtAuthzMode, enforce_ext_authz};
+use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::reverse::router::HttpRoute;
 use anyhow::Result;
@@ -32,10 +32,11 @@ pub(super) async fn enforce_reverse_access_control(
         sanitized_headers,
         request_destination,
     } = input;
-    let ext_authz = enforce_ext_authz(
+    let decision_service = enforce_decision_service(
         state,
         selected_policy,
-        ExtAuthzInput {
+        DecisionServiceInput {
+            mode: DecisionServiceMode::ReverseHttp,
             proxy_kind: ProxyKind::Reverse,
             proxy_name,
             scope_name: reverse_name,
@@ -67,7 +68,7 @@ pub(super) async fn enforce_reverse_access_control(
         matched_route: route.name.as_deref().map(ToOwned::to_owned),
         identity,
         destination: request_destination,
-        ext_authz: Some(&ext_authz),
+        decision_service: Some(&decision_service),
     });
     if let Some(response) = evaluate_http_guard(DispatchGuardInput {
         profile: route.plan.guard.as_deref(),
@@ -80,9 +81,9 @@ pub(super) async fn enforce_reverse_access_control(
     {
         return Ok(ReverseAccessOutcome::Response(Box::new(response)));
     }
-    let allowed = match apply_ext_authz_http_access(ExtAuthzHttpAccessInput {
-        enforcement: ext_authz,
-        mode: ExtAuthzMode::ReverseHttp,
+    let allowed = match apply_decision_service_http_access(DecisionServiceHttpAccessInput {
+        enforcement: decision_service,
+        mode: DecisionServiceMode::ReverseHttp,
         base_headers: route.headers.clone(),
         request_limit: None,
         request_head: (request_method, req.version()),
@@ -92,8 +93,8 @@ pub(super) async fn enforce_reverse_access_control(
             .body(Body::from(state.messages.reverse_error.clone()))?,
         audit: &audit_ctx,
     })? {
-        ExtAuthzHttpAccessOutcome::Continue(allow) => allow,
-        ExtAuthzHttpAccessOutcome::Blocked(response, _) => {
+        DecisionServiceHttpAccessOutcome::Continue(allow) => allow,
+        DecisionServiceHttpAccessOutcome::Blocked(response, _) => {
             return Ok(ReverseAccessOutcome::Response(Box::new(response)));
         }
     };
@@ -154,7 +155,7 @@ pub(super) async fn enforce_reverse_access_control(
             override_upstream: allowed.override_upstream,
             route_timeout,
             cache_bypass: allowed.cache_bypass,
-            ext_authz_mirror_upstreams: allowed.mirror_upstreams,
+            decision_service_mirror_upstreams: allowed.mirror_upstreams,
             request_limit_ctx,
             request_limits,
         },

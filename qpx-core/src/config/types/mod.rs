@@ -74,8 +74,16 @@ pub use self::rules::{
     TlsFingerprintMatchConfig,
 };
 pub use self::security::{
-    AssertionClaimsMapConfig, AuthConfig, ExtAuthzConfig, ExtAuthzKind, ExtAuthzOnError,
-    ExtAuthzSendConfig, IdentitySourceConfig, IdentitySourceFromConfig,
+    AssertionClaimsMapConfig, AuthConfig, DecisionServiceAuthConfig,
+    DecisionServiceAuthorityConfig, DecisionServiceCacheConfig, DecisionServiceCapabilityConfig,
+    DecisionServiceConfig, DecisionServiceConstraintsConfig, DecisionServiceContractConfig,
+    DecisionServiceDriver, DecisionServiceHttpMessageSignaturesConfig,
+    DecisionServiceMappingRuleConfig, DecisionServiceMappingTargetDocument,
+    DecisionServiceMtlsConfig, DecisionServicePepSignalConfig,
+    DecisionServicePolicyCompositionConfig, DecisionServiceQpxSchemasConfig,
+    DecisionServiceRemoteSchemasConfig, DecisionServiceSchemaRefConfig,
+    DecisionServiceSchemaResolutionConfig, DecisionServiceSchemasConfig,
+    DecisionServiceSignatureAlgorithm, IdentitySourceConfig, IdentitySourceFromConfig,
     IdentitySourceHeadersConfig, IdentitySourceKind, LdapConfig, LocalUser, MtlsIdentityMapConfig,
     NamedSetConfig, NamedSetKind, PolicyContextConfig, SignedAssertionConfig,
     UpstreamTlsTrustConfig, UpstreamTlsTrustProfileConfig,

@@ -12,7 +12,7 @@ pub(super) struct ConnectAuditContext<'a> {
     pub(super) audit_host: &'a str,
     pub(super) path: Option<&'a str>,
     pub(super) matched_rule: Option<&'a str>,
-    pub(super) ext_authz_policy_id: Option<&'a str>,
+    pub(super) decision_service_policy_id: Option<&'a str>,
     pub(super) log_context: &'a RequestLogContext,
 }
 
@@ -33,7 +33,7 @@ impl ConnectAuditContext<'_> {
                 status: Some(response.status().as_u16()),
                 matched_rule: self.matched_rule,
                 matched_route: None,
-                ext_authz_policy_id: self.ext_authz_policy_id,
+                decision_service_policy_id: self.decision_service_policy_id,
             },
             self.log_context,
         );

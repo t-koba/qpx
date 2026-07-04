@@ -230,7 +230,10 @@ async fn stream_and_record_body(
             .await
             .map_err(|err| anyhow!("reverse first-attempt body relay failed: {err}"))?;
     }
-    if let Some(trailers) = body.trailers().await? {
+    if let Some(trailers) = timeout(body_read_timeout, body.trailers())
+        .await
+        .map_err(|_| anyhow!("reverse request trailers read timed out"))??
+    {
         sender
             .send_trailers(trailers)
             .await

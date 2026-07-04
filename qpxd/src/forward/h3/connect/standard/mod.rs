@@ -40,7 +40,7 @@ pub(super) struct PreparedH3Connect {
     pub(super) response_headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) log_context: RequestLogContext,
     pub(super) matched_rule: Option<String>,
-    pub(super) ext_authz_policy_id: Option<String>,
+    pub(super) decision_service_policy_id: Option<String>,
     pub(super) audit_path: Option<String>,
     pub(super) timeout_override: Option<Duration>,
     pub(super) rate_limit_profile: Option<String>,
@@ -58,7 +58,7 @@ pub(super) struct H3PolicyResponseContext<'a> {
     pub(super) path: Option<&'a str>,
     pub(super) outcome: DispatchOutcome,
     pub(super) matched_rule: Option<&'a str>,
-    pub(super) ext_authz_policy_id: Option<&'a str>,
+    pub(super) decision_service_policy_id: Option<&'a str>,
     pub(super) log_context: &'a RequestLogContext,
 }
 
@@ -106,7 +106,7 @@ pub(super) async fn send_h3_policy_response(
         path,
         outcome,
         matched_rule,
-        ext_authz_policy_id,
+        decision_service_policy_id,
         log_context,
     } = ctx;
     emit_audit_log(
@@ -123,7 +123,7 @@ pub(super) async fn send_h3_policy_response(
             status: Some(response.status().as_u16()),
             matched_rule,
             matched_route: None,
-            ext_authz_policy_id,
+            decision_service_policy_id,
         },
         log_context,
     );

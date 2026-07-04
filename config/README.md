@@ -70,13 +70,13 @@ HTTP/3 backend selection is a build-time `qpxd` feature choice. YAML does not se
 - `forward-upstream-chain.yaml`: forward proxy chained to upstream proxy.
 - `forward-local-auth-basic-digest.yaml`: optional built-in multi-user local auth (Basic/Digest) baseline for tests, local development, or small deployments; requires `qpxd` `auth-basic` / `auth-digest` features and shows both cleartext `password` and precomputed Digest `ha1`.
 - `forward-ldap-group-policy.yaml`: optional direct LDAP bind/group policy when `qpx` itself terminates the auth hop; requires `auth-ldap` and includes `user_filter`, `group_filter`, and `group_attr` overrides for non-default directory schemas.
-- `forward-trusted-identity-ext-authz.yaml`: trusted identity ingestion + external authz policy callout.
-- `forward-signed-assertion-policy.yaml`: locally verified signed identity assertions (`signed_assertion`) + external authz, including `user_from_sub`.
+- `forward-trusted-identity-decision-service.yaml`: trusted identity ingestion + decision service policy callout.
+- `forward-signed-assertion-policy.yaml`: locally verified signed identity assertions (`signed_assertion`) + decision service authorization, including `user_from_sub`.
 - `forward-tls-inspection-selective.yaml`: selective TLS inspection/tunnel/block.
 - `forward-adblock-privacy.yaml`: ad/tracker blocking profile.
 - `forward-firewall-style-policy.yaml`: firewall-style multi-condition rules.
 - `forward-authenticated-upstream.yaml`: authenticated users + upstream egress chaining.
-- `forward-rate-limit-profiles.yaml`: transport-aware inline throttling plus reusable `rate_limit_profiles` (`requests` / `traffic` / `sessions`) for ext_authz-driven enforcement.
+- `forward-rate-limit-profiles.yaml`: transport-aware inline throttling plus reusable `rate_limit_profiles` (`requests` / `traffic` / `sessions`) for decision_service-driven enforcement.
 - `forward-destination-intelligence-and-trust.yaml`: named destination sets, file-backed feeds, destination-resolution precedence/confidence policy, upstream discovery, and trust profiles.
 
 ### 03-service-publishing (`config/usecases/03-service-publishing`)
@@ -231,7 +231,7 @@ cargo build -p qpxd -p qpxf
 - Transport-aware shaping uses one canonical surface: `rate_limit` / `rate_limit_profiles` with `apply_to`, `requests`, `traffic`, and `sessions`. WebTransport supports session-wide `webtransport` plus `webtransport_bidi`, `webtransport_uni`, `webtransport_datagram`, and direction-specific `*_downstream` / `*_upstream` scopes.
 - Reverse-route retry/ejection/concurrency policy is expressed with `resilience`; named upstreams use the same `resilience` surface.
 - Response-stage rules live under `edges[].http.response_rules` and `edges[kind=reverse].routes[].http.response_rules`, and the same response-aware policy surface is enforced in forward, MITM, transparent HTTP, and reverse HTTP paths.
-- Multi-file config merge has fixed semantics. Named collections append across files and are then validated for duplicate names: `edges`, `upstreams`, `caches`, `http.guard_profiles`, `http.module_chains`, `traffic.rate_limit_profiles`, `security.identity_sources`, `security.named_sets`, `security.upstream_trust_profiles`, `security.decisions.ext_authz`, and `security.auth.users`. Scalar settings and ordinary objects are overlaid by later files.
+- Multi-file config merge has fixed semantics. Named collections append across files and are then validated for duplicate names: `edges`, `upstreams`, `caches`, `http.guard_profiles`, `http.module_chains`, `traffic.rate_limit_profiles`, `security.identity_sources`, `security.named_sets`, `security.upstream_trust_profiles`, `security.decisions.services`, and `security.auth.users`. Scalar settings and ordinary objects are overlaid by later files.
 
 ## Related docs
 

@@ -1,6 +1,6 @@
 use super::*;
 
-async fn spawn_ext_authz_server(response_body: &str) -> SocketAddr {
+async fn spawn_decision_service_server(response_body: &str) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind authz");
     let addr = listener.local_addr().expect("authz addr");
     let response_body = response_body.to_string();
@@ -32,9 +32,10 @@ async fn spawn_ext_authz_server(response_body: &str) -> SocketAddr {
 }
 
 #[tokio::test]
-async fn ext_authz_unknown_rate_limit_profile_fails_closed() {
+async fn decision_service_unknown_rate_limit_profile_fails_closed() {
     let authz_addr =
-        spawn_ext_authz_server(r#"{"decision":"allow","rate_limit_profile":"missing"}"#).await;
+        spawn_decision_service_server(r#"{"decision":"allow","rate_limit_profile":"missing"}"#)
+            .await;
     let runtime = Runtime::new(Config {
         state_dir: None,
         identity: IdentityConfig::default(),
@@ -52,15 +53,10 @@ async fn ext_authz_unknown_rate_limit_profile_fails_closed() {
             auth: AuthConfig::default(),
             identity_sources: Vec::new(),
             decisions: qpx_core::config::DecisionConfig {
-                ext_authz: vec![ExtAuthzConfig {
-                    name: "authz".to_string(),
-                    kind: Default::default(),
-                    endpoint: format!("http://{authz_addr}"),
-                    timeout_ms: 1_000,
-                    max_response_bytes: 1024 * 1024,
-                    send: ExtAuthzSendConfig::default(),
-                    on_error: Default::default(),
-                }],
+                services: vec![test_decision_service_config(
+                    "authz",
+                    format!("http://{authz_addr}"),
+                )],
             },
             destination: Default::default(),
             named_sets: Vec::new(),
@@ -95,7 +91,7 @@ async fn ext_authz_unknown_rate_limit_profile_fails_closed() {
             rate_limit: None,
             policy_context: Some(PolicyContextConfig {
                 identity_sources: Vec::new(),
-                ext_authz: Some("authz".to_string()),
+                decision_service: Some("authz".to_string()),
             }),
             http: None,
             http_guard_profile: None,
@@ -121,6 +117,6 @@ async fn ext_authz_unknown_rate_limit_profile_fails_closed() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
     )
     .await
-    .expect_err("unknown ext_authz profile should fail closed");
+    .expect_err("unknown decision_service profile should fail closed");
     assert!(err.to_string().contains("unknown rate limit profile"));
 }

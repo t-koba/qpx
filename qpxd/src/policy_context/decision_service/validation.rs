@@ -4,80 +4,85 @@ use http::{HeaderValue, StatusCode};
 use qpx_core::config::{LocalResponseConfig, RpcLocalResponseConfig};
 use url::Url;
 
-use super::{ExtAuthzAllow, ExtAuthzMode};
+use super::{DecisionServiceAllow, DecisionServiceMode};
 
-pub(super) fn validate_ext_authz_upstream_value(
+pub(super) fn validate_decision_service_upstream_value(
     value: String,
     field: &'static str,
 ) -> Result<String> {
     let value = value.trim();
     if value.is_empty() {
-        return Err(anyhow!("ext_authz {field} must not be empty"));
+        return Err(anyhow!("decision_service {field} must not be empty"));
     }
-    let url = Url::parse(value).map_err(|err| anyhow!("ext_authz {field} is invalid: {err}"))?;
+    let url =
+        Url::parse(value).map_err(|err| anyhow!("decision_service {field} is invalid: {err}"))?;
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(anyhow!("ext_authz {field} must not include userinfo"));
+        return Err(anyhow!(
+            "decision_service {field} must not include userinfo"
+        ));
     }
     if url.host_str().is_none() {
-        return Err(anyhow!("ext_authz {field} must include a host"));
+        return Err(anyhow!("decision_service {field} must include a host"));
     }
     match url.scheme() {
         "http" | "https" | "h2c" | "h2" | "h3" => Ok(value.to_string()),
         other => Err(anyhow!(
-            "ext_authz {field} has unsupported upstream scheme: {other}"
+            "decision_service {field} has unsupported upstream scheme: {other}"
         )),
     }
 }
 
-pub(super) fn validate_ext_authz_local_response(
+pub(super) fn validate_decision_service_local_response(
     local: LocalResponseConfig,
 ) -> Result<LocalResponseConfig> {
     if !(200..=599).contains(&local.status) {
         return Err(anyhow!(
-            "ext_authz local_response.status must be in 200..=599"
+            "decision_service local_response.status must be in 200..=599"
         ));
     }
     StatusCode::from_u16(local.status)
-        .map_err(|_| anyhow!("ext_authz local_response.status is invalid"))?;
+        .map_err(|_| anyhow!("decision_service local_response.status is invalid"))?;
     if let Some(content_type) = local.content_type.as_deref() {
         HeaderValue::from_str(content_type)
-            .map_err(|_| anyhow!("ext_authz local_response.content_type is invalid"))?;
+            .map_err(|_| anyhow!("decision_service local_response.content_type is invalid"))?;
     }
     for (name, value) in &local.headers {
-        HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| anyhow!("ext_authz local_response.headers contains invalid name"))?;
-        HeaderValue::from_str(value)
-            .map_err(|_| anyhow!("ext_authz local_response.headers contains invalid value"))?;
+        HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            anyhow!("decision_service local_response.headers contains invalid name")
+        })?;
+        HeaderValue::from_str(value).map_err(|_| {
+            anyhow!("decision_service local_response.headers contains invalid value")
+        })?;
     }
     if let Some(rpc) = local.rpc.as_ref() {
-        validate_ext_authz_rpc_local_response(rpc)?;
+        validate_decision_service_rpc_local_response(rpc)?;
     }
     Ok(local)
 }
 
-fn validate_ext_authz_rpc_local_response(rpc: &RpcLocalResponseConfig) -> Result<()> {
+fn validate_decision_service_rpc_local_response(rpc: &RpcLocalResponseConfig) -> Result<()> {
     let protocol = rpc.protocol.trim().to_ascii_lowercase();
     if !matches!(protocol.as_str(), "grpc" | "grpc_web" | "connect") {
         return Err(anyhow!(
-            "ext_authz local_response.rpc.protocol must be one of: grpc, grpc_web, connect"
+            "decision_service local_response.rpc.protocol must be one of: grpc, grpc_web, connect"
         ));
     }
     if let Some(http_status) = rpc.http_status
         && !(200..=599).contains(&http_status)
     {
         return Err(anyhow!(
-            "ext_authz local_response.rpc.http_status must be in 200..=599"
+            "decision_service local_response.rpc.http_status must be in 200..=599"
         ));
     }
     if let Some(status) = rpc.status.as_deref() {
         match protocol.as_str() {
             "grpc" | "grpc_web" => {
                 let code = status.parse::<u16>().map_err(|_| {
-                    anyhow!("ext_authz local_response.rpc.status must be a gRPC code")
+                    anyhow!("decision_service local_response.rpc.status must be a gRPC code")
                 })?;
                 if code > 16 {
                     return Err(anyhow!(
-                        "ext_authz local_response.rpc.status must be in 0..=16"
+                        "decision_service local_response.rpc.status must be in 0..=16"
                     ));
                 }
             }
@@ -87,15 +92,18 @@ fn validate_ext_authz_rpc_local_response(rpc: &RpcLocalResponseConfig) -> Result
     }
     for (name, value) in &rpc.headers {
         HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| anyhow!("ext_authz local_response.rpc.headers has invalid name"))?;
-        HeaderValue::from_str(value)
-            .map_err(|_| anyhow!("ext_authz local_response.rpc.headers has invalid value"))?;
+            .map_err(|_| anyhow!("decision_service local_response.rpc.headers has invalid name"))?;
+        HeaderValue::from_str(value).map_err(|_| {
+            anyhow!("decision_service local_response.rpc.headers has invalid value")
+        })?;
     }
     for (name, value) in &rpc.trailers {
-        HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| anyhow!("ext_authz local_response.rpc.trailers has invalid name"))?;
-        HeaderValue::from_str(value)
-            .map_err(|_| anyhow!("ext_authz local_response.rpc.trailers has invalid value"))?;
+        HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            anyhow!("decision_service local_response.rpc.trailers has invalid name")
+        })?;
+        HeaderValue::from_str(value).map_err(|_| {
+            anyhow!("decision_service local_response.rpc.trailers has invalid value")
+        })?;
     }
     Ok(())
 }
@@ -124,12 +132,12 @@ fn validate_connect_code_name(status: &str) -> Result<()> {
         return Ok(());
     }
     Err(anyhow!(
-        "ext_authz local_response.rpc.status must be a Connect code name"
+        "decision_service local_response.rpc.status must be a Connect code name"
     ))
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ExtAuthzModeCapabilities {
+struct DecisionServiceModeCapabilities {
     name: &'static str,
     inject_headers: bool,
     override_upstream: bool,
@@ -141,10 +149,10 @@ struct ExtAuthzModeCapabilities {
     force_tunnel: bool,
 }
 
-impl ExtAuthzMode {
-    fn capabilities(self) -> ExtAuthzModeCapabilities {
+impl DecisionServiceMode {
+    fn capabilities(self) -> DecisionServiceModeCapabilities {
         match self {
-            Self::ForwardHttp => ExtAuthzModeCapabilities {
+            Self::ForwardHttp => DecisionServiceModeCapabilities {
                 name: "forward_http",
                 inject_headers: true,
                 override_upstream: true,
@@ -155,7 +163,7 @@ impl ExtAuthzMode {
                 force_inspect: false,
                 force_tunnel: false,
             },
-            Self::ForwardConnect => ExtAuthzModeCapabilities {
+            Self::ForwardConnect => DecisionServiceModeCapabilities {
                 name: "forward_connect",
                 inject_headers: true,
                 override_upstream: true,
@@ -167,7 +175,7 @@ impl ExtAuthzMode {
                 force_tunnel: true,
             },
             #[cfg(feature = "mitm")]
-            Self::ForwardMitmHttp => ExtAuthzModeCapabilities {
+            Self::ForwardMitmHttp => DecisionServiceModeCapabilities {
                 name: "forward_mitm_http",
                 inject_headers: true,
                 override_upstream: false,
@@ -178,7 +186,7 @@ impl ExtAuthzMode {
                 force_inspect: false,
                 force_tunnel: false,
             },
-            Self::ReverseHttp => ExtAuthzModeCapabilities {
+            Self::ReverseHttp => DecisionServiceModeCapabilities {
                 name: "reverse_http",
                 inject_headers: true,
                 override_upstream: true,
@@ -189,7 +197,7 @@ impl ExtAuthzMode {
                 force_inspect: false,
                 force_tunnel: false,
             },
-            Self::TransparentHttp => ExtAuthzModeCapabilities {
+            Self::TransparentHttp => DecisionServiceModeCapabilities {
                 name: "transparent_http",
                 inject_headers: true,
                 override_upstream: true,
@@ -200,7 +208,7 @@ impl ExtAuthzMode {
                 force_inspect: false,
                 force_tunnel: false,
             },
-            Self::TransparentTls => ExtAuthzModeCapabilities {
+            Self::TransparentTls => DecisionServiceModeCapabilities {
                 name: "transparent_tls",
                 inject_headers: false,
                 override_upstream: true,
@@ -212,7 +220,7 @@ impl ExtAuthzMode {
                 force_tunnel: true,
             },
             #[cfg(feature = "http3")]
-            Self::TransparentUdp => ExtAuthzModeCapabilities {
+            Self::TransparentUdp => DecisionServiceModeCapabilities {
                 name: "transparent_udp",
                 inject_headers: false,
                 override_upstream: false,
@@ -227,9 +235,9 @@ impl ExtAuthzMode {
     }
 }
 
-pub(crate) fn validate_ext_authz_allow_mode(
-    allow: &ExtAuthzAllow,
-    mode: ExtAuthzMode,
+pub(crate) fn validate_decision_service_allow_mode(
+    allow: &DecisionServiceAllow,
+    mode: DecisionServiceMode,
 ) -> Result<()> {
     let caps = mode.capabilities();
     let mut unsupported = Vec::new();
@@ -261,7 +269,7 @@ pub(crate) fn validate_ext_authz_allow_mode(
         return Ok(());
     }
     Err(anyhow!(
-        "ext_authz fields [{}] are not supported for {}",
+        "decision_service fields [{}] are not supported for {}",
         unsupported.join(", "),
         caps.name
     ))

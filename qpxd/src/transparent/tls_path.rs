@@ -1,8 +1,9 @@
 use super::destination::{ConnectTarget, connect_target_stream, resolve_upstream};
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::policy_context::{
-    AuditRecord, ExtAuthzEnforcement, ExtAuthzInput, ExtAuthzMode, emit_audit_log,
-    enforce_ext_authz, prepare_ext_authz_allow_controls, resolve_identity,
+    AuditRecord, DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
+    emit_audit_log, enforce_decision_service, prepare_decision_service_allow_controls,
+    resolve_identity,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
@@ -207,17 +208,18 @@ where
                 status: None,
                 matched_rule: decision.matched_rule.as_deref(),
                 matched_route: None,
-                ext_authz_policy_id: None,
+                decision_service_policy_id: None,
             },
             &log_context,
         );
         return Ok(TransparentTlsOutcome::Blocked);
     }
 
-    let ext_authz = enforce_ext_authz(
+    let decision_service = enforce_decision_service(
         &state,
         &effective_policy,
-        ExtAuthzInput {
+        DecisionServiceInput {
+            mode: DecisionServiceMode::TransparentTls,
             proxy_kind: ProxyKind::Transparent,
             proxy_name: state.plan.identity.proxy_name.as_ref(),
             scope_name: listener_name,
@@ -236,14 +238,14 @@ where
         },
     )
     .await?;
-    let ext_authz_policy_id = ext_authz.policy_id().map(str::to_owned);
-    let ext_authz_policy_tags = ext_authz.policy_tags().to_vec();
+    let decision_service_policy_id = decision_service.policy_id().map(str::to_owned);
+    let decision_service_policy_tags = decision_service.policy_tags().to_vec();
     let mut log_context = identity.to_log_context(
         decision.matched_rule.as_deref(),
         None,
-        ext_authz_policy_id.as_deref(),
+        decision_service_policy_id.as_deref(),
     );
-    log_context.policy_tags = ext_authz_policy_tags;
+    log_context.policy_tags = decision_service_policy_tags;
     let emit_decision_audit = |audit_outcome| {
         emit_audit_log(
             &state,
@@ -259,16 +261,19 @@ where
                 status: None,
                 matched_rule: decision.matched_rule.as_deref(),
                 matched_route: None,
-                ext_authz_policy_id: ext_authz_policy_id.as_deref(),
+                decision_service_policy_id: decision_service_policy_id.as_deref(),
             },
             &log_context,
         );
     };
     let mut action = decision.action.clone();
-    let timeout_override = match ext_authz {
-        ExtAuthzEnforcement::Continue(allow) => {
-            let allow =
-                prepare_ext_authz_allow_controls(allow, ExtAuthzMode::TransparentTls, None)?;
+    let timeout_override = match decision_service {
+        DecisionServiceEnforcement::Continue(allow) => {
+            let allow = prepare_decision_service_allow_controls(
+                allow,
+                DecisionServiceMode::TransparentTls,
+                None,
+            )?;
             if request_limits
                 .merge_profile_and_check(
                     &state.policy.rate_limiters,
@@ -284,8 +289,8 @@ where
             allow.apply_action_overrides(&mut action);
             allow.timeout_override
         }
-        ExtAuthzEnforcement::Deny(_) => {
-            emit_decision_audit(DispatchOutcome::ExtAuthzDeny);
+        DecisionServiceEnforcement::Deny(_) => {
+            emit_decision_audit(DispatchOutcome::DecisionServiceDeny);
             return Ok(TransparentTlsOutcome::Blocked);
         }
     };

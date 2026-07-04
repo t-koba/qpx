@@ -20,8 +20,8 @@ The acceptance rule is not “old YAML still parses”. The rule is:
 - `forward-upstream-chain.yaml`: chained upstream proxying.
 - `forward-local-auth-basic-digest.yaml`: built-in Basic/Digest auth, including HA1 preload.
 - `forward-ldap-group-policy.yaml`: direct LDAP auth/group policy.
-- `forward-trusted-identity-ext-authz.yaml`: trusted identity ingestion plus external authorization.
-- `forward-signed-assertion-policy.yaml`: signed assertion identity plus external authorization.
+- `forward-trusted-identity-decision-service.yaml`: trusted identity ingestion plus decision service authorization.
+- `forward-signed-assertion-policy.yaml`: signed assertion identity plus decision service authorization.
 - `forward-tls-inspection-selective.yaml`: selective inspect/tunnel/block.
 - `forward-adblock-privacy.yaml`: ad/tracker filtering.
 - `forward-firewall-style-policy.yaml`: multi-condition firewall-style rules.

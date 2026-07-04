@@ -18,7 +18,7 @@ pub(crate) struct AuditRecord<'a> {
     pub(crate) status: Option<u16>,
     pub(crate) matched_rule: Option<&'a str>,
     pub(crate) matched_route: Option<&'a str>,
-    pub(crate) ext_authz_policy_id: Option<&'a str>,
+    pub(crate) decision_service_policy_id: Option<&'a str>,
 }
 
 pub(crate) fn emit_audit_log(
@@ -95,10 +95,10 @@ pub(crate) fn emit_audit_log(
             ""
         },
         policy_tags = policy_tags.as_deref().unwrap_or(""),
-        ext_authz_policy_id = if include(AuditIncludeField::ExtAuthzPolicyId) {
+        decision_service_policy_id = if include(AuditIncludeField::DecisionServicePolicyId) {
             record
-                .ext_authz_policy_id
-                .or(context.ext_authz_policy_id.as_deref())
+                .decision_service_policy_id
+                .or(context.decision_service_policy_id.as_deref())
                 .unwrap_or("")
         } else {
             ""

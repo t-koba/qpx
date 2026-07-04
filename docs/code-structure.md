@@ -64,7 +64,7 @@ listener accept (mode-specific: forward/ reverse/ transparent/)
   ├─ Rule/policy evaluation             (forward/policy/, http/policy/,
   │                                      qpx-core rules + prefilter + matchers)
   ├─ Shared dispatch stages             (http/dispatch/: audit context, guard,
-  │                                      ext_authz, rate limit, cache flow,
+  │                                      decision_service, rate limit, cache flow,
   │                                      response policy, websocket setup)
   ├─ Action dispatch (mode dispatchers delegating to shared stages)
   │   ├─ direct / proxy upstream        (upstream/, upstream/origin/)
@@ -105,12 +105,12 @@ internal compatibility re-exports.
 | `forward/` | explicit proxy: `request/` dispatch, `connect/` CONNECT + H2 extended CONNECT, `policy/` auth + rule evaluation, `h3/` forward HTTP/3 (`backend_h3.rs` and clean-room `qpx/` with `connect/`, webtransport, relay) |
 | `reverse/` | reverse proxy: `listener/` TCP/TLS accept, `router/` route compile + match, `transport/` request handling with `dispatch/` stages and response rules, `health/` active probes, `tls/` termination glue, `h3/` terminate + backend-neutral passthrough |
 | `transparent/` | intercepted traffic: `http/` plain-HTTP path with `dispatch/`, `tls_path/` tunnel/block/MITM decisions, `udp/` UDP/QUIC session routing |
-| `http/` | shared HTTP mechanics: `protocol/` (RFC 911x semantics, l7 finalize, header control, addresses), `codec/` HTTP/1 codecs, `body/` body channels + observation/spooling, `dispatch/` shared dispatch stages (audit, access, guard, rate limit, ext_authz deny, cache flow, response policy, websocket), `modules/` public in-process module API + built-ins, `mitm/` decrypted-path dispatch, `policy/` shared policy evaluation, `rpc/` gRPC / gRPC-Web / Connect observation + local responses, `capture/`, `pipeline/`, `local_response.rs` |
+| `http/` | shared HTTP mechanics: `protocol/` (RFC 911x semantics, l7 finalize, header control, addresses), `codec/` HTTP/1 codecs, `body/` body channels + observation/spooling, `dispatch/` shared dispatch stages (audit, access, guard, rate limit, decision_service deny, cache flow, response policy, websocket), `modules/` public in-process module API + built-ins, `mitm/` decrypted-path dispatch, `policy/` shared policy evaluation, `rpc/` gRPC / gRPC-Web / Connect observation + local responses, `capture/`, `pipeline/`, `local_response.rs` |
 | `http3/` | QUIC/HTTP/3 support: `listener/`, `server/`, `qpx_stream/` clean-room adapters, `quinn_socket/` upgrade broker, capsules/datagrams, drain limits |
 | `upstream/` | outbound connections: `origin/` direct origins (HTTP/1, H2, pooled H3), `pool/` chained-proxy pools, `raw_http1/` |
 | `pool/` | generic pool plumbing shared by the concrete pools: `registry.rs`, `evict.rs`, `single_flight.rs` |
 | `tunnel/` | unified tunnel runtime (CONNECT, WebSocket, WebTransport relays): metrics, idle/low-speed policy |
-| `policy_context/` | trusted identity (`identity/`), `signed_assertion/` JWS/JWT verification, `ext_authz/` external authorization, audit records, crypto helpers |
+| `policy_context/` | trusted identity (`identity/`), `signed_assertion/` JWS/JWT verification, `decision_service/` external authorization, audit records, crypto helpers |
 | `destination/` | destination intelligence: category/reputation/application classification |
 | `rate_limit/` | sharded token buckets for requests/traffic/sessions |
 | `ipc_client/` | QPX-IPC client for `target.type: ipc` routes (SHM and TCP body transfer, idle pool) |
@@ -180,7 +180,8 @@ intent behind it.
   multiply.
 - Connection-pool struct count, qpx-core TLS type budget, dependency
   duplicate-name count, raw `counter!`/`gauge!` macro usage, duplicate test
-  helpers, and ext_authz response buffering shape are all baseline-checked.
+  helpers, and cancellable bounded decision_service response collection are all
+  baseline-checked.
 - Security-critical parsers (policy-context identity, signed assertions,
   PROXY v2, TLS ClientHello sniff, QPACK, SHM ring, IPC meta frames, FTP
   responses) keep boundary-focused tests and fuzz targets (`fuzz/fuzz_targets/`).

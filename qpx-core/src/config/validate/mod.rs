@@ -22,9 +22,10 @@ use observability::{
 };
 use reverse::validate_reverse_edge_configs;
 use security::{
-    validate_auth_config, validate_destination_resolution_config, validate_ext_authz_configs,
-    validate_http_guard_profiles, validate_identity_sources, validate_named_sets,
-    validate_rate_limit_profiles, validate_upstream_trust_profiles,
+    validate_auth_config, validate_decision_service_configs,
+    validate_destination_resolution_config, validate_http_guard_profiles,
+    validate_identity_sources, validate_named_sets, validate_rate_limit_profiles,
+    validate_upstream_trust_profiles,
 };
 use upstreams::{validate_cache_backends, validate_upstream_configs};
 
@@ -64,11 +65,15 @@ pub(super) fn validate_config(config: &Config) -> Result<()> {
     validate_destination_resolution_config(&config.security.destination)?;
     validate_named_sets(&config.security.named_sets)?;
     validate_identity_sources(&config.security.identity_sources)?;
-    validate_ext_authz_configs(&config.security.decisions.ext_authz)?;
-    let http_guard_profiles = validate_http_guard_profiles(&config.http.guard_profiles)?;
-    validate_rate_limit_profiles(&config.traffic.rate_limit_profiles)?;
     let upstream_trust_profiles =
         validate_upstream_trust_profiles(&config.security.upstream_trust_profiles)?;
+    validate_decision_service_configs(
+        &config.security.decisions.services,
+        &upstream_trust_profiles,
+        &config.security.upstream_trust_profiles,
+    )?;
+    let http_guard_profiles = validate_http_guard_profiles(&config.http.guard_profiles)?;
+    validate_rate_limit_profiles(&config.traffic.rate_limit_profiles)?;
     let upstreams = validate_upstream_configs(config, &upstream_trust_profiles)?;
     let cache_backends = validate_cache_backends(&config.caches)?;
     validate_ingress_edge_configs(

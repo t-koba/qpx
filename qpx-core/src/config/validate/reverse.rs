@@ -80,7 +80,7 @@ pub(super) fn validate_reverse_edge_configs(
         validate_policy_context_refs(
             reverse_edge.policy_context.as_ref(),
             &config.security.identity_sources,
-            &config.security.decisions.ext_authz,
+            &config.security.decisions.services,
             &format!("reverse_edge {}", reverse_edge.name),
             reverse_has_mtls_identity,
         )?;
@@ -361,7 +361,7 @@ pub(super) fn validate_reverse_edge_configs(
             validate_policy_context_refs(
                 route.policy_context.as_ref(),
                 &config.security.identity_sources,
-                &config.security.decisions.ext_authz,
+                &config.security.decisions.services,
                 &format!("reverse_edge {} route", reverse_edge.name),
                 reverse_has_mtls_identity,
             )?;

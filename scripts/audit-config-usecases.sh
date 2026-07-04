@@ -79,13 +79,13 @@ assert_all config/usecases/02-secure-egress/forward-ldap-group-policy.yaml \
   "LDAP user filter" 'user_filter:' \
   "LDAP group filter" 'group_filter:' \
   "LDAP group attribute" 'group_attr:'
-assert_all config/usecases/02-secure-egress/forward-trusted-identity-ext-authz.yaml \
+assert_all config/usecases/02-secure-egress/forward-trusted-identity-decision-service.yaml \
   "trusted identity source" 'trusted_headers|trusted_header' \
-  "external authorization" 'ext_authz'
+  "decision service" 'decision_service'
 assert_all config/usecases/02-secure-egress/forward-signed-assertion-policy.yaml \
   "signed assertion source" 'signed_assertion' \
   "subject mapping from sub" 'user_from_sub' \
-  "external authorization" 'ext_authz'
+  "decision service" 'decision_service'
 assert_all config/usecases/02-secure-egress/forward-tls-inspection-selective.yaml \
   "TLS inspection" 'tls_inspection:' \
   "inspect action" 'type:[[:space:]]*inspect' \
@@ -108,7 +108,7 @@ assert_all config/usecases/02-secure-egress/forward-rate-limit-profiles.yaml \
   "request limits" 'requests:' \
   "traffic limits" 'traffic:' \
   "session limits" 'sessions:' \
-  "external authz enforcement" 'ext_authz'
+  "decision service enforcement" 'decision_service'
 assert_all config/usecases/02-secure-egress/forward-destination-intelligence-and-trust.yaml \
   "named destination sets" 'named_sets:' \
   "file-backed feed" 'file:' \
@@ -247,7 +247,7 @@ assert_all config/usecases/07-observability-debug/observability-otel-rich-audit.
   "OTel config" 'otel:' \
   "metrics allowlist" 'allow:' \
   "audit field coverage" 'audit_log:' \
-  "external authz" 'ext_authz'
+  "decision service" 'decision_service'
 assert_all config/usecases/07-observability-debug/forward-trace-debug.yaml \
   "TRACE runtime enabled" 'trace_enabled:[[:space:]]*true' \
   "TRACE header safety" 'trace_reflect_all_headers:[[:space:]]*false'

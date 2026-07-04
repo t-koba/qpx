@@ -49,7 +49,7 @@ pub(super) fn validate_ingress_edge_configs(
         validate_policy_context_refs(
             edge.policy_context.as_ref(),
             &config.security.identity_sources,
-            &config.security.decisions.ext_authz,
+            &config.security.decisions.services,
             &format!("edge {}", edge.name),
             false,
         )?;

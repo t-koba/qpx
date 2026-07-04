@@ -4,8 +4,8 @@ use super::{
 };
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::policy_context::{
-    ExtAuthzAllowControls, ExtAuthzDeny, ExtAuthzEnforcement, ExtAuthzMode, merge_header_controls,
-    prepare_ext_authz_allow_controls,
+    DecisionServiceAllowControls, DecisionServiceDeny, DecisionServiceEnforcement,
+    DecisionServiceMode, merge_header_controls, prepare_decision_service_allow_controls,
 };
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, RateLimiters, TransportScope};
 use anyhow::Result;
@@ -14,34 +14,35 @@ use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
-pub(crate) type ExtAuthzRateLimit<'a> = (
+pub(crate) type DecisionServiceRateLimit<'a> = (
     &'a mut AppliedRateLimits,
     &'a RateLimitContext,
     &'a RateLimiters,
 );
 
-pub(crate) struct ExtAuthzHttpAccessInput<'a> {
-    pub(crate) enforcement: ExtAuthzEnforcement,
-    pub(crate) mode: ExtAuthzMode,
+pub(crate) struct DecisionServiceHttpAccessInput<'a> {
+    pub(crate) enforcement: DecisionServiceEnforcement,
+    pub(crate) mode: DecisionServiceMode,
     pub(crate) base_headers: Option<Arc<CompiledHeaderControl>>,
-    pub(crate) request_limit: Option<ExtAuthzRateLimit<'a>>,
+    pub(crate) request_limit: Option<DecisionServiceRateLimit<'a>>,
     pub(crate) request_head: (&'a Method, http::Version),
     pub(crate) proxy_name: &'a str,
     pub(crate) default_deny_response: Response<Body>,
     pub(crate) audit: &'a DispatchAuditContext,
 }
 
-pub(crate) enum ExtAuthzHttpAccessOutcome {
-    Continue(ExtAuthzAllowControls),
+pub(crate) enum DecisionServiceHttpAccessOutcome {
+    Continue(DecisionServiceAllowControls),
     Blocked(Response<Body>, bool),
 }
 
-pub(crate) fn apply_ext_authz_http_access(
-    input: ExtAuthzHttpAccessInput<'_>,
-) -> Result<ExtAuthzHttpAccessOutcome> {
+pub(crate) fn apply_decision_service_http_access(
+    input: DecisionServiceHttpAccessInput<'_>,
+) -> Result<DecisionServiceHttpAccessOutcome> {
     match input.enforcement {
-        ExtAuthzEnforcement::Continue(allow) => {
-            let allow = prepare_ext_authz_allow_controls(allow, input.mode, input.base_headers)?;
+        DecisionServiceEnforcement::Continue(allow) => {
+            let allow =
+                prepare_decision_service_allow_controls(allow, input.mode, input.base_headers)?;
             if let Some((request_limits, request_limit_ctx, rate_limiters)) = input.request_limit
                 && let Some(retry_after) = request_limits.merge_profile_and_check(
                     rate_limiters,
@@ -51,7 +52,7 @@ pub(crate) fn apply_ext_authz_http_access(
                     1,
                 )?
             {
-                return Ok(ExtAuthzHttpAccessOutcome::Blocked(
+                return Ok(DecisionServiceHttpAccessOutcome::Blocked(
                     rate_limit_response_for_parts(
                         input.request_head.0,
                         input.request_head.1,
@@ -62,10 +63,10 @@ pub(crate) fn apply_ext_authz_http_access(
                     true,
                 ));
             }
-            Ok(ExtAuthzHttpAccessOutcome::Continue(allow))
+            Ok(DecisionServiceHttpAccessOutcome::Continue(allow))
         }
-        ExtAuthzEnforcement::Deny(deny) => Ok(ExtAuthzHttpAccessOutcome::Blocked(
-            ext_authz_deny_response(
+        DecisionServiceEnforcement::Deny(deny) => Ok(DecisionServiceHttpAccessOutcome::Blocked(
+            decision_service_deny_response(
                 deny,
                 input.base_headers,
                 input.request_head.0,
@@ -79,8 +80,8 @@ pub(crate) fn apply_ext_authz_http_access(
     }
 }
 
-fn ext_authz_deny_response(
-    deny: ExtAuthzDeny,
+fn decision_service_deny_response(
+    deny: DecisionServiceDeny,
     base_headers: Option<Arc<CompiledHeaderControl>>,
     request_method: &Method,
     request_version: http::Version,
@@ -97,7 +98,7 @@ fn ext_authz_deny_response(
             local,
             merged_headers.as_deref(),
             audit,
-            DispatchOutcome::ExtAuthzLocalResponse,
+            DispatchOutcome::DecisionServiceLocalResponse,
         );
     }
     let mut response = finalize_response_with_headers(
@@ -108,6 +109,11 @@ fn ext_authz_deny_response(
         merged_headers.as_deref(),
         false,
     );
-    annotate_dispatch_response(&mut response, audit, DispatchOutcome::ExtAuthzDeny, &[]);
+    annotate_dispatch_response(
+        &mut response,
+        audit,
+        DispatchOutcome::DecisionServiceDeny,
+        &[],
+    );
     Ok(response)
 }

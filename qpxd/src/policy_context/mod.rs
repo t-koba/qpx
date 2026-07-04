@@ -1,15 +1,16 @@
 mod audit;
 mod crypto;
-mod ext_authz;
+mod decision_service;
 mod identity;
 mod metrics;
 mod signed_assertion;
 mod util;
 
 pub(crate) use audit::{AuditRecord, emit_audit_log};
-pub(crate) use ext_authz::{
-    CompiledExtAuthz, ExtAuthzAllowControls, ExtAuthzDeny, ExtAuthzEnforcement, ExtAuthzInput,
-    ExtAuthzMode, enforce_ext_authz, merge_header_controls, prepare_ext_authz_allow_controls,
+pub(crate) use decision_service::{
+    CompiledDecisionService, DecisionServiceAllowControls, DecisionServiceDeny,
+    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
+    enforce_decision_service, merge_header_controls, prepare_decision_service_allow_controls,
 };
 pub(crate) use identity::{
     CompiledIdentitySource, EffectivePolicyContext, ResolvedIdentity, resolve_identity,

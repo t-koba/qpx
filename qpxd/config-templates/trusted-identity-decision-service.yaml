@@ -1,0 +1,51 @@
+runtime: {}
+telemetry:
+  system_log:
+    level: info
+security:
+  identity_sources:
+    - name: trusted-headers
+      type: trusted_headers
+      from:
+        trusted_peers: [127.0.0.1/32]
+      headers:
+        user: x-auth-user
+  decisions:
+    services:
+      - name: edge-authz
+        endpoint: http://127.0.0.1:8181/authorize
+        contract:
+          driver: schema_mapped_http
+          profile_id: qpx.generic.v1
+          schemas: {}
+        pep_signal:
+          selected_headers: [user-agent]
+        request_mapping:
+          - target_document: decision_request
+            target: /subject/id
+            source: $.pep_signal.identity.user
+            optional: true
+          - target_document: decision_request
+            target: /action/name
+            source: $.pep_signal.request.method
+            optional: true
+          - target_document: decision_request
+            target: /resource/path
+            source: $.pep_signal.request.path
+            optional: true
+        response_mapping:
+          - target_document: enforceable_effect
+            target: /decision
+            source: $.decision_response.decision
+http: {}
+traffic: {}
+edges:
+  - kind: forward
+    name: egress
+    listen: 127.0.0.1:18080
+    policy_context:
+      identity_sources: [trusted-headers]
+      decision_service: edge-authz
+    default_action:
+      type: direct
+    rules: []

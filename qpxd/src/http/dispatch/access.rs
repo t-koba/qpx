@@ -1,12 +1,13 @@
-use super::ext_authz_access::ExtAuthzRateLimit;
+use super::decision_service_access::DecisionServiceRateLimit;
 use super::{
-    DispatchAuditContext, DispatchAuditInput, ExtAuthzHttpAccessInput, ExtAuthzHttpAccessOutcome,
-    ProxyKind, apply_ext_authz_http_access, build_dispatch_audit_context,
+    DecisionServiceHttpAccessInput, DecisionServiceHttpAccessOutcome, DispatchAuditContext,
+    DispatchAuditInput, ProxyKind, apply_decision_service_http_access,
+    build_dispatch_audit_context,
 };
 use crate::destination::DestinationMetadata;
 use crate::policy_context::{
-    EffectivePolicyContext, ExtAuthzAllowControls, ExtAuthzInput, ExtAuthzMode, ResolvedIdentity,
-    enforce_ext_authz,
+    DecisionServiceAllowControls, DecisionServiceInput, DecisionServiceMode,
+    EffectivePolicyContext, ResolvedIdentity, enforce_decision_service,
 };
 use crate::runtime::RuntimeState;
 use anyhow::Result;
@@ -17,18 +18,18 @@ use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-/// Mode-independent HTTP access-control stage: external authorization,
-/// dispatch audit context construction, and ext_authz allow/deny application
+/// Mode-independent HTTP access-control stage: decision service,
+/// dispatch audit context construction, and decision_service allow/deny application
 /// in one pass. Mode dispatchers feed mode-specific values as data instead of
 /// duplicating this sequence.
 pub(crate) struct HttpAccessInput<'a> {
     pub(crate) state: &'a Arc<RuntimeState>,
     pub(crate) policy: &'a EffectivePolicyContext,
     pub(crate) kind: ProxyKind,
-    pub(crate) mode: ExtAuthzMode,
-    /// `false` skips ext_authz enforcement (e.g. transparent requests without
+    pub(crate) mode: DecisionServiceMode,
+    /// `false` skips decision_service enforcement (e.g. transparent requests without
     /// an evaluated policy) while still producing the audit context.
-    pub(crate) enforce_ext_authz: bool,
+    pub(crate) enforce_decision_service: bool,
     pub(crate) proxy_name: &'a str,
     pub(crate) scope_name: &'a str,
     pub(crate) remote_addr: SocketAddr,
@@ -46,12 +47,12 @@ pub(crate) struct HttpAccessInput<'a> {
     pub(crate) identity: &'a ResolvedIdentity,
     pub(crate) destination: &'a DestinationMetadata,
     pub(crate) base_headers: Option<Arc<CompiledHeaderControl>>,
-    pub(crate) request_limit: Option<ExtAuthzRateLimit<'a>>,
+    pub(crate) request_limit: Option<DecisionServiceRateLimit<'a>>,
     pub(crate) default_deny_response: Response<Body>,
 }
 
 pub(crate) enum HttpAccessDecision {
-    /// Request may proceed. `controls` is `None` when ext_authz was skipped.
+    /// Request may proceed. `controls` is `None` when decision_service was skipped.
     Allow(Box<HttpAccessAllowed>),
     /// Request was denied or rate limited; `response` is already finalized
     /// and annotated.
@@ -63,16 +64,17 @@ pub(crate) enum HttpAccessDecision {
 
 pub(crate) struct HttpAccessAllowed {
     pub(crate) audit: DispatchAuditContext,
-    pub(crate) controls: Option<ExtAuthzAllowControls>,
+    pub(crate) controls: Option<DecisionServiceAllowControls>,
 }
 
 pub(crate) async fn enforce_http_access(input: HttpAccessInput<'_>) -> Result<HttpAccessDecision> {
-    let ext_authz = if input.enforce_ext_authz {
+    let decision_service = if input.enforce_decision_service {
         Some(
-            enforce_ext_authz(
+            enforce_decision_service(
                 input.state,
                 input.policy,
-                ExtAuthzInput {
+                DecisionServiceInput {
+                    mode: input.mode,
                     proxy_kind: input.kind,
                     proxy_name: input.proxy_name,
                     scope_name: input.scope_name,
@@ -108,16 +110,16 @@ pub(crate) async fn enforce_http_access(input: HttpAccessInput<'_>) -> Result<Ht
         matched_route: input.matched_route.map(ToOwned::to_owned),
         identity: input.identity,
         destination: input.destination,
-        ext_authz: ext_authz.as_ref(),
+        decision_service: decision_service.as_ref(),
     });
-    let Some(ext_authz) = ext_authz else {
+    let Some(decision_service) = decision_service else {
         return Ok(HttpAccessDecision::Allow(Box::new(HttpAccessAllowed {
             audit,
             controls: None,
         })));
     };
-    match apply_ext_authz_http_access(ExtAuthzHttpAccessInput {
-        enforcement: ext_authz,
+    match apply_decision_service_http_access(DecisionServiceHttpAccessInput {
+        enforcement: decision_service,
         mode: input.mode,
         base_headers: input.base_headers,
         request_limit: input.request_limit,
@@ -126,13 +128,13 @@ pub(crate) async fn enforce_http_access(input: HttpAccessInput<'_>) -> Result<Ht
         default_deny_response: input.default_deny_response,
         audit: &audit,
     })? {
-        ExtAuthzHttpAccessOutcome::Continue(controls) => {
+        DecisionServiceHttpAccessOutcome::Continue(controls) => {
             Ok(HttpAccessDecision::Allow(Box::new(HttpAccessAllowed {
                 audit,
                 controls: Some(controls),
             })))
         }
-        ExtAuthzHttpAccessOutcome::Blocked(response, rate_limited) => {
+        DecisionServiceHttpAccessOutcome::Blocked(response, rate_limited) => {
             Ok(HttpAccessDecision::Blocked {
                 response: Box::new(response),
                 rate_limited,

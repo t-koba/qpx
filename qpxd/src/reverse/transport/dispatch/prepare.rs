@@ -110,7 +110,7 @@ pub(super) async fn prepare_reverse_retry_dispatch(
         request_method,
         seed,
         sticky_seed,
-        ext_authz_mirror_upstreams,
+        decision_service_mirror_upstreams,
         route_timeout,
         proxy_name,
     } = input;
@@ -134,28 +134,28 @@ pub(super) async fn prepare_reverse_retry_dispatch(
     let selected_mirrors = route.select_mirror_upstreams(seed, sticky_seed);
     let mut streaming_mirrors = Vec::new();
     let mut mirror_upstreams = Vec::new();
-    let ext_authz_mirror_body_limit = Some(
+    let decision_service_mirror_body_limit = Some(
         state
             .plan
             .limits
             .upstream
             .max_reverse_retry_template_body_bytes,
     );
-    let mut ext_authz_mirrors = ext_authz_mirror_upstreams
+    let mut decision_service_mirrors = decision_service_mirror_upstreams
         .into_iter()
         .map(UpstreamEndpoint::new)
         .map(Arc::new)
         .map(|upstream| SelectedMirrorTarget {
             upstream,
-            max_mirror_body_bytes: ext_authz_mirror_body_limit,
+            max_mirror_body_bytes: decision_service_mirror_body_limit,
         })
         .collect::<Vec<_>>();
     if attempts == 1 {
         streaming_mirrors.extend(selected_mirrors);
-        streaming_mirrors.append(&mut ext_authz_mirrors);
+        streaming_mirrors.append(&mut decision_service_mirrors);
     } else {
         mirror_upstreams.extend(selected_mirrors);
-        mirror_upstreams.extend(ext_authz_mirrors);
+        mirror_upstreams.extend(decision_service_mirrors);
     }
     let req = if streaming_mirrors.is_empty() {
         req

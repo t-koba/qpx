@@ -27,7 +27,7 @@ telemetry:
     - idp
     - identity_source
     - policy_tags
-    - ext_authz_policy_id
+    - decision_service_policy_id
     - matched_rule
     - matched_route
   metrics:

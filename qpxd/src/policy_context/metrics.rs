@@ -8,9 +8,9 @@ pub(super) fn signed_assertion_verification_failed(source: &str) {
     .increment(1);
 }
 
-pub(super) fn ext_authz_response_body_bytes(scheme: &str, bytes: usize) {
+pub(super) fn decision_service_response_body_bytes(scheme: &str, bytes: usize) {
     histogram!(
-        "qpx_ext_authz_response_body_bytes",
+        "qpx_decision_service_response_body_bytes",
         "scheme" => scheme.to_owned(),
     )
     .record(bytes as f64);

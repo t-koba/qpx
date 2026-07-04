@@ -11,8 +11,8 @@ pub(super) fn record_dispatch_outcome(kind: ProxyKind, outcome: DispatchOutcome)
         "rate_limited" | "concurrency_limited" => {
             counter!("qpx_rate_limited_total", "kind" => kind_label).increment(1);
         }
-        "ext_authz_deny" | "ext_authz_local_response" => {
-            counter!("qpx_ext_authz_deny_total", "kind" => kind_label).increment(1);
+        "decision_service_deny" | "decision_service_local_response" => {
+            counter!("qpx_decision_service_deny_total", "kind" => kind_label).increment(1);
         }
         "cache_hit" => record_cache_lookup_result(kind, "hit"),
         "cache_stale" => record_cache_lookup_result(kind, "stale"),

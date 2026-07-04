@@ -78,7 +78,7 @@ pub enum AuditIncludeField {
     Idp,
     IdentitySource,
     PolicyTags,
-    ExtAuthzPolicyId,
+    DecisionServicePolicyId,
     MatchedRule,
     MatchedRoute,
 }
