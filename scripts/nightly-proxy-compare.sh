@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT_JSON="${1:-${QPX_PROXY_COMPARE_JSON:-$ROOT_DIR/target/perf/nightly-proxy-compare.jsonl}}"
+QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
+REQUESTS="${QPX_PROXY_COMPARE_REQUESTS:-5000}"
+CONCURRENCY="${QPX_PROXY_COMPARE_CONCURRENCY:-64}"
+BODY_BYTES="${QPX_PROXY_COMPARE_BODY_BYTES:-1024}"
+HOST_HEADER="${QPX_PROXY_COMPARE_HOST:-bench.local}"
+
+BACKEND_PORT="${QPX_PROXY_COMPARE_BACKEND_PORT:-18080}"
+QPX_PORT="${QPX_PROXY_COMPARE_QPX_PORT:-18081}"
+NGINX_PORT="${QPX_PROXY_COMPARE_NGINX_PORT:-18082}"
+APACHE_PORT="${QPX_PROXY_COMPARE_APACHE_PORT:-18083}"
+LIGHTTPD_PORT="${QPX_PROXY_COMPARE_LIGHTTPD_PORT:-18084}"
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-proxy-compare.XXXXXX")"
+LOG_DIR="$TMP_DIR/logs"
+STATE_DIR="$TMP_DIR/state"
+mkdir -p "$LOG_DIR" "$STATE_DIR" "$(dirname "$OUT_JSON")"
+
+PIDS=()
+
+cleanup() {
+  local pid
+  for pid in "${PIDS[@]:-}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+register_pid() {
+  PIDS+=("$1")
+}
+
+wait_http() {
+  local name="$1"
+  local port="$2"
+  local pid="$3"
+  local log_file="$4"
+  local tries=0
+  while [ "$tries" -lt 100 ]; do
+    if curl -fsS --max-time 2 -H "Host: ${HOST_HEADER}" "http://127.0.0.1:${port}/bench" >/dev/null 2>&1; then
+      return 0
+    fi
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      echo "${name} exited before becoming ready" >&2
+      cat "$log_file" >&2 || true
+      exit 1
+    fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  echo "timeout waiting for ${name} on port ${port}" >&2
+  cat "$log_file" >&2 || true
+  exit 1
+}
+
+start_backend() {
+  local script="$TMP_DIR/backend.py"
+  cat >"$script" <<'PY'
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+BODY = b"x" * int(os.environ.get("BENCH_BODY_BYTES", "1024"))
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(BODY)))
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        self.wfile.write(BODY)
+
+    def log_message(self, _format, *_args):
+        return
+
+port = int(sys.argv[1])
+server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+server.daemon_threads = True
+server.serve_forever()
+PY
+  BENCH_BODY_BYTES="$BODY_BYTES" python3 "$script" "$BACKEND_PORT" >"$LOG_DIR/backend.log" 2>&1 &
+  local pid=$!
+  register_pid "$pid"
+  wait_http "backend" "$BACKEND_PORT" "$pid" "$LOG_DIR/backend.log"
+}
+
+start_qpxd() {
+  local config="$TMP_DIR/qpxd.yaml"
+  cat >"$config" <<YAML
+state_dir: "$STATE_DIR"
+upstreams:
+  - name: bench
+    url: http://127.0.0.1:${BACKEND_PORT}
+edges:
+  - kind: reverse
+    name: benchmark
+    listen: 127.0.0.1:${QPX_PORT}
+    routes:
+      - name: bench
+        streaming_requirement: required
+        match:
+          host: [${HOST_HEADER}]
+        target:
+          type: upstream
+          upstreams: [bench]
+YAML
+  QPX_STATE_DIR="$STATE_DIR" "$QPXD_BIN" run --config "$config" >"$LOG_DIR/qpxd.log" 2>&1 &
+  local pid=$!
+  register_pid "$pid"
+  wait_http "qpxd" "$QPX_PORT" "$pid" "$LOG_DIR/qpxd.log"
+}
+
+start_nginx() {
+  local prefix="$TMP_DIR/nginx"
+  local config="$prefix/nginx.conf"
+  mkdir -p "$prefix/logs"
+  cat >"$config" <<NGINX
+pid $prefix/nginx.pid;
+error_log $prefix/logs/error.log warn;
+worker_processes 1;
+events {
+  worker_connections 4096;
+}
+http {
+  access_log off;
+  server {
+    listen 127.0.0.1:${NGINX_PORT};
+    location / {
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_pass http://127.0.0.1:${BACKEND_PORT};
+    }
+  }
+}
+NGINX
+  nginx -p "$prefix" -c "$config" -g 'daemon off;' >"$LOG_DIR/nginx.log" 2>&1 &
+  local pid=$!
+  register_pid "$pid"
+  wait_http "nginx" "$NGINX_PORT" "$pid" "$LOG_DIR/nginx.log"
+}
+
+apache_load_module() {
+  local module="$1"
+  local path="/usr/lib/apache2/modules/mod_${module}.so"
+  if [ -f "$path" ]; then
+    printf 'LoadModule %s_module %s\n' "$module" "$path"
+  fi
+}
+
+start_apache() {
+  local root="$TMP_DIR/apache"
+  local config="$root/apache.conf"
+  mkdir -p "$root/run" "$root/logs"
+  {
+    echo "ServerRoot \"$root\""
+    echo "DefaultRuntimeDir \"$root/run\""
+    echo "PidFile \"$root/run/apache.pid\""
+    echo "ServerName 127.0.0.1"
+    echo "Listen 127.0.0.1:${APACHE_PORT}"
+    echo "ErrorLog \"$root/logs/error.log\""
+    echo "LogLevel warn"
+    echo "Mutex file:$root/run default"
+    apache_load_module "mpm_event"
+    apache_load_module "authn_core"
+    apache_load_module "authz_core"
+    apache_load_module "proxy"
+    apache_load_module "proxy_http"
+    apache_load_module "unixd"
+    echo "<VirtualHost 127.0.0.1:${APACHE_PORT}>"
+    echo "  ProxyPass \"/\" \"http://127.0.0.1:${BACKEND_PORT}/\" retry=0"
+    echo "  ProxyPassReverse \"/\" \"http://127.0.0.1:${BACKEND_PORT}/\""
+    echo "</VirtualHost>"
+  } >"$config"
+  apache2 -f "$config" -DFOREGROUND >"$LOG_DIR/apache.log" 2>&1 &
+  local pid=$!
+  register_pid "$pid"
+  wait_http "apache" "$APACHE_PORT" "$pid" "$LOG_DIR/apache.log"
+}
+
+start_lighttpd() {
+  local root="$TMP_DIR/lighttpd"
+  local config="$root/lighttpd.conf"
+  mkdir -p "$root/www" "$root/logs"
+  cat >"$config" <<LIGHTTPD
+server.modules = ( "mod_proxy" )
+server.document-root = "$root/www"
+server.bind = "127.0.0.1"
+server.port = ${LIGHTTPD_PORT}
+server.pid-file = "$root/lighttpd.pid"
+server.errorlog = "$root/logs/error.log"
+proxy.server = ( "" => ( ( "host" => "127.0.0.1", "port" => ${BACKEND_PORT} ) ) )
+LIGHTTPD
+  lighttpd -D -f "$config" >"$LOG_DIR/lighttpd.log" 2>&1 &
+  local pid=$!
+  register_pid "$pid"
+  wait_http "lighttpd" "$LIGHTTPD_PORT" "$pid" "$LOG_DIR/lighttpd.log"
+}
+
+extract_ab_value() {
+  local file="$1"
+  local pattern="$2"
+  awk -F: -v pattern="$pattern" '
+    $1 ~ pattern {
+      gsub(/^[ \t]+/, "", $2)
+      split($2, parts, " ")
+      print parts[1]
+      exit
+    }
+  ' "$file"
+}
+
+run_one() {
+  local proxy="$1"
+  local port="$2"
+  local out="$TMP_DIR/${proxy}.ab"
+  local url="http://127.0.0.1:${port}/bench"
+
+  ab -k -n 200 -c 16 -H "Host: ${HOST_HEADER}" "$url" >"$TMP_DIR/${proxy}.warmup" 2>&1
+  ab -k -n "$REQUESTS" -c "$CONCURRENCY" -H "Host: ${HOST_HEADER}" "$url" >"$out" 2>&1 || {
+    echo "ab failed for ${proxy}" >&2
+    cat "$out" >&2 || true
+    exit 1
+  }
+
+  local rps mean_ms transfer_kbps commit
+  rps="$(extract_ab_value "$out" "Requests per second")"
+  mean_ms="$(awk -F: '/Time per request/ && $0 !~ /across all concurrent requests/ {gsub(/^[ \t]+/, "", $2); split($2, parts, " "); print parts[1]; exit}' "$out")"
+  transfer_kbps="$(extract_ab_value "$out" "Transfer rate")"
+  commit="${GITHUB_SHA:-unknown}"
+
+  printf '{"bench":"proxy_compare_http1_reverse","proxy":"%s","requests":%s,"concurrency":%s,"body_bytes":%s,"requests_per_sec":%s,"mean_time_per_request_ms":%s,"transfer_kbytes_per_sec":%s,"commit":"%s"}\n' \
+    "$proxy" "$REQUESTS" "$CONCURRENCY" "$BODY_BYTES" "$rps" "$mean_ms" "$transfer_kbps" "$commit" >>"$OUT_JSON"
+}
+
+require_cmd ab
+require_cmd apache2
+require_cmd curl
+require_cmd lighttpd
+require_cmd nginx
+require_cmd python3
+
+if [ ! -x "$QPXD_BIN" ]; then
+  echo "missing qpxd binary: $QPXD_BIN" >&2
+  exit 1
+fi
+
+: >"$OUT_JSON"
+start_backend
+start_qpxd
+start_nginx
+start_apache
+start_lighttpd
+
+run_one "direct-backend" "$BACKEND_PORT"
+run_one "qpxd" "$QPX_PORT"
+run_one "nginx" "$NGINX_PORT"
+run_one "apache" "$APACHE_PORT"
+run_one "lighttpd" "$LIGHTTPD_PORT"

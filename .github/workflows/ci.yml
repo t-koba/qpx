@@ -193,6 +193,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: install proxy comparison packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apache2 apache2-utils lighttpd nginx
       - name: criterion streaming throughput bench
         env:
           RUSTFLAGS: "-D warnings"
@@ -200,6 +204,13 @@ jobs:
           mkdir -p target/perf
           printf '{"bench":"criterion_streaming_throughput","first_byte_ms":null,"p95_chunk_gap_ms":null,"total_ms":null,"rss_peak_mb":null,"cpu_ms":null,"bytes":null,"commit":"%s"}\n' "${GITHUB_SHA:-unknown}" > target/perf/nightly-criterion.jsonl
           cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10
+      - name: external proxy comparison bench
+        env:
+          RUSTFLAGS: "-D warnings"
+          QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/nightly-proxy-compare.jsonl
+        run: |
+          cargo build -p qpxd --release --locked
+          scripts/nightly-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
       - name: upload nightly perf artifact
         uses: actions/upload-artifact@v4
         if: always()
