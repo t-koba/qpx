@@ -57,6 +57,8 @@ jobs:
             grpc_frame_observer \
             grpc_web_binary_frame_observer \
             grpc_web_text_base64_observer \
+            h3_content_length_state \
+            h3_trailer_sanitizer \
             http1_request_head \
             ipc_meta_frame \
             proxy_v2_parser \

@@ -171,25 +171,98 @@ fn write_perf_artifact(
     let Some(path) = std::env::var_os("QPX_PERF_SMOKE_JSON") else {
         return Ok(());
     };
+    let _guard = perf_artifact_lock().lock().expect("perf artifact lock");
+    let path = PathBuf::from(path);
     let record = serde_json::json!({
-        "bench": label,
+        "bench": canonical_perf_bench_label(label),
+        "legacy_bench": label,
+        "first_byte_ms": serde_json::Value::Null,
+        "p95_chunk_gap_ms": serde_json::Value::Null,
+        "total_ms": elapsed.as_secs_f64() * 1000.0,
+        "rss_peak_mb": serde_json::Value::Null,
+        "cpu_ms": serde_json::Value::Null,
+        "bytes": serde_json::Value::Null,
+        "commit": perf_commit(),
         "total_requests": total_requests,
         "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
         "req_per_sec": req_per_sec,
         "p50_ms": p50.as_secs_f64() * 1000.0,
         "p95_ms": p95.as_secs_f64() * 1000.0,
         "p99_ms": p99.as_secs_f64() * 1000.0,
-        "bytes": serde_json::Value::Null,
-        "rss_peak_mb": serde_json::Value::Null,
-        "cpu_ms": serde_json::Value::Null,
     });
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create perf artifact dir {}", parent.display()))?;
+    }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .with_context(|| format!("open perf artifact {}", PathBuf::from(path).display()))?;
+        .with_context(|| format!("open perf artifact {}", path.display()))?;
     writeln!(file, "{}", serde_json::to_string(&record)?).context("write perf artifact")?;
     Ok(())
+}
+
+fn perf_artifact_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+fn canonical_perf_bench_label(label: &str) -> &str {
+    match label {
+        "reverse_upstream_http1" | "reverse_local_response" => "reverse_http1_plain_small",
+        "grpc_unary" => "reverse_http2_plain_small",
+        "reverse_http3_terminate" => {
+            #[cfg(feature = "http3-backend-qpx")]
+            {
+                "h3_qpx_backend_unary_1kb"
+            }
+            #[cfg(all(not(feature = "http3-backend-qpx"), feature = "http3-backend-h3"))]
+            {
+                "h3_h3_backend_unary_1kb"
+            }
+            #[cfg(not(any(feature = "http3-backend-qpx", feature = "http3-backend-h3")))]
+            {
+                "h3_h3_backend_unary_1kb"
+            }
+        }
+        "reverse_h3_bulk" => {
+            #[cfg(feature = "http3-backend-qpx")]
+            {
+                "h3_qpx_backend_stream_100mb"
+            }
+            #[cfg(all(not(feature = "http3-backend-qpx"), feature = "http3-backend-h3"))]
+            {
+                "h3_h3_backend_stream_100mb"
+            }
+            #[cfg(not(any(feature = "http3-backend-qpx", feature = "http3-backend-h3")))]
+            {
+                "h3_h3_backend_stream_100mb"
+            }
+        }
+        "grpc_streaming" => "grpc_server_stream_10000_messages",
+        "forward_connect" => "connect_streaming_messages",
+        other => other,
+    }
+}
+
+fn perf_commit() -> String {
+    if let Ok(value) = std::env::var("GITHUB_SHA")
+        && !value.trim().is_empty()
+    {
+        return value;
+    }
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn full_body(

@@ -19,6 +19,13 @@ Its core responsibilities are:
 
 `qpx` is not intended to be an identity product, an IdP, or a full SASE control plane.
 
+Canonical boundary:
+
+- `qpx` does policy enforcement, protocol gatewaying, trusted identity context
+  validation/use, observability, authorization delegation, and local/lab auth.
+- `qpx` does not become the enterprise IdP, primary session authority, user
+  lifecycle manager, or account recovery system.
+
 ## 2. Architectural role
 
 Use `qpx` as a:

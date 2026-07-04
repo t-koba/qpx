@@ -1,6 +1,28 @@
 # qpxf Backends
 
-qpxf runs CGI, FastCGI, SCGI, and WASM backends behind the qpx IPC boundary. Backend failures are treated as response failures and should not return incomplete pooled connections to service.
+qpxf runs CGI, FastCGI, SCGI, and WASM backends behind the qpx IPC boundary.
+Backend failures are treated as response failures and should not return
+incomplete pooled connections to service.
+
+## Failure Matrix
+
+| Backend | Failure | Expected qpxf behavior |
+| --- | --- | --- |
+| FastCGI | backend closes mid-response | fail request and discard connection |
+| FastCGI | missing `END_REQUEST` | fail request and discard connection |
+| FastCGI | slow backend timeout | fail request and do not reuse connection |
+| FastCGI | incomplete response | never return connection to idle pool |
+| FastCGI | complete responder `END_REQUEST` | return connection to idle pool when `pool.max_idle` allows |
+| SCGI | invalid or missing non-empty `Content-Length` | reject before collecting stdin |
+| SCGI | backend closes mid-response | fail request |
+| SCGI | backend does not read body | timeout or write failure cleans up worker |
+| SCGI | invalid response header | server-side CGI response parsing rejects the response |
+| SCGI | client cancel | abort worker and release concurrency permit |
+
+FastCGI pooling is intentionally conservative: a connection is reusable only
+after a complete responder `END_REQUEST`. SCGI uses per-request connections and
+requires a valid `Content-Length` for non-empty stdin so qpxf does not buffer
+the full upload to construct the SCGI netstring.
 
 Important operational limits:
 
