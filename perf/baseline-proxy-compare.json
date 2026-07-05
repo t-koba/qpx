@@ -1,0 +1,17 @@
+{
+  "baselines": [
+    {
+      "baseline_ratio": 0.75,
+      "bench": "proxy_compare_http1_reverse",
+      "body_bytes": 1024,
+      "concurrency": 64,
+      "direct_backend_requests_per_sec": 12000.0,
+      "qpxd_requests_per_sec": 9000.0,
+      "requests": 5000,
+      "source_commit": "initial-plan-f1-baseline"
+    }
+  ],
+  "degradation_threshold": 0.1,
+  "metric": "qpxd_requests_per_sec / direct-backend_requests_per_sec",
+  "schema_version": 1
+}

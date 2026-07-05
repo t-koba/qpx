@@ -12,6 +12,7 @@ arbitrary = { version = "1", features = ["derive"] }
 libfuzzer-sys = "0.4"
 qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
 qpx-h3 = { path = "../qpx-h3" }
+qpx-auth = { path = "../qpx-auth" }
 qpxd = { path = "../qpxd" }
 serde_yaml = { package = "serde_norway", version = "0.9" }
 tempfile = "3"
@@ -138,6 +139,27 @@ bench = false
 [[bin]]
 name = "reverse_target_input_deserializer"
 path = "fuzz_targets/reverse_target_input_deserializer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_credential_parser"
+path = "fuzz_targets/auth_credential_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dispatch_policy_match"
+path = "fuzz_targets/dispatch_policy_match.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_key"
+path = "fuzz_targets/cache_key.rs"
 test = false
 doc = false
 bench = false

@@ -5,7 +5,7 @@ use thiserror::Error;
 mod authenticator;
 #[cfg(feature = "ldap-auth")]
 mod cache;
-mod digest;
+pub(crate) mod digest;
 #[cfg(feature = "ldap-auth")]
 mod ldap;
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]

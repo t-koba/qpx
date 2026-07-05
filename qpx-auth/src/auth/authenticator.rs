@@ -122,10 +122,8 @@ impl Authenticator {
     #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
     fn strip_auth_scheme<'a>(header_value: &'a str, scheme: &str) -> Option<&'a str> {
         let value = header_value.trim_start();
-        if value.len() <= scheme.len() {
-            return None;
-        }
-        if !value[..scheme.len()].eq_ignore_ascii_case(scheme) {
+        let prefix = value.get(..scheme.len())?;
+        if !prefix.eq_ignore_ascii_case(scheme) {
             return None;
         }
         let rest = &value[scheme.len()..];

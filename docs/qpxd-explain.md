@@ -10,6 +10,7 @@ qpxd explain -c config/qpx.example.yaml --format json
 The JSON output is deterministic and includes:
 
 - edge and route identity
+- build capabilities compiled into the current binary
 - target type
 - effective streaming limits
 - module body mode
@@ -28,6 +29,18 @@ Top-level shape:
 
 ```json
 {
+  "build_capabilities": {
+    "mitm": true,
+    "acme": true,
+    "auth_basic": true,
+    "auth_digest": true,
+    "auth_ldap": true,
+    "tls_rustls": true,
+    "tls_native": false,
+    "http3": true,
+    "http3_backend_h3": true,
+    "http3_backend_qpx": true
+  },
   "edges": [
     {
       "edge": "public-http",

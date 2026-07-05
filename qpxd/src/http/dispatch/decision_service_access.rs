@@ -4,8 +4,8 @@ use super::{
 };
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::policy_context::{
-    DecisionServiceAllowControls, DecisionServiceDeny, DecisionServiceEnforcement,
-    DecisionServiceMode, merge_header_controls, prepare_decision_service_allow_controls,
+    DecisionServiceAllow, DecisionServiceDeny, DecisionServiceEnforcement, DecisionServiceMode,
+    merge_header_controls, prepare_decision_service_allow,
 };
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, RateLimiters, TransportScope};
 use anyhow::Result;
@@ -32,7 +32,7 @@ pub(crate) struct DecisionServiceHttpAccessInput<'a> {
 }
 
 pub(crate) enum DecisionServiceHttpAccessOutcome {
-    Continue(DecisionServiceAllowControls),
+    Continue(DecisionServiceAllow),
     Blocked(Response<Body>, bool),
 }
 
@@ -41,8 +41,7 @@ pub(crate) fn apply_decision_service_http_access(
 ) -> Result<DecisionServiceHttpAccessOutcome> {
     match input.enforcement {
         DecisionServiceEnforcement::Continue(allow) => {
-            let allow =
-                prepare_decision_service_allow_controls(allow, input.mode, input.base_headers)?;
+            let allow = prepare_decision_service_allow(allow, input.mode, input.base_headers)?;
             if let Some((request_limits, request_limit_ctx, rate_limiters)) = input.request_limit
                 && let Some(retry_after) = request_limits.merge_profile_and_check(
                     rate_limiters,

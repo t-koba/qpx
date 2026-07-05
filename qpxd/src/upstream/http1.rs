@@ -11,7 +11,7 @@ use hyper::header::{CONNECTION, HOST, HeaderValue, UPGRADE};
 use hyper::{Request, Response, Uri};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
-use qpx_http::tls::client::connect_tls_http1_with_options;
+use qpx_http::tls::builder::connect_client_http1;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::{Instant, timeout};
@@ -227,12 +227,15 @@ pub(crate) async fn open_upstream_proxy_sender(
                 Some(dur) => {
                     timeout(
                         dur,
-                        connect_tls_http1_with_options(endpoint.host.as_str(), tcp, true, trust),
+                        connect_client_http1(endpoint.host.as_str(), tcp, true, trust),
                     )
                     .await??
+                    .0
                 }
                 None => {
-                    connect_tls_http1_with_options(endpoint.host.as_str(), tcp, true, trust).await?
+                    connect_client_http1(endpoint.host.as_str(), tcp, true, trust)
+                        .await?
+                        .0
                 }
             };
             let (sender, conn) = match timeout_dur {

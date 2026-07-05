@@ -12,6 +12,7 @@ pub(crate) fn render_explain_plan(
     route_filter: Option<&str>,
 ) -> String {
     let mut output = String::new();
+    append_build_capabilities(&mut output, runtime::BuildCapabilities::current());
     for edge in plan.edges.iter() {
         match edge {
             runtime::CompiledEdge::Forward(edge) => {
@@ -181,7 +182,68 @@ pub(crate) fn render_explain_plan_json(
             }
         }
     }
-    Ok(serde_json::to_string_pretty(&json!({ "edges": edges }))?)
+    Ok(serde_json::to_string_pretty(&json!({
+        "build_capabilities": runtime::BuildCapabilities::current(),
+        "edges": edges,
+    }))?)
+}
+
+pub(crate) fn explain_plan_match_count(
+    plan: &runtime::RuntimePlan,
+    edge_filter: Option<&str>,
+    route_filter: Option<&str>,
+) -> usize {
+    let mut count = 0usize;
+    for edge in plan.edges.iter() {
+        match edge {
+            runtime::CompiledEdge::Forward(edge) => {
+                if edge_filter_matches(edge_filter, &edge.name) {
+                    count = count.saturating_add(1);
+                    count = count.saturating_add(
+                        edge.rules
+                            .iter()
+                            .filter(|rule| route_filter_matches(route_filter, &rule.name))
+                            .count(),
+                    );
+                }
+            }
+            runtime::CompiledEdge::Transparent(edge) => {
+                if edge_filter_matches(edge_filter, &edge.name) {
+                    count = count.saturating_add(1);
+                    count = count.saturating_add(
+                        edge.rules
+                            .iter()
+                            .filter(|rule| route_filter_matches(route_filter, &rule.name))
+                            .count(),
+                    );
+                }
+            }
+            runtime::CompiledEdge::Reverse(edge) => {
+                if edge_filter_matches(edge_filter, &edge.name) {
+                    count = count.saturating_add(
+                        edge.routes
+                            .iter()
+                            .filter(|route| route_filter_matches(route_filter, &route.name))
+                            .count(),
+                    );
+                    count = count.saturating_add(
+                        edge.tls_passthrough_routes
+                            .iter()
+                            .filter(|route| route_filter_matches(route_filter, &route.name))
+                            .count(),
+                    );
+                }
+            }
+        }
+    }
+    count
+}
+
+fn append_build_capabilities(output: &mut String, caps: runtime::BuildCapabilities) {
+    output.push_str("build_capabilities\n");
+    for (name, enabled) in caps.text_lines() {
+        output.push_str(&format!("  {name}: {enabled}\n"));
+    }
 }
 
 fn ingress_plan_json(

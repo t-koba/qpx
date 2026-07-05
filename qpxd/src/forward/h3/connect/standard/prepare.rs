@@ -19,7 +19,7 @@ use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_static_response};
 use crate::policy_context::{
     DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
-    enforce_decision_service, prepare_decision_service_allow_controls, resolve_identity,
+    enforce_decision_service, prepare_decision_service_allow, resolve_identity,
     sanitize_headers_for_policy,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
@@ -335,11 +335,8 @@ pub(crate) async fn prepare_h3_connect_request(
     log_context.policy_tags = decision_service_policy_tags;
     let (response_headers, timeout_override, rate_limit_profile) = match decision_service {
         DecisionServiceEnforcement::Continue(allow) => {
-            let allow = prepare_decision_service_allow_controls(
-                allow,
-                DecisionServiceMode::ForwardConnect,
-                None,
-            )?;
+            let allow =
+                prepare_decision_service_allow(allow, DecisionServiceMode::ForwardConnect, None)?;
             let rate_limit_profile = allow.rate_limit_profile.clone();
             if let Some(retry_after) = request_limits.merge_profile_and_check(
                 &state.policy.rate_limiters,

@@ -48,10 +48,7 @@ impl<'a> Iterator for ConfigLoadErrorChain<'a> {
 
 /// Loads one YAML config file, including any nested includes, and validates it.
 pub fn load_config(path: &Path) -> Result<Config> {
-    let mut stack = Vec::new();
-    let mut sources = Vec::new();
-    let value = load_value(path, &mut stack, &mut sources)?;
-    load_config_value(value, path.display())
+    load_config_with_sources(path).map(|(config, _sources)| config)
 }
 
 /// Loads one YAML config file and returns every source file that contributed.
@@ -65,19 +62,7 @@ pub fn load_config_with_sources(path: &Path) -> Result<(Config, Vec<PathBuf>)> {
 
 /// Loads and deep-merges multiple config files in the supplied order.
 pub fn load_configs(paths: &[PathBuf]) -> Result<Config> {
-    if paths.is_empty() {
-        return Err(ConfigLoadError::NoConfigFiles);
-    }
-
-    let mut sources = Vec::new();
-    let mut merged = Value::Mapping(Mapping::new());
-    for path in paths {
-        let mut stack = Vec::new();
-        let value = load_value(path, &mut stack, &mut sources)?;
-        merged = merge_values(merged, value);
-    }
-
-    load_config_value(merged, format!("merged config from {}", path_list(paths)))
+    load_configs_with_sources(paths).map(|(config, _sources)| config)
 }
 
 /// Loads multiple config files and returns the merged config plus source list.

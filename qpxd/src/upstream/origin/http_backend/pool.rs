@@ -12,7 +12,7 @@ use tracing::warn;
 
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_core::tls::UpstreamCertificateInfo;
-use qpx_http::tls::client::{BoxTlsStream, connect_tls_h2_h1_with_info_with_options};
+use qpx_http::tls::builder::{BoxTlsStream, connect_client_h2_h1};
 
 pub(super) type SharedOriginH2Sender = h2::client::SendRequest<Bytes>;
 const DIRECT_ORIGIN_POOL_SHARDS: usize = 32;
@@ -43,7 +43,7 @@ pub(super) struct PlainHttpOriginSlot {
 }
 
 pub(super) struct TlsHttp1OriginConnection {
-    pub(super) stream: qpx_http::tls::client::BoxTlsStream,
+    pub(super) stream: qpx_http::tls::builder::BoxTlsStream,
     pub(super) upstream_cert: UpstreamCertificateInfo,
 }
 
@@ -437,7 +437,7 @@ pub(super) async fn open_https_origin_stream(
 ) -> Result<(BoxTlsStream, bool, UpstreamCertificateInfo)> {
     let tcp = TcpStream::connect(connect_authority).await?;
     let _ = tcp.set_nodelay(true);
-    connect_tls_h2_h1_with_info_with_options(server_name, tcp, verify_upstream_cert, trust).await
+    connect_client_h2_h1(server_name, tcp, verify_upstream_cert, trust).await
 }
 
 pub(super) async fn acquire_https_connection(

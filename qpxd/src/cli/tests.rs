@@ -87,6 +87,8 @@ fn explain_renderer_uses_compiled_runtime_plan_flags() {
     let state = runtime_state_from_template(InitTemplate::ReverseBasic);
     let output = render_explain_plan(state.plan.as_ref(), Some("public-http"), Some("app"));
 
+    assert!(output.contains("build_capabilities"));
+    assert!(output.contains("  tls_rustls:"));
     assert!(output.contains("edge public-http"));
     assert!(output.contains("  kind: reverse"));
     assert!(output.contains("  route app match_criteria"));
@@ -167,6 +169,18 @@ edges:
     let value: serde_json::Value = serde_json::from_str(&output).expect("valid json");
 
     assert!(value.get("schema_version").is_none());
+    assert!(
+        value
+            .pointer("/build_capabilities/mitm")
+            .and_then(|v| v.as_bool())
+            .is_some()
+    );
+    assert!(
+        value
+            .pointer("/build_capabilities/http3_backend_qpx")
+            .and_then(|v| v.as_bool())
+            .is_some()
+    );
     assert_eq!(
         value.pointer("/edges/0/edge").and_then(|v| v.as_str()),
         Some("public-http")

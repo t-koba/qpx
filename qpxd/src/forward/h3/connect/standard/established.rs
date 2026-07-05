@@ -18,7 +18,7 @@ use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::CompiledHeaderControl;
 #[cfg(feature = "mitm")]
 use qpx_core::tls::CompiledUpstreamTlsTrust;
-use qpx_http::tls::client::preview_tls_certificate_with_options;
+use qpx_http::tls::builder::preview_client_certificate;
 use qpx_observability::access_log::RequestLogContext;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -116,7 +116,7 @@ pub(super) async fn finish_h3_connect(input: EstablishedH3Connect) -> Result<()>
         let preview_server = server
             .take()
             .ok_or_else(|| anyhow!("HTTP/3 CONNECT upstream tunnel missing before cert preview"))?;
-        match preview_tls_certificate_with_options(
+        match preview_client_certificate(
             host.as_str(),
             preview_server,
             preview_verify,

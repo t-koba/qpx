@@ -1,0 +1,1 @@
+Digest username="alice", realm="qpx", nonce="n", uri="/", algorithm=SHA-256, qop=auth, nc=00000001, cnonce="c", opaque="o", response="00"

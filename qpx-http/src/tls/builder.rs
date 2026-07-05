@@ -382,3 +382,95 @@ mod imp {
         ))
     }
 }
+
+#[cfg(all(test, feature = "tls-rustls"))]
+mod tests {
+    use super::*;
+    use qpx_core::config::UpstreamTlsTrustConfig;
+    use qpx_core::tls::extract_upstream_certificate_info;
+    use rcgen::generate_simple_self_signed;
+    use rustls::crypto::CryptoProvider;
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::sync::Arc;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::Duration;
+    use tokio_rustls::TlsAcceptor;
+
+    fn ensure_rustls_provider() {
+        if CryptoProvider::get_default().is_none() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        }
+    }
+
+    async fn spawn_tls_server(host: &str) -> (std::net::SocketAddr, String) {
+        ensure_rustls_provider();
+        let certified =
+            generate_simple_self_signed(vec![host.to_string()]).expect("self-signed cert");
+        let cert_der = certified.cert.der().clone();
+        let fingerprint = extract_upstream_certificate_info(Some(cert_der.as_ref()))
+            .fingerprint_sha256
+            .expect("fingerprint");
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certified.signing_key.serialize_der(),
+        ));
+        let mut config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key)
+            .expect("server config");
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let _tls = acceptor.accept(stream).await.expect("tls accept");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        });
+        (addr, fingerprint)
+    }
+
+    #[tokio::test]
+    async fn connect_client_http1_accepts_matching_pin() {
+        ensure_rustls_provider();
+        let (addr, fingerprint) = spawn_tls_server("example.com").await;
+        let trust = CompiledUpstreamTlsTrust::from_config(Some(&UpstreamTlsTrustConfig {
+            pin_sha256: vec![fingerprint],
+            issuer: Vec::new(),
+            san_dns: Vec::new(),
+            san_uri: Vec::new(),
+            client_cert: None,
+            client_key: None,
+        }))
+        .expect("compile trust")
+        .expect("trust present");
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        connect_client_http1("example.com", stream, false, Some(trust.as_ref()))
+            .await
+            .expect("TLS connect should succeed");
+    }
+
+    #[tokio::test]
+    async fn connect_client_http1_rejects_pin_mismatch() {
+        ensure_rustls_provider();
+        let (addr, _) = spawn_tls_server("example.com").await;
+        let trust = CompiledUpstreamTlsTrust::from_config(Some(&UpstreamTlsTrustConfig {
+            pin_sha256: vec![
+                "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            ],
+            issuer: Vec::new(),
+            san_dns: Vec::new(),
+            san_uri: Vec::new(),
+            client_cert: None,
+            client_key: None,
+        }))
+        .expect("compile trust")
+        .expect("trust present");
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        let err =
+            match connect_client_http1("example.com", stream, false, Some(trust.as_ref())).await {
+                Ok(_) => panic!("pin mismatch should fail"),
+                Err(err) => err,
+            };
+        assert!(err.to_string().contains("pin mismatch"));
+    }
+}

@@ -6,7 +6,7 @@ use super::{
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::policy_context::{
     AuditRecord, DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
-    emit_audit_log, enforce_decision_service, prepare_decision_service_allow_controls,
+    emit_audit_log, enforce_decision_service, prepare_decision_service_allow,
 };
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
@@ -182,11 +182,8 @@ pub(super) async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Res
     let mut action = outcome.action.clone();
     let timeout_override = match decision_service {
         DecisionServiceEnforcement::Continue(allow) => {
-            let allow = prepare_decision_service_allow_controls(
-                allow,
-                DecisionServiceMode::TransparentUdp,
-                None,
-            )?;
+            let allow =
+                prepare_decision_service_allow(allow, DecisionServiceMode::TransparentUdp, None)?;
             if request_limits
                 .merge_profile_and_check(
                     &state.policy.rate_limiters,

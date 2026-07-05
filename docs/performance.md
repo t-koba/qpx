@@ -28,6 +28,25 @@ Runner-local values are regression signals only. Compare them against the same
 runner class and the same benchmark lane; do not use CI artifacts as absolute
 throughput claims.
 
+Nightly proxy comparison writes `target/perf/nightly-proxy-compare.jsonl` with
+`direct-backend`, `qpxd`, and external proxy rows. The CI gate compares the
+ratio `qpxd requests_per_sec / direct-backend requests_per_sec` against
+`perf/baseline-proxy-compare.json` and fails when the ratio drops by more than
+10%. The ratio is used instead of absolute throughput so runner-level noise does
+not turn into a false release blocker.
+
+To update the proxy baseline, download the latest `qpx-nightly-perf-jsonl`
+artifact from the scheduled `nightly_perf_bench` job and regenerate the baseline
+with the same checker:
+
+```bash
+scripts/compare-proxy-baseline.sh --generate-baseline target/perf/nightly-proxy-compare.jsonl perf/baseline-proxy-compare.json
+scripts/compare-proxy-baseline.sh target/perf/nightly-proxy-compare.jsonl perf/baseline-proxy-compare.json
+```
+
+Commit the regenerated JSON together with the performance reason. Do not edit
+the numeric baseline by hand.
+
 Tracked lanes:
 
 - `reverse_http1_plain_small`

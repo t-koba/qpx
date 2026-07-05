@@ -307,14 +307,12 @@ fn decision_service_action_overrides_apply_force_modes() {
         upstream: Some("baseline".to_string()),
         local_response: None,
     };
-    apply_decision_service_action_overrides(
-        &mut action,
-        &DecisionServiceAllow {
-            override_upstream: Some("http://override.internal:8080".to_string()),
-            force_inspect: true,
-            ..Default::default()
-        },
-    );
+    DecisionServiceAllow {
+        override_upstream: Some("http://override.internal:8080".to_string()),
+        force_inspect: true,
+        ..Default::default()
+    }
+    .apply_action_overrides(&mut action);
     assert!(matches!(action.kind, ActionKind::Inspect));
     assert_eq!(
         action.upstream.as_deref(),
@@ -326,13 +324,11 @@ fn decision_service_action_overrides_apply_force_modes() {
         upstream: None,
         local_response: None,
     };
-    apply_decision_service_action_overrides(
-        &mut action,
-        &DecisionServiceAllow {
-            force_tunnel: true,
-            ..Default::default()
-        },
-    );
+    DecisionServiceAllow {
+        force_tunnel: true,
+        ..Default::default()
+    }
+    .apply_action_overrides(&mut action);
     assert!(matches!(action.kind, ActionKind::Tunnel));
 }
 

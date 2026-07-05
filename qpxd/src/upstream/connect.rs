@@ -5,13 +5,13 @@ use hyper::header::{HOST, HeaderMap, HeaderName, HeaderValue};
 use hyper::{StatusCode, Version};
 use qpx_http::protocol::address::format_authority_host_port;
 use qpx_http::protocol::semantics::append_via_for_version;
-use qpx_http::tls::client::connect_tls_http1_with_options;
+use qpx_http::tls::builder::connect_client_http1;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 
-pub type TunnelIo = qpx_http::tls::client::BoxTlsStream;
+pub type TunnelIo = qpx_http::tls::builder::BoxTlsStream;
 
 pub struct ConnectedTunnel {
     pub io: TunnelIo,
@@ -78,11 +78,11 @@ pub(crate) async fn connect_via_upstream(
         UpstreamProxyScheme::Http => Box::new(tcp),
         UpstreamProxyScheme::Https => match timeout(
             CONNECT_IO_TIMEOUT,
-            connect_tls_http1_with_options(endpoint.host.as_str(), tcp, true, upstream.trust()),
+            connect_client_http1(endpoint.host.as_str(), tcp, true, upstream.trust()),
         )
         .await
         {
-            Ok(Ok(tls)) => tls,
+            Ok(Ok((tls, _cert))) => tls,
             Ok(Err(err)) => {
                 upstream.mark_connect_error();
                 return Err(err);

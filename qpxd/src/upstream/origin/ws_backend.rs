@@ -12,7 +12,7 @@ use crate::upstream::http1::{
     WebsocketProxyConfig, normalize_websocket_switching_protocols_response, proxy_websocket_http1,
 };
 use qpx_core::tls::CompiledUpstreamTlsTrust;
-use qpx_http::tls::client::connect_tls_http1_with_options;
+use qpx_http::tls::builder::connect_client_http1;
 
 use super::OriginEndpoint;
 use super::dispatch::{OriginScheme, origin_scheme};
@@ -107,9 +107,10 @@ async fn proxy_wss(
     let _ = tcp.set_nodelay(true);
     let tls = timeout(
         timeout_dur,
-        connect_tls_http1_with_options(server_name, tcp, true, trust),
+        connect_client_http1(server_name, tcp, true, trust),
     )
-    .await??;
+    .await??
+    .0;
     let (mut sender, conn) = timeout(
         timeout_dur,
         qpx_http::protocol::common::handshake_http1(tls),

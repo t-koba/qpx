@@ -30,7 +30,7 @@ use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_http::body::Body;
-use qpx_http::tls::client::preview_tls_certificate_with_options;
+use qpx_http::tls::builder::preview_client_certificate;
 #[cfg(feature = "mitm")]
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 #[cfg(feature = "mitm")]
@@ -265,7 +265,7 @@ async fn prepare_connect_upstream_after_preview(
         let preview_server = server
             .take()
             .ok_or_else(|| anyhow!("CONNECT upstream tunnel missing before cert preview"))?;
-        match preview_tls_certificate_with_options(
+        match preview_client_certificate(
             ctx.host.as_str(),
             preview_server.io,
             preview_verify,

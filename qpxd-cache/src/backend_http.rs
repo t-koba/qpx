@@ -9,7 +9,7 @@ use hyper::{Method, Request, StatusCode, Uri};
 use qpx_core::config::CacheBackendConfig;
 use qpx_http::body::Body;
 use qpx_http::protocol::common::Http1SendRequest;
-use qpx_http::tls::client::connect_tls_http1;
+use qpx_http::tls::builder::connect_client_http1;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -94,7 +94,8 @@ impl HttpCacheBackend {
                 Ok(sender)
             }
             "https" => {
-                let tls = timeout(self.timeout, connect_tls_http1(host, tcp)).await??;
+                let (tls, _cert) =
+                    timeout(self.timeout, connect_client_http1(host, tcp, true, None)).await??;
                 let (sender, conn) = timeout(
                     self.timeout,
                     qpx_http::protocol::common::handshake_http1(tls),

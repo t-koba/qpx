@@ -15,7 +15,7 @@ use crate::http::protocol::common::{
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
     DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
-    enforce_decision_service, prepare_decision_service_allow_controls, resolve_identity,
+    enforce_decision_service, prepare_decision_service_allow, resolve_identity,
     sanitize_headers_for_policy,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
@@ -242,11 +242,8 @@ pub(super) async fn handle_connect(
     };
     let (response_headers, timeout_override) = match decision_service {
         DecisionServiceEnforcement::Continue(allow) => {
-            let allow = prepare_decision_service_allow_controls(
-                allow,
-                DecisionServiceMode::ForwardConnect,
-                None,
-            )?;
+            let allow =
+                prepare_decision_service_allow(allow, DecisionServiceMode::ForwardConnect, None)?;
             if let Some(retry_after) = request_limits.merge_profile_and_check(
                 &state.policy.rate_limiters,
                 allow.rate_limit_profile.as_deref(),

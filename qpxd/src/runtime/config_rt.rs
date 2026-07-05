@@ -32,6 +32,7 @@ impl RuntimeResources {
         mut config: Config,
         http_module_registry: Arc<HttpModuleRegistry>,
     ) -> Result<Self> {
+        super::validate_build_capabilities(&config, &super::BuildCapabilities::current())?;
         expand_upstream_trust_profiles_in_config(&mut config)?;
         expand_named_sets_in_config(&mut config)?;
         let operational = Arc::new(config);

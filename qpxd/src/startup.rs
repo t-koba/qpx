@@ -105,6 +105,14 @@ pub(crate) fn explain_config(
         config,
         http_module_registry,
     )?;
+    if crate::cli_render::explain_plan_match_count(
+        &plan,
+        edge_filter.as_deref(),
+        route_filter.as_deref(),
+    ) == 0
+    {
+        anyhow::bail!("no explain target matched the requested edge/route filter");
+    }
     match format {
         ExplainFormat::Text => {
             let rendered = crate::cli_render::render_explain_plan(
@@ -112,9 +120,6 @@ pub(crate) fn explain_config(
                 edge_filter.as_deref(),
                 route_filter.as_deref(),
             );
-            if rendered.trim().is_empty() {
-                anyhow::bail!("no explain target matched the requested edge/route filter");
-            }
             print!("{rendered}");
         }
         ExplainFormat::Json => {
@@ -123,9 +128,6 @@ pub(crate) fn explain_config(
                 edge_filter.as_deref(),
                 route_filter.as_deref(),
             )?;
-            if rendered == "{\n  \"edges\": []\n}" {
-                anyhow::bail!("no explain target matched the requested edge/route filter");
-            }
             println!("{rendered}");
         }
     }

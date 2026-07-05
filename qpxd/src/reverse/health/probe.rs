@@ -4,7 +4,7 @@ use hyper::header::HOST;
 use hyper::{Request, StatusCode, Uri};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
-use qpx_http::tls::client::connect_tls_http1_with_options;
+use qpx_http::tls::builder::connect_client_http1;
 use tokio::net::TcpStream;
 use url::Url;
 
@@ -99,7 +99,7 @@ async fn probe_http_tls(
     let addr = origin.connect_authority(443)?;
     let server_name = origin.tls_server_name()?;
     let tcp = TcpStream::connect(addr).await?;
-    let tls = connect_tls_http1_with_options(server_name.as_str(), tcp, true, trust).await?;
+    let (tls, _cert) = connect_client_http1(server_name.as_str(), tcp, true, trust).await?;
     let (mut sender, conn) = qpx_http::protocol::common::handshake_http1(tls).await?;
     tokio::spawn(async move {
         let _ = conn.await;

@@ -24,7 +24,8 @@ pub use lookup_ops::{
 pub use store::{CacheStoreTiming, maybe_store, revalidate_not_modified};
 pub use types::{CacheBackend, CacheRequestKey, LookupOutcome, RevalidationState};
 pub use types::{
-    CachedBody, InFlightLookups, InFlightRevalidations, RequestCollapseGuard, RequestCollapseJoin,
+    CachedBody, CachedBodyStream, InFlightLookups, InFlightRevalidations, RequestCollapseGuard,
+    RequestCollapseJoin,
 };
 
 #[cfg(test)]

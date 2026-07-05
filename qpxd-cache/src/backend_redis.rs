@@ -6,7 +6,7 @@ use bytes::{Bytes, BytesMut};
 use qpx_core::config::CacheBackendConfig;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::format_authority_host_port;
-use qpx_http::tls::client::connect_tls_http1;
+use qpx_http::tls::builder::connect_client_http1;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,7 +20,7 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio::time::{Duration, timeout};
 use url::Url;
 
-type DynStream = qpx_http::tls::client::BoxTlsStream;
+type DynStream = qpx_http::tls::builder::BoxTlsStream;
 const REDIS_CACHE_MAX_IDLE_CONNECTIONS: usize = 8;
 const REDIS_CACHE_MAX_ACTIVE_OPERATIONS: usize = 32;
 const REDIS_APPEND_PIPELINE_WINDOW: usize = 16;
@@ -89,7 +89,9 @@ impl RedisCacheBackend {
             RedisTransport::Tcp { addr } => {
                 let tcp = timeout(self.timeout, TcpStream::connect(addr)).await??;
                 if let Some(domain) = self.tls_domain.as_deref() {
-                    timeout(self.timeout, connect_tls_http1(domain, tcp)).await??
+                    timeout(self.timeout, connect_client_http1(domain, tcp, true, None))
+                        .await??
+                        .0
                 } else {
                     Box::new(tcp)
                 }

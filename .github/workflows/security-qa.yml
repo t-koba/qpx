@@ -49,10 +49,13 @@ jobs:
         run: |
           set -euo pipefail
           for target in \
+            auth_credential_parser \
+            cache_key \
             client_hello_sniff \
             config_canonical_loader \
             connect_frame_observer \
             datagram_capsule_parser \
+            dispatch_policy_match \
             ftp_response_parser \
             grpc_frame_observer \
             grpc_web_binary_frame_observer \

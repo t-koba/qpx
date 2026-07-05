@@ -18,6 +18,16 @@
 !/fuzz/corpus/datagram_capsule_parser/
 /fuzz/corpus/datagram_capsule_parser/*
 !/fuzz/corpus/datagram_capsule_parser/split_capsule_header
+!/fuzz/corpus/auth_credential_parser/
+/fuzz/corpus/auth_credential_parser/*
+!/fuzz/corpus/auth_credential_parser/basic
+!/fuzz/corpus/auth_credential_parser/digest
+!/fuzz/corpus/cache_key/
+/fuzz/corpus/cache_key/*
+!/fuzz/corpus/cache_key/default
+!/fuzz/corpus/dispatch_policy_match/
+/fuzz/corpus/dispatch_policy_match/*
+!/fuzz/corpus/dispatch_policy_match/default
 
 # Editor / OS files
 .DS_Store

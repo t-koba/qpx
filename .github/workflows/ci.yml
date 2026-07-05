@@ -211,6 +211,8 @@ jobs:
         run: |
           cargo build -p qpxd --release --locked
           scripts/nightly-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
+      - name: compare proxy baseline
+        run: scripts/compare-proxy-baseline.sh target/perf/nightly-proxy-compare.jsonl perf/baseline-proxy-compare.json
       - name: upload nightly perf artifact
         uses: actions/upload-artifact@v4
         if: always()

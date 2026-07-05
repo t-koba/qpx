@@ -18,6 +18,13 @@ pub struct CachedBodyStream {
     pub(crate) body: Body,
 }
 
+impl CachedBodyStream {
+    #[doc(hidden)]
+    pub fn from_body_for_backend(len: u64, body: Body) -> Self {
+        Self { len, body }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CachedBody {
     Memory(Bytes),

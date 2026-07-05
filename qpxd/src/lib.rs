@@ -138,6 +138,110 @@ pub mod fuzz_support {
         qpx_core::ipc::protocol::fuzz_decode_ipc_meta_frame(bytes);
     }
 
+    pub fn match_dispatch_policy(bytes: &[u8]) {
+        let input = String::from_utf8_lossy(bytes);
+        let mut lines = input.lines();
+        let method = lines.next().unwrap_or("GET").trim();
+        let host = lines.next().unwrap_or("example.test").trim();
+        let path = lines.next().unwrap_or("/").trim();
+        let mut headers = http::HeaderMap::new();
+        for line in lines.take(16) {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let Ok(name) = http::header::HeaderName::from_bytes(name.trim().as_bytes()) else {
+                continue;
+            };
+            let Ok(value) = http::HeaderValue::from_str(value.trim()) else {
+                continue;
+            };
+            headers.append(name, value);
+        }
+        let Some(engine) = dispatch_policy_engine() else {
+            return;
+        };
+        let ctx = qpx_core::rules::RuleMatchContext {
+            method: (!method.is_empty()).then_some(method),
+            host: (!host.is_empty()).then_some(host),
+            path: (!path.is_empty()).then_some(path),
+            headers: Some(&headers),
+            ..Default::default()
+        };
+        let _ = engine.matcher_candidate_indices(&ctx);
+        let _ = engine.evaluate_ref(&ctx);
+    }
+
+    pub fn derive_cache_key(bytes: &[u8]) {
+        let input = String::from_utf8_lossy(bytes);
+        let mut lines = input.lines();
+        let path = lines.next().unwrap_or("/");
+        let host = lines.next().unwrap_or("cache.example");
+        let method = lines.next().unwrap_or("GET");
+        let Ok(request) = http::Request::builder()
+            .method(method)
+            .uri(if path.starts_with('/') { path } else { "/" })
+            .header(http::header::HOST, host)
+            .body(qpx_http::body::Body::empty())
+        else {
+            return;
+        };
+        if let Ok(Some(key)) = qpxd_cache::CacheRequestKey::for_lookup(&request, "http") {
+            let _ = key.primary_hash();
+            let _ = key.absolute_url();
+            let _ = key.with_method_group("GET").primary_hash();
+        }
+    }
+
+    fn dispatch_policy_engine() -> Option<&'static qpx_core::rules::RuleEngine> {
+        static ENGINE: std::sync::OnceLock<Option<qpx_core::rules::RuleEngine>> =
+            std::sync::OnceLock::new();
+        ENGINE
+            .get_or_init(|| {
+                qpx_core::rules::RuleEngine::new(
+                    vec![
+                        qpx_core::config::RuleConfig {
+                            name: "host-get".to_string(),
+                            r#match: Some(qpx_core::config::MatchConfig {
+                                host: vec!["example.test".to_string()],
+                                method: vec!["GET".to_string()],
+                                ..Default::default()
+                            }),
+                            auth: None,
+                            action: Some(qpx_core::config::ActionConfig {
+                                kind: qpx_core::config::ActionKind::Direct,
+                                upstream: None,
+                                local_response: None,
+                            }),
+                            headers: None,
+                            rate_limit: None,
+                        },
+                        qpx_core::config::RuleConfig {
+                            name: "path-block".to_string(),
+                            r#match: Some(qpx_core::config::MatchConfig {
+                                path: vec!["/admin".to_string()],
+                                ..Default::default()
+                            }),
+                            auth: None,
+                            action: Some(qpx_core::config::ActionConfig {
+                                kind: qpx_core::config::ActionKind::Block,
+                                upstream: None,
+                                local_response: None,
+                            }),
+                            headers: None,
+                            rate_limit: None,
+                        },
+                    ],
+                    qpx_core::config::ActionConfig {
+                        kind: qpx_core::config::ActionKind::Proxy,
+                        upstream: Some("http://127.0.0.1:8080".to_string()),
+                        local_response: None,
+                    },
+                )
+                .ok()
+            })
+            .as_ref()
+    }
+
     #[cfg(feature = "http3")]
     pub fn observe_sse_events(bytes: &[u8]) {
         let mut observer = crate::http::protocol::sse::SseEventObserver::new();

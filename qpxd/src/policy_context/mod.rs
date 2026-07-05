@@ -8,9 +8,9 @@ mod util;
 
 pub(crate) use audit::{AuditRecord, emit_audit_log};
 pub(crate) use decision_service::{
-    CompiledDecisionService, DecisionServiceAllowControls, DecisionServiceDeny,
-    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
-    enforce_decision_service, merge_header_controls, prepare_decision_service_allow_controls,
+    CompiledDecisionService, DecisionServiceAllow, DecisionServiceDeny, DecisionServiceEnforcement,
+    DecisionServiceInput, DecisionServiceMode, enforce_decision_service, merge_header_controls,
+    prepare_decision_service_allow,
 };
 pub(crate) use identity::{
     CompiledIdentitySource, EffectivePolicyContext, ResolvedIdentity, resolve_identity,

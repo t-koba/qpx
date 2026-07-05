@@ -11,7 +11,7 @@ use h2::{Reason as H2Reason, RecvStream as H2RecvStream, client as h2_client};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
-use qpx_http::tls::client::{BoxTlsStream, connect_tls_h2_h1_with_options};
+use qpx_http::tls::builder::{BoxTlsStream, connect_client_h2_h1};
 use std::{future::poll_fn, pin::Pin, task::Poll};
 use tokio::net::{TcpStream, lookup_host};
 use tokio::time::{Duration, timeout};
@@ -109,11 +109,11 @@ pub(super) async fn open_upstream_h2_extended_connect_stream(
     let io: BoxTlsStream = if use_tls {
         let (tls, negotiated_h2) = match timeout(
             timeout_dur,
-            connect_tls_h2_h1_with_options(connect_host.as_str(), tcp, true, trust),
+            connect_client_h2_h1(connect_host.as_str(), tcp, true, trust),
         )
         .await
         {
-            Ok(Ok(tls)) => tls,
+            Ok(Ok((tls, negotiated_h2, _cert))) => (tls, negotiated_h2),
             Ok(Err(err)) => return Err(err),
             Err(_) => return Err(anyhow!("extended CONNECT upstream TLS handshake timed out")),
         };

@@ -1,24 +1,19 @@
 use crate::http::dispatch::ProxyKind;
 use crate::runtime::RuntimeState;
 use anyhow::{Context, Result, anyhow};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use http::header::HeaderName;
 use http_body_util::BodyExt;
 use hyper::{HeaderMap, Request};
 use jsonschema::Validator;
-use lru::LruCache;
 use qpx_core::config::{
     ActionConfig, ActionKind, DecisionServiceAuthorityConfig, DecisionServiceConfig,
     DecisionServiceConstraintsConfig, DecisionServiceDriver, DecisionServiceMappingRuleConfig,
-    DecisionServiceMappingTargetDocument, DecisionServiceSignatureAlgorithm, HeaderControl,
-    LocalResponseConfig, UpstreamTlsTrustConfig,
+    DecisionServiceMappingTargetDocument, HeaderControl, LocalResponseConfig,
+    UpstreamTlsTrustConfig,
 };
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
-use ring::hmac;
-use ring::signature::Ed25519KeyPair;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use serde_json_path::JsonPath;
@@ -26,18 +21,21 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::IpAddr;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use tokio::time::{Duration, Instant, timeout};
+use std::sync::Arc;
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 use url::Url;
 
 use super::identity::{EffectivePolicyContext, ResolvedIdentity};
 use super::util::{normalize_string_list, selected_headers_map};
 
+mod cache;
+mod signature;
 mod validation;
 
+use self::cache::{DecisionServiceCache, compile_cache, decision_cache_key};
+use self::signature::{CompiledSignature, apply_http_message_signature, compile_signature};
 pub(crate) use self::validation::validate_decision_service_allow_mode;
 use self::validation::{
     validate_decision_service_local_response, validate_decision_service_upstream_value,
@@ -85,18 +83,7 @@ pub(crate) struct DecisionServiceAllow {
     pub(crate) policy_tags: Vec<String>,
 }
 
-pub(crate) struct DecisionServiceAllowControls {
-    pub(crate) headers: Option<Arc<CompiledHeaderControl>>,
-    pub(crate) override_upstream: Option<String>,
-    pub(crate) timeout_override: Option<Duration>,
-    pub(crate) cache_bypass: bool,
-    pub(crate) mirror_upstreams: Vec<String>,
-    pub(crate) rate_limit_profile: Option<String>,
-    force_inspect: bool,
-    force_tunnel: bool,
-}
-
-impl DecisionServiceAllowControls {
+impl DecisionServiceAllow {
     pub(crate) fn apply_action_overrides(&self, action: &mut ActionConfig) {
         apply_override_upstream(action, self.override_upstream.clone());
         if self.force_inspect {
@@ -432,57 +419,6 @@ fn build_remote_decision_request(
     Ok(request)
 }
 
-#[derive(Debug)]
-struct DecisionServiceCache {
-    entries: Mutex<LruCache<String, CachedDecision>>,
-    ttl: Duration,
-}
-
-#[derive(Debug, Clone)]
-struct CachedDecision {
-    expires_at: Instant,
-    enforcement: DecisionServiceEnforcement,
-}
-
-impl DecisionServiceCache {
-    fn new(max_entries: usize, ttl: Duration) -> Self {
-        let max_entries = match NonZeroUsize::new(max_entries) {
-            Some(max_entries) => max_entries,
-            None => NonZeroUsize::MIN,
-        };
-        Self {
-            entries: Mutex::new(LruCache::new(max_entries)),
-            ttl,
-        }
-    }
-
-    fn get(&self, key: &str) -> Option<DecisionServiceEnforcement> {
-        let mut entries = self.entries.lock().ok()?;
-        let now = Instant::now();
-        match entries.get(key) {
-            Some(entry) if entry.expires_at > now => Some(entry.enforcement.clone()),
-            Some(_) => {
-                entries.pop(key);
-                None
-            }
-            None => None,
-        }
-    }
-
-    fn insert(&self, key: String, enforcement: DecisionServiceEnforcement) {
-        let Ok(mut entries) = self.entries.lock() else {
-            return;
-        };
-        entries.put(
-            key,
-            CachedDecision {
-                expires_at: Instant::now() + self.ttl,
-                enforcement,
-            },
-        );
-    }
-}
-
 impl CompiledDecisionService {
     fn validate_mode(&self, mode: DecisionServiceMode) -> Result<()> {
         if self.allowed_modes.is_empty() || self.allowed_modes.contains(mode.as_str()) {
@@ -508,28 +444,6 @@ impl CompiledDecisionService {
             effect
         ))
     }
-}
-
-fn compile_cache(config: &DecisionServiceConfig) -> Result<Option<Arc<DecisionServiceCache>>> {
-    if !config.cache.enabled {
-        return Ok(None);
-    }
-    Ok(Some(Arc::new(DecisionServiceCache::new(
-        config.cache.max_entries.unwrap_or(1024),
-        Duration::from_millis(config.cache.ttl_ms.unwrap_or(1_000)),
-    ))))
-}
-
-fn decision_cache_key(cfg: &CompiledDecisionService, body: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(cfg.profile_id.as_bytes());
-    hasher.update([0]);
-    if let Some(contract_id) = cfg.contract_id.as_deref() {
-        hasher.update(contract_id.as_bytes());
-    }
-    hasher.update([0]);
-    hasher.update(body);
-    sha256_output_to_digest(hasher.finalize())
 }
 
 fn map_remote_decision_response(
@@ -1608,7 +1522,7 @@ fn sha256_digest(bytes: &[u8]) -> String {
     sha256_output_to_digest(Sha256::digest(bytes))
 }
 
-fn sha256_output_to_digest(digest: impl AsRef<[u8]>) -> String {
+pub(super) fn sha256_output_to_digest(digest: impl AsRef<[u8]>) -> String {
     let mut out = String::with_capacity("sha256:".len() + 64);
     out.push_str("sha256:");
     for byte in digest.as_ref() {
@@ -1693,97 +1607,6 @@ fn compile_mtls(
     })
 }
 
-#[derive(Debug, Clone)]
-enum CompiledSignature {
-    HmacSha256 { key_id: String, secret: Vec<u8> },
-    Ed25519 { key_id: String, pkcs8: Vec<u8> },
-}
-
-fn compile_signature(config: &DecisionServiceConfig) -> Result<Option<CompiledSignature>> {
-    let Some(signature) = config.auth.http_message_signatures.as_ref() else {
-        return Ok(None);
-    };
-    match signature.algorithm {
-        DecisionServiceSignatureAlgorithm::HmacSha256 => {
-            let env = signature.secret_env.as_deref().ok_or_else(|| {
-                anyhow!(
-                    "decision_service {} hmac_sha256 signature requires secret_env",
-                    config.name
-                )
-            })?;
-            Ok(Some(CompiledSignature::HmacSha256 {
-                key_id: signature.key_id.clone(),
-                secret: std::env::var(env)
-                    .with_context(|| format!("failed to read signature secret env {env}"))?
-                    .into_bytes(),
-            }))
-        }
-        DecisionServiceSignatureAlgorithm::Ed25519 => {
-            let env = signature.private_key_env.as_deref().ok_or_else(|| {
-                anyhow!(
-                    "decision_service {} ed25519 signature requires private_key_env",
-                    config.name
-                )
-            })?;
-            Ok(Some(CompiledSignature::Ed25519 {
-                key_id: signature.key_id.clone(),
-                pkcs8: BASE64
-                    .decode(std::env::var(env).with_context(|| {
-                        format!("failed to read signature private key env {env}")
-                    })?)
-                    .with_context(|| {
-                        format!(
-                            "decision_service {} ed25519 key must be base64 PKCS#8",
-                            config.name
-                        )
-                    })?,
-            }))
-        }
-    }
-}
-
-fn apply_http_message_signature(
-    mut builder: http::request::Builder,
-    cfg: &CompiledDecisionService,
-    body: &[u8],
-) -> Result<http::request::Builder> {
-    let Some(signature) = cfg.signature.as_ref() else {
-        return Ok(builder);
-    };
-    let digest = format!("sha-256=:{}:", BASE64.encode(Sha256::digest(body)));
-    builder = builder.header("content-digest", digest.as_str());
-    let mut path = cfg.endpoint.path().to_string();
-    if let Some(query) = cfg.endpoint.query() {
-        path.push('?');
-        path.push_str(query);
-    }
-    let signature_input =
-        r#"sig1=("@method" "@path" "content-digest" "content-type");alg="qpx-v1";keyid=""#;
-    let key_id = match signature {
-        CompiledSignature::HmacSha256 { key_id, .. }
-        | CompiledSignature::Ed25519 { key_id, .. } => key_id,
-    };
-    let signature_input = format!("{signature_input}{key_id}\"");
-    let base = format!(
-        "\"@method\": POST\n\"@path\": {path}\n\"content-digest\": {digest}\n\"content-type\": application/json\n\"@signature-params\": {signature_input}"
-    );
-    let signature_bytes = match signature {
-        CompiledSignature::HmacSha256 { secret, .. } => {
-            let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
-            hmac::sign(&key, base.as_bytes()).as_ref().to_vec()
-        }
-        CompiledSignature::Ed25519 { pkcs8, .. } => {
-            let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8)
-                .map_err(|_| anyhow!("failed to parse ed25519 PKCS#8 signing key"))?;
-            key_pair.sign(base.as_bytes()).as_ref().to_vec()
-        }
-    };
-    Ok(builder.header("signature-input", signature_input).header(
-        "signature",
-        format!("sig1=:{}:", BASE64.encode(signature_bytes)),
-    ))
-}
-
 fn is_empty_json_value(value: &Value) -> bool {
     value.is_null() || value.as_object().is_some_and(Map::is_empty)
 }
@@ -1800,22 +1623,14 @@ pub(crate) fn merge_header_controls(
     }
 }
 
-pub(crate) fn prepare_decision_service_allow_controls(
-    allow: DecisionServiceAllow,
+pub(crate) fn prepare_decision_service_allow(
+    mut allow: DecisionServiceAllow,
     mode: DecisionServiceMode,
     base_headers: Option<Arc<CompiledHeaderControl>>,
-) -> Result<DecisionServiceAllowControls> {
+) -> Result<DecisionServiceAllow> {
     validate_decision_service_allow_mode(&allow, mode)?;
-    Ok(DecisionServiceAllowControls {
-        headers: merge_header_controls(base_headers, allow.headers),
-        override_upstream: allow.override_upstream,
-        timeout_override: allow.timeout_override,
-        cache_bypass: allow.cache_bypass,
-        mirror_upstreams: allow.mirror_upstreams,
-        rate_limit_profile: allow.rate_limit_profile,
-        force_inspect: allow.force_inspect,
-        force_tunnel: allow.force_tunnel,
-    })
+    allow.headers = merge_header_controls(base_headers, allow.headers);
+    Ok(allow)
 }
 
 pub(crate) fn apply_override_upstream(
@@ -1829,19 +1644,6 @@ pub(crate) fn apply_override_upstream(
         action.kind = ActionKind::Proxy;
     }
     action.upstream = Some(override_upstream);
-}
-
-#[cfg(test)]
-pub(crate) fn apply_decision_service_action_overrides(
-    action: &mut ActionConfig,
-    allow: &DecisionServiceAllow,
-) {
-    apply_override_upstream(action, allow.override_upstream.clone());
-    if allow.force_inspect {
-        action.kind = ActionKind::Inspect;
-    } else if allow.force_tunnel {
-        action.kind = ActionKind::Tunnel;
-    }
 }
 
 #[cfg(test)]

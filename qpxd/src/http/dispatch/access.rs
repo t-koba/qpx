@@ -6,8 +6,8 @@ use super::{
 };
 use crate::destination::DestinationMetadata;
 use crate::policy_context::{
-    DecisionServiceAllowControls, DecisionServiceInput, DecisionServiceMode,
-    EffectivePolicyContext, ResolvedIdentity, enforce_decision_service,
+    DecisionServiceAllow, DecisionServiceInput, DecisionServiceMode, EffectivePolicyContext,
+    ResolvedIdentity, enforce_decision_service,
 };
 use crate::runtime::RuntimeState;
 use anyhow::Result;
@@ -64,7 +64,7 @@ pub(crate) enum HttpAccessDecision {
 
 pub(crate) struct HttpAccessAllowed {
     pub(crate) audit: DispatchAuditContext,
-    pub(crate) controls: Option<DecisionServiceAllowControls>,
+    pub(crate) controls: Option<DecisionServiceAllow>,
 }
 
 pub(crate) async fn enforce_http_access(input: HttpAccessInput<'_>) -> Result<HttpAccessDecision> {

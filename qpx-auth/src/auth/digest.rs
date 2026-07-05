@@ -301,7 +301,7 @@ fn parse_nc(nc_hex: &str) -> Option<u32> {
 }
 
 #[cfg(feature = "digest-auth")]
-pub(super) fn parse_digest(input: &str) -> Option<HashMap<String, String>> {
+pub(crate) fn parse_digest(input: &str) -> Option<HashMap<String, String>> {
     let mut out = HashMap::new();
     let mut current = String::new();
     let mut in_quotes = false;

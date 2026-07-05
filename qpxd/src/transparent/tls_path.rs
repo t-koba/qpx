@@ -2,15 +2,14 @@ use super::destination::{ConnectTarget, connect_target_stream, resolve_upstream}
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::policy_context::{
     AuditRecord, DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
-    emit_audit_log, enforce_decision_service, prepare_decision_service_allow_controls,
-    resolve_identity,
+    emit_audit_log, enforce_decision_service, prepare_decision_service_allow, resolve_identity,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use crate::tls::TlsClientHelloInfo;
 use anyhow::{Result, anyhow};
 use qpx_core::config::ActionKind;
-use qpx_http::tls::client::preview_tls_certificate_with_options;
+use qpx_http::tls::builder::preview_client_certificate;
 use std::net::SocketAddr;
 use tokio::time::Duration;
 use tracing::warn;
@@ -135,7 +134,7 @@ where
         .await
         {
             Ok(upstream_connected) => {
-                match preview_tls_certificate_with_options(
+                match preview_client_certificate(
                     preview_domain,
                     upstream_connected.io,
                     verify_upstream,
@@ -269,11 +268,8 @@ where
     let mut action = decision.action.clone();
     let timeout_override = match decision_service {
         DecisionServiceEnforcement::Continue(allow) => {
-            let allow = prepare_decision_service_allow_controls(
-                allow,
-                DecisionServiceMode::TransparentTls,
-                None,
-            )?;
+            let allow =
+                prepare_decision_service_allow(allow, DecisionServiceMode::TransparentTls, None)?;
             if request_limits
                 .merge_profile_and_check(
                     &state.policy.rate_limiters,

@@ -11,6 +11,7 @@ use tokio::time::Instant as TokioInstant;
 
 pub(crate) mod auth;
 mod cache_rt;
+mod capabilities;
 mod config_rt;
 mod obs_rt;
 mod plan;
@@ -20,6 +21,7 @@ mod security_rt;
 pub mod views;
 
 pub use cache_rt::CacheRuntime;
+pub(crate) use capabilities::{BuildCapabilities, validate_build_capabilities};
 pub use config_rt::{MessageTexts, RuntimeResources};
 pub use obs_rt::ObsRuntime;
 pub(crate) use obs_rt::{MetricNames, metric_names};

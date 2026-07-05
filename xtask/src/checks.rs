@@ -1773,7 +1773,7 @@ fn reverse_mirror_spawn_backpressure_violations(content: &str) -> Vec<&'static s
 }
 
 fn check_decision_service_response_buffering(root: &Path) -> Result<()> {
-    let rel = "qpxd/src/policy_context/decision_service.rs";
+    let rel = "qpxd/src/policy_context/decision_service/mod.rs";
     let content = fs::read_to_string(root.join(rel))?;
     let violations = decision_service_response_buffering_violations(&content);
     if !violations.is_empty() {
@@ -2835,10 +2835,13 @@ pub(crate) fn check_security_qa_fuzz_targets(root: &Path) -> Result<()> {
 }
 
 const PLAN_P3_FUZZ_TARGETS: &[&str] = &[
+    "auth_credential_parser",
+    "cache_key",
     "client_hello_sniff",
     "config_canonical_loader",
     "connect_frame_observer",
     "datagram_capsule_parser",
+    "dispatch_policy_match",
     "ftp_response_parser",
     "grpc_frame_observer",
     "grpc_web_binary_frame_observer",
@@ -3003,6 +3006,7 @@ fn phase4_ci_acceptance_violations(
         "cargo build -p qpxd --release --locked",
         "scripts/nightly-proxy-compare.sh \"$QPX_PROXY_COMPARE_JSON\"",
         "target/perf/nightly-proxy-compare.jsonl",
+        "scripts/compare-proxy-baseline.sh target/perf/nightly-proxy-compare.jsonl perf/baseline-proxy-compare.json",
         "schedule:",
         "cron: '17 19 * * *'",
         "github.event_name == 'workflow_dispatch'",
@@ -3064,7 +3068,13 @@ fn phase4_ci_acceptance_violations(
         "cargo build --workspace --release --locked --target ${{ matrix.target }} --features \"${QPXD_SAMPLE_RUSTLS_FEATURES}\"",
         "cargo about generate --fail --config about.toml --workspace --locked licenses/about.hbs > THIRDPARTY.md",
         "softprops/action-gh-release@v3",
-        "files: ${{ env.ASSET }}",
+        "id-token: write",
+        "attestations: write",
+        "actions/attest-build-provenance@v4.1.1",
+        "subject-path: ${{ env.ASSET }}",
+        "ASSET_SHA256=",
+        "files: |",
+        "${{ env.ASSET_SHA256 }}",
     ] {
         if !release.contains(required) {
             violations.push("release.yml missing release build, package, or publish gate");
@@ -5312,6 +5322,7 @@ mod tests {
             cargo build -p qpxd --release --locked
             scripts/nightly-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
             target/perf/nightly-proxy-compare.jsonl
+            scripts/compare-proxy-baseline.sh target/perf/nightly-proxy-compare.jsonl perf/baseline-proxy-compare.json
             schedule:
             cron: '17 19 * * *'
             github.event_name == 'workflow_dispatch'
@@ -5345,7 +5356,13 @@ mod tests {
             cargo build --workspace --release --locked --target ${{ matrix.target }} --features "${QPXD_SAMPLE_RUSTLS_FEATURES}"
             cargo about generate --fail --config about.toml --workspace --locked licenses/about.hbs > THIRDPARTY.md
             softprops/action-gh-release@v3
-            files: ${{ env.ASSET }}
+            id-token: write
+            attestations: write
+            actions/attest-build-provenance@v4.1.1
+            subject-path: ${{ env.ASSET }}
+            ASSET_SHA256=
+            files: |
+            ${{ env.ASSET_SHA256 }}
         "#;
         let about = r#"
             accepted = [
@@ -5443,9 +5460,12 @@ mod tests {
             security_qa_fuzz_target_violations("config_canonical_loader"),
             [
                 "security-qa workflow must run cargo fuzz for each target",
+                "security-qa workflow missing fuzz target auth_credential_parser",
+                "security-qa workflow missing fuzz target cache_key",
                 "security-qa workflow missing fuzz target client_hello_sniff",
                 "security-qa workflow missing fuzz target connect_frame_observer",
                 "security-qa workflow missing fuzz target datagram_capsule_parser",
+                "security-qa workflow missing fuzz target dispatch_policy_match",
                 "security-qa workflow missing fuzz target ftp_response_parser",
                 "security-qa workflow missing fuzz target grpc_frame_observer",
                 "security-qa workflow missing fuzz target grpc_web_binary_frame_observer",

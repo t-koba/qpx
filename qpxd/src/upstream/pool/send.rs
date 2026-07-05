@@ -126,19 +126,15 @@ async fn open_upstream_proxy_sender(
 async fn open_upstream_proxy_stream(
     endpoint: &UpstreamProxyEndpoint,
     trust: Option<&CompiledUpstreamTlsTrust>,
-) -> Result<qpx_http::tls::client::BoxTlsStream> {
+) -> Result<qpx_http::tls::builder::BoxTlsStream> {
     let tcp = TcpStream::connect(endpoint.authority.as_str()).await?;
     let _ = tcp.set_nodelay(true);
     match endpoint.scheme {
         UpstreamProxyScheme::Http => Ok(Box::new(tcp)),
         UpstreamProxyScheme::Https => {
-            qpx_http::tls::client::connect_tls_http1_with_options(
-                endpoint.host.as_str(),
-                tcp,
-                true,
-                trust,
-            )
-            .await
+            qpx_http::tls::builder::connect_client_http1(endpoint.host.as_str(), tcp, true, trust)
+                .await
+                .map(|(tls, _cert)| tls)
         }
     }
 }
