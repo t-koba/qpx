@@ -86,51 +86,31 @@ wait_http() {
 }
 
 start_backend() {
-  local script="$TMP_DIR/backend.py"
-  cat >"$script" <<'PY'
-import asyncio
-import os
-import sys
-
-BODY = b"x" * int(os.environ.get("BENCH_BODY_BYTES", "1024"))
-HEAD = (
-    b"HTTP/1.1 200 OK\r\n"
-    b"Server: qpx-bench\r\n"
-    b"Content-Type: application/octet-stream\r\n"
-    + f"Content-Length: {len(BODY)}\r\n".encode("ascii")
-    + b"Connection: keep-alive\r\n"
-    + b"\r\n"
-)
-RESPONSE = HEAD + BODY
-
-
-async def handle(reader, writer):
-    try:
-        while True:
-            try:
-                raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=30)
-            except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError):
-                break
-            lower = raw.lower()
-            writer.write(RESPONSE)
-            await writer.drain()
-            if b"connection: close" in lower:
-                break
-    finally:
-        writer.close()
-        await writer.wait_closed()
-
-
-async def main():
-    port = int(sys.argv[1])
-    server = await asyncio.start_server(handle, "127.0.0.1", port, backlog=4096)
-    async with server:
-        await server.serve_forever()
-
-
-asyncio.run(main())
-PY
-  BENCH_BODY_BYTES="$BODY_BYTES" python3 "$script" "$BACKEND_PORT" >"$LOG_DIR/backend.log" 2>&1 &
+  local prefix="$TMP_DIR/backend-nginx"
+  local config="$prefix/backend-nginx.conf"
+  mkdir -p "$prefix/logs" "$prefix/www"
+  dd if=/dev/zero of="$prefix/www/bench" bs="$BODY_BYTES" count=1 status=none
+  cat >"$config" <<NGINX
+pid $prefix/backend-nginx.pid;
+error_log $prefix/logs/error.log warn;
+worker_processes 1;
+events {
+  worker_connections 4096;
+}
+http {
+  access_log off;
+  sendfile on;
+  keepalive_timeout 65;
+  server {
+    listen 127.0.0.1:${BACKEND_PORT};
+    location = /bench {
+      default_type application/octet-stream;
+      alias $prefix/www/bench;
+    }
+  }
+}
+NGINX
+  nginx -p "$prefix" -c "$config" -g 'daemon off;' >"$LOG_DIR/backend.log" 2>&1 &
   local pid=$!
   register_pid "$pid"
   wait_http "backend" "$BACKEND_PORT" "$pid" "$LOG_DIR/backend.log"
@@ -212,11 +192,14 @@ start_apache() {
     apache_load_module "mpm_event"
     apache_load_module "authn_core"
     apache_load_module "authz_core"
+    apache_load_module "env"
     apache_load_module "proxy"
     apache_load_module "proxy_http"
     apache_load_module "unixd"
+    echo "ProxyTimeout 30"
     echo "<VirtualHost 127.0.0.1:${APACHE_PORT}>"
-    echo "  ProxyPass \"/\" \"http://127.0.0.1:${BACKEND_PORT}/\" retry=0"
+    echo "  SetEnv proxy-initial-not-pooled 1"
+    echo "  ProxyPass \"/\" \"http://127.0.0.1:${BACKEND_PORT}/\" retry=0 keepalive=On max=128 smax=128 ttl=60 acquire=3000"
     echo "  ProxyPassReverse \"/\" \"http://127.0.0.1:${BACKEND_PORT}/\""
     echo "</VirtualHost>"
   } >"$config"
@@ -297,8 +280,8 @@ run_one() {
   local status_before status_after
 
   expect_status_ok "$proxy" "$port" "preflight"
-  status_before="$(probe_status "$port")"
   ab -k -n 200 -c 16 -H "Host: ${HOST_HEADER}" "$url" >"$TMP_DIR/${proxy}.warmup" 2>&1
+  status_before="$(probe_status "$port")"
   ab -k -n "$REQUESTS" -c "$CONCURRENCY" -H "Host: ${HOST_HEADER}" "$url" >"$out" 2>&1 || {
     echo "ab failed for ${proxy}" >&2
     cat "$out" >&2 || true
@@ -306,7 +289,7 @@ run_one() {
   }
   status_after="$(probe_status "$port")"
 
-  local complete failed non_2xx write_errors rps mean_ms transfer_kbps commit
+  local complete failed non_2xx write_errors rps mean_ms transfer_kbps commit valid
   complete="$(extract_ab_int_or_zero "$out" "Complete requests")"
   failed="$(extract_ab_int_or_zero "$out" "Failed requests")"
   non_2xx="$(extract_ab_int_or_zero "$out" "Non-2xx responses")"
@@ -320,13 +303,11 @@ run_one() {
     cat "$out" >&2 || true
     exit 1
   fi
-
+  valid="$([ "$complete" = "$REQUESTS" ] && [ "$failed" = 0 ] && [ "$non_2xx" = 0 ] && [ "$write_errors" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
   printf '{"bench":"proxy_compare_http1_reverse","proxy":"%s","requests":%s,"concurrency":%s,"body_bytes":%s,"complete_requests":%s,"failed_requests":%s,"non_2xx_responses":%s,"write_errors":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"transfer_kbytes_per_sec":%s,"valid":%s,"commit":"%s"}\n' \
-    "$proxy" "$REQUESTS" "$CONCURRENCY" "$BODY_BYTES" "$complete" "$failed" "$non_2xx" "$write_errors" "$status_before" "$status_after" "$rps" "$mean_ms" "$transfer_kbps" \
-    "$([ "$complete" = "$REQUESTS" ] && [ "$failed" = 0 ] && [ "$non_2xx" = 0 ] && [ "$write_errors" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)" \
-    "$commit" >>"$OUT_JSON"
+    "$proxy" "$REQUESTS" "$CONCURRENCY" "$BODY_BYTES" "$complete" "$failed" "$non_2xx" "$write_errors" "$status_before" "$status_after" "$rps" "$mean_ms" "$transfer_kbps" "$valid" "$commit" >>"$OUT_JSON"
 
-  if [ "$complete" != "$REQUESTS" ] || [ "$failed" != 0 ] || [ "$non_2xx" != 0 ] || [ "$write_errors" != 0 ] || [ "$status_before" != 200 ] || [ "$status_after" != 200 ]; then
+  if [ "$valid" != true ]; then
     echo "${proxy} produced an invalid benchmark sample" >&2
     echo "complete=${complete} failed=${failed} non_2xx=${non_2xx} write_errors=${write_errors} status_before=${status_before} status_after=${status_after}" >&2
     cat "$out" >&2 || true
@@ -339,7 +320,6 @@ require_cmd apache2
 require_cmd curl
 require_cmd lighttpd
 require_cmd nginx
-require_cmd python3
 
 if [ ! -x "$QPXD_BIN" ]; then
   echo "missing qpxd binary: $QPXD_BIN" >&2
