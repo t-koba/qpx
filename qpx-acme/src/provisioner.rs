@@ -6,13 +6,16 @@ use instant_acme::{
 };
 use qpx_core::config::{AcmeConfig, Config};
 use qpx_core::tls::{load_cert_chain, load_private_key};
+use rcgen::{CertificateParams, CustomExtension, DistinguishedName, DnType, KeyPair};
 use rustls::crypto::ring::sign::any_supported_type;
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::sign::CertifiedKey;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{info, warn};
 use x509_parser::pem::Pem;
@@ -192,48 +195,42 @@ async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -
         .await
         .with_context(|| "acme new_order failed")?;
 
-    let mut tokens_to_cleanup: Vec<String> = Vec::new();
+    let mut cleanups: Vec<ChallengeCleanup> = Vec::new();
     let mut authorizations = order.authorizations();
     while let Some(result) = authorizations.next().await {
         let mut authz = match result {
             Ok(v) => v,
             Err(err) => {
-                for token in tokens_to_cleanup {
-                    state.tokens.remove(&token);
-                }
+                cleanup_challenges(state, cleanups).await;
                 return Err(err.into());
             }
         };
         if authz.status == instant_acme::AuthorizationStatus::Valid {
             continue;
         }
-        let mut challenge = authz
-            .challenge(ChallengeType::Http01)
-            .ok_or_else(|| anyhow!("no http-01 challenge for authorization"))?;
-        let token = challenge.token.clone();
-        let key_auth = challenge.key_authorization().as_str().to_string();
-        state.tokens.insert(token.clone(), key_auth);
+        let challenge_type = configured_challenge_type(state)?;
+        let mut challenge = authz.challenge(challenge_type).ok_or_else(|| {
+            anyhow!(
+                "no {} challenge for authorization",
+                configured_challenge_name(state)
+            )
+        })?;
+        prepare_challenge(state, &challenge, &mut cleanups).await?;
         if let Err(err) = challenge
             .set_ready()
             .await
             .with_context(|| "acme challenge set_ready failed")
         {
-            state.tokens.remove(&token);
-            for token in tokens_to_cleanup {
-                state.tokens.remove(&token);
-            }
+            cleanup_challenges(state, cleanups).await;
             return Err(err);
         }
-        tokens_to_cleanup.push(token);
     }
 
     let status_res = order
         .poll_ready(&RetryPolicy::default())
         .await
         .with_context(|| "acme order poll_ready failed");
-    for token in tokens_to_cleanup {
-        state.tokens.remove(&token);
-    }
+    cleanup_challenges(state, cleanups).await;
     let status = status_res?;
     if status != OrderStatus::Ready {
         return Err(anyhow!("acme order not ready (status={:?})", status));
@@ -253,6 +250,136 @@ async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -
     write_bytes_file(&cert_path, cert_chain_pem.as_bytes(), 0o644)?;
 
     load_cert_into_store(state, sni)?;
+    Ok(())
+}
+
+enum ChallengeCleanup {
+    Http01Token(String),
+    Dns01Record { domain: String, value: String },
+    TlsAlpn01Cert(String),
+}
+
+fn configured_challenge_name(state: &AcmeRuntime) -> &str {
+    state.challenge.trim()
+}
+
+fn configured_challenge_type(state: &AcmeRuntime) -> Result<ChallengeType> {
+    match configured_challenge_name(state) {
+        "http-01" => Ok(ChallengeType::Http01),
+        "dns-01" => Ok(ChallengeType::Dns01),
+        "tls-alpn-01" => Ok(ChallengeType::TlsAlpn01),
+        other => Err(anyhow!("unsupported acme.challenge {other}")),
+    }
+}
+
+async fn prepare_challenge(
+    state: &AcmeRuntime,
+    challenge: &instant_acme::ChallengeHandle<'_>,
+    cleanups: &mut Vec<ChallengeCleanup>,
+) -> Result<()> {
+    match configured_challenge_name(state) {
+        "http-01" => {
+            let token = challenge.token.clone();
+            let key_auth = challenge.key_authorization().as_str().to_string();
+            state.tokens.insert(token.clone(), key_auth);
+            cleanups.push(ChallengeCleanup::Http01Token(token));
+            Ok(())
+        }
+        "dns-01" => {
+            let hook = state
+                .dns_hook
+                .as_ref()
+                .ok_or_else(|| anyhow!("acme.dns_hook missing for dns-01"))?;
+            let domain = challenge.identifier().to_string();
+            let value = challenge.key_authorization().dns_value();
+            run_dns_hook(hook.set_command.as_str(), &domain, &value).await?;
+            cleanups.push(ChallengeCleanup::Dns01Record {
+                domain,
+                value: value.clone(),
+            });
+            if hook.propagation_wait_secs > 0 {
+                sleep(Duration::from_secs(hook.propagation_wait_secs)).await;
+            }
+            Ok(())
+        }
+        "tls-alpn-01" => {
+            let sni = challenge.identifier().to_string().to_ascii_lowercase();
+            let key_auth = challenge.key_authorization();
+            let cert = tls_alpn01_challenge_cert(&sni, key_auth.digest().as_ref())?;
+            state.tls_alpn01.upsert(sni.clone(), Arc::new(cert));
+            cleanups.push(ChallengeCleanup::TlsAlpn01Cert(sni));
+            Ok(())
+        }
+        other => Err(anyhow!("unsupported acme.challenge {other}")),
+    }
+}
+
+async fn cleanup_challenges(state: &AcmeRuntime, cleanups: Vec<ChallengeCleanup>) {
+    for cleanup in cleanups {
+        match cleanup {
+            ChallengeCleanup::Http01Token(token) => {
+                state.tokens.remove(&token);
+            }
+            ChallengeCleanup::Dns01Record { domain, value } => {
+                if let Some(hook) = state.dns_hook.as_ref()
+                    && let Err(err) =
+                        run_dns_hook(hook.clear_command.as_str(), &domain, &value).await
+                {
+                    warn!(domain = %domain, error = ?err, "acme dns-01 cleanup hook failed");
+                }
+            }
+            ChallengeCleanup::TlsAlpn01Cert(sni) => {
+                state.tls_alpn01.remove(&sni);
+            }
+        }
+    }
+}
+
+fn tls_alpn01_challenge_cert(sni: &str, digest: &[u8]) -> Result<CertifiedKey> {
+    let mut params = CertificateParams::new(vec![sni.to_string()])?;
+    params.distinguished_name = DistinguishedName::new();
+    params.distinguished_name.push(DnType::CommonName, sni);
+    params
+        .custom_extensions
+        .push(CustomExtension::new_acme_identifier(digest));
+    let key_pair = KeyPair::generate()?;
+    let cert = params.self_signed(&key_pair)?;
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+    let signing_key = any_supported_type(&key).map_err(|_| anyhow!("unsupported key"))?;
+    Ok(CertifiedKey::new(vec![cert.der().clone()], signing_key))
+}
+
+async fn run_dns_hook(command: &str, domain: &str, value: &str) -> Result<()> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("acme dns hook command must not be empty"));
+    }
+    #[cfg(unix)]
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(trimmed)
+        .env("QPX_ACME_DOMAIN", domain)
+        .env("QPX_ACME_TXT_VALUE", value)
+        .status()
+        .await?;
+    #[cfg(windows)]
+    let status = Command::new("cmd")
+        .arg("/C")
+        .arg(trimmed)
+        .env("QPX_ACME_DOMAIN", domain)
+        .env("QPX_ACME_TXT_VALUE", value)
+        .status()
+        .await?;
+    #[cfg(not(any(unix, windows)))]
+    let status = {
+        let _ = (trimmed, domain, value);
+        return Err(anyhow!(
+            "acme dns hook commands are not supported on this platform"
+        ));
+    };
+    if !status.success() {
+        return Err(anyhow!("acme dns hook command failed with status {status}"));
+    }
     Ok(())
 }
 
@@ -416,17 +543,19 @@ fn write_bytes_file(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::acme_directory_url;
+    use super::{acme_directory_url, run_dns_hook, tls_alpn01_challenge_cert};
     use qpx_core::config::AcmeConfig;
 
     fn base_acme_config() -> AcmeConfig {
         AcmeConfig {
             enabled: true,
+            challenge: "http-01".to_string(),
             staging: false,
             directory_url: None,
             email: None,
             terms_of_service_agreed: false,
             http01_listen: None,
+            dns_hook: None,
             renew_before_days: 30,
         }
     }
@@ -471,5 +600,46 @@ mod tests {
             acme_directory_url(&config),
             "https://acme-v02.api.letsencrypt.org/directory"
         );
+    }
+
+    #[test]
+    fn tls_alpn01_challenge_cert_contains_acme_extension() {
+        let digest = [7u8; 32];
+        let cert = tls_alpn01_challenge_cert("acme.example", &digest).expect("cert");
+        let der = cert.cert.first().expect("leaf");
+        let (_, parsed) = x509_parser::parse_x509_certificate(der.as_ref()).expect("x509");
+        let ext = parsed
+            .extensions()
+            .iter()
+            .find(|ext| ext.oid.to_id_string() == "1.3.6.1.5.5.7.1.31")
+            .expect("acme extension");
+        assert!(ext.critical);
+        assert!(
+            ext.value.contains(&7),
+            "extension should contain challenge digest"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dns_hook_receives_domain_and_txt_value_env() {
+        let path = std::env::temp_dir().join(format!(
+            "qpx-acme-dns-hook-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let command = format!(
+            "printf '%s|%s' \"$QPX_ACME_DOMAIN\" \"$QPX_ACME_TXT_VALUE\" > {}",
+            path.display()
+        );
+        run_dns_hook(&command, "example.com", "txt-value")
+            .await
+            .expect("hook");
+        let text = std::fs::read_to_string(&path).expect("read hook output");
+        assert_eq!(text, "example.com|txt-value");
+        let _ = std::fs::remove_file(path);
     }
 }

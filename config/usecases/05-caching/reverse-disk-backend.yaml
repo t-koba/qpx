@@ -1,0 +1,40 @@
+state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
+caches:
+- name: local-disk-cache
+  kind: disk
+  path: "${QPX_DISK_CACHE_DIR:-./.qpx-cache}"
+  max_bytes: 1073741824
+  sweep_interval_secs: 60
+  timeout_ms: 1500
+  max_object_bytes: 2097152
+edges:
+- kind: reverse
+  name: site
+  listen: 127.0.0.1:8443
+  routes:
+  - match:
+      host:
+      - cache.example.local
+      path:
+      - "/assets/*"
+      - "/docs/*"
+      method:
+      - GET
+      - HEAD
+    cache:
+      enabled: true
+      backend: local-disk-cache
+      namespace: reverse-site-assets
+      default_ttl_secs: 300
+      max_object_bytes: 2097152
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:18080
+  - match:
+      host:
+      - cache.example.local
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:18081

@@ -17,14 +17,44 @@ pub(super) fn validate_cache_backends(backends: &[CacheBackendConfig]) -> Result
         if !cache_backends.insert(backend.name.clone()) {
             return Err(anyhow!("duplicate cache backend name: {}", backend.name));
         }
-        if backend.kind != "http" && backend.kind != "redis" {
+        if backend.kind != "http" && backend.kind != "redis" && backend.kind != "disk" {
             return Err(anyhow!(
                 "cache backend {} has unsupported kind: {}",
                 backend.name,
                 backend.kind
             ));
         }
-        if backend.endpoint.trim().is_empty() {
+        if backend.kind == "disk" {
+            let Some(path) = backend
+                .path
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            else {
+                return Err(anyhow!(
+                    "cache backend {} path must be set for disk kind",
+                    backend.name
+                ));
+            };
+            if path.as_bytes().contains(&0) {
+                return Err(anyhow!(
+                    "cache backend {} path must not contain NUL bytes",
+                    backend.name
+                ));
+            }
+            if backend.max_bytes.unwrap_or(0) < 1024 * 1024 {
+                return Err(anyhow!(
+                    "cache backend {} max_bytes must be >= 1048576 for disk kind",
+                    backend.name
+                ));
+            }
+            if backend.sweep_interval_secs == 0 {
+                return Err(anyhow!(
+                    "cache backend {} sweep_interval_secs must be >= 1",
+                    backend.name
+                ));
+            }
+        } else if backend.endpoint.trim().is_empty() {
             return Err(anyhow!(
                 "cache backend {} endpoint must not be empty",
                 backend.name

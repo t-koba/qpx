@@ -48,8 +48,8 @@ pub use self::listener::{
     OriginalDstConfig, OriginalDstSource, TlsInspectionConfig, XdpConfig,
 };
 pub use self::observability::{
-    AccessLogConfig, AcmeConfig, AuditIncludeField, AuditLogConfig, CaptureBodyMode,
-    CapturePlaintextPolicyConfig, CapturePolicyConfig, CaptureRedactionConfig,
+    AccessLogConfig, AcmeConfig, AcmeDnsHookConfig, AuditIncludeField, AuditLogConfig,
+    CaptureBodyMode, CapturePlaintextPolicyConfig, CapturePolicyConfig, CaptureRedactionConfig,
     ExporterCaptureConfig, ExporterConfig, LogOutputConfig, MetricsConfig, OtelConfig,
     SystemLogConfig,
 };

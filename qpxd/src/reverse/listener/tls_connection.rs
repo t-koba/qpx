@@ -517,13 +517,16 @@ async fn handle_tls_connection(
         .ok_or_else(|| anyhow::anyhow!("reverse tls acceptor missing"))?
         .clone();
     let tls_stream = timeout(tls_accept_timeout, acceptor.accept(stream, sni.as_deref())).await??;
-    let negotiated_h2 = tls_stream
+    let negotiated_alpn = tls_stream
         .get_ref()
         .negotiated_alpn()
         .ok()
         .flatten()
-        .map(|alpn| alpn == b"h2")
-        .unwrap_or(false);
+        .map(|alpn| alpn.to_vec());
+    if negotiated_alpn.as_deref() == Some(b"acme-tls/1".as_slice()) {
+        return Ok(());
+    }
+    let negotiated_h2 = negotiated_alpn.as_deref() == Some(b"h2".as_slice());
     let header_read_timeout = Duration::from_millis(
         reverse
             .runtime

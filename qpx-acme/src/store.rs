@@ -57,6 +57,34 @@ pub(crate) struct Http01TokenStore {
     by_token: ArcSwap<HashMap<String, String>>,
 }
 
+pub(crate) struct TlsAlpn01CertStore {
+    by_sni: ArcSwap<HashMap<String, Arc<CertifiedKey>>>,
+}
+
+impl TlsAlpn01CertStore {
+    pub(crate) fn new() -> Self {
+        Self {
+            by_sni: ArcSwap::from_pointee(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn upsert(&self, sni: String, key: Arc<CertifiedKey>) {
+        let mut next = (**self.by_sni.load()).clone();
+        next.insert(sni.to_ascii_lowercase(), key);
+        self.by_sni.store(Arc::new(next));
+    }
+
+    pub(crate) fn remove(&self, sni: &str) {
+        let mut next = (**self.by_sni.load()).clone();
+        next.remove(&sni.to_ascii_lowercase());
+        self.by_sni.store(Arc::new(next));
+    }
+
+    pub(crate) fn get(&self, sni: &str) -> Option<Arc<CertifiedKey>> {
+        self.by_sni.load().get(&sni.to_ascii_lowercase()).cloned()
+    }
+}
+
 impl Http01TokenStore {
     pub(crate) fn new() -> Self {
         Self {

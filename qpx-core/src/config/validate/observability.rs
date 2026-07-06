@@ -214,6 +214,15 @@ pub(super) fn validate_acme_config(config: &Config, acme: &AcmeConfig) -> Result
     if acme.renew_before_days == 0 {
         return Err(anyhow!("acme.renew_before_days must be >= 1"));
     }
+    let challenge = acme.challenge.trim();
+    match challenge {
+        "http-01" | "tls-alpn-01" | "dns-01" => {}
+        other => {
+            return Err(anyhow!(
+                "acme.challenge must be one of http-01, tls-alpn-01, dns-01 (got {other})"
+            ));
+        }
+    }
     if acme.staging && acme.directory_url.is_some() {
         return Err(anyhow!(
             "acme.staging and acme.directory_url are mutually exclusive"
@@ -224,14 +233,38 @@ pub(super) fn validate_acme_config(config: &Config, acme: &AcmeConfig) -> Result
     {
         return Err(anyhow!("acme.email must not be empty when set"));
     }
-    let Some(listen) = acme.http01_listen.as_deref() else {
+    if challenge == "http-01" {
+        let Some(listen) = acme.http01_listen.as_deref() else {
+            return Err(anyhow!(
+                "acme.http01_listen must be set when acme.challenge=http-01"
+            ));
+        };
+        let _: std::net::SocketAddr = listen
+            .parse()
+            .map_err(|e| anyhow!("acme.http01_listen is invalid: {}", e))?;
+    } else if let Some(listen) = acme.http01_listen.as_deref() {
+        let _: std::net::SocketAddr = listen
+            .parse()
+            .map_err(|e| anyhow!("acme.http01_listen is invalid: {}", e))?;
+    }
+    if challenge == "dns-01" {
+        let Some(hook) = acme.dns_hook.as_ref() else {
+            return Err(anyhow!(
+                "acme.dns_hook must be set when acme.challenge=dns-01"
+            ));
+        };
+        if hook.set_command.trim().is_empty() {
+            return Err(anyhow!("acme.dns_hook.set_command must not be empty"));
+        }
+        if hook.clear_command.trim().is_empty() {
+            return Err(anyhow!("acme.dns_hook.clear_command must not be empty"));
+        }
+    }
+    if challenge == "tls-alpn-01" && !has_acme_tls_terminating_listener(config) {
         return Err(anyhow!(
-            "acme.http01_listen must be set when acme.enabled=true (HTTP-01 challenge server)"
+            "acme.challenge=tls-alpn-01 requires at least one ACME-managed reverse TLS certificate"
         ));
-    };
-    let _: std::net::SocketAddr = listen
-        .parse()
-        .map_err(|e| anyhow!("acme.http01_listen is invalid: {}", e))?;
+    }
 
     if let Some(dir) = acme.directory_url.as_deref() {
         let raw = dir.trim();
@@ -248,6 +281,18 @@ pub(super) fn validate_acme_config(config: &Config, acme: &AcmeConfig) -> Result
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "tls-rustls")]
+fn has_acme_tls_terminating_listener(config: &Config) -> bool {
+    config.reverse_edge_configs().into_iter().any(|reverse| {
+        reverse.tls.as_ref().is_some_and(|tls| {
+            tls.certificates.iter().any(|cert| {
+                cert.cert.as_deref().unwrap_or("").trim().is_empty()
+                    && cert.key.as_deref().unwrap_or("").trim().is_empty()
+            })
+        })
+    })
 }
 
 #[cfg(not(feature = "tls-rustls"))]

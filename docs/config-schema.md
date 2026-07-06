@@ -23,6 +23,17 @@ validate a concrete config file.
 Reverse routes use exactly one typed `target`: `upstream`, `weighted`, `ipc`,
 `local_response`, or `tls_passthrough`.
 
+Cache backends support `redis`, `http`, and `disk` kinds. `disk` backends use
+`path`, `max_bytes`, and optional `sweep_interval_secs`; the path is created as
+owner-only directories, symlinked path components are rejected, and objects are
+stored under sharded SHA-256 filenames with atomic same-directory renames.
+
+ACME supports `challenge: http-01`, `tls-alpn-01`, or `dns-01`. HTTP-01 uses
+`http01_listen`; TLS-ALPN-01 uses an ACME-managed reverse TLS certificate and
+serves a temporary `acme-tls/1` challenge certificate; DNS-01 uses
+`dns_hook.set_command` and `dns_hook.clear_command` with `QPX_ACME_DOMAIN` and
+`QPX_ACME_TXT_VALUE` in the hook environment.
+
 ## Validation Workflow
 
 ```bash

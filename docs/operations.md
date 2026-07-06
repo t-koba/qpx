@@ -12,6 +12,10 @@ runtime state in place. Listener/reverse bind-shape or acceptor startup changes
 trigger an in-process restart of the listener/reverse server set rather than a
 full daemon restart.
 
+Reload is file-watch based. `qpxd` does not use `SIGHUP` as a reload signal.
+`SIGUSR2` is reserved for binary upgrade and has nginx/HAProxy-like handoff
+semantics for sockets, not configuration reload semantics.
+
 Restart is required for:
 
 - `state_dir`
@@ -31,6 +35,9 @@ In-process listener/server-set restart is used for:
 
 Existing accepted TCP connections continue draining on the old runtime
 generation while replacement listeners start with the new config.
+Long-lived application streams such as SSE, gRPC, gRPC-Web, and WebSocket are
+not forcibly drained by in-place reload. They continue on their accepted
+connection and observe the runtime state attached to that generation.
 
 ## Binary Upgrade
 
@@ -103,6 +110,12 @@ reload for compatible config edits.
   associated WebTransport sessions per QUIC connection.
 - `runtime.upstream_http_timeout_ms` is the default dial/request timeout for
   upstream HTTP and reverse route proxying.
+- FTP gateway concurrency is bounded by the listener/reverse worker topology and
+  by FTP request/download limits. Tune `runtime.worker_threads`,
+  `runtime.max_blocking_threads`, `runtime.acceptor_tasks_per_listener`,
+  `ftp.max_request_body_bytes`, `ftp.max_download_bytes`, and `ftp.timeout_ms`
+  together for deployments that proxy many simultaneous directory listings,
+  uploads, or downloads.
 - `runtime.max_observed_request_body_bytes` and
   `runtime.max_observed_response_body_bytes` are hard caps for policy, guard,
   RPC, and response-rule body observation.

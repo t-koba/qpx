@@ -289,3 +289,78 @@ impl GrpcFrameObserver {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grpc_frame_observer_counts_split_frames() {
+        let mut observer = GrpcFrameObserver::new(None);
+        observer.feed(&[0, 0, 0]).expect("partial header");
+        observer
+            .feed(&[0, 3, b'a', b'b'])
+            .expect("header and partial payload");
+        observer.feed(b"c").expect("payload end");
+
+        let summary = observer.finish().expect("summary");
+        assert_eq!(summary.message_count, 1);
+        assert_eq!(summary.message_bytes, 3);
+        assert!(summary.trailers.is_none());
+    }
+
+    #[test]
+    fn grpc_frame_observer_reports_message_limit_error() {
+        let mut observer = GrpcFrameObserver::new(Some(2));
+        let err = observer
+            .feed(&[0, 0, 0, 0, 3])
+            .expect_err("oversized frame must fail");
+        assert!(matches!(
+            err,
+            GrpcFrameError::MessageTooLarge { len: 3, max: 2 }
+        ));
+    }
+
+    #[test]
+    fn grpc_frame_observer_reports_mid_frame_eof() {
+        let mut observer = GrpcFrameObserver::new(None);
+        observer.feed(&[0, 0, 0, 0, 3, b'a']).expect("partial");
+        let err = observer.finish().expect_err("mid-frame EOF must fail");
+        assert!(
+            err.to_string().contains("ended mid-frame"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn grpc_web_observer_parses_split_trailer_frame() {
+        let mut observer = GrpcFrameObserver::grpc_web(false, None, None);
+        observer.feed(&[0, 0, 0, 0, 1, b'x']).expect("message");
+        observer
+            .feed(&[0x80, 0, 0, 0, 16, b'g', b'r', b'p', b'c'])
+            .expect("trailer start");
+        observer.feed(b"-status: 0\r\n").expect("trailer finish");
+
+        let summary = observer.finish().expect("summary");
+        assert_eq!(summary.message_count, 1);
+        let trailers = summary.trailers.expect("trailers");
+        assert_eq!(
+            trailers
+                .get("grpc-status")
+                .and_then(|value| value.to_str().ok()),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn grpc_web_text_observer_rejects_invalid_base64() {
+        let mut observer = GrpcFrameObserver::grpc_web(true, None, None);
+        let err = observer
+            .feed(b"!!!!")
+            .expect_err("invalid base64 must fail");
+        assert!(
+            err.to_string().contains("Invalid symbol"),
+            "unexpected error: {err}"
+        );
+    }
+}

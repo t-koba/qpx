@@ -6,7 +6,14 @@ pub struct CacheBackendConfig {
     pub name: String,
     #[serde(default = "default_cache_backend_kind")]
     pub kind: String,
+    #[serde(default)]
     pub endpoint: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
+    #[serde(default = "default_cache_disk_sweep_interval_secs")]
+    pub sweep_interval_secs: u64,
     #[serde(default = "default_cache_timeout_ms")]
     pub timeout_ms: u64,
     #[serde(default = "default_cache_max_object_bytes")]

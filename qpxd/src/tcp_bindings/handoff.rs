@@ -67,7 +67,11 @@ impl TcpBindings {
             }
 
             #[cfg(feature = "acme")]
-            if let Some(acme) = config.acme.as_ref().filter(|acme| acme.enabled) {
+            if let Some(acme) = config
+                .acme
+                .as_ref()
+                .filter(|acme| acme.enabled && acme.challenge.trim() == "http-01")
+            {
                 let listen = acme
                     .http01_listen
                     .as_ref()
@@ -152,7 +156,11 @@ impl TcpBindings {
             };
 
             #[cfg(feature = "acme")]
-            let acme_http01 = match config.acme.as_ref().filter(|acme| acme.enabled) {
+            let acme_http01 = match config
+                .acme
+                .as_ref()
+                .filter(|acme| acme.enabled && acme.challenge.trim() == "http-01")
+            {
                 Some(acme) => {
                     let listen = acme
                         .http01_listen

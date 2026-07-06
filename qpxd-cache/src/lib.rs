@@ -1,3 +1,4 @@
+mod backend_disk;
 mod backend_http;
 mod backend_redis;
 mod directives;

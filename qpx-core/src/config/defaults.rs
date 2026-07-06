@@ -30,6 +30,10 @@ pub(super) fn default_acme_renew_before_days() -> u64 {
     30
 }
 
+pub(super) fn default_acme_challenge() -> String {
+    "http-01".to_string()
+}
+
 pub(super) fn default_otel_protocol() -> String {
     "grpc".to_string()
 }
@@ -468,6 +472,10 @@ pub(super) fn default_cache_timeout_ms() -> u64 {
 
 pub(super) fn default_cache_max_object_bytes() -> usize {
     1024 * 1024
+}
+
+pub(super) fn default_cache_disk_sweep_interval_secs() -> u64 {
+    60
 }
 
 pub(super) fn default_upstream_discovery_interval_ms() -> u64 {

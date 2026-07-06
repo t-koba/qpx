@@ -155,11 +155,17 @@ pub(super) fn validate_reverse_edge_configs(
                                     reverse_edge.name
                                 ));
                             }
-                            if cert.sni.contains('*') {
+                            let acme_challenge = config
+                                .acme
+                                .as_ref()
+                                .map(|acme| acme.challenge.trim())
+                                .unwrap_or("http-01");
+                            if cert.sni.contains('*') && acme_challenge != "dns-01" {
                                 return Err(anyhow!(
-                                    "reverse_edge {} tls.certificates[] uses wildcard sni ({}), but ACME HTTP-01 does not support wildcard certificates",
+                                    "reverse_edge {} tls.certificates[] uses wildcard sni ({}), but ACME challenge {} does not support wildcard certificates",
                                     reverse_edge.name,
-                                    cert.sni
+                                    cert.sni,
+                                    acme_challenge
                                 ));
                             }
                         } else if cert_path.is_empty() || key_path.is_empty() {

@@ -25,22 +25,30 @@ impl AdminTasks {
         #[cfg(feature = "acme")]
         let (http01_task, manager_task) =
             if let Some(acme_state) = qpx_acme::init(config, std::sync::Arc::new(runtime))? {
-                let http_listener = tcp_bindings.clone_acme_http01()?.ok_or_else(|| {
-                    anyhow::anyhow!("acme http-01 binding missing while ACME is enabled")
-                })?;
-                let http_state = acme_state.clone();
-                let http01_task = tokio::spawn(async move {
-                    qpx_acme::run_http01_server_with_std_listener(http_listener, http_state)
-                        .await
-                        .map_err(anyhow::Error::from)
-                });
+                let http01_task = if config
+                    .acme
+                    .as_ref()
+                    .is_some_and(|acme| acme.challenge.trim() == "http-01")
+                {
+                    let http_listener = tcp_bindings.clone_acme_http01()?.ok_or_else(|| {
+                        anyhow::anyhow!("acme http-01 binding missing while HTTP-01 is enabled")
+                    })?;
+                    let http_state = acme_state.clone();
+                    Some(tokio::spawn(async move {
+                        qpx_acme::run_http01_server_with_std_listener(http_listener, http_state)
+                            .await
+                            .map_err(anyhow::Error::from)
+                    }))
+                } else {
+                    None
+                };
                 let manager_state = acme_state.clone();
                 let manager_task = tokio::spawn(async move {
                     qpx_acme::run_manager(manager_state)
                         .await
                         .map_err(anyhow::Error::from)
                 });
-                (Some(http01_task), Some(manager_task))
+                (http01_task, Some(manager_task))
             } else {
                 (None, None)
             };

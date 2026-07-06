@@ -9,7 +9,7 @@ pub use provisioner::run_manager;
 pub use store::AcmeCertStore;
 #[cfg(feature = "http3")]
 pub use store::AcmeQuicCertStore;
-use store::Http01TokenStore;
+use store::{Http01TokenStore, TlsAlpn01CertStore};
 
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
@@ -19,7 +19,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use qpx_core::config::Config;
+use qpx_core::config::{AcmeDnsHookConfig, Config};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -59,16 +59,19 @@ pub trait ConfigProvider: Send + Sync {
 pub struct AcmeRuntime {
     pub(crate) operational_config_provider: Arc<dyn ConfigProvider>,
     pub(crate) directory_url: String,
+    pub(crate) challenge: String,
     pub(crate) renew_before_days: u64,
     pub(crate) contact_email: Option<String>,
     pub(crate) tos_agreed: bool,
-    pub(crate) http01_listen: SocketAddr,
+    pub(crate) http01_listen: Option<SocketAddr>,
+    pub(crate) dns_hook: Option<AcmeDnsHookConfig>,
     pub(crate) certs_dir: PathBuf,
     pub(crate) account_path: PathBuf,
     pub(crate) store: Arc<AcmeCertStore>,
     #[cfg(feature = "http3")]
     pub(crate) quic_store: Arc<AcmeQuicCertStore>,
     pub(crate) tokens: Arc<Http01TokenStore>,
+    pub(crate) tls_alpn01: Arc<TlsAlpn01CertStore>,
 }
 
 static STATE: OnceLock<Arc<AcmeRuntime>> = OnceLock::new();
@@ -102,9 +105,12 @@ pub fn init(
     let http01_listen = acme
         .http01_listen
         .as_deref()
-        .ok_or_else(|| anyhow!("acme.http01_listen missing"))?
-        .parse::<SocketAddr>()
-        .map_err(|e| anyhow!("acme.http01_listen is invalid: {e}"))?;
+        .map(|listen| {
+            listen
+                .parse::<SocketAddr>()
+                .map_err(|e| anyhow!("acme.http01_listen is invalid: {e}"))
+        })
+        .transpose()?;
 
     let state_dir = PathBuf::from(state_root).join("acme");
     let certs_dir = state_dir.join("certs");
@@ -117,25 +123,35 @@ pub fn init(
     let rt = Arc::new(AcmeRuntime {
         operational_config_provider: config_provider,
         directory_url: provisioner::acme_directory_url(acme),
+        challenge: acme.challenge.clone(),
         renew_before_days: acme.renew_before_days,
         contact_email: acme.email.clone(),
         tos_agreed: acme.terms_of_service_agreed,
         http01_listen,
+        dns_hook: acme.dns_hook.clone(),
         certs_dir,
         account_path,
         store: Arc::new(AcmeCertStore::new()),
         #[cfg(feature = "http3")]
         quic_store: Arc::new(AcmeQuicCertStore::new()),
         tokens: Arc::new(Http01TokenStore::new()),
+        tls_alpn01: Arc::new(TlsAlpn01CertStore::new()),
     });
 
     let _ = STATE.set(rt.clone());
     provisioner::preload_certs(rt.as_ref())?;
     Ok(Some(rt))
 }
+
+/// Returns a temporary TLS-ALPN-01 certificate for the given SNI, if present.
+pub fn tls_alpn01_cert(sni: &str) -> Option<Arc<rustls::sign::CertifiedKey>> {
+    STATE.get().and_then(|s| s.tls_alpn01.get(sni))
+}
 /// Runs the HTTP-01 challenge server using the configured listener address.
 pub async fn run_http01_server(state: Arc<AcmeRuntime>) -> AcmeResult<()> {
-    let addr = state.http01_listen;
+    let addr = state
+        .http01_listen
+        .ok_or_else(|| anyhow!("acme.http01_listen missing"))?;
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind acme.http01_listen={addr}"))?;
@@ -159,7 +175,11 @@ async fn run_http01_server_with_listener(
     listener: TcpListener,
     state: Arc<AcmeRuntime>,
 ) -> AcmeResult<()> {
-    let addr = listener.local_addr().unwrap_or(state.http01_listen);
+    let addr = listener
+        .local_addr()
+        .ok()
+        .or(state.http01_listen)
+        .ok_or_else(|| anyhow!("acme.http01_listen missing"))?;
     let tokens = state.tokens.clone();
     let concurrency = Arc::new(Semaphore::new(ACME_HTTP01_MAX_CONCURRENCY));
     info!(listen = %addr, "acme http-01 challenge server started");

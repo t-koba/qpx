@@ -44,6 +44,8 @@ pub(in crate::reverse) fn build_tls_acceptor(
             .with_cert_resolver(resolver)
     };
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    #[cfg(feature = "acme")]
+    config.alpn_protocols.push(b"acme-tls/1".to_vec());
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
@@ -96,6 +98,15 @@ impl rustls::server::ResolvesServerCert for SniResolver {
         client_hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
         let name = client_hello.server_name()?.to_ascii_lowercase();
+        #[cfg(feature = "acme")]
+        if client_hello
+            .alpn()
+            .is_some_and(|mut protocols| protocols.any(|protocol| protocol == b"acme-tls/1"))
+            && self.acme_snis.contains(&name)
+            && let Some(cert) = qpx_acme::tls_alpn01_cert(&name)
+        {
+            return Some(cert);
+        }
         if let Some(key) = self.certs.get(&name) {
             return Some(key.clone());
         }

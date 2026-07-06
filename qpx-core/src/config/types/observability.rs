@@ -99,6 +99,8 @@ pub struct MetricsConfig {
 pub struct AcmeConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_acme_challenge")]
+    pub challenge: String,
     #[serde(default)]
     pub staging: bool,
     #[serde(default)]
@@ -109,8 +111,19 @@ pub struct AcmeConfig {
     pub terms_of_service_agreed: bool,
     #[serde(default)]
     pub http01_listen: Option<String>,
+    #[serde(default)]
+    pub dns_hook: Option<AcmeDnsHookConfig>,
     #[serde(default = "default_acme_renew_before_days")]
     pub renew_before_days: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AcmeDnsHookConfig {
+    pub set_command: String,
+    pub clear_command: String,
+    #[serde(default)]
+    pub propagation_wait_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

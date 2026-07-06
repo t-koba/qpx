@@ -15,6 +15,7 @@ pub fn build_backends(
                 cfg.clone(),
                 generated_user_agent,
             )?),
+            "disk" => Arc::new(super::backend_disk::DiskCacheBackend::new(cfg.clone())?),
             "redis" => Arc::new(super::backend_redis::RedisCacheBackend::new(cfg.clone())?),
             other => {
                 return Err(anyhow!(

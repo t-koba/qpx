@@ -122,7 +122,11 @@ impl TcpBindings {
             .transpose()?;
 
         #[cfg(feature = "acme")]
-        let acme_http01 = if config.acme.as_ref().is_some_and(|acme| acme.enabled) {
+        let acme_http01 = if config
+            .acme
+            .as_ref()
+            .is_some_and(|acme| acme.enabled && acme.challenge.trim() == "http-01")
+        {
             let listen = config
                 .acme
                 .as_ref()
@@ -190,7 +194,11 @@ impl TcpBindings {
             .transpose()?;
 
         #[cfg(feature = "acme")]
-        let acme_http01 = if config.acme.as_ref().is_some_and(|acme| acme.enabled) {
+        let acme_http01 = if config
+            .acme
+            .as_ref()
+            .is_some_and(|acme| acme.enabled && acme.challenge.trim() == "http-01")
+        {
             let listen = config
                 .acme
                 .as_ref()
@@ -375,7 +383,10 @@ impl TcpBindings {
 
         #[cfg(feature = "acme")]
         let acme_http01 = match (
-            config.acme.as_ref().filter(|acme| acme.enabled),
+            config
+                .acme
+                .as_ref()
+                .filter(|acme| acme.enabled && acme.challenge.trim() == "http-01"),
             inherited.acme_http01.as_ref(),
         ) {
             (Some(acme), Some(inherited)) => {
