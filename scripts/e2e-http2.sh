@@ -8,13 +8,22 @@ STATE_DIR="$TMP_DIR/state"
 LOG_DIR="$TMP_DIR/logs"
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 
-PORT_BASE=$((30000 + ($$ % 10000)))
-REV_H2C_PROXY_PORT=$((PORT_BASE + 10))
-REV_H2C_BACKEND_PORT=$((PORT_BASE + 11))
-TRANS_PROXY_PORT=$((PORT_BASE + 12))
-TRANS_BACKEND_PORT=$((PORT_BASE + 13))
-REV_TLS_PROXY_PORT=$((PORT_BASE + 14))
-REV_TLS_BACKEND_PORT=$((PORT_BASE + 15))
+read -r REV_H2C_PROXY_PORT REV_H2C_BACKEND_PORT TRANS_PROXY_PORT TRANS_BACKEND_PORT REV_TLS_PROXY_PORT REV_TLS_BACKEND_PORT < <(
+  python3 - <<'PY'
+import socket
+
+sockets = []
+try:
+    for _ in range(6):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sockets.append(sock)
+    print(" ".join(str(sock.getsockname()[1]) for sock in sockets))
+finally:
+    for sock in sockets:
+        sock.close()
+PY
+)
 
 PIDS=()
 LAST_PID=""

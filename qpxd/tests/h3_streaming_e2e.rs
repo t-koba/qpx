@@ -34,6 +34,7 @@ struct H3ReadResult {
     ttfb: Duration,
     first_data_at: Option<Duration>,
     ttlb: Duration,
+    body_len: usize,
     body: Vec<u8>,
     trailers: Option<http::HeaderMap>,
     data_error: Option<String>,
@@ -92,12 +93,21 @@ async fn large_response_bounded_memory() -> Result<()> {
         None,
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
+    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(
+        backend_port,
+        "    streaming:\n      max_response_body_bytes: 12582912\n",
+    )
+    .await?;
 
-    let response = request_h3(port, &cert_path, "/large", &[], false).await?;
+    let response = request_h3_counting(port, &cert_path, "/large", &[]).await?;
 
     assert_eq!(response.status, http::StatusCode::OK);
-    assert_eq!(response.body.len(), 625 * 16 * 1024);
+    assert_eq!(response.data_error, None);
+    assert_eq!(response.body_len, 625 * 16 * 1024);
+    assert!(
+        response.body.is_empty(),
+        "large streaming test should count bytes without retaining the response body"
+    );
     let first_data = response.first_data_at.expect("first data");
     assert!(
         first_data < response.ttlb,
@@ -387,6 +397,26 @@ async fn request_h3(
     headers: &[(&str, &str)],
     close_after_first_data: bool,
 ) -> Result<H3ReadResult> {
+    request_h3_inner(port, ca_cert, path, headers, close_after_first_data, true).await
+}
+
+async fn request_h3_counting(
+    port: u16,
+    ca_cert: &Path,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> Result<H3ReadResult> {
+    request_h3_inner(port, ca_cert, path, headers, false, false).await
+}
+
+async fn request_h3_inner(
+    port: u16,
+    ca_cert: &Path,
+    path: &str,
+    headers: &[(&str, &str)],
+    close_after_first_data: bool,
+    collect_body: bool,
+) -> Result<H3ReadResult> {
     let mut endpoint = build_quinn_client_endpoint()?;
     endpoint.set_default_client_config(build_h3_test_client_config(ca_cert)?);
     let started = Instant::now();
@@ -420,6 +450,7 @@ async fn request_h3(
     let ttfb = started.elapsed();
     let status = response.status();
     let mut body = Vec::new();
+    let mut body_len = 0usize;
     let mut first_data_at = None;
     let mut data_error = None;
 
@@ -427,7 +458,15 @@ async fn request_h3(
         match stream.recv_data().await {
             Ok(Some(mut chunk)) => {
                 first_data_at.get_or_insert_with(|| started.elapsed());
-                body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+                let chunk_len = chunk.remaining();
+                body_len = body_len
+                    .checked_add(chunk_len)
+                    .ok_or_else(|| anyhow!("H3 response body length overflow"))?;
+                if collect_body {
+                    body.extend_from_slice(&chunk.copy_to_bytes(chunk_len));
+                } else {
+                    chunk.advance(chunk_len);
+                }
                 if close_after_first_data {
                     conn.close(quinn::VarInt::from_u32(0), b"client cancel");
                     driver.abort();
@@ -437,6 +476,7 @@ async fn request_h3(
                         ttfb,
                         first_data_at,
                         ttlb: started.elapsed(),
+                        body_len,
                         body,
                         trailers: None,
                         data_error: None,
@@ -463,6 +503,7 @@ async fn request_h3(
         ttfb,
         first_data_at,
         ttlb: started.elapsed(),
+        body_len,
         body,
         trailers,
         data_error,
