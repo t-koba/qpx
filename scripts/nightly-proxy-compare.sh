@@ -88,30 +88,47 @@ wait_http() {
 start_backend() {
   local script="$TMP_DIR/backend.py"
   cat >"$script" <<'PY'
+import asyncio
 import os
 import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BODY = b"x" * int(os.environ.get("BENCH_BODY_BYTES", "1024"))
+HEAD = (
+    b"HTTP/1.1 200 OK\r\n"
+    b"Server: qpx-bench\r\n"
+    b"Content-Type: application/octet-stream\r\n"
+    + f"Content-Length: {len(BODY)}\r\n".encode("ascii")
+    + b"Connection: keep-alive\r\n"
+    + b"\r\n"
+)
+RESPONSE = HEAD + BODY
 
-class Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
 
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(BODY)))
-        self.send_header("Connection", "keep-alive")
-        self.end_headers()
-        self.wfile.write(BODY)
+async def handle(reader, writer):
+    try:
+        while True:
+            try:
+                raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=30)
+            except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError):
+                break
+            lower = raw.lower()
+            writer.write(RESPONSE)
+            await writer.drain()
+            if b"connection: close" in lower:
+                break
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
-    def log_message(self, _format, *_args):
-        return
 
-port = int(sys.argv[1])
-server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-server.daemon_threads = True
-server.serve_forever()
+async def main():
+    port = int(sys.argv[1])
+    server = await asyncio.start_server(handle, "127.0.0.1", port, backlog=4096)
+    async with server:
+        await server.serve_forever()
+
+
+asyncio.run(main())
 PY
   BENCH_BODY_BYTES="$BODY_BYTES" python3 "$script" "$BACKEND_PORT" >"$LOG_DIR/backend.log" 2>&1 &
   local pid=$!
