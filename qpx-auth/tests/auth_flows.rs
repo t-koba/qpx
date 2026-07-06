@@ -1,6 +1,13 @@
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use http::HeaderMap;
-use qpx_auth::{AuthOutcome, Authenticator};
-use qpx_core::config::{AuthConfig, LocalUser};
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+use qpx_auth::AuthOutcome;
+#[cfg(any(feature = "basic-auth", feature = "digest-auth", feature = "ldap-auth"))]
+use qpx_auth::Authenticator;
+#[cfg(any(feature = "basic-auth", feature = "digest-auth", feature = "ldap-auth"))]
+use qpx_core::config::AuthConfig;
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+use qpx_core::config::LocalUser;
 
 #[cfg(feature = "digest-auth")]
 use sha2::{Digest, Sha256};

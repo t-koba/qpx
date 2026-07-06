@@ -44,7 +44,7 @@ case "$(uname -s)" in
     qpx_h3_api_hash=d8be4f46e894aee75742bd9c4978aa18da20e65b2967be9ab8c108e34a38a975
     ;;
   *)
-    qpx_core_api_hash=5ae66e29b639c0ee2a522510776bc29d4f97bdef3c4e08d7fd1b2069e0a40fac
+    qpx_core_api_hash=ee1a8137dc5d0b2f75b50f8f6cff76778524349a2c29328ce1c1abee8be9f311
     qpx_h3_api_hash=540781e2e1344a18d82194b31634b84a509c5d6182d6d7e9abe1d2455e50c654
     ;;
 esac

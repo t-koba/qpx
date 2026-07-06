@@ -543,7 +543,9 @@ fn write_bytes_file(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{acme_directory_url, run_dns_hook, tls_alpn01_challenge_cert};
+    #[cfg(unix)]
+    use super::run_dns_hook;
+    use super::{acme_directory_url, tls_alpn01_challenge_cert};
     use qpx_core::config::AcmeConfig;
 
     fn base_acme_config() -> AcmeConfig {
