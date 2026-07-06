@@ -3006,6 +3006,7 @@ fn phase4_ci_acceptance_violations(
         "cargo build -p qpxd --release --locked",
         "scripts/nightly-proxy-compare.sh \"$QPX_PROXY_COMPARE_JSON\"",
         "target/perf/nightly-proxy-compare.jsonl",
+        "target/perf/proxy-compare-logs/**",
         "scripts/compare-proxy-baseline.sh target/perf/nightly-proxy-compare.jsonl perf/baseline-proxy-compare.json",
         "schedule:",
         "cron: '17 19 * * *'",
@@ -5322,6 +5323,7 @@ mod tests {
             cargo build -p qpxd --release --locked
             scripts/nightly-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
             target/perf/nightly-proxy-compare.jsonl
+            target/perf/proxy-compare-logs/**
             scripts/compare-proxy-baseline.sh target/perf/nightly-proxy-compare.jsonl perf/baseline-proxy-compare.json
             schedule:
             cron: '17 19 * * *'

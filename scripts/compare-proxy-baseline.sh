@@ -108,6 +108,32 @@ def number(record, field):
     return value
 
 
+def nonnegative_int(record, field):
+    try:
+        value = int(record[field])
+    except (KeyError, TypeError, ValueError):
+        fail(f"record for proxy {record.get('proxy', '<missing>')} is missing integer {field}")
+    if value < 0:
+        fail(f"{field} must be non-negative")
+    return value
+
+
+def require_valid_sample(record):
+    proxy = record.get("proxy", "<missing>")
+    if record.get("valid") is not True:
+        fail(f"proxy comparison record for {proxy} is marked invalid")
+    if nonnegative_int(record, "complete_requests") != nonnegative_int(record, "requests"):
+        fail(f"proxy comparison record for {proxy} did not complete all requests")
+    if nonnegative_int(record, "failed_requests") != 0:
+        fail(f"proxy comparison record for {proxy} has failed requests")
+    if nonnegative_int(record, "non_2xx_responses") != 0:
+        fail(f"proxy comparison record for {proxy} has non-2xx responses")
+    if nonnegative_int(record, "write_errors") != 0:
+        fail(f"proxy comparison record for {proxy} has write errors")
+    if str(record.get("status_before")) != "200" or str(record.get("status_after")) != "200":
+        fail(f"proxy comparison record for {proxy} failed status probes")
+
+
 def lane_key(record):
     try:
         return (
@@ -125,6 +151,7 @@ def collect_ratios(records):
     for record in records:
         if record.get("bench") != BENCH:
             continue
+        require_valid_sample(record)
         proxy = record.get("proxy")
         if proxy not in {"direct-backend", "qpxd"}:
             continue

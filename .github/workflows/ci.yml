@@ -218,7 +218,9 @@ jobs:
         if: always()
         with:
           name: qpx-nightly-perf-jsonl
-          path: target/perf/*.jsonl
+          path: |
+            target/perf/*.jsonl
+            target/perf/proxy-compare-logs/**
           if-no-files-found: ignore
 
   config_samples:

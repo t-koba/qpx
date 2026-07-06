@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_JSON="${1:-${QPX_PROXY_COMPARE_JSON:-$ROOT_DIR/target/perf/nightly-proxy-compare.jsonl}}"
+LOG_ARTIFACT_DIR="${QPX_PROXY_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/proxy-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
 REQUESTS="${QPX_PROXY_COMPARE_REQUESTS:-5000}"
 CONCURRENCY="${QPX_PROXY_COMPARE_CONCURRENCY:-64}"
@@ -21,6 +22,21 @@ STATE_DIR="$TMP_DIR/state"
 mkdir -p "$LOG_DIR" "$STATE_DIR" "$(dirname "$OUT_JSON")"
 
 PIDS=()
+ARTIFACTS_COLLECTED=0
+
+collect_artifacts() {
+  if [ "$ARTIFACTS_COLLECTED" -eq 1 ]; then
+    return
+  fi
+  ARTIFACTS_COLLECTED=1
+  rm -rf "$LOG_ARTIFACT_DIR"
+  mkdir -p "$LOG_ARTIFACT_DIR"
+  cp -R "$LOG_DIR"/. "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.ab "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.warmup "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.yaml "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  find "$TMP_DIR" -name '*.conf' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
+}
 
 cleanup() {
   local pid
@@ -30,6 +46,7 @@ cleanup() {
       wait "$pid" >/dev/null 2>&1 || true
     fi
   done
+  collect_artifacts
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -106,9 +123,6 @@ start_qpxd() {
   local config="$TMP_DIR/qpxd.yaml"
   cat >"$config" <<YAML
 state_dir: "$STATE_DIR"
-upstreams:
-  - name: bench
-    url: http://127.0.0.1:${BACKEND_PORT}
 edges:
   - kind: reverse
     name: benchmark
@@ -120,7 +134,7 @@ edges:
           host: [${HOST_HEADER}]
         target:
           type: upstream
-          upstreams: [bench]
+          upstreams: [http://127.0.0.1:${BACKEND_PORT}]
 YAML
   QPX_STATE_DIR="$STATE_DIR" "$QPXD_BIN" run --config "$config" >"$LOG_DIR/qpxd.log" 2>&1 &
   local pid=$!
@@ -227,27 +241,80 @@ extract_ab_value() {
   ' "$file"
 }
 
+extract_ab_int_or_zero() {
+  local file="$1"
+  local pattern="$2"
+  local value
+  value="$(extract_ab_value "$file" "$pattern")"
+  if [ -z "$value" ]; then
+    echo 0
+  else
+    echo "$value"
+  fi
+}
+
+probe_status() {
+  local port="$1"
+  curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+    -H "Host: ${HOST_HEADER}" \
+    "http://127.0.0.1:${port}/bench"
+}
+
+expect_status_ok() {
+  local proxy="$1"
+  local port="$2"
+  local phase="$3"
+  local status
+  status="$(probe_status "$port")"
+  if [ "$status" != "200" ]; then
+    echo "${proxy} returned HTTP ${status} during ${phase}; refusing to record invalid benchmark" >&2
+    return 1
+  fi
+}
+
 run_one() {
   local proxy="$1"
   local port="$2"
   local out="$TMP_DIR/${proxy}.ab"
   local url="http://127.0.0.1:${port}/bench"
+  local status_before status_after
 
+  expect_status_ok "$proxy" "$port" "preflight"
+  status_before="$(probe_status "$port")"
   ab -k -n 200 -c 16 -H "Host: ${HOST_HEADER}" "$url" >"$TMP_DIR/${proxy}.warmup" 2>&1
   ab -k -n "$REQUESTS" -c "$CONCURRENCY" -H "Host: ${HOST_HEADER}" "$url" >"$out" 2>&1 || {
     echo "ab failed for ${proxy}" >&2
     cat "$out" >&2 || true
     exit 1
   }
+  status_after="$(probe_status "$port")"
 
-  local rps mean_ms transfer_kbps commit
+  local complete failed non_2xx write_errors rps mean_ms transfer_kbps commit
+  complete="$(extract_ab_int_or_zero "$out" "Complete requests")"
+  failed="$(extract_ab_int_or_zero "$out" "Failed requests")"
+  non_2xx="$(extract_ab_int_or_zero "$out" "Non-2xx responses")"
+  write_errors="$(extract_ab_int_or_zero "$out" "Write errors")"
   rps="$(extract_ab_value "$out" "Requests per second")"
   mean_ms="$(awk -F: '/Time per request/ && $0 !~ /across all concurrent requests/ {gsub(/^[ \t]+/, "", $2); split($2, parts, " "); print parts[1]; exit}' "$out")"
   transfer_kbps="$(extract_ab_value "$out" "Transfer rate")"
   commit="${GITHUB_SHA:-unknown}"
+  if [ -z "$rps" ] || [ -z "$mean_ms" ] || [ -z "$transfer_kbps" ]; then
+    echo "${proxy} ab output is missing required throughput fields" >&2
+    cat "$out" >&2 || true
+    exit 1
+  fi
 
-  printf '{"bench":"proxy_compare_http1_reverse","proxy":"%s","requests":%s,"concurrency":%s,"body_bytes":%s,"requests_per_sec":%s,"mean_time_per_request_ms":%s,"transfer_kbytes_per_sec":%s,"commit":"%s"}\n' \
-    "$proxy" "$REQUESTS" "$CONCURRENCY" "$BODY_BYTES" "$rps" "$mean_ms" "$transfer_kbps" "$commit" >>"$OUT_JSON"
+  printf '{"bench":"proxy_compare_http1_reverse","proxy":"%s","requests":%s,"concurrency":%s,"body_bytes":%s,"complete_requests":%s,"failed_requests":%s,"non_2xx_responses":%s,"write_errors":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"transfer_kbytes_per_sec":%s,"valid":%s,"commit":"%s"}\n' \
+    "$proxy" "$REQUESTS" "$CONCURRENCY" "$BODY_BYTES" "$complete" "$failed" "$non_2xx" "$write_errors" "$status_before" "$status_after" "$rps" "$mean_ms" "$transfer_kbps" \
+    "$([ "$complete" = "$REQUESTS" ] && [ "$failed" = 0 ] && [ "$non_2xx" = 0 ] && [ "$write_errors" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)" \
+    "$commit" >>"$OUT_JSON"
+
+  if [ "$complete" != "$REQUESTS" ] || [ "$failed" != 0 ] || [ "$non_2xx" != 0 ] || [ "$write_errors" != 0 ] || [ "$status_before" != 200 ] || [ "$status_after" != 200 ]; then
+    echo "${proxy} produced an invalid benchmark sample" >&2
+    echo "complete=${complete} failed=${failed} non_2xx=${non_2xx} write_errors=${write_errors} status_before=${status_before} status_after=${status_after}" >&2
+    cat "$out" >&2 || true
+    exit 1
+  fi
 }
 
 require_cmd ab
