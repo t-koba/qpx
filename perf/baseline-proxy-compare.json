@@ -1,17 +1,19 @@
 {
   "baselines": [
     {
-      "baseline_ratio": 0.75,
+      "baseline_ratio": 0.15,
       "bench": "proxy_compare_http1_reverse",
       "body_bytes": 1024,
       "concurrency": 64,
-      "direct_backend_requests_per_sec": 12000.0,
-      "qpxd_requests_per_sec": 9000.0,
+      "direct_backend_requests_per_sec": null,
+      "external_proxy_median_requests_per_sec": null,
+      "external_proxy_requests_per_sec": {},
+      "qpxd_requests_per_sec": null,
       "requests": 5000,
-      "source_commit": "initial-plan-f1-baseline"
+      "source_commit": "nginx-backend-transition-floor"
     }
   ],
   "degradation_threshold": 0.1,
-  "metric": "qpxd_requests_per_sec / direct-backend_requests_per_sec",
+  "metric": "qpxd_requests_per_sec / external_proxy_median_requests_per_sec",
   "schema_version": 1
 }

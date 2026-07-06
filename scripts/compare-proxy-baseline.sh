@@ -63,8 +63,9 @@ from collections import defaultdict
 
 MODE, JSONL_PATH, BASELINE_PATH, THRESHOLD_ARG = sys.argv[1:5]
 BENCH = "proxy_compare_http1_reverse"
-METRIC = "qpxd_requests_per_sec / direct-backend_requests_per_sec"
+METRIC = "qpxd_requests_per_sec / external_proxy_median_requests_per_sec"
 DEFAULT_THRESHOLD = 0.10
+EXTERNAL_PROXIES = ("nginx", "apache", "lighttpd")
 
 
 def fail(message):
@@ -153,18 +154,20 @@ def collect_ratios(records):
             continue
         require_valid_sample(record)
         proxy = record.get("proxy")
-        if proxy not in {"direct-backend", "qpxd"}:
+        if proxy not in {"direct-backend", "qpxd", *EXTERNAL_PROXIES}:
             continue
         grouped[lane_key(record)][proxy] = record
 
     ratios = []
     for key in sorted(grouped):
         proxies = grouped[key]
-        if "direct-backend" not in proxies or "qpxd" not in proxies:
-            fail(f"missing direct-backend or qpxd record for lane {key}")
-        direct_rps = number(proxies["direct-backend"], "requests_per_sec")
+        missing = [proxy for proxy in ("qpxd", *EXTERNAL_PROXIES) if proxy not in proxies]
+        if missing:
+            fail(f"missing proxy comparison records for lane {key}: {', '.join(missing)}")
         qpxd_rps = number(proxies["qpxd"], "requests_per_sec")
-        ratio = qpxd_rps / direct_rps
+        external_rps = sorted(number(proxies[proxy], "requests_per_sec") for proxy in EXTERNAL_PROXIES)
+        external_median_rps = external_rps[len(external_rps) // 2]
+        ratio = qpxd_rps / external_median_rps
         bench, requests, concurrency, body_bytes = key
         ratios.append(
             {
@@ -174,7 +177,13 @@ def collect_ratios(records):
                 "body_bytes": body_bytes,
                 "baseline_ratio": round(ratio, 6),
                 "qpxd_requests_per_sec": qpxd_rps,
-                "direct_backend_requests_per_sec": direct_rps,
+                "external_proxy_median_requests_per_sec": external_median_rps,
+                "external_proxy_requests_per_sec": {
+                    proxy: number(proxies[proxy], "requests_per_sec") for proxy in EXTERNAL_PROXIES
+                },
+                "direct_backend_requests_per_sec": number(proxies["direct-backend"], "requests_per_sec")
+                if "direct-backend" in proxies
+                else None,
                 "source_commit": proxies["qpxd"].get("commit", "unknown"),
             }
         )
