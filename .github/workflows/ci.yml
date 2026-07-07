@@ -138,6 +138,8 @@ jobs:
         run: bash ./scripts/e2e-local-response.sh
       - name: run http2 e2e
         run: bash ./scripts/e2e-http2.sh
+      - name: run ACME Pebble e2e
+        run: bash ./scripts/e2e-acme-pebble.sh
 
   e2e_control_plane_windows:
     name: control-plane e2e (windows)

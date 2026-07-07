@@ -9,6 +9,7 @@ REQUESTS="${QPX_PROXY_COMPARE_REQUESTS:-5000}"
 CONCURRENCY="${QPX_PROXY_COMPARE_CONCURRENCY:-64}"
 BODY_BYTES="${QPX_PROXY_COMPARE_BODY_BYTES:-1024}"
 HOST_HEADER="${QPX_PROXY_COMPARE_HOST:-bench.local}"
+APACHE_BIN="${QPX_PROXY_COMPARE_APACHE_BIN:-}"
 
 BACKEND_PORT="${QPX_PROXY_COMPARE_BACKEND_PORT:-18080}"
 QPX_PORT="${QPX_PROXY_COMPARE_QPX_PORT:-18081}"
@@ -170,9 +171,17 @@ NGINX
 
 apache_load_module() {
   local module="$1"
-  local path="/usr/lib/apache2/modules/mod_${module}.so"
+  local path
+  for path in \
+    "/usr/lib/apache2/modules/mod_${module}.so" \
+    "$($APACHE_BIN -V 2>/dev/null | awk -F'\"' '/HTTPD_ROOT/ {print $2; exit}')/lib/httpd/modules/mod_${module}.so"; do
   if [ -f "$path" ]; then
     printf 'LoadModule %s_module %s\n' "$module" "$path"
+      return
+    fi
+  done
+  if [ "$module" = "mpm_event" ]; then
+    return
   fi
 }
 
@@ -199,11 +208,12 @@ start_apache() {
     echo "ProxyTimeout 30"
     echo "<VirtualHost 127.0.0.1:${APACHE_PORT}>"
     echo "  SetEnv proxy-initial-not-pooled 1"
-    echo "  ProxyPass \"/\" \"http://127.0.0.1:${BACKEND_PORT}/\" retry=0 keepalive=On max=128 smax=128 ttl=60 acquire=3000"
+    echo "  SetEnv proxy-nokeepalive 1"
+    echo "  ProxyPass \"/\" \"http://127.0.0.1:${BACKEND_PORT}/\" retry=0 keepalive=Off max=128 smax=128 ttl=60 acquire=3000"
     echo "  ProxyPassReverse \"/\" \"http://127.0.0.1:${BACKEND_PORT}/\""
     echo "</VirtualHost>"
   } >"$config"
-  apache2 -f "$config" -DFOREGROUND >"$LOG_DIR/apache.log" 2>&1 &
+  "$APACHE_BIN" -f "$config" -DFOREGROUND >"$LOG_DIR/apache.log" 2>&1 &
   local pid=$!
   register_pid "$pid"
   wait_http "apache" "$APACHE_PORT" "$pid" "$LOG_DIR/apache.log"
@@ -316,10 +326,20 @@ run_one() {
 }
 
 require_cmd ab
-require_cmd apache2
 require_cmd curl
 require_cmd lighttpd
 require_cmd nginx
+
+if [ -z "$APACHE_BIN" ]; then
+  if command -v apache2 >/dev/null 2>&1; then
+    APACHE_BIN="$(command -v apache2)"
+  elif command -v httpd >/dev/null 2>&1; then
+    APACHE_BIN="$(command -v httpd)"
+  else
+    echo "missing required command: apache2 or httpd" >&2
+    exit 1
+  fi
+fi
 
 if [ ! -x "$QPXD_BIN" ]; then
   echo "missing qpxd binary: $QPXD_BIN" >&2

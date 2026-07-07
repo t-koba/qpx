@@ -140,7 +140,7 @@ async fn load_or_create_account(state: &AcmeRuntime) -> Result<Account> {
     {
         let credentials: AccountCredentials = serde_json::from_slice(&data)
             .with_context(|| format!("invalid acme account {}", state.account_path.display()))?;
-        let builder = Account::builder().with_context(|| "acme client init failed")?;
+        let builder = account_builder().with_context(|| "acme client init failed")?;
         return builder
             .from_credentials(credentials)
             .await
@@ -160,7 +160,7 @@ async fn load_or_create_account(state: &AcmeRuntime) -> Result<Account> {
         terms_of_service_agreed: state.tos_agreed,
         only_return_existing: false,
     };
-    let builder = Account::builder().with_context(|| "acme client init failed")?;
+    let builder = account_builder().with_context(|| "acme client init failed")?;
     let (account, credentials) = builder
         .create(&new_account, state.directory_url.clone(), None)
         .await
@@ -170,6 +170,14 @@ async fn load_or_create_account(state: &AcmeRuntime) -> Result<Account> {
     write_bytes_file(&state.account_path, &serialized, 0o600)
         .with_context(|| format!("failed to write {}", state.account_path.display()))?;
     Ok(account)
+}
+
+fn account_builder() -> Result<instant_acme::AccountBuilder> {
+    if let Some(root) = std::env::var_os("QPX_ACME_ROOT_CERT") {
+        let path = std::path::PathBuf::from(root);
+        return Account::builder_with_root(path).map_err(Into::into);
+    }
+    Account::builder().map_err(Into::into)
 }
 
 async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -> Result<()> {
