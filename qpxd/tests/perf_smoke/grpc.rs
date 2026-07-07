@@ -66,7 +66,7 @@ edges:
 
 async fn grpc_unary_once(port: u16, request_body: Bytes) -> Result<()> {
     let stream = timeout(
-        Duration::from_secs(3),
+        profile_timeout(Duration::from_secs(3)),
         TcpStream::connect(("127.0.0.1", port)),
     )
     .await??;
@@ -171,7 +171,7 @@ runtime:
 
 async fn grpc_streaming_once(port: u16, request_body: Bytes) -> Result<()> {
     let stream = timeout(
-        Duration::from_secs(3),
+        profile_timeout(Duration::from_secs(3)),
         TcpStream::connect(("127.0.0.1", port)),
     )
     .await??;

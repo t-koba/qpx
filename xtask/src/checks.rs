@@ -3000,17 +3000,48 @@ fn phase4_ci_acceptance_violations(
         "bash ./scripts/audit-config-usecases.sh",
         "bash ./scripts/audit-config-behavior.sh",
         "cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture",
-        "cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture",
+        "cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture",
         "cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10",
-        "sudo apt-get install -y apache2 apache2-utils lighttpd nginx wrk",
+        "target/perf/perf-audit-protocol-h3-crate-perf.jsonl",
+        "target/perf/perf-audit-protocol-qpx-h3-perf.jsonl",
+        "target/perf/perf-audit-advanced-transport-perf.jsonl",
+        "cargo test -p qpxd --release --test perf_smoke --locked --features http3-backend-h3 -- --nocapture",
+        "cargo test -p qpxd --release --test perf_smoke --locked --features http3-backend-qpx -- --nocapture",
+        "runs-on: ubuntu-latest",
+        "scripts/check-perf-runner.sh",
+        "target/perf/runner.jsonl",
+        "sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk",
         "cargo build -p qpxd --release --locked",
-        "scripts/nightly-proxy-compare.sh \"$QPX_PROXY_COMPARE_JSON\"",
-        "target/perf/nightly-proxy-compare.jsonl",
+        "scripts/perf-audit-proxy-compare.sh \"$QPX_PROXY_COMPARE_JSON\"",
+        "target/perf/perf-audit-proxy-compare.jsonl",
+        "scripts/perf-audit-http2-compare.sh \"$QPX_HTTP2_COMPARE_JSON\"",
+        "target/perf/perf-audit-http2-compare.jsonl",
+        "target/perf/http2-compare-logs/**",
+        "scripts/perf-audit-streaming-compare.sh \"$QPX_STREAMING_COMPARE_JSON\"",
+        "target/perf/perf-audit-streaming-compare.jsonl",
+        "target/perf/streaming-compare-logs/**",
+        "scripts/perf-audit-allocation-profile.sh",
+        "target/perf/perf-audit-allocation-profile.jsonl",
+        "target/perf/allocations/**",
+        "scripts/perf-audit-netem-compare.sh \"$QPX_NETEM_COMPARE_JSON\"",
+        "target/perf/perf-audit-netem-proxy-compare.jsonl",
+        "target/perf/perf-audit-netem-profile.jsonl",
+        "target/perf/netem-proxy-compare-logs/**",
+        "scripts/h3-interop/run.sh all",
+        "target/perf/qpx-h3-interop-matrix.json",
         "target/perf/proxy-compare-logs/**",
-        "scripts/compare-proxy-baseline.sh target/perf/nightly-proxy-compare.jsonl perf/baseline-proxy-compare.json",
-        "schedule:",
-        "cron: '17 19 * * *'",
-        "github.event_name == 'workflow_dispatch'",
+        "scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json",
+        "scripts/perf-audit-profile.sh",
+        "target/perf/perf-audit-profile-summary.jsonl",
+        "target/perf/perf-audit-profile-events.jsonl",
+        "target/perf/profiles/**",
+        "CARGO_PROFILE_RELEASE_STRIP: \"none\"",
+        "workflow_dispatch:",
+        "release:",
+        "types: [published]",
+        "tags:",
+        "\"v*\"",
+        "github.event_name == 'workflow_dispatch' || github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')",
     ] {
         if !ci.contains(required) {
             violations.push("ci.yml missing Phase 4 required job or command");
@@ -5317,17 +5348,48 @@ mod tests {
             bash ./scripts/audit-config-usecases.sh
             bash ./scripts/audit-config-behavior.sh
             cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
-            cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture
+            cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture
             cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10
-            sudo apt-get install -y apache2 apache2-utils lighttpd nginx wrk
+            target/perf/perf-audit-protocol-h3-crate-perf.jsonl
+            target/perf/perf-audit-protocol-qpx-h3-perf.jsonl
+            target/perf/perf-audit-advanced-transport-perf.jsonl
+            cargo test -p qpxd --release --test perf_smoke --locked --features http3-backend-h3 -- --nocapture
+            cargo test -p qpxd --release --test perf_smoke --locked --features http3-backend-qpx -- --nocapture
+            runs-on: ubuntu-latest
+            scripts/check-perf-runner.sh
+            target/perf/runner.jsonl
+            sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk
             cargo build -p qpxd --release --locked
-            scripts/nightly-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
-            target/perf/nightly-proxy-compare.jsonl
+            scripts/perf-audit-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
+            target/perf/perf-audit-proxy-compare.jsonl
+            scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
+            target/perf/perf-audit-http2-compare.jsonl
+            target/perf/http2-compare-logs/**
+            scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"
+            target/perf/perf-audit-streaming-compare.jsonl
+            target/perf/streaming-compare-logs/**
+            scripts/perf-audit-allocation-profile.sh
+            target/perf/perf-audit-allocation-profile.jsonl
+            target/perf/allocations/**
+            scripts/perf-audit-netem-compare.sh "$QPX_NETEM_COMPARE_JSON"
+            target/perf/perf-audit-netem-proxy-compare.jsonl
+            target/perf/perf-audit-netem-profile.jsonl
+            target/perf/netem-proxy-compare-logs/**
+            scripts/h3-interop/run.sh all
+            target/perf/qpx-h3-interop-matrix.json
             target/perf/proxy-compare-logs/**
-            scripts/compare-proxy-baseline.sh target/perf/nightly-proxy-compare.jsonl perf/baseline-proxy-compare.json
-            schedule:
-            cron: '17 19 * * *'
-            github.event_name == 'workflow_dispatch'
+            scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json
+            scripts/perf-audit-profile.sh
+            target/perf/perf-audit-profile-summary.jsonl
+            target/perf/perf-audit-profile-events.jsonl
+            target/perf/profiles/**
+            CARGO_PROFILE_RELEASE_STRIP: "none"
+            workflow_dispatch:
+            release:
+            types: [published]
+            tags:
+            "v*"
+            github.event_name == 'workflow_dispatch' || github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
         "#;
         let security = r#"
             RUSTFLAGS: -Zsanitizer=address

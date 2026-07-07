@@ -52,7 +52,7 @@ edges:
     let mut endpoint = build_quinn_client_endpoint()?;
     endpoint.set_default_client_config(build_h3_test_client_config(&cert_path)?);
     let conn = timeout(
-        Duration::from_secs(3),
+        profile_timeout(Duration::from_secs(3)),
         endpoint.connect(
             SocketAddr::from(([127, 0, 0, 1], port)),
             PERF_TLS_SERVER_NAME,
@@ -191,7 +191,7 @@ edges:
     let mut endpoint = build_quinn_client_endpoint()?;
     endpoint.set_default_client_config(build_h3_test_client_config(&cert_path)?);
     let conn = timeout(
-        Duration::from_secs(3),
+        profile_timeout(Duration::from_secs(3)),
         endpoint.connect(
             SocketAddr::from(([127, 0, 0, 1], front_port)),
             PERF_TLS_SERVER_NAME,

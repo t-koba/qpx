@@ -101,7 +101,9 @@ async fn spawn_tls_backend() -> Result<TlsBackend> {
                 let mut head = Vec::new();
                 let mut buf = [0u8; 1024];
                 loop {
-                    let Ok(n) = timeout(Duration::from_secs(3), tls.read(&mut buf)).await else {
+                    let Ok(n) =
+                        timeout(profile_timeout(Duration::from_secs(3)), tls.read(&mut buf)).await
+                    else {
                         return;
                     };
                     let Ok(n) = n else {
@@ -130,7 +132,7 @@ async fn spawn_tls_backend() -> Result<TlsBackend> {
 
 async fn mitm_round_trip(port: u16, backend_authority: &str, ca_cert: &Path) -> Result<()> {
     let mut stream = timeout(
-        Duration::from_secs(3),
+        profile_timeout(Duration::from_secs(3)),
         TcpStream::connect(("127.0.0.1", port)),
     )
     .await??;
@@ -156,7 +158,7 @@ async fn mitm_round_trip(port: u16, backend_authority: &str, ca_cert: &Path) -> 
     let server_name =
         ServerName::try_from(MITM_SERVER_NAME.to_string()).map_err(|_| anyhow!("bad sni"))?;
     let mut tls = timeout(
-        Duration::from_secs(3),
+        profile_timeout(Duration::from_secs(3)),
         connector.connect(server_name, stream),
     )
     .await??;
@@ -169,7 +171,7 @@ async fn mitm_round_trip(port: u16, backend_authority: &str, ca_cert: &Path) -> 
     let mut response = Vec::new();
     let mut buf = [0u8; 1024];
     loop {
-        match timeout(Duration::from_secs(3), tls.read(&mut buf)).await {
+        match timeout(profile_timeout(Duration::from_secs(3)), tls.read(&mut buf)).await {
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => response.extend_from_slice(&buf[..n]),
             Ok(Err(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
@@ -185,7 +187,7 @@ async fn mitm_round_trip(port: u16, backend_authority: &str, ca_cert: &Path) -> 
 
 async fn wait_for_file(path: &Path) -> Result<()> {
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
+    while started.elapsed() < profile_timeout(Duration::from_secs(5)) {
         if path.is_file() {
             return Ok(());
         }
@@ -198,7 +200,11 @@ async fn read_http1_status(stream: &mut TcpStream) -> Result<u16> {
     let mut head = Vec::new();
     let mut buf = [0u8; 256];
     loop {
-        let n = timeout(Duration::from_secs(3), stream.read(&mut buf)).await??;
+        let n = timeout(
+            profile_timeout(Duration::from_secs(3)),
+            stream.read(&mut buf),
+        )
+        .await??;
         if n == 0 {
             return Err(anyhow!("connection closed before CONNECT response"));
         }

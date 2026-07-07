@@ -116,8 +116,11 @@ runtime:
         let authority = authority.clone();
         let client_hello = client_hello.clone();
         Box::pin(async move {
-            let mut stream =
-                timeout(Duration::from_secs(3), TcpStream::connect(proxy_addr)).await??;
+            let mut stream = timeout(
+                profile_timeout(Duration::from_secs(3)),
+                TcpStream::connect(proxy_addr),
+            )
+            .await??;
             let request = format!(
                 "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
             );
@@ -130,7 +133,11 @@ runtime:
             stream.write_all(client_hello.as_slice()).await?;
             stream.flush().await?;
             let mut echoed = vec![0u8; client_hello.len()];
-            timeout(Duration::from_secs(3), stream.read_exact(&mut echoed)).await??;
+            timeout(
+                profile_timeout(Duration::from_secs(3)),
+                stream.read_exact(&mut echoed),
+            )
+            .await??;
             if echoed != client_hello.as_slice() {
                 return Err(anyhow!("unexpected CONNECT echo payload"));
             }

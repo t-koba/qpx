@@ -82,6 +82,8 @@ async fn measure_parallel_perf(
     thresholds: PerfThresholds,
     op: PerfOperation,
 ) -> Result<()> {
+    let total_requests = profile_total_requests(total_requests);
+    let concurrency = profile_concurrency(concurrency, total_requests);
     let latencies = Arc::new(Mutex::new(Vec::with_capacity(total_requests)));
     let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let started = Instant::now();
@@ -145,6 +147,10 @@ fn report_perf(
     );
     write_perf_artifact(label, total_requests, elapsed, req_per_sec, p50, p95, p99)?;
 
+    if perf_profile_mode() {
+        return Ok(());
+    }
+
     assert!(
         req_per_sec >= thresholds.min_req_per_sec,
         "throughput regression on {label}: req_per_sec={req_per_sec:.1} (< {})",
@@ -173,14 +179,15 @@ fn write_perf_artifact(
     };
     let _guard = perf_artifact_lock().lock().expect("perf artifact lock");
     let path = PathBuf::from(path);
+    let (rss_peak_mb, cpu_ms) = resource_snapshot();
     let record = serde_json::json!({
         "bench": canonical_perf_bench_label(label),
         "legacy_bench": label,
         "first_byte_ms": serde_json::Value::Null,
         "p95_chunk_gap_ms": serde_json::Value::Null,
         "total_ms": elapsed.as_secs_f64() * 1000.0,
-        "rss_peak_mb": serde_json::Value::Null,
-        "cpu_ms": serde_json::Value::Null,
+        "rss_peak_mb": rss_peak_mb,
+        "cpu_ms": cpu_ms,
         "bytes": serde_json::Value::Null,
         "commit": perf_commit(),
         "total_requests": total_requests,
@@ -189,6 +196,7 @@ fn write_perf_artifact(
         "p50_ms": p50.as_secs_f64() * 1000.0,
         "p95_ms": p95.as_secs_f64() * 1000.0,
         "p99_ms": p99.as_secs_f64() * 1000.0,
+        "profile_mode": perf_profile_mode(),
     });
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -203,6 +211,145 @@ fn write_perf_artifact(
         .with_context(|| format!("open perf artifact {}", path.display()))?;
     writeln!(file, "{}", serde_json::to_string(&record)?).context("write perf artifact")?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn resource_snapshot() -> (serde_json::Value, serde_json::Value) {
+    unsafe {
+        let mut self_usage: libc::rusage = std::mem::zeroed();
+        let mut child_usage: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_SELF, &mut self_usage) != 0
+            || libc::getrusage(libc::RUSAGE_CHILDREN, &mut child_usage) != 0
+        {
+            return (serde_json::Value::Null, serde_json::Value::Null);
+        }
+        let (live_qpxd_rss_peak_mb, live_qpxd_cpu_ms) = live_qpxd_resource_snapshot();
+        let cpu_ms = timeval_ms(self_usage.ru_utime)
+            + timeval_ms(self_usage.ru_stime)
+            + timeval_ms(child_usage.ru_utime)
+            + timeval_ms(child_usage.ru_stime)
+            + live_qpxd_cpu_ms;
+        let rss_peak_mb = maxrss_to_mb(self_usage.ru_maxrss.max(child_usage.ru_maxrss))
+            .max(live_qpxd_rss_peak_mb);
+        (serde_json::json!(rss_peak_mb), serde_json::json!(cpu_ms))
+    }
+}
+
+#[cfg(not(unix))]
+fn resource_snapshot() -> (serde_json::Value, serde_json::Value) {
+    (serde_json::Value::Null, serde_json::Value::Null)
+}
+
+#[cfg(unix)]
+fn timeval_ms(value: libc::timeval) -> f64 {
+    value.tv_sec as f64 * 1000.0 + value.tv_usec as f64 / 1000.0
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn maxrss_to_mb(value: libc::c_long) -> f64 {
+    value as f64 / 1024.0
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn maxrss_to_mb(value: libc::c_long) -> f64 {
+    value as f64 / 1024.0 / 1024.0
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn live_qpxd_resource_snapshot() -> (f64, f64) {
+    let clock_ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if clock_ticks <= 0 {
+        return (0.0, 0.0);
+    }
+    let mut rss_peak_kb = 0.0_f64;
+    let mut cpu_ms = 0.0_f64;
+    for pid in common::qpxd_child_pids() {
+        rss_peak_kb += linux_status_kb(pid, "VmHWM");
+        cpu_ms += linux_cpu_ticks(pid) * 1000.0 / clock_ticks as f64;
+    }
+    (rss_peak_kb / 1024.0, cpu_ms)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn live_qpxd_resource_snapshot() -> (f64, f64) {
+    (0.0, 0.0)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn linux_status_kb(pid: u32, key: &str) -> f64 {
+    let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return 0.0;
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix(&format!("{key}:")) {
+            return rest
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.0);
+        }
+    }
+    0.0
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn linux_cpu_ticks(pid: u32) -> f64 {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return 0.0;
+    };
+    let Some((_, rest)) = stat.split_once(") ") else {
+        return 0.0;
+    };
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    let utime = fields
+        .get(11)
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let stime = fields
+        .get(12)
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    utime + stime
+}
+
+fn perf_profile_mode() -> bool {
+    std::env::var("QPX_PERF_PROFILE").is_ok_and(|value| value == "1" || value == "true")
+}
+
+fn profile_total_requests(total_requests: usize) -> usize {
+    if !perf_profile_mode() {
+        return total_requests;
+    }
+    let limit = std::env::var("QPX_PERF_PROFILE_REQUESTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(32);
+    total_requests.min(limit).max(1)
+}
+
+fn profile_concurrency(concurrency: usize, total_requests: usize) -> usize {
+    if !perf_profile_mode() {
+        return concurrency;
+    }
+    let limit = std::env::var("QPX_PERF_PROFILE_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(4);
+    concurrency.min(limit).min(total_requests).max(1)
+}
+
+fn profile_timeout(duration: Duration) -> Duration {
+    if !perf_profile_mode() {
+        return duration;
+    }
+    let multiplier = std::env::var("QPX_PERF_PROFILE_TIMEOUT_MULTIPLIER")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(50);
+    duration.saturating_mul(multiplier)
 }
 
 fn perf_artifact_lock() -> &'static std::sync::Mutex<()> {
@@ -333,7 +480,11 @@ async fn read_http1_status(stream: &mut TcpStream) -> Result<u16> {
     let mut head = Vec::new();
     let mut buf = [0u8; 1024];
     loop {
-        let n = timeout(Duration::from_secs(3), stream.read(&mut buf)).await??;
+        let n = timeout(
+            profile_timeout(Duration::from_secs(3)),
+            stream.read(&mut buf),
+        )
+        .await??;
         if n == 0 {
             return Err(anyhow!("connection closed before HTTP/1 response head"));
         }

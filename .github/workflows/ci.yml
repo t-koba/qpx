@@ -2,10 +2,14 @@ name: ci
 
 on:
   push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
   pull_request:
-  schedule:
-    - cron: '17 19 * * *'
   workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -19,7 +23,6 @@ jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -30,7 +33,6 @@ jobs:
   msrv:
     name: msrv
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
@@ -45,7 +47,6 @@ jobs:
   typos:
     name: typos
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: crate-ci/typos@v1.43.5
@@ -53,7 +54,6 @@ jobs:
   sensitive_artifacts:
     name: sensitive artifacts
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - name: reject local paths, secrets, and runtime artifacts
@@ -62,7 +62,6 @@ jobs:
   doc:
     name: doc
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -74,7 +73,6 @@ jobs:
   public_api:
     name: public-api
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -90,7 +88,6 @@ jobs:
   machete:
     name: unused-dependencies
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -99,7 +96,6 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -115,7 +111,6 @@ jobs:
   e2e_tests:
     name: e2e tests
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -144,7 +139,6 @@ jobs:
   e2e_control_plane_windows:
     name: control-plane e2e (windows)
     runs-on: windows-2022
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -160,7 +154,6 @@ jobs:
   perf_smoke:
     name: perf smoke
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -178,7 +171,7 @@ jobs:
           QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/advanced-transport-perf.jsonl
         run: |
           mkdir -p target/perf
-          cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture
+          cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture
       - name: upload perf smoke artifact
         uses: actions/upload-artifact@v4
         if: always()
@@ -187,48 +180,107 @@ jobs:
           path: target/perf/*.jsonl
           if-no-files-found: ignore
 
-  nightly_perf_bench:
-    name: nightly perf bench
+  perf_audit:
+    name: perf audit
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: verify perf runner capacity
+        env:
+          QPX_PERF_RUNNER_JSON: ${{ github.workspace }}/target/perf/runner.jsonl
+        run: |
+          mkdir -p target/perf
+          scripts/check-perf-runner.sh
       - name: install proxy comparison packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y apache2 apache2-utils lighttpd nginx wrk
+          sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk
       - name: criterion streaming throughput bench
         env:
           RUSTFLAGS: "-D warnings"
         run: |
           mkdir -p target/perf
-          printf '{"bench":"criterion_streaming_throughput","first_byte_ms":null,"p95_chunk_gap_ms":null,"total_ms":null,"rss_peak_mb":null,"cpu_ms":null,"bytes":null,"commit":"%s"}\n' "${GITHUB_SHA:-unknown}" > target/perf/nightly-criterion.jsonl
+          printf '{"bench":"criterion_streaming_throughput","first_byte_ms":null,"p95_chunk_gap_ms":null,"total_ms":null,"rss_peak_mb":null,"cpu_ms":null,"bytes":null,"commit":"%s"}\n' "${GITHUB_SHA:-unknown}" > target/perf/perf-audit-criterion.jsonl
           cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10
+      - name: h3 crate protocol perf benchmarks
+        env:
+          RUSTFLAGS: "-D warnings"
+          QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-audit-protocol-h3-crate-perf.jsonl
+        run: |
+          cargo test -p qpxd --release --test perf_smoke --locked --features http3-backend-h3 -- --nocapture
+      - name: qpx http3 protocol perf benchmarks
+        env:
+          RUSTFLAGS: "-D warnings"
+          QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-audit-protocol-qpx-h3-perf.jsonl
+        run: |
+          cargo test -p qpxd --release --test perf_smoke --locked --features http3-backend-qpx -- --nocapture
+      - name: advanced transport perf benchmarks
+        env:
+          RUSTFLAGS: "-D warnings"
+          QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-audit-advanced-transport-perf.jsonl
+        run: |
+          cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture
       - name: external proxy comparison bench
         env:
           RUSTFLAGS: "-D warnings"
-          QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/nightly-proxy-compare.jsonl
+          QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-proxy-compare.jsonl
         run: |
           cargo build -p qpxd --release --locked
-          scripts/nightly-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
+          scripts/perf-audit-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
+      - name: external http2 comparison bench
+        env:
+          QPX_HTTP2_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-http2-compare.jsonl
+        run: scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
+      - name: external long streaming comparison bench
+        env:
+          QPX_STREAMING_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-streaming-compare.jsonl
+        run: scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"
+      - name: allocation profile
+        env:
+          QPX_ALLOCATION_PROFILE_JSON: ${{ github.workspace }}/target/perf/perf-audit-allocation-profile.jsonl
+          QPX_ALLOCATION_PROFILE_DIR: ${{ github.workspace }}/target/perf/allocations
+        run: scripts/perf-audit-allocation-profile.sh
       - name: compare proxy baseline
-        run: scripts/compare-proxy-baseline.sh target/perf/nightly-proxy-compare.jsonl perf/baseline-proxy-compare.json
-      - name: upload nightly perf artifact
+        run: scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json
+      - name: netem proxy comparison bench
+        env:
+          QPX_NETEM_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-netem-proxy-compare.jsonl
+          QPX_NETEM_META_JSON: ${{ github.workspace }}/target/perf/perf-audit-netem-profile.jsonl
+        run: scripts/perf-audit-netem-compare.sh "$QPX_NETEM_COMPARE_JSON"
+      - name: http3 interop matrix
+        env:
+          QPX_H3_INTEROP_JSON: ${{ github.workspace }}/target/perf/qpx-h3-interop-matrix.json
+        run: scripts/h3-interop/run.sh all
+      - name: callgrind hot path profile
+        env:
+          RUSTFLAGS: "-D warnings -C force-frame-pointers=yes"
+          CARGO_PROFILE_RELEASE_DEBUG: "1"
+          CARGO_PROFILE_RELEASE_STRIP: "none"
+          QPX_PERF_PROFILE_JSON: ${{ github.workspace }}/target/perf/perf-audit-profile-summary.jsonl
+          QPX_PERF_PROFILE_EVENTS: ${{ github.workspace }}/target/perf/perf-audit-profile-events.jsonl
+        run: scripts/perf-audit-profile.sh
+      - name: upload perf audit artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: qpx-nightly-perf-jsonl
+          name: qpx-perf-audit-jsonl
           path: |
             target/perf/*.jsonl
+            target/perf/*.json
+            target/perf/allocations/**
+            target/perf/http2-compare-logs/**
+            target/perf/netem-proxy-compare-logs/**
             target/perf/proxy-compare-logs/**
+            target/perf/streaming-compare-logs/**
+            target/perf/profiles/**
           if-no-files-found: ignore
 
   config_samples:
     name: config samples
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -251,7 +303,6 @@ jobs:
   build_test:
     name: build/test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -289,7 +340,6 @@ jobs:
   release_target_preflight:
     name: release preflight (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -342,7 +392,6 @@ jobs:
   clippy_feature_matrix:
     name: clippy (feature matrix, ubuntu)
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v5
 

@@ -165,6 +165,7 @@ async fn measure_isolated_perf(
     thresholds: PerfThresholds,
     op: PerfOperation,
 ) -> Result<()> {
+    let total_requests = profile_total_requests(total_requests);
     let started = Instant::now();
     let mut latencies = Vec::with_capacity(total_requests);
     for _ in 0..total_requests {
@@ -205,6 +206,10 @@ fn report_perf(
     );
     write_perf_artifact(label, total_requests, elapsed, req_per_sec, p95)?;
 
+    if perf_profile_mode() {
+        return Ok(());
+    }
+
     assert!(
         req_per_sec >= thresholds.min_req_per_sec,
         "throughput regression on {label}: req_per_sec={req_per_sec:.2} (< {})",
@@ -231,20 +236,22 @@ fn write_perf_artifact(
     };
     let _guard = perf_artifact_lock().lock().expect("perf artifact lock");
     let path = PathBuf::from(path);
+    let (rss_peak_mb, cpu_ms) = resource_snapshot();
     let record = serde_json::json!({
         "bench": canonical_perf_bench_label(label),
         "legacy_bench": label,
         "first_byte_ms": serde_json::Value::Null,
         "p95_chunk_gap_ms": serde_json::Value::Null,
         "total_ms": elapsed.as_secs_f64() * 1000.0,
-        "rss_peak_mb": serde_json::Value::Null,
-        "cpu_ms": serde_json::Value::Null,
+        "rss_peak_mb": rss_peak_mb,
+        "cpu_ms": cpu_ms,
         "bytes": serde_json::Value::Null,
         "commit": perf_commit(),
         "total_requests": total_requests,
         "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
         "req_per_sec": req_per_sec,
         "p95_ms": p95.as_secs_f64() * 1000.0,
+        "profile_mode": perf_profile_mode(),
     });
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -261,6 +268,133 @@ fn write_perf_artifact(
     writeln!(file, "{}", serde_json::to_string(&record)?)
         .map_err(|err| anyhow!("write perf artifact: {err}"))?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn resource_snapshot() -> (serde_json::Value, serde_json::Value) {
+    unsafe {
+        let mut self_usage: libc::rusage = std::mem::zeroed();
+        let mut child_usage: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_SELF, &mut self_usage) != 0
+            || libc::getrusage(libc::RUSAGE_CHILDREN, &mut child_usage) != 0
+        {
+            return (serde_json::Value::Null, serde_json::Value::Null);
+        }
+        let (live_qpxd_rss_peak_mb, live_qpxd_cpu_ms) = live_qpxd_resource_snapshot();
+        let cpu_ms = timeval_ms(self_usage.ru_utime)
+            + timeval_ms(self_usage.ru_stime)
+            + timeval_ms(child_usage.ru_utime)
+            + timeval_ms(child_usage.ru_stime)
+            + live_qpxd_cpu_ms;
+        let rss_peak_mb = maxrss_to_mb(self_usage.ru_maxrss.max(child_usage.ru_maxrss))
+            .max(live_qpxd_rss_peak_mb);
+        (serde_json::json!(rss_peak_mb), serde_json::json!(cpu_ms))
+    }
+}
+
+#[cfg(not(unix))]
+fn resource_snapshot() -> (serde_json::Value, serde_json::Value) {
+    (serde_json::Value::Null, serde_json::Value::Null)
+}
+
+#[cfg(unix)]
+fn timeval_ms(value: libc::timeval) -> f64 {
+    value.tv_sec as f64 * 1000.0 + value.tv_usec as f64 / 1000.0
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn maxrss_to_mb(value: libc::c_long) -> f64 {
+    value as f64 / 1024.0
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn maxrss_to_mb(value: libc::c_long) -> f64 {
+    value as f64 / 1024.0 / 1024.0
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn live_qpxd_resource_snapshot() -> (f64, f64) {
+    let clock_ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if clock_ticks <= 0 {
+        return (0.0, 0.0);
+    }
+    let mut rss_peak_kb = 0.0_f64;
+    let mut cpu_ms = 0.0_f64;
+    for pid in common::qpxd_child_pids() {
+        rss_peak_kb += linux_status_kb(pid, "VmHWM");
+        cpu_ms += linux_cpu_ticks(pid) * 1000.0 / clock_ticks as f64;
+    }
+    (rss_peak_kb / 1024.0, cpu_ms)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn live_qpxd_resource_snapshot() -> (f64, f64) {
+    (0.0, 0.0)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn linux_status_kb(pid: u32, key: &str) -> f64 {
+    let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return 0.0;
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix(&format!("{key}:")) {
+            return rest
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.0);
+        }
+    }
+    0.0
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn linux_cpu_ticks(pid: u32) -> f64 {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return 0.0;
+    };
+    let Some((_, rest)) = stat.split_once(") ") else {
+        return 0.0;
+    };
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    let utime = fields
+        .get(11)
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let stime = fields
+        .get(12)
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    utime + stime
+}
+
+fn perf_profile_mode() -> bool {
+    std::env::var("QPX_PERF_PROFILE").is_ok_and(|value| value == "1" || value == "true")
+}
+
+fn profile_total_requests(total_requests: usize) -> usize {
+    if !perf_profile_mode() {
+        return total_requests;
+    }
+    let limit = std::env::var("QPX_PERF_PROFILE_REQUESTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(2);
+    total_requests.min(limit).max(1)
+}
+
+fn profile_timeout(duration: Duration) -> Duration {
+    if !perf_profile_mode() {
+        return duration;
+    }
+    let multiplier = std::env::var("QPX_PERF_PROFILE_TIMEOUT_MULTIPLIER")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(50);
+    duration.saturating_mul(multiplier)
 }
 
 fn perf_artifact_lock() -> &'static std::sync::Mutex<()> {
@@ -336,7 +470,7 @@ runtime:
     let mut endpoint = build_quinn_client_endpoint()?;
     endpoint.set_default_client_config(build_h3_test_client_config(&ca_cert)?);
     let conn = timeout(
-        Duration::from_secs(5),
+        profile_timeout(Duration::from_secs(5)),
         endpoint.connect(SocketAddr::from(([127, 0, 0, 1], udp_port)), "localhost")?,
     )
     .await??;
@@ -365,7 +499,11 @@ runtime:
 
     let mut stream = sender.send_request(request).await?;
     stream.finish().await?;
-    let response = timeout(Duration::from_secs(5), stream.recv_response()).await??;
+    let response = timeout(
+        profile_timeout(Duration::from_secs(5)),
+        stream.recv_response(),
+    )
+    .await??;
     assert_eq!(response.status(), http::StatusCode::OK);
     assert_eq!(
         response
@@ -421,7 +559,7 @@ runtime:
     let mut endpoint = build_quinn_client_endpoint()?;
     endpoint.set_default_client_config(build_h3_test_client_config(&ca_cert)?);
     let connection = timeout(
-        Duration::from_secs(5),
+        profile_timeout(Duration::from_secs(5)),
         endpoint.connect(SocketAddr::from(([127, 0, 0, 1], udp_port)), "localhost")?,
     )
     .await??;
@@ -440,10 +578,10 @@ runtime:
         qpx_h3::Settings {
             enable_extended_connect: true,
             enable_datagram: true,
-            read_timeout: Duration::from_secs(5),
+            read_timeout: profile_timeout(Duration::from_secs(5)),
             ..Default::default()
         },
-        Duration::from_secs(5),
+        profile_timeout(Duration::from_secs(5)),
     )
     .await?;
     assert_eq!(stream.response.status(), http::StatusCode::OK);
@@ -452,10 +590,13 @@ runtime:
         .request_stream
         .send_data(Bytes::from_static(b"ping"))
         .await?;
-    let echoed = timeout(Duration::from_secs(5), stream.request_stream.recv_data())
-        .await
-        .map_err(|_| anyhow!("timed out waiting for extended CONNECT echo"))??
-        .ok_or_else(|| anyhow!("missing extended CONNECT echo"))?;
+    let echoed = timeout(
+        profile_timeout(Duration::from_secs(5)),
+        stream.request_stream.recv_data(),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for extended CONNECT echo"))??
+    .ok_or_else(|| anyhow!("missing extended CONNECT echo"))?;
     assert_eq!(echoed, Bytes::from_static(b"ping"));
 
     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -467,10 +608,13 @@ runtime:
         Bytes::from_static(b"dg"),
         &mut bytes::BytesMut::new(),
     )?;
-    let echoed_datagram = timeout(Duration::from_secs(5), datagrams.receiver.recv())
-        .await
-        .map_err(|_| anyhow!("timed out waiting for extended CONNECT datagram"))?
-        .ok_or_else(|| anyhow!("missing extended CONNECT datagram"))?;
+    let echoed_datagram = timeout(
+        profile_timeout(Duration::from_secs(5)),
+        datagrams.receiver.recv(),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for extended CONNECT datagram"))?
+    .ok_or_else(|| anyhow!("missing extended CONNECT datagram"))?;
     assert_eq!(echoed_datagram, Bytes::from_static(b"dg"));
 
     shutdown_qpx_extended_stream(stream).await?;
@@ -521,7 +665,7 @@ runtime:
     let mut endpoint = build_quinn_client_endpoint()?;
     endpoint.set_default_client_config(build_h3_test_client_config(&ca_cert)?);
     let connection = timeout(
-        Duration::from_secs(5),
+        profile_timeout(Duration::from_secs(5)),
         endpoint.connect(SocketAddr::from(([127, 0, 0, 1], udp_port)), "localhost")?,
     )
     .await??;
@@ -542,10 +686,10 @@ runtime:
             enable_datagram: true,
             enable_webtransport: true,
             max_webtransport_sessions: 4,
-            read_timeout: Duration::from_secs(5),
+            read_timeout: profile_timeout(Duration::from_secs(5)),
             ..Default::default()
         },
-        Duration::from_secs(5),
+        profile_timeout(Duration::from_secs(5)),
     )
     .await?;
     assert_eq!(stream.response.status(), http::StatusCode::OK);
@@ -554,10 +698,13 @@ runtime:
         .request_stream
         .send_data(Bytes::from_static(b"request-stream"))
         .await?;
-    let echoed = timeout(Duration::from_secs(5), stream.request_stream.recv_data())
-        .await
-        .map_err(|_| anyhow!("timed out waiting for WebTransport request echo"))??
-        .ok_or_else(|| anyhow!("missing WebTransport request echo"))?;
+    let echoed = timeout(
+        profile_timeout(Duration::from_secs(5)),
+        stream.request_stream.recv_data(),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for WebTransport request echo"))??
+    .ok_or_else(|| anyhow!("missing WebTransport request echo"))?;
     assert_eq!(echoed, Bytes::from_static(b"request-stream"));
 
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -569,10 +716,13 @@ runtime:
         Bytes::from_static(b"wt-dgram"),
         &mut bytes::BytesMut::new(),
     )?;
-    let echoed_datagram = timeout(Duration::from_secs(5), datagrams.receiver.recv())
-        .await
-        .map_err(|_| anyhow!("timed out waiting for WebTransport datagram echo"))?
-        .ok_or_else(|| anyhow!("missing WebTransport datagram echo"))?;
+    let echoed_datagram = timeout(
+        profile_timeout(Duration::from_secs(5)),
+        datagrams.receiver.recv(),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for WebTransport datagram echo"))?
+    .ok_or_else(|| anyhow!("missing WebTransport datagram echo"))?;
     assert_eq!(echoed_datagram, Bytes::from_static(b"wt-dgram"));
 
     let session_id = stream.request_stream.id();
@@ -589,10 +739,13 @@ runtime:
         .take()
         .ok_or_else(|| anyhow!("missing associated uni receiver"))?;
 
-    let server_bidi = timeout(Duration::from_secs(5), associated_bidi.recv())
-        .await
-        .map_err(|_| anyhow!("timed out waiting for server-initiated bidi"))?
-        .ok_or_else(|| anyhow!("missing server-initiated bidi"))?;
+    let server_bidi = timeout(
+        profile_timeout(Duration::from_secs(5)),
+        associated_bidi.recv(),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for server-initiated bidi"))?
+    .ok_or_else(|| anyhow!("missing server-initiated bidi"))?;
     assert_eq!(read_qpx_bidi_stream(server_bidi).await?, b"server-bidi");
 
     let client_bidi = opener.open_webtransport_bidi(session_id).await?;
@@ -607,10 +760,13 @@ runtime:
     }
     assert_eq!(echoed_bidi, b"client-bidi");
 
-    let server_uni = timeout(Duration::from_secs(5), associated_uni.recv())
-        .await
-        .map_err(|_| anyhow!("timed out waiting for server-initiated uni"))?
-        .ok_or_else(|| anyhow!("missing server-initiated uni"))?;
+    let server_uni = timeout(
+        profile_timeout(Duration::from_secs(5)),
+        associated_uni.recv(),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for server-initiated uni"))?
+    .ok_or_else(|| anyhow!("missing server-initiated uni"))?;
     assert_eq!(read_qpx_uni_stream(server_uni).await?, b"server-uni");
 
     let mut client_uni = opener.open_webtransport_uni(session_id).await?;
@@ -618,10 +774,13 @@ runtime:
         .send_chunk(Bytes::from_static(b"client-uni"))
         .await?;
     client_uni.finish().await?;
-    let echoed_uni = timeout(Duration::from_secs(5), associated_uni.recv())
-        .await
-        .map_err(|_| anyhow!("timed out waiting for echoed uni"))?
-        .ok_or_else(|| anyhow!("missing echoed uni"))?;
+    let echoed_uni = timeout(
+        profile_timeout(Duration::from_secs(5)),
+        associated_uni.recv(),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for echoed uni"))?
+    .ok_or_else(|| anyhow!("missing echoed uni"))?;
     assert_eq!(read_qpx_uni_stream(echoed_uni).await?, b"client-uni");
 
     shutdown_qpx_extended_stream(stream).await?;
@@ -632,7 +791,7 @@ runtime:
 
 async fn wait_for_file(path: &Path) -> Result<()> {
     let started = tokio::time::Instant::now();
-    while started.elapsed() < Duration::from_secs(15) {
+    while started.elapsed() < profile_timeout(Duration::from_secs(15)) {
         if path.is_file() {
             return Ok(());
         }
@@ -650,7 +809,7 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
         qpx_h3::Settings {
             enable_extended_connect: true,
             enable_datagram: true,
-            read_timeout: Duration::from_secs(5),
+            read_timeout: profile_timeout(Duration::from_secs(5)),
             ..Default::default()
         }
     }
@@ -679,12 +838,15 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
         req_stream
             .send_response_head(&ok_qpx_response_head(false))
             .await?;
-        let chunk = timeout(Duration::from_secs(5), req_stream.recv_data())
-            .await
-            .map_err(|_| anyhow!("timed out waiting for extended CONNECT request data"))??
-            .ok_or_else(|| anyhow!("missing extended CONNECT request data"))?;
+        let chunk = timeout(
+            profile_timeout(Duration::from_secs(5)),
+            req_stream.recv_data(),
+        )
+        .await
+        .map_err(|_| anyhow!("timed out waiting for extended CONNECT request data"))??
+        .ok_or_else(|| anyhow!("missing extended CONNECT request data"))?;
         req_stream.send_data(chunk).await?;
-        let payload = timeout(Duration::from_secs(5), async {
+        let payload = timeout(profile_timeout(Duration::from_secs(5)), async {
             datagrams
                 .as_mut()
                 .ok_or_else(|| anyhow!("missing downstream datagrams"))?
@@ -715,7 +877,7 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
             enable_datagram: true,
             enable_webtransport: true,
             max_webtransport_sessions: 8,
-            read_timeout: Duration::from_secs(5),
+            read_timeout: profile_timeout(Duration::from_secs(5)),
             ..Default::default()
         }
     }
@@ -761,13 +923,16 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
             .await?;
         server_uni.finish().await?;
 
-        let chunk = timeout(Duration::from_secs(5), req_stream.recv_data())
-            .await
-            .map_err(|_| anyhow!("timed out waiting for WebTransport request data"))??
-            .ok_or_else(|| anyhow!("missing WebTransport request data"))?;
+        let chunk = timeout(
+            profile_timeout(Duration::from_secs(5)),
+            req_stream.recv_data(),
+        )
+        .await
+        .map_err(|_| anyhow!("timed out waiting for WebTransport request data"))??
+        .ok_or_else(|| anyhow!("missing WebTransport request data"))?;
         req_stream.send_data(chunk).await?;
 
-        let payload = timeout(Duration::from_secs(5), async {
+        let payload = timeout(profile_timeout(Duration::from_secs(5)), async {
             datagrams
                 .as_mut()
                 .ok_or_else(|| anyhow!("missing WebTransport datagrams"))?
@@ -784,7 +949,7 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
             .sender
             .send_unprefixed_datagram_with_scratch(payload, &mut bytes::BytesMut::new())?;
 
-        let bidi = timeout(Duration::from_secs(5), bidi_streams.recv())
+        let bidi = timeout(profile_timeout(Duration::from_secs(5)), bidi_streams.recv())
             .await
             .map_err(|_| anyhow!("timed out waiting for client bidi stream"))?
             .ok_or_else(|| anyhow!("missing client bidi stream"))?;
@@ -794,7 +959,7 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
         }
         bidi_send.finish().await?;
 
-        let uni = timeout(Duration::from_secs(5), uni_streams.recv())
+        let uni = timeout(profile_timeout(Duration::from_secs(5)), uni_streams.recv())
             .await
             .map_err(|_| anyhow!("timed out waiting for client uni stream"))?
             .ok_or_else(|| anyhow!("missing client uni stream"))?;
@@ -817,7 +982,7 @@ async fn start_qpx_h3_server<H: qpx_h3::RequestHandler>(
     let endpoint = quinn::Endpoint::server(server_config, SocketAddr::from(([127, 0, 0, 1], 0)))?;
     let addr = endpoint.local_addr()?;
     let task = tokio::spawn(async move {
-        let connecting = timeout(Duration::from_secs(5), endpoint.accept())
+        let connecting = timeout(profile_timeout(Duration::from_secs(5)), endpoint.accept())
             .await
             .map_err(|_| anyhow!("timed out waiting for inbound QUIC connection"))?
             .ok_or_else(|| anyhow!("server endpoint closed before accept"))?;
