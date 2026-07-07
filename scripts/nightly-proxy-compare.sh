@@ -5,8 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_JSON="${1:-${QPX_PROXY_COMPARE_JSON:-$ROOT_DIR/target/perf/nightly-proxy-compare.jsonl}}"
 LOG_ARTIFACT_DIR="${QPX_PROXY_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/proxy-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
-REQUESTS="${QPX_PROXY_COMPARE_REQUESTS:-5000}"
+DURATION_SECONDS="${QPX_PROXY_COMPARE_DURATION_SECONDS:-10}"
 CONCURRENCY="${QPX_PROXY_COMPARE_CONCURRENCY:-64}"
+THREADS="${QPX_PROXY_COMPARE_THREADS:-2}"
 BODY_BYTES="${QPX_PROXY_COMPARE_BODY_BYTES:-1024}"
 HOST_HEADER="${QPX_PROXY_COMPARE_HOST:-bench.local}"
 APACHE_BIN="${QPX_PROXY_COMPARE_APACHE_BIN:-}"
@@ -33,7 +34,8 @@ collect_artifacts() {
   rm -rf "$LOG_ARTIFACT_DIR"
   mkdir -p "$LOG_ARTIFACT_DIR"
   cp -R "$LOG_DIR"/. "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
-  cp "$TMP_DIR"/*.ab "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.wrk "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.lua "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.warmup "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.yaml "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   find "$TMP_DIR" -name '*.conf' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
@@ -238,24 +240,17 @@ LIGHTTPD
   wait_http "lighttpd" "$LIGHTTPD_PORT" "$pid" "$LOG_DIR/lighttpd.log"
 }
 
-extract_ab_value() {
+extract_metric() {
   local file="$1"
-  local pattern="$2"
-  awk -F: -v pattern="$pattern" '
-    $1 ~ pattern {
-      gsub(/^[ \t]+/, "", $2)
-      split($2, parts, " ")
-      print parts[1]
-      exit
-    }
-  ' "$file"
+  local key="$2"
+  awk -v key="$key" '$1 == key { print $2; exit }' "$file"
 }
 
-extract_ab_int_or_zero() {
+extract_metric_or_zero() {
   local file="$1"
-  local pattern="$2"
+  local key="$2"
   local value
-  value="$(extract_ab_value "$file" "$pattern")"
+  value="$(extract_metric "$file" "$key")"
   if [ -z "$value" ]; then
     echo 0
   else
@@ -285,50 +280,117 @@ expect_status_ok() {
 run_one() {
   local proxy="$1"
   local port="$2"
-  local out="$TMP_DIR/${proxy}.ab"
+  local out="$TMP_DIR/${proxy}.wrk"
+  local lua="$TMP_DIR/${proxy}.lua"
   local url="http://127.0.0.1:${port}/bench"
   local status_before status_after
 
+  cat >"$lua" <<LUA
+local expected = ${BODY_BYTES}
+local threads = {}
+
+setup = function(thread)
+  table.insert(threads, thread)
+end
+
+init = function(args)
+  responses = 0
+  non_200 = 0
+  bad_length = 0
+end
+
+request = function()
+  return wrk.format("GET", "/bench", { ["Host"] = "${HOST_HEADER}" })
+end
+
+response = function(status, headers, body)
+  responses = responses + 1
+  if status ~= 200 then
+    non_200 = non_200 + 1
+  end
+  if body == nil or string.len(body) ~= expected then
+    bad_length = bad_length + 1
+  end
+end
+
+done = function(summary, latency, requests)
+  local seconds = summary.duration / 1000000
+  local total_responses = 0
+  local total_non_200 = 0
+  local total_bad_length = 0
+  for _, thread in ipairs(threads) do
+    total_responses = total_responses + tonumber(thread:get("responses") or 0)
+    total_non_200 = total_non_200 + tonumber(thread:get("non_200") or 0)
+    total_bad_length = total_bad_length + tonumber(thread:get("bad_length") or 0)
+  end
+  io.write(string.format("qpx_complete_requests %d\n", total_responses))
+  io.write(string.format("qpx_summary_requests %d\n", summary.requests))
+  io.write(string.format("qpx_non_2xx_responses %d\n", total_non_200))
+  io.write(string.format("qpx_bad_length_responses %d\n", total_bad_length))
+  io.write(string.format("qpx_requests_per_sec %.6f\n", summary.requests / seconds))
+  io.write(string.format("qpx_transfer_kbytes_per_sec %.6f\n", summary.bytes / 1024 / seconds))
+end
+LUA
+
   expect_status_ok "$proxy" "$port" "preflight"
-  ab -k -n 200 -c 16 -H "Host: ${HOST_HEADER}" "$url" >"$TMP_DIR/${proxy}.warmup" 2>&1
+  wrk -t"$THREADS" -c16 -d2s -s "$lua" "$url" >"$TMP_DIR/${proxy}.warmup" 2>&1
   status_before="$(probe_status "$port")"
-  ab -k -n "$REQUESTS" -c "$CONCURRENCY" -H "Host: ${HOST_HEADER}" "$url" >"$out" 2>&1 || {
-    echo "ab failed for ${proxy}" >&2
+  wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" -s "$lua" "$url" >"$out" 2>&1 || {
+    echo "wrk failed for ${proxy}" >&2
     cat "$out" >&2 || true
     exit 1
   }
   status_after="$(probe_status "$port")"
 
-  local complete failed non_2xx write_errors rps mean_ms transfer_kbps commit valid
-  complete="$(extract_ab_int_or_zero "$out" "Complete requests")"
-  failed="$(extract_ab_int_or_zero "$out" "Failed requests")"
-  non_2xx="$(extract_ab_int_or_zero "$out" "Non-2xx responses")"
-  write_errors="$(extract_ab_int_or_zero "$out" "Write errors")"
-  rps="$(extract_ab_value "$out" "Requests per second")"
-  mean_ms="$(awk -F: '/Time per request/ && $0 !~ /across all concurrent requests/ {gsub(/^[ \t]+/, "", $2); split($2, parts, " "); print parts[1]; exit}' "$out")"
-  transfer_kbps="$(extract_ab_value "$out" "Transfer rate")"
+  local complete summary_requests failed non_2xx bad_length write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
+  complete="$(extract_metric_or_zero "$out" "qpx_complete_requests")"
+  summary_requests="$(extract_metric_or_zero "$out" "qpx_summary_requests")"
+  non_2xx="$(extract_metric_or_zero "$out" "qpx_non_2xx_responses")"
+  bad_length="$(extract_metric_or_zero "$out" "qpx_bad_length_responses")"
+  rps="$(extract_metric "$out" "qpx_requests_per_sec")"
+  transfer_kbps="$(extract_metric "$out" "qpx_transfer_kbytes_per_sec")"
+  mean_ms="$(awk '
+    /Latency/ {
+      value = $2
+      unit = substr(value, length(value) - 1)
+      number = substr(value, 1, length(value) - 2)
+      if (unit == "us") print number / 1000
+      else if (unit == "ms") print number
+      else if (unit == "s") print number * 1000
+      exit
+    }
+  ' "$out")"
+  connect_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "connect") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
+  read_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "read") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
+  write_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "write") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
+  timeout_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "timeout") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
+  connect_errors="${connect_errors:-0}"
+  read_errors="${read_errors:-0}"
+  write_errors="${write_errors:-0}"
+  timeout_errors="${timeout_errors:-0}"
+  failed=$((connect_errors + read_errors + write_errors + timeout_errors))
   commit="${GITHUB_SHA:-unknown}"
   if [ -z "$rps" ] || [ -z "$mean_ms" ] || [ -z "$transfer_kbps" ]; then
-    echo "${proxy} ab output is missing required throughput fields" >&2
+    echo "${proxy} wrk output is missing required throughput fields" >&2
     cat "$out" >&2 || true
     exit 1
   fi
-  valid="$([ "$complete" = "$REQUESTS" ] && [ "$failed" = 0 ] && [ "$non_2xx" = 0 ] && [ "$write_errors" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
-  printf '{"bench":"proxy_compare_http1_reverse","proxy":"%s","requests":%s,"concurrency":%s,"body_bytes":%s,"complete_requests":%s,"failed_requests":%s,"non_2xx_responses":%s,"write_errors":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"transfer_kbytes_per_sec":%s,"valid":%s,"commit":"%s"}\n' \
-    "$proxy" "$REQUESTS" "$CONCURRENCY" "$BODY_BYTES" "$complete" "$failed" "$non_2xx" "$write_errors" "$status_before" "$status_after" "$rps" "$mean_ms" "$transfer_kbps" "$valid" "$commit" >>"$OUT_JSON"
+  valid="$([ "$complete" -gt 0 ] && [ "$summary_requests" = "$complete" ] && [ "$failed" = 0 ] && [ "$non_2xx" = 0 ] && [ "$bad_length" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
+  printf '{"bench":"proxy_compare_http1_reverse","proxy":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"requests":%s,"complete_requests":%s,"failed_requests":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"write_errors":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"transfer_kbytes_per_sec":%s,"valid":%s,"commit":"%s"}\n' \
+    "$proxy" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$BODY_BYTES" "$summary_requests" "$complete" "$failed" "$non_2xx" "$bad_length" "$write_errors" "$status_before" "$status_after" "$rps" "$mean_ms" "$transfer_kbps" "$valid" "$commit" >>"$OUT_JSON"
 
   if [ "$valid" != true ]; then
     echo "${proxy} produced an invalid benchmark sample" >&2
-    echo "complete=${complete} failed=${failed} non_2xx=${non_2xx} write_errors=${write_errors} status_before=${status_before} status_after=${status_after}" >&2
+    echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} non_2xx=${non_2xx} bad_length=${bad_length} write_errors=${write_errors} status_before=${status_before} status_after=${status_after}" >&2
     cat "$out" >&2 || true
     exit 1
   fi
 }
 
-require_cmd ab
 require_cmd curl
 require_cmd lighttpd
 require_cmd nginx
+require_cmd wrk
 
 if [ -z "$APACHE_BIN" ]; then
   if command -v apache2 >/dev/null 2>&1; then

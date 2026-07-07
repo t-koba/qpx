@@ -12,6 +12,7 @@
         "lighttpd": 32757.89,
         "nginx": 32163.03
       },
+      "duration_seconds": 10,
       "qpxd_requests_per_sec": 13845.51,
       "requests": 5000,
       "source_commit": "dfad0aec342a8ec3548fbac37ac0bd99662df707"

@@ -129,17 +129,39 @@ def require_valid_sample(record):
         fail(f"proxy comparison record for {proxy} has failed requests")
     if nonnegative_int(record, "non_2xx_responses") != 0:
         fail(f"proxy comparison record for {proxy} has non-2xx responses")
+    if nonnegative_int(record, "bad_length_responses") != 0:
+        fail(f"proxy comparison record for {proxy} has bad response lengths")
     if nonnegative_int(record, "write_errors") != 0:
         fail(f"proxy comparison record for {proxy} has write errors")
     if str(record.get("status_before")) != "200" or str(record.get("status_after")) != "200":
         fail(f"proxy comparison record for {proxy} failed status probes")
 
 
+def sample_dimension(record):
+    if "duration_seconds" in record:
+        try:
+            duration_seconds = int(record["duration_seconds"])
+        except (TypeError, ValueError):
+            fail("duration_seconds must be an integer")
+        if duration_seconds <= 0:
+            fail("duration_seconds must be positive")
+        return ("duration_seconds", duration_seconds)
+    try:
+        requests = int(record["requests"])
+    except (KeyError, TypeError, ValueError):
+        fail("requests must be an integer")
+    if requests <= 0:
+        fail("requests must be positive")
+    return ("requests", requests)
+
+
 def lane_key(record):
     try:
+        dimension_name, dimension_value = sample_dimension(record)
         return (
             record["bench"],
-            int(record["requests"]),
+            dimension_name,
+            dimension_value,
             int(record["concurrency"]),
             int(record["body_bytes"]),
         )
@@ -168,24 +190,27 @@ def collect_ratios(records):
         external_rps = sorted(number(proxies[proxy], "requests_per_sec") for proxy in EXTERNAL_PROXIES)
         external_median_rps = external_rps[len(external_rps) // 2]
         ratio = qpxd_rps / external_median_rps
-        bench, requests, concurrency, body_bytes = key
+        bench, dimension_name, dimension_value, concurrency, body_bytes = key
+        ratio_record = {
+            "bench": bench,
+            dimension_name: dimension_value,
+            "concurrency": concurrency,
+            "body_bytes": body_bytes,
+            "baseline_ratio": round(ratio, 6),
+            "qpxd_requests_per_sec": qpxd_rps,
+            "external_proxy_median_requests_per_sec": external_median_rps,
+            "external_proxy_requests_per_sec": {
+                proxy: number(proxies[proxy], "requests_per_sec") for proxy in EXTERNAL_PROXIES
+            },
+            "direct_backend_requests_per_sec": number(proxies["direct-backend"], "requests_per_sec")
+            if "direct-backend" in proxies
+            else None,
+            "source_commit": proxies["qpxd"].get("commit", "unknown"),
+        }
+        if dimension_name == "duration_seconds":
+            ratio_record["requests"] = int(proxies["qpxd"]["requests"])
         ratios.append(
-            {
-                "bench": bench,
-                "requests": requests,
-                "concurrency": concurrency,
-                "body_bytes": body_bytes,
-                "baseline_ratio": round(ratio, 6),
-                "qpxd_requests_per_sec": qpxd_rps,
-                "external_proxy_median_requests_per_sec": external_median_rps,
-                "external_proxy_requests_per_sec": {
-                    proxy: number(proxies[proxy], "requests_per_sec") for proxy in EXTERNAL_PROXIES
-                },
-                "direct_backend_requests_per_sec": number(proxies["direct-backend"], "requests_per_sec")
-                if "direct-backend" in proxies
-                else None,
-                "source_commit": proxies["qpxd"].get("commit", "unknown"),
-            }
+            ratio_record
         )
 
     if not ratios:
@@ -195,9 +220,11 @@ def collect_ratios(records):
 
 def baseline_key(entry):
     try:
+        dimension_name, dimension_value = sample_dimension(entry)
         return (
             entry["bench"],
-            int(entry["requests"]),
+            dimension_name,
+            dimension_value,
             int(entry["concurrency"]),
             int(entry["body_bytes"]),
         )

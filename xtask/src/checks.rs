@@ -3002,7 +3002,7 @@ fn phase4_ci_acceptance_violations(
         "cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture",
         "cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture",
         "cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10",
-        "sudo apt-get install -y apache2 apache2-utils lighttpd nginx",
+        "sudo apt-get install -y apache2 apache2-utils lighttpd nginx wrk",
         "cargo build -p qpxd --release --locked",
         "scripts/nightly-proxy-compare.sh \"$QPX_PROXY_COMPARE_JSON\"",
         "target/perf/nightly-proxy-compare.jsonl",
@@ -5319,7 +5319,7 @@ mod tests {
             cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
             cargo test -p qpxd --release --test advanced_transport_perf --locked -- --nocapture
             cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10
-            sudo apt-get install -y apache2 apache2-utils lighttpd nginx
+            sudo apt-get install -y apache2 apache2-utils lighttpd nginx wrk
             cargo build -p qpxd --release --locked
             scripts/nightly-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
             target/perf/nightly-proxy-compare.jsonl
