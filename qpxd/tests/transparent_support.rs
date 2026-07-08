@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,12 +15,31 @@ pub use common::{spawn_qpxd_on_random_port, temp_dir};
 pub type Http1Head = (u16, Vec<(String, String)>, Vec<u8>);
 
 pub async fn send_http1_and_read_head(addr: SocketAddr, request_bytes: &[u8]) -> Result<Http1Head> {
-    let mut stream = timeout(Duration::from_secs(3), TcpStream::connect(addr))
-        .await
-        .context("connect timed out")??;
+    let mut stream = connect_with_retry(addr, Duration::from_secs(3)).await?;
     stream.write_all(request_bytes).await?;
     stream.flush().await?;
     read_http1_head(&mut stream).await
+}
+
+async fn connect_with_retry(addr: SocketAddr, deadline: Duration) -> Result<TcpStream> {
+    let started = Instant::now();
+    loop {
+        match timeout(Duration::from_millis(200), TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) if err.kind() == io::ErrorKind::ConnectionRefused => {
+                if started.elapsed() >= deadline {
+                    return Err(err).context("connect refused until deadline");
+                }
+            }
+            Ok(Err(err)) => return Err(err).context("connect failed"),
+            Err(_) => {
+                if started.elapsed() >= deadline {
+                    return Err(anyhow!("connect timed out"));
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 pub async fn read_http1_head(stream: &mut TcpStream) -> Result<Http1Head> {
