@@ -9,6 +9,7 @@ DURATION_SECONDS="${QPX_HTTP2_COMPARE_DURATION_SECONDS:-10}"
 CONCURRENCY="${QPX_HTTP2_COMPARE_CONCURRENCY:-64}"
 MAX_CONCURRENT_STREAMS="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS:-100}"
 BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1024 1048576}"
+TLS_HOST="${QPX_HTTP2_COMPARE_TLS_HOST:-localhost}"
 BACKEND_PORT="${QPX_HTTP2_COMPARE_BACKEND_PORT:-18280}"
 QPX_PORT="${QPX_HTTP2_COMPARE_QPX_PORT:-18281}"
 NGINX_PORT="${QPX_HTTP2_COMPARE_NGINX_PORT:-18282}"
@@ -173,7 +174,7 @@ wait_https() {
   local path="${5:-/bench-$(first_body_size)}"
   local tries=0
   while [ "$tries" -lt 100 ]; do
-    if curl -fsSk --http1.1 --max-time 2 "https://127.0.0.1:${port}${path}" >/dev/null 2>&1; then
+    if curl -fsSk --http1.1 --max-time 2 --resolve "${TLS_HOST}:${port}:127.0.0.1" "https://${TLS_HOST}:${port}${path}" >/dev/null 2>&1; then
       return 0
     fi
     if ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -220,8 +221,8 @@ make_certs() {
     -sha256 \
     -days 1 \
     -nodes \
-    -subj "/CN=127.0.0.1" \
-    -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" \
+    -subj "/CN=${TLS_HOST}" \
+    -addext "subjectAltName=IP:127.0.0.1,DNS:${TLS_HOST}" \
     -keyout "$TMP_DIR/server.key" \
     -out "$TMP_DIR/server.crt" \
     >"$LOG_DIR/openssl.log" 2>&1
@@ -277,7 +278,7 @@ edges:
     enforce_sni_host_match: false
     tls:
       certificates:
-        - sni: 127.0.0.1
+        - sni: ${TLS_HOST}
           cert: "$TMP_DIR/server.crt"
           key: "$TMP_DIR/server.key"
     routes:
@@ -407,9 +408,9 @@ run_one() {
   local out cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb metrics valid commit requests_per_cpu_second
   body_kind="$(body_profile "$body_bytes")"
   out="$TMP_DIR/http2.${proxy}.${body_bytes}.h2load"
-  h2load -n 16 -c 4 -m "$MAX_CONCURRENT_STREAMS" -k "https://127.0.0.1:${port}/bench-${body_bytes}" >"$TMP_DIR/http2.${proxy}.${body_bytes}.warmup.h2load" 2>&1
+  h2load -n 16 -c 4 -m "$MAX_CONCURRENT_STREAMS" -k "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$TMP_DIR/http2.${proxy}.${body_bytes}.warmup.h2load" 2>&1
   cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
-  h2load -D "$DURATION_SECONDS" -c "$CONCURRENCY" -m "$MAX_CONCURRENT_STREAMS" -k "https://127.0.0.1:${port}/bench-${body_bytes}" >"$out" 2>&1 || {
+  h2load -D "$DURATION_SECONDS" -c "$CONCURRENCY" -m "$MAX_CONCURRENT_STREAMS" -k "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1 || {
     echo "h2load failed for ${proxy}" >&2
     cat "$out" >&2 || true
     exit 1
