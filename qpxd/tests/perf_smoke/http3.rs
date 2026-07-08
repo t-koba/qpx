@@ -49,45 +49,58 @@ edges:
             )
         })?;
 
-    let mut endpoint = build_quinn_client_endpoint()?;
-    endpoint.set_default_client_config(build_h3_test_client_config(&cert_path)?);
-    let conn = timeout(
-        profile_timeout(Duration::from_secs(3)),
-        endpoint.connect(
-            SocketAddr::from(([127, 0, 0, 1], port)),
-            PERF_TLS_SERVER_NAME,
-        )?,
-    )
-    .await??;
-    let mut builder = ::h3::client::builder();
-    let (mut h3_conn, mut sender) = builder
-        .build::<_, _, Bytes>(h3_quinn::Connection::new(conn))
-        .await?;
-    let driver = tokio::spawn(async move {
-        let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
-    });
-    assert_h3_get_body(
-        &mut sender,
-        port,
-        "/perf",
-        b"H3PERF",
-        "h3 terminate warm-up",
-    )
-    .await?;
-
     let started = Instant::now();
-    let mut latencies = Vec::with_capacity(128);
-    for _ in 0..128usize {
-        let req_started = Instant::now();
-        assert_h3_get_body(&mut sender, port, "/perf", b"H3PERF", "h3 terminate").await?;
-        latencies.push(req_started.elapsed());
+    let connections = 4usize;
+    let requests_per_connection = 32usize;
+    let mut tasks = Vec::with_capacity(connections);
+    for _ in 0..connections {
+        let cert_path = cert_path.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut endpoint = build_quinn_client_endpoint()?;
+            endpoint.set_default_client_config(build_h3_test_client_config(&cert_path)?);
+            let conn = timeout(
+                profile_timeout(Duration::from_secs(3)),
+                endpoint.connect(
+                    SocketAddr::from(([127, 0, 0, 1], port)),
+                    PERF_TLS_SERVER_NAME,
+                )?,
+            )
+            .await??;
+            let mut builder = ::h3::client::builder();
+            let (mut h3_conn, mut sender) = builder
+                .build::<_, _, Bytes>(h3_quinn::Connection::new(conn))
+                .await?;
+            let driver = tokio::spawn(async move {
+                let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
+            });
+            assert_h3_get_body(
+                &mut sender,
+                port,
+                "/perf",
+                b"H3PERF",
+                "h3 terminate warm-up",
+            )
+            .await?;
+
+            let mut latencies = Vec::with_capacity(requests_per_connection);
+            for _ in 0..requests_per_connection {
+                let req_started = Instant::now();
+                assert_h3_get_body(&mut sender, port, "/perf", b"H3PERF", "h3 terminate").await?;
+                latencies.push(req_started.elapsed());
+            }
+            driver.abort();
+            let _ = driver.await;
+            Ok::<_, anyhow::Error>(latencies)
+        }));
     }
-    driver.abort();
-    let _ = driver.await;
+    let mut latencies = Vec::with_capacity(connections * requests_per_connection);
+    for task in tasks {
+        latencies.extend(task.await.expect("join")?);
+    }
 
     report_perf(
         "reverse_http3_terminate",
-        128,
+        connections * requests_per_connection,
         started.elapsed(),
         latencies,
         PerfThresholds {

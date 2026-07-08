@@ -32,6 +32,7 @@ mkdir -p "$LOG_DIR" "$STATE_DIR" "$(dirname "$OUT_JSON")"
 
 PIDS=()
 ARTIFACTS_COLLECTED=0
+INVALID_SAMPLES=0
 LAST_STARTED_PID=""
 BACKEND_PID=""
 QPXD_PID=""
@@ -768,7 +769,7 @@ LUA
     echo "${proxy} produced an invalid benchmark sample" >&2
     echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} non_2xx=${non_2xx} bad_length=${bad_length} write_errors=${write_errors} status_before=${status_before} status_after=${status_after}" >&2
     cat "${failed_sample:-$out}" >&2 || true
-    exit 1
+    INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
   fi
 }
 
@@ -830,3 +831,8 @@ for workers in $SCALE_WORKERS; do
     run_one "proxy_scale_http1_reverse" "qpxd-workers-${workers}" "$scale_port" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$scale_pid"
   done
 done
+
+if [ "$INVALID_SAMPLES" -gt 0 ]; then
+  echo "proxy comparison produced ${INVALID_SAMPLES} invalid sample(s)" >&2
+  exit 1
+fi
