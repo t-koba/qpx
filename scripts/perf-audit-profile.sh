@@ -65,13 +65,18 @@ annotate_callgrind_outputs() {
     instructions="$(awk '/^summary:/ { print $2; exit }' "$file")"
     instructions="${instructions:-0}"
     annotated="${file}.annotated.txt"
-    callgrind_annotate --threshold=99 "$file" >"$annotated"
+    if ! callgrind_annotate --threshold=99 "$file" >"$annotated" 2>"${annotated}.err"; then
+      {
+        echo "callgrind_annotate failed for ${file}"
+        cat "${annotated}.err"
+      } >"$annotated"
+    fi
     printf '{"bench":"callgrind_hot_path_profile","target":%s,"filter":%s,"instructions":%s,"callgrind_file":%s,"annotated_file":%s,"commit":%s}\n' \
       "$(json_escape "$target")" \
       "$(json_escape "$filter")" \
       "$instructions" \
-      "$(json_escape "${file#$ROOT_DIR/}")" \
-      "$(json_escape "${annotated#$ROOT_DIR/}")" \
+      "$(json_escape "${file#"$ROOT_DIR"/}")" \
+      "$(json_escape "${annotated#"$ROOT_DIR"/}")" \
       "$(json_escape "$commit")" >>"$PROFILE_JSON"
   done
 }

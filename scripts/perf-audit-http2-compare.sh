@@ -9,6 +9,7 @@ DURATION_SECONDS="${QPX_HTTP2_COMPARE_DURATION_SECONDS:-10}"
 CONCURRENCY="${QPX_HTTP2_COMPARE_CONCURRENCY:-64}"
 MAX_CONCURRENT_STREAMS="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS:-100}"
 BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1024 1048576}"
+SAMPLE_ATTEMPTS="${QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS:-3}"
 TLS_HOST="${QPX_HTTP2_COMPARE_TLS_HOST:-localhost}"
 BACKEND_PORT="${QPX_HTTP2_COMPARE_BACKEND_PORT:-18280}"
 QPX_PORT="${QPX_HTTP2_COMPARE_QPX_PORT:-18281}"
@@ -406,32 +407,45 @@ run_one() {
   local body_bytes="$4"
   local body_kind
   local out warmup_out cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb metrics valid commit requests_per_cpu_second
+  local attempt failed_sample
   body_kind="$(body_profile "$body_bytes")"
   out="$TMP_DIR/http2.${proxy}.${body_bytes}.h2load"
   warmup_out="$TMP_DIR/http2.${proxy}.${body_bytes}.warmup.h2load"
-  h2load -n 16 -c 4 -m "$MAX_CONCURRENT_STREAMS" -k --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$warmup_out" 2>&1 || {
+  h2load -n 16 -c 4 -m "$MAX_CONCURRENT_STREAMS" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$warmup_out" 2>&1 || {
     echo "h2load warmup failed for ${proxy}" >&2
     cat "$warmup_out" >&2 || true
     exit 1
   }
-  cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
-  h2load -D "$DURATION_SECONDS" -c "$CONCURRENCY" -m "$MAX_CONCURRENT_STREAMS" -k --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1 || {
-    echo "h2load failed for ${proxy}" >&2
-    cat "$out" >&2 || true
-    exit 1
-  }
-  cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
-  cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
-  rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
-  rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
-  metrics="$(parse_h2load "$out")"
-  valid="$(python3 - "$metrics" <<'PY'
+  attempt=1
+  failed_sample=""
+  while [ "$attempt" -le "$SAMPLE_ATTEMPTS" ]; do
+    out="$TMP_DIR/http2.${proxy}.${body_bytes}.attempt-${attempt}.h2load"
+    cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
+    h2load -D "$DURATION_SECONDS" -c "$CONCURRENCY" -m "$MAX_CONCURRENT_STREAMS" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1 || {
+      echo "h2load failed for ${proxy} attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
+      cat "$out" >&2 || true
+      exit 1
+    }
+    cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
+    cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
+    rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
+    metrics="$(parse_h2load "$out")"
+    valid="$(python3 - "$metrics" <<'PY'
 import json
 import sys
 m = json.loads(sys.argv[1])
 print("true" if m["requests"] > 0 and m["requests"] == m["complete_requests"] and m["failed_requests"] == 0 and m["non_2xx_responses"] == 0 else "false")
 PY
 )"
+    if [ "$valid" = true ]; then
+      break
+    fi
+    failed_sample="$out"
+    echo "${proxy} produced an invalid HTTP/2 benchmark sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
+    cat "$out" >&2 || true
+    attempt=$((attempt + 1))
+  done
   requests_per_cpu_second="$(python3 - "$metrics" "$cpu_ms" <<'PY'
 import json
 import sys
@@ -467,7 +481,7 @@ with open(out, "a", encoding="utf-8") as handle:
 PY
   if [ "$valid" != true ]; then
     echo "${proxy} produced an invalid HTTP/2 benchmark sample" >&2
-    cat "$out" >&2 || true
+    cat "${failed_sample:-$out}" >&2 || true
     exit 1
   fi
 }

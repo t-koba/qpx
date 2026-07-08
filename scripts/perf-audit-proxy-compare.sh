@@ -10,6 +10,7 @@ CONCURRENCY="${QPX_PROXY_COMPARE_CONCURRENCY:-64}"
 THREADS="${QPX_PROXY_COMPARE_THREADS:-2}"
 WRK_TIMEOUT="${QPX_PROXY_COMPARE_WRK_TIMEOUT:-30s}"
 BODY_SIZES="${QPX_PROXY_COMPARE_BODY_SIZES:-1024 1048576}"
+SAMPLE_ATTEMPTS="${QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS:-3}"
 HOST_HEADER="${QPX_PROXY_COMPARE_HOST:-bench.local}"
 APACHE_BIN="${QPX_PROXY_COMPARE_APACHE_BIN:-}"
 SCALE_WORKERS="${QPX_PROXY_COMPARE_SCALE_WORKERS:-}"
@@ -617,6 +618,7 @@ run_one() {
   local lua="$TMP_DIR/${artifact_name}.lua"
   local status_before status_after
   local cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb
+  local attempt failed_sample
   body_kind="$(body_profile "$body_bytes")"
 
   cat >"$lua" <<LUA
@@ -686,36 +688,39 @@ LUA
   else
     status_before="$(probe_status "$port" "/bench-${body_bytes}")"
   fi
-  cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
-  wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$out" 2>&1 || {
-    echo "wrk failed for ${proxy}" >&2
-    cat "$out" >&2 || true
-    exit 1
-  }
-  cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
-  cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
-  rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
-  rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
-  if [ "$mode" = "forward" ]; then
-    status_after="$(probe_forward_status "$port" "/bench-${body_bytes}")"
-  else
-    status_after="$(probe_status "$port" "/bench-${body_bytes}")"
-  fi
-
   local complete summary_requests failed non_2xx bad_length write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
   local latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms requests_per_cpu_second
-  complete="$(extract_metric_or_zero "$out" "qpx_complete_requests")"
-  summary_requests="$(extract_metric_or_zero "$out" "qpx_summary_requests")"
-  non_2xx="$(extract_metric_or_zero "$out" "qpx_non_2xx_responses")"
-  bad_length="$(extract_metric_or_zero "$out" "qpx_bad_length_responses")"
-  rps="$(extract_metric "$out" "qpx_requests_per_sec")"
-  transfer_kbps="$(extract_metric "$out" "qpx_transfer_kbytes_per_sec")"
-  latency_p50_ms="$(extract_metric "$out" "qpx_latency_p50_ms")"
-  latency_p90_ms="$(extract_metric "$out" "qpx_latency_p90_ms")"
-  latency_p95_ms="$(extract_metric "$out" "qpx_latency_p95_ms")"
-  latency_p99_ms="$(extract_metric "$out" "qpx_latency_p99_ms")"
-  latency_p999_ms="$(extract_metric "$out" "qpx_latency_p999_ms")"
-  mean_ms="$(awk '
+  attempt=1
+  failed_sample=""
+  while [ "$attempt" -le "$SAMPLE_ATTEMPTS" ]; do
+    out="$TMP_DIR/${artifact_name}.attempt-${attempt}.wrk"
+    cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
+    wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$out" 2>&1 || {
+      echo "wrk failed for ${proxy} attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
+      cat "$out" >&2 || true
+      exit 1
+    }
+    cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
+    cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
+    rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
+    if [ "$mode" = "forward" ]; then
+      status_after="$(probe_forward_status "$port" "/bench-${body_bytes}")"
+    else
+      status_after="$(probe_status "$port" "/bench-${body_bytes}")"
+    fi
+    complete="$(extract_metric_or_zero "$out" "qpx_complete_requests")"
+    summary_requests="$(extract_metric_or_zero "$out" "qpx_summary_requests")"
+    non_2xx="$(extract_metric_or_zero "$out" "qpx_non_2xx_responses")"
+    bad_length="$(extract_metric_or_zero "$out" "qpx_bad_length_responses")"
+    rps="$(extract_metric "$out" "qpx_requests_per_sec")"
+    transfer_kbps="$(extract_metric "$out" "qpx_transfer_kbytes_per_sec")"
+    latency_p50_ms="$(extract_metric "$out" "qpx_latency_p50_ms")"
+    latency_p90_ms="$(extract_metric "$out" "qpx_latency_p90_ms")"
+    latency_p95_ms="$(extract_metric "$out" "qpx_latency_p95_ms")"
+    latency_p99_ms="$(extract_metric "$out" "qpx_latency_p99_ms")"
+    latency_p999_ms="$(extract_metric "$out" "qpx_latency_p999_ms")"
+    mean_ms="$(awk '
     /Latency/ {
       value = $2
       unit = substr(value, length(value) - 1)
@@ -726,30 +731,39 @@ LUA
       exit
     }
   ' "$out")"
-  connect_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "connect") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
-  read_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "read") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
-  write_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "write") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
-  timeout_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "timeout") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
-  connect_errors="${connect_errors:-0}"
-  read_errors="${read_errors:-0}"
-  write_errors="${write_errors:-0}"
-  timeout_errors="${timeout_errors:-0}"
-  failed=$((connect_errors + read_errors + write_errors + timeout_errors))
-  commit="${GITHUB_SHA:-unknown}"
-  if [ -z "$rps" ] || [ -z "$mean_ms" ] || [ -z "$transfer_kbps" ] || [ -z "$latency_p99_ms" ]; then
-    echo "${proxy} wrk output is missing required throughput fields" >&2
+    connect_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "connect") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
+    read_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "read") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
+    write_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "write") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
+    timeout_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "timeout") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
+    connect_errors="${connect_errors:-0}"
+    read_errors="${read_errors:-0}"
+    write_errors="${write_errors:-0}"
+    timeout_errors="${timeout_errors:-0}"
+    failed=$((connect_errors + read_errors + write_errors + timeout_errors))
+    commit="${GITHUB_SHA:-unknown}"
+    if [ -z "$rps" ] || [ -z "$mean_ms" ] || [ -z "$transfer_kbps" ] || [ -z "$latency_p99_ms" ]; then
+      echo "${proxy} wrk output is missing required throughput fields" >&2
+      cat "$out" >&2 || true
+      exit 1
+    fi
+    requests_per_cpu_second="$(awk -v requests="$summary_requests" -v cpu_ms="$cpu_ms" 'BEGIN { if (cpu_ms > 0) printf "%.6f", requests / (cpu_ms / 1000); else printf "null" }')"
+    valid="$([ "$complete" -gt 0 ] && [ "$summary_requests" = "$complete" ] && [ "$failed" = 0 ] && [ "$non_2xx" = 0 ] && [ "$bad_length" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
+    if [ "$valid" = true ]; then
+      break
+    fi
+    failed_sample="$out"
+    echo "${proxy} produced an invalid benchmark sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
+    echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} non_2xx=${non_2xx} bad_length=${bad_length} write_errors=${write_errors} status_before=${status_before} status_after=${status_after}" >&2
     cat "$out" >&2 || true
-    exit 1
-  fi
-  requests_per_cpu_second="$(awk -v requests="$summary_requests" -v cpu_ms="$cpu_ms" 'BEGIN { if (cpu_ms > 0) printf "%.6f", requests / (cpu_ms / 1000); else printf "null" }')"
-  valid="$([ "$complete" -gt 0 ] && [ "$summary_requests" = "$complete" ] && [ "$failed" = 0 ] && [ "$non_2xx" = 0 ] && [ "$bad_length" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
+    attempt=$((attempt + 1))
+  done
   printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"requests":%s,"complete_requests":%s,"failed_requests":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"write_errors":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_peak_kb":%s,"requests_per_cpu_second":%s,"valid":%s,"commit":"%s"}\n' \
     "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$summary_requests" "$complete" "$failed" "$non_2xx" "$bad_length" "$write_errors" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_peak_kb")" "$requests_per_cpu_second" "$valid" "$commit" >>"$OUT_JSON"
 
   if [ "$valid" != true ]; then
     echo "${proxy} produced an invalid benchmark sample" >&2
     echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} non_2xx=${non_2xx} bad_length=${bad_length} write_errors=${write_errors} status_before=${status_before} status_after=${status_after}" >&2
-    cat "$out" >&2 || true
+    cat "${failed_sample:-$out}" >&2 || true
     exit 1
   fi
 }

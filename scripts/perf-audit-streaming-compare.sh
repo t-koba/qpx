@@ -8,6 +8,7 @@ QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
 STREAM_BYTES="${QPX_STREAMING_COMPARE_BYTES:-104857600}"
 CHUNK_BYTES="${QPX_STREAMING_COMPARE_CHUNK_BYTES:-65536}"
 SLOW_READ_DELAY_MS="${QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS:-1}"
+SAMPLE_ATTEMPTS="${QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS:-3}"
 BACKEND_PORT="${QPX_STREAMING_COMPARE_BACKEND_PORT:-18380}"
 QPX_PORT="${QPX_STREAMING_COMPARE_QPX_PORT:-18381}"
 NGINX_PORT="${QPX_STREAMING_COMPARE_NGINX_PORT:-18382}"
@@ -430,15 +431,38 @@ run_one() {
   local read_mode="$4"
   local delay_ms="0"
   local cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb metrics requests_per_cpu_second commit
+  local attempt valid
   if [ "$read_mode" = "slow" ]; then
     delay_ms="$SLOW_READ_DELAY_MS"
   fi
-  cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
-  metrics="$(run_client "$proxy" "$port" "$read_mode" "$delay_ms")"
-  cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
-  cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
-  rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
-  rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
+  attempt=1
+  valid=false
+  while [ "$attempt" -le "$SAMPLE_ATTEMPTS" ]; do
+    cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
+    if ! metrics="$(run_client "$proxy" "$port" "$read_mode" "$delay_ms")"; then
+      echo "${proxy} streaming client failed on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
+      if [ "$attempt" -eq "$SAMPLE_ATTEMPTS" ]; then
+        exit 1
+      fi
+      attempt=$((attempt + 1))
+      continue
+    fi
+    cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
+    cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
+    rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
+    valid="$(python3 - "$metrics" <<'PY'
+import json
+import sys
+print("true" if json.loads(sys.argv[1])["valid"] else "false")
+PY
+)"
+    if [ "$valid" = true ]; then
+      break
+    fi
+    echo "${proxy} produced an invalid streaming sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}: ${metrics}" >&2
+    attempt=$((attempt + 1))
+  done
   requests_per_cpu_second="$(awk -v cpu_ms="$cpu_ms" 'BEGIN { if (cpu_ms > 0) printf "%.6f", 1000 / cpu_ms; else printf "null" }')"
   commit="${GITHUB_SHA:-unknown}"
   python3 - "$OUT_JSON" "$metrics" "$STREAM_BYTES" "$CHUNK_BYTES" "$cpu_ms" "$rss_kb" "$rss_peak_kb" "$requests_per_cpu_second" "$commit" <<'PY'

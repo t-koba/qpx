@@ -123,7 +123,6 @@ YAML
   QPX_STATE_DIR="$STATE_DIR" valgrind \
     --tool=dhat \
     --mode=heap \
-    --show-top-n=0 \
     --dhat-out-file="$dhat_file" \
     "$QPXD_BIN" run --config "$config" >"$LOG_DIR/qpxd-dhat.log" 2>&1 &
   local pid=$!
@@ -133,9 +132,10 @@ YAML
 }
 
 run_load() {
-  local i
-  for i in $(seq 1 "$REQUESTS"); do
+  local remaining="$REQUESTS"
+  while [ "$remaining" -gt 0 ]; do
     curl -fsS --max-time 10 -o /dev/null "http://127.0.0.1:${QPX_PORT}/bench"
+    remaining=$((remaining - 1))
   done
 }
 
