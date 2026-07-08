@@ -79,23 +79,7 @@ async fn spawn_fake_dns_rcode_server(rcode: u8) -> Result<(SocketAddr, JoinHandl
 async fn spawn_fake_dns_server_with_tcp_fallback(
     answers: HashMap<(String, u16), Vec<TestDnsRecord>>,
 ) -> Result<(SocketAddr, JoinHandle<Result<()>>, JoinHandle<Result<()>>)> {
-    let (udp, addr, tcp) = 'bound: loop {
-        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let addr = udp.local_addr()?;
-        let mut last_bind_error = match TcpListener::bind(addr).await {
-            Ok(tcp) => break 'bound (udp, addr, tcp),
-            Err(err) => err,
-        };
-        for _ in 1..32 {
-            let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-            let addr = udp.local_addr()?;
-            match TcpListener::bind(addr).await {
-                Ok(tcp) => break 'bound (udp, addr, tcp),
-                Err(err) => last_bind_error = err,
-            }
-        }
-        return Err(anyhow::Error::from(last_bind_error));
-    };
+    let (udp, addr, tcp) = bind_fake_dns_udp_tcp_pair().await?;
     let udp_task = tokio::spawn(async move {
         let mut buf = [0u8; 2048];
         loop {
@@ -124,6 +108,21 @@ async fn spawn_fake_dns_server_with_tcp_fallback(
         }
     });
     Ok((addr, udp_task, tcp_task))
+}
+
+async fn bind_fake_dns_udp_tcp_pair() -> Result<(UdpSocket, SocketAddr, TcpListener)> {
+    let mut last_bind_error = None;
+    for _ in 0..32 {
+        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let addr = udp.local_addr()?;
+        match TcpListener::bind(addr).await {
+            Ok(tcp) => return Ok((udp, addr, tcp)),
+            Err(err) => last_bind_error = Some(err),
+        }
+    }
+    Err(last_bind_error
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow!("failed to bind fake DNS TCP fallback")))
 }
 
 fn build_test_dns_response(
