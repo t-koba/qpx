@@ -3,23 +3,15 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub struct QpxdHandle {
-    child: Child,
-    pid: u32,
+    pub(crate) child: Child,
 }
 
 impl QpxdHandle {
     pub fn new(child: Child) -> Self {
-        let pid = child.id();
-        live_qpxd_pids().lock().expect("qpxd pid lock").push(pid);
-        Self { child, pid }
-    }
-
-    pub fn pid(&self) -> u32 {
-        self.pid
+        Self { child }
     }
 }
 
@@ -27,20 +19,7 @@ impl Drop for QpxdHandle {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        live_qpxd_pids()
-            .lock()
-            .expect("qpxd pid lock")
-            .retain(|pid| *pid != self.pid);
     }
-}
-
-pub fn qpxd_child_pids() -> Vec<u32> {
-    live_qpxd_pids().lock().expect("qpxd pid lock").clone()
-}
-
-fn live_qpxd_pids() -> &'static Mutex<Vec<u32>> {
-    static PIDS: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
-    PIDS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 const PORT_PICK_ATTEMPTS: usize = 256;

@@ -15,7 +15,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -25,12 +25,40 @@ pub mod common;
 mod h3_client_support;
 mod yaml_support;
 
-use common::{QpxdHandle, pick_free_tcp_port, spawn_qpxd, temp_dir};
+use common::{pick_free_tcp_port, temp_dir};
 use h3_client_support::{build_h3_test_client_config, build_quinn_client_endpoint};
 use yaml_support::yaml_quote_path;
 
 type PerfOperation =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+
+struct QpxdHandle {
+    inner: common::QpxdHandle,
+}
+
+impl QpxdHandle {
+    fn new(inner: common::QpxdHandle) -> Self {
+        live_qpxd_pids()
+            .lock()
+            .expect("qpxd pid lock")
+            .push(inner.child.id());
+        Self { inner }
+    }
+}
+
+impl Drop for QpxdHandle {
+    fn drop(&mut self) {
+        live_qpxd_pids()
+            .lock()
+            .expect("qpxd pid lock")
+            .retain(|pid| *pid != self.inner.child.id());
+    }
+}
+
+fn live_qpxd_pids() -> &'static StdMutex<Vec<u32>> {
+    static PIDS: OnceLock<StdMutex<Vec<u32>>> = OnceLock::new();
+    PIDS.get_or_init(|| StdMutex::new(Vec::new()))
+}
 
 #[derive(Clone, Copy)]
 struct PerfThresholds {
@@ -55,8 +83,8 @@ fn spawn_qpxd_on_random_tcp_udp_ports(
         let tcp_port = pick_free_tcp_port()?;
         let udp_port = pick_free_udp_port()?;
         fs::write(config_path, make_config(tcp_port, udp_port))?;
-        match spawn_qpxd(config_path, tcp_port, log_path.clone()) {
-            Ok(handle) => return Ok((tcp_port, udp_port, handle)),
+        match common::spawn_qpxd(config_path, tcp_port, log_path.clone()) {
+            Ok(handle) => return Ok((tcp_port, udp_port, QpxdHandle::new(handle))),
             Err(err) => {
                 let log_retryable = fs::read_to_string(&log_path)
                     .ok()
@@ -272,6 +300,7 @@ fn write_perf_artifact(
 
 #[cfg(unix)]
 fn resource_snapshot() -> (serde_json::Value, serde_json::Value) {
+    // SAFETY: getrusage initializes the provided rusage structs and does not retain the pointers.
     unsafe {
         let mut self_usage: libc::rusage = std::mem::zeroed();
         let mut child_usage: libc::rusage = std::mem::zeroed();
@@ -314,13 +343,15 @@ fn maxrss_to_mb(value: libc::c_long) -> f64 {
 
 #[cfg(all(unix, target_os = "linux"))]
 fn live_qpxd_resource_snapshot() -> (f64, f64) {
+    // SAFETY: sysconf reads a process-global constant and does not dereference pointers.
     let clock_ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     if clock_ticks <= 0 {
         return (0.0, 0.0);
     }
     let mut rss_peak_kb = 0.0_f64;
     let mut cpu_ms = 0.0_f64;
-    for pid in common::qpxd_child_pids() {
+    let pids = live_qpxd_pids().lock().expect("qpxd pid lock").clone();
+    for pid in pids {
         rss_peak_kb += linux_status_kb(pid, "VmHWM");
         cpu_ms += linux_cpu_ticks(pid) * 1000.0 / clock_ticks as f64;
     }
