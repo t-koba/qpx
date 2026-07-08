@@ -218,6 +218,18 @@ json_number_or_null() {
   fi
 }
 
+dump_service_log() {
+  local log_file="$1"
+  local extra
+  cat "$log_file" >&2 || true
+  for extra in "${log_file%.*}"*.log; do
+    if [ "$extra" != "$log_file" ] && [ -f "$extra" ]; then
+      echo "--- ${extra} ---" >&2
+      cat "$extra" >&2 || true
+    fi
+  done
+}
+
 wait_http() {
   local name="$1"
   local port="$2"
@@ -231,14 +243,14 @@ wait_http() {
     fi
     if ! kill -0 "$pid" >/dev/null 2>&1; then
       echo "${name} exited before becoming ready" >&2
-      cat "$log_file" >&2 || true
+      dump_service_log "$log_file"
       exit 1
     fi
     tries=$((tries + 1))
     sleep 0.1
   done
   echo "timeout waiting for ${name} on port ${port}" >&2
-  cat "$log_file" >&2 || true
+  dump_service_log "$log_file"
   exit 1
 }
 
@@ -448,13 +460,19 @@ LIGHTTPD
 start_squid() {
   local root="$TMP_DIR/squid"
   local config="$root/squid.conf"
+  local run_group
+  local run_user
+  run_group="$(id -gn)"
+  run_user="$(id -un)"
   mkdir -p "$root/cache" "$root/logs" "$root/run"
   cat >"$config" <<SQUID
 pid_filename $root/run/squid.pid
 http_port 127.0.0.1:${SQUID_PORT}
-access_log none
-cache_log $root/logs/cache.log
-cache_store_log none
+visible_hostname qpx-perf-audit
+cache_effective_user ${run_user}
+cache_effective_group ${run_group}
+access_log stdio:$root/logs/access.log
+cache_log $LOG_DIR/squid-cache.log
 coredump_dir $root/cache
 cache deny all
 acl allsrc src all
@@ -544,14 +562,14 @@ wait_forward() {
     fi
     if ! kill -0 "$pid" >/dev/null 2>&1; then
       echo "${name} exited before becoming ready" >&2
-      cat "$log_file" >&2 || true
+      dump_service_log "$log_file"
       exit 1
     fi
     tries=$((tries + 1))
     sleep 0.1
   done
   echo "timeout waiting for ${name} on port ${port}" >&2
-  cat "$log_file" >&2 || true
+  dump_service_log "$log_file"
   exit 1
 }
 

@@ -324,6 +324,8 @@ require scripts/perf-audit-proxy-compare.sh 'missing required command: apache2 o
 require scripts/perf-audit-proxy-compare.sh 'require_cmd lighttpd'
 require scripts/perf-audit-proxy-compare.sh 'require_cmd wrk'
 require scripts/perf-audit-proxy-compare.sh 'require_cmd squid'
+require scripts/perf-audit-proxy-compare.sh 'cache_effective_user'
+require scripts/perf-audit-proxy-compare.sh 'squid-cache.log'
 require scripts/perf-audit-proxy-compare.sh '"proxy_compare_http1_forward"'
 require scripts/perf-audit-proxy-compare.sh '"proxy_scale_http1_reverse"'
 require scripts/perf-audit-proxy-compare.sh 'BODY_SIZES="${QPX_PROXY_COMPARE_BODY_SIZES:-1024 1048576}"'
