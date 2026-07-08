@@ -462,8 +462,10 @@ start_squid() {
   local config="$root/squid.conf"
   local run_group
   local run_user
+  local service_name
   run_group="$(id -gn)"
   run_user="$(id -un)"
+  service_name="qpx_proxy_compare_$$"
   mkdir -p "$root/cache" "$root/logs" "$root/run"
   cat >"$config" <<SQUID
 pid_filename $root/run/squid.pid
@@ -477,10 +479,10 @@ coredump_dir $root/cache
 cache deny all
 acl allsrc src all
 http_access allow allsrc
-via off
+via on
 forwarded_for delete
 SQUID
-  squid -N -f "$config" >"$LOG_DIR/squid.log" 2>&1 &
+  squid -N -n "$service_name" -f "$config" >"$LOG_DIR/squid.log" 2>&1 &
   local pid=$!
   LAST_STARTED_PID="$pid"
   SQUID_PID="$pid"
