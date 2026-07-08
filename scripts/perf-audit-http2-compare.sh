@@ -111,12 +111,12 @@ proc_cpu_ticks() {
     return
   fi
   awk '{
-    close = index($0, ") ")
-    if (close == 0) {
+    comm_end = index($0, ") ")
+    if (comm_end == 0) {
       print 0
       exit
     }
-    rest = substr($0, close + 2)
+    rest = substr($0, comm_end + 2)
     split(rest, fields, " ")
     print fields[12] + fields[13]
   }' "$stat"
