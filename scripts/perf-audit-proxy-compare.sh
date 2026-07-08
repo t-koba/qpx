@@ -8,6 +8,7 @@ QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
 DURATION_SECONDS="${QPX_PROXY_COMPARE_DURATION_SECONDS:-10}"
 CONCURRENCY="${QPX_PROXY_COMPARE_CONCURRENCY:-64}"
 THREADS="${QPX_PROXY_COMPARE_THREADS:-2}"
+WRK_TIMEOUT="${QPX_PROXY_COMPARE_WRK_TIMEOUT:-30s}"
 BODY_SIZES="${QPX_PROXY_COMPARE_BODY_SIZES:-1024 1048576}"
 HOST_HEADER="${QPX_PROXY_COMPARE_HOST:-bench.local}"
 APACHE_BIN="${QPX_PROXY_COMPARE_APACHE_BIN:-}"
@@ -674,14 +675,14 @@ LUA
   else
     expect_status_ok "$proxy" "$port" "preflight" "/bench-${body_bytes}"
   fi
-  wrk -t"$THREADS" -c16 -d2s -s "$lua" "$url" >"$TMP_DIR/${artifact_name}.warmup" 2>&1
+  wrk -t"$THREADS" -c16 -d2s --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$TMP_DIR/${artifact_name}.warmup" 2>&1
   if [ "$mode" = "forward" ]; then
     status_before="$(probe_forward_status "$port" "/bench-${body_bytes}")"
   else
     status_before="$(probe_status "$port" "/bench-${body_bytes}")"
   fi
   cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
-  wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" -s "$lua" "$url" >"$out" 2>&1 || {
+  wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$out" 2>&1 || {
     echo "wrk failed for ${proxy}" >&2
     cat "$out" >&2 || true
     exit 1
