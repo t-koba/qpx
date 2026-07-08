@@ -66,32 +66,20 @@ edges:
     let driver = tokio::spawn(async move {
         let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
     });
+    assert_h3_get_body(
+        &mut sender,
+        port,
+        "/perf",
+        b"H3PERF",
+        "h3 terminate warm-up",
+    )
+    .await?;
 
     let started = Instant::now();
     let mut latencies = Vec::with_capacity(128);
     for _ in 0..128usize {
         let req_started = Instant::now();
-        let uri = ::http::Uri::builder()
-            .scheme("https")
-            .authority(format!("{PERF_TLS_SERVER_NAME}:{port}"))
-            .path_and_query("/perf")
-            .build()?;
-        let request = ::http::Request::builder()
-            .method(::http::Method::GET)
-            .uri(uri)
-            .body(())?;
-        let mut stream = sender.send_request(request).await?;
-        stream.finish().await?;
-        let response = stream.recv_response().await?;
-        assert_eq!(response.status(), ::http::StatusCode::OK);
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.recv_data().await? {
-            let mut chunk = chunk;
-            body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
-        }
-        if body != b"H3PERF" {
-            return Err(anyhow!("unexpected h3 terminate response body"));
-        }
+        assert_h3_get_body(&mut sender, port, "/perf", b"H3PERF", "h3 terminate").await?;
         latencies.push(req_started.elapsed());
     }
     driver.abort();
@@ -205,32 +193,27 @@ edges:
     let driver = tokio::spawn(async move {
         let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
     });
+    assert_h3_get_body(
+        &mut sender,
+        front_port,
+        "/perf",
+        b"H3PASS",
+        "h3 passthrough warm-up",
+    )
+    .await?;
 
     let started = Instant::now();
     let mut latencies = Vec::with_capacity(64);
     for _ in 0..64usize {
         let req_started = Instant::now();
-        let uri = ::http::Uri::builder()
-            .scheme("https")
-            .authority(format!("{PERF_TLS_SERVER_NAME}:{front_port}"))
-            .path_and_query("/perf")
-            .build()?;
-        let request = ::http::Request::builder()
-            .method(::http::Method::GET)
-            .uri(uri)
-            .body(())?;
-        let mut stream = sender.send_request(request).await?;
-        stream.finish().await?;
-        let response = stream.recv_response().await?;
-        assert_eq!(response.status(), ::http::StatusCode::OK);
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.recv_data().await? {
-            let mut chunk = chunk;
-            body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
-        }
-        if body != b"H3PASS" {
-            return Err(anyhow!("unexpected h3 passthrough response body"));
-        }
+        assert_h3_get_body(
+            &mut sender,
+            front_port,
+            "/perf",
+            b"H3PASS",
+            "h3 passthrough",
+        )
+        .await?;
         latencies.push(req_started.elapsed());
     }
     driver.abort();
@@ -246,4 +229,55 @@ edges:
             max_p95: Duration::from_millis(300),
         },
     )
+}
+
+#[cfg(all(feature = "http3", feature = "tls-rustls"))]
+async fn assert_h3_get_body<T>(
+    sender: &mut ::h3::client::SendRequest<T, Bytes>,
+    port: u16,
+    path: &'static str,
+    expected: &'static [u8],
+    label: &'static str,
+) -> Result<()>
+where
+    T: ::h3::quic::OpenStreams<Bytes>,
+{
+    let uri = ::http::Uri::builder()
+        .scheme("https")
+        .authority(format!("{PERF_TLS_SERVER_NAME}:{port}"))
+        .path_and_query(path)
+        .build()?;
+    let request = ::http::Request::builder()
+        .method(::http::Method::GET)
+        .uri(uri)
+        .body(())?;
+    let mut stream = timeout(
+        profile_timeout(Duration::from_secs(3)),
+        sender.send_request(request),
+    )
+    .await??;
+    timeout(profile_timeout(Duration::from_secs(3)), stream.finish()).await??;
+    let response = timeout(
+        profile_timeout(Duration::from_secs(3)),
+        stream.recv_response(),
+    )
+    .await??;
+    if response.status() != ::http::StatusCode::OK {
+        return Err(anyhow!("{label} returned HTTP {}", response.status()));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) =
+        timeout(profile_timeout(Duration::from_secs(3)), stream.recv_data()).await??
+    {
+        let mut chunk = chunk;
+        body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+    }
+    if body != expected {
+        return Err(anyhow!(
+            "unexpected {label} response body: expected {:?}, got {:?}",
+            String::from_utf8_lossy(expected),
+            String::from_utf8_lossy(&body)
+        ));
+    }
+    Ok(())
 }
