@@ -465,7 +465,7 @@ start_squid() {
   local service_name
   run_group="$(id -gn)"
   run_user="$(id -un)"
-  service_name="qpx_proxy_compare_$$"
+  service_name="qpxproxycompare$$"
   mkdir -p "$root/cache" "$root/logs" "$root/run"
   cat >"$config" <<SQUID
 pid_filename $root/run/squid.pid
