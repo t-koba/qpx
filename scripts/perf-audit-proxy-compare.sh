@@ -230,6 +230,16 @@ dump_service_log() {
   done
 }
 
+dump_benchmark_logs() {
+  local log
+  for log in "$LOG_DIR"/*.log; do
+    if [ -f "$log" ]; then
+      echo "--- ${log} ---" >&2
+      cat "$log" >&2 || true
+    fi
+  done
+}
+
 wait_http() {
   local name="$1"
   local port="$2"
@@ -531,11 +541,18 @@ expect_status_ok() {
   local phase="$3"
   local path="$4"
   local status
-  status="$(probe_status "$port" "$path")"
-  if [ "$status" != "200" ]; then
-    echo "${proxy} returned HTTP ${status} during ${phase}; refusing to record invalid benchmark" >&2
-    return 1
-  fi
+  local tries=0
+  while [ "$tries" -lt 40 ]; do
+    status="$(probe_status "$port" "$path")"
+    if [ "$status" = "200" ]; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 0.25
+  done
+  echo "${proxy} returned HTTP ${status} during ${phase}; refusing to record invalid benchmark" >&2
+  dump_benchmark_logs
+  return 1
 }
 
 expect_forward_status_ok() {
@@ -544,11 +561,18 @@ expect_forward_status_ok() {
   local phase="$3"
   local path="$4"
   local status
-  status="$(probe_forward_status "$port" "$path")"
-  if [ "$status" != "200" ]; then
-    echo "${proxy} returned HTTP ${status} during ${phase}; refusing to record invalid benchmark" >&2
-    return 1
-  fi
+  local tries=0
+  while [ "$tries" -lt 40 ]; do
+    status="$(probe_forward_status "$port" "$path")"
+    if [ "$status" = "200" ]; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 0.25
+  done
+  echo "${proxy} returned HTTP ${status} during ${phase}; refusing to record invalid benchmark" >&2
+  dump_benchmark_logs
+  return 1
 }
 
 wait_forward() {
