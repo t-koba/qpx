@@ -613,6 +613,7 @@ run_one() {
   local url="http://127.0.0.1:${port}/"
   local artifact_name="${bench}.${proxy}.${body_bytes}"
   local out="$TMP_DIR/${artifact_name}.wrk"
+  local warmup_out="$TMP_DIR/${artifact_name}.warmup"
   local lua="$TMP_DIR/${artifact_name}.lua"
   local status_before status_after
   local cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb
@@ -675,7 +676,11 @@ LUA
   else
     expect_status_ok "$proxy" "$port" "preflight" "/bench-${body_bytes}"
   fi
-  wrk -t"$THREADS" -c16 -d2s --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$TMP_DIR/${artifact_name}.warmup" 2>&1
+  wrk -t"$THREADS" -c16 -d2s --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$warmup_out" 2>&1 || {
+    echo "wrk warmup failed for ${proxy}" >&2
+    cat "$warmup_out" >&2 || true
+    exit 1
+  }
   if [ "$mode" = "forward" ]; then
     status_before="$(probe_forward_status "$port" "/bench-${body_bytes}")"
   else

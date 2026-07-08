@@ -405,12 +405,17 @@ run_one() {
   local resource_pid="$3"
   local body_bytes="$4"
   local body_kind
-  local out cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb metrics valid commit requests_per_cpu_second
+  local out warmup_out cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb metrics valid commit requests_per_cpu_second
   body_kind="$(body_profile "$body_bytes")"
   out="$TMP_DIR/http2.${proxy}.${body_bytes}.h2load"
-  h2load -n 16 -c 4 -m "$MAX_CONCURRENT_STREAMS" -k "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$TMP_DIR/http2.${proxy}.${body_bytes}.warmup.h2load" 2>&1
+  warmup_out="$TMP_DIR/http2.${proxy}.${body_bytes}.warmup.h2load"
+  h2load -n 16 -c 4 -m "$MAX_CONCURRENT_STREAMS" -k --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$warmup_out" 2>&1 || {
+    echo "h2load warmup failed for ${proxy}" >&2
+    cat "$warmup_out" >&2 || true
+    exit 1
+  }
   cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
-  h2load -D "$DURATION_SECONDS" -c "$CONCURRENCY" -m "$MAX_CONCURRENT_STREAMS" -k "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1 || {
+  h2load -D "$DURATION_SECONDS" -c "$CONCURRENCY" -m "$MAX_CONCURRENT_STREAMS" -k --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1 || {
     echo "h2load failed for ${proxy}" >&2
     cat "$out" >&2 || true
     exit 1

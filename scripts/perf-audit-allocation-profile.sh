@@ -44,7 +44,7 @@ wait_http() {
   local pid="$3"
   local log_file="$4"
   local tries=0
-  while [ "$tries" -lt 200 ]; do
+  while [ "$tries" -lt 600 ]; do
     if curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:${port}/bench" >/dev/null 2>&1; then
       return 0
     fi
