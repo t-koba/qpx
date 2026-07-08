@@ -235,6 +235,7 @@ runtime:
   worker_threads: 1
   acceptor_tasks_per_listener: 1
   reuse_port: false
+  upstream_proxy_max_concurrent_per_endpoint: 512
 edges:
   - kind: reverse
     name: streaming
@@ -242,6 +243,8 @@ edges:
     routes:
       - name: stream
         streaming_requirement: required
+        streaming:
+          max_response_body_bytes: ${STREAM_BYTES}
         match:
           path_prefix: /
         target:

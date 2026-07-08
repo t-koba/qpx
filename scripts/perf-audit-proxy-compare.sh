@@ -316,6 +316,7 @@ runtime:
   worker_threads: ${worker_threads}
   acceptor_tasks_per_listener: ${acceptor_tasks}
   reuse_port: ${reuse_port}
+  upstream_proxy_max_concurrent_per_endpoint: 512
 edges:
   - kind: reverse
     name: ${name}
@@ -323,6 +324,8 @@ edges:
     routes:
       - name: bench
         streaming_requirement: required
+        streaming:
+          max_response_body_bytes: 134217728
         match:
           host: [${HOST_HEADER}]
         target:
@@ -349,6 +352,7 @@ runtime:
   worker_threads: 1
   acceptor_tasks_per_listener: 1
   reuse_port: false
+  upstream_proxy_max_concurrent_per_endpoint: 512
 edges:
   - kind: forward
     name: benchmark-forward
