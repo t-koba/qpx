@@ -330,6 +330,7 @@ async fn send_qpx_response_stream_observed_inner(
         }
     };
     let mut trailers_for_status = trailers.clone();
+    let sent_trailers = trailers.is_some();
     if let Some(mut trailers) = trailers {
         qpx_http::protocol::semantics::sanitize_response_trailers(&mut trailers);
         if let Err(err) = qpx_timeout_result(
@@ -351,6 +352,11 @@ async fn send_qpx_response_stream_observed_inner(
             abort_body_error!(err);
         }
     };
+    if sent_trailers {
+        // Trailer HEADERS terminate the HTTP/3 message; an extra FIN is redundant
+        // and can race trailer delivery in some clients.
+        return Ok(summary);
+    }
     if let Err(err) = qpx_timeout_result(
         req_stream.finish(),
         body_send_timeout,

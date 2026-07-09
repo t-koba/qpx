@@ -275,7 +275,10 @@ where
     S: ::h3::quic::SendStream<Bytes>,
 {
     if sent_trailers {
-        tokio::task::yield_now().await;
+        // Trailer HEADERS terminate the HTTP/3 message; sending an additional FIN
+        // after trailers is redundant and has caused clients to observe EOF before
+        // the trailer block on some runtimes.
+        return Ok(());
     }
     timeout_or_deadline(
         req_stream.finish(),
