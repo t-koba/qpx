@@ -376,16 +376,8 @@ fn insert_digest_param(out: &mut HashMap<String, String>, raw: &str) -> bool {
 #[cfg(feature = "digest-auth")]
 fn unquote_http_quoted_string(raw: &str) -> Option<String> {
     let mut s = raw.trim();
-    if let Some(rest) = s.strip_prefix('"') {
-        s = rest;
-    } else {
-        return None;
-    }
-    if let Some(rest) = s.strip_suffix('"') {
-        s = rest;
-    } else {
-        return None;
-    }
+    s = s.strip_prefix('"')?;
+    s = s.strip_suffix('"')?;
     let mut out = String::with_capacity(s.len());
     let mut escape = false;
     for ch in s.chars() {

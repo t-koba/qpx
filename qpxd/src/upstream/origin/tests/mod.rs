@@ -113,16 +113,31 @@ async fn spawn_fake_dns_server_with_tcp_fallback(
 async fn bind_fake_dns_udp_tcp_pair() -> Result<(UdpSocket, SocketAddr, TcpListener)> {
     let mut last_bind_error = None;
     for _ in 0..32 {
-        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let addr = udp.local_addr()?;
-        match TcpListener::bind(addr).await {
-            Ok(tcp) => return Ok((udp, addr, tcp)),
-            Err(err) => last_bind_error = Some(err),
+        match bind_fake_dns_udp_first().await {
+            Ok(pair) => return Ok(pair),
+            Err(_) => match bind_fake_dns_tcp_first().await {
+                Ok(pair) => return Ok(pair),
+                Err(err) => last_bind_error = Some(err),
+            },
         }
     }
     Err(last_bind_error
         .map(anyhow::Error::from)
         .unwrap_or_else(|| anyhow!("failed to bind fake DNS TCP fallback")))
+}
+
+async fn bind_fake_dns_udp_first() -> std::io::Result<(UdpSocket, SocketAddr, TcpListener)> {
+    let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let addr = udp.local_addr()?;
+    let tcp = TcpListener::bind(addr).await?;
+    Ok((udp, addr, tcp))
+}
+
+async fn bind_fake_dns_tcp_first() -> std::io::Result<(UdpSocket, SocketAddr, TcpListener)> {
+    let tcp = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let addr = tcp.local_addr()?;
+    let udp = UdpSocket::bind(addr).await?;
+    Ok((udp, addr, tcp))
 }
 
 fn build_test_dns_response(
