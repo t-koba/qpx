@@ -7,7 +7,7 @@ LOG_ARTIFACT_DIR="${QPX_HTTP2_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/http2-compa
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
 DURATION_SECONDS="${QPX_HTTP2_COMPARE_DURATION_SECONDS:-10}"
 CONCURRENCY="${QPX_HTTP2_COMPARE_CONCURRENCY:-64}"
-MAX_CONCURRENT_STREAMS="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS:-100}"
+MAX_CONCURRENT_STREAMS="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS:-1}"
 BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1024 1048576}"
 SAMPLE_ATTEMPTS="${QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS:-3}"
 TLS_HOST="${QPX_HTTP2_COMPARE_TLS_HOST:-localhost}"
@@ -22,6 +22,7 @@ mkdir -p "$LOG_DIR" "$STATE_DIR" "$(dirname "$OUT_JSON")"
 
 PIDS=()
 ARTIFACTS_COLLECTED=0
+INVALID_SAMPLES=0
 BACKEND_PID=""
 QPXD_PID=""
 NGINX_PID=""
@@ -485,7 +486,7 @@ PY
   if [ "$valid" != true ]; then
     echo "${proxy} produced an invalid HTTP/2 benchmark sample" >&2
     cat "${failed_sample:-$out}" >&2 || true
-    exit 1
+    INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
   fi
 }
 
@@ -510,3 +511,8 @@ for body_bytes in $BODY_SIZES; do
   run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$body_bytes"
   run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$body_bytes"
 done
+
+if [ "$INVALID_SAMPLES" -gt 0 ]; then
+  echo "HTTP/2 comparison produced ${INVALID_SAMPLES} invalid sample(s)" >&2
+  exit 1
+fi
