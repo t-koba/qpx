@@ -344,6 +344,9 @@ edges:
           max_response_body_bytes: 134217728
         match:
           host: [${HOST_HEADER}]
+        health_check:
+          fail_threshold: 1000000
+          cooldown_ms: 1
         target:
           type: upstream
           upstreams: [http://127.0.0.1:${BACKEND_PORT}]

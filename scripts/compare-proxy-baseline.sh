@@ -169,16 +169,19 @@ def lane_key(record):
         fail(f"invalid proxy comparison record shape: {exc}")
 
 
-def collect_ratios(records):
+def collect_ratios(records, target_keys=None):
     grouped = defaultdict(dict)
     for record in records:
         if record.get("bench") != BENCH:
             continue
-        require_valid_sample(record)
         proxy = record.get("proxy")
         if proxy not in {"direct-backend", "qpxd", *EXTERNAL_PROXIES}:
             continue
-        grouped[lane_key(record)][proxy] = record
+        key = lane_key(record)
+        if target_keys is not None and key not in target_keys:
+            continue
+        require_valid_sample(record)
+        grouped[key][proxy] = record
 
     ratios = []
     for key in sorted(grouped):
@@ -261,10 +264,12 @@ if baseline.get("metric") != METRIC:
     fail("proxy baseline metric does not match this checker")
 
 threshold = parse_threshold(THRESHOLD_ARG, float(baseline.get("degradation_threshold", DEFAULT_THRESHOLD)))
-current = {baseline_key(entry): entry for entry in collect_ratios(records)}
+baseline_entries = baseline.get("baselines", [])
+target_keys = {baseline_key(entry) for entry in baseline_entries}
+current = {baseline_key(entry): entry for entry in collect_ratios(records, target_keys)}
 failures = []
 
-for entry in baseline.get("baselines", []):
+for entry in baseline_entries:
     key = baseline_key(entry)
     current_entry = current.get(key)
     if current_entry is None:
