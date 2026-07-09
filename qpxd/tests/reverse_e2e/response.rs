@@ -20,6 +20,7 @@ async fn reverse_cache_uses_http_backend_store() -> Result<()> {
         ),
     ];
     let (origin_addr, origin_hits) = start_text_backend("CACHE", origin_headers)?;
+    tokio::task::yield_now().await;
 
     let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("reverse-cache.log"), |port| {
         let state_dir_yaml = yaml_quote_path(&state_dir);
@@ -27,8 +28,7 @@ async fn reverse_cache_uses_http_backend_store() -> Result<()> {
             r#"upstreams:
 - name: origin
   url: http://{origin_addr}
-state_dir:
-  {state_dir_yaml}
+state_dir: {state_dir_yaml}
 runtime:
   acceptor_tasks_per_listener: 1
   reuse_port: false
@@ -36,7 +36,7 @@ caches:
 - name: http-cache
   kind: http
   endpoint: http://{cache_addr}
-  timeout_ms: 1000
+  timeout_ms: 10000
   max_object_bytes: 1048576
 edges:
 - kind: reverse

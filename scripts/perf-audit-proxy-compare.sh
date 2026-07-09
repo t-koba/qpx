@@ -221,6 +221,21 @@ json_number_or_null() {
   fi
 }
 
+record_invalid_sample() {
+  local bench="$1"
+  local proxy="$2"
+  local body_kind="$3"
+  local body_bytes="$4"
+  local status_before="$5"
+  local status_after="$6"
+  local error_code="$7"
+  local commit
+  commit="${GITHUB_SHA:-unknown}"
+  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"requests":0,"complete_requests":0,"failed_requests":1,"non_2xx_responses":0,"bad_length_responses":0,"write_errors":0,"status_before":"%s","status_after":"%s","requests_per_sec":0,"mean_time_per_request_ms":null,"latency_p50_ms":null,"latency_p90_ms":null,"latency_p95_ms":null,"latency_p99_ms":null,"latency_p999_ms":null,"transfer_kbytes_per_sec":0,"cpu_ms":null,"rss_kb":null,"rss_peak_kb":null,"requests_per_cpu_second":null,"valid":false,"error":"%s","commit":"%s"}\n' \
+    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$status_before" "$status_after" "$error_code" "$commit" >>"$OUT_JSON"
+  INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
+}
+
 dump_service_log() {
   local log_file="$1"
   local extra
@@ -542,6 +557,32 @@ probe_forward_status() {
     "http://127.0.0.1:${BACKEND_PORT}${path}"
 }
 
+safe_probe_status() {
+  local status
+  if ! status="$(probe_status "$@" 2>/dev/null)"; then
+    if [ -z "$status" ]; then
+      echo "000"
+    else
+      echo "$status"
+    fi
+    return
+  fi
+  echo "$status"
+}
+
+safe_probe_forward_status() {
+  local status
+  if ! status="$(probe_forward_status "$@" 2>/dev/null)"; then
+    if [ -z "$status" ]; then
+      echo "000"
+    else
+      echo "$status"
+    fi
+    return
+  fi
+  echo "$status"
+}
+
 expect_status_ok() {
   local proxy="$1"
   local port="$2"
@@ -550,7 +591,7 @@ expect_status_ok() {
   local status
   local tries=0
   while [ "$tries" -lt 40 ]; do
-    status="$(probe_status "$port" "$path")"
+    status="$(safe_probe_status "$port" "$path")"
     if [ "$status" = "200" ]; then
       return 0
     fi
@@ -570,7 +611,7 @@ expect_forward_status_ok() {
   local status
   local tries=0
   while [ "$tries" -lt 40 ]; do
-    status="$(probe_forward_status "$port" "$path")"
+    status="$(safe_probe_forward_status "$port" "$path")"
     if [ "$status" = "200" ]; then
       return 0
     fi
@@ -679,19 +720,28 @@ end
 LUA
 
   if [ "$mode" = "forward" ]; then
-    expect_forward_status_ok "$proxy" "$port" "preflight" "/bench-${body_bytes}"
+    if ! expect_forward_status_ok "$proxy" "$port" "preflight" "/bench-${body_bytes}"; then
+      status_before="$(safe_probe_forward_status "$port" "/bench-${body_bytes}")"
+      record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "$status_before" "$status_before" "preflight_failed"
+      return 0
+    fi
   else
-    expect_status_ok "$proxy" "$port" "preflight" "/bench-${body_bytes}"
+    if ! expect_status_ok "$proxy" "$port" "preflight" "/bench-${body_bytes}"; then
+      status_before="$(safe_probe_status "$port" "/bench-${body_bytes}")"
+      record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "$status_before" "$status_before" "preflight_failed"
+      return 0
+    fi
   fi
-  wrk -t"$THREADS" -c16 -d2s --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$warmup_out" 2>&1 || {
+  if ! wrk -t"$THREADS" -c16 -d2s --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$warmup_out" 2>&1; then
     echo "wrk warmup failed for ${proxy}" >&2
     cat "$warmup_out" >&2 || true
-    exit 1
-  }
+    record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "200" "200" "warmup_failed"
+    return 0
+  fi
   if [ "$mode" = "forward" ]; then
-    status_before="$(probe_forward_status "$port" "/bench-${body_bytes}")"
+    status_before="$(safe_probe_forward_status "$port" "/bench-${body_bytes}")"
   else
-    status_before="$(probe_status "$port" "/bench-${body_bytes}")"
+    status_before="$(safe_probe_status "$port" "/bench-${body_bytes}")"
   fi
   local complete summary_requests failed non_2xx bad_length write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
   local latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms requests_per_cpu_second
@@ -700,19 +750,21 @@ LUA
   while [ "$attempt" -le "$SAMPLE_ATTEMPTS" ]; do
     out="$TMP_DIR/${artifact_name}.attempt-${attempt}.wrk"
     cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
-    wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$out" 2>&1 || {
+    if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$out" 2>&1; then
       echo "wrk failed for ${proxy} attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       cat "$out" >&2 || true
-      exit 1
-    }
+      failed_sample="$out"
+      attempt=$((attempt + 1))
+      continue
+    fi
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
     cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
     rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
     rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
     if [ "$mode" = "forward" ]; then
-      status_after="$(probe_forward_status "$port" "/bench-${body_bytes}")"
+      status_after="$(safe_probe_forward_status "$port" "/bench-${body_bytes}")"
     else
-      status_after="$(probe_status "$port" "/bench-${body_bytes}")"
+      status_after="$(safe_probe_status "$port" "/bench-${body_bytes}")"
     fi
     complete="$(extract_metric_or_zero "$out" "qpx_complete_requests")"
     summary_requests="$(extract_metric_or_zero "$out" "qpx_summary_requests")"
@@ -749,7 +801,9 @@ LUA
     if [ -z "$rps" ] || [ -z "$mean_ms" ] || [ -z "$transfer_kbps" ] || [ -z "$latency_p99_ms" ]; then
       echo "${proxy} wrk output is missing required throughput fields" >&2
       cat "$out" >&2 || true
-      exit 1
+      failed_sample="$out"
+      attempt=$((attempt + 1))
+      continue
     fi
     requests_per_cpu_second="$(awk -v requests="$summary_requests" -v cpu_ms="$cpu_ms" 'BEGIN { if (cpu_ms > 0) printf "%.6f", requests / (cpu_ms / 1000); else printf "null" }')"
     valid="$([ "$complete" -gt 0 ] && [ "$summary_requests" = "$complete" ] && [ "$failed" = 0 ] && [ "$non_2xx" = 0 ] && [ "$bad_length" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
@@ -762,6 +816,16 @@ LUA
     cat "$out" >&2 || true
     attempt=$((attempt + 1))
   done
+  if [ -z "${summary_requests:-}" ]; then
+    if [ "$mode" = "forward" ]; then
+      status_after="$(safe_probe_forward_status "$port" "/bench-${body_bytes}")"
+    else
+      status_after="$(safe_probe_status "$port" "/bench-${body_bytes}")"
+    fi
+    record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "${status_before:-200}" "$status_after" "benchmark_failed"
+    cat "${failed_sample:-$out}" >&2 || true
+    return 0
+  fi
   printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"requests":%s,"complete_requests":%s,"failed_requests":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"write_errors":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_peak_kb":%s,"requests_per_cpu_second":%s,"valid":%s,"commit":"%s"}\n' \
     "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$summary_requests" "$complete" "$failed" "$non_2xx" "$bad_length" "$write_errors" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_peak_kb")" "$requests_per_cpu_second" "$valid" "$commit" >>"$OUT_JSON"
 
