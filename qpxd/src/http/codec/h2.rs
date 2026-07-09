@@ -5,16 +5,62 @@ use bytes::Bytes;
 use h2::Reason;
 use h2::RecvStream;
 use h2::server::SendResponse;
+use http_body::Frame;
 use hyper::header::{CONTENT_LENGTH, COOKIE};
 use hyper::{Request, Response, Uri};
-use qpx_http::body::Body;
+use qpx_http::body::{Body, BodyError};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::spawn;
-use tokio::time::{Duration, sleep, timeout};
+use std::task::{Context, Poll};
+use tokio::time::{Duration, Sleep, timeout};
 use tracing::warn;
 
 const H2_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const H2_INITIAL_STREAM_WINDOW_SIZE: u32 = 1024 * 1024;
+const H2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
+const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
+const H2_MAX_SEND_BUFFER_SIZE: usize = 1024 * 1024;
+const H2_MAX_CONCURRENT_STREAMS: u32 = 256;
+
+#[derive(Clone, Copy)]
+pub(crate) struct H2TransportTuning {
+    pub(crate) initial_stream_window_size: u32,
+    pub(crate) initial_connection_window_size: u32,
+}
+
+impl Default for H2TransportTuning {
+    fn default() -> Self {
+        Self {
+            initial_stream_window_size: H2_INITIAL_STREAM_WINDOW_SIZE,
+            initial_connection_window_size: H2_INITIAL_CONNECTION_WINDOW_SIZE,
+        }
+    }
+}
+
+pub(crate) fn tuned_h2_client_builder() -> h2::client::Builder {
+    tuned_h2_client_builder_with(H2TransportTuning::default())
+}
+
+pub(crate) fn tuned_h2_client_builder_with(tuning: H2TransportTuning) -> h2::client::Builder {
+    let mut builder = h2::client::Builder::new();
+    builder.initial_window_size(tuning.initial_stream_window_size);
+    builder.initial_connection_window_size(tuning.initial_connection_window_size);
+    builder.max_frame_size(H2_MAX_FRAME_SIZE);
+    builder.max_send_buffer_size(H2_MAX_SEND_BUFFER_SIZE);
+    builder
+}
+
+pub(crate) fn tune_h2_server_builder_with(
+    builder: &mut h2::server::Builder,
+    tuning: H2TransportTuning,
+) {
+    builder.initial_window_size(tuning.initial_stream_window_size);
+    builder.initial_connection_window_size(tuning.initial_connection_window_size);
+    builder.max_frame_size(H2_MAX_FRAME_SIZE);
+    builder.max_send_buffer_size(H2_MAX_SEND_BUFFER_SIZE);
+    builder.max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS);
+}
 
 #[cfg(test)]
 pub(crate) fn h2_request_to_hyper(req: Http1Request<RecvStream>) -> Result<Request<Body>> {
@@ -201,38 +247,29 @@ async fn read_h2_response_trailers(
 }
 
 pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
-    let mut headers = http::HeaderMap::new();
+    if src.get_all(COOKIE).iter().count() <= 1 {
+        return Ok(src.clone());
+    }
+    let mut headers = http::HeaderMap::with_capacity(src.len());
+    let mut merged_cookie = Vec::new();
     for (name, value) in src {
-        let name = http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            .map_err(|e| anyhow!("invalid header name from HTTP/2 message: {e}"))?;
-        let value = http::HeaderValue::from_bytes(value.as_bytes())
-            .map_err(|e| anyhow!("invalid header value from HTTP/2 message: {e}"))?;
-        if name == COOKIE
-            && let Some(existing) = headers.get(COOKIE).cloned()
-        {
-            let mut merged =
-                Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
-            merged.extend_from_slice(existing.as_bytes());
-            merged.extend_from_slice(b"; ");
-            merged.extend_from_slice(value.as_bytes());
-            headers.insert(COOKIE, http::HeaderValue::from_bytes(merged.as_slice())?);
+        if name == COOKIE {
+            if !merged_cookie.is_empty() {
+                merged_cookie.extend_from_slice(b"; ");
+            }
+            merged_cookie.extend_from_slice(value.as_bytes());
             continue;
         }
-        headers.append(name, value);
+        headers.append(name.clone(), value.clone());
+    }
+    if !merged_cookie.is_empty() {
+        headers.insert(COOKIE, http::HeaderValue::from_bytes(&merged_cookie)?);
     }
     Ok(headers)
 }
 
 pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {
-    let mut headers = ::http::HeaderMap::new();
-    for (name, value) in src {
-        let name = ::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            .map_err(|e| anyhow!("invalid header name for HTTP/2 message: {e}"))?;
-        let value = ::http::HeaderValue::from_bytes(value.as_bytes())
-            .map_err(|e| anyhow!("invalid header value for HTTP/2 message: {e}"))?;
-        headers.append(name, value);
-    }
-    Ok(headers)
+    Ok(src.clone())
 }
 
 pub(crate) fn parse_declared_content_length(headers: &http::HeaderMap) -> Result<Option<u64>> {
@@ -273,79 +310,14 @@ pub(crate) fn h2_response_body(body: RecvStream) -> Body {
 }
 
 pub(crate) fn h2_response_body_with_inflight(
-    mut body: RecvStream,
+    body: RecvStream,
     inflight: Option<Arc<AtomicUsize>>,
 ) -> Body {
     if body.is_end_stream() {
+        drop(InflightRelease(inflight));
         return Body::empty();
     }
-
-    let (mut sender, out) = Body::channel_with_capacity(16);
-    spawn(async move {
-        let _release = InflightRelease(inflight);
-        let mut flow = body.flow_control().clone();
-        loop {
-            let chunk = tokio::select! {
-                _ = sender.closed() => return,
-                _ = sleep(H2_BODY_IDLE_TIMEOUT) => {
-                    warn!("HTTP/2 response body stream timed out while idle");
-                    sender.abort();
-                    return;
-                }
-                chunk = body.data() => chunk,
-            };
-            let Some(chunk) = chunk else {
-                break;
-            };
-            let chunk = match chunk {
-                Ok(chunk) => chunk,
-                Err(err) => {
-                    warn!(error = ?err, "HTTP/2 response body stream failed");
-                    sender.abort();
-                    return;
-                }
-            };
-            let len = chunk.len();
-            if !chunk.is_empty() && sender.send_data(chunk).await.is_err() {
-                let _ = flow.release_capacity(len);
-                return;
-            }
-            if let Err(err) = flow.release_capacity(len) {
-                warn!(error = ?err, "HTTP/2 response body flow control release failed");
-                sender.abort();
-                return;
-            }
-        }
-
-        let trailers = match tokio::select! {
-            _ = sender.closed() => return,
-            _ = sleep(H2_BODY_IDLE_TIMEOUT) => {
-                warn!("HTTP/2 response trailers timed out while idle");
-                sender.abort();
-                return;
-            }
-            trailers = body.trailers() => trailers,
-        } {
-            Ok(trailers) => trailers,
-            Err(err) => {
-                warn!(error = ?err, "HTTP/2 response trailers failed");
-                sender.abort();
-                return;
-            }
-        };
-        if let Some(trailers) = trailers {
-            let trailers = match h1_headers_to_http(&trailers) {
-                Ok(trailers) => trailers,
-                Err(err) => {
-                    warn!(error = ?err, "invalid HTTP/2 response trailers");
-                    sender.abort();
-                    return;
-                }
-            };
-            let _ = sender.send_trailers(trailers).await;
-        }
-    });
-    out
+    Body::wrap(H2RecvBody::response(body, inflight))
 }
 
 pub(crate) fn h2_response_to_hyper(
@@ -377,91 +349,200 @@ pub(crate) fn h2_response_to_hyper_with_inflight(
     Ok(out)
 }
 
-fn body_from_h2_stream(mut body: RecvStream, body_channel_capacity: usize) -> Body {
+fn body_from_h2_stream(body: RecvStream, _body_channel_capacity: usize) -> Body {
     if body.is_end_stream() {
         return Body::empty();
     }
+    Body::wrap(H2RecvBody::request(body))
+}
 
-    let (mut sender, out) = Body::channel_with_capacity(body_channel_capacity.max(1));
-    spawn(async move {
-        let mut flow = body.flow_control().clone();
-        let mut seen = 0u64;
+enum H2RecvBodyKind {
+    Request { seen: u64 },
+    Response { _inflight: InflightRelease },
+}
+
+enum H2RecvBodyState {
+    Data,
+    Trailers,
+    Done,
+}
+
+struct H2RecvBody {
+    body: RecvStream,
+    kind: H2RecvBodyKind,
+    state: H2RecvBodyState,
+    read_timer: Option<Pin<Box<Sleep>>>,
+}
+
+impl H2RecvBody {
+    fn request(body: RecvStream) -> Self {
+        Self {
+            body,
+            kind: H2RecvBodyKind::Request { seen: 0 },
+            state: H2RecvBodyState::Data,
+            read_timer: None,
+        }
+    }
+
+    fn response(body: RecvStream, inflight: Option<Arc<AtomicUsize>>) -> Self {
+        Self {
+            body,
+            kind: H2RecvBodyKind::Response {
+                _inflight: InflightRelease(inflight),
+            },
+            state: H2RecvBodyState::Data,
+            read_timer: None,
+        }
+    }
+
+    fn error(message: impl Into<String>) -> BodyError {
+        BodyError::new(message)
+    }
+
+    fn clear_timer(&mut self) {
+        self.read_timer = None;
+    }
+}
+
+impl http_body::Body for H2RecvBody {
+    type Data = Bytes;
+    type Error = BodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.as_mut().get_mut();
         loop {
-            let chunk = tokio::select! {
-                _ = sender.closed() => return,
-                _ = sleep(H2_BODY_IDLE_TIMEOUT) => {
-                    warn!("HTTP/2 request body stream timed out while idle");
-                    sender.abort();
-                    return;
-                }
-                chunk = body.data() => chunk,
-            };
-            let Some(chunk) = chunk else {
-                break;
-            };
-            let chunk = match chunk {
-                Ok(chunk) => chunk,
-                Err(err) => {
-                    warn!(error = ?err, "HTTP/2 request body stream failed");
-                    sender.abort();
-                    return;
-                }
-            };
-            let len = chunk.len();
-            seen = match seen.checked_add(len as u64) {
-                Some(seen) => seen,
-                None => {
-                    warn!("HTTP/2 request body length overflow");
-                    sender.abort();
-                    return;
-                }
-            };
-            if !chunk.is_empty() && sender.send_data(chunk).await.is_err() {
-                let _ = flow.release_capacity(len);
-                return;
-            }
-            if let Err(err) = flow.release_capacity(len) {
-                warn!(error = ?err, "HTTP/2 request body flow control release failed");
-                sender.abort();
-                return;
+            match this.state {
+                H2RecvBodyState::Data => match poll_h2_data(this, cx) {
+                    Poll::Ready(Ok(Some(chunk))) => {
+                        if let H2RecvBodyKind::Request { seen } = &mut this.kind {
+                            *seen = match seen.checked_add(chunk.len() as u64) {
+                                Some(seen) => seen,
+                                None => {
+                                    this.state = H2RecvBodyState::Done;
+                                    return Poll::Ready(Some(Err(Self::error(
+                                        "HTTP/2 request body length overflow",
+                                    ))));
+                                }
+                            };
+                        }
+                        let len = chunk.len();
+                        if let Err(err) = this.body.flow_control().release_capacity(len) {
+                            this.state = H2RecvBodyState::Done;
+                            return Poll::Ready(Some(Err(Self::error(format!(
+                                "HTTP/2 body flow control release failed: {err}"
+                            )))));
+                        }
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        return Poll::Ready(Some(Ok(Frame::data(chunk))));
+                    }
+                    Poll::Ready(Ok(None)) => {
+                        this.state = H2RecvBodyState::Trailers;
+                        continue;
+                    }
+                    Poll::Ready(Err(err)) => {
+                        this.state = H2RecvBodyState::Done;
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                H2RecvBodyState::Trailers => match poll_h2_trailers(this, cx) {
+                    Poll::Ready(Ok(Some(trailers))) => {
+                        this.state = H2RecvBodyState::Done;
+                        let trailers = match h1_headers_to_http(&trailers) {
+                            Ok(trailers) => trailers,
+                            Err(err) => {
+                                return Poll::Ready(Some(Err(Self::error(err.to_string()))));
+                            }
+                        };
+                        if matches!(this.kind, H2RecvBodyKind::Request { .. })
+                            && let Err(err) =
+                                qpx_http::protocol::semantics::validate_request_trailers(&trailers)
+                        {
+                            return Poll::Ready(Some(Err(Self::error(format!(
+                                "invalid HTTP/2 request trailers: {err:?}"
+                            )))));
+                        }
+                        return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
+                    }
+                    Poll::Ready(Ok(None)) => {
+                        this.state = H2RecvBodyState::Done;
+                        return Poll::Ready(None);
+                    }
+                    Poll::Ready(Err(err)) => {
+                        this.state = H2RecvBodyState::Done;
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                H2RecvBodyState::Done => return Poll::Ready(None),
             }
         }
+    }
+}
 
-        let trailers = match tokio::select! {
-            _ = sender.closed() => return,
-            _ = sleep(H2_BODY_IDLE_TIMEOUT) => {
-                warn!("HTTP/2 request trailers timed out while idle");
-                sender.abort();
-                return;
-            }
-            trailers = body.trailers() => trailers,
-        } {
-            Ok(trailers) => trailers,
-            Err(err) => {
-                warn!(error = ?err, "HTTP/2 request trailers failed");
-                sender.abort();
-                return;
-            }
-        };
-        let Some(trailers) = trailers else {
-            return;
-        };
-        let trailers = match h1_headers_to_http(&trailers) {
-            Ok(trailers) => trailers,
-            Err(err) => {
-                warn!(error = ?err, "invalid HTTP/2 request trailers");
-                sender.abort();
-                return;
-            }
-        };
-        if let Err(err) = qpx_http::protocol::semantics::validate_request_trailers(&trailers) {
-            warn!(error = ?err, "rejecting forbidden HTTP/2 request trailers");
-            sender.abort();
-            return;
+fn poll_h2_data(
+    body: &mut H2RecvBody,
+    cx: &mut Context<'_>,
+) -> Poll<Result<Option<Bytes>, BodyError>> {
+    ensure_h2_read_timer(body);
+    match body.body.poll_data(cx) {
+        Poll::Ready(Some(Ok(chunk))) => {
+            body.clear_timer();
+            Poll::Ready(Ok(Some(chunk)))
         }
-        let _ = sender.send_trailers(trailers).await;
-    });
-    out
+        Poll::Ready(Some(Err(err))) => {
+            body.clear_timer();
+            Poll::Ready(Err(BodyError::new(err.to_string())))
+        }
+        Poll::Ready(None) => {
+            body.clear_timer();
+            Poll::Ready(Ok(None))
+        }
+        Poll::Pending => poll_h2_idle_timeout(body, cx, "HTTP/2 body stream timed out while idle"),
+    }
+}
+
+fn poll_h2_trailers(
+    body: &mut H2RecvBody,
+    cx: &mut Context<'_>,
+) -> Poll<Result<Option<::http::HeaderMap>, BodyError>> {
+    ensure_h2_read_timer(body);
+    match body.body.poll_trailers(cx) {
+        Poll::Ready(Ok(trailers)) => {
+            body.clear_timer();
+            Poll::Ready(Ok(trailers))
+        }
+        Poll::Ready(Err(err)) => {
+            body.clear_timer();
+            Poll::Ready(Err(BodyError::new(err.to_string())))
+        }
+        Poll::Pending => poll_h2_idle_timeout(body, cx, "HTTP/2 trailers timed out while idle"),
+    }
+}
+
+fn ensure_h2_read_timer(body: &mut H2RecvBody) {
+    if body.read_timer.is_none() {
+        body.read_timer = Some(Box::pin(tokio::time::sleep(H2_BODY_IDLE_TIMEOUT)));
+    }
+}
+
+fn poll_h2_idle_timeout<T>(
+    body: &mut H2RecvBody,
+    cx: &mut Context<'_>,
+    message: &'static str,
+) -> Poll<Result<Option<T>, BodyError>> {
+    if let Some(timer) = body.read_timer.as_mut()
+        && timer.as_mut().poll(cx).is_ready()
+    {
+        body.clear_timer();
+        return Poll::Ready(Err(BodyError::new(message)));
+    }
+    Poll::Pending
 }
 
 #[cfg(test)]

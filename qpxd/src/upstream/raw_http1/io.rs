@@ -1,14 +1,19 @@
-use super::{MAX_HEADER_BYTES, parse_declared_content_length, response::ResponseBodyKind};
-use crate::http::codec::h1_common::{
-    find_crlf, has_connection_token, has_only_chunked_transfer_encoding, parse_header_map,
-};
+#[cfg(test)]
+use super::MAX_HEADER_BYTES;
+use super::{parse_declared_content_length, response::ResponseBodyKind};
+#[cfg(test)]
+use crate::http::codec::h1_common::{find_crlf, parse_header_map};
+use crate::http::codec::h1_common::{has_connection_token, has_only_chunked_transfer_encoding};
 use anyhow::{Result, anyhow};
-use bytes::{Buf, BytesMut};
+#[cfg(test)]
+use bytes::Buf;
+use bytes::BytesMut;
 use hyper::header::HeaderMap;
 use hyper::{Method, StatusCode, Version};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::{Duration, timeout};
 
+#[cfg(test)]
 pub(super) async fn read_crlf_line<S>(
     stream: &mut S,
     buf: &mut BytesMut,
@@ -28,6 +33,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub(super) async fn read_trailer_headers<S>(
     stream: &mut S,
     buf: &mut BytesMut,
@@ -57,6 +63,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub(super) async fn fill_buffer<S>(
     stream: &mut S,
     buf: &mut BytesMut,
@@ -125,6 +132,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub(super) async fn read_limited_with_timeout<S>(
     stream: &mut S,
     buf: &mut [u8],

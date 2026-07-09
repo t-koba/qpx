@@ -4,7 +4,8 @@ use tokio::io::duplex;
 
 fn test_https_origin_slot() -> HttpsOriginSlot {
     HttpsOriginSlot {
-        http1_idle: Arc::new(AsyncMutex::new(Vec::new())),
+        http1_idle: Arc::new(StdMutex::new(Vec::new())),
+        max_http1_idle: Arc::new(AtomicUsize::new(MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN)),
         h2: StdMutex::new(H2PoolState::default()),
         h2_ready: Arc::new(Notify::new()),
         h2_rr: AtomicUsize::new(0),

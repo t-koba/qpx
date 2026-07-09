@@ -31,6 +31,9 @@ runtime:
   max_observed_response_body_bytes: 8388608
   max_reverse_retry_template_body_bytes: 8388608
   upstream_http_timeout_ms: 30000
+  upstream_max_idle_connections_per_origin: 64
+  h2_initial_stream_window_size_bytes: 1048576
+  h2_initial_connection_window_size_bytes: 4194304
 upstreams:
 - name: corp-proxy
   url: https://proxy.example.com:3129

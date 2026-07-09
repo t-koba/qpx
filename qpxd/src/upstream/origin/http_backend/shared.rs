@@ -1,7 +1,7 @@
 use super::backend_h2::{prepare_internal_h2_request, send_h2_request_with_sender};
 use super::pool::{
-    HttpsConnectionAcquisition, HttpsOriginSlot, MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN,
-    TlsHttp1OriginConnection, acquire_https_connection, https_origin_pool_key,
+    HttpsConnectionAcquisition, HttpsOriginSlot, TlsHttp1OriginConnection,
+    acquire_https_connection, https_origin_pool_key,
 };
 use crate::upstream::raw_http1::{
     Http1ConnectionRecycler, Http1ResponseWithInterim, send_http1_request_with_interim_reusable,
@@ -29,8 +29,15 @@ pub(crate) async fn shared_reverse_https_request_with_trust(
         trust,
     ));
 
-    match acquire_https_connection(&slot, authority.as_str(), target.host.as_str(), true, trust)
-        .await?
+    match acquire_https_connection(
+        &slot,
+        authority.as_str(),
+        target.host.as_str(),
+        true,
+        trust,
+        pools.direct_origin.h2_tuning(),
+    )
+    .await?
     {
         HttpsConnectionAcquisition::H2Ready { shared, ready } => {
             let req = prepare_internal_h2_request(req, target.scheme.as_str(), authority.as_str())?;
@@ -67,19 +74,13 @@ pub(super) async fn send_tls_http1_with_recycle(
         entry.stream,
         req,
         Http1ConnectionRecycler::new({
-            let idle = slot.http1_idle.clone();
+            let slot = slot.clone();
             move |stream| {
-                let idle = idle.clone();
                 let upstream_cert = upstream_cert.clone();
-                async move {
-                    let mut idle = idle.lock().await;
-                    if idle.len() < MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN {
-                        idle.push(TlsHttp1OriginConnection {
-                            stream,
-                            upstream_cert,
-                        });
-                    }
-                }
+                slot.recycle_http1_idle(TlsHttp1OriginConnection {
+                    stream,
+                    upstream_cert,
+                });
             }
         }),
     )

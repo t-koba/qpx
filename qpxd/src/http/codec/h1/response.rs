@@ -8,6 +8,9 @@ use hyper::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderValue, TRAILER, TRANSFER_ENCODING,
 };
 use qpx_http::body::Body;
+use std::future::{Future, poll_fn};
+use std::io::{Error as IoError, ErrorKind, IoSlice};
+use std::task::Poll;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, WriteHalf};
 use tokio::time::{Duration, timeout};
 
@@ -72,9 +75,6 @@ where
         || (request_method == Method::CONNECT && parts.status.is_success());
     let declared_length = parse_declared_content_length(&headers)?;
     let has_chunked = has_chunked_transfer_encoding(&headers)?;
-    let first_chunk: Option<Bytes> = None;
-    let mut first_trailers: Option<HeaderMap> = None;
-
     let body_kind = if no_body {
         if request_method != Method::HEAD {
             headers.remove(CONTENT_LENGTH);
@@ -98,6 +98,22 @@ where
         ResponseBodyKind::CloseDelimited
     };
 
+    let mut first_chunk = None;
+    let mut first_trailers = None;
+    let mut first_body_error = None;
+    if !matches!(body_kind, ResponseBodyKind::Empty) {
+        match poll_response_body_data_now(&mut body).await {
+            Ok(chunk) => first_chunk = chunk,
+            Err(err) => first_body_error = Some(err),
+        }
+        if first_body_error.is_none() && first_chunk.is_none() {
+            match poll_response_trailers_now(&mut body).await {
+                Ok(trailers) => first_trailers = trailers,
+                Err(err) => first_body_error = Some(err),
+            }
+        }
+    }
+
     let emit_trailers = if matches!(body_kind, ResponseBodyKind::Chunked) {
         prepare_http1_trailer_metadata(&mut headers, first_trailers.as_mut())
     } else {
@@ -116,26 +132,32 @@ where
         &headers,
         keep_alive,
     );
-    write_status_and_headers(
-        writer,
-        request_version,
-        parts.status,
-        &headers,
-        connection_mode,
-    )
-    .await?;
+    let head =
+        serialize_status_and_headers(request_version, parts.status, &headers, connection_mode);
 
     match body_kind {
-        ResponseBodyKind::Empty => {}
+        ResponseBodyKind::Empty => write_all_with_timeout(writer, &head).await?,
         ResponseBodyKind::ContentLength(length) => {
-            write_content_length_response_body(writer, &mut body, length, body_read_timeout)
+            if let Some(err) = first_body_error.take() {
+                write_all_with_timeout(writer, &head).await?;
+                return Err(err);
+            }
+            let remaining =
+                write_head_and_first_content_length_chunk(writer, &head, first_chunk, length)
+                    .await?;
+            write_content_length_response_body(writer, &mut body, remaining, body_read_timeout)
                 .await?;
         }
         ResponseBodyKind::Chunked => {
+            if let Some(err) = first_body_error.take() {
+                write_all_with_timeout(writer, &head).await?;
+                return Err(err);
+            }
+            write_head_and_first_chunked_chunk(writer, &head, first_chunk).await?;
             write_chunked_response_body(
                 writer,
                 &mut body,
-                first_chunk,
+                None,
                 first_trailers,
                 emit_trailers,
                 body_read_timeout,
@@ -143,8 +165,12 @@ where
             .await?;
         }
         ResponseBodyKind::CloseDelimited => {
-            write_close_delimited_response_body(writer, &mut body, first_chunk, body_read_timeout)
-                .await?;
+            if let Some(err) = first_body_error.take() {
+                write_all_with_timeout(writer, &head).await?;
+                return Err(err);
+            }
+            write_head_and_first_close_delimited_chunk(writer, &head, first_chunk).await?;
+            write_close_delimited_response_body(writer, &mut body, None, body_read_timeout).await?;
         }
     }
     flush_with_timeout(writer).await?;
@@ -161,6 +187,17 @@ pub(super) async fn write_status_and_headers<W>(
 where
     W: AsyncRead + AsyncWrite + Unpin,
 {
+    let head = serialize_status_and_headers(version, status, headers, connection_mode);
+    write_all_with_timeout(writer, &head).await?;
+    Ok(())
+}
+
+fn serialize_status_and_headers(
+    version: Version,
+    status: StatusCode,
+    headers: &HeaderMap,
+    connection_mode: ConnectionHeaderMode,
+) -> Vec<u8> {
     let mut head = Vec::with_capacity(512);
     let version = match version {
         Version::HTTP_10 => "HTTP/1.0",
@@ -202,8 +239,7 @@ where
         }
     }
     head.extend_from_slice(b"\r\n");
-    write_all_with_timeout(writer, &head).await?;
-    Ok(())
+    head
 }
 
 async fn write_content_length_response_body<W>(
@@ -267,7 +303,6 @@ where
     if let Some(trailers) = trailers.as_mut() {
         let _ = qpx_http::protocol::semantics::sanitize_response_trailers(trailers);
         if emit_trailers && !trailers.is_empty() {
-            serialize_headers(trailers, &mut Vec::new())?;
             let mut out = Vec::with_capacity(256);
             serialize_headers(trailers, &mut out)?;
             write_all_with_timeout(writer, &out).await?;
@@ -326,11 +361,67 @@ where
     if chunk.is_empty() {
         return Ok(());
     }
-    let header = format!("{:X}\r\n", chunk.len());
-    write_all_with_timeout(writer, header.as_bytes()).await?;
-    write_all_with_timeout(writer, chunk).await?;
-    write_all_with_timeout(writer, b"\r\n").await?;
+    let mut header = [0_u8; 18];
+    let header = chunk_size_header(chunk.len(), &mut header);
+    write_vectored_all_with_timeout(writer, &[header, chunk, b"\r\n"]).await?;
     Ok(())
+}
+
+async fn write_head_and_first_content_length_chunk<W>(
+    writer: &mut WriteHalf<W>,
+    head: &[u8],
+    first_chunk: Option<Bytes>,
+    length: u64,
+) -> Result<u64>
+where
+    W: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(chunk) = first_chunk else {
+        write_all_with_timeout(writer, head).await?;
+        return Ok(length);
+    };
+    let chunk_len = chunk.len() as u64;
+    if chunk_len > length {
+        return Err(anyhow!("response body exceeded declared content-length"));
+    }
+    if chunk.is_empty() {
+        write_all_with_timeout(writer, head).await?;
+    } else {
+        write_vectored_all_with_timeout(writer, &[head, &chunk]).await?;
+    }
+    Ok(length - chunk_len)
+}
+
+async fn write_head_and_first_chunked_chunk<W>(
+    writer: &mut WriteHalf<W>,
+    head: &[u8],
+    first_chunk: Option<Bytes>,
+) -> Result<()>
+where
+    W: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(chunk) = first_chunk.filter(|chunk| !chunk.is_empty()) else {
+        write_all_with_timeout(writer, head).await?;
+        return Ok(());
+    };
+    let mut chunk_header = [0_u8; 18];
+    let chunk_header = chunk_size_header(chunk.len(), &mut chunk_header);
+    write_vectored_all_with_timeout(writer, &[head, chunk_header, &chunk, b"\r\n"]).await
+}
+
+async fn write_head_and_first_close_delimited_chunk<W>(
+    writer: &mut WriteHalf<W>,
+    head: &[u8],
+    first_chunk: Option<Bytes>,
+) -> Result<()>
+where
+    W: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(chunk) = first_chunk.filter(|chunk| !chunk.is_empty()) else {
+        write_all_with_timeout(writer, head).await?;
+        return Ok(());
+    };
+    write_vectored_all_with_timeout(writer, &[head, &chunk]).await
 }
 
 async fn write_all_with_timeout<W>(writer: &mut WriteHalf<W>, bytes: &[u8]) -> Result<()>
@@ -341,6 +432,111 @@ where
         .await
         .map_err(|_| anyhow!("HTTP/1 response write timed out"))?
         .map_err(Into::into)
+}
+
+async fn write_vectored_all_with_timeout<W>(
+    writer: &mut WriteHalf<W>,
+    slices: &[&[u8]],
+) -> Result<()>
+where
+    W: AsyncRead + AsyncWrite + Unpin,
+{
+    timeout(RESPONSE_WRITE_TIMEOUT, write_vectored_all(writer, slices))
+        .await
+        .map_err(|_| anyhow!("HTTP/1 response write timed out"))?
+        .map_err(Into::into)
+}
+
+async fn write_vectored_all<W>(writer: &mut W, slices: &[&[u8]]) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut index = 0usize;
+    let mut offset = 0usize;
+    while index < slices.len() {
+        while index < slices.len() && offset == slices[index].len() {
+            index += 1;
+            offset = 0;
+        }
+        if index >= slices.len() {
+            return Ok(());
+        }
+        let mut io_slices = Vec::with_capacity(slices.len() - index);
+        io_slices.push(IoSlice::new(&slices[index][offset..]));
+        for slice in &slices[index + 1..] {
+            if !slice.is_empty() {
+                io_slices.push(IoSlice::new(slice));
+            }
+        }
+        let written = writer.write_vectored(&io_slices).await?;
+        if written == 0 {
+            return Err(IoError::new(
+                ErrorKind::WriteZero,
+                "failed to write HTTP/1 response",
+            ));
+        }
+        advance_slices(slices, &mut index, &mut offset, written);
+    }
+    Ok(())
+}
+
+fn advance_slices(slices: &[&[u8]], index: &mut usize, offset: &mut usize, written: usize) {
+    let mut remaining = written;
+    while remaining > 0 && *index < slices.len() {
+        let available = slices[*index].len() - *offset;
+        if remaining < available {
+            *offset += remaining;
+            return;
+        }
+        remaining -= available;
+        *index += 1;
+        *offset = 0;
+    }
+}
+
+fn chunk_size_header(len: usize, out: &mut [u8; 18]) -> &[u8] {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut value = len;
+    let mut cursor = 16;
+    if value == 0 {
+        cursor -= 1;
+        out[cursor] = b'0';
+    } else {
+        while value > 0 {
+            cursor -= 1;
+            out[cursor] = HEX[value & 0x0f];
+            value >>= 4;
+        }
+    }
+    let digits = 16 - cursor;
+    out.copy_within(cursor..16, 0);
+    out[digits] = b'\r';
+    out[digits + 1] = b'\n';
+    &out[..digits + 2]
+}
+
+async fn poll_response_body_data_now(body: &mut Body) -> Result<Option<Bytes>> {
+    poll_fn(|cx| {
+        let future = body.data();
+        let mut future = std::pin::pin!(future);
+        match Future::poll(future.as_mut(), cx) {
+            Poll::Ready(chunk) => Poll::Ready(chunk.transpose().map_err(Into::into)),
+            Poll::Pending => Poll::Ready(Ok(None)),
+        }
+    })
+    .await
+}
+
+async fn poll_response_trailers_now(body: &mut Body) -> Result<Option<HeaderMap>> {
+    poll_fn(|cx| {
+        let future = body.trailers();
+        let mut future = std::pin::pin!(future);
+        match Future::poll(future.as_mut(), cx) {
+            Poll::Ready(trailers) => Poll::Ready(trailers.map_err(Into::into)),
+            Poll::Pending => Poll::Ready(Ok(None)),
+        }
+    })
+    .await
 }
 
 async fn flush_with_timeout<W>(writer: &mut WriteHalf<W>) -> Result<()>

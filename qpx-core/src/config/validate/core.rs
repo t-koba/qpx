@@ -178,6 +178,19 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
             "runtime.upstream_proxy_max_concurrent_per_endpoint must be >= 1"
         ));
     }
+    if runtime.upstream_max_idle_connections_per_origin == 0 {
+        return Err(anyhow!(
+            "runtime.upstream_max_idle_connections_per_origin must be >= 1"
+        ));
+    }
+    validate_h2_window_size(
+        runtime.h2_initial_stream_window_size_bytes,
+        "runtime.h2_initial_stream_window_size_bytes",
+    )?;
+    validate_h2_window_size(
+        runtime.h2_initial_connection_window_size_bytes,
+        "runtime.h2_initial_connection_window_size_bytes",
+    )?;
     if runtime.tls_peek_timeout_ms == 0 {
         return Err(anyhow!("runtime.tls_peek_timeout_ms must be >= 1"));
     }
@@ -258,6 +271,17 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
     }
     if runtime.tcp_backlog <= 0 {
         return Err(anyhow!("runtime.tcp_backlog must be >= 1"));
+    }
+    Ok(())
+}
+
+fn validate_h2_window_size(size: u32, name: &str) -> Result<()> {
+    const MAX_H2_WINDOW_SIZE: u32 = (1 << 31) - 1;
+    if size == 0 {
+        return Err(anyhow!("{name} must be >= 1"));
+    }
+    if size > MAX_H2_WINDOW_SIZE {
+        return Err(anyhow!("{name} must be <= {MAX_H2_WINDOW_SIZE}"));
     }
     Ok(())
 }

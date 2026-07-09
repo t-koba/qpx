@@ -8,7 +8,8 @@ use tracing::warn;
 
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::upstream::raw_http1::{
-    Http1ConnectionRecycler, Http1ResponseWithInterim, send_http1_request_with_interim_reusable,
+    Http1ConnectionRecycler, Http1ResponseWithInterim, idle_connection_closed_or_dirty,
+    send_http1_request_with_interim_reusable,
 };
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 
@@ -136,16 +137,27 @@ async fn proxy_plain_http(
         host_authority.as_str(),
     ));
     let req = prepare_proxy_http1_request(req, host_authority.as_str(), proxy_name)?;
-    let stream = match slot.idle.lock().await.pop() {
+    let stream = match take_reusable_plain_http_stream(&slot).await {
         Some(stream) => stream,
         None => open_plain_http_origin_stream(connect_authority.as_str()).await?,
     };
+    let recycle_slot = slot.clone();
     send_http1_request_with_interim_reusable(
         stream,
         req,
-        Http1ConnectionRecycler::from_idle(slot.idle.clone()),
+        Http1ConnectionRecycler::new(move |stream| recycle_slot.recycle_idle(stream)),
     )
     .await
+}
+
+async fn take_reusable_plain_http_stream(slot: &pool::PlainHttpOriginSlot) -> Option<TcpStream> {
+    loop {
+        let mut stream = slot.pop_idle()?;
+        if idle_connection_closed_or_dirty(&mut stream).await {
+            continue;
+        }
+        return Some(stream);
+    }
 }
 
 async fn proxy_https_with_options(
@@ -203,6 +215,7 @@ async fn proxy_https_with_options(
         server_name.as_str(),
         verify_upstream_cert,
         trust,
+        pools.direct_origin.h2_tuning(),
     )
     .await?
     {

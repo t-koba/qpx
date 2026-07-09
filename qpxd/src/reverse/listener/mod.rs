@@ -4,7 +4,7 @@ use super::{
 };
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 use crate::http::codec::interim::{
-    H2_PREFACE, serve_h2_with_interim_and_capacity, sniff_h2_preface,
+    H2_PREFACE, serve_h2_with_interim_and_capacity_and_tuning, sniff_h2_preface,
 };
 use crate::tcp_bindings::filter::ConnectionFilterStage;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
@@ -172,12 +172,18 @@ pub(super) async fn run_reverse_http_acceptor(
                     },
                     &access_cfg,
                 );
-                if let Err(err) = serve_h2_with_interim_and_capacity(
+                let h2_limits = reverse.runtime.state().plan.limits.h2;
+                let h2_tuning = crate::http::codec::h2::H2TransportTuning {
+                    initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
+                    initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
+                };
+                if let Err(err) = serve_h2_with_interim_and_capacity_and_tuning(
                     stream,
                     service,
                     false,
                     header_read_timeout,
                     reverse_body_channel_capacity(&reverse),
+                    h2_tuning,
                 )
                 .await
                 {

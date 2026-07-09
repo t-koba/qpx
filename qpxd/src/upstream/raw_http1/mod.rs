@@ -3,12 +3,14 @@ use hyper::header::{CONTENT_LENGTH, HeaderMap};
 use hyper::{Request, Response, StatusCode};
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
-use std::future::Future;
+use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
+use tokio::io::ReadBuf;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::Mutex;
 
+mod body;
 mod io;
 mod request;
 mod response;
@@ -16,11 +18,10 @@ mod response;
 mod tests;
 
 const MAX_HEADER_BYTES: usize = 128 * 1024;
-const READ_BUF_SIZE: usize = 16 * 1024;
+const READ_BUF_SIZE: usize = 64 * 1024;
 const MAX_CHUNKED_BODY_BYTES: u64 = 1024 * 1024 * 1024;
 const RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT: tokio::time::Duration =
     tokio::time::Duration::from_secs(30);
-const MAX_RECYCLED_HTTP1_CONNECTIONS_PER_IDLE: usize = 8;
 
 #[derive(Debug, Clone)]
 pub(crate) struct InterimResponseHead {
@@ -34,8 +35,7 @@ pub(crate) struct Http1ResponseWithInterim {
     pub(crate) upstream_cert: Option<UpstreamCertificateInfo>,
 }
 
-type RecycleFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
-type RecycleFn<S> = dyn Fn(S) -> RecycleFuture + Send + Sync;
+type RecycleFn<S> = dyn Fn(S) + Send + Sync;
 
 #[derive(Clone)]
 pub(crate) struct Http1ConnectionRecycler<S> {
@@ -43,34 +43,34 @@ pub(crate) struct Http1ConnectionRecycler<S> {
 }
 
 impl<S> Http1ConnectionRecycler<S> {
-    pub(crate) fn new<F, Fut>(recycle: F) -> Self
+    pub(crate) fn new<F>(recycle: F) -> Self
     where
-        F: Fn(S) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        F: Fn(S) + Send + Sync + 'static,
     {
         Self {
-            recycle: Arc::new(move |stream| Box::pin(recycle(stream))),
+            recycle: Arc::new(recycle),
         }
     }
 
-    pub(crate) fn from_idle(idle: Arc<Mutex<Vec<S>>>) -> Self
-    where
-        S: Send + 'static,
-    {
-        Self::new(move |stream| {
-            let idle = idle.clone();
-            async move {
-                let mut idle = idle.lock().await;
-                if idle.len() < MAX_RECYCLED_HTTP1_CONNECTIONS_PER_IDLE {
-                    idle.push(stream);
-                }
-            }
-        })
+    fn recycle(&self, stream: S) {
+        (self.recycle)(stream);
     }
+}
 
-    async fn recycle(&self, stream: S) {
-        (self.recycle)(stream).await;
-    }
+pub(crate) async fn idle_connection_closed_or_dirty<S>(stream: &mut S) -> bool
+where
+    S: AsyncRead + Unpin,
+{
+    let mut byte = [0_u8; 1];
+    let mut read_buf = ReadBuf::new(&mut byte);
+    poll_fn(
+        |cx| match Pin::new(&mut *stream).poll_read(cx, &mut read_buf) {
+            Poll::Ready(Ok(())) => Poll::Ready(true),
+            Poll::Ready(Err(_)) => Poll::Ready(true),
+            Poll::Pending => Poll::Ready(false),
+        },
+    )
+    .await
 }
 
 pub(crate) async fn send_http1_request_with_interim<S>(

@@ -33,6 +33,7 @@ pub struct CompiledRuntimeLimits {
     pub timeouts: TimeoutLimits,
     pub body: BodyLimits,
     pub grpc: GrpcLimits,
+    pub h2: H2TransportLimits,
     pub h3: H3ChannelLimits,
     pub upstream: UpstreamLimits,
     pub sse: SseStreamingPolicy,
@@ -73,6 +74,12 @@ pub struct GrpcLimits {
 }
 
 #[derive(Clone, Copy)]
+pub struct H2TransportLimits {
+    pub initial_stream_window_size_bytes: u32,
+    pub initial_connection_window_size_bytes: u32,
+}
+
+#[derive(Clone, Copy)]
 pub struct H3ChannelLimits {
     pub max_h3_streams_per_connection: usize,
     pub datagram_channel_capacity: usize,
@@ -84,6 +91,7 @@ pub struct H3ChannelLimits {
 #[derive(Clone, Copy)]
 pub struct UpstreamLimits {
     pub upstream_proxy_max_concurrent_per_endpoint: usize,
+    pub upstream_max_idle_connections_per_origin: usize,
     pub max_reverse_retry_template_body_bytes: usize,
 }
 

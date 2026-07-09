@@ -46,6 +46,17 @@ struct ParsedRequestHead {
 
 type BodyReadResult<I> = Result<(ReadHalf<I>, BytesMut)>;
 
+enum RequestBodyRead<I>
+where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    Inline {
+        read_half: ReadHalf<I>,
+        read_buf: BytesMut,
+    },
+    Spawned(JoinHandle<BodyReadResult<I>>),
+}
+
 #[cfg(test)]
 pub(crate) async fn serve_http1_with_interim<I, S>(
     io: I,
@@ -163,7 +174,7 @@ where
             write_half.flush().await?;
         }
 
-        let (body, body_task) = spawn_request_body(
+        let (body, body_read) = prepare_request_body(
             read_half,
             body_prefix,
             parsed.body_kind,
@@ -192,30 +203,46 @@ where
         .await?;
 
         if !keep_alive {
-            body_task.abort();
+            if let RequestBodyRead::Spawned(body_task) = body_read {
+                body_task.abort();
+            }
             return Ok(());
         }
 
-        let (next_read_half, next_buf) = body_task.await??;
-        read_half = next_read_half;
-        read_buf = next_buf;
+        match body_read {
+            RequestBodyRead::Inline {
+                read_half: next_read_half,
+                read_buf: next_buf,
+            } => {
+                read_half = next_read_half;
+                read_buf = next_buf;
+            }
+            RequestBodyRead::Spawned(body_task) => {
+                let (next_read_half, next_buf) = body_task.await??;
+                read_half = next_read_half;
+                read_buf = next_buf;
+            }
+        }
     }
 }
 
-fn spawn_request_body<I>(
+fn prepare_request_body<I>(
     read_half: ReadHalf<I>,
     read_buf: BytesMut,
     kind: RequestBodyKind,
     read_timeout: Duration,
     body_channel_capacity: usize,
-) -> (Body, JoinHandle<BodyReadResult<I>>)
+) -> (Body, RequestBodyRead<I>)
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     match kind {
         RequestBodyKind::Empty => (
             Body::empty(),
-            tokio::spawn(async move { Ok((read_half, read_buf)) }),
+            RequestBodyRead::Inline {
+                read_half,
+                read_buf,
+            },
         ),
         RequestBodyKind::ContentLength(length) => {
             let (sender, body) = Body::channel_with_capacity(body_channel_capacity.max(1));
@@ -229,14 +256,14 @@ where
                 )
                 .await
             });
-            (body, task)
+            (body, RequestBodyRead::Spawned(task))
         }
         RequestBodyKind::Chunked => {
             let (sender, body) = Body::channel_with_capacity(body_channel_capacity.max(1));
             let task = tokio::spawn(async move {
                 forward_chunked_request_body(read_half, read_buf, sender, read_timeout).await
             });
-            (body, task)
+            (body, RequestBodyRead::Spawned(task))
         }
     }
 }

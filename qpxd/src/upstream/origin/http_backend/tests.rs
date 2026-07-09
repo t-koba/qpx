@@ -10,8 +10,8 @@ use qpx_http::body::to_bytes;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-#[cfg(feature = "tls-rustls")]
 use tokio::sync::Notify;
 use tokio::task::yield_now;
 
@@ -46,6 +46,57 @@ async fn spawn_counting_http1_origin(scheme: &str) -> Result<(OriginEndpoint, Ar
     ))
 }
 
+async fn spawn_closing_keepalive_http1_origin() -> Result<(
+    OriginEndpoint,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<Notify>,
+)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let closes = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(Notify::new());
+    let accepts_task = accepts.clone();
+    let closes_task = closes.clone();
+    let closed_task = closed.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            accepts_task.fetch_add(1, Ordering::SeqCst);
+            let closes = closes_task.clone();
+            let closed = closed_task.clone();
+            tokio::spawn(async move {
+                let mut raw = Vec::new();
+                let mut buf = [0_u8; 1024];
+                loop {
+                    let n = stream.read(&mut buf).await.expect("read request");
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    if raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                    .await
+                    .expect("write response");
+                drop(stream);
+                closes.fetch_add(1, Ordering::SeqCst);
+                closed.notify_waiters();
+            });
+        }
+    });
+    Ok((
+        OriginEndpoint::direct(format!("http://127.0.0.1:{}", addr.port())),
+        accepts,
+        closes,
+        closed,
+    ))
+}
+
 #[tokio::test]
 async fn proxy_plain_http_reuses_direct_origin_connection() -> Result<()> {
     let (origin, accepts) = spawn_counting_http1_origin("http").await?;
@@ -77,6 +128,45 @@ async fn proxy_plain_http_reuses_direct_origin_connection() -> Result<()> {
     assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
 
     assert_eq!(accepts.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()> {
+    let (origin, accepts, closes, closed) = spawn_closing_keepalive_http1_origin().await?;
+    let pools = crate::pool::PoolRegistry::new();
+
+    let first = proxy_http_with_interim(
+        &pools,
+        Request::builder()
+            .uri("http://reverse_edges.test/one")
+            .body(Body::empty())?,
+        &origin,
+        "qpx-test",
+        None,
+    )
+    .await?;
+    assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
+    while closes.load(Ordering::SeqCst) == 0 {
+        let notified = closed.notified();
+        if closes.load(Ordering::SeqCst) == 0 {
+            notified.await;
+        }
+    }
+
+    let second = proxy_http_with_interim(
+        &pools,
+        Request::builder()
+            .uri("http://reverse_edges.test/two")
+            .body(Body::empty())?,
+        &origin,
+        "qpx-test",
+        None,
+    )
+    .await?;
+    assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
+
+    assert_eq!(accepts.load(Ordering::SeqCst), 2);
     Ok(())
 }
 

@@ -4,7 +4,7 @@ use super::response::{
     forward_close_delimited_body,
 };
 use super::{
-    RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, parse_declared_content_length,
+    Http1ConnectionRecycler, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, parse_declared_content_length,
     send_http1_request_with_interim,
 };
 use bytes::{Bytes, BytesMut};
@@ -12,6 +12,8 @@ use hyper::header::{CONTENT_LENGTH, HeaderName, HeaderValue, TRANSFER_ENCODING};
 use hyper::{HeaderMap, Method, Request, StatusCode, Version};
 use qpx_http::body::Body;
 use qpx_http::body::to_bytes;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Duration;
@@ -207,6 +209,86 @@ async fn chunked_response_build_removes_conflicting_content_length() {
 }
 
 #[tokio::test]
+async fn inline_content_length_response_recycles_before_body_poll() {
+    let (stream, _peer) = tokio::io::duplex(64);
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let response = build_response(
+        stream,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body_kind: ResponseBodyKind::ContentLength(2),
+        },
+        BytesMut::from(&b"OK"[..]),
+        Some(Http1ConnectionRecycler::new(move |_stream| {
+            recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+        })),
+    );
+
+    assert_eq!(recycled.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        to_bytes(response.into_body()).await.expect("body bytes"),
+        Bytes::from_static(b"OK")
+    );
+}
+
+#[tokio::test]
+async fn pull_content_length_response_recycles_after_complete_body() {
+    let (proxy, mut origin) = tokio::io::duplex(64);
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let response = build_response(
+        proxy,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body_kind: ResponseBodyKind::ContentLength(2),
+        },
+        BytesMut::from(&b"O"[..]),
+        Some(Http1ConnectionRecycler::new(move |_stream| {
+            recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+        })),
+    );
+    origin.write_all(b"K").await.expect("write body");
+
+    assert_eq!(
+        to_bytes(response.into_body()).await.expect("body bytes"),
+        Bytes::from_static(b"OK")
+    );
+    assert_eq!(recycled.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn pull_content_length_response_does_not_recycle_with_leftover_bytes() {
+    let (proxy, mut origin) = tokio::io::duplex(64);
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let response = build_response(
+        proxy,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body_kind: ResponseBodyKind::ContentLength(2),
+        },
+        BytesMut::from(&b"O"[..]),
+        Some(Http1ConnectionRecycler::new(move |_stream| {
+            recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+        })),
+    );
+    origin.write_all(b"KEXTRA").await.expect("write body");
+
+    assert_eq!(
+        to_bytes(response.into_body()).await.expect("body bytes"),
+        Bytes::from_static(b"OK")
+    );
+    assert_eq!(recycled.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn chunked_response_reader_rejects_oversized_chunk_before_payload_allocation() {
     let (mut origin, proxy) = tokio::io::duplex(1024);
     origin
@@ -286,15 +368,12 @@ async fn write_http1_request_announces_chunked_request_trailers() {
     });
 
     let stream = TcpStream::connect(addr).await.expect("connect");
-    let (mut sender, body) = Body::channel_with_capacity(16);
-    tokio::spawn(async move {
-        let mut trailers = HeaderMap::new();
-        trailers.insert(
-            HeaderName::from_static("x-checksum"),
-            HeaderValue::from_static("abc123"),
-        );
-        let _ = sender.send_trailers(trailers).await;
-    });
+    let mut trailers = HeaderMap::new();
+    trailers.insert(
+        HeaderName::from_static("x-checksum"),
+        HeaderValue::from_static("abc123"),
+    );
+    let body = Body::replay(Bytes::new(), Some(trailers));
     let request = Request::builder()
         .method(Method::POST)
         .uri("/trailers")

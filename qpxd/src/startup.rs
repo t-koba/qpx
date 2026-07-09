@@ -187,6 +187,11 @@ pub(crate) async fn run(
         tcp_backlog = config.runtime.tcp_backlog,
         upstream_proxy_max_concurrent_per_endpoint =
             config.runtime.upstream_proxy_max_concurrent_per_endpoint,
+        upstream_max_idle_connections_per_origin =
+            config.runtime.upstream_max_idle_connections_per_origin,
+        h2_initial_stream_window_size_bytes = config.runtime.h2_initial_stream_window_size_bytes,
+        h2_initial_connection_window_size_bytes =
+            config.runtime.h2_initial_connection_window_size_bytes,
         "runtime tuning"
     );
     log_binary_upgrade_capabilities(&config);

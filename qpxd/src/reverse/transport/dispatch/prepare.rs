@@ -41,6 +41,9 @@ struct ReverseRouteSelection {
     // override (stable for the request lifetime); avoids cloning and hashing
     // the override config on every request.
     request_destination_cache: Vec<(usize, crate::destination::DestinationMetadata)>,
+    // Keyed by the address of the route's compiled policy context. The compiled
+    // router is immutable for the request lifetime, so the address is stable.
+    identity_cache: Vec<(usize, crate::policy_context::ResolvedIdentity)>,
     observation_plan: RequestObservationPlan,
     max_observed_request_body_bytes: usize,
     collect_observation_from_remaining: bool,
@@ -222,25 +225,33 @@ fn scan_reverse_routes(
     request_rpc: Option<&crate::http::rpc::RpcMatchContext>,
     selection: &mut ReverseRouteSelection,
 ) -> Result<()> {
+    let sanitized_headers = sanitized_headers_for_route_scan(req, state, conn)?;
     router.try_for_each_candidate_route(prefilter_ctx.clone(), |idx, route| {
         let resolution_override = route.plan.destination_resolution.as_ref();
-        let effective_policy = route.plan.policy_context.clone();
-        let mut sanitized_headers = req.headers().clone();
-        sanitize_headers_for_policy(
-            state,
-            &effective_policy,
-            conn.remote_addr.ip(),
-            &mut sanitized_headers,
-        )?;
-        let identity = resolve_identity(
-            state,
-            &effective_policy,
-            conn.remote_addr.ip(),
-            Some(&sanitized_headers),
-            conn.peer_certificates
-                .as_deref()
-                .map(|certs| certs.as_slice()),
-        )?;
+        let effective_policy = &route.plan.policy_context;
+        let policy_key = policy_context_cache_key(effective_policy);
+        let identity = match selection
+            .identity_cache
+            .iter()
+            .find(|(key, _)| *key == policy_key)
+        {
+            Some((_, identity)) => identity.clone(),
+            None => {
+                let identity = resolve_identity(
+                    state,
+                    effective_policy,
+                    conn.remote_addr.ip(),
+                    Some(sanitized_headers.as_ref()),
+                    conn.peer_certificates
+                        .as_deref()
+                        .map(|certs| certs.as_slice()),
+                )?;
+                selection
+                    .identity_cache
+                    .push((policy_key, identity.clone()));
+                identity
+            }
+        };
         let override_key = super::destination_override_key(resolution_override);
         let request_destination = match selection
             .request_destination_cache
@@ -260,7 +271,7 @@ fn scan_reverse_routes(
         let ctx = crate::http::policy::rule_context::build_request_rule_match_context(
             crate::http::policy::rule_context::RequestRuleContextInput {
                 base,
-                headers: &sanitized_headers,
+                headers: sanitized_headers.as_ref(),
                 destination: &request_destination,
                 identity: &identity,
                 request_size,
@@ -272,9 +283,9 @@ fn scan_reverse_routes(
         if request_size.is_some() || request_rpc.is_some() {
             if route.matches(&ctx) {
                 selection.route_idx = Some(idx);
-                selection.selected_policy = effective_policy;
+                selection.selected_policy = effective_policy.clone();
                 selection.selected_identity = Some(identity);
-                selection.selected_headers = Some(sanitized_headers);
+                selection.selected_headers = Some(sanitized_headers.as_ref().clone());
                 return Ok::<bool, anyhow::Error>(true);
             }
             return Ok::<bool, anyhow::Error>(false);
@@ -319,14 +330,36 @@ fn scan_reverse_routes(
         }
         if route.matches(&ctx) {
             selection.route_idx = Some(idx);
-            selection.selected_policy = effective_policy;
+            selection.selected_policy = effective_policy.clone();
             selection.selected_identity = Some(identity);
-            selection.selected_headers = Some(sanitized_headers);
+            selection.selected_headers = Some(sanitized_headers.as_ref().clone());
             return Ok::<bool, anyhow::Error>(true);
         }
         Ok::<bool, anyhow::Error>(false)
     })?;
     Ok(())
+}
+
+fn sanitized_headers_for_route_scan<'a>(
+    req: &'a Request<Body>,
+    state: &crate::runtime::RuntimeState,
+    conn: &ReverseConnInfo,
+) -> Result<std::borrow::Cow<'a, http::HeaderMap>> {
+    if state.security.identity_sources.sources.is_empty() {
+        return Ok(std::borrow::Cow::Borrowed(req.headers()));
+    }
+    let mut sanitized = req.headers().clone();
+    sanitize_headers_for_policy(
+        state,
+        &EffectivePolicyContext::default(),
+        conn.remote_addr.ip(),
+        &mut sanitized,
+    )?;
+    Ok(std::borrow::Cow::Owned(sanitized))
+}
+
+fn policy_context_cache_key(policy: &EffectivePolicyContext) -> usize {
+    policy as *const EffectivePolicyContext as usize
 }
 
 pub(super) async fn prepare_reverse_request(
@@ -379,6 +412,7 @@ pub(super) async fn prepare_reverse_request(
         selected_identity: None,
         selected_headers: None,
         request_destination_cache: Vec::new(),
+        identity_cache: Vec::new(),
         observation_plan: RequestObservationPlan::default(),
         max_observed_request_body_bytes: state.plan.limits.body.max_observed_request_body_bytes,
         collect_observation_from_remaining: false,

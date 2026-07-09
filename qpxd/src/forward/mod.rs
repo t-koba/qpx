@@ -1,6 +1,6 @@
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 use crate::http::codec::interim::{
-    H2_PREFACE, serve_h2_with_interim_and_capacity, sniff_h2_preface,
+    H2_PREFACE, serve_h2_with_interim_and_capacity_and_tuning, sniff_h2_preface,
 };
 use crate::http::metrics as http_metrics;
 use crate::http::protocol::l7::finalize_response_for_request;
@@ -215,7 +215,12 @@ async fn run_forward_acceptor(
             };
             let stream = crate::http::protocol::io_prefix::PrefixedIo::new(stream, preface.clone());
             let access_cfg = runtime.state().resources.access_log.clone();
-            let body_channel_capacity = runtime.state().plan.limits.body.body_channel_capacity;
+            let limits = runtime.state().plan.limits;
+            let body_channel_capacity = limits.body.body_channel_capacity;
+            let h2_tuning = crate::http::codec::h2::H2TransportTuning {
+                initial_stream_window_size: limits.h2.initial_stream_window_size_bytes,
+                initial_connection_window_size: limits.h2.initial_connection_window_size_bytes,
+            };
             let access_name = Arc::<str>::from(listener_name.as_str());
             let request_runtime = runtime.clone();
             let service = handler_fn(move |req| {
@@ -236,12 +241,13 @@ async fn run_forward_acceptor(
                 &access_cfg,
             );
             let result = if preface.as_ref() == H2_PREFACE {
-                serve_h2_with_interim_and_capacity(
+                serve_h2_with_interim_and_capacity_and_tuning(
                     stream,
                     service,
                     true,
                     header_read_timeout,
                     body_channel_capacity,
+                    h2_tuning,
                 )
                 .await
             } else {

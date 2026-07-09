@@ -1,10 +1,13 @@
 use crate::http::codec::h2::*;
+use http_body::Body as _;
 use hyper::StatusCode;
 use qpx_http::body::to_bytes;
 use qpx_observability::RequestHandler;
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Clone)]
@@ -185,6 +188,53 @@ async fn send_h2_response_strips_body_framing_for_no_body_status() {
     assert!(!response.headers().contains_key(::http::header::TRAILER));
     let body = h2_response_to_hyper(response).expect("convert");
     assert!(to_bytes(body.into_body()).await.expect("body").is_empty());
+}
+
+#[tokio::test]
+async fn empty_h2_response_releases_inflight_immediately() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        let mut connection = h2::server::handshake(socket).await.expect("handshake");
+        let (request, mut respond) = connection
+            .accept()
+            .await
+            .expect("request state")
+            .expect("request");
+        drop(request);
+        let response = ::http::Response::builder()
+            .status(::http::StatusCode::NO_CONTENT)
+            .body(())
+            .expect("response");
+        respond
+            .send_response(response, true)
+            .expect("send response");
+        poll_fn(|cx| connection.poll_closed(cx))
+            .await
+            .expect("connection close");
+    });
+
+    let socket = TcpStream::connect(addr).await.expect("connect");
+    let (mut client, connection) = h2::client::handshake(socket).await.expect("handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client = client.ready().await.expect("ready");
+    let request = ::http::Request::builder()
+        .method("GET")
+        .uri("https://reverse_edges.test/empty")
+        .body(())
+        .expect("request");
+    let (response, _) = client.send_request(request, true).expect("send request");
+    let response = response.await.expect("response");
+    let inflight = Arc::new(AtomicUsize::new(1));
+
+    let converted = h2_response_to_hyper_with_inflight(response, Some(inflight.clone()))
+        .expect("convert response");
+
+    assert!(converted.body().is_end_stream());
+    assert_eq!(inflight.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -438,7 +488,8 @@ async fn h2_request_to_hyper_rejects_content_length_mismatch() {
             .expect_err("mismatch should fail");
         assert!(
             err.to_string().contains("content-length mismatch")
-                || err.to_string().contains("body aborted"),
+                || err.to_string().contains("body aborted")
+                || err.to_string().contains("stream error detected"),
             "unexpected error: {err}"
         );
     });

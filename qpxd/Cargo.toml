@@ -96,6 +96,7 @@ h2.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true
 httparse.workspace = true
+memchr.workspace = true
 libc.workspace = true
 quinn = { workspace = true, optional = true }
 h3 = { workspace = true, optional = true }

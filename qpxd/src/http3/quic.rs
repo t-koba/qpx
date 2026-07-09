@@ -100,6 +100,9 @@ pub(crate) fn build_h3_server_config_from_tls(
         .ok_or_else(|| anyhow!("failed to configure QUIC transport"))?;
     transport.max_concurrent_bidi_streams(max_bidi_streams.into());
     transport.max_concurrent_uni_streams(max_uni_streams.into());
+    transport.stream_receive_window((1024_u32 * 1024).into());
+    transport.receive_window((4_u32 * 1024 * 1024).into());
+    transport.send_window(4_u64 * 1024 * 1024);
     server_config.migration(false);
     Ok(server_config)
 }

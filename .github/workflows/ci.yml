@@ -276,6 +276,8 @@ jobs:
         id: allocation_profile
         continue-on-error: true
         env:
+          CARGO_PROFILE_RELEASE_DEBUG: "1"
+          CARGO_PROFILE_RELEASE_STRIP: "none"
           QPX_ALLOCATION_PROFILE_JSON: ${{ github.workspace }}/target/perf/perf-audit-allocation-profile.jsonl
           QPX_ALLOCATION_PROFILE_DIR: ${{ github.workspace }}/target/perf/allocations
         run: scripts/perf-audit-allocation-profile.sh

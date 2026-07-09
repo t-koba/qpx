@@ -1,12 +1,18 @@
 use super::io::{
-    determine_response_body_kind, fill_buffer, fill_buffer_capped, read_buf_with_timeout,
-    read_crlf_line, read_limited_with_timeout, read_trailer_headers, response_body_allows_reuse,
+    determine_response_body_kind, fill_buffer_capped, response_body_allows_reuse,
     response_keep_alive,
 };
-use super::{
-    Http1ConnectionRecycler, InterimResponseHead, MAX_CHUNKED_BODY_BYTES, MAX_HEADER_BYTES,
-    RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, READ_BUF_SIZE,
+#[cfg(test)]
+use super::io::{
+    fill_buffer, read_buf_with_timeout, read_crlf_line, read_limited_with_timeout,
+    read_trailer_headers,
 };
+use super::{
+    Http1ConnectionRecycler, InterimResponseHead, MAX_HEADER_BYTES,
+    RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
+};
+#[cfg(test)]
+use super::{MAX_CHUNKED_BODY_BYTES, READ_BUF_SIZE};
 use crate::http::codec::h1_common::{parse_header_map, parse_version};
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
@@ -14,8 +20,8 @@ use hyper::header::CONTENT_LENGTH;
 use hyper::{HeaderMap, Method, Response, StatusCode, Version};
 use qpx_http::body::Body;
 use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(test)]
 use tokio::time::Duration;
-use tracing::warn;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ResponseBodyKind {
@@ -95,7 +101,7 @@ where
 pub(super) fn build_response<S>(
     stream: S,
     mut head: ParsedResponseHead,
-    prefix: BytesMut,
+    mut prefix: BytesMut,
     recycler: Option<Http1ConnectionRecycler<S>>,
 ) -> Response<Body>
 where
@@ -111,20 +117,30 @@ where
                 && prefix.is_empty()
                 && response_keep_alive(head.version, &head.headers)
             {
-                tokio::spawn(async move {
-                    recycler.recycle(stream).await;
-                });
+                recycler.recycle(stream);
             }
             Body::empty()
         }
-        kind => spawn_response_body(
+        ResponseBodyKind::ContentLength(length)
+            if length <= usize::MAX as u64 && prefix.len() >= length as usize =>
+        {
+            let body = Body::from(prefix.split_to(length as usize).freeze());
+            if let Some(recycler) = recycler
+                && prefix.is_empty()
+                && response_keep_alive(head.version, &head.headers)
+            {
+                recycler.recycle(stream);
+            }
+            body
+        }
+        kind => Body::wrap(super::body::Http1ResponseBody::new(
             stream,
             prefix,
             kind,
             recycler.filter(|_| {
                 response_body_allows_reuse(kind) && response_keep_alive(head.version, &head.headers)
             }),
-        ),
+        )),
     };
     let mut response = Response::builder()
         .status(head.status)
@@ -135,103 +151,7 @@ where
     response
 }
 
-fn spawn_response_body<S>(
-    stream: S,
-    prefix: BytesMut,
-    kind: ResponseBodyKind,
-    recycler: Option<Http1ConnectionRecycler<S>>,
-) -> Body
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let (mut sender, body) = Body::channel_with_capacity(16);
-    tokio::spawn(async move {
-        let result = match kind {
-            ResponseBodyKind::Empty => Ok(None),
-            ResponseBodyKind::ContentLength(length) => forward_content_length_body(
-                stream,
-                prefix,
-                length,
-                &mut sender,
-                RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-            )
-            .await
-            .map(Some),
-            ResponseBodyKind::CloseDelimited => forward_close_delimited_body(
-                stream,
-                prefix,
-                &mut sender,
-                RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-            )
-            .await
-            .map(|()| None),
-            ResponseBodyKind::Chunked => forward_chunked_body(
-                stream,
-                prefix,
-                &mut sender,
-                RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-            )
-            .await
-            .map(Some),
-        };
-        match result {
-            Ok(Some((stream, leftover))) => {
-                if let Some(recycler) = recycler
-                    && leftover.is_empty()
-                {
-                    recycler.recycle(stream).await;
-                }
-            }
-            Ok(None) => {}
-            Err(err) => {
-                warn!(error = ?err, "reverse_edges raw http/1 response body relay failed");
-                sender.abort();
-            }
-        }
-    });
-    body
-}
-
-async fn forward_content_length_body<S>(
-    mut stream: S,
-    mut prefix: BytesMut,
-    mut remaining: u64,
-    sender: &mut qpx_http::body::Sender,
-    read_timeout: Duration,
-) -> Result<(S, BytesMut)>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    if remaining == 0 {
-        return Ok((stream, prefix));
-    }
-    if !prefix.is_empty() {
-        let take = std::cmp::min(prefix.len() as u64, remaining) as usize;
-        if take > 0 {
-            sender.send_data(prefix.split_to(take).freeze()).await?;
-            remaining -= take as u64;
-        }
-    }
-    let mut chunk = BytesMut::with_capacity(READ_BUF_SIZE);
-    while remaining > 0 {
-        let cap = std::cmp::min(READ_BUF_SIZE as u64, remaining) as usize;
-        chunk.clear();
-        chunk.resize(cap, 0);
-        let n =
-            read_limited_with_timeout(&mut stream, &mut chunk[..cap], read_timeout, Some(sender))
-                .await?;
-        if n == 0 {
-            return Err(anyhow!(
-                "upstream response closed before content-length completed"
-            ));
-        }
-        chunk.truncate(n);
-        sender.send_data(chunk.split().freeze()).await?;
-        remaining -= n as u64;
-    }
-    Ok((stream, prefix))
-}
-
+#[cfg(test)]
 pub(super) async fn forward_close_delimited_body<S>(
     mut stream: S,
     mut prefix: BytesMut,
@@ -256,6 +176,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub(super) async fn forward_chunked_body<S>(
     mut stream: S,
     mut buf: BytesMut,
@@ -297,6 +218,7 @@ where
     }
 }
 
+#[cfg(test)]
 async fn forward_chunk_payload_segmented<S>(
     stream: &mut S,
     buf: &mut BytesMut,

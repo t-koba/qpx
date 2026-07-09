@@ -1,6 +1,6 @@
 use super::{ReverseInterimService, reverse_body_channel_capacity};
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
-use crate::http::codec::interim::serve_h2_with_interim_and_capacity;
+use crate::http::codec::interim::serve_h2_with_interim_and_capacity_and_tuning;
 use crate::reverse::transport::ReverseConnInfo;
 use crate::reverse::{
     ReloadableReverse, record_reverse_connection_filter_block, reverse_connection_filter_match,
@@ -385,12 +385,18 @@ async fn handle_tls_connection(
             },
             &access_cfg,
         );
-        serve_h2_with_interim_and_capacity(
+        let h2_limits = reverse.runtime.state().plan.limits.h2;
+        let h2_tuning = crate::http::codec::h2::H2TransportTuning {
+            initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
+            initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
+        };
+        serve_h2_with_interim_and_capacity_and_tuning(
             tls_stream,
             service,
             false,
             header_read_timeout,
             reverse_body_channel_capacity(&reverse),
+            h2_tuning,
         )
         .await?;
     } else {
@@ -552,12 +558,18 @@ async fn handle_tls_connection(
             },
             &access_cfg,
         );
-        serve_h2_with_interim_and_capacity(
+        let h2_limits = reverse.runtime.state().plan.limits.h2;
+        let h2_tuning = crate::http::codec::h2::H2TransportTuning {
+            initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
+            initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
+        };
+        serve_h2_with_interim_and_capacity_and_tuning(
             tls_stream,
             service,
             false,
             header_read_timeout,
             reverse_body_channel_capacity(&reverse),
+            h2_tuning,
         )
         .await?;
     } else {

@@ -6,6 +6,7 @@
 //! is carried across reloads by [`crate::runtime::Runtime::swap`]; only the
 //! configured limits are re-applied on reload.
 
+use crate::http::codec::h2::H2TransportTuning;
 use crate::ipc_client::IpcConnectionPool;
 use crate::upstream::origin::DirectOriginPools;
 use crate::upstream::pool::UpstreamProxyPool;
@@ -32,6 +33,8 @@ pub(crate) struct PoolRegistry {
 #[derive(Clone, Copy)]
 pub(crate) struct PoolLimits {
     pub(crate) upstream_proxy_max_concurrent_per_endpoint: usize,
+    pub(crate) direct_origin_http1_max_idle_per_origin: usize,
+    pub(crate) direct_origin_h2_tuning: H2TransportTuning,
     pub(crate) h3_origin_max_connections_per_origin: usize,
     pub(crate) h3_origin_max_inflight_streams_per_connection: usize,
 }
@@ -60,6 +63,10 @@ impl PoolRegistry {
     pub(crate) fn apply_limits(&self, limits: PoolLimits) {
         self.upstream_proxy
             .set_max_concurrent_per_endpoint(limits.upstream_proxy_max_concurrent_per_endpoint);
+        self.direct_origin
+            .set_http1_max_idle_per_origin(limits.direct_origin_http1_max_idle_per_origin);
+        self.direct_origin
+            .set_h2_tuning(limits.direct_origin_h2_tuning);
         #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
         self.h3_origin.set_limits(
             limits.h3_origin_max_connections_per_origin,
@@ -84,6 +91,10 @@ impl PoolRegistry {
     pub(crate) fn copy_limits_from(&self, other: &PoolRegistry) {
         self.upstream_proxy
             .set_max_concurrent_per_endpoint(other.upstream_proxy.max_concurrent_per_endpoint());
+        self.direct_origin
+            .set_http1_max_idle_per_origin(other.direct_origin.http1_max_idle_per_origin());
+        self.direct_origin
+            .set_h2_tuning(other.direct_origin.h2_tuning());
         #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
         self.h3_origin.set_limits(
             other.h3_origin.max_connections_per_origin(),

@@ -1,7 +1,7 @@
 use super::destination::{ConnectTarget, resolve_http_target, resolve_upstream};
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 use crate::http::codec::interim::{
-    H2_PREFACE, serve_h2_with_interim_and_capacity, sniff_h2_preface,
+    H2_PREFACE, serve_h2_with_interim_and_capacity_and_tuning, sniff_h2_preface,
 };
 use crate::http::protocol::common::bad_request_response as bad_request;
 use crate::http::protocol::l7::finalize_response_for_request;
@@ -95,12 +95,18 @@ where
     let preface = sniff_h2_preface(&mut stream, header_read_timeout).await?;
     let stream = crate::http::protocol::io_prefix::PrefixedIo::new(stream, preface.clone());
     if preface.as_ref() == H2_PREFACE {
-        serve_h2_with_interim_and_capacity(
+        let h2_limits = dispatch_view.plan.limits.h2;
+        let h2_tuning = crate::http::codec::h2::H2TransportTuning {
+            initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
+            initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
+        };
+        serve_h2_with_interim_and_capacity_and_tuning(
             stream,
             service,
             false,
             header_read_timeout,
             body_channel_capacity,
+            h2_tuning,
         )
         .await
         .context("transparent HTTP/2 serve_connection failed")?;

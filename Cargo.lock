@@ -2920,6 +2920,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "lru",
+ "memchr",
  "metrics",
  "native-tls",
  "notify",

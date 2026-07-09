@@ -1,4 +1,4 @@
-use crate::http::codec::h2::{h1_headers_to_http, http_headers_to_h1};
+use crate::http::codec::h2::{h1_headers_to_http, http_headers_to_h1, tuned_h2_client_builder};
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use ::http::{
     HeaderMap as Http1HeaderMap, Method, Request, Request as Http1Request,
@@ -7,7 +7,7 @@ use ::http::{
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use h2::ext::Protocol as H2Protocol;
-use h2::{Reason as H2Reason, RecvStream as H2RecvStream, client as h2_client};
+use h2::{Reason as H2Reason, RecvStream as H2RecvStream};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
@@ -127,7 +127,7 @@ pub(super) async fn open_upstream_h2_extended_connect_stream(
         Box::new(tcp)
     };
     let (sender, connection) =
-        match timeout(timeout_dur, h2_client::Builder::new().handshake(io)).await {
+        match timeout(timeout_dur, tuned_h2_client_builder().handshake(io)).await {
             Ok(Ok(parts)) => parts,
             Ok(Err(err)) => return Err(err.into()),
             Err(_) => return Err(anyhow!("extended CONNECT upstream h2 setup timed out")),

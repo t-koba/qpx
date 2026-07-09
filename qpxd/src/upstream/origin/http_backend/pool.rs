@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::task::Poll;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::Notify;
 use tracing::warn;
 
+use crate::http::codec::h2::H2TransportTuning;
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::tls::builder::{BoxTlsStream, connect_client_h2_h1};
@@ -19,7 +20,7 @@ const DIRECT_ORIGIN_POOL_SHARDS: usize = 32;
 const DIRECT_ORIGIN_POOL_MAX_SLOTS: usize = 4096;
 const DIRECT_ORIGIN_POOL_MAX_SLOTS_PER_SHARD: usize =
     DIRECT_ORIGIN_POOL_MAX_SLOTS / DIRECT_ORIGIN_POOL_SHARDS;
-pub(super) const MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN: usize = 8;
+pub(super) const MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN: usize = 64;
 const MAX_POOLED_H2_CONNECTIONS_PER_ORIGIN: usize = 4;
 static DIRECT_ORIGIN_POOL_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 
@@ -39,7 +40,8 @@ pub(super) struct HttpsOriginPoolKey {
 }
 
 pub(super) struct PlainHttpOriginSlot {
-    pub(super) idle: Arc<AsyncMutex<Vec<TcpStream>>>,
+    idle: Arc<StdMutex<Vec<TcpStream>>>,
+    max_http1_idle: Arc<AtomicUsize>,
 }
 
 pub(super) struct TlsHttp1OriginConnection {
@@ -68,7 +70,8 @@ struct H2PoolState {
 }
 
 pub(super) struct HttpsOriginSlot {
-    pub(super) http1_idle: Arc<AsyncMutex<Vec<TlsHttp1OriginConnection>>>,
+    http1_idle: Arc<StdMutex<Vec<TlsHttp1OriginConnection>>>,
+    max_http1_idle: Arc<AtomicUsize>,
     h2: StdMutex<H2PoolState>,
     h2_ready: Arc<Notify>,
     h2_rr: AtomicUsize,
@@ -79,6 +82,23 @@ pub(super) struct H2ConnectionReservation<'a> {
 }
 
 impl HttpsOriginSlot {
+    pub(super) fn pop_http1_idle(&self) -> Option<TlsHttp1OriginConnection> {
+        self.http1_idle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+    }
+
+    pub(super) fn recycle_http1_idle(&self, entry: TlsHttp1OriginConnection) {
+        let mut idle = self
+            .http1_idle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if idle.len() < self.max_http1_idle.load(Ordering::Relaxed) {
+            idle.push(entry);
+        }
+    }
+
     pub(super) fn has_h2_connections(&self) -> bool {
         !self
             .h2
@@ -163,6 +183,25 @@ impl HttpsOriginSlot {
     }
 }
 
+impl PlainHttpOriginSlot {
+    pub(super) fn pop_idle(&self) -> Option<TcpStream> {
+        self.idle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+    }
+
+    pub(super) fn recycle_idle(&self, stream: TcpStream) {
+        let mut idle = self
+            .idle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if idle.len() < self.max_http1_idle.load(Ordering::Relaxed) {
+            idle.push(stream);
+        }
+    }
+}
+
 impl<'a> H2ConnectionReservation<'a> {
     pub(super) fn complete(mut self, connection: Arc<SharedTlsH2OriginConnection>) {
         if let Some(slot) = self.slot.take() {
@@ -187,6 +226,8 @@ type HttpsOriginPoolShard = RwLock<HashMap<HttpsOriginPoolKey, Arc<HttpsOriginSl
 pub(crate) struct DirectOriginPools {
     plain: Vec<PlainHttpOriginPoolShard>,
     https: Vec<HttpsOriginPoolShard>,
+    http1_max_idle_per_origin: Arc<AtomicUsize>,
+    h2_tuning: Arc<StdMutex<H2TransportTuning>>,
 }
 
 impl Default for DirectOriginPools {
@@ -197,9 +238,13 @@ impl Default for DirectOriginPools {
 
 impl DirectOriginPools {
     pub(crate) fn new() -> Self {
+        let http1_max_idle_per_origin =
+            Arc::new(AtomicUsize::new(MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN));
         Self {
             plain: init_sharded_pool(),
             https: init_sharded_pool(),
+            http1_max_idle_per_origin,
+            h2_tuning: Arc::new(StdMutex::new(H2TransportTuning::default())),
         }
     }
 
@@ -220,17 +265,70 @@ impl DirectOriginPools {
 
     pub(super) fn plain_slot(&self, key: PlainHttpOriginPoolKey) -> Arc<PlainHttpOriginSlot> {
         typed_pool_slot(&self.plain, key, || PlainHttpOriginSlot {
-            idle: Arc::new(AsyncMutex::new(Vec::new())),
+            idle: Arc::new(StdMutex::new(Vec::new())),
+            max_http1_idle: self.http1_max_idle_per_origin.clone(),
         })
     }
 
     pub(super) fn https_slot(&self, key: HttpsOriginPoolKey) -> Arc<HttpsOriginSlot> {
         typed_pool_slot(&self.https, key, || HttpsOriginSlot {
-            http1_idle: Arc::new(AsyncMutex::new(Vec::new())),
+            http1_idle: Arc::new(StdMutex::new(Vec::new())),
+            max_http1_idle: self.http1_max_idle_per_origin.clone(),
             h2: StdMutex::new(H2PoolState::default()),
             h2_ready: Arc::new(Notify::new()),
             h2_rr: AtomicUsize::new(0),
         })
+    }
+
+    pub(crate) fn set_http1_max_idle_per_origin(&self, max: usize) {
+        let max = max.max(1);
+        self.http1_max_idle_per_origin.store(max, Ordering::Relaxed);
+        self.trim_http1_idle(max);
+    }
+
+    pub(crate) fn http1_max_idle_per_origin(&self) -> usize {
+        self.http1_max_idle_per_origin.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_h2_tuning(&self, tuning: H2TransportTuning) {
+        *self
+            .h2_tuning
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = tuning;
+    }
+
+    pub(crate) fn h2_tuning(&self) -> H2TransportTuning {
+        *self
+            .h2_tuning
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn trim_http1_idle(&self, max: usize) {
+        for shard in &self.plain {
+            for slot in shard
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .values()
+            {
+                slot.idle
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .truncate(max);
+            }
+        }
+        for shard in &self.https {
+            for slot in shard
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .values()
+            {
+                slot.http1_idle
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .truncate(max);
+            }
+        }
     }
 }
 
@@ -446,6 +544,7 @@ pub(super) async fn acquire_https_connection(
     server_name: &str,
     verify_upstream_cert: bool,
     trust: Option<&CompiledUpstreamTlsTrust>,
+    h2_tuning: H2TransportTuning,
 ) -> Result<HttpsConnectionAcquisition> {
     if let Some((shared, ready)) = try_take_ready_h2_sender(slot, connect_authority).await {
         return Ok(HttpsConnectionAcquisition::H2Ready { shared, ready });
@@ -459,7 +558,10 @@ pub(super) async fn acquire_https_connection(
         {
             Ok((tls, negotiated_h2, upstream_cert)) => {
                 if negotiated_h2 {
-                    let (sender, connection) = h2::client::Builder::new().handshake(tls).await?;
+                    let (sender, connection) =
+                        crate::http::codec::h2::tuned_h2_client_builder_with(h2_tuning)
+                            .handshake(tls)
+                            .await?;
                     spawn_origin_h2_connection_task(connection);
                     let shared = Arc::new(SharedTlsH2OriginConnection {
                         sender: sender.clone(),
@@ -496,7 +598,7 @@ pub(super) async fn acquire_https_connection(
         return Ok(HttpsConnectionAcquisition::H2Ready { shared, ready });
     }
 
-    if let Some(entry) = { slot.http1_idle.lock().await.pop() } {
+    if let Some(entry) = take_reusable_tls_http1_connection(slot).await {
         return Ok(HttpsConnectionAcquisition::H1(entry));
     }
 
@@ -509,7 +611,7 @@ pub(super) async fn acquire_https_connection(
         if let Some((shared, ready)) = wait_for_h2_sender(slot, connect_authority).await {
             return Ok(HttpsConnectionAcquisition::H2Ready { shared, ready });
         }
-        if let Some(entry) = { slot.http1_idle.lock().await.pop() } {
+        if let Some(entry) = take_reusable_tls_http1_connection(slot).await {
             return Ok(HttpsConnectionAcquisition::H1(entry));
         }
     }
@@ -523,7 +625,7 @@ pub(super) async fn acquire_https_connection(
         if let Some((shared, ready)) = wait_for_h2_sender(slot, connect_authority).await {
             return Ok(HttpsConnectionAcquisition::H2Ready { shared, ready });
         }
-        if let Some(entry) = { slot.http1_idle.lock().await.pop() } {
+        if let Some(entry) = take_reusable_tls_http1_connection(slot).await {
             return Ok(HttpsConnectionAcquisition::H1(entry));
         }
     };
@@ -531,7 +633,9 @@ pub(super) async fn acquire_https_connection(
         open_https_origin_stream(connect_authority, server_name, verify_upstream_cert, trust)
             .await?;
     if negotiated_h2 {
-        let (sender, connection) = h2::client::Builder::new().handshake(tls).await?;
+        let (sender, connection) = crate::http::codec::h2::tuned_h2_client_builder_with(h2_tuning)
+            .handshake(tls)
+            .await?;
         spawn_origin_h2_connection_task(connection);
         let shared = Arc::new(SharedTlsH2OriginConnection {
             sender: sender.clone(),
@@ -554,6 +658,18 @@ pub(super) async fn acquire_https_connection(
         stream: tls,
         upstream_cert,
     }))
+}
+
+async fn take_reusable_tls_http1_connection(
+    slot: &HttpsOriginSlot,
+) -> Option<TlsHttp1OriginConnection> {
+    loop {
+        let mut entry = slot.pop_http1_idle()?;
+        if crate::upstream::raw_http1::idle_connection_closed_or_dirty(&mut entry.stream).await {
+            continue;
+        }
+        return Some(entry);
+    }
 }
 
 #[cfg(test)]

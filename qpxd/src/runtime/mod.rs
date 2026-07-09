@@ -167,6 +167,20 @@ impl RuntimeState {
                 .operational
                 .runtime
                 .upstream_proxy_max_concurrent_per_endpoint,
+            direct_origin_http1_max_idle_per_origin: resources
+                .operational
+                .runtime
+                .upstream_max_idle_connections_per_origin,
+            direct_origin_h2_tuning: crate::http::codec::h2::H2TransportTuning {
+                initial_stream_window_size: resources
+                    .operational
+                    .runtime
+                    .h2_initial_stream_window_size_bytes,
+                initial_connection_window_size: resources
+                    .operational
+                    .runtime
+                    .h2_initial_connection_window_size_bytes,
+            },
             h3_origin_max_connections_per_origin: resources
                 .operational
                 .runtime

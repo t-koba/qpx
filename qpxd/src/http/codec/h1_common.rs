@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use bytes::BytesMut;
 use hyper::Version;
 use hyper::header::{CONNECTION, HeaderMap, HeaderName, HeaderValue, TRANSFER_ENCODING};
+use memchr::memchr;
 
 pub(crate) const MAX_HEADER_BYTES: usize = 128 * 1024;
 
@@ -54,11 +55,19 @@ pub(crate) fn serialize_headers(headers: &HeaderMap, out: &mut Vec<u8>) -> Resul
 }
 
 pub(crate) fn find_crlf(buf: &BytesMut) -> Option<usize> {
-    buf.windows(2).position(|window| window == b"\r\n")
+    let mut cursor = 0;
+    while let Some(offset) = memchr(b'\r', &buf[cursor..]) {
+        let index = cursor + offset;
+        if buf.get(index + 1).copied() == Some(b'\n') {
+            return Some(index);
+        }
+        cursor = index + 1;
+    }
+    None
 }
 
 pub(crate) fn parse_header_map(headers: &[httparse::Header<'_>]) -> Result<HeaderMap> {
-    let mut out = HeaderMap::new();
+    let mut out = HeaderMap::with_capacity(headers.len());
     for header in headers {
         let name = HeaderName::from_bytes(header.name.as_bytes())?;
         let value = HeaderValue::from_bytes(header.value)?;

@@ -237,6 +237,12 @@ pub struct RuntimeConfig {
     pub upstream_http_timeout_ms: u64,
     #[serde(default = "default_runtime_upstream_proxy_max_concurrent_per_endpoint")]
     pub upstream_proxy_max_concurrent_per_endpoint: usize,
+    #[serde(default = "default_runtime_upstream_max_idle_connections_per_origin")]
+    pub upstream_max_idle_connections_per_origin: usize,
+    #[serde(default = "default_runtime_h2_initial_stream_window_size_bytes")]
+    pub h2_initial_stream_window_size_bytes: u32,
+    #[serde(default = "default_runtime_h2_initial_connection_window_size_bytes")]
+    pub h2_initial_connection_window_size_bytes: u32,
     #[serde(default = "default_runtime_tls_peek_timeout_ms")]
     pub tls_peek_timeout_ms: u64,
     #[serde(default = "default_runtime_http_header_read_timeout_ms")]
@@ -296,6 +302,12 @@ impl Default for RuntimeConfig {
             upstream_http_timeout_ms: default_runtime_upstream_http_timeout_ms(),
             upstream_proxy_max_concurrent_per_endpoint:
                 default_runtime_upstream_proxy_max_concurrent_per_endpoint(),
+            upstream_max_idle_connections_per_origin:
+                default_runtime_upstream_max_idle_connections_per_origin(),
+            h2_initial_stream_window_size_bytes:
+                default_runtime_h2_initial_stream_window_size_bytes(),
+            h2_initial_connection_window_size_bytes:
+                default_runtime_h2_initial_connection_window_size_bytes(),
             tls_peek_timeout_ms: default_runtime_tls_peek_timeout_ms(),
             http_header_read_timeout_ms: default_runtime_http_header_read_timeout_ms(),
             upgrade_wait_timeout_ms: default_runtime_upgrade_wait_timeout_ms(),

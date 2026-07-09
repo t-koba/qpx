@@ -353,6 +353,10 @@ fn compile_runtime_limits(config: &RuntimeResources) -> CompiledRuntimeLimits {
             max_grpc_web_trailer_bytes: runtime.max_grpc_web_trailer_bytes,
             max_grpc_stream_duration_ms: runtime.max_grpc_stream_duration_ms,
         },
+        h2: H2TransportLimits {
+            initial_stream_window_size_bytes: runtime.h2_initial_stream_window_size_bytes,
+            initial_connection_window_size_bytes: runtime.h2_initial_connection_window_size_bytes,
+        },
         h3: H3ChannelLimits {
             max_h3_streams_per_connection: runtime.max_h3_streams_per_connection,
             datagram_channel_capacity: runtime.datagram_channel_capacity,
@@ -363,6 +367,8 @@ fn compile_runtime_limits(config: &RuntimeResources) -> CompiledRuntimeLimits {
         upstream: UpstreamLimits {
             upstream_proxy_max_concurrent_per_endpoint: runtime
                 .upstream_proxy_max_concurrent_per_endpoint,
+            upstream_max_idle_connections_per_origin: runtime
+                .upstream_max_idle_connections_per_origin,
             max_reverse_retry_template_body_bytes: runtime.max_reverse_retry_template_body_bytes,
         },
         sse: runtime.sse,

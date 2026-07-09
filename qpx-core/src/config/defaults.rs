@@ -310,6 +310,18 @@ pub(super) fn default_runtime_upstream_proxy_max_concurrent_per_endpoint() -> us
     8
 }
 
+pub(super) fn default_runtime_upstream_max_idle_connections_per_origin() -> usize {
+    64
+}
+
+pub(super) fn default_runtime_h2_initial_stream_window_size_bytes() -> u32 {
+    1024 * 1024
+}
+
+pub(super) fn default_runtime_h2_initial_connection_window_size_bytes() -> u32 {
+    4 * 1024 * 1024
+}
+
 pub(super) fn default_runtime_max_h3_request_body_bytes() -> usize {
     16 * 1024 * 1024
 }

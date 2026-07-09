@@ -1,4 +1,4 @@
-use crate::http::codec::h2::send_h2_response_with_interim;
+use crate::http::codec::h2::{H2TransportTuning, send_h2_response_with_interim};
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::Result;
 use bytes::Bytes;
@@ -35,6 +35,7 @@ where
     serve_h2_with_interim_and_capacity(io, service, enable_connect_protocol, idle_timeout, 16).await
 }
 
+#[cfg(test)]
 pub(crate) async fn serve_h2_with_interim_and_capacity<I, S>(
     io: I,
     service: S,
@@ -51,7 +52,36 @@ where
         + 'static,
     S::Future: Send + 'static,
 {
+    serve_h2_with_interim_and_capacity_and_tuning(
+        io,
+        service,
+        enable_connect_protocol,
+        idle_timeout,
+        body_channel_capacity,
+        H2TransportTuning::default(),
+    )
+    .await
+}
+
+pub(crate) async fn serve_h2_with_interim_and_capacity_and_tuning<I, S>(
+    io: I,
+    service: S,
+    enable_connect_protocol: bool,
+    idle_timeout: Duration,
+    body_channel_capacity: usize,
+    h2_tuning: H2TransportTuning,
+) -> Result<()>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    S::Future: Send + 'static,
+{
     let mut builder = h2::server::Builder::new();
+    crate::http::codec::h2::tune_h2_server_builder_with(&mut builder, h2_tuning);
     if enable_connect_protocol {
         builder.enable_connect_protocol();
     }

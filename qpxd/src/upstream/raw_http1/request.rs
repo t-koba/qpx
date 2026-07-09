@@ -7,8 +7,10 @@ use hyper::header::{
 };
 use hyper::{Request, Version};
 use qpx_http::body::Body;
+use std::future::{Future, poll_fn};
+use std::io::{Error as IoError, ErrorKind, IoSlice};
+use std::task::Poll;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::time::Duration;
 
 pub(super) async fn write_http1_request<S>(stream: &mut S, req: Request<Body>) -> Result<()>
 where
@@ -90,19 +92,27 @@ where
 }
 
 async fn poll_body_data_now(body: &mut Body) -> Result<Option<Bytes>> {
-    tokio::select! {
-        biased;
-        chunk = body.data() => chunk.transpose().map_err(Into::into),
-        _ = tokio::time::sleep(Duration::ZERO) => Ok(None),
-    }
+    poll_fn(|cx| {
+        let future = body.data();
+        let mut future = std::pin::pin!(future);
+        match Future::poll(future.as_mut(), cx) {
+            Poll::Ready(chunk) => Poll::Ready(chunk.transpose().map_err(Into::into)),
+            Poll::Pending => Poll::Ready(Ok(None)),
+        }
+    })
+    .await
 }
 
 async fn poll_body_trailers_now(body: &mut Body) -> Result<Option<HeaderMap>> {
-    tokio::select! {
-        biased;
-        trailers = body.trailers() => trailers.map_err(Into::into),
-        _ = tokio::time::sleep(Duration::ZERO) => Ok(None),
-    }
+    poll_fn(|cx| {
+        let future = body.trailers();
+        let mut future = std::pin::pin!(future);
+        match Future::poll(future.as_mut(), cx) {
+            Poll::Ready(trailers) => Poll::Ready(trailers.map_err(Into::into)),
+            Poll::Pending => Poll::Ready(Ok(None)),
+        }
+    })
+    .await
 }
 
 async fn write_content_length_body<S>(
@@ -199,9 +209,76 @@ where
     if chunk.is_empty() {
         return Ok(());
     }
-    let header = format!("{:X}\r\n", chunk.len());
-    stream.write_all(header.as_bytes()).await?;
-    stream.write_all(chunk).await?;
-    stream.write_all(b"\r\n").await?;
+    let mut header = [0_u8; 18];
+    let header = chunk_size_header(chunk.len(), &mut header);
+    write_vectored_all(stream, &[header, chunk, b"\r\n"]).await?;
     Ok(())
+}
+
+async fn write_vectored_all<S>(stream: &mut S, slices: &[&[u8]]) -> std::io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let mut index = 0usize;
+    let mut offset = 0usize;
+    while index < slices.len() {
+        while index < slices.len() && offset == slices[index].len() {
+            index += 1;
+            offset = 0;
+        }
+        if index >= slices.len() {
+            return Ok(());
+        }
+        let mut io_slices = Vec::with_capacity(slices.len() - index);
+        io_slices.push(IoSlice::new(&slices[index][offset..]));
+        for slice in &slices[index + 1..] {
+            if !slice.is_empty() {
+                io_slices.push(IoSlice::new(slice));
+            }
+        }
+        let written = stream.write_vectored(&io_slices).await?;
+        if written == 0 {
+            return Err(IoError::new(
+                ErrorKind::WriteZero,
+                "failed to write HTTP/1 request",
+            ));
+        }
+        advance_slices(slices, &mut index, &mut offset, written);
+    }
+    Ok(())
+}
+
+fn advance_slices(slices: &[&[u8]], index: &mut usize, offset: &mut usize, written: usize) {
+    let mut remaining = written;
+    while remaining > 0 && *index < slices.len() {
+        let available = slices[*index].len() - *offset;
+        if remaining < available {
+            *offset += remaining;
+            return;
+        }
+        remaining -= available;
+        *index += 1;
+        *offset = 0;
+    }
+}
+
+fn chunk_size_header(len: usize, out: &mut [u8; 18]) -> &[u8] {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut value = len;
+    let mut cursor = 16;
+    if value == 0 {
+        cursor -= 1;
+        out[cursor] = b'0';
+    } else {
+        while value > 0 {
+            cursor -= 1;
+            out[cursor] = HEX[value & 0x0f];
+            value >>= 4;
+        }
+    }
+    let digits = 16 - cursor;
+    out.copy_within(cursor..16, 0);
+    out[digits] = b'\r';
+    out[digits + 1] = b'\n';
+    &out[..digits + 2]
 }

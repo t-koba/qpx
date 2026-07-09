@@ -110,6 +110,13 @@ reload for compatible config edits.
   associated WebTransport sessions per QUIC connection.
 - `runtime.upstream_http_timeout_ms` is the default dial/request timeout for
   upstream HTTP and reverse route proxying.
+- `runtime.upstream_max_idle_connections_per_origin` caps reusable direct
+  HTTP/1 origin connections per origin. Raise it for high-concurrency reverse
+  routes that concentrate traffic on a small upstream set.
+- `runtime.h2_initial_stream_window_size_bytes` and
+  `runtime.h2_initial_connection_window_size_bytes` tune HTTP/2 flow-control
+  windows for downstream H2 listeners and direct HTTPS/H2 origin connections.
+  Defaults favor high-throughput proxying without requiring per-route tuning.
 - FTP gateway concurrency is bounded by the listener/reverse worker topology and
   by FTP request/download limits. Tune `runtime.worker_threads`,
   `runtime.max_blocking_threads`, `runtime.acceptor_tasks_per_listener`,
