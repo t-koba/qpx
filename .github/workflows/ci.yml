@@ -166,7 +166,7 @@ jobs:
           QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-smoke.jsonl
         run: |
           mkdir -p target/perf
-          cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
+          cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture --test-threads=1
       - name: advanced transport perf (release)
         id: advanced_transport_perf_release
         continue-on-error: true
@@ -175,7 +175,7 @@ jobs:
           QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/advanced-transport-perf.jsonl
         run: |
           mkdir -p target/perf
-          cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture
+          cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture --test-threads=1
       - name: fail if any perf smoke evaluation failed
         if: always()
         env:
@@ -234,7 +234,7 @@ jobs:
           RUSTFLAGS: "-D warnings"
           QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-audit-protocol-h3-crate-perf.jsonl
         run: |
-          cargo test -p qpxd --release --test perf_smoke --locked --features http3-backend-h3 -- --nocapture
+          cargo test -p qpxd --release --test perf_smoke --locked --features http3-backend-h3 -- --nocapture --test-threads=1
       - name: qpx http3 protocol perf benchmarks
         id: qpx_http3_protocol_perf_benchmarks
         continue-on-error: true
@@ -242,7 +242,7 @@ jobs:
           RUSTFLAGS: "-D warnings"
           QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-audit-protocol-qpx-h3-perf.jsonl
         run: |
-          cargo test -p qpxd --release --test perf_smoke --locked --features http3-backend-qpx -- --nocapture
+          cargo test -p qpxd --release --test perf_smoke --locked --features http3-backend-qpx -- --nocapture --test-threads=1
       - name: advanced transport perf benchmarks
         id: advanced_transport_perf_benchmarks
         continue-on-error: true
@@ -250,7 +250,7 @@ jobs:
           RUSTFLAGS: "-D warnings"
           QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-audit-advanced-transport-perf.jsonl
         run: |
-          cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture
+          cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture --test-threads=1
       - name: external proxy comparison bench
         id: external_proxy_comparison_bench
         continue-on-error: true

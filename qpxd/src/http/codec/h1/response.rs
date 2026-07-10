@@ -101,12 +101,17 @@ where
     let mut first_chunk = None;
     let mut first_trailers = None;
     let mut first_body_error = None;
+    let mut body_data_finished = false;
     if !matches!(body_kind, ResponseBodyKind::Empty) {
         match poll_response_body_data_now(&mut body).await {
-            Ok(chunk) => first_chunk = chunk,
+            Ok(Poll::Ready(chunk)) => {
+                body_data_finished = chunk.is_none();
+                first_chunk = chunk;
+            }
+            Ok(Poll::Pending) => {}
             Err(err) => first_body_error = Some(err),
         }
-        if first_body_error.is_none() && first_chunk.is_none() {
+        if first_body_error.is_none() && body_data_finished {
             match poll_response_trailers_now(&mut body).await {
                 Ok(trailers) => first_trailers = trailers,
                 Err(err) => first_body_error = Some(err),
@@ -515,13 +520,15 @@ fn chunk_size_header(len: usize, out: &mut [u8; 18]) -> &[u8] {
     &out[..digits + 2]
 }
 
-async fn poll_response_body_data_now(body: &mut Body) -> Result<Option<Bytes>> {
+async fn poll_response_body_data_now(body: &mut Body) -> Result<Poll<Option<Bytes>>> {
     poll_fn(|cx| {
         let future = body.data();
         let mut future = std::pin::pin!(future);
         match Future::poll(future.as_mut(), cx) {
-            Poll::Ready(chunk) => Poll::Ready(chunk.transpose().map_err(Into::into)),
-            Poll::Pending => Poll::Ready(Ok(None)),
+            Poll::Ready(chunk) => {
+                Poll::Ready(chunk.transpose().map(Poll::Ready).map_err(Into::into))
+            }
+            Poll::Pending => Poll::Ready(Ok(Poll::Pending)),
         }
     })
     .await

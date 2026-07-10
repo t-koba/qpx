@@ -1,8 +1,38 @@
 use super::*;
+use bytes::Bytes;
+use http_body::Frame;
 use hyper::header::{CONNECTION, CONTENT_LENGTH, HeaderValue, TRAILER, TRANSFER_ENCODING};
 use qpx_observability::RequestHandler;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::net::{TcpListener, TcpStream};
+
+struct PendingThenDataBody {
+    state: u8,
+}
+
+impl http_body::Body for PendingThenDataBody {
+    type Data = Bytes;
+    type Error = qpx_http::body::BodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.state {
+            0 => {
+                self.state = 1;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            1 => {
+                self.state = 2;
+                Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"delayed")))))
+            }
+            _ => Poll::Ready(None),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct StaticInterimService;
@@ -228,6 +258,36 @@ async fn send_http1_response_stops_when_response_body_limit_is_exceeded() {
     let text = String::from_utf8(raw).expect("utf8");
     assert!(text.starts_with("HTTP/1.1 200"));
     assert!(!text.ends_with("abcde"));
+}
+
+#[tokio::test]
+async fn response_data_pending_does_not_trigger_destructive_trailer_poll() {
+    let (mut client, server) = tokio::io::duplex(4096);
+    let (read_half, mut write_half) = tokio::io::split(server);
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_LENGTH, "7")
+        .body(Body::wrap(PendingThenDataBody { state: 0 }))
+        .expect("response");
+
+    let keep_alive = send_http1_response_with_interim(
+        &mut write_half,
+        Version::HTTP_11,
+        &Method::GET,
+        response,
+        &[],
+        true,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("send response");
+    drop(write_half);
+    drop(read_half);
+
+    assert!(keep_alive);
+    let mut raw = Vec::new();
+    client.read_to_end(&mut raw).await.expect("read response");
+    assert!(raw.ends_with(b"\r\n\r\ndelayed"));
 }
 
 #[test]
