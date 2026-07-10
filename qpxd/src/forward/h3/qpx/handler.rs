@@ -9,7 +9,6 @@ use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::ConnectUdpConfig;
 use qpx_http::body::Body;
-use std::future::Future;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tracing::warn;
@@ -47,53 +46,47 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
         self.runtime.state().plan.identity.proxy_name.clone()
     }
 
-    fn handle_request(
+    async fn handle_request(
         &self,
         request: qpx_h3::Request,
         conn: qpx_h3::ConnectionInfo,
         req_stream: qpx_h3::RequestStream,
-    ) -> impl Future<Output = qpx_h3::H3Result<()>> + Send {
-        async move {
-            if request.head.method() == http::Method::CONNECT {
-                return self
-                    .handle_connect(request, conn, req_stream)
-                    .await
-                    .map_err(Into::into);
-            }
-
-            self.handle_http_request(request, conn.remote_addr, req_stream)
+    ) -> qpx_h3::H3Result<()> {
+        if request.head.method() == http::Method::CONNECT {
+            return self
+                .handle_connect(request, conn, req_stream)
                 .await
-                .map_err(Into::into)
+                .map_err(Into::into);
         }
+
+        self.handle_http_request(request, conn.remote_addr, req_stream)
+            .await
+            .map_err(Into::into)
     }
 
-    fn handle_webtransport_connect(
+    async fn handle_webtransport_connect(
         &self,
         req_head: http::Request<()>,
         req_stream: qpx_h3::RequestStream,
         conn: qpx_h3::ConnectionInfo,
         session: qpx_h3::WebTransportSession,
-    ) -> impl Future<Output = qpx_h3::H3Result<()>> + Send {
-        async move {
-            self.handle_qpx_webtransport_connect(req_head, req_stream, conn, session)
-                .await
-                .map_err(Into::into)
-        }
+    ) -> qpx_h3::H3Result<()> {
+        self.handle_qpx_webtransport_connect(req_head, req_stream, conn, session)
+            .await
+            .map_err(Into::into)
     }
 
-    fn handle_connect_stream(
+    async fn handle_connect_stream(
         &self,
         req_head: http::Request<()>,
         req_stream: qpx_h3::RequestStream,
         conn: qpx_h3::ConnectionInfo,
         protocol: qpx_h3::Protocol,
         datagrams: Option<qpx_h3::StreamDatagrams>,
-    ) -> impl Future<Output = qpx_h3::H3Result<()>> + Send {
-        async move {
-            handle_qpx_connect_stream(self, req_head, req_stream, conn, protocol, datagrams)
-                .await
-                .map_err(Into::into)
-        }
+    ) -> qpx_h3::H3Result<()> {
+        handle_qpx_connect_stream(self, req_head, req_stream, conn, protocol, datagrams)
+            .await
+            .map_err(Into::into)
     }
 }
 

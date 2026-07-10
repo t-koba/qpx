@@ -16,7 +16,6 @@ use qpx_core::config::ReverseEdgeConfig;
 use qpx_core::tls::{load_cert_chain, load_private_key};
 use qpx_http::body::Body;
 use std::collections::HashMap;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -286,17 +285,15 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
             .clone()
     }
 
-    fn handle_request(
+    async fn handle_request(
         &self,
         request: qpx_h3::Request,
         conn: qpx_h3::ConnectionInfo,
         req_stream: qpx_h3::RequestStream,
-    ) -> impl Future<Output = qpx_h3::H3Result<()>> + Send {
-        async move {
-            self.handle_request_inner(request, conn, req_stream)
-                .await
-                .map_err(Into::into)
-        }
+    ) -> qpx_h3::H3Result<()> {
+        self.handle_request_inner(request, conn, req_stream)
+            .await
+            .map_err(Into::into)
     }
 }
 
