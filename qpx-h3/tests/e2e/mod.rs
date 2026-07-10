@@ -7,7 +7,6 @@ use qpx_h3::{
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use rcgen::generate_simple_self_signed;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,48 +52,46 @@ impl RequestHandler for ExtendedEchoHandler {
         }
     }
 
-    fn handle_request(
+    async fn handle_request(
         &self,
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move { Err(anyhow!("unexpected request").into()) }
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
-    fn handle_connect_stream(
+    async fn handle_connect_stream(
         &self,
         _req_head: http::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         protocol: Protocol,
         mut datagrams: Option<StreamDatagrams>,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move {
-            match protocol {
-                Protocol::Other(name) if name == "websocket" => {}
-                other => return Err(anyhow!("unexpected protocol: {other:?}").into()),
-            }
-            req_stream.send_response_head(&ok_head(false)).await?;
-            let chunk = timeout(TEST_TIMEOUT, req_stream.recv_data())
-                .await
-                .map_err(|_| anyhow!("timed out waiting for extended CONNECT request data"))??
-                .ok_or_else(|| anyhow!("missing extended CONNECT request data"))?;
-            req_stream.send_data(chunk).await?;
-            let payload = timeout(TEST_TIMEOUT, async {
-                datagrams
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("missing downstream datagrams"))?
-                    .receiver
-                    .recv()
-                    .await
-                    .ok_or_else(|| anyhow!("missing downstream extended CONNECT datagram"))
-            })
-            .await
-            .map_err(|_| anyhow!("timed out waiting for extended CONNECT datagram"))??;
-            send_test_datagram(datagrams.as_mut().expect("checked above"), payload)?;
-            req_stream.finish().await
+    ) -> H3Result<()> {
+        match protocol {
+            Protocol::Other(name) if name == "websocket" => {}
+            other => return Err(anyhow!("unexpected protocol: {other:?}").into()),
         }
+        req_stream.send_response_head(&ok_head(false)).await?;
+        let chunk = timeout(TEST_TIMEOUT, req_stream.recv_data())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for extended CONNECT request data"))??
+            .ok_or_else(|| anyhow!("missing extended CONNECT request data"))?;
+        req_stream.send_data(chunk).await?;
+        let payload = timeout(TEST_TIMEOUT, async {
+            datagrams
+                .as_mut()
+                .ok_or_else(|| anyhow!("missing downstream datagrams"))?
+                .receiver
+                .recv()
+                .await
+                .ok_or_else(|| anyhow!("missing downstream extended CONNECT datagram"))
+        })
+        .await
+        .map_err(|_| anyhow!("timed out waiting for extended CONNECT datagram"))??;
+        send_test_datagram(datagrams.as_mut().expect("checked above"), payload)?;
+        req_stream.finish().await
     }
 }
 
@@ -111,47 +108,45 @@ impl RequestHandler for ConnectUdpEchoHandler {
         }
     }
 
-    fn handle_request(
+    async fn handle_request(
         &self,
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move { Err(anyhow!("unexpected request").into()) }
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
-    fn handle_connect_stream(
+    async fn handle_connect_stream(
         &self,
         _req_head: http::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         protocol: Protocol,
         mut datagrams: Option<StreamDatagrams>,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move {
-            if protocol != Protocol::ConnectUdp {
-                return Err(anyhow!("unexpected protocol: {protocol:?}").into());
-            }
-            req_stream.send_response_head(&ok_head(true)).await?;
-            let capsule = timeout(TEST_TIMEOUT, req_stream.recv_data())
-                .await
-                .map_err(|_| anyhow!("timed out waiting for CONNECT-UDP capsule"))??
-                .ok_or_else(|| anyhow!("missing CONNECT-UDP capsule"))?;
-            req_stream.send_data(capsule).await?;
-            let payload = timeout(TEST_TIMEOUT, async {
-                datagrams
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("missing CONNECT-UDP datagrams"))?
-                    .receiver
-                    .recv()
-                    .await
-                    .ok_or_else(|| anyhow!("missing CONNECT-UDP datagram payload"))
-            })
-            .await
-            .map_err(|_| anyhow!("timed out waiting for CONNECT-UDP datagram"))??;
-            send_test_datagram(datagrams.as_mut().expect("checked above"), payload)?;
-            req_stream.finish().await
+    ) -> H3Result<()> {
+        if protocol != Protocol::ConnectUdp {
+            return Err(anyhow!("unexpected protocol: {protocol:?}").into());
         }
+        req_stream.send_response_head(&ok_head(true)).await?;
+        let capsule = timeout(TEST_TIMEOUT, req_stream.recv_data())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for CONNECT-UDP capsule"))??
+            .ok_or_else(|| anyhow!("missing CONNECT-UDP capsule"))?;
+        req_stream.send_data(capsule).await?;
+        let payload = timeout(TEST_TIMEOUT, async {
+            datagrams
+                .as_mut()
+                .ok_or_else(|| anyhow!("missing CONNECT-UDP datagrams"))?
+                .receiver
+                .recv()
+                .await
+                .ok_or_else(|| anyhow!("missing CONNECT-UDP datagram payload"))
+        })
+        .await
+        .map_err(|_| anyhow!("timed out waiting for CONNECT-UDP datagram"))??;
+        send_test_datagram(datagrams.as_mut().expect("checked above"), payload)?;
+        req_stream.finish().await
     }
 }
 
@@ -170,86 +165,84 @@ impl RequestHandler for WebTransportEchoHandler {
         }
     }
 
-    fn handle_request(
+    async fn handle_request(
         &self,
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move { Err(anyhow!("unexpected request").into()) }
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
-    fn handle_webtransport_connect(
+    async fn handle_webtransport_connect(
         &self,
         _req_head: http::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         session: WebTransportSession,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move {
-            let WebTransportSession {
-                session_id,
-                mut opener,
-                mut datagrams,
-                mut bidi_streams,
-                mut uni_streams,
-            } = session;
+    ) -> H3Result<()> {
+        let WebTransportSession {
+            session_id,
+            mut opener,
+            mut datagrams,
+            mut bidi_streams,
+            mut uni_streams,
+        } = session;
 
-            req_stream.send_response_head(&ok_head(false)).await?;
+        req_stream.send_response_head(&ok_head(false)).await?;
 
-            let server_bidi = opener.open_webtransport_bidi(session_id).await?;
-            let (mut server_bidi_send, _) = server_bidi.split();
-            server_bidi_send
-                .send_chunk(Bytes::from_static(b"server-bidi"))
-                .await?;
-            server_bidi_send.finish().await?;
+        let server_bidi = opener.open_webtransport_bidi(session_id).await?;
+        let (mut server_bidi_send, _) = server_bidi.split();
+        server_bidi_send
+            .send_chunk(Bytes::from_static(b"server-bidi"))
+            .await?;
+        server_bidi_send.finish().await?;
 
-            let mut server_uni = opener.open_webtransport_uni(session_id).await?;
-            server_uni
-                .send_chunk(Bytes::from_static(b"server-uni"))
-                .await?;
-            server_uni.finish().await?;
+        let mut server_uni = opener.open_webtransport_uni(session_id).await?;
+        server_uni
+            .send_chunk(Bytes::from_static(b"server-uni"))
+            .await?;
+        server_uni.finish().await?;
 
-            let chunk = timeout(TEST_TIMEOUT, req_stream.recv_data())
-                .await
-                .map_err(|_| anyhow!("timed out waiting for WebTransport request data"))??
-                .ok_or_else(|| anyhow!("missing WebTransport request data"))?;
-            req_stream.send_data(chunk).await?;
-
-            let payload = timeout(TEST_TIMEOUT, async {
-                datagrams
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("missing WebTransport datagrams"))?
-                    .receiver
-                    .recv()
-                    .await
-                    .ok_or_else(|| anyhow!("missing WebTransport datagram"))
-            })
+        let chunk = timeout(TEST_TIMEOUT, req_stream.recv_data())
             .await
-            .map_err(|_| anyhow!("timed out waiting for WebTransport datagram"))??;
-            send_test_datagram(datagrams.as_mut().expect("checked above"), payload)?;
+            .map_err(|_| anyhow!("timed out waiting for WebTransport request data"))??
+            .ok_or_else(|| anyhow!("missing WebTransport request data"))?;
+        req_stream.send_data(chunk).await?;
 
-            let bidi = timeout(TEST_TIMEOUT, bidi_streams.recv())
+        let payload = timeout(TEST_TIMEOUT, async {
+            datagrams
+                .as_mut()
+                .ok_or_else(|| anyhow!("missing WebTransport datagrams"))?
+                .receiver
+                .recv()
                 .await
-                .map_err(|_| anyhow!("timed out waiting for client bidi stream"))?
-                .ok_or_else(|| anyhow!("missing client bidi stream"))?;
-            let (mut bidi_send, mut bidi_recv) = bidi.split();
-            while let Some(chunk) = bidi_recv.recv_chunk().await? {
-                bidi_send.send_chunk(chunk).await?;
-            }
-            bidi_send.finish().await?;
+                .ok_or_else(|| anyhow!("missing WebTransport datagram"))
+        })
+        .await
+        .map_err(|_| anyhow!("timed out waiting for WebTransport datagram"))??;
+        send_test_datagram(datagrams.as_mut().expect("checked above"), payload)?;
 
-            let uni = timeout(TEST_TIMEOUT, uni_streams.recv())
-                .await
-                .map_err(|_| anyhow!("timed out waiting for client uni stream"))?
-                .ok_or_else(|| anyhow!("missing client uni stream"))?;
-            let echoed = read_uni_stream(uni).await?;
-            let mut reply_uni = opener.open_webtransport_uni(session_id).await?;
-            reply_uni.send_chunk(Bytes::from(echoed)).await?;
-            reply_uni.finish().await?;
-
-            req_stream.finish().await
+        let bidi = timeout(TEST_TIMEOUT, bidi_streams.recv())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for client bidi stream"))?
+            .ok_or_else(|| anyhow!("missing client bidi stream"))?;
+        let (mut bidi_send, mut bidi_recv) = bidi.split();
+        while let Some(chunk) = bidi_recv.recv_chunk().await? {
+            bidi_send.send_chunk(chunk).await?;
         }
+        bidi_send.finish().await?;
+
+        let uni = timeout(TEST_TIMEOUT, uni_streams.recv())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for client uni stream"))?
+            .ok_or_else(|| anyhow!("missing client uni stream"))?;
+        let echoed = read_uni_stream(uni).await?;
+        let mut reply_uni = opener.open_webtransport_uni(session_id).await?;
+        reply_uni.send_chunk(Bytes::from(echoed)).await?;
+        reply_uni.finish().await?;
+
+        req_stream.finish().await
     }
 }
 
@@ -275,23 +268,23 @@ impl RequestHandler for WebTransportZeroSessionHandler {
         "qpx-test"
     }
 
-    fn handle_request(
+    async fn handle_request(
         &self,
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move { Err(anyhow!("unexpected request").into()) }
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
-    fn handle_webtransport_connect(
+    async fn handle_webtransport_connect(
         &self,
         _req_head: http::Request<()>,
         _req_stream: RequestStream,
         _conn: ConnectionInfo,
         _session: WebTransportSession,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move { Err(anyhow!("WebTransport handler must not run when max sessions is zero").into()) }
+    ) -> H3Result<()> {
+        Err(anyhow!("WebTransport handler must not run when max sessions is zero").into())
     }
 }
 
@@ -307,30 +300,28 @@ impl RequestHandler for WebTransportRejectHandler {
         }
     }
 
-    fn handle_request(
+    async fn handle_request(
         &self,
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move { Err(anyhow!("unexpected request").into()) }
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
-    fn handle_webtransport_connect(
+    async fn handle_webtransport_connect(
         &self,
         _req_head: http::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         _session: WebTransportSession,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move {
-            let response = http::Response::builder()
-                .status(http::StatusCode::FORBIDDEN)
-                .body(())?;
-            req_stream.send_response_head(&response).await?;
-            req_stream.send_data(Bytes::from_static(b"denied")).await?;
-            req_stream.finish().await
-        }
+    ) -> H3Result<()> {
+        let response = http::Response::builder()
+            .status(http::StatusCode::FORBIDDEN)
+            .body(())?;
+        req_stream.send_response_head(&response).await?;
+        req_stream.send_data(Bytes::from_static(b"denied")).await?;
+        req_stream.finish().await
     }
 }
 
@@ -347,29 +338,27 @@ impl RequestHandler for DynamicHeaderHandler {
         }
     }
 
-    fn handle_request(
+    async fn handle_request(
         &self,
         request: Request,
         _conn: ConnectionInfo,
         mut stream: RequestStream,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move {
-            let value = request
-                .head
-                .headers()
-                .get("x-dynamic")
-                .and_then(|value| value.to_str().ok())
-                .ok_or_else(|| anyhow!("missing x-dynamic header"))?
-                .to_string();
-            if let Some(tx) = self.seen.lock().await.take() {
-                let _ = tx.send(value);
-            }
-            let response = http::Response::builder()
-                .status(http::StatusCode::NO_CONTENT)
-                .body(())?;
-            stream.send_response_head(&response).await?;
-            stream.finish().await
+    ) -> H3Result<()> {
+        let value = request
+            .head
+            .headers()
+            .get("x-dynamic")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| anyhow!("missing x-dynamic header"))?
+            .to_string();
+        if let Some(tx) = self.seen.lock().await.take() {
+            let _ = tx.send(value);
         }
+        let response = http::Response::builder()
+            .status(http::StatusCode::NO_CONTENT)
+            .body(())?;
+        stream.send_response_head(&response).await?;
+        stream.finish().await
     }
 }
 
@@ -384,31 +373,29 @@ impl RequestHandler for HeadBodyAttemptHandler {
         }
     }
 
-    fn handle_request(
+    async fn handle_request(
         &self,
         request: Request,
         _conn: ConnectionInfo,
         mut stream: RequestStream,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move {
-            if request.head.method() != http::Method::HEAD {
-                return Err(anyhow!("expected HEAD request").into());
-            }
-            let response = http::Response::builder()
-                .status(http::StatusCode::OK)
-                .header(http::header::CONTENT_LENGTH, "5")
-                .body(())?;
-            stream.send_response_head(&response).await?;
-            let err = stream
-                .send_data(Bytes::from_static(b"hello"))
-                .await
-                .expect_err("HEAD response DATA must be rejected");
-            assert!(
-                err.to_string().contains("DATA is not allowed"),
-                "unexpected DATA rejection: {err}"
-            );
-            stream.finish().await
+    ) -> H3Result<()> {
+        if request.head.method() != http::Method::HEAD {
+            return Err(anyhow!("expected HEAD request").into());
         }
+        let response = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header(http::header::CONTENT_LENGTH, "5")
+            .body(())?;
+        stream.send_response_head(&response).await?;
+        let err = stream
+            .send_data(Bytes::from_static(b"hello"))
+            .await
+            .expect_err("HEAD response DATA must be rejected");
+        assert!(
+            err.to_string().contains("DATA is not allowed"),
+            "unexpected DATA rejection: {err}"
+        );
+        stream.finish().await
     }
 }
 
@@ -423,24 +410,24 @@ impl RequestHandler for ExtendedConnectDisabledHandler {
         }
     }
 
-    fn handle_request(
+    async fn handle_request(
         &self,
         _request: Request,
         _conn: ConnectionInfo,
         _stream: RequestStream,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move { Err(anyhow!("unexpected request").into()) }
+    ) -> H3Result<()> {
+        Err(anyhow!("unexpected request").into())
     }
 
-    fn handle_connect_stream(
+    async fn handle_connect_stream(
         &self,
         _req_head: http::Request<()>,
         _req_stream: RequestStream,
         _conn: ConnectionInfo,
         _protocol: Protocol,
         _datagrams: Option<StreamDatagrams>,
-    ) -> impl Future<Output = H3Result<()>> + Send {
-        async move { Err(anyhow!("extended CONNECT handler must not run when disabled").into()) }
+    ) -> H3Result<()> {
+        Err(anyhow!("extended CONNECT handler must not run when disabled").into())
     }
 }
 

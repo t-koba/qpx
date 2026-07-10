@@ -61,7 +61,7 @@ impl From<ChannelSendError> for BodyError {
 pub struct Body {
     inner: BodyInner,
     close_signal: Option<Arc<BodyCloseSignal>>,
-    pending_trailers: Option<HeaderMap>,
+    pending_trailers: Option<Box<HeaderMap>>,
     stream_finished: bool,
 }
 
@@ -70,11 +70,11 @@ enum BodyInner {
     Empty,
     Once {
         bytes: Option<Bytes>,
-        trailers: Option<HeaderMap>,
+        trailers: Option<Box<HeaderMap>>,
     },
     Chunks {
         chunks: VecDeque<Bytes>,
-        trailers: Option<HeaderMap>,
+        trailers: Option<Box<HeaderMap>>,
         remaining_len: u64,
     },
     Boxed(UnsyncBoxBody<Bytes, BodyError>),
@@ -125,7 +125,7 @@ impl Body {
         Self {
             inner: BodyInner::Once {
                 bytes: (!bytes.is_empty()).then_some(bytes),
-                trailers,
+                trailers: trailers.map(Box::new),
             },
             close_signal: None,
             pending_trailers: None,
@@ -145,7 +145,7 @@ impl Body {
         Self {
             inner: BodyInner::Chunks {
                 chunks,
-                trailers,
+                trailers: trailers.map(Box::new),
                 remaining_len,
             },
             close_signal: None,
@@ -188,7 +188,7 @@ impl Body {
                     Ok(data) => return Some(Ok(data)),
                     Err(frame) => {
                         if let Ok(trailers) = frame.into_trailers() {
-                            self.pending_trailers = Some(trailers);
+                            self.pending_trailers = Some(Box::new(trailers));
                             self.stream_finished = true;
                             return None;
                         }
@@ -205,7 +205,7 @@ impl Body {
 
     pub async fn trailers(&mut self) -> Result<Option<HeaderMap>, BodyError> {
         if self.pending_trailers.is_some() {
-            return Ok(self.pending_trailers.take());
+            return Ok(self.pending_trailers.take().map(|trailers| *trailers));
         }
         if self.stream_finished {
             return Ok(None);
@@ -236,7 +236,7 @@ impl Body {
                 } else {
                     trailers
                         .take()
-                        .map(|trailers| Ok(Frame::trailers(trailers)))
+                        .map(|trailers| Ok(Frame::trailers(*trailers)))
                 }
             }
             BodyInner::Chunks {
@@ -250,7 +250,7 @@ impl Body {
                 } else {
                     trailers
                         .take()
-                        .map(|trailers| Ok(Frame::trailers(trailers)))
+                        .map(|trailers| Ok(Frame::trailers(*trailers)))
                 }
             }
             BodyInner::Boxed(inner) => inner.frame().await,
@@ -323,7 +323,7 @@ impl http_body::Body for Body {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.as_mut().get_mut();
         if let Some(trailers) = this.pending_trailers.take() {
-            return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
+            return Poll::Ready(Some(Ok(Frame::trailers(*trailers))));
         }
         if this.stream_finished {
             return Poll::Ready(None);
@@ -337,7 +337,7 @@ impl http_body::Body for Body {
                     Poll::Ready(
                         trailers
                             .take()
-                            .map(|trailers| Ok(Frame::trailers(trailers))),
+                            .map(|trailers| Ok(Frame::trailers(*trailers))),
                     )
                 }
             }
@@ -353,7 +353,7 @@ impl http_body::Body for Body {
                     Poll::Ready(
                         trailers
                             .take()
-                            .map(|trailers| Ok(Frame::trailers(trailers))),
+                            .map(|trailers| Ok(Frame::trailers(*trailers))),
                     )
                 }
             }

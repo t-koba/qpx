@@ -16,33 +16,27 @@ impl RequestHandler<Request<Body>> for StaticInterimService {
     type Response = Response<Body>;
     type Error = std::convert::Infallible;
 
-    fn call(
-        &self,
-        _req: Request<Body>,
-    ) -> impl std::future::Future<Output = Result<Response<Body>, std::convert::Infallible>> + Send
-    {
-        async move {
-            let interim = vec![InterimResponseHead {
-                status: StatusCode::from_u16(103).expect("103"),
-                headers: {
-                    let mut headers = http::HeaderMap::new();
-                    headers.insert(
-                        http::header::LINK,
-                        http::HeaderValue::from_static("</app.css>; rel=preload; as=style"),
-                    );
-                    headers.insert(http::header::CONTENT_LENGTH, "99".parse().unwrap());
-                    headers.insert(http::header::TRAILER, "x-trailer".parse().unwrap());
-                    headers.insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
-                    headers
-                },
-            }];
-            let mut response = Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from("OK"))
-                .expect("response");
-            response.extensions_mut().insert(interim);
-            Ok(response)
-        }
+    async fn call(&self, _req: Request<Body>) -> Result<Response<Body>, std::convert::Infallible> {
+        let interim = vec![InterimResponseHead {
+            status: StatusCode::from_u16(103).expect("103"),
+            headers: {
+                let mut headers = http::HeaderMap::new();
+                headers.insert(
+                    http::header::LINK,
+                    http::HeaderValue::from_static("</app.css>; rel=preload; as=style"),
+                );
+                headers.insert(http::header::CONTENT_LENGTH, "99".parse().unwrap());
+                headers.insert(http::header::TRAILER, "x-trailer".parse().unwrap());
+                headers.insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+                headers
+            },
+        }];
+        let mut response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from("OK"))
+            .expect("response");
+        response.extensions_mut().insert(interim);
+        Ok(response)
     }
 }
 

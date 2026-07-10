@@ -41,36 +41,31 @@ impl RequestHandler<Request<Body>> for StaticInterimService {
     type Response = Response<Body>;
     type Error = Infallible;
 
-    fn call(
-        &self,
-        _req: Request<Body>,
-    ) -> impl std::future::Future<Output = Result<Response<Body>, Infallible>> + Send {
-        async move {
-            let interim = vec![InterimResponseHead {
-                status: StatusCode::from_u16(103).expect("103"),
-                headers: {
-                    let mut headers = HeaderMap::new();
-                    headers.insert(
-                        hyper::header::LINK,
-                        HeaderValue::from_static("</app.css>; rel=preload; as=style"),
-                    );
-                    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("99"));
-                    headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
-                    headers.insert(
-                        hyper::header::TRAILER,
-                        HeaderValue::from_static("x-trailer"),
-                    );
-                    headers
-                },
-            }];
-            let mut response = Response::builder()
-                .status(StatusCode::OK)
-                .header(CONTENT_LENGTH, "2")
-                .body(Body::from("OK"))
-                .expect("response");
-            response.extensions_mut().insert(interim);
-            Ok(response)
-        }
+    async fn call(&self, _req: Request<Body>) -> Result<Response<Body>, Infallible> {
+        let interim = vec![InterimResponseHead {
+            status: StatusCode::from_u16(103).expect("103"),
+            headers: {
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    hyper::header::LINK,
+                    HeaderValue::from_static("</app.css>; rel=preload; as=style"),
+                );
+                headers.insert(CONTENT_LENGTH, HeaderValue::from_static("99"));
+                headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+                headers.insert(
+                    hyper::header::TRAILER,
+                    HeaderValue::from_static("x-trailer"),
+                );
+                headers
+            },
+        }];
+        let mut response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_LENGTH, "2")
+            .body(Body::from("OK"))
+            .expect("response");
+        response.extensions_mut().insert(interim);
+        Ok(response)
     }
 }
 
