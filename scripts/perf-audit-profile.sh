@@ -60,9 +60,13 @@ annotate_callgrind_outputs() {
   local target="$1"
   local filter="$2"
   local commit="${GITHUB_SHA:-unknown}"
-  local file instructions annotated cmd_line failed
+  local file instructions annotated cmd_line failed annotated_outputs
   failed=0
+  annotated_outputs=0
   while IFS= read -r file; do
+    if [ ! -s "$file" ]; then
+      continue
+    fi
     if ! grep -q '^events:' "$file"; then
       echo "callgrind output missing events: ${file}" >&2
       failed=1
@@ -84,6 +88,7 @@ annotate_callgrind_outputs() {
       failed=1
       continue
     fi
+    annotated_outputs=$((annotated_outputs + 1))
     printf '{"bench":"callgrind_hot_path_profile","target":%s,"filter":%s,"command":%s,"instructions":%s,"callgrind_file":%s,"annotated_file":%s,"commit":%s}\n' \
       "$(json_escape "$target")" \
       "$(json_escape "$filter")" \
@@ -93,6 +98,10 @@ annotate_callgrind_outputs() {
       "$(json_escape "${annotated#"$ROOT_DIR"/}")" \
       "$(json_escape "$commit")" >>"$PROFILE_JSON"
   done < <(find "$PROFILE_DIR" -type f -name "callgrind.${target}.${filter}.*.out" | sort)
+  if [ "$annotated_outputs" -eq 0 ]; then
+    echo "no valid callgrind outputs for ${target} ${filter}" >&2
+    return 1
+  fi
   return "$failed"
 }
 
