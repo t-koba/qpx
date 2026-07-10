@@ -8,7 +8,7 @@ use super::io::{
     read_trailer_headers,
 };
 use super::{
-    Http1ConnectionRecycler, InterimResponseHead, MAX_HEADER_BYTES,
+    Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, InterimResponseHead, MAX_HEADER_BYTES,
     RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
 };
 #[cfg(test)]
@@ -45,7 +45,7 @@ pub(super) async fn read_response_head_with_interim<S>(
 where
     S: AsyncRead + Unpin,
 {
-    let mut buf = BytesMut::with_capacity(4096);
+    let mut buf = BytesMut::with_capacity(INITIAL_READ_BUF_SIZE);
     let mut interim = Vec::new();
     loop {
         let parsed = loop {

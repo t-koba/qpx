@@ -18,10 +18,13 @@ pub(crate) use identity::{
 };
 
 pub(crate) fn attach_log_context(
+    state: &crate::runtime::RuntimeState,
     response: &mut hyper::Response<qpx_http::body::Body>,
     log_context: &qpx_observability::access_log::RequestLogContext,
 ) {
-    response.extensions_mut().insert(log_context.clone());
+    if state.resources.access_log.output.enabled || qpx_observability::otel_enabled() {
+        response.extensions_mut().insert(log_context.clone());
+    }
 }
 
 pub(crate) fn merge_policy_tags(into: &mut Vec<String>, extra: &[String]) {

@@ -4,17 +4,20 @@ use super::response::{
     forward_close_delimited_body,
 };
 use super::{
-    Http1ConnectionRecycler, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, parse_declared_content_length,
-    send_http1_request_with_interim,
+    Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
+    parse_declared_content_length, send_http1_request_with_interim,
 };
 use bytes::{Bytes, BytesMut};
 use hyper::header::{CONTENT_LENGTH, HeaderName, HeaderValue, TRANSFER_ENCODING};
 use hyper::{HeaderMap, Method, Request, StatusCode, Version};
 use qpx_http::body::Body;
 use qpx_http::body::to_bytes;
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Duration;
 
@@ -262,6 +265,32 @@ async fn pull_content_length_response_recycles_after_complete_body() {
 }
 
 #[tokio::test]
+async fn short_content_length_response_uses_bounded_read_capacity() {
+    let max_read_capacity = Arc::new(AtomicUsize::new(0));
+    let stream = RecordingStream::new(Bytes::from_static(b"OK"), max_read_capacity.clone());
+    let response = build_response(
+        stream,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body_kind: ResponseBodyKind::ContentLength(2),
+        },
+        BytesMut::with_capacity(INITIAL_READ_BUF_SIZE),
+        None,
+    );
+
+    assert_eq!(
+        to_bytes(response.into_body()).await.expect("body bytes"),
+        Bytes::from_static(b"OK")
+    );
+    assert!(
+        max_read_capacity.load(Ordering::SeqCst) <= INITIAL_READ_BUF_SIZE,
+        "short body read unexpectedly reserved more than the initial response buffer"
+    );
+}
+
+#[tokio::test]
 async fn pull_content_length_response_does_not_recycle_with_leftover_bytes() {
     let (proxy, mut origin) = tokio::io::duplex(64);
     let recycled = Arc::new(AtomicUsize::new(0));
@@ -385,4 +414,54 @@ async fn write_http1_request_announces_chunked_request_trailers() {
     let text = String::from_utf8(raw).expect("utf8");
     assert!(text.contains("trailer: x-checksum\r\n"));
     assert!(text.contains("x-checksum: abc123\r\n"));
+}
+
+struct RecordingStream {
+    input: Bytes,
+    offset: usize,
+    max_read_capacity: Arc<AtomicUsize>,
+}
+
+impl RecordingStream {
+    fn new(input: Bytes, max_read_capacity: Arc<AtomicUsize>) -> Self {
+        Self {
+            input,
+            offset: 0,
+            max_read_capacity,
+        }
+    }
+}
+
+impl AsyncRead for RecordingStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.max_read_capacity
+            .fetch_max(buf.remaining(), Ordering::SeqCst);
+        let remaining = &self.input[self.offset..];
+        let len = remaining.len().min(buf.remaining());
+        buf.put_slice(&remaining[..len]);
+        self.offset += len;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for RecordingStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
 }

@@ -1,4 +1,5 @@
 use crate::http::protocol::header_control::{apply_request_headers, apply_response_headers};
+use crate::http::protocol::trailer_body;
 use hyper::{Method, Request, Response, StatusCode};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
@@ -9,8 +10,6 @@ use qpx_http::protocol::semantics::{
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
 use tracing::warn;
-
-const TRAILER_WRAPPER_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) fn finalize_response_for_request(
     request_method: &Method,
@@ -413,120 +412,13 @@ fn should_reflect_trace_header(name: &http::header::HeaderName, reflect_all_head
 }
 
 fn wrap_body_validating_request_trailers(request: &mut Request<Body>) {
-    let mut inner = std::mem::take(request.body_mut());
-    let (mut sender, out) = Body::channel_with_capacity(16);
-    tokio::spawn(async move {
-        loop {
-            let frame = tokio::select! {
-                _ = sender.closed() => return,
-                frame = timeout(TRAILER_WRAPPER_BODY_IDLE_TIMEOUT, inner.data()) => match frame {
-                    Ok(frame) => frame,
-                    Err(_) => {
-                        warn!("request body trailer wrapper timed out while idle");
-                        sender.abort();
-                        return;
-                    }
-                },
-            };
-            let Some(frame) = frame else {
-                break;
-            };
-            let chunk = match frame {
-                Ok(chunk) => chunk,
-                Err(err) => {
-                    warn!(error = ?err, "request body stream failed");
-                    return;
-                }
-            };
-            if sender.send_data(chunk).await.is_err() {
-                return;
-            }
-        }
-        let trailers = match tokio::select! {
-            _ = sender.closed() => return,
-            trailers = timeout(TRAILER_WRAPPER_BODY_IDLE_TIMEOUT, inner.trailers()) => match trailers {
-                Ok(trailers) => trailers,
-                Err(_) => {
-                    warn!("request body trailers timed out while idle");
-                    sender.abort();
-                    return;
-                }
-            },
-        } {
-            Ok(trailers) => trailers,
-            Err(err) => {
-                warn!(error = ?err, "request body trailers failed");
-                return;
-            }
-        };
-        if let Some(trailers) = trailers {
-            if let Err(err) = qpx_http::protocol::semantics::validate_request_trailers(&trailers) {
-                warn!(error = ?err, "rejecting forbidden request trailers");
-                sender.abort();
-                return;
-            }
-            let _ = sender.send_trailers(trailers).await;
-        }
-    });
-    *request.body_mut() = out;
+    let inner = std::mem::take(request.body_mut());
+    *request.body_mut() = trailer_body::validating_request(inner);
 }
 
 fn wrap_body_sanitizing_response_trailers(response: &mut Response<Body>) {
-    let mut inner = std::mem::take(response.body_mut());
-    let (mut sender, out) = Body::channel_with_capacity(16);
-    tokio::spawn(async move {
-        loop {
-            let frame = tokio::select! {
-                _ = sender.closed() => return,
-                frame = timeout(TRAILER_WRAPPER_BODY_IDLE_TIMEOUT, inner.data()) => match frame {
-                    Ok(frame) => frame,
-                    Err(_) => {
-                        warn!("response body trailer wrapper timed out while idle");
-                        sender.abort();
-                        return;
-                    }
-                },
-            };
-            let Some(frame) = frame else {
-                break;
-            };
-            let chunk = match frame {
-                Ok(chunk) => chunk,
-                Err(err) => {
-                    warn!(error = ?err, "response body stream failed");
-                    return;
-                }
-            };
-            if sender.send_data(chunk).await.is_err() {
-                return;
-            }
-        }
-        let trailers = match tokio::select! {
-            _ = sender.closed() => return,
-            trailers = timeout(TRAILER_WRAPPER_BODY_IDLE_TIMEOUT, inner.trailers()) => match trailers {
-                Ok(trailers) => trailers,
-                Err(_) => {
-                    warn!("response body trailers timed out while idle");
-                    sender.abort();
-                    return;
-                }
-            },
-        } {
-            Ok(trailers) => trailers,
-            Err(err) => {
-                warn!(error = ?err, "response body trailers failed");
-                return;
-            }
-        };
-        if let Some(mut trailers) = trailers {
-            let removed = qpx_http::protocol::semantics::sanitize_response_trailers(&mut trailers);
-            if removed > 0 {
-                warn!(removed, "dropping forbidden response trailers");
-            }
-            let _ = sender.send_trailers(trailers).await;
-        }
-    });
-    *response.body_mut() = out;
+    let inner = std::mem::take(response.body_mut());
+    *response.body_mut() = trailer_body::sanitizing_response(inner);
 }
 
 #[cfg(test)]

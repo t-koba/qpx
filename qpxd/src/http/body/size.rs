@@ -2,7 +2,7 @@ use crate::http::rpc::{PrecomputedRpcBodySummary, RpcBodySummaryObserver};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
-use http_body::Frame;
+use http_body::{Body as _, Frame};
 use hyper::{Request, Response};
 use qpx_http::body::{Body, BodyError};
 use std::fmt;
@@ -138,6 +138,9 @@ pub(crate) fn limit_request_body(
         ensure_observed_size_within_limit(size, max_body_bytes)?;
     }
     if has_observed_request_bytes(&req) {
+        return Ok(req);
+    }
+    if req.body().is_end_stream() {
         return Ok(req);
     }
     let (parts, body) = req.into_parts();

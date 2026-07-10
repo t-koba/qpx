@@ -4,6 +4,7 @@ use http::Method;
 use hyper::Response;
 use qpx_http::body::Body;
 use qpx_observability::access_log::RequestLogContext;
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -88,9 +89,14 @@ pub(crate) fn annotate_dispatch_response(
     extra_policy_tags: &[String],
 ) {
     record_dispatch_outcome(ctx.kind, outcome);
-    let mut annotated_context = ctx.log_context.clone();
-    merge_policy_tags(&mut annotated_context.policy_tags, extra_policy_tags);
-    attach_log_context(response, &annotated_context);
+    let annotated_context = if extra_policy_tags.is_empty() {
+        Cow::Borrowed(&ctx.log_context)
+    } else {
+        let mut annotated_context = ctx.log_context.clone();
+        merge_policy_tags(&mut annotated_context.policy_tags, extra_policy_tags);
+        Cow::Owned(annotated_context)
+    };
+    attach_log_context(&ctx.state, response, &annotated_context);
     emit_audit_log(
         &ctx.state,
         AuditRecord {

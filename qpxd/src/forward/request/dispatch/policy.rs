@@ -125,7 +125,7 @@ pub(super) fn finalize_forward_policy_response(
         response,
         false,
     );
-    attach_log_context(&mut response, &log_context);
+    attach_log_context(input.state, &mut response, &log_context);
     emit_audit_log(
         input.state,
         AuditRecord {

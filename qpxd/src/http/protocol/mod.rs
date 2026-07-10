@@ -6,5 +6,6 @@ pub mod l7;
 pub mod preflight;
 #[cfg(feature = "http3")]
 pub mod sse;
+mod trailer_body;
 pub mod upgrade;
 pub mod websocket;

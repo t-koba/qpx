@@ -18,7 +18,7 @@ pub(super) struct ConnectAuditContext<'a> {
 
 impl ConnectAuditContext<'_> {
     pub(super) fn annotate(&self, response: &mut Response<Body>, outcome: DispatchOutcome) {
-        attach_log_context(response, self.log_context);
+        attach_log_context(self.state, response, self.log_context);
         emit_audit_log(
             self.state,
             AuditRecord {

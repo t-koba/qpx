@@ -18,6 +18,7 @@ mod response;
 mod tests;
 
 const MAX_HEADER_BYTES: usize = 128 * 1024;
+const INITIAL_READ_BUF_SIZE: usize = 4 * 1024;
 const READ_BUF_SIZE: usize = 64 * 1024;
 const MAX_CHUNKED_BODY_BYTES: u64 = 1024 * 1024 * 1024;
 const RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT: tokio::time::Duration =

@@ -42,6 +42,65 @@ async fn finalize_response_sanitizes_h2_trailers_for_h1_downstream() {
 }
 
 #[tokio::test]
+async fn prepare_request_rejects_forbidden_h2_trailers() {
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("2"),
+    );
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri("https://example.com/upload")
+        .version(http::Version::HTTP_2)
+        .body(Body::replay(Bytes::from_static(b"ok"), Some(trailers)))
+        .expect("request");
+
+    prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
+
+    assert_eq!(
+        request
+            .body_mut()
+            .data()
+            .await
+            .expect("body frame")
+            .expect("body chunk"),
+        Bytes::from_static(b"ok")
+    );
+    let err = request
+        .body_mut()
+        .trailers()
+        .await
+        .expect_err("forbidden request trailers must fail");
+    assert_eq!(err.to_string(), "body aborted");
+}
+
+#[tokio::test]
+async fn finalize_response_preserves_body_stream_errors() {
+    let (mut sender, body) = Body::channel();
+    sender.abort();
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .body(body)
+        .expect("response");
+
+    finalize_response_in_place(
+        &Method::GET,
+        http::Version::HTTP_11,
+        "qpx",
+        &mut response,
+        false,
+    );
+
+    let err = response
+        .body_mut()
+        .data()
+        .await
+        .expect("body error frame")
+        .expect_err("upstream body error must be preserved");
+    assert_eq!(err.to_string(), "body aborted");
+}
+
+#[tokio::test]
 async fn trace_loopback_filters_sensitive_headers_by_default() {
     let mut request = Request::builder()
         .method(Method::TRACE)

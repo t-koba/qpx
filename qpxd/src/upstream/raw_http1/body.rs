@@ -1,6 +1,6 @@
 use super::response::ResponseBodyKind;
 use super::{
-    Http1ConnectionRecycler, MAX_CHUNKED_BODY_BYTES, MAX_HEADER_BYTES,
+    Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, MAX_CHUNKED_BODY_BYTES, MAX_HEADER_BYTES,
     RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, READ_BUF_SIZE,
 };
 use crate::http::codec::h1_common::{find_crlf, parse_header_map};
@@ -120,7 +120,11 @@ where
                             this.buf.split_to(take).freeze(),
                         ))));
                     }
-                    match poll_read_with_timeout(this, cx) {
+                    // Bounded read-ahead keeps unexpected bytes from entering the reusable pool.
+                    let read_size = (*remaining)
+                        .clamp(INITIAL_READ_BUF_SIZE as u64, READ_BUF_SIZE as u64)
+                        as usize;
+                    match poll_read_with_timeout(this, cx, read_size) {
                         Poll::Ready(Ok(0)) => {
                             this.state = BodyState::Done;
                             this.discard();
@@ -144,7 +148,7 @@ where
                             this.buf.split_to(take).freeze(),
                         ))));
                     }
-                    match poll_read_with_timeout(this, cx) {
+                    match poll_read_with_timeout(this, cx, READ_BUF_SIZE) {
                         Poll::Ready(Ok(0)) => {
                             this.state = BodyState::Done;
                             this.discard();
@@ -194,7 +198,7 @@ where
                                 "HTTP/1 chunk-size line exceeded configured limit",
                             ))));
                         }
-                        match poll_read_with_timeout(this, cx) {
+                        match poll_read_with_timeout(this, cx, INITIAL_READ_BUF_SIZE) {
                             Poll::Ready(Ok(0)) => {
                                 this.state = BodyState::Done;
                                 this.discard();
@@ -223,7 +227,8 @@ where
                                 this.buf.split_to(take).freeze(),
                             ))));
                         }
-                        match poll_read_with_timeout(this, cx) {
+                        let read_size = (*remaining).min(READ_BUF_SIZE);
+                        match poll_read_with_timeout(this, cx, read_size) {
                             Poll::Ready(Ok(0)) => {
                                 this.state = BodyState::Done;
                                 this.discard();
@@ -253,7 +258,8 @@ where
                             *state = ChunkState::Size;
                             continue;
                         }
-                        match poll_read_with_timeout(this, cx) {
+                        let read_size = 2usize.saturating_sub(this.buf.len()).max(1);
+                        match poll_read_with_timeout(this, cx, read_size) {
                             Poll::Ready(Ok(0)) => {
                                 this.state = BodyState::Done;
                                 this.discard();
@@ -304,7 +310,7 @@ where
                                         "HTTP/1 trailer block exceeded configured limit",
                                     ))));
                                 }
-                                match poll_read_with_timeout(this, cx) {
+                                match poll_read_with_timeout(this, cx, INITIAL_READ_BUF_SIZE) {
                                     Poll::Ready(Ok(0)) => {
                                         this.state = BodyState::Done;
                                         this.discard();
@@ -346,6 +352,7 @@ where
 fn poll_read_with_timeout<S>(
     body: &mut Http1ResponseBody<S>,
     cx: &mut Context<'_>,
+    read_size: usize,
 ) -> Poll<Result<usize, BodyError>>
 where
     S: AsyncRead + Unpin,
@@ -356,7 +363,9 @@ where
     if body.read_timer.is_none() {
         body.read_timer = Some(Box::pin(tokio::time::sleep(body.read_timeout)));
     }
-    body.buf.reserve(READ_BUF_SIZE);
+    if body.buf.capacity() == body.buf.len() {
+        body.buf.reserve(read_size.max(1));
+    }
     match tokio_util::io::poll_read_buf(Pin::new(stream), cx, &mut body.buf) {
         Poll::Ready(Ok(n)) => {
             body.read_timer = None;

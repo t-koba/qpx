@@ -90,6 +90,16 @@ async fn limit_request_body_streams_unknown_length_without_prebuffering() {
     assert!(err.to_string().contains("request body exceeds hard cap"));
 }
 
+#[test]
+fn limit_request_body_keeps_empty_body_at_end_of_stream() {
+    let req = Request::builder().body(Body::empty()).expect("request");
+
+    let req = limit_request_body(req, 4).expect("limit body");
+
+    assert!(http_body::Body::is_end_stream(req.body()));
+    assert_eq!(http_body::Body::size_hint(req.body()).exact(), Some(0));
+}
+
 #[tokio::test]
 async fn observe_response_body_size_rejects_content_length_over_cap_without_buffering() {
     let (_sender, body) = Body::channel();
