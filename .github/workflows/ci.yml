@@ -225,8 +225,8 @@ jobs:
           RUSTFLAGS: "-D warnings"
         run: |
           mkdir -p target/perf
-          printf '{"bench":"criterion_streaming_throughput","first_byte_ms":null,"p95_chunk_gap_ms":null,"total_ms":null,"rss_peak_mb":null,"cpu_ms":null,"bytes":null,"commit":"%s"}\n' "${GITHUB_SHA:-unknown}" > target/perf/perf-audit-criterion.jsonl
           cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10
+          scripts/perf-audit-criterion-jsonl.sh target/perf/perf-audit-criterion.jsonl
       - name: h3 crate protocol perf benchmarks
         id: h3_crate_protocol_perf_benchmarks
         continue-on-error: true

@@ -30,7 +30,6 @@ where
         + Send
         + Sync
         + 'static,
-    S::Future: Send + 'static,
 {
     serve_h2_with_interim_and_capacity(io, service, enable_connect_protocol, idle_timeout, 16).await
 }
@@ -50,7 +49,6 @@ where
         + Send
         + Sync
         + 'static,
-    S::Future: Send + 'static,
 {
     serve_h2_with_interim_and_capacity_and_tuning(
         io,
@@ -78,7 +76,6 @@ where
         + Send
         + Sync
         + 'static,
-    S::Future: Send + 'static,
 {
     let mut builder = h2::server::Builder::new();
     crate::http::codec::h2::tune_h2_server_builder_with(&mut builder, h2_tuning);

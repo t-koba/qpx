@@ -69,7 +69,6 @@ where
         + Send
         + Sync
         + 'static,
-    S::Future: Send + 'static,
 {
     serve_http1_with_interim_and_capacity(io, service, header_read_timeout, 16).await
 }
@@ -86,7 +85,6 @@ where
         + Send
         + Sync
         + 'static,
-    S::Future: Send + 'static,
 {
     let (mut read_half, mut write_half) = tokio::io::split(io);
     let mut read_buf = BytesMut::new();

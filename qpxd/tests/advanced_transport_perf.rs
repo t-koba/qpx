@@ -5,7 +5,6 @@
 ))]
 
 use anyhow::{Result, anyhow};
-use async_trait::async_trait;
 use bytes::Bytes;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -834,7 +833,6 @@ async fn wait_for_file(path: &Path) -> Result<()> {
 #[derive(Clone, Default)]
 struct QpxH3ExtendedEchoHandler;
 
-#[async_trait]
 impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
     fn settings(&self) -> qpx_h3::Settings {
         qpx_h3::Settings {
@@ -845,62 +843,63 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
         }
     }
 
-    async fn handle_request(
+    fn handle_request(
         &self,
         _request: qpx_h3::Request,
         _conn: qpx_h3::ConnectionInfo,
         _stream: qpx_h3::RequestStream,
-    ) -> std::result::Result<(), qpx_h3::H3Error> {
-        Err(anyhow!("unexpected buffered request").into())
+    ) -> impl Future<Output = std::result::Result<(), qpx_h3::H3Error>> + Send {
+        async { Err(anyhow!("unexpected buffered request").into()) }
     }
 
-    async fn handle_connect_stream(
+    fn handle_connect_stream(
         &self,
         _req_head: http::Request<()>,
         mut req_stream: qpx_h3::RequestStream,
         _conn: qpx_h3::ConnectionInfo,
         protocol: qpx_h3::Protocol,
         mut datagrams: Option<qpx_h3::StreamDatagrams>,
-    ) -> std::result::Result<(), qpx_h3::H3Error> {
-        match protocol {
-            qpx_h3::Protocol::Other(name) if name == "websocket" => {}
-            other => return Err(anyhow!("unexpected protocol: {other:?}").into()),
-        }
-        req_stream
-            .send_response_head(&ok_qpx_response_head(false))
-            .await?;
-        let chunk = timeout(
-            profile_timeout(Duration::from_secs(5)),
-            req_stream.recv_data(),
-        )
-        .await
-        .map_err(|_| anyhow!("timed out waiting for extended CONNECT request data"))??
-        .ok_or_else(|| anyhow!("missing extended CONNECT request data"))?;
-        req_stream.send_data(chunk).await?;
-        let payload = timeout(profile_timeout(Duration::from_secs(5)), async {
+    ) -> impl Future<Output = std::result::Result<(), qpx_h3::H3Error>> + Send {
+        async move {
+            match protocol {
+                qpx_h3::Protocol::Other(name) if name == "websocket" => {}
+                other => return Err(anyhow!("unexpected protocol: {other:?}").into()),
+            }
+            req_stream
+                .send_response_head(&ok_qpx_response_head(false))
+                .await?;
+            let chunk = timeout(
+                profile_timeout(Duration::from_secs(5)),
+                req_stream.recv_data(),
+            )
+            .await
+            .map_err(|_| anyhow!("timed out waiting for extended CONNECT request data"))??
+            .ok_or_else(|| anyhow!("missing extended CONNECT request data"))?;
+            req_stream.send_data(chunk).await?;
+            let payload = timeout(profile_timeout(Duration::from_secs(5)), async {
+                datagrams
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("missing downstream datagrams"))?
+                    .receiver
+                    .recv()
+                    .await
+                    .ok_or_else(|| anyhow!("missing downstream extended CONNECT datagram"))
+            })
+            .await
+            .map_err(|_| anyhow!("timed out waiting for extended CONNECT datagram"))??;
             datagrams
                 .as_mut()
-                .ok_or_else(|| anyhow!("missing downstream datagrams"))?
-                .receiver
-                .recv()
-                .await
-                .ok_or_else(|| anyhow!("missing downstream extended CONNECT datagram"))
-        })
-        .await
-        .map_err(|_| anyhow!("timed out waiting for extended CONNECT datagram"))??;
-        datagrams
-            .as_mut()
-            .expect("checked above")
-            .sender
-            .send_unprefixed_datagram_with_scratch(payload, &mut bytes::BytesMut::new())?;
-        req_stream.finish().await
+                .expect("checked above")
+                .sender
+                .send_unprefixed_datagram_with_scratch(payload, &mut bytes::BytesMut::new())?;
+            req_stream.finish().await
+        }
     }
 }
 
 #[derive(Clone, Default)]
 struct QpxH3WebTransportEchoHandler;
 
-#[async_trait]
 impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
     fn settings(&self) -> qpx_h3::Settings {
         qpx_h3::Settings {
@@ -913,93 +912,95 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
         }
     }
 
-    async fn handle_request(
+    fn handle_request(
         &self,
         _request: qpx_h3::Request,
         _conn: qpx_h3::ConnectionInfo,
         _stream: qpx_h3::RequestStream,
-    ) -> std::result::Result<(), qpx_h3::H3Error> {
-        Err(anyhow!("unexpected buffered request").into())
+    ) -> impl Future<Output = std::result::Result<(), qpx_h3::H3Error>> + Send {
+        async { Err(anyhow!("unexpected buffered request").into()) }
     }
 
-    async fn handle_webtransport_connect(
+    fn handle_webtransport_connect(
         &self,
         _req_head: http::Request<()>,
         mut req_stream: qpx_h3::RequestStream,
         _conn: qpx_h3::ConnectionInfo,
         session: qpx_h3::WebTransportSession,
-    ) -> std::result::Result<(), qpx_h3::H3Error> {
-        let qpx_h3::WebTransportSession {
-            session_id,
-            mut opener,
-            mut datagrams,
-            mut bidi_streams,
-            mut uni_streams,
-        } = session;
+    ) -> impl Future<Output = std::result::Result<(), qpx_h3::H3Error>> + Send {
+        async move {
+            let qpx_h3::WebTransportSession {
+                session_id,
+                mut opener,
+                mut datagrams,
+                mut bidi_streams,
+                mut uni_streams,
+            } = session;
 
-        req_stream
-            .send_response_head(&ok_qpx_response_head(false))
-            .await?;
+            req_stream
+                .send_response_head(&ok_qpx_response_head(false))
+                .await?;
 
-        let server_bidi = opener.open_webtransport_bidi(session_id).await?;
-        let (mut server_bidi_send, _) = server_bidi.split();
-        server_bidi_send
-            .send_chunk(Bytes::from_static(b"server-bidi"))
-            .await?;
-        server_bidi_send.finish().await?;
+            let server_bidi = opener.open_webtransport_bidi(session_id).await?;
+            let (mut server_bidi_send, _) = server_bidi.split();
+            server_bidi_send
+                .send_chunk(Bytes::from_static(b"server-bidi"))
+                .await?;
+            server_bidi_send.finish().await?;
 
-        let mut server_uni = opener.open_webtransport_uni(session_id).await?;
-        server_uni
-            .send_chunk(Bytes::from_static(b"server-uni"))
-            .await?;
-        server_uni.finish().await?;
+            let mut server_uni = opener.open_webtransport_uni(session_id).await?;
+            server_uni
+                .send_chunk(Bytes::from_static(b"server-uni"))
+                .await?;
+            server_uni.finish().await?;
 
-        let chunk = timeout(
-            profile_timeout(Duration::from_secs(5)),
-            req_stream.recv_data(),
-        )
-        .await
-        .map_err(|_| anyhow!("timed out waiting for WebTransport request data"))??
-        .ok_or_else(|| anyhow!("missing WebTransport request data"))?;
-        req_stream.send_data(chunk).await?;
+            let chunk = timeout(
+                profile_timeout(Duration::from_secs(5)),
+                req_stream.recv_data(),
+            )
+            .await
+            .map_err(|_| anyhow!("timed out waiting for WebTransport request data"))??
+            .ok_or_else(|| anyhow!("missing WebTransport request data"))?;
+            req_stream.send_data(chunk).await?;
 
-        let payload = timeout(profile_timeout(Duration::from_secs(5)), async {
+            let payload = timeout(profile_timeout(Duration::from_secs(5)), async {
+                datagrams
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("missing WebTransport datagrams"))?
+                    .receiver
+                    .recv()
+                    .await
+                    .ok_or_else(|| anyhow!("missing WebTransport datagram"))
+            })
+            .await
+            .map_err(|_| anyhow!("timed out waiting for WebTransport datagram"))??;
             datagrams
                 .as_mut()
-                .ok_or_else(|| anyhow!("missing WebTransport datagrams"))?
-                .receiver
-                .recv()
+                .expect("checked above")
+                .sender
+                .send_unprefixed_datagram_with_scratch(payload, &mut bytes::BytesMut::new())?;
+
+            let bidi = timeout(profile_timeout(Duration::from_secs(5)), bidi_streams.recv())
                 .await
-                .ok_or_else(|| anyhow!("missing WebTransport datagram"))
-        })
-        .await
-        .map_err(|_| anyhow!("timed out waiting for WebTransport datagram"))??;
-        datagrams
-            .as_mut()
-            .expect("checked above")
-            .sender
-            .send_unprefixed_datagram_with_scratch(payload, &mut bytes::BytesMut::new())?;
+                .map_err(|_| anyhow!("timed out waiting for client bidi stream"))?
+                .ok_or_else(|| anyhow!("missing client bidi stream"))?;
+            let (mut bidi_send, mut bidi_recv) = bidi.split();
+            while let Some(chunk) = bidi_recv.recv_chunk().await? {
+                bidi_send.send_chunk(chunk).await?;
+            }
+            bidi_send.finish().await?;
 
-        let bidi = timeout(profile_timeout(Duration::from_secs(5)), bidi_streams.recv())
-            .await
-            .map_err(|_| anyhow!("timed out waiting for client bidi stream"))?
-            .ok_or_else(|| anyhow!("missing client bidi stream"))?;
-        let (mut bidi_send, mut bidi_recv) = bidi.split();
-        while let Some(chunk) = bidi_recv.recv_chunk().await? {
-            bidi_send.send_chunk(chunk).await?;
+            let uni = timeout(profile_timeout(Duration::from_secs(5)), uni_streams.recv())
+                .await
+                .map_err(|_| anyhow!("timed out waiting for client uni stream"))?
+                .ok_or_else(|| anyhow!("missing client uni stream"))?;
+            let echoed = read_qpx_uni_stream(uni).await?;
+            let mut reply_uni = opener.open_webtransport_uni(session_id).await?;
+            reply_uni.send_chunk(Bytes::from(echoed)).await?;
+            reply_uni.finish().await?;
+
+            req_stream.finish().await
         }
-        bidi_send.finish().await?;
-
-        let uni = timeout(profile_timeout(Duration::from_secs(5)), uni_streams.recv())
-            .await
-            .map_err(|_| anyhow!("timed out waiting for client uni stream"))?
-            .ok_or_else(|| anyhow!("missing client uni stream"))?;
-        let echoed = read_qpx_uni_stream(uni).await?;
-        let mut reply_uni = opener.open_webtransport_uni(session_id).await?;
-        reply_uni.send_chunk(Bytes::from(echoed)).await?;
-        reply_uni.finish().await?;
-
-        req_stream.finish().await
     }
 }
 

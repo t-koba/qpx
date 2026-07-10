@@ -466,14 +466,20 @@ where
         if index >= slices.len() {
             return Ok(());
         }
-        let mut io_slices = Vec::with_capacity(slices.len() - index);
-        io_slices.push(IoSlice::new(&slices[index][offset..]));
+        let mut io_slices = std::array::from_fn::<_, 4, _>(|_| IoSlice::new(&[]));
+        let mut io_slice_count = 0usize;
+        io_slices[io_slice_count] = IoSlice::new(&slices[index][offset..]);
+        io_slice_count += 1;
         for slice in &slices[index + 1..] {
             if !slice.is_empty() {
-                io_slices.push(IoSlice::new(slice));
+                if io_slice_count == io_slices.len() {
+                    break;
+                }
+                io_slices[io_slice_count] = IoSlice::new(slice);
+                io_slice_count += 1;
             }
         }
-        let written = writer.write_vectored(&io_slices).await?;
+        let written = writer.write_vectored(&io_slices[..io_slice_count]).await?;
         if written == 0 {
             return Err(IoError::new(
                 ErrorKind::WriteZero,

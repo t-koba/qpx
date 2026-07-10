@@ -5,7 +5,6 @@ use qpx_http::body::to_bytes;
 use qpx_observability::RequestHandler;
 use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::{TcpListener, TcpStream};
@@ -16,15 +15,13 @@ struct StaticInterimService;
 impl RequestHandler<Request<Body>> for StaticInterimService {
     type Response = Response<Body>;
     type Error = std::convert::Infallible;
-    type Future = Pin<
-        Box<
-            dyn std::future::Future<Output = Result<Response<Body>, std::convert::Infallible>>
-                + Send,
-        >,
-    >;
 
-    fn call(&self, _req: Request<Body>) -> Self::Future {
-        Box::pin(async move {
+    fn call(
+        &self,
+        _req: Request<Body>,
+    ) -> impl std::future::Future<Output = Result<Response<Body>, std::convert::Infallible>> + Send
+    {
+        async move {
             let interim = vec![InterimResponseHead {
                 status: StatusCode::from_u16(103).expect("103"),
                 headers: {
@@ -45,7 +42,7 @@ impl RequestHandler<Request<Body>> for StaticInterimService {
                 .expect("response");
             response.extensions_mut().insert(interim);
             Ok(response)
-        })
+        }
     }
 }
 

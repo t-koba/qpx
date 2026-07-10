@@ -6,10 +6,10 @@ use crate::http::body::size::set_observed_request_size;
 use crate::http3::codec::h3_request_to_hyper;
 use crate::runtime::{ResolvedStreamingLimits, Runtime};
 use anyhow::{Result, anyhow};
-use async_trait::async_trait;
 use hyper::{Response, StatusCode};
 use qpx_core::config::ConnectUdpConfig;
 use qpx_http::body::Body;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tracing::warn;
@@ -21,7 +21,6 @@ pub(crate) struct ForwardQpxHandler {
     pub(crate) connect_udp: ConnectUdpConfig,
 }
 
-#[async_trait]
 impl qpx_h3::RequestHandler for ForwardQpxHandler {
     fn settings(&self) -> qpx_h3::Settings {
         let state = self.runtime.state();
@@ -44,51 +43,57 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
         }
     }
 
-    fn via_received_by(&self) -> String {
-        self.runtime.state().plan.identity.proxy_name.to_string()
+    fn via_received_by(&self) -> impl AsRef<str> + Send + 'static {
+        self.runtime.state().plan.identity.proxy_name.clone()
     }
 
-    async fn handle_request(
+    fn handle_request(
         &self,
         request: qpx_h3::Request,
         conn: qpx_h3::ConnectionInfo,
         req_stream: qpx_h3::RequestStream,
-    ) -> qpx_h3::H3Result<()> {
-        if request.head.method() == http::Method::CONNECT {
-            return self
-                .handle_connect(request, conn, req_stream)
-                .await
-                .map_err(Into::into);
-        }
+    ) -> impl Future<Output = qpx_h3::H3Result<()>> + Send {
+        async move {
+            if request.head.method() == http::Method::CONNECT {
+                return self
+                    .handle_connect(request, conn, req_stream)
+                    .await
+                    .map_err(Into::into);
+            }
 
-        self.handle_http_request(request, conn.remote_addr, req_stream)
-            .await
-            .map_err(Into::into)
+            self.handle_http_request(request, conn.remote_addr, req_stream)
+                .await
+                .map_err(Into::into)
+        }
     }
 
-    async fn handle_webtransport_connect(
+    fn handle_webtransport_connect(
         &self,
         req_head: http::Request<()>,
         req_stream: qpx_h3::RequestStream,
         conn: qpx_h3::ConnectionInfo,
         session: qpx_h3::WebTransportSession,
-    ) -> qpx_h3::H3Result<()> {
-        self.handle_qpx_webtransport_connect(req_head, req_stream, conn, session)
-            .await
-            .map_err(Into::into)
+    ) -> impl Future<Output = qpx_h3::H3Result<()>> + Send {
+        async move {
+            self.handle_qpx_webtransport_connect(req_head, req_stream, conn, session)
+                .await
+                .map_err(Into::into)
+        }
     }
 
-    async fn handle_connect_stream(
+    fn handle_connect_stream(
         &self,
         req_head: http::Request<()>,
         req_stream: qpx_h3::RequestStream,
         conn: qpx_h3::ConnectionInfo,
         protocol: qpx_h3::Protocol,
         datagrams: Option<qpx_h3::StreamDatagrams>,
-    ) -> qpx_h3::H3Result<()> {
-        handle_qpx_connect_stream(self, req_head, req_stream, conn, protocol, datagrams)
-            .await
-            .map_err(Into::into)
+    ) -> impl Future<Output = qpx_h3::H3Result<()>> + Send {
+        async move {
+            handle_qpx_connect_stream(self, req_head, req_stream, conn, protocol, datagrams)
+                .await
+                .map_err(Into::into)
+        }
     }
 }
 

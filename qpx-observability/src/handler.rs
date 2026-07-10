@@ -6,11 +6,12 @@ pub trait RequestHandler<Request>: Send + Sync {
     type Response;
     /// Error returned by the handler.
     type Error;
-    /// Future returned by [`RequestHandler::call`].
-    type Future: Future<Output = Result<Self::Response, Self::Error>> + Send;
 
     /// Handles one request.
-    fn call(&self, request: Request) -> Self::Future;
+    fn call(
+        &self,
+        request: Request,
+    ) -> impl Future<Output = Result<Self::Response, Self::Error>> + Send;
 }
 
 /// [`RequestHandler`] implementation backed by a closure.
@@ -31,9 +32,8 @@ where
 {
     type Response = Response;
     type Error = Error;
-    type Future = Fut;
 
-    fn call(&self, request: Request) -> Self::Future {
+    fn call(&self, request: Request) -> impl Future<Output = Result<Response, Error>> + Send {
         (self.inner)(request)
     }
 }

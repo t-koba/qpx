@@ -4,9 +4,9 @@ pub mod tee;
 use bytes::Bytes;
 use http::HeaderMap;
 use http_body::Frame;
+use http_body_util::BodyExt as _;
 use http_body_util::channel::{Channel, SendError as ChannelSendError, Sender as ChannelSender};
 use http_body_util::combinators::UnsyncBoxBody;
-use http_body_util::{BodyExt as _, Empty};
 use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;
@@ -59,10 +59,25 @@ impl From<ChannelSendError> for BodyError {
 
 #[derive(Debug)]
 pub struct Body {
-    inner: UnsyncBoxBody<Bytes, BodyError>,
+    inner: BodyInner,
     close_signal: Option<Arc<BodyCloseSignal>>,
     pending_trailers: Option<HeaderMap>,
     stream_finished: bool,
+}
+
+#[derive(Debug)]
+enum BodyInner {
+    Empty,
+    Once {
+        bytes: Option<Bytes>,
+        trailers: Option<HeaderMap>,
+    },
+    Chunks {
+        chunks: VecDeque<Bytes>,
+        trailers: Option<HeaderMap>,
+        remaining_len: u64,
+    },
+    Boxed(UnsyncBoxBody<Bytes, BodyError>),
 }
 
 #[derive(Debug)]
@@ -73,9 +88,7 @@ struct BodyCloseSignal {
 impl Body {
     pub fn empty() -> Self {
         Self {
-            inner: Empty::<Bytes>::new()
-                .map_err(|err| match err {})
-                .boxed_unsync(),
+            inner: BodyInner::Empty,
             close_signal: None,
             pending_trailers: None,
             stream_finished: true,
@@ -97,7 +110,7 @@ impl Body {
                 close_signal: close_signal.clone(),
             },
             Self {
-                inner: body.boxed_unsync(),
+                inner: BodyInner::Boxed(body.boxed_unsync()),
                 close_signal: Some(close_signal),
                 pending_trailers: None,
                 stream_finished: false,
@@ -106,8 +119,14 @@ impl Body {
     }
 
     pub fn replay(bytes: Bytes, trailers: Option<HeaderMap>) -> Self {
+        if bytes.is_empty() && trailers.is_none() {
+            return Self::empty();
+        }
         Self {
-            inner: ReplayBody::new(bytes, trailers).boxed_unsync(),
+            inner: BodyInner::Once {
+                bytes: (!bytes.is_empty()).then_some(bytes),
+                trailers,
+            },
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
@@ -115,8 +134,20 @@ impl Body {
     }
 
     pub fn replay_chunks(chunks: Vec<Bytes>, trailers: Option<HeaderMap>) -> Self {
+        let remaining_len = chunks.iter().map(|chunk| chunk.len() as u64).sum();
+        let chunks = chunks
+            .into_iter()
+            .filter(|chunk| !chunk.is_empty())
+            .collect::<VecDeque<_>>();
+        if chunks.is_empty() && trailers.is_none() {
+            return Self::empty();
+        }
         Self {
-            inner: ChunkReplayBody::new(chunks, trailers).boxed_unsync(),
+            inner: BodyInner::Chunks {
+                chunks,
+                trailers,
+                remaining_len,
+            },
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
@@ -128,7 +159,7 @@ impl Body {
         B: http_body::Body<Data = Bytes, Error = BodyError> + Send + 'static,
     {
         Self {
-            inner: body.boxed_unsync(),
+            inner: BodyInner::Boxed(body.boxed_unsync()),
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
@@ -152,7 +183,7 @@ impl Body {
             return None;
         }
         loop {
-            match self.inner.frame().await {
+            match self.next_frame().await {
                 Some(Ok(frame)) => match frame.into_data() {
                     Ok(data) => return Some(Ok(data)),
                     Err(frame) => {
@@ -180,7 +211,7 @@ impl Body {
             return Ok(None);
         }
         loop {
-            match self.inner.frame().await {
+            match self.next_frame().await {
                 Some(Ok(frame)) => {
                     if let Ok(trailers) = frame.into_trailers() {
                         self.stream_finished = true;
@@ -193,6 +224,36 @@ impl Body {
                     return Ok(None);
                 }
             }
+        }
+    }
+
+    async fn next_frame(&mut self) -> Option<Result<Frame<Bytes>, BodyError>> {
+        match &mut self.inner {
+            BodyInner::Empty => None,
+            BodyInner::Once { bytes, trailers } => {
+                if let Some(bytes) = bytes.take() {
+                    Some(Ok(Frame::data(bytes)))
+                } else {
+                    trailers
+                        .take()
+                        .map(|trailers| Ok(Frame::trailers(trailers)))
+                }
+            }
+            BodyInner::Chunks {
+                chunks,
+                trailers,
+                remaining_len,
+            } => {
+                if let Some(bytes) = chunks.pop_front() {
+                    *remaining_len = remaining_len.saturating_sub(bytes.len() as u64);
+                    Some(Ok(Frame::data(bytes)))
+                } else {
+                    trailers
+                        .take()
+                        .map(|trailers| Ok(Frame::trailers(trailers)))
+                }
+            }
+            BodyInner::Boxed(inner) => inner.frame().await,
         }
     }
 }
@@ -236,7 +297,7 @@ impl From<&'static [u8]> for Body {
 impl From<hyper::body::Incoming> for Body {
     fn from(value: hyper::body::Incoming) -> Self {
         Self {
-            inner: value.map_err(BodyError::from).boxed_unsync(),
+            inner: BodyInner::Boxed(value.map_err(BodyError::from).boxed_unsync()),
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
@@ -260,19 +321,50 @@ impl http_body::Body for Body {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        if let Some(trailers) = self.pending_trailers.take() {
+        let this = self.as_mut().get_mut();
+        if let Some(trailers) = this.pending_trailers.take() {
             return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
         }
-        if self.stream_finished {
+        if this.stream_finished {
             return Poll::Ready(None);
         }
-        let poll = Pin::new(&mut self.inner).poll_frame(cx);
+        let poll = match &mut this.inner {
+            BodyInner::Empty => Poll::Ready(None),
+            BodyInner::Once { bytes, trailers } => {
+                if let Some(bytes) = bytes.take() {
+                    Poll::Ready(Some(Ok(Frame::data(bytes))))
+                } else {
+                    Poll::Ready(
+                        trailers
+                            .take()
+                            .map(|trailers| Ok(Frame::trailers(trailers))),
+                    )
+                }
+            }
+            BodyInner::Chunks {
+                chunks,
+                trailers,
+                remaining_len,
+            } => {
+                if let Some(bytes) = chunks.pop_front() {
+                    *remaining_len = remaining_len.saturating_sub(bytes.len() as u64);
+                    Poll::Ready(Some(Ok(Frame::data(bytes))))
+                } else {
+                    Poll::Ready(
+                        trailers
+                            .take()
+                            .map(|trailers| Ok(Frame::trailers(trailers))),
+                    )
+                }
+            }
+            BodyInner::Boxed(inner) => Pin::new(inner).poll_frame(cx),
+        };
         match &poll {
             Poll::Ready(Some(Ok(frame))) if frame.is_trailers() => {
-                self.stream_finished = true;
+                this.stream_finished = true;
             }
             Poll::Ready(None) => {
-                self.stream_finished = true;
+                this.stream_finished = true;
             }
             _ => {}
         }
@@ -288,23 +380,45 @@ impl http_body::Body for Body {
     }
 }
 
+impl BodyInner {
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Empty => true,
+            Self::Once { bytes, trailers } => bytes.is_none() && trailers.is_none(),
+            Self::Chunks {
+                chunks, trailers, ..
+            } => chunks.is_empty() && trailers.is_none(),
+            Self::Boxed(inner) => http_body::Body::is_end_stream(inner),
+        }
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        match self {
+            Self::Empty => {
+                let mut hint = http_body::SizeHint::new();
+                hint.set_exact(0);
+                hint
+            }
+            Self::Once { bytes, .. } => {
+                let mut hint = http_body::SizeHint::new();
+                let size = bytes.as_ref().map(|bytes| bytes.len() as u64).unwrap_or(0);
+                hint.set_exact(size);
+                hint
+            }
+            Self::Chunks { remaining_len, .. } => {
+                let mut hint = http_body::SizeHint::new();
+                hint.set_exact(*remaining_len);
+                hint
+            }
+            Self::Boxed(inner) => http_body::Body::size_hint(inner),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Sender {
     inner: Option<ChannelSender<Bytes, BodyError>>,
     close_signal: Arc<BodyCloseSignal>,
-}
-
-#[derive(Debug)]
-struct ReplayBody {
-    bytes: Option<Bytes>,
-    trailers: Option<HeaderMap>,
-}
-
-#[derive(Debug)]
-struct ChunkReplayBody {
-    chunks: VecDeque<Bytes>,
-    trailers: Option<HeaderMap>,
-    remaining_len: u64,
 }
 
 #[derive(Debug)]
@@ -313,91 +427,6 @@ struct LimitedBody {
     max_bytes: usize,
     seen: usize,
     exceeded: bool,
-}
-
-impl ReplayBody {
-    fn new(bytes: Bytes, trailers: Option<HeaderMap>) -> Self {
-        Self {
-            bytes: (!bytes.is_empty()).then_some(bytes),
-            trailers,
-        }
-    }
-}
-
-impl http_body::Body for ReplayBody {
-    type Data = Bytes;
-    type Error = BodyError;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        if let Some(bytes) = self.bytes.take() {
-            return Poll::Ready(Some(Ok(Frame::data(bytes))));
-        }
-        if let Some(trailers) = self.trailers.take() {
-            return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
-        }
-        Poll::Ready(None)
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.bytes.is_none() && self.trailers.is_none()
-    }
-
-    fn size_hint(&self) -> http_body::SizeHint {
-        let mut hint = http_body::SizeHint::new();
-        let size = self
-            .bytes
-            .as_ref()
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or(0);
-        hint.set_exact(size);
-        hint
-    }
-}
-
-impl ChunkReplayBody {
-    fn new(chunks: Vec<Bytes>, trailers: Option<HeaderMap>) -> Self {
-        let remaining_len = chunks.iter().map(|chunk| chunk.len() as u64).sum();
-        Self {
-            chunks: chunks
-                .into_iter()
-                .filter(|chunk| !chunk.is_empty())
-                .collect(),
-            trailers,
-            remaining_len,
-        }
-    }
-}
-
-impl http_body::Body for ChunkReplayBody {
-    type Data = Bytes;
-    type Error = BodyError;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        if let Some(bytes) = self.chunks.pop_front() {
-            self.remaining_len = self.remaining_len.saturating_sub(bytes.len() as u64);
-            return Poll::Ready(Some(Ok(Frame::data(bytes))));
-        }
-        if let Some(trailers) = self.trailers.take() {
-            return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
-        }
-        Poll::Ready(None)
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.chunks.is_empty() && self.trailers.is_none()
-    }
-
-    fn size_hint(&self) -> http_body::SizeHint {
-        let mut hint = http_body::SizeHint::new();
-        hint.set_exact(self.remaining_len);
-        hint
-    }
 }
 
 impl http_body::Body for LimitedBody {

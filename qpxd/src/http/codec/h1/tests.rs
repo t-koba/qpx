@@ -40,11 +40,12 @@ struct StaticInterimService;
 impl RequestHandler<Request<Body>> for StaticInterimService {
     type Response = Response<Body>;
     type Error = Infallible;
-    type Future =
-        Pin<Box<dyn std::future::Future<Output = Result<Response<Body>, Infallible>> + Send>>;
 
-    fn call(&self, _req: Request<Body>) -> Self::Future {
-        Box::pin(async move {
+    fn call(
+        &self,
+        _req: Request<Body>,
+    ) -> impl std::future::Future<Output = Result<Response<Body>, Infallible>> + Send {
+        async move {
             let interim = vec![InterimResponseHead {
                 status: StatusCode::from_u16(103).expect("103"),
                 headers: {
@@ -69,7 +70,7 @@ impl RequestHandler<Request<Body>> for StaticInterimService {
                 .expect("response");
             response.extensions_mut().insert(interim);
             Ok(response)
-        })
+        }
     }
 }
 

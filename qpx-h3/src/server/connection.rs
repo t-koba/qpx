@@ -361,7 +361,7 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
                 &mut send,
                 http::StatusCode::REQUEST_TIMEOUT,
                 b"",
-                via_received_by.as_str(),
+                via_received_by.as_ref(),
             )
             .await?;
             send.finish()?;
@@ -506,7 +506,7 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
                 &mut send,
                 http::StatusCode::TOO_MANY_REQUESTS,
                 b"too many WebTransport sessions",
-                via_received_by.as_str(),
+                via_received_by.as_ref(),
             )
             .await?;
             send.finish()?;

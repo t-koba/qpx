@@ -60,25 +60,40 @@ annotate_callgrind_outputs() {
   local target="$1"
   local filter="$2"
   local commit="${GITHUB_SHA:-unknown}"
-  local file instructions annotated
-  find "$PROFILE_DIR" -type f -name "callgrind.${target}.${filter}.*.out" | sort | while IFS= read -r file; do
+  local file instructions annotated cmd_line failed
+  failed=0
+  while IFS= read -r file; do
+    if ! grep -q '^events:' "$file"; then
+      echo "callgrind output missing events: ${file}" >&2
+      failed=1
+      continue
+    fi
     instructions="$(awk '/^summary:/ { print $2; exit }' "$file")"
     instructions="${instructions:-0}"
+    if ! [[ "$instructions" =~ ^[0-9]+$ ]] || [ "$instructions" -le 0 ]; then
+      echo "callgrind output has no instructions: ${file}" >&2
+      failed=1
+      continue
+    fi
+    cmd_line="$(awk -F':  ' '/^cmd:/ { print $2; exit }' "$file")"
+    cmd_line="${cmd_line:-unknown}"
     annotated="${file}.annotated.txt"
     if ! callgrind_annotate --threshold=99 "$file" >"$annotated" 2>"${annotated}.err"; then
-      {
-        echo "callgrind_annotate failed for ${file}"
-        cat "${annotated}.err"
-      } >"$annotated"
+      echo "callgrind_annotate failed for ${file}" >&2
+      cat "${annotated}.err" >&2 || true
+      failed=1
+      continue
     fi
-    printf '{"bench":"callgrind_hot_path_profile","target":%s,"filter":%s,"instructions":%s,"callgrind_file":%s,"annotated_file":%s,"commit":%s}\n' \
+    printf '{"bench":"callgrind_hot_path_profile","target":%s,"filter":%s,"command":%s,"instructions":%s,"callgrind_file":%s,"annotated_file":%s,"commit":%s}\n' \
       "$(json_escape "$target")" \
       "$(json_escape "$filter")" \
+      "$(json_escape "$cmd_line")" \
       "$instructions" \
       "$(json_escape "${file#"$ROOT_DIR"/}")" \
       "$(json_escape "${annotated#"$ROOT_DIR"/}")" \
       "$(json_escape "$commit")" >>"$PROFILE_JSON"
-  done
+  done < <(find "$PROFILE_DIR" -type f -name "callgrind.${target}.${filter}.*.out" | sort)
+  return "$failed"
 }
 
 run_profile() {
@@ -91,6 +106,9 @@ run_profile() {
   filter_slug="${filter_slug//[^A-Za-z0-9_.-]/_}"
   test_bin="$(build_test_binary "$test_name" "$features")"
   echo "profiling ${test_name} ${filter_slug}" >&2
+  rm -f "$PROFILE_DIR/callgrind.${test_name}.${filter_slug}."*.out \
+    "$PROFILE_DIR/callgrind.${test_name}.${filter_slug}."*.out.annotated.txt \
+    "$PROFILE_DIR/callgrind.${test_name}.${filter_slug}."*.out.annotated.txt.err
   QPX_PERF_PROFILE=1 \
   QPX_PERF_PROFILE_REQUESTS="$PROFILE_REQUESTS" \
   QPX_PERF_PROFILE_CONCURRENCY="$PROFILE_CONCURRENCY" \

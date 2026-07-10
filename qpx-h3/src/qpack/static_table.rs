@@ -1,17 +1,74 @@
 pub(super) fn static_exact_match(name: &str, value: &[u8]) -> Option<usize> {
-    STATIC_TABLE.iter().position(|(table_name, table_value)| {
-        table_name == &name && table_value.as_bytes() == value
+    static_name_indices(name).iter().copied().find(|index| {
+        let (_, table_value) = STATIC_TABLE[*index];
+        table_value.as_bytes() == value
     })
 }
 
 pub(super) fn static_name_index(name: &str) -> Option<usize> {
-    STATIC_TABLE
-        .iter()
-        .position(|(table_name, _)| table_name == &name)
+    static_name_indices(name).first().copied()
 }
 
 pub(super) fn static_field(index: usize) -> Option<(&'static str, &'static str)> {
     STATIC_TABLE.get(index).copied()
+}
+
+fn static_name_indices(name: &str) -> &'static [usize] {
+    match name {
+        ":authority" => &[0],
+        ":path" => &[1],
+        "age" => &[2],
+        "content-disposition" => &[3],
+        "content-length" => &[4],
+        "cookie" => &[5],
+        "date" => &[6],
+        "etag" => &[7],
+        "if-modified-since" => &[8],
+        "if-none-match" => &[9],
+        "last-modified" => &[10],
+        "link" => &[11],
+        "location" => &[12],
+        "referer" => &[13],
+        "set-cookie" => &[14],
+        ":method" => &[15, 16, 17, 18, 19, 20, 21],
+        ":scheme" => &[22, 23],
+        ":status" => &[24, 25, 26, 27, 28, 63, 64, 65, 66, 67, 68, 69, 70],
+        "accept" => &[29, 30],
+        "accept-encoding" => &[31],
+        "accept-ranges" => &[32],
+        "access-control-allow-headers" => &[33, 34, 75],
+        "access-control-allow-origin" => &[35],
+        "cache-control" => &[36, 37, 38, 39, 40, 41],
+        "content-encoding" => &[42, 43],
+        "content-type" => &[44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54],
+        "range" => &[55],
+        "strict-transport-security" => &[56, 57, 58],
+        "vary" => &[59, 60],
+        "x-content-type-options" => &[61],
+        "x-xss-protection" => &[62],
+        "accept-language" => &[71],
+        "access-control-allow-credentials" => &[72, 73],
+        "access-control-allow-methods" => &[76, 77, 78],
+        "access-control-expose-headers" => &[79],
+        "access-control-request-headers" => &[80],
+        "access-control-request-method" => &[81, 82],
+        "alt-svc" => &[83],
+        "authorization" => &[84],
+        "content-security-policy" => &[85],
+        "early-data" => &[86],
+        "expect-ct" => &[87],
+        "forwarded" => &[88],
+        "if-range" => &[89],
+        "origin" => &[90],
+        "purpose" => &[91],
+        "server" => &[92],
+        "timing-allow-origin" => &[93],
+        "upgrade-insecure-requests" => &[94],
+        "user-agent" => &[95],
+        "x-forwarded-for" => &[96],
+        "x-frame-options" => &[97, 98],
+        _ => &[],
+    }
 }
 
 // QPACK static table from RFC 9204 Appendix A.

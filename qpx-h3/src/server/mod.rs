@@ -20,8 +20,8 @@ use crate::qpack::{
 use crate::transport::{
     BidiStream, DatagramDispatch, OpenStreams, RequestStream, StreamDatagrams, UniRecvStream,
 };
-use async_trait::async_trait;
 use helpers::{close_connection, extract_peer_certificates, extract_tls_sni, send_simple_response};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -157,62 +157,65 @@ pub struct Request {
     pub priority_updates: PriorityUpdates,
 }
 
-#[async_trait]
 /// Request handler used by [`serve_connection`].
 pub trait RequestHandler: Clone + Send + Sync + 'static {
     /// Returns per-connection settings.
     fn settings(&self) -> Settings;
 
     /// Returns the Via received-by value.
-    fn via_received_by(&self) -> String {
-        "qpx-h3".to_string()
+    fn via_received_by(&self) -> impl AsRef<str> + Send + 'static {
+        "qpx-h3"
     }
 
     /// Handles a regular HTTP/3 request.
-    async fn handle_request(
+    fn handle_request(
         &self,
         request: Request,
         conn: ConnectionInfo,
         stream: RequestStream,
-    ) -> Result<()>;
+    ) -> impl Future<Output = Result<()>> + Send;
 
     /// Handles an extended CONNECT stream.
-    async fn handle_connect_stream(
+    fn handle_connect_stream(
         &self,
         _req_head: http::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         _protocol: Protocol,
         _datagrams: Option<StreamDatagrams>,
-    ) -> Result<()> {
+    ) -> impl Future<Output = Result<()>> + Send {
         let via_received_by = self.via_received_by();
-        send_simple_response(
-            req_stream.send_mut(),
-            http::StatusCode::NOT_IMPLEMENTED,
-            b"extended CONNECT is not supported",
-            via_received_by.as_str(),
-        )
-        .await?;
-        req_stream.finish().await
+        async move {
+            send_simple_response(
+                req_stream.send_mut(),
+                http::StatusCode::NOT_IMPLEMENTED,
+                b"extended CONNECT is not supported",
+                via_received_by.as_ref(),
+            )
+            .await?;
+            req_stream.finish().await
+        }
     }
 
     /// Handles a WebTransport CONNECT stream.
-    async fn handle_webtransport_connect(
+    fn handle_webtransport_connect(
         &self,
         _req_head: http::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         _session: WebTransportSession,
-    ) -> Result<()> {
+    ) -> impl Future<Output = Result<()>> + Send {
         let via_received_by = self.via_received_by();
-        send_simple_response(
-            req_stream.send_mut(),
-            http::StatusCode::NOT_IMPLEMENTED,
-            b"WEBTRANSPORT over extended CONNECT is not supported",
-            via_received_by.as_str(),
-        )
-        .await?;
-        req_stream.finish().await
+        async move {
+            send_simple_response(
+                req_stream.send_mut(),
+                http::StatusCode::NOT_IMPLEMENTED,
+                b"WEBTRANSPORT over extended CONNECT is not supported",
+                via_received_by.as_ref(),
+            )
+            .await?;
+            req_stream.finish().await
+        }
     }
 }
 

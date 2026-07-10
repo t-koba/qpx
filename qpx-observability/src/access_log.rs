@@ -372,9 +372,11 @@ where
 {
     type Response = Response<ResBody>;
     type Error = S::Error;
-    type Future = AccessLogFuture<S::Future>;
 
-    fn call(&self, req: Request<ReqBody>) -> Self::Future {
+    fn call(
+        &self,
+        req: Request<ReqBody>,
+    ) -> impl Future<Output = Result<Response<ResBody>, S::Error>> + Send {
         let should_log = self.enabled && tracing::enabled!(target: "access_log", Level::INFO);
         let path = req.uri().path();
         let should_log = should_log && !self.is_excluded(path);

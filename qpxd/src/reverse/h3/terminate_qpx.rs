@@ -11,12 +11,12 @@ use crate::reverse::transport::{self, ReverseConnInfo};
 use crate::runtime::ResolvedStreamingLimits;
 use crate::server::control::SidecarControl;
 use anyhow::{Result, anyhow};
-use async_trait::async_trait;
 use hyper::{Response, StatusCode};
 use qpx_core::config::ReverseEdgeConfig;
 use qpx_core::tls::{load_cert_chain, load_private_key};
 use qpx_http::body::Body;
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -255,7 +255,6 @@ impl ReverseQpxHandler {
     }
 }
 
-#[async_trait]
 impl qpx_h3::RequestHandler for ReverseQpxHandler {
     fn settings(&self) -> qpx_h3::Settings {
         let state = self.reverse.runtime.state();
@@ -277,25 +276,27 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
         }
     }
 
-    fn via_received_by(&self) -> String {
+    fn via_received_by(&self) -> impl AsRef<str> + Send + 'static {
         self.reverse
             .runtime
             .state()
             .plan
             .identity
             .proxy_name
-            .to_string()
+            .clone()
     }
 
-    async fn handle_request(
+    fn handle_request(
         &self,
         request: qpx_h3::Request,
         conn: qpx_h3::ConnectionInfo,
         req_stream: qpx_h3::RequestStream,
-    ) -> qpx_h3::H3Result<()> {
-        self.handle_request_inner(request, conn, req_stream)
-            .await
-            .map_err(Into::into)
+    ) -> impl Future<Output = qpx_h3::H3Result<()>> + Send {
+        async move {
+            self.handle_request_inner(request, conn, req_stream)
+                .await
+                .map_err(Into::into)
+        }
     }
 }
 
