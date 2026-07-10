@@ -11,6 +11,7 @@ THREADS="${QPX_PROXY_COMPARE_THREADS:-2}"
 WRK_TIMEOUT="${QPX_PROXY_COMPARE_WRK_TIMEOUT:-30s}"
 BODY_SIZES="${QPX_PROXY_COMPARE_BODY_SIZES:-1024 1048576}"
 SAMPLE_ATTEMPTS="${QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS:-3}"
+MAX_READ_ERROR_RATE_PPM="${QPX_PROXY_COMPARE_MAX_READ_ERROR_RATE_PPM:-0}"
 HOST_HEADER="${QPX_PROXY_COMPARE_HOST:-bench.local}"
 APACHE_BIN="${QPX_PROXY_COMPARE_APACHE_BIN:-}"
 SCALE_WORKERS="${QPX_PROXY_COMPARE_SCALE_WORKERS:-}"
@@ -221,6 +222,13 @@ json_number_or_null() {
   fi
 }
 
+read_error_rate_allowed() {
+  local read_errors="$1"
+  local completed_requests="$2"
+  [ "$completed_requests" -gt 0 ] &&
+    [ $((read_errors * 1000000)) -le $((completed_requests * MAX_READ_ERROR_RATE_PPM)) ]
+}
+
 record_invalid_sample() {
   local bench="$1"
   local proxy="$2"
@@ -231,8 +239,8 @@ record_invalid_sample() {
   local error_code="$7"
   local commit
   commit="${GITHUB_SHA:-unknown}"
-  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"requests":0,"complete_requests":0,"failed_requests":1,"non_2xx_responses":0,"bad_length_responses":0,"write_errors":0,"status_before":"%s","status_after":"%s","requests_per_sec":0,"mean_time_per_request_ms":null,"latency_p50_ms":null,"latency_p90_ms":null,"latency_p95_ms":null,"latency_p99_ms":null,"latency_p999_ms":null,"transfer_kbytes_per_sec":0,"cpu_ms":null,"rss_kb":null,"rss_peak_kb":null,"requests_per_cpu_second":null,"valid":false,"error":"%s","commit":"%s"}\n' \
-    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$status_before" "$status_after" "$error_code" "$commit" >>"$OUT_JSON"
+  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"requests":0,"complete_requests":0,"failed_requests":1,"connect_errors":0,"read_errors":0,"write_errors":0,"timeout_errors":0,"max_read_error_rate_ppm":%s,"non_2xx_responses":0,"bad_length_responses":0,"status_before":"%s","status_after":"%s","requests_per_sec":0,"mean_time_per_request_ms":null,"latency_p50_ms":null,"latency_p90_ms":null,"latency_p95_ms":null,"latency_p99_ms":null,"latency_p999_ms":null,"transfer_kbytes_per_sec":0,"cpu_ms":null,"rss_kb":null,"rss_peak_kb":null,"requests_per_cpu_second":null,"valid":false,"error":"%s","commit":"%s"}\n' \
+    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$MAX_READ_ERROR_RATE_PPM" "$status_before" "$status_after" "$error_code" "$commit" >>"$OUT_JSON"
   INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
 }
 
@@ -746,7 +754,7 @@ LUA
   else
     status_before="$(safe_probe_status "$port" "/bench-${body_bytes}")"
   fi
-  local complete summary_requests failed non_2xx bad_length write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
+  local complete summary_requests failed fatal_errors non_2xx bad_length write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
   local latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms requests_per_cpu_second
   attempt=1
   failed_sample=""
@@ -799,6 +807,7 @@ LUA
     read_errors="${read_errors:-0}"
     write_errors="${write_errors:-0}"
     timeout_errors="${timeout_errors:-0}"
+    fatal_errors=$((connect_errors + write_errors + timeout_errors))
     failed=$((connect_errors + read_errors + write_errors + timeout_errors))
     commit="${GITHUB_SHA:-unknown}"
     if [ -z "$rps" ] || [ -z "$mean_ms" ] || [ -z "$transfer_kbps" ] || [ -z "$latency_p99_ms" ]; then
@@ -809,13 +818,13 @@ LUA
       continue
     fi
     requests_per_cpu_second="$(awk -v requests="$summary_requests" -v cpu_ms="$cpu_ms" 'BEGIN { if (cpu_ms > 0) printf "%.6f", requests / (cpu_ms / 1000); else printf "null" }')"
-    valid="$([ "$complete" -gt 0 ] && [ "$summary_requests" = "$complete" ] && [ "$failed" = 0 ] && [ "$non_2xx" = 0 ] && [ "$bad_length" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
+    valid="$([ "$complete" -gt 0 ] && [ "$summary_requests" = "$complete" ] && [ "$fatal_errors" = 0 ] && read_error_rate_allowed "$read_errors" "$complete" && [ "$non_2xx" = 0 ] && [ "$bad_length" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
     if [ "$valid" = true ]; then
       break
     fi
     failed_sample="$out"
     echo "${proxy} produced an invalid benchmark sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
-    echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} non_2xx=${non_2xx} bad_length=${bad_length} write_errors=${write_errors} status_before=${status_before} status_after=${status_after}" >&2
+    echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} connect_errors=${connect_errors} read_errors=${read_errors} write_errors=${write_errors} timeout_errors=${timeout_errors} max_read_error_rate_ppm=${MAX_READ_ERROR_RATE_PPM} non_2xx=${non_2xx} bad_length=${bad_length} status_before=${status_before} status_after=${status_after}" >&2
     cat "$out" >&2 || true
     attempt=$((attempt + 1))
   done
@@ -829,12 +838,12 @@ LUA
     cat "${failed_sample:-$out}" >&2 || true
     return 0
   fi
-  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"requests":%s,"complete_requests":%s,"failed_requests":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"write_errors":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_peak_kb":%s,"requests_per_cpu_second":%s,"valid":%s,"commit":"%s"}\n' \
-    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$summary_requests" "$complete" "$failed" "$non_2xx" "$bad_length" "$write_errors" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_peak_kb")" "$requests_per_cpu_second" "$valid" "$commit" >>"$OUT_JSON"
+  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_peak_kb":%s,"requests_per_cpu_second":%s,"valid":%s,"commit":"%s"}\n' \
+    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_peak_kb")" "$requests_per_cpu_second" "$valid" "$commit" >>"$OUT_JSON"
 
   if [ "$valid" != true ]; then
     echo "${proxy} produced an invalid benchmark sample" >&2
-    echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} non_2xx=${non_2xx} bad_length=${bad_length} write_errors=${write_errors} status_before=${status_before} status_after=${status_after}" >&2
+    echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} connect_errors=${connect_errors} read_errors=${read_errors} write_errors=${write_errors} timeout_errors=${timeout_errors} max_read_error_rate_ppm=${MAX_READ_ERROR_RATE_PPM} non_2xx=${non_2xx} bad_length=${bad_length} status_before=${status_before} status_after=${status_after}" >&2
     cat "${failed_sample:-$out}" >&2 || true
     INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
   fi
@@ -845,6 +854,17 @@ require_cmd lighttpd
 require_cmd nginx
 require_cmd squid
 require_cmd wrk
+
+case "$MAX_READ_ERROR_RATE_PPM" in
+  ''|*[!0-9]*)
+    echo "QPX_PROXY_COMPARE_MAX_READ_ERROR_RATE_PPM must be an integer from 0 to 1000000" >&2
+    exit 1
+    ;;
+esac
+if [ "$MAX_READ_ERROR_RATE_PPM" -gt 1000000 ]; then
+  echo "QPX_PROXY_COMPARE_MAX_READ_ERROR_RATE_PPM must be an integer from 0 to 1000000" >&2
+  exit 1
+fi
 
 if [ -z "$APACHE_BIN" ]; then
   if command -v apache2 >/dev/null 2>&1; then
