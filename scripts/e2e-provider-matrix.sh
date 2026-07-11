@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/debug/qpxd}"
 KEYCLOAK_IMAGE="quay.io/keycloak/keycloak@sha256:98fab020a3a490aba0978f237e2a06cd0ea42bf149c6cf10f11c0aaf27728ff2"
 CERBOS_IMAGE="ghcr.io/cerbos/cerbos@sha256:86f768368bbab30ceddd39e0e6df3d9ff8824c5f324af255a5573f0bddaae042"
+ORIGIN_PORT="${QPX_PROVIDER_MATRIX_ORIGIN_PORT:-18090}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-provider-e2e.XXXXXX")"
 PIDS=()
 CONTAINERS=()
@@ -37,9 +38,9 @@ wait_tcp() {
 }
 
 start_origin() {
-  python3 -m http.server 18090 --bind 127.0.0.1 --directory "$TMP_DIR" >"$TMP_DIR/origin.log" 2>&1 &
+  python3 -m http.server "$ORIGIN_PORT" --bind 127.0.0.1 --directory "$TMP_DIR" >"$TMP_DIR/origin.log" 2>&1 &
   PIDS+=("$!")
-  wait_http http://127.0.0.1:18090/
+  wait_http "http://127.0.0.1:$ORIGIN_PORT/"
 }
 
 start_qpx() {
@@ -64,8 +65,8 @@ test_keycloak() {
     | jq -er .access_token)"
   start_qpx "$ROOT_DIR/integration/providers/keycloak/qpx.yaml" keycloak-qpx
   wait_tcp 18082
-  curl -fsS -x http://127.0.0.1:18082 -H "Authorization: Bearer $token" http://127.0.0.1:18090/ >/dev/null
-  if curl -fsS -x http://127.0.0.1:18082 http://127.0.0.1:18090/ >/dev/null 2>&1; then
+  curl -fsS -x http://127.0.0.1:18082 -H "Authorization: Bearer $token" "http://127.0.0.1:$ORIGIN_PORT/" >/dev/null
+  if curl -fsS -x http://127.0.0.1:18082 "http://127.0.0.1:$ORIGIN_PORT/" >/dev/null 2>&1; then
     echo "Keycloak resource server accepted an unauthenticated request" >&2
     return 1
   fi
@@ -81,8 +82,8 @@ test_cerbos() {
   wait_http http://127.0.0.1:18083/_cerbos/health
   start_qpx "$ROOT_DIR/integration/providers/cerbos/qpx.yaml" cerbos-qpx
   wait_tcp 18084
-  curl -fsS -x http://127.0.0.1:18084 http://127.0.0.1:18090/ >/dev/null
-  if curl -fsS -X POST -x http://127.0.0.1:18084 http://127.0.0.1:18090/ >/dev/null 2>&1; then
+  curl -fsS -x http://127.0.0.1:18084 "http://127.0.0.1:$ORIGIN_PORT/" >/dev/null
+  if curl -fsS -X POST -x http://127.0.0.1:18084 "http://127.0.0.1:$ORIGIN_PORT/" >/dev/null 2>&1; then
     echo "Cerbos denied action was forwarded" >&2
     return 1
   fi
@@ -90,11 +91,51 @@ test_cerbos() {
 
 test_qid() {
   local qid_dir="${SISTER_QID_REPO_DIR:?SISTER_QID_REPO_DIR is required}"
-  QPXD_BIN="$QPXD_BIN" bash "$qid_dir/examples/qpx-e2e/run.sh"
+  qid_dir="$(cd "$qid_dir" && pwd)"
+  local fixture_dir="$ROOT_DIR/integration/providers/qid"
+  local runtime_dir="$TMP_DIR/qid"
+  mkdir -p "$runtime_dir"
+  cp "$fixture_dir/qid.yaml" "$fixture_dir/policy.json" "$runtime_dir/"
+
+  cargo build --manifest-path "$qid_dir/Cargo.toml" --locked --bin qidd
+  (
+    cd "$runtime_dir"
+    "$qid_dir/target/debug/qidd" -c qid.yaml
+  ) >"$TMP_DIR/qidd.log" 2>&1 &
+  PIDS+=("$!")
+  if ! wait_http http://127.0.0.1:8443/health; then
+    cat "$TMP_DIR/qidd.log" >&2
+    return 1
+  fi
+
+  local token
+  token="$(curl -fsS -X POST http://127.0.0.1:8443/oauth2/token \
+    -u 'qpx-provider-matrix:qpx-provider-matrix-secret' \
+    -H 'content-type: application/x-www-form-urlencoded' \
+    --data 'grant_type=client_credentials&scope=api&resource=urn:qid:pep:qpx:edge/qpx-provider-matrix' \
+    | jq -er .access_token)"
+
+  export QPX_DECISION_CLIENT_SECRET=qpx-provider-matrix-secret
+  start_qpx "$fixture_dir/qpx.yaml" qid-jwt-qpx
+  wait_tcp 18088
+  if ! curl -fsS -x http://127.0.0.1:18088 \
+    -H "Authorization: Bearer $token" "http://127.0.0.1:$ORIGIN_PORT/" >/dev/null; then
+    cat "$TMP_DIR/qid-jwt-qpx.log" >&2
+    return 1
+  fi
+
+  start_qpx "$fixture_dir/qpx-introspection.yaml" qid-introspection-qpx
+  wait_tcp 18089
+  if ! curl -fsS -x http://127.0.0.1:18089 \
+    -H "Authorization: Bearer $token" "http://127.0.0.1:$ORIGIN_PORT/" >/dev/null; then
+    cat "$TMP_DIR/qid-introspection-qpx.log" >&2
+    return 1
+  fi
+  unset QPX_DECISION_CLIENT_SECRET
 }
 
-test_qid
 start_origin
+test_qid
 test_keycloak
 test_cerbos
 echo "provider-neutral integration matrix passed"

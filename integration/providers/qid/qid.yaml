@@ -1,0 +1,80 @@
+server:
+  listen: "127.0.0.1:8443"
+  public_base_url: "https://id.example.com"
+storage:
+  primary:
+    type: sqlite
+    url: "sqlite:qid-provider-matrix.db"
+crypto:
+  default_alg: ES256
+  keyrings:
+    - name: provider-matrix-main
+      realm_id: provider-matrix
+      purposes: [oidc_token]
+      signer: { type: local }
+      rotation: { overlap_days: 14, max_age_days: 90 }
+    - name: provider-matrix-pep-assertion
+      realm_id: provider-matrix
+      purposes: [pep_assertion]
+      signer: { type: local }
+      rotation: { overlap_days: 14, max_age_days: 90 }
+realms:
+  - id: provider-matrix
+    issuer: "https://id.example.com/realms/provider-matrix"
+    display_name: "Provider Matrix"
+    clients:
+      - client_id: "qpx-provider-matrix"
+        id: "client-qpx-provider-matrix"
+        client_type: confidential
+        token_endpoint_auth_method: client_secret_basic
+        client_secret: "qpx-provider-matrix-secret"
+        grant_types: [client_credentials]
+    protocols:
+      oidc:
+        enabled: true
+        authorization_code: { enabled: true, pkce_required: true }
+        implicit: { enabled: false }
+        ropc: { enabled: false }
+        logout: { backchannel: true, frontchannel: true }
+      oauth:
+        introspection: true
+        revocation: true
+        dynamic_client_registration: false
+        resource_servers:
+          - audience: "qpx"
+            resources: ["urn:qid:pep:qpx:edge/qpx-provider-matrix"]
+            scopes: [api]
+            introspection_client_ids: [qpx-provider-matrix]
+            require_sender_constraint: false
+    authentication:
+      passkeys: { enabled: false }
+      password: { enabled: true, hash: argon2id }
+    sessions:
+      browser:
+        cookie_name: "__Host-qid"
+        same_site: Lax
+        idle_timeout_minutes: 30
+        absolute_timeout_hours: 12
+    pep_registrations:
+      enabled: true
+      registrations:
+        - name: service:qpx-provider-matrix
+          audience: "qpx"
+          capabilities:
+            - effect: authzen
+            - effect: policy_tags
+          auth:
+            active_method: bearer_jwt
+            replay_protection: false
+          decision:
+            endpoint: "/pep/decision/v1/evaluate"
+            fail_policy: deny
+    policy:
+      bundles:
+        - name: default
+          source: policy.json
+          mode: enforce
+      default_decision: deny
+observability:
+  logs: { format: json }
+  metrics: { listen: "127.0.0.1:9464" }

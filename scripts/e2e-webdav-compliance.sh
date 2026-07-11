@@ -4,13 +4,19 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/debug/qpxd}"
 LITMUS_BIN="${LITMUS_BIN:?LITMUS_BIN is required}"
-CALDAVTESTER_DIR="${CALDAVTESTER_DIR:?CALDAVTESTER_DIR is required}"
+CALDAV_TESTER_BIN="${CALDAV_TESTER_BIN:?CALDAV_TESTER_BIN is required}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-webdav-e2e.XXXXXX")"
 QPXD_PID=""
 
 cleanup() {
+  status=$?
   if [[ -n "$QPXD_PID" ]]; then kill "$QPXD_PID" 2>/dev/null || true; fi
+  if [[ $status -ne 0 ]]; then
+    [[ -f "$TMP_DIR/qpxd.log" ]] && sed -n '1,240p' "$TMP_DIR/qpxd.log" >&2
+    [[ -f "$TMP_DIR/caldav-results.json" ]] && cat "$TMP_DIR/caldav-results.json" >&2
+  fi
   rm -rf "$TMP_DIR"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -28,16 +34,19 @@ nc -z 127.0.0.1 18086
 
 "$LITMUS_BIN" http://127.0.0.1:18086/dav/ unused unused
 
-mkdir -p "$TMP_DIR/caldav/tests" "$TMP_DIR/caldav/data"
-cp "$ROOT_DIR/integration/webdav/caldav/serverinfo.xml" "$TMP_DIR/caldav/serverinfo.xml"
-cp "$ROOT_DIR/integration/webdav/caldav/tests/qpx.xml" "$TMP_DIR/caldav/tests/qpx.xml"
-cp "$ROOT_DIR/integration/webdav/caldav/data/"* "$TMP_DIR/caldav/data/"
-cp "$CALDAVTESTER_DIR/scripts/server/serverinfo.dtd" "$TMP_DIR/caldav/serverinfo.dtd"
-cp "$CALDAVTESTER_DIR/scripts/tests/CalDAV/caldavtest.dtd" "$TMP_DIR/caldav/tests/caldavtest.dtd"
-(
-  cd "$CALDAVTESTER_DIR"
-  python3 testcaldav.py \
-    --print-details-onfail --stop \
-    --basedir "$TMP_DIR/caldav" qpx.xml
-)
+curl --fail --silent --show-error \
+  --request MKCALENDAR \
+  --header 'Content-Type: application/xml' \
+  --data '<C:mkcalendar xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:"><D:set><D:prop><D:displayname>Compliance</D:displayname></D:prop></D:set></C:mkcalendar>' \
+  http://127.0.0.1:18086/dav/compliance
+
+"$CALDAV_TESTER_BIN" \
+  --caldav-url http://127.0.0.1:18086/dav/ \
+  --caldav-username unused \
+  --caldav-password unused \
+  --run-feature create-calendar \
+  --run-feature search.time-range.event \
+  --run-feature freebusy-query \
+  --format json >"$TMP_DIR/caldav-results.json"
+jq -e '.features | length == 0' "$TMP_DIR/caldav-results.json" >/dev/null
 echo "WebDAV and CalDAV external compliance suites passed"

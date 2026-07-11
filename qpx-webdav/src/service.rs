@@ -9,7 +9,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use quick_xml::XmlVersion;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
 use std::sync::Arc;
@@ -240,7 +240,7 @@ impl<S: WebDavStore> WebDavService<S> {
             if !matches!(content_type, Some("application/xml" | "text/xml")) {
                 return response(StatusCode::UNSUPPORTED_MEDIA_TYPE, Vec::new());
             }
-            let patch = parse_property_update(body)?;
+            let patch = parse_property_update_allow_empty(body)?;
             if !patch.remove.is_empty() || patch.set.iter().any(is_protected_live_property) {
                 return response(StatusCode::FORBIDDEN, Vec::new());
             }
@@ -274,7 +274,7 @@ impl<S: WebDavStore> WebDavService<S> {
             if !matches!(content_type, Some("application/xml" | "text/xml")) {
                 return response(StatusCode::UNSUPPORTED_MEDIA_TYPE, Vec::new());
             }
-            let patch = parse_property_update(body)?;
+            let patch = parse_property_update_allow_empty(body)?;
             if !patch.remove.is_empty() || patch.set.iter().any(is_protected_live_property) {
                 return response(StatusCode::FORBIDDEN, Vec::new());
             }
@@ -323,11 +323,31 @@ impl<S: WebDavStore> WebDavService<S> {
             let Some(metadata) = self.store.metadata(&resolved)? else {
                 continue;
             };
+            let properties = self.store.properties(&resolved)?;
+            let is_calendar = properties.iter().any(|property| {
+                property.namespace == CALDAV_NAMESPACE && property.name == CALENDAR_MARKER
+            });
+            let mut href = resource.as_str().to_owned();
+            if metadata.is_collection && !href.ends_with('/') {
+                href.push('/');
+            }
             xml.push_str("<D:response><D:href>");
-            xml.push_str(&escape_xml(resource.as_str()));
+            xml.push_str(&escape_xml(&href));
             xml.push_str("</D:href><D:propstat><D:prop>");
             if metadata.is_collection {
-                xml.push_str("<D:resourcetype><D:collection/></D:resourcetype>");
+                xml.push_str("<D:resourcetype><D:collection/>");
+                if is_calendar {
+                    xml.push_str("<C:calendar xmlns:C=\"urn:ietf:params:xml:ns:caldav\"/>");
+                }
+                xml.push_str("</D:resourcetype>");
+                xml.push_str("<D:current-user-principal><D:href>");
+                xml.push_str(&escape_xml(&href));
+                xml.push_str("</D:href></D:current-user-principal>");
+                xml.push_str(
+                    "<C:calendar-home-set xmlns:C=\"urn:ietf:params:xml:ns:caldav\"><D:href>",
+                );
+                xml.push_str(&escape_xml(&href));
+                xml.push_str("</D:href></C:calendar-home-set>");
             } else {
                 xml.push_str("<D:resourcetype/>");
             }
@@ -336,17 +356,26 @@ impl<S: WebDavStore> WebDavService<S> {
             xml.push_str("</D:getetag><D:getcontentlength>");
             xml.push_str(&metadata.content_length.to_string());
             xml.push_str("</D:getcontentlength>");
-            for property in self.store.properties(&resolved)? {
-                if property.namespace == ACL_POLICY_NAMESPACE && property.name == ACL_POLICY_NAME {
+            for property in properties {
+                if property.namespace == ACL_POLICY_NAMESPACE && property.name == ACL_POLICY_NAME
+                    || property.namespace == CALDAV_NAMESPACE && property.name == CALENDAR_MARKER
+                {
                     continue;
                 }
-                xml.push_str("<Q:property xmlns:Q=\"");
+                if !is_xml_local_name(&property.name) {
+                    return Err(anyhow!(
+                        "WebDAV property name is not a valid XML local name"
+                    ));
+                }
+                xml.push_str("<Q:");
+                xml.push_str(&property.name);
+                xml.push_str(" xmlns:Q=\"");
                 xml.push_str(&escape_xml(&property.namespace));
-                xml.push_str("\" name=\"");
-                xml.push_str(&escape_xml(&property.name));
                 xml.push_str("\">");
                 xml.push_str(&escape_xml(&property.value_xml));
-                xml.push_str("</Q:property>");
+                xml.push_str("</Q:");
+                xml.push_str(&property.name);
+                xml.push('>');
             }
             xml.push_str("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>");
         }
@@ -604,7 +633,8 @@ impl<S: WebDavStore> WebDavService<S> {
                 component,
                 start,
                 end,
-            } => self.calendar_query(resource, component.as_deref(), start, end),
+                text_filters,
+            } => self.calendar_query(resource, component.as_deref(), start, end, &text_filters),
             ReportRequest::FreeBusy { start, end } => self.free_busy(resource, start, end),
         }
     }
@@ -615,6 +645,7 @@ impl<S: WebDavStore> WebDavService<S> {
         component: Option<&str>,
         start: Option<CalendarInstant>,
         end: Option<CalendarInstant>,
+        text_filters: &[CalendarTextFilter],
     ) -> Result<Response<Vec<u8>>> {
         if !self.is_calendar_collection(collection)? {
             return response(StatusCode::CONFLICT, Vec::new());
@@ -624,22 +655,64 @@ impl<S: WebDavStore> WebDavService<S> {
             let Some(metadata) = self.store.metadata(&child)? else {
                 continue;
             };
-            if metadata.is_collection || metadata.content_type.as_deref() != Some("text/calendar") {
+            if metadata.is_collection || !is_calendar_content_type(metadata.content_type.as_deref())
+            {
                 continue;
             }
             let objects = validate_calendar(&self.store.read(&child)?)?;
+            let body = self.store.read(&child)?;
             if objects.iter().any(|object| {
                 component.is_none_or(|name| object.component == name)
                     && start.is_none_or(|lower| object.end >= lower)
                     && end.is_none_or(|upper| object.start < upper)
-            }) {
+            }) && text_filters
+                .iter()
+                .all(|filter| calendar_text_filter_matches(&body, filter))
+            {
                 matches.push(child);
             }
         }
         if matches.len() > self.max_multistatus_entries {
             return response(StatusCode::INSUFFICIENT_STORAGE, Vec::new());
         }
-        self.multistatus_resources(matches)
+        self.calendar_multistatus(matches)
+    }
+
+    fn calendar_multistatus(
+        &self,
+        resources: impl IntoIterator<Item = ResourceId>,
+    ) -> Result<Response<Vec<u8>>> {
+        let mut xml = String::from(
+            r#"<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">"#,
+        );
+        for resource in resources {
+            let resolved = self.store.resolve_binding(&resource)?;
+            let Some(metadata) = self.store.metadata(&resolved)? else {
+                continue;
+            };
+            if metadata.is_collection || !is_calendar_content_type(metadata.content_type.as_deref())
+            {
+                continue;
+            }
+            let body = self.store.read(&resolved)?;
+            let calendar = std::str::from_utf8(&body)
+                .map_err(|_| anyhow!("stored calendar resource is not UTF-8"))?;
+            xml.push_str("<D:response><D:href>");
+            xml.push_str(&escape_xml(resource.as_str()));
+            xml.push_str("</D:href><D:propstat><D:prop><D:getetag>");
+            xml.push_str(&escape_xml(&metadata.etag));
+            xml.push_str(
+                "</D:getetag><C:calendar-data content-type=\"text/calendar\" version=\"2.0\">",
+            );
+            xml.push_str(&escape_xml(calendar));
+            xml.push_str("</C:calendar-data></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>");
+        }
+        xml.push_str("</D:multistatus>");
+        Response::builder()
+            .status(StatusCode::MULTI_STATUS)
+            .header(http::header::CONTENT_TYPE, "application/xml; charset=utf-8")
+            .body(xml.into_bytes())
+            .map_err(Into::into)
     }
 
     fn free_busy(
@@ -656,7 +729,8 @@ impl<S: WebDavStore> WebDavService<S> {
             let Some(metadata) = self.store.metadata(&child)? else {
                 continue;
             };
-            if metadata.is_collection || metadata.content_type.as_deref() != Some("text/calendar") {
+            if metadata.is_collection || !is_calendar_content_type(metadata.content_type.as_deref())
+            {
                 continue;
             }
             for object in validate_calendar(&self.store.read(&child)?)? {
@@ -928,17 +1002,49 @@ fn reject_unsafe_xml(body: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn xml_attribute(element: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>> {
+    for attribute in element.attributes() {
+        let attribute = attribute?;
+        if attribute.key.local_name().as_ref() == name {
+            return Ok(Some(
+                attribute
+                    .normalized_value(XmlVersion::Implicit1_0)?
+                    .into_owned(),
+            ));
+        }
+    }
+    Ok(None)
+}
+
 enum ReportRequest {
     VersionTree,
     CalendarQuery {
         component: Option<String>,
         start: Option<CalendarInstant>,
         end: Option<CalendarInstant>,
+        text_filters: Vec<CalendarTextFilter>,
     },
     FreeBusy {
         start: CalendarInstant,
         end: CalendarInstant,
     },
+}
+
+#[derive(Debug)]
+struct CalendarTextFilter {
+    property: String,
+    value: String,
+    negate: bool,
+    match_type: CalendarTextMatchType,
+}
+
+#[derive(Debug, Default)]
+enum CalendarTextMatchType {
+    Equals,
+    StartsWith,
+    EndsWith,
+    #[default]
+    Contains,
 }
 
 fn parse_report(body: &[u8]) -> Result<ReportRequest> {
@@ -952,6 +1058,9 @@ fn parse_report(body: &[u8]) -> Result<ReportRequest> {
     let mut component = None;
     let mut start = None;
     let mut end = None;
+    let mut text_filters = Vec::new();
+    let mut property_filter = None::<String>;
+    let mut pending_text_filter = None::<CalendarTextFilter>;
     let mut depth = 0usize;
     loop {
         let (resolution, event) = reader.read_resolved_event()?;
@@ -986,6 +1095,29 @@ fn parse_report(body: &[u8]) -> Result<ReportRequest> {
                         }
                     }
                 }
+                if namespace == CALDAV_NAMESPACE && name == "prop-filter" {
+                    property_filter = xml_attribute(&element, b"name")?;
+                }
+                if namespace == CALDAV_NAMESPACE && name == "text-match" {
+                    let property = property_filter
+                        .clone()
+                        .ok_or_else(|| anyhow!("CalDAV text-match requires a prop-filter"))?;
+                    let negate = xml_attribute(&element, b"negate-condition")?
+                        .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
+                    let match_type = match xml_attribute(&element, b"match-type")?.as_deref() {
+                        None | Some("contains") => CalendarTextMatchType::Contains,
+                        Some("equals") => CalendarTextMatchType::Equals,
+                        Some("starts-with") => CalendarTextMatchType::StartsWith,
+                        Some("ends-with") => CalendarTextMatchType::EndsWith,
+                        Some(_) => return Err(anyhow!("CalDAV text match type is not supported")),
+                    };
+                    pending_text_filter = Some(CalendarTextFilter {
+                        property,
+                        value: String::new(),
+                        negate,
+                        match_type,
+                    });
+                }
                 depth += 1;
             }
             Event::Empty(element) => {
@@ -1019,17 +1151,31 @@ fn parse_report(body: &[u8]) -> Result<ReportRequest> {
                     }
                 }
             }
-            Event::End(_) => depth = depth.saturating_sub(1),
-            Event::Text(text) if !text.decode()?.trim().is_empty() => {
-                return Err(anyhow!("CalDAV REPORT contains unexpected text"));
+            Event::Text(text) => {
+                if let Some(filter) = pending_text_filter.as_mut() {
+                    filter.value.push_str(&text.decode()?);
+                }
             }
-            Event::CData(text) if !text.decode()?.trim().is_empty() => {
-                return Err(anyhow!("CalDAV REPORT contains unexpected text"));
+            Event::CData(text) => {
+                if let Some(filter) = pending_text_filter.as_mut() {
+                    filter.value.push_str(&text.decode()?);
+                }
+            }
+            Event::End(element) => {
+                let name = std::str::from_utf8(element.local_name().as_ref())?.to_owned();
+                if name == "text-match"
+                    && let Some(filter) = pending_text_filter.take()
+                {
+                    text_filters.push(filter);
+                }
+                if name == "prop-filter" {
+                    property_filter = None;
+                }
+                depth = depth.saturating_sub(1);
             }
             Event::DocType(_) => return Err(anyhow!("CalDAV XML document types are forbidden")),
             Event::Eof => break,
             Event::Decl(_) | Event::PI(_) | Event::Comment(_) | Event::GeneralRef(_) => {}
-            Event::Text(_) | Event::CData(_) => {}
         }
     }
     if depth != 0 {
@@ -1044,6 +1190,7 @@ fn parse_report(body: &[u8]) -> Result<ReportRequest> {
             component,
             start,
             end,
+            text_filters,
         }),
         Some((CALDAV_NAMESPACE, "free-busy-query")) => {
             let start = start.ok_or_else(|| anyhow!("free-busy-query requires start"))?;
@@ -1223,6 +1370,45 @@ fn resource_contains(parent: &ResourceId, child: &ResourceId) -> bool {
             .starts_with(&format!("{}/", parent.as_str().trim_end_matches('/')))
 }
 
+fn is_calendar_content_type(content_type: Option<&str>) -> bool {
+    content_type
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/calendar"))
+}
+
+fn calendar_text_filter_matches(body: &[u8], filter: &CalendarTextFilter) -> bool {
+    let text = String::from_utf8_lossy(body).replace("\r\n", "\n");
+    let mut unfolded = Vec::<String>::new();
+    for line in text.lines() {
+        if (line.starts_with(' ') || line.starts_with('\t')) && !unfolded.is_empty() {
+            unfolded.last_mut().unwrap().push_str(&line[1..]);
+        } else {
+            unfolded.push(line.to_owned());
+        }
+    }
+    let expected = filter.value.to_lowercase();
+    let matched = unfolded.iter().any(|line| {
+        let Some((name_and_parameters, value)) = line.split_once(':') else {
+            return false;
+        };
+        let name = name_and_parameters
+            .split(';')
+            .next()
+            .unwrap_or(name_and_parameters);
+        if !name.eq_ignore_ascii_case(&filter.property) {
+            return false;
+        }
+        let actual = value.to_lowercase();
+        match filter.match_type {
+            CalendarTextMatchType::Equals => actual == expected,
+            CalendarTextMatchType::StartsWith => actual.starts_with(&expected),
+            CalendarTextMatchType::EndsWith => actual.ends_with(&expected),
+            CalendarTextMatchType::Contains => actual.contains(&expected),
+        }
+    });
+    matched != filter.negate
+}
+
 struct BindingRequest {
     segment: String,
     href: Option<String>,
@@ -1335,6 +1521,14 @@ struct PendingProperty {
 }
 
 fn parse_property_update(body: &[u8]) -> Result<PropertyPatch> {
+    parse_property_update_inner(body, false)
+}
+
+fn parse_property_update_allow_empty(body: &[u8]) -> Result<PropertyPatch> {
+    parse_property_update_inner(body, true)
+}
+
+fn parse_property_update_inner(body: &[u8], allow_empty: bool) -> Result<PropertyPatch> {
     reject_unsafe_xml(body)?;
     let document = std::str::from_utf8(body)?;
     let mut reader = NsReader::from_str(document);
@@ -1418,7 +1612,10 @@ fn parse_property_update(body: &[u8]) -> Result<PropertyPatch> {
             Event::Decl(_) | Event::PI(_) | Event::Comment(_) | Event::GeneralRef(_) => {}
         }
     }
-    if !stack.is_empty() || pending.is_some() || patch.set.is_empty() && patch.remove.is_empty() {
+    if !stack.is_empty()
+        || pending.is_some()
+        || !allow_empty && patch.set.is_empty() && patch.remove.is_empty()
+    {
         return Err(anyhow!("WebDAV property update is empty or malformed"));
     }
     Ok(patch)
@@ -1433,6 +1630,14 @@ fn resolved_namespace(resolution: ResolveResult<'_>) -> Result<String> {
             String::from_utf8_lossy(prefix.as_ref())
         )),
     }
+}
+
+fn is_xml_local_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
 fn finish_property(patch: &mut PropertyPatch, property: PendingProperty) {
@@ -1548,11 +1753,10 @@ mod tests {
             .unwrap();
         let response = service.handle(propfind, &context).unwrap();
         assert_eq!(response.status(), 207);
-        assert!(
-            String::from_utf8(response.into_body())
-                .unwrap()
-                .contains("report.txt")
-        );
+        let body = String::from_utf8(response.into_body()).unwrap();
+        assert!(body.contains("report.txt"));
+        assert!(body.contains("current-user-principal"));
+        assert!(body.contains("calendar-home-set"));
 
         let proppatch = Request::builder()
             .method("PROPPATCH")
@@ -1924,11 +2128,11 @@ mod tests {
             service.handle(invalid, &context).unwrap().status(),
             StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
-        let event = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nDTSTART:20260711T010000Z\r\nDTEND:20260711T020000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let event = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nDTSTART:20260711T010000Z\r\nDTEND:20260711T020000Z\r\nCATEGORIES:Hands,Feet\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let put = Request::builder()
             .method("PUT")
             .uri("/events/meeting.ics")
-            .header(http::header::CONTENT_TYPE, "text/calendar")
+            .header(http::header::CONTENT_TYPE, "text/calendar; charset=utf-8")
             .body(event.to_vec())
             .unwrap();
         assert_eq!(
@@ -1938,12 +2142,14 @@ mod tests {
         let query = Request::builder()
             .method("REPORT")
             .uri("/events")
-            .body(br#"<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20260711T000000Z" end="20260712T000000Z"/></C:comp-filter></C:comp-filter></C:filter></C:calendar-query>"#.to_vec())
+            .body(br#"<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20260711T000000Z" end="20260712T000000Z"/><C:prop-filter name="CATEGORIES"><C:text-match collation="i;octet">hands</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter></C:calendar-query>"#.to_vec())
             .unwrap();
         let response = service.handle(query, &context).unwrap();
         assert_eq!(response.status(), StatusCode::MULTI_STATUS);
         let query_body = String::from_utf8(response.into_body()).unwrap();
         assert!(query_body.contains("meeting.ics"), "{query_body}");
+        assert!(query_body.contains("C:calendar-data"), "{query_body}");
+        assert!(query_body.contains("BEGIN:VCALENDAR"), "{query_body}");
         let free_busy = Request::builder()
             .method("REPORT")
             .uri("/events")

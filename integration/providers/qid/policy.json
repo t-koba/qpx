@@ -1,0 +1,12 @@
+{
+  "version": "1",
+  "default_decision": "deny",
+  "rules": [
+    {
+      "name": "allow-provider-matrix-get",
+      "type": "allow",
+      "action": "GET",
+      "resource_host": "*"
+    }
+  ]
+}

@@ -125,14 +125,25 @@ def require_valid_sample(record):
         fail(f"proxy comparison record for {proxy} is marked invalid")
     if nonnegative_int(record, "complete_requests") != nonnegative_int(record, "requests"):
         fail(f"proxy comparison record for {proxy} did not complete all requests")
-    if nonnegative_int(record, "failed_requests") != 0:
-        fail(f"proxy comparison record for {proxy} has failed requests")
+    connect_errors = nonnegative_int(record, "connect_errors")
+    read_errors = nonnegative_int(record, "read_errors")
+    write_errors = nonnegative_int(record, "write_errors")
+    timeout_errors = nonnegative_int(record, "timeout_errors")
+    failed_requests = nonnegative_int(record, "failed_requests")
+    if failed_requests != connect_errors + read_errors + write_errors + timeout_errors:
+        fail(f"proxy comparison record for {proxy} has inconsistent failure counters")
+    if connect_errors != 0 or write_errors != 0 or timeout_errors != 0:
+        fail(f"proxy comparison record for {proxy} has fatal transport errors")
+    max_read_error_rate_ppm = nonnegative_int(record, "max_read_error_rate_ppm")
+    if max_read_error_rate_ppm > 1_000_000:
+        fail(f"proxy comparison record for {proxy} has invalid read error tolerance")
+    complete_requests = nonnegative_int(record, "complete_requests")
+    if read_errors * 1_000_000 > complete_requests * max_read_error_rate_ppm:
+        fail(f"proxy comparison record for {proxy} exceeds its read error tolerance")
     if nonnegative_int(record, "non_2xx_responses") != 0:
         fail(f"proxy comparison record for {proxy} has non-2xx responses")
     if nonnegative_int(record, "bad_length_responses") != 0:
         fail(f"proxy comparison record for {proxy} has bad response lengths")
-    if nonnegative_int(record, "write_errors") != 0:
-        fail(f"proxy comparison record for {proxy} has write errors")
     if str(record.get("status_before")) != "200" or str(record.get("status_after")) != "200":
         fail(f"proxy comparison record for {proxy} failed status probes")
 

@@ -1,0 +1,54 @@
+state_dir: "${QPX_STATE_DIR}"
+identity:
+  proxy_name: qpx-provider-matrix
+security:
+  identity_sources:
+    - name: bearer-resource-server
+      type: bearer
+      bearer:
+        source:
+          mode: jwt
+          issuer: "https://id.example.com/realms/provider-matrix"
+          audience: qpx
+          algorithms: [ES256]
+          jwks_url: http://127.0.0.1:8443/jwks
+        claims:
+          user_from_sub: true
+          groups: groups
+          tenant: tenant
+          auth_strength: acr
+          idp: iss
+          groups_separator: ","
+  decisions:
+    services:
+      - name: external-authzen
+        endpoint: http://127.0.0.1:8443/access/v1/evaluation
+        timeout_ms: 300
+        contract:
+          driver: authzen
+          profile_id: authzen-evaluation-v1
+          schemas: {}
+        capability:
+          effects: [allow]
+        auth:
+          oauth2_client_credentials:
+            token_endpoint: http://127.0.0.1:8443/oauth2/token
+            client_id: qpx-provider-matrix
+            client_secret_env: QPX_DECISION_CLIENT_SECRET
+            client_auth_method: client_secret_basic
+            scope: api
+            resource: urn:qid:pep:qpx:edge/qpx-provider-matrix
+edges:
+  - kind: forward
+    name: provider-matrix
+    listen: 127.0.0.1:18088
+    default_action: { type: block }
+    rules:
+      - name: allow-authenticated
+        match:
+          host: ["*"]
+          identity: { user: ["*"] }
+        action: { type: direct }
+    policy_context:
+      identity_sources: [bearer-resource-server]
+      decision_service: external-authzen

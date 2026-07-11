@@ -43,7 +43,14 @@ pub(crate) fn validate_calendar(body: &[u8]) -> Result<Vec<CalendarObject>> {
             }
         } else if let Some(name) = line.strip_prefix("END:") {
             if component.as_deref() == Some(name) {
-                let start = start.ok_or_else(|| anyhow!("calendar component has no DTSTART"))?;
+                let start = match name {
+                    "VEVENT" | "VFREEBUSY" => {
+                        start.ok_or_else(|| anyhow!("calendar component has no DTSTART"))?
+                    }
+                    "VTODO" => start.or(end).unwrap_or(CalendarInstant(0)),
+                    "VJOURNAL" => start.unwrap_or(CalendarInstant(0)),
+                    _ => unreachable!("component names are validated when opened"),
+                };
                 let end = end.unwrap_or(start);
                 if end < start {
                     return Err(anyhow!("calendar component ends before it starts"));
@@ -103,6 +110,10 @@ fn property_value(line: &str) -> Result<&str> {
 
 pub(crate) fn parse_datetime(value: &str) -> Result<CalendarInstant> {
     let digits = value.strip_suffix('Z').unwrap_or(value);
+    if digits.len() == 8 {
+        let date = format!("{digits}T000000");
+        return parse_datetime(&date);
+    }
     if digits.len() != 15 || digits.as_bytes().get(8) != Some(&b'T') {
         return Err(anyhow!("iCalendar date-time must use YYYYMMDDTHHMMSS[Z]"));
     }
