@@ -294,6 +294,88 @@ async fn send_h2_response_sanitizes_response_trailers() {
 }
 
 #[tokio::test]
+async fn early_h2_response_drains_abandoned_request_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        let mut conn = h2::server::handshake(socket).await.expect("handshake");
+        while let Some(result) = conn.accept().await {
+            let (request, respond) = result.expect("request");
+            tokio::spawn(async move {
+                let mut request = h2_request_to_hyper(request).expect("convert request");
+                assert_eq!(
+                    request
+                        .body_mut()
+                        .data()
+                        .await
+                        .expect("request data")
+                        .expect("first chunk"),
+                    Bytes::from_static(b"first")
+                );
+                drop(request);
+
+                let mut trailers = http::HeaderMap::new();
+                trailers.insert("grpc-status", "0".parse().expect("grpc status"));
+                let response = Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::replay(
+                        Bytes::from_static(b"response"),
+                        Some(trailers),
+                    ))
+                    .expect("response");
+                send_h2_response_with_interim(
+                    respond,
+                    response,
+                    &[],
+                    &hyper::Method::POST,
+                    false,
+                    H2_BODY_IDLE_TIMEOUT,
+                )
+                .await
+                .expect("send response");
+            });
+        }
+    });
+
+    let socket = TcpStream::connect(addr).await.expect("connect");
+    let (client, connection) = h2::client::handshake(socket).await.expect("handshake");
+    tokio::spawn(async move {
+        connection.await.expect("client connection");
+    });
+
+    let mut client = client.ready().await.expect("ready");
+    let request = ::http::Request::builder()
+        .method("POST")
+        .uri("https://reverse_edges.test/grpc")
+        .body(())
+        .expect("request");
+    let (response_future, mut send_stream) = client.send_request(request, false).expect("send");
+    send_stream
+        .send_data(Bytes::from_static(b"first"), false)
+        .expect("first chunk");
+    send_stream
+        .send_data(Bytes::from_static(b"second"), true)
+        .expect("second chunk");
+
+    let response = response_future.await.expect("response");
+    let mut body = h2_response_to_hyper(response)
+        .expect("convert response")
+        .into_body();
+    assert_eq!(
+        body.data().await.expect("response data").expect("chunk"),
+        Bytes::from_static(b"response")
+    );
+    let trailers = body.trailers().await.expect("trailers").expect("present");
+    assert_eq!(
+        trailers
+            .get("grpc-status")
+            .and_then(|value| value.to_str().ok()),
+        Some("0")
+    );
+}
+
+#[tokio::test]
 async fn send_h2_response_with_interim_rejects_content_length_mismatch() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("addr");

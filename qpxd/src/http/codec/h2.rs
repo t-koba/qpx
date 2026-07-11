@@ -14,9 +14,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use tokio::time::{Duration, Sleep, timeout};
-use tracing::warn;
+use tracing::{debug, warn};
 
 const H2_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const H2_ABANDONED_REQUEST_DRAIN_LIMIT: usize = 1024 * 1024;
 const H2_INITIAL_STREAM_WINDOW_SIZE: u32 = 1024 * 1024;
 const H2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
 const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
@@ -368,7 +369,7 @@ enum H2RecvBodyState {
 }
 
 struct H2RecvBody {
-    body: RecvStream,
+    body: Option<RecvStream>,
     kind: H2RecvBodyKind,
     state: H2RecvBodyState,
     read_timer: Option<Pin<Box<Sleep>>>,
@@ -377,7 +378,7 @@ struct H2RecvBody {
 impl H2RecvBody {
     fn request(body: RecvStream) -> Self {
         Self {
-            body,
+            body: Some(body),
             kind: H2RecvBodyKind::Request { seen: 0 },
             state: H2RecvBodyState::Data,
             read_timer: None,
@@ -386,7 +387,7 @@ impl H2RecvBody {
 
     fn response(body: RecvStream, inflight: Option<Arc<AtomicUsize>>) -> Self {
         Self {
-            body,
+            body: Some(body),
             kind: H2RecvBodyKind::Response {
                 _inflight: InflightRelease(inflight),
             },
@@ -401,6 +402,33 @@ impl H2RecvBody {
 
     fn clear_timer(&mut self) {
         self.read_timer = None;
+    }
+
+    fn body_mut(&mut self) -> Result<&mut RecvStream, BodyError> {
+        self.body
+            .as_mut()
+            .ok_or_else(|| Self::error("HTTP/2 body stream is unavailable"))
+    }
+}
+
+impl Drop for H2RecvBody {
+    fn drop(&mut self) {
+        if !matches!(self.kind, H2RecvBodyKind::Request { .. })
+            || matches!(self.state, H2RecvBodyState::Done)
+        {
+            return;
+        }
+        let Some(body) = self.body.take() else {
+            return;
+        };
+        if body.is_end_stream() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            warn!("cannot drain abandoned HTTP/2 request body outside a Tokio runtime");
+            return;
+        };
+        runtime.spawn(drain_abandoned_h2_request(body));
     }
 }
 
@@ -429,7 +457,12 @@ impl http_body::Body for H2RecvBody {
                             };
                         }
                         let len = chunk.len();
-                        if let Err(err) = this.body.flow_control().release_capacity(len) {
+                        let release = this.body_mut().and_then(|body| {
+                            body.flow_control()
+                                .release_capacity(len)
+                                .map_err(|err| Self::error(err.to_string()))
+                        });
+                        if let Err(err) = release {
                             this.state = H2RecvBodyState::Done;
                             return Poll::Ready(Some(Err(Self::error(format!(
                                 "HTTP/2 body flow control release failed: {err}"
@@ -490,7 +523,11 @@ fn poll_h2_data(
     cx: &mut Context<'_>,
 ) -> Poll<Result<Option<Bytes>, BodyError>> {
     ensure_h2_read_timer(body);
-    match body.body.poll_data(cx) {
+    let poll = match body.body_mut() {
+        Ok(stream) => stream.poll_data(cx),
+        Err(err) => return Poll::Ready(Err(err)),
+    };
+    match poll {
         Poll::Ready(Some(Ok(chunk))) => {
             body.clear_timer();
             Poll::Ready(Ok(Some(chunk)))
@@ -512,7 +549,11 @@ fn poll_h2_trailers(
     cx: &mut Context<'_>,
 ) -> Poll<Result<Option<::http::HeaderMap>, BodyError>> {
     ensure_h2_read_timer(body);
-    match body.body.poll_trailers(cx) {
+    let poll = match body.body_mut() {
+        Ok(stream) => stream.poll_trailers(cx),
+        Err(err) => return Poll::Ready(Err(err)),
+    };
+    match poll {
         Poll::Ready(Ok(trailers)) => {
             body.clear_timer();
             Poll::Ready(Ok(trailers))
@@ -522,6 +563,46 @@ fn poll_h2_trailers(
             Poll::Ready(Err(BodyError::new(err.to_string())))
         }
         Poll::Pending => poll_h2_idle_timeout(body, cx, "HTTP/2 trailers timed out while idle"),
+    }
+}
+
+async fn drain_abandoned_h2_request(mut body: RecvStream) {
+    let drain = async {
+        let mut drained = 0usize;
+        while let Some(chunk) = body.data().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    debug!(error = ?err, "abandoned HTTP/2 request body drain failed");
+                    return;
+                }
+            };
+            drained = match drained.checked_add(chunk.len()) {
+                Some(drained) => drained,
+                None => {
+                    debug!("abandoned HTTP/2 request body drain size overflow");
+                    return;
+                }
+            };
+            if drained > H2_ABANDONED_REQUEST_DRAIN_LIMIT {
+                debug!(
+                    limit = H2_ABANDONED_REQUEST_DRAIN_LIMIT,
+                    "abandoned HTTP/2 request body drain reached its limit"
+                );
+                return;
+            }
+            if let Err(err) = body.flow_control().release_capacity(chunk.len()) {
+                warn!(error = ?err, "abandoned HTTP/2 request body flow control release failed");
+                return;
+            }
+        }
+        if let Err(err) = body.trailers().await {
+            debug!(error = ?err, "abandoned HTTP/2 request trailer drain failed");
+        }
+    };
+
+    if timeout(H2_BODY_IDLE_TIMEOUT, drain).await.is_err() {
+        debug!("abandoned HTTP/2 request body drain timed out");
     }
 }
 
