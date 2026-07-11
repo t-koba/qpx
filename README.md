@@ -245,7 +245,7 @@ smoke tests, multi-platform builds, and end-to-end reload/upgrade paths.
   modules
 - [`docs/enterprise-edge-scope.md`](docs/enterprise-edge-scope.md): enterprise
   cloud-edge positioning
-- [`docs/rfc911x-compliance.md`](docs/rfc911x-compliance.md): RFC compliance
+- [`docs/http-rfc-compliance.md`](docs/http-rfc-compliance.md): comprehensive HTTP RFC compliance matrix
   notes and verification
 - [`docs/interoperability-matrix.md`](docs/interoperability-matrix.md):
   protocol interoperability lanes

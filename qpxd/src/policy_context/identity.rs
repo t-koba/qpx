@@ -18,6 +18,7 @@ use x509_parser::extensions::GeneralName;
 #[cfg(feature = "tls-rustls")]
 use x509_parser::prelude::FromDer;
 
+use super::bearer::CompiledBearerIdentity;
 use super::signed_assertion::CompiledSignedAssertion;
 use super::util::{
     compile_optional_header_name, extend_unique, extract_first_header, extract_list_header,
@@ -62,6 +63,8 @@ impl EffectivePolicyContext {
 pub(crate) struct ResolvedIdentity {
     pub(crate) user: Option<String>,
     pub(crate) groups: Vec<String>,
+    pub(crate) roles: Vec<String>,
+    pub(crate) entitlements: Vec<String>,
     pub(crate) device_id: Option<String>,
     pub(crate) posture: Vec<String>,
     pub(crate) tenant: Option<String>,
@@ -88,6 +91,8 @@ impl ResolvedIdentity {
             self.idp = other.idp;
         }
         extend_unique(&mut self.groups, other.groups);
+        extend_unique(&mut self.roles, other.roles);
+        extend_unique(&mut self.entitlements, other.entitlements);
         extend_unique(&mut self.posture, other.posture);
         self.identity_source =
             merge_identity_source_labels(self.identity_source.take(), other.identity_source);
@@ -130,13 +135,14 @@ impl ResolvedIdentity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct CompiledIdentitySource {
     kind: CompiledIdentitySourceKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum CompiledIdentitySourceKind {
+    Bearer(Box<CompiledBearerIdentity>),
     TrustedHeaders(Box<CompiledTrustedHeaders>),
     MtlsSubject(CompiledMtlsIdentityMap),
     SignedAssertion(Box<CompiledSignedAssertion>),
@@ -154,6 +160,8 @@ struct CompiledTrustedHeaders {
 struct CompiledIdentityHeaders {
     user: Option<HeaderName>,
     groups: Option<HeaderName>,
+    roles: Option<HeaderName>,
+    entitlements: Option<HeaderName>,
     device_id: Option<HeaderName>,
     posture: Option<HeaderName>,
     tenant: Option<HeaderName>,
@@ -173,6 +181,18 @@ struct CompiledMtlsIdentityMap {
 impl CompiledIdentitySource {
     pub(crate) fn from_config(config: &IdentitySourceConfig) -> Result<Self> {
         let kind = match config.kind {
+            IdentitySourceKind::Bearer => {
+                let bearer = config.bearer.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "bearer identity source {} is missing configuration",
+                        config.name
+                    )
+                })?;
+                CompiledIdentitySourceKind::Bearer(Box::new(CompiledBearerIdentity::from_config(
+                    &config.name,
+                    bearer,
+                )?))
+            }
             IdentitySourceKind::TrustedHeaders => {
                 let headers = config
                     .headers
@@ -219,6 +239,8 @@ impl CompiledIdentityHeaders {
         Ok(Self {
             user: compile_optional_header_name(config.user.as_deref())?,
             groups: compile_optional_header_name(config.groups.as_deref())?,
+            roles: compile_optional_header_name(config.roles.as_deref())?,
+            entitlements: compile_optional_header_name(config.entitlements.as_deref())?,
             device_id: compile_optional_header_name(config.device_id.as_deref())?,
             posture: compile_optional_header_name(config.posture.as_deref())?,
             tenant: compile_optional_header_name(config.tenant.as_deref())?,
@@ -231,6 +253,8 @@ impl CompiledIdentityHeaders {
         [
             self.user.as_ref(),
             self.groups.as_ref(),
+            self.roles.as_ref(),
+            self.entitlements.as_ref(),
             self.device_id.as_ref(),
             self.posture.as_ref(),
             self.tenant.as_ref(),
@@ -291,6 +315,7 @@ pub(crate) fn strip_untrusted_identity_headers(
             }
             CompiledIdentitySourceKind::SignedAssertion(_) => {}
             CompiledIdentitySourceKind::MtlsSubject(_) => {}
+            CompiledIdentitySourceKind::Bearer(_) => {}
         }
     }
 
@@ -300,7 +325,34 @@ pub(crate) fn strip_untrusted_identity_headers(
     Ok(())
 }
 
-pub(crate) fn resolve_identity(
+pub(crate) async fn resolve_identity(
+    state: &RuntimeState,
+    policy: &EffectivePolicyContext,
+    peer_ip: IpAddr,
+    headers: Option<&HeaderMap>,
+    peer_certificates: Option<&[Vec<u8>]>,
+) -> Result<ResolvedIdentity> {
+    let mut resolved = resolve_identity_local(state, policy, peer_ip, headers, peer_certificates)?;
+
+    for source_name in &policy.identity_sources {
+        let source = state
+            .security
+            .identity_sources
+            .sources
+            .get(source_name)
+            .ok_or_else(|| anyhow!("identity source missing at runtime: {}", source_name))?;
+        if let CompiledIdentitySourceKind::Bearer(cfg) = &source.kind {
+            let extracted = match headers {
+                Some(headers) => cfg.extract(state, headers).await?,
+                None => ResolvedIdentity::default(),
+            };
+            resolved.merge(extracted);
+        }
+    }
+    Ok(resolved)
+}
+
+pub(crate) fn resolve_identity_local(
     state: &RuntimeState,
     policy: &EffectivePolicyContext,
     peer_ip: IpAddr,
@@ -328,6 +380,7 @@ pub(crate) fn resolve_identity(
                 Some(headers) => cfg.extract(headers)?,
                 None => ResolvedIdentity::default(),
             },
+            CompiledIdentitySourceKind::Bearer(_) => ResolvedIdentity::default(),
         };
         resolved.merge(extracted);
     }
@@ -340,6 +393,8 @@ impl CompiledTrustedHeaders {
         let mut identity = ResolvedIdentity {
             user: extract_first_header(headers, self.headers.user.as_ref()),
             groups: extract_list_header(headers, self.headers.groups.as_ref()),
+            roles: extract_list_header(headers, self.headers.roles.as_ref()),
+            entitlements: extract_list_header(headers, self.headers.entitlements.as_ref()),
             device_id: extract_first_header(headers, self.headers.device_id.as_ref()),
             posture: extract_list_header(headers, self.headers.posture.as_ref()),
             tenant: extract_first_header(headers, self.headers.tenant.as_ref()),
@@ -349,6 +404,8 @@ impl CompiledTrustedHeaders {
         };
         if identity.user.is_some()
             || !identity.groups.is_empty()
+            || !identity.roles.is_empty()
+            || !identity.entitlements.is_empty()
             || identity.device_id.is_some()
             || !identity.posture.is_empty()
             || identity.tenant.is_some()

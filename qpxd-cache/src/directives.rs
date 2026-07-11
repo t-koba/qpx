@@ -1,9 +1,14 @@
 use super::freshness::{parse_http_date_secs, parse_if_none_match};
 use super::types::{ByteRangeSpec, IfRangeCondition, RequestDirectives, ResponseDirectives};
+use http::HeaderName;
 use http::header::{
     CACHE_CONTROL, IF_MATCH, IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, IF_UNMODIFIED_SINCE,
     PRAGMA, RANGE,
 };
+use qpx_http::structured_fields::{BareItem, ListEntry, parse_dictionary_fields};
+
+const QPX_CACHE_CONTROL: HeaderName = HeaderName::from_static("qpx-cache-control");
+const CDN_CACHE_CONTROL: HeaderName = HeaderName::from_static("cdn-cache-control");
 
 pub fn parse_request_directives(headers: &http::HeaderMap) -> RequestDirectives {
     let range = parse_single_range_header(headers);
@@ -95,6 +100,97 @@ pub fn parse_if_match(headers: &http::HeaderMap) -> Vec<String> {
 }
 
 pub fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDirectives {
+    parse_response_directives_for_targets(
+        headers,
+        &[QPX_CACHE_CONTROL.clone(), CDN_CACHE_CONTROL.clone()],
+    )
+}
+
+pub fn parse_response_directives_for_targets(
+    headers: &http::HeaderMap,
+    target_list: &[HeaderName],
+) -> ResponseDirectives {
+    for name in target_list {
+        if headers.contains_key(name) {
+            return parse_targeted_response_directives(headers, name).unwrap_or_else(|()| {
+                ResponseDirectives {
+                    no_store: true,
+                    invalid_freshness: true,
+                    ..ResponseDirectives::default()
+                }
+            });
+        }
+    }
+    parse_cache_control_response_directives(headers)
+}
+
+fn parse_targeted_response_directives(
+    headers: &http::HeaderMap,
+    name: &HeaderName,
+) -> Result<ResponseDirectives, ()> {
+    let dictionary = parse_dictionary_fields(headers, name)
+        .map_err(|_| ())?
+        .ok_or(())?;
+    if dictionary.is_empty() {
+        return Err(());
+    }
+
+    let mut out = ResponseDirectives::default();
+    for (name, entry) in dictionary {
+        let ListEntry::Item(item) = entry else {
+            return Err(());
+        };
+        let directive = name.as_str();
+        let value = &item.bare_item;
+        match directive {
+            "no-store" => out.no_store = require_true(value).ok_or(())?,
+            "no-cache" => match value {
+                BareItem::Boolean(true) => out.no_cache = true,
+                BareItem::String(fields) => {
+                    out.no_cache_fields
+                        .extend(parse_cache_field_name_list(fields.as_str()));
+                }
+                _ => return Err(()),
+            },
+            "must-understand" => out.must_understand = require_true(value).ok_or(())?,
+            "private" => match value {
+                BareItem::Boolean(true) => out.private = true,
+                BareItem::String(fields) => {
+                    out.private_fields
+                        .extend(parse_cache_field_name_list(fields.as_str()));
+                }
+                _ => return Err(()),
+            },
+            "public" => out.public = require_true(value).ok_or(())?,
+            "must-revalidate" => out.must_revalidate = require_true(value).ok_or(())?,
+            "proxy-revalidate" => out.proxy_revalidate = require_true(value).ok_or(())?,
+            "immutable" => out.immutable = require_true(value).ok_or(())?,
+            "max-age" => out.max_age = Some(require_non_negative_integer(value).ok_or(())?),
+            "s-maxage" => out.s_maxage = Some(require_non_negative_integer(value).ok_or(())?),
+            "stale-while-revalidate" => {
+                out.stale_while_revalidate = Some(require_non_negative_integer(value).ok_or(())?);
+            }
+            "stale-if-error" => {
+                out.stale_if_error = Some(require_non_negative_integer(value).ok_or(())?);
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+fn require_true(value: &BareItem) -> Option<bool> {
+    matches!(value, BareItem::Boolean(true)).then_some(true)
+}
+
+fn require_non_negative_integer(value: &BareItem) -> Option<u64> {
+    let BareItem::Integer(value) = value else {
+        return None;
+    };
+    u64::try_from(i64::from(*value)).ok()
+}
+
+fn parse_cache_control_response_directives(headers: &http::HeaderMap) -> ResponseDirectives {
     let mut out = ResponseDirectives::default();
     let mut saw_max_age = false;
     let mut saw_s_maxage = false;
@@ -130,6 +226,8 @@ pub fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDirective
                 out.must_revalidate = true;
             } else if directive == "proxy-revalidate" {
                 out.proxy_revalidate = true;
+            } else if directive == "immutable" {
+                out.immutable = true;
             } else if directive == "max-age" {
                 if saw_max_age {
                     out.invalid_freshness = true;

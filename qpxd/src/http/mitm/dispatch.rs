@@ -60,7 +60,7 @@ pub(super) async fn dispatch_mitm_request(
     let base_plan = mitm_plan.http;
     let effective_policy = base_plan.policy_context.clone();
     let http_guard = base_plan.guard.as_deref();
-    let websocket = is_websocket_upgrade(req.headers());
+    let websocket = is_websocket_upgrade(req.method(), req.headers())?;
     let client_upgrade = websocket.then(|| crate::http::protocol::upgrade::on(&mut req));
     let path_owned = base.path.clone().unwrap_or_else(|| "/".to_string());
     let engine = state

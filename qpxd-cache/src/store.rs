@@ -5,7 +5,8 @@ use super::invalidate::invalidate_primary;
 use super::types::{
     CACHE_HEADER, CacheBackend, CacheRequestKey, CachedBody, CachedResponseEnvelope,
     INDEX_TTL_SECS, MAX_CACHE_OBJECT_BYTES, RequestCollapseGuard, ResponseDirectives,
-    RevalidationState, VarySpec, cache_body_storage_key, encode_cached_response_metadata,
+    RevalidationState, VarySpec, cache_body_storage_key, cache_status_header,
+    encode_cached_response_metadata,
 };
 use super::util::{
     cache_namespace, load_variant_index, now_millis, sanitize_cached_headers_for_storage,
@@ -49,7 +50,7 @@ pub async fn maybe_store(
     if req.no_store {
         response
             .headers_mut()
-            .insert(CACHE_HEADER, http::HeaderValue::from_static("BYPASS"));
+            .insert(CACHE_HEADER, cache_status_header("BYPASS", None)?);
         return Ok(response);
     }
 
@@ -74,7 +75,7 @@ pub async fn maybe_store(
     if !is_storable {
         response
             .headers_mut()
-            .insert(CACHE_HEADER, http::HeaderValue::from_static("MISS"));
+            .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
         return Ok(response);
     }
     let vary = parse_vary(response.headers());
@@ -82,7 +83,7 @@ pub async fn maybe_store(
         VarySpec::Any => {
             response
                 .headers_mut()
-                .insert(CACHE_HEADER, http::HeaderValue::from_static("MISS"));
+                .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
             return Ok(response);
         }
         VarySpec::Fields(v) => v,
@@ -91,7 +92,7 @@ pub async fn maybe_store(
     let Some(freshness_lifetime_secs) = freshness else {
         response
             .headers_mut()
-            .insert(CACHE_HEADER, http::HeaderValue::from_static("MISS"));
+            .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
         return Ok(response);
     };
 
@@ -99,7 +100,11 @@ pub async fn maybe_store(
         .unwrap_or_else(|| key.clone());
     let storage_primary = storage_key.primary_hash();
     let initial_age_secs = initial_age_secs(response.headers(), now, timing.response_delay_secs);
-    let vary_values = vary_values_from_request_headers(request_headers, &vary);
+    let vary_values = cache_vary_values(
+        request_headers,
+        &vary,
+        storage_key.content_digest.as_deref(),
+    );
     let variant_key = variant_storage_key(storage_primary.as_str(), &vary_values);
     let namespace = cache_namespace(policy, "default");
     let ttl = object_retention_ttl_secs(freshness_lifetime_secs, &resp_directives);
@@ -142,7 +147,7 @@ pub async fn maybe_store(
 
     response
         .headers_mut()
-        .insert(CACHE_HEADER, http::HeaderValue::from_static("MISS"));
+        .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
     Ok(response)
 }
 
@@ -309,7 +314,11 @@ pub async fn revalidate_not_modified(
             response_delay_secs,
             freshness_lifetime_secs: freshness,
             vary_headers: vary_headers.clone(),
-            vary_values: vary_values_from_request_headers(request_headers, &vary_headers),
+            vary_values: refreshed_vary_values(
+                request_headers,
+                &vary_headers,
+                &state.envelope.vary_values,
+            ),
             header_map: std::sync::OnceLock::new(),
         };
         return super::entry::response_from_envelope_for_request(
@@ -332,7 +341,11 @@ pub async fn revalidate_not_modified(
         response_delay_secs,
         freshness_lifetime_secs: freshness,
         vary_headers: vary_headers.clone(),
-        vary_values: vary_values_from_request_headers(request_headers, &vary_headers),
+        vary_values: refreshed_vary_values(
+            request_headers,
+            &vary_headers,
+            &state.envelope.vary_values,
+        ),
         header_map: std::sync::OnceLock::new(),
     };
 
@@ -414,6 +427,7 @@ fn is_response_storable(
     }
     match *request_method {
         Method::GET | Method::HEAD => true,
+        _ if request_method.as_str() == "QUERY" => true,
         Method::POST | Method::PATCH => {
             has_explicit_freshness(response.headers(), directives)
                 && key
@@ -431,6 +445,7 @@ fn response_storage_key(
 ) -> Option<CacheRequestKey> {
     match *request_method {
         Method::GET | Method::HEAD => Some(key.clone()),
+        _ if request_method.as_str() == "QUERY" => Some(key.clone()),
         Method::POST | Method::PATCH if content_location_matches_target(response_headers, key) => {
             Some(key.with_method_group("GET"))
         }
@@ -445,6 +460,30 @@ fn has_explicit_freshness(
     directives.s_maxage.is_some()
         || directives.max_age.is_some()
         || response_headers.contains_key(EXPIRES)
+}
+
+fn cache_vary_values(
+    request_headers: &http::HeaderMap,
+    vary_headers: &[String],
+    content_digest: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut values = vary_values_from_request_headers(request_headers, vary_headers);
+    if let Some(digest) = content_digest {
+        values.push(("@query-content".to_string(), digest.to_string()));
+    }
+    values
+}
+
+fn refreshed_vary_values(
+    request_headers: &http::HeaderMap,
+    vary_headers: &[String],
+    previous: &[(String, String)],
+) -> Vec<(String, String)> {
+    let content_digest = previous
+        .iter()
+        .find(|(name, _)| name == "@query-content")
+        .map(|(_, value)| value.as_str());
+    cache_vary_values(request_headers, vary_headers, content_digest)
 }
 
 fn content_location_matches_target(

@@ -15,22 +15,20 @@ impl Default for StreamPriority {
 
 pub(crate) fn parse_priority(value: &str) -> StreamPriority {
     let mut priority = StreamPriority::default();
-    for item in value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
+    let Ok(dictionary) = qpx_http::structured_fields::parse_dictionary(value.as_bytes()) else {
+        return priority;
+    };
+    if let Some(qpx_http::structured_fields::ListEntry::Item(item)) = dictionary.get("u")
+        && let qpx_http::structured_fields::BareItem::Integer(value) = item.bare_item
+        && let Ok(urgency) = u8::try_from(value)
+        && urgency <= 7
     {
-        if let Some(raw) = item.strip_prefix("u=") {
-            if let Ok(urgency) = raw.parse::<u8>()
-                && urgency <= 7
-            {
-                priority.urgency = urgency;
-            }
-        } else if item == "i" || item == "i=?1" || item == "i=1" {
-            priority.incremental = true;
-        } else if item == "i=?0" || item == "i=0" {
-            priority.incremental = false;
-        }
+        priority.urgency = urgency;
+    }
+    if let Some(qpx_http::structured_fields::ListEntry::Item(item)) = dictionary.get("i")
+        && let qpx_http::structured_fields::BareItem::Boolean(incremental) = item.bare_item
+    {
+        priority.incremental = incremental;
     }
     priority
 }

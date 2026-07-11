@@ -7,7 +7,7 @@ use crate::http3::codec::h3_request_to_hyper;
 use crate::runtime::{ResolvedStreamingLimits, Runtime};
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
-use qpx_core::config::ConnectUdpConfig;
+use qpx_core::config::{ConnectIpConfig, ConnectUdpConfig};
 use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -18,6 +18,7 @@ pub(crate) struct ForwardQpxHandler {
     pub(crate) runtime: Runtime,
     pub(crate) listener_name: Arc<str>,
     pub(crate) connect_udp: ConnectUdpConfig,
+    pub(crate) connect_ip: ConnectIpConfig,
 }
 
 impl qpx_h3::RequestHandler for ForwardQpxHandler {

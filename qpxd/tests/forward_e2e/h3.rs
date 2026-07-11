@@ -150,6 +150,7 @@ runtime:
             "https://127.0.0.1:{}/extended",
             upstream_addr.port()
         ))
+        .header("sec-websocket-version", "13")
         .body(())?;
     let mut stream = qpx_h3::open_extended_connect_stream(
         endpoint,

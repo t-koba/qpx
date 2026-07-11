@@ -43,6 +43,7 @@ impl CacheRequestKey {
             scheme,
             authority,
             path_and_query,
+            content_digest: None,
         }))
     }
 
@@ -71,7 +72,14 @@ impl CacheRequestKey {
             scheme: self.scheme.clone(),
             authority: self.authority.clone(),
             path_and_query: self.path_and_query.clone(),
+            content_digest: self.content_digest.clone(),
         }
+    }
+
+    pub fn with_content_digest(&self, digest: impl Into<String>) -> Self {
+        let mut key = self.clone();
+        key.content_digest = Some(digest.into());
+        key
     }
 }
 
@@ -137,5 +145,26 @@ pub fn normalize_url_authority(url: &Url) -> Option<String> {
     match url.port() {
         Some(port) if port != default_port => Some(format_authority_host_port(host.as_str(), port)),
         _ => Some(host),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_content_digest_selects_variant_without_fragmenting_primary_index() {
+        let request = Request::builder()
+            .method("QUERY")
+            .uri("https://example.com/search")
+            .body(Body::empty())
+            .unwrap();
+        let key = CacheRequestKey::for_lookup(&request, "https")
+            .unwrap()
+            .unwrap();
+        let first = key.with_content_digest("sha-256:first");
+        let second = key.with_content_digest("sha-256:second");
+        assert_eq!(first.primary_hash(), second.primary_hash());
+        assert_ne!(first.content_digest, second.content_digest);
     }
 }

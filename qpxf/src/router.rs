@@ -1,4 +1,4 @@
-use crate::config::{BackendConfig, QpxfConfig};
+use crate::config::{BackendConfig, QpxfConfig, VerifiedContextMode};
 use crate::executor::Executor;
 use crate::executor::cgi::CgiExecutor;
 use crate::executor::persistent::{FastCgiExecutor, ScgiExecutor};
@@ -15,6 +15,7 @@ struct CompiledHandler {
     path_regex: Option<Regex>,
     host: Option<String>,
     executor: Arc<dyn Executor>,
+    verified_context: VerifiedContextMode,
 }
 
 pub type Router = CompiledRuntime;
@@ -55,6 +56,7 @@ impl CompiledRuntime {
                 path_regex,
                 host: h.r#match.host.clone(),
                 executor,
+                verified_context: h.verified_context,
             });
         }
         Ok(Self { handlers })
@@ -65,7 +67,7 @@ impl CompiledRuntime {
         &self,
         script_name: &str,
         host: Option<&str>,
-    ) -> Option<(Arc<dyn Executor>, Option<String>)> {
+    ) -> Option<(Arc<dyn Executor>, Option<String>, VerifiedContextMode)> {
         for h in &self.handlers {
             if let Some(prefix) = &h.path_prefix {
                 let prefix = prefix.as_str();
@@ -88,7 +90,11 @@ impl CompiledRuntime {
                     _ => continue,
                 }
             }
-            return Some((Arc::clone(&h.executor), h.path_prefix.clone()));
+            return Some((
+                Arc::clone(&h.executor),
+                h.path_prefix.clone(),
+                h.verified_context,
+            ));
         }
         None
     }

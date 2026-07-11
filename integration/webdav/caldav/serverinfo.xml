@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE serverinfo SYSTEM "serverinfo.dtd">
+<serverinfo>
+  <host>127.0.0.1</host>
+  <nonsslport>18086</nonsslport>
+  <sslport>18086</sslport>
+  <authtype>basic</authtype>
+  <features><feature>caldav</feature><feature>Extended MKCOL</feature></features>
+  <substitutions>
+    <substitution><key>$userid1:</key><value>unused</value></substitution>
+    <substitution><key>$pswd1:</key><value>unused</value></substitution>
+    <substitution><key>$calendarhome1:</key><value>/dav</value></substitution>
+  </substitutions>
+</serverinfo>

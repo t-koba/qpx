@@ -265,6 +265,31 @@ fn execution_plan_for_common(
         .and_then(|http| HttpResponseRuleEngine::new(http.response_rules.as_slice()).transpose())
         .transpose()?
         .map(Arc::new);
+    plan.forwarded = inputs
+        .http
+        .and_then(|http| http.forwarded.as_ref())
+        .map(compile_forwarded_policy)
+        .transpose()?
+        .map(Arc::new);
+    plan.api_metadata = inputs
+        .http
+        .and_then(|http| http.api_metadata.as_ref())
+        .map(compile_api_metadata)
+        .transpose()?
+        .map(Arc::new);
+    plan.hsts = inputs
+        .http
+        .and_then(|http| http.hsts.as_ref())
+        .map(|hsts| {
+            let policy = qpx_http::hsts::HstsPolicy {
+                max_age_seconds: hsts.max_age_seconds,
+                include_subdomains: hsts.include_subdomains,
+            };
+            policy.to_header_value()?;
+            Ok::<_, anyhow::Error>(policy)
+        })
+        .transpose()?;
+    plan.require_precondition = inputs.http.is_some_and(|http| http.require_precondition);
     if let Some(rules) = plan.response_rules.clone() {
         plan.flags.insert(PlanFlags::RESPONSE_RULES);
         if rules.any_rule_requires_response_body_observation()
@@ -288,6 +313,76 @@ fn execution_plan_for_common(
     }
     apply_module_flags(plan.modules.as_ref(), &mut plan.flags);
     Ok(plan)
+}
+
+fn compile_forwarded_policy(
+    config: &qpx_core::config::ForwardedConfig,
+) -> Result<CompiledForwardedPolicy> {
+    if config.trusted_peers.is_empty() {
+        return Err(anyhow!("http.forwarded.trusted_peers must not be empty"));
+    }
+    let trusted_peers = config
+        .trusted_peers
+        .iter()
+        .map(|peer| {
+            peer.parse::<cidr::IpCidr>().map_err(|error| {
+                anyhow!("invalid http.forwarded.trusted_peers CIDR {peer}: {error}")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let by = config.by.trim();
+    qpx_http::forwarded::ForwardedElement::new([("by".to_string(), by.to_string())])
+        .map_err(|error| anyhow!("invalid http.forwarded.by value: {error}"))?;
+    Ok(CompiledForwardedPolicy {
+        trusted_peers: trusted_peers.into(),
+        by: Arc::from(by),
+        untrusted_chain: config.untrusted_chain,
+    })
+}
+
+fn compile_api_metadata(
+    config: &qpx_core::config::ApiMetadataConfig,
+) -> Result<qpx_http::api_metadata::ApiMetadata> {
+    let deprecation = config
+        .deprecation_unix_seconds
+        .map(system_time_from_unix_seconds)
+        .transpose()?;
+    let sunset = config
+        .sunset_unix_seconds
+        .map(system_time_from_unix_seconds)
+        .transpose()?;
+    let links = config
+        .links
+        .iter()
+        .map(|link| {
+            let value =
+                qpx_http::api_metadata::LinkValue::new(link.target.clone(), link.relation.clone())?;
+            link.media_type
+                .as_ref()
+                .map(|media_type| value.clone().with_media_type(media_type.clone()))
+                .transpose()
+                .map(|with_type| with_type.unwrap_or(value))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let metadata = qpx_http::api_metadata::ApiMetadata {
+        deprecation,
+        sunset,
+        links,
+    };
+    metadata.apply(&mut http::HeaderMap::new())?;
+    Ok(metadata)
+}
+
+fn system_time_from_unix_seconds(seconds: i64) -> Result<std::time::SystemTime> {
+    if seconds >= 0 {
+        std::time::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(seconds as u64))
+            .ok_or_else(|| anyhow!("http.api_metadata date is outside SystemTime range"))
+    } else {
+        std::time::UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(seconds.unsigned_abs()))
+            .ok_or_else(|| anyhow!("http.api_metadata date is outside SystemTime range"))
+    }
 }
 
 fn merge_destination_resolution_override(

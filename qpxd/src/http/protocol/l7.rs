@@ -72,6 +72,17 @@ fn finalize_response_headers_common(
         );
     }
     ensure_date_header(response.headers_mut());
+    if let Err(error) =
+        qpx_http::proxy_status::append_proxy_status(response.headers_mut(), proxy_name)
+    {
+        warn!(error = %error, "discarding invalid inbound Proxy-Status field");
+        response.headers_mut().remove("proxy-status");
+        if let Err(error) =
+            qpx_http::proxy_status::append_proxy_status(response.headers_mut(), proxy_name)
+        {
+            warn!(error = %error, "failed to emit Proxy-Status field");
+        }
+    }
     append_via_for_version(response.headers_mut(), request_version, proxy_name);
 }
 

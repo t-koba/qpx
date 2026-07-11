@@ -78,6 +78,7 @@ pub(super) struct ReverseAccessControl {
     pub(super) route_timeout: Duration,
     pub(super) cache_bypass: bool,
     pub(super) decision_service_mirror_upstreams: Vec<String>,
+    pub(super) authorization_decision: Option<qpx_core::ipc::meta::AuthorizationDecisionContext>,
     pub(super) request_limit_ctx: RateLimitContext,
     pub(super) request_limits: crate::rate_limit::AppliedRateLimits,
 }
@@ -216,6 +217,8 @@ pub(super) struct ReverseIpcDispatchInput<'a> {
     pub(super) request_version: http::Version,
     pub(super) request_rpc: Option<&'a crate::http::rpc::RpcMatchContext>,
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
+    pub(super) authorization_decision:
+        Option<&'a qpx_core::ipc::meta::AuthorizationDecisionContext>,
     pub(super) route_headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
@@ -253,6 +256,8 @@ pub(super) struct ReversePostModuleInput<'a> {
     pub(super) request_version: http::Version,
     pub(super) request_rpc: Option<&'a crate::http::rpc::RpcMatchContext>,
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
+    pub(super) authorization_decision:
+        Option<&'a qpx_core::ipc::meta::AuthorizationDecisionContext>,
     pub(super) route_headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) override_upstream: Option<&'a str>,
     pub(super) decision_service_mirror_upstreams: Vec<String>,

@@ -311,15 +311,7 @@ pub(super) fn request_is_retryable(
 }
 
 fn is_retryable_method(method: &http::Method) -> bool {
-    matches!(
-        *method,
-        http::Method::GET
-            | http::Method::HEAD
-            | http::Method::OPTIONS
-            | http::Method::TRACE
-            | http::Method::PUT
-            | http::Method::DELETE
-    )
+    qpx_http::protocol::method::method_semantics(method).idempotent
 }
 
 fn request_may_have_body(req: &Request<Body>) -> bool {

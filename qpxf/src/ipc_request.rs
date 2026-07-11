@@ -94,7 +94,7 @@ pub(crate) fn plan_ipc_request(
         .and_then(host_only)
         .or_else(|| uri.authority().and_then(|a| host_only(a.as_str())));
 
-    let (executor, matched_prefix) =
+    let (executor, matched_prefix, verified_context) =
         match router.route(request_path.as_str(), route_host.as_deref()) {
             Some(v) => v,
             None => return Ok(Err(IpcPlainResponse::new(404, b"no handler matched"))),
@@ -134,6 +134,11 @@ pub(crate) fn plan_ipc_request(
         remote_port,
         http_headers: cgi_header_map(meta.headers),
         matched_prefix,
+        identity_env: verified_context_env(
+            meta.verified_identity.as_ref(),
+            meta.authorization_decision.as_ref(),
+            verified_context,
+        )?,
     };
 
     if cgi_req.content_length > max_stdin_bytes {
@@ -145,6 +150,56 @@ pub(crate) fn plan_ipc_request(
         cgi_req,
         expected_stdin_bytes: declared_stdin_bytes,
     }))
+}
+
+fn verified_context_env(
+    identity: Option<&qpx_core::ipc::meta::VerifiedIdentityContext>,
+    authorization: Option<&qpx_core::ipc::meta::AuthorizationDecisionContext>,
+    mode: crate::config::VerifiedContextMode,
+) -> Result<HashMap<String, String>> {
+    if mode == crate::config::VerifiedContextMode::None {
+        return Ok(HashMap::new());
+    }
+    let mut env = HashMap::new();
+    if let Some(identity) = identity {
+        if let Some(subject) = identity.subject.as_ref() {
+            env.insert("QPX_VERIFIED_SUBJECT".to_string(), subject.clone());
+        }
+        if let Some(issuer) = identity.issuer.as_ref() {
+            env.insert("QPX_VERIFIED_ISSUER".to_string(), issuer.clone());
+        }
+        if let Some(tenant) = identity.tenant.as_ref() {
+            env.insert("QPX_VERIFIED_TENANT".to_string(), tenant.clone());
+        }
+        if let Some(assurance) = identity.assurance.as_ref() {
+            env.insert("QPX_VERIFIED_ASSURANCE".to_string(), assurance.clone());
+        }
+        env.insert(
+            "QPX_VERIFIED_GROUPS_JSON".to_string(),
+            serde_json::to_string(&identity.groups)?,
+        );
+        env.insert(
+            "QPX_VERIFIED_ROLES_JSON".to_string(),
+            serde_json::to_string(&identity.roles)?,
+        );
+        env.insert(
+            "QPX_VERIFIED_ENTITLEMENTS_JSON".to_string(),
+            serde_json::to_string(&identity.entitlements)?,
+        );
+    }
+    if let Some(authorization) = authorization {
+        if let Some(decision_id) = authorization.external_decision_id.as_ref() {
+            env.insert("QPX_EXTERNAL_DECISION_ID".to_string(), decision_id.clone());
+        }
+        if let Some(policy_id) = authorization.policy_id.as_ref() {
+            env.insert("QPX_AUTHORIZATION_POLICY_ID".to_string(), policy_id.clone());
+        }
+        env.insert(
+            "QPX_AUTHORIZATION_POLICY_TAGS_JSON".to_string(),
+            serde_json::to_string(&authorization.policy_tags)?,
+        );
+    }
+    Ok(env)
 }
 
 fn split_script_name_path_info(path: &str, matched_prefix: Option<&str>) -> (String, String) {
@@ -248,7 +303,9 @@ fn cgi_header_map(headers: Vec<(String, String)>) -> HashMap<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{declared_content_length, split_script_name_path_info};
+    use super::{declared_content_length, split_script_name_path_info, verified_context_env};
+    use crate::config::VerifiedContextMode;
+    use qpx_core::ipc::meta::VerifiedIdentityContext;
 
     #[test]
     fn declared_content_length_accepts_repeated_equal_values() {
@@ -303,5 +360,22 @@ mod tests {
         let (script_name, path_info) = split_script_name_path_info("/app/foo", None);
         assert_eq!(script_name, "/app");
         assert_eq!(path_info, "/foo");
+    }
+
+    #[test]
+    fn verified_identity_requires_explicit_handler_opt_in() {
+        let identity = VerifiedIdentityContext {
+            subject: Some("alice".to_string()),
+            groups: vec!["finance".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            verified_context_env(Some(&identity), None, VerifiedContextMode::None)
+                .unwrap()
+                .is_empty()
+        );
+        let env = verified_context_env(Some(&identity), None, VerifiedContextMode::CgiEnv).unwrap();
+        assert_eq!(env["QPX_VERIFIED_SUBJECT"], "alice");
+        assert_eq!(env["QPX_VERIFIED_GROUPS_JSON"], "[\"finance\"]");
     }
 }

@@ -67,6 +67,14 @@ pub(crate) fn validate_local_response_config(
     local: Option<&LocalResponseConfig>,
     context: &str,
 ) -> Result<()> {
+    validate_local_response_config_with_capport(local, context, false)
+}
+
+pub(crate) fn validate_local_response_config_with_capport(
+    local: Option<&LocalResponseConfig>,
+    context: &str,
+    capport: bool,
+) -> Result<()> {
     let Some(local) = local else {
         return Ok(());
     };
@@ -78,10 +86,35 @@ pub(crate) fn validate_local_response_config(
             .map_err(|_| anyhow!("{context}.content_type has invalid header value"))?;
     }
     validate_header_map(&local.headers, &format!("{context}.headers"))?;
+    if local.status == 451 && !has_blocked_by_link(&local.headers) {
+        return Err(anyhow!(
+            "{context} status 451 requires a Link field with rel=blocked-by"
+        ));
+    }
+    if local.status == 511 && !capport {
+        return Err(anyhow!(
+            "{context} status 511 is reserved for an explicit CAPPORT route"
+        ));
+    }
     if let Some(rpc) = local.rpc.as_ref() {
         validate_rpc_local_response_config(rpc, &format!("{context}.rpc"))?;
     }
     Ok(())
+}
+
+fn has_blocked_by_link(headers: &std::collections::HashMap<String, String>) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("link")
+            && value.split(';').skip(1).any(|parameter| {
+                let parameter = parameter.trim();
+                parameter
+                    .strip_prefix("rel=")
+                    .map(|value| value.trim_matches('"').split_ascii_whitespace())
+                    .is_some_and(|mut relations| {
+                        relations.any(|relation| relation.eq_ignore_ascii_case("blocked-by"))
+                    })
+            })
+    })
 }
 
 pub(crate) fn validate_http_response_effects(

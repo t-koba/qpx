@@ -7,7 +7,8 @@ use super::rules::{
     has_cache_purge_module, validate_affinity_config, validate_cache_policy,
     validate_connection_filter_rules, validate_endpoint_lifecycle_config, validate_grpc_config,
     validate_health_check_config, validate_http_modules, validate_http_response_effects,
-    validate_identity_match_config, validate_lb_config, validate_match_config,
+    validate_identity_match_config, validate_lb_config,
+    validate_local_response_config_with_capport, validate_match_config,
     validate_policy_context_refs, validate_resilience_config, validate_sse_policy,
     validate_streaming_config, validate_xdp_config,
 };
@@ -372,6 +373,18 @@ pub(super) fn validate_reverse_edge_configs(
                 reverse_has_mtls_identity,
             )?;
             let has_local = route.target.is_local_response();
+            if let ReverseRouteTargetConfig::LocalResponse { response } = &route.target {
+                validate_local_response_config_with_capport(
+                    Some(response),
+                    &format!("reverse_edge {} route local_response", reverse_edge.name),
+                    route.http.as_ref().is_some_and(|http| http.capport),
+                )?;
+            } else if route.http.as_ref().is_some_and(|http| http.capport) {
+                return Err(anyhow!(
+                    "reverse_edge {} CAPPORT route must use a local_response target",
+                    reverse_edge.name
+                ));
+            }
             if let ReverseRouteTargetConfig::Ipc { config: ipc } = &route.target {
                 if ipc.address.trim().is_empty() {
                     return Err(anyhow!(
@@ -397,6 +410,20 @@ pub(super) fn validate_reverse_edge_configs(
                         reverse_edge.name
                     ));
                 }
+            }
+            if let ReverseRouteTargetConfig::Webdav { origin } = &route.target
+                && !config
+                    .http
+                    .origins
+                    .webdav
+                    .iter()
+                    .any(|candidate| candidate.name == *origin)
+            {
+                return Err(anyhow!(
+                    "reverse_edge {} route references unknown WebDAV origin: {}",
+                    reverse_edge.name,
+                    origin
+                ));
             }
             if let Some(lb) = route.target.lb() {
                 validate_lb_config(lb, &format!("reverse_edge {} route", reverse_edge.name))?;
@@ -549,7 +576,8 @@ pub(super) fn validate_reverse_edge_configs(
                     }
                 }
                 ReverseRouteTargetConfig::Ipc { .. }
-                | ReverseRouteTargetConfig::LocalResponse { .. } => {}
+                | ReverseRouteTargetConfig::LocalResponse { .. }
+                | ReverseRouteTargetConfig::Webdav { .. } => {}
             }
             for mirror in &route.mirrors {
                 if mirror.percent == 0 || mirror.percent > 100 {

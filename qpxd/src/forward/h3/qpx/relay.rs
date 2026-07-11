@@ -1,11 +1,15 @@
 use crate::http3::capsule::{
-    CapsuleBuffer, decode_quic_varint, encode_datagram_capsule_context_header,
-    encode_datagram_capsule_header,
+    CapsuleBuffer, decode_quic_varint, encode_capsule_header,
+    encode_datagram_capsule_context_header, encode_datagram_capsule_header,
 };
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use qpx_core::config::ConnectUdpConfig;
+use qpx_http::connect_ip::{
+    ADDRESS_ASSIGN_CAPSULE, ADDRESS_REQUEST_CAPSULE, ConnectIpPacketPolicy,
+    ROUTE_ADVERTISEMENT_CAPSULE, decode_ip_prefix_records, decode_ip_routes,
+};
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, sleep, timeout};
 use tracing::warn;
@@ -84,6 +88,241 @@ pub(super) async fn relay_qpx_extended_connect_stream(
         }
     }
     Ok(())
+}
+
+pub(super) struct ChainedConnectIpRelay {
+    pub downstream: qpx_h3::RequestStream,
+    pub downstream_datagrams: Option<qpx_h3::StreamDatagrams>,
+    pub upstream: qpx_h3::RequestStream,
+    pub upstream_datagrams: Option<qpx_h3::StreamDatagrams>,
+    pub downstream_policy: ConnectIpPacketPolicy,
+    pub upstream_policy: ConnectIpPacketPolicy,
+    pub max_capsule_buffer_bytes: usize,
+    pub idle_timeout: Duration,
+}
+
+pub(super) async fn relay_qpx_connect_ip_stream_chained(
+    input: ChainedConnectIpRelay,
+) -> Result<()> {
+    let ChainedConnectIpRelay {
+        downstream,
+        mut downstream_datagrams,
+        upstream,
+        mut upstream_datagrams,
+        downstream_policy,
+        upstream_policy,
+        max_capsule_buffer_bytes,
+        idle_timeout,
+    } = input;
+    let (mut downstream_send, mut downstream_recv) = downstream.split();
+    let (mut upstream_send, mut upstream_recv) = upstream.split();
+    let mut downstream_capsules = CapsuleBuffer::new();
+    let mut upstream_capsules = CapsuleBuffer::new();
+    let mut downstream_scratch = BytesMut::new();
+    let mut upstream_scratch = BytesMut::new();
+    let deadline = tokio::time::sleep(idle_timeout);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            chunk = downstream_recv.recv_data() => {
+                let Some(chunk) = chunk? else { break };
+                downstream_capsules.push(chunk, max_capsule_buffer_bytes)?;
+                while let Some((capsule_type, payload)) = downstream_capsules.take_next()? {
+                    validate_connect_ip_capsule(capsule_type, &payload, &downstream_policy)?;
+                    upstream_send.send_data(encode_capsule_header(capsule_type, payload.len())?).await?;
+                    if !payload.is_empty() {
+                        upstream_send.send_data(payload).await?;
+                    }
+                }
+                deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
+            }
+            chunk = upstream_recv.recv_data() => {
+                let Some(chunk) = chunk? else { break };
+                upstream_capsules.push(chunk, max_capsule_buffer_bytes)?;
+                while let Some((capsule_type, payload)) = upstream_capsules.take_next()? {
+                    validate_connect_ip_capsule(capsule_type, &payload, &upstream_policy)?;
+                    downstream_send.send_data(encode_capsule_header(capsule_type, payload.len())?).await?;
+                    if !payload.is_empty() {
+                        downstream_send.send_data(payload).await?;
+                    }
+                }
+                deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
+            }
+            payload = async {
+                if let Some(datagrams) = downstream_datagrams.as_mut() {
+                    datagrams.receiver.recv().await
+                } else {
+                    std::future::pending::<Option<Bytes>>().await
+                }
+            } => {
+                let Some(payload) = payload else { break };
+                validate_connect_ip_datagram(&payload, &downstream_policy)?;
+                if let Some(datagrams) = upstream_datagrams.as_mut() {
+                    datagrams.sender.send_unprefixed_datagram_with_scratch(payload, &mut upstream_scratch)?;
+                } else {
+                    let header = encode_datagram_capsule_header(payload.len())?;
+                    upstream_send.send_data(header).await?;
+                    upstream_send.send_data(payload).await?;
+                }
+                deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
+            }
+            payload = async {
+                if let Some(datagrams) = upstream_datagrams.as_mut() {
+                    datagrams.receiver.recv().await
+                } else {
+                    std::future::pending::<Option<Bytes>>().await
+                }
+            } => {
+                let Some(payload) = payload else { break };
+                validate_connect_ip_datagram(&payload, &upstream_policy)?;
+                if let Some(datagrams) = downstream_datagrams.as_mut() {
+                    datagrams.sender.send_unprefixed_datagram_with_scratch(payload, &mut downstream_scratch)?;
+                } else {
+                    let header = encode_datagram_capsule_header(payload.len())?;
+                    downstream_send.send_data(header).await?;
+                    downstream_send.send_data(payload).await?;
+                }
+                deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
+            }
+        }
+    }
+    let _ = upstream_send.finish().await;
+    let _ = downstream_send.finish().await;
+    Ok(())
+}
+
+pub(super) async fn relay_qpx_connect_ip_device(
+    req_stream: qpx_h3::RequestStream,
+    mut datagrams: Option<qpx_h3::StreamDatagrams>,
+    device: crate::connect_ip::SystemIpDevice,
+    downstream_policy: ConnectIpPacketPolicy,
+    upstream_policy: ConnectIpPacketPolicy,
+    max_capsule_buffer_bytes: usize,
+    idle_timeout: Duration,
+) -> Result<()> {
+    let (mut req_send, mut req_recv) = req_stream.split();
+    let (mut device_reader, mut device_writer) = device.split();
+    let mut capsules = CapsuleBuffer::new();
+    let mut datagram_scratch = BytesMut::new();
+    let mut packet = vec![0u8; 65_535];
+    let deadline = tokio::time::sleep(idle_timeout);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            chunk = req_recv.recv_data() => {
+                let Some(chunk) = chunk? else { break };
+                capsules.push(chunk, max_capsule_buffer_bytes)?;
+                while let Some((capsule_type, payload)) = capsules.take_next()? {
+                    validate_connect_ip_capsule(capsule_type, &payload, &downstream_policy)?;
+                    if capsule_type == 0 {
+                        let (_, offset) = decode_quic_varint(&payload)
+                            .ok_or_else(|| anyhow!("CONNECT-IP capsule context is invalid"))?;
+                        device_writer.send_packet(&payload[offset..]).await?;
+                    } else if capsule_type == ADDRESS_REQUEST_CAPSULE {
+                        let assignments = decode_ip_prefix_records(&payload, true)?;
+                        let payload = qpx_http::connect_ip::encode_ip_prefix_records(&assignments)?;
+                        req_send
+                            .send_data(encode_capsule_header(
+                                ADDRESS_ASSIGN_CAPSULE,
+                                payload.len(),
+                            )?)
+                            .await?;
+                        req_send.send_data(Bytes::from(payload)).await?;
+                    }
+                }
+                deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
+            }
+            payload = async {
+                if let Some(datagrams) = datagrams.as_mut() {
+                    datagrams.receiver.recv().await
+                } else {
+                    std::future::pending::<Option<Bytes>>().await
+                }
+            } => {
+                let Some(payload) = payload else { break };
+                validate_connect_ip_datagram(&payload, &downstream_policy)?;
+                let (_, offset) = decode_quic_varint(&payload)
+                    .ok_or_else(|| anyhow!("CONNECT-IP datagram context is invalid"))?;
+                device_writer.send_packet(&payload[offset..]).await?;
+                deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
+            }
+            read = device_reader.recv_packet(&mut packet) => {
+                let read = read?;
+                if read == 0 {
+                    break;
+                }
+                upstream_policy.validate(&packet[..read])?;
+                let mut payload = BytesMut::with_capacity(read + 1);
+                payload.extend_from_slice(&[0]);
+                payload.extend_from_slice(&packet[..read]);
+                let payload = payload.freeze();
+                let mut sent = false;
+                if let Some(datagrams) = datagrams.as_mut()
+                    && datagrams
+                        .sender
+                        .send_unprefixed_datagram_with_scratch(payload.clone(), &mut datagram_scratch)
+                        .is_ok()
+                {
+                    sent = true;
+                }
+                if !sent {
+                    req_send.send_data(encode_datagram_capsule_header(payload.len())?).await?;
+                    req_send.send_data(payload).await?;
+                }
+                deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
+            }
+        }
+    }
+    let _ = req_send.finish().await;
+    Ok(())
+}
+
+fn validate_connect_ip_datagram(payload: &[u8], policy: &ConnectIpPacketPolicy) -> Result<()> {
+    let (context_id, offset) = decode_quic_varint(payload)
+        .ok_or_else(|| anyhow!("CONNECT-IP datagram has an invalid context ID"))?;
+    if context_id != 0 || offset >= payload.len() {
+        return Err(anyhow!("CONNECT-IP datagram context must be zero"));
+    }
+    policy.validate(&payload[offset..])?;
+    Ok(())
+}
+
+fn validate_connect_ip_capsule(
+    capsule_type: u64,
+    payload: &[u8],
+    policy: &ConnectIpPacketPolicy,
+) -> Result<()> {
+    match capsule_type {
+        0 => validate_connect_ip_datagram(payload, policy),
+        ADDRESS_ASSIGN_CAPSULE | ADDRESS_REQUEST_CAPSULE => {
+            let records =
+                decode_ip_prefix_records(payload, capsule_type == ADDRESS_REQUEST_CAPSULE)?;
+            if records
+                .iter()
+                .any(|record| !policy.allows_source_prefix(record.address, record.prefix_len))
+            {
+                return Err(anyhow!(
+                    "CONNECT-IP address assignment is outside the source CIDR policy"
+                ));
+            }
+            Ok(())
+        }
+        ROUTE_ADVERTISEMENT_CAPSULE => {
+            let routes = decode_ip_routes(payload)?;
+            if routes
+                .iter()
+                .any(|route| !policy.allows_destination_range(route.start, route.end))
+            {
+                return Err(anyhow!(
+                    "CONNECT-IP route advertisement is outside the destination CIDR policy"
+                ));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 pub(super) async fn relay_qpx_connect_udp_stream(
@@ -384,4 +623,80 @@ async fn apply_connect_udp_bandwidth_controls(
         sleep(delay).await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod connect_ip_tests {
+    use super::*;
+    use qpx_http::connect_ip::{
+        IpPrefixRecord, IpRouteRecord, encode_ip_prefix_records, encode_ip_routes,
+    };
+
+    fn policy() -> ConnectIpPacketPolicy {
+        ConnectIpPacketPolicy::new(
+            vec!["192.0.2.0/24".parse().unwrap()],
+            vec!["198.51.100.0/24".parse().unwrap()],
+            1280,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn connect_ip_relay_validates_datagram_packet_policy() {
+        let mut payload = vec![0, 0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0];
+        payload.extend_from_slice(&[192, 0, 2, 1, 198, 51, 100, 2]);
+        assert!(validate_connect_ip_datagram(&payload, &policy()).is_ok());
+        payload[18] = 113;
+        assert!(validate_connect_ip_datagram(&payload, &policy()).is_err());
+    }
+
+    #[test]
+    fn connect_ip_relay_bounds_assignment_and_route_capsules() {
+        let assignment = encode_ip_prefix_records(&[IpPrefixRecord {
+            request_id: 1,
+            address: "192.0.2.0".parse().unwrap(),
+            prefix_len: 24,
+        }])
+        .unwrap();
+        assert!(
+            validate_connect_ip_capsule(ADDRESS_ASSIGN_CAPSULE, &assignment, &policy()).is_ok()
+        );
+        let oversized_assignment = encode_ip_prefix_records(&[IpPrefixRecord {
+            request_id: 2,
+            address: "192.0.2.0".parse().unwrap(),
+            prefix_len: 23,
+        }])
+        .unwrap();
+        assert!(
+            validate_connect_ip_capsule(ADDRESS_ASSIGN_CAPSULE, &oversized_assignment, &policy())
+                .is_err()
+        );
+        let route = encode_ip_routes(&[IpRouteRecord {
+            start: "198.51.100.1".parse().unwrap(),
+            end: "198.51.100.254".parse().unwrap(),
+            protocol: 0,
+        }])
+        .unwrap();
+        assert!(
+            validate_connect_ip_capsule(ROUTE_ADVERTISEMENT_CAPSULE, &route, &policy()).is_ok()
+        );
+        let denied = encode_ip_routes(&[IpRouteRecord {
+            start: "203.0.113.1".parse().unwrap(),
+            end: "203.0.113.2".parse().unwrap(),
+            protocol: 0,
+        }])
+        .unwrap();
+        assert!(
+            validate_connect_ip_capsule(ROUTE_ADVERTISEMENT_CAPSULE, &denied, &policy()).is_err()
+        );
+        let crossing = encode_ip_routes(&[IpRouteRecord {
+            start: "198.51.100.254".parse().unwrap(),
+            end: "198.51.101.1".parse().unwrap(),
+            protocol: 0,
+        }])
+        .unwrap();
+        assert!(
+            validate_connect_ip_capsule(ROUTE_ADVERTISEMENT_CAPSULE, &crossing, &policy()).is_err()
+        );
+    }
 }

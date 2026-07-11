@@ -9,6 +9,7 @@ use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
 use qpx_core::config::{
     ReverseEdgeConfig, ReverseRouteTargetConfig, UpstreamConfig, UpstreamDiscoveryConfig,
+    WebDavOriginConfig,
 };
 use qpx_core::matchers::CompiledMatch;
 use qpx_core::prefilter::{MatchPrefilterContext, MatchPrefilterIndex, StringInterner};
@@ -148,6 +149,7 @@ pub(super) struct HttpRoute {
     pub(super) local_response: Option<qpx_core::config::LocalResponseConfig>,
     pub(super) headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) ipc: Option<IpcUpstream>,
+    pub(super) webdav: Option<Arc<WebDavOriginService>>,
     backends: Vec<WeightedBackend>,
     mirrors: Vec<MirrorTarget>,
     pub(super) response_rules: Option<Arc<HttpResponseRuleEngine>>,
@@ -156,6 +158,13 @@ pub(super) struct HttpRoute {
     pub(super) affinity: ReverseAffinityRuntime,
     pub(super) policy: RoutePolicy,
 }
+
+pub(super) type WebDavOriginService = qpx_webdav::WebDavService<
+    qpx_webdav::PersistentWebDavStore<
+        qpx_webdav::FileSystemDataStore,
+        qpx_webdav::RedbMetadataStore,
+    >,
+>;
 
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(super) struct TlsPassthroughRoute {
@@ -201,6 +210,7 @@ impl ReverseRouter {
         Self::new_with_plan(
             config,
             upstream_configs,
+            &[],
             http_module_registry,
             compiled_edge,
         )
@@ -209,6 +219,7 @@ impl ReverseRouter {
     pub(super) fn new_with_plan(
         config: ReverseEdgeConfig,
         upstream_configs: &[UpstreamConfig],
+        webdav_origins: &[WebDavOriginConfig],
         http_module_registry: &HttpModuleRegistry,
         compiled_edge: &CompiledReverseEdge,
     ) -> Result<Self> {
@@ -232,6 +243,10 @@ impl ReverseRouter {
         let upstreams = upstream_configs
             .iter()
             .map(|cfg| (cfg.name.as_str(), cfg))
+            .collect::<HashMap<_, _>>();
+        let webdav_origins = webdav_origins
+            .iter()
+            .map(|origin| (origin.name.as_str(), origin))
             .collect::<HashMap<_, _>>();
         let mut interner = StringInterner::default();
         let mut http_routes = Vec::with_capacity(config.routes.len());
@@ -278,6 +293,7 @@ impl ReverseRouter {
             let (route, hint) = HttpRoute::from_config(
                 route,
                 &upstreams,
+                &webdav_origins,
                 &mut interner,
                 http_module_registry,
                 compiled_route,
@@ -568,6 +584,7 @@ fn reverse_target_kind(target: &ReverseRouteTargetConfig) -> &'static str {
         ReverseRouteTargetConfig::Weighted { .. } => "weighted",
         ReverseRouteTargetConfig::Ipc { .. } => "ipc",
         ReverseRouteTargetConfig::LocalResponse { .. } => "local_response",
+        ReverseRouteTargetConfig::Webdav { .. } => "webdav",
     }
 }
 

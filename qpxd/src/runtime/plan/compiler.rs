@@ -66,6 +66,9 @@ fn compile_reverse_route_target(target: &ReverseRouteTargetConfig) -> CompiledRe
                 status: response.status,
             }
         }
+        ReverseRouteTargetConfig::Webdav { origin } => CompiledReverseRouteTarget::Webdav {
+            origin: Arc::from(origin.as_str()),
+        },
     }
 }
 

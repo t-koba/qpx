@@ -188,7 +188,7 @@ pub(super) async fn complete_transparent_request(
         return Ok(response);
     }
     strip_untrusted_identity_headers(&state, &effective_policy, remote_ip, req.headers_mut())?;
-    let websocket = is_websocket_upgrade(req.headers());
+    let websocket = is_websocket_upgrade(req.method(), req.headers())?;
     let policy_headers = policy.headers.as_deref();
     prepare_request_with_headers_in_place(&mut req, proxy_name, policy_headers, websocket);
     let module_init = transparent_module_init(proxy_name, listener_name, remote_ip, &identity);

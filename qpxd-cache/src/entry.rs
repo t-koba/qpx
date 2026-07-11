@@ -1,6 +1,8 @@
 use super::freshness::active_range;
 use super::freshness::current_age_secs;
-use super::types::{ByteRangeSpec, CACHE_HEADER, CachedResponseEnvelope, RequestDirectives};
+use super::types::{
+    ByteRangeSpec, CACHE_HEADER, CachedResponseEnvelope, RequestDirectives, cache_status_header,
+};
 use anyhow::Result;
 use http::header::{ACCEPT_RANGES, AGE, CONTENT_LENGTH, CONTENT_RANGE};
 use hyper::{Method, Response, StatusCode};
@@ -145,7 +147,7 @@ pub fn precondition_failed_response(cache_state: &'static str) -> Result<Respons
         .body(Body::empty())?;
     response
         .headers_mut()
-        .insert(CACHE_HEADER, http::HeaderValue::from_static(cache_state));
+        .insert(CACHE_HEADER, cache_status_header(cache_state, None)?);
     Ok(response)
 }
 
@@ -269,10 +271,15 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
     if let Ok(age_header) = http::HeaderValue::from_str(age.as_str()) {
         response.headers_mut().insert(AGE, age_header);
     }
-    response.headers_mut().insert(
-        CACHE_HEADER,
-        http::HeaderValue::from_static(params.cache_state),
-    );
+    let ttl = (params.cache_state == "HIT").then(|| {
+        params
+            .envelope
+            .freshness_lifetime_secs
+            .saturating_sub(current_age_secs(params.envelope, params.now_ms))
+    });
+    response
+        .headers_mut()
+        .insert(CACHE_HEADER, cache_status_header(params.cache_state, ttl)?);
     let content_length = params.content_length_override.unwrap_or(params.body_len);
     if let Ok(length) = http::HeaderValue::from_str(content_length.to_string().as_str()) {
         response.headers_mut().insert(CONTENT_LENGTH, length);

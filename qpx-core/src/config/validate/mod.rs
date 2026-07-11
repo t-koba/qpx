@@ -5,6 +5,7 @@ use super::types::Config;
 mod core;
 mod listeners;
 mod observability;
+mod origin;
 mod reverse;
 mod rules;
 mod security;
@@ -20,6 +21,7 @@ use observability::{
     validate_exporter_config, validate_metrics_config, validate_otel_config,
     validate_system_log_config,
 };
+use origin::validate_origins;
 use reverse::validate_reverse_edge_configs;
 use security::{
     validate_auth_config, validate_decision_service_configs,
@@ -74,6 +76,7 @@ pub(super) fn validate_config(config: &Config) -> Result<()> {
     )?;
     let http_guard_profiles = validate_http_guard_profiles(&config.http.guard_profiles)?;
     validate_rate_limit_profiles(&config.traffic.rate_limit_profiles)?;
+    validate_origins(&config.http.origins)?;
     let upstreams = validate_upstream_configs(config, &upstream_trust_profiles)?;
     let cache_backends = validate_cache_backends(&config.caches)?;
     validate_ingress_edge_configs(

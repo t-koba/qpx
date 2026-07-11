@@ -50,6 +50,7 @@ auth-ldap = ["auth-basic", "qpx-auth/ldap-auth"]
 qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
 qpx-http = { path = "../qpx-http" }
 qpxd-cache = { path = "../qpxd-cache" }
+qpx-webdav = { path = "../qpx-webdav" }
 qpx-auth = { path = "../qpx-auth", default-features = false, optional = true }
 qpx-acme = { path = "../qpx-acme", optional = true }
 qpx-observability = { path = "../qpx-observability" }
@@ -125,6 +126,7 @@ windows-sys = { workspace = true, features = [
   "Win32_Networking_WinSock",
   "Win32_Security",
   "Win32_System_Threading",
+  "Win32_System_LibraryLoader",
 ] }
 
 [dev-dependencies]
@@ -134,6 +136,7 @@ tracing-subscriber.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true
 criterion.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "streaming_throughput"

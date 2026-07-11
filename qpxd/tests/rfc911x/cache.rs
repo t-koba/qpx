@@ -52,13 +52,13 @@ caches:
     let origin_uri = format!("http://{origin_addr}/cacheable");
     let h1_req = format!("GET {origin_uri} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
     let (_, headers1, _) = send_http1_and_read_response(proxy_addr, h1_req.as_bytes()).await?;
-    assert_header_present_contains(&headers1, "x-qpx-cache", "MISS");
+    assert_header_present_contains(&headers1, "cache-status", "fwd=miss");
     if origin_hits.load(Ordering::SeqCst) != 1 {
         return Err(anyhow!("expected exactly 1 origin hit after first request"));
     }
     wait_for_cache_store_entries(cache_store.clone(), 3).await?;
     let (_, headers2, _) = send_http1_and_read_response(proxy_addr, h1_req.as_bytes()).await?;
-    assert_header_present_contains(&headers2, "x-qpx-cache", "HIT");
+    assert_header_present_contains(&headers2, "cache-status", "hit");
     if origin_hits.load(Ordering::SeqCst) != 1 {
         return Err(anyhow!("expected cache HIT to avoid origin"));
     }
@@ -67,9 +67,9 @@ caches:
     let cookie_uri = format!("http://{origin_addr}/cookie");
     let cookie_req = format!("GET {cookie_uri} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
     let (_, headers3, _) = send_http1_and_read_response(proxy_addr, cookie_req.as_bytes()).await?;
-    assert_header_present_contains(&headers3, "x-qpx-cache", "MISS");
+    assert_header_present_contains(&headers3, "cache-status", "fwd=miss");
     let (_, headers4, _) = send_http1_and_read_response(proxy_addr, cookie_req.as_bytes()).await?;
-    assert_header_present_contains(&headers4, "x-qpx-cache", "MISS");
+    assert_header_present_contains(&headers4, "cache-status", "fwd=miss");
     if origin_hits.load(Ordering::SeqCst) < 3 {
         return Err(anyhow!(
             "expected Set-Cookie responses to bypass storage and hit origin twice"

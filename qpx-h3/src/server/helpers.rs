@@ -88,6 +88,7 @@ pub(super) async fn send_simple_response(
 pub(super) fn parse_protocol(protocol: &str) -> Protocol {
     match protocol {
         "connect-udp" => Protocol::ConnectUdp,
+        "connect-ip" => Protocol::ConnectIp,
         "webtransport" => Protocol::WebTransport,
         other => Protocol::Other(other.to_string()),
     }

@@ -121,10 +121,8 @@ pub(in crate::upstream::origin::http_backend) async fn forget_alt_svc_h3_endpoin
 pub(in crate::upstream::origin::http_backend) fn request_can_use_alt_svc_h3(
     req: &Request<Body>,
 ) -> bool {
-    matches!(
-        *req.method(),
-        http::Method::GET | http::Method::HEAD | http::Method::OPTIONS | http::Method::TRACE
-    ) && req.headers().get(http::header::TRANSFER_ENCODING).is_none()
+    qpx_http::protocol::method::method_semantics(req.method()).safe
+        && req.headers().get(http::header::TRANSFER_ENCODING).is_none()
         && http_body::Body::is_end_stream(req.body())
         && content_length_is_zero_or_absent(req.headers())
 }

@@ -66,6 +66,7 @@ fn gateway_env_does_not_duplicate_content_headers_as_http_vars() {
         remote_port: None,
         http_headers: headers,
         matched_prefix: None,
+        identity_env: HashMap::new(),
     };
 
     let env = build_gateway_env(&req, Some(5));
@@ -524,6 +525,7 @@ fn test_cgi_request_with_path(script_name: &str, path_info: &str) -> CgiRequest 
         remote_port: None,
         http_headers: HashMap::new(),
         matched_prefix: None,
+        identity_env: HashMap::new(),
     }
 }
 

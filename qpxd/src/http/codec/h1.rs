@@ -32,6 +32,7 @@ enum RequestBodyKind {
     Chunked,
 }
 
+#[derive(Debug)]
 struct ParsedRequestHead {
     method: Method,
     uri: Uri,
@@ -96,10 +97,15 @@ where
                 Ok(Some(parsed)) => parsed,
                 Ok(None) => return Ok(()),
                 Err(err) => {
+                    let status = if err.downcast_ref::<RequestHeaderFieldsTooLarge>().is_some() {
+                        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    };
                     write_status_and_headers(
                         &mut write_half,
                         Version::HTTP_11,
-                        StatusCode::BAD_REQUEST,
+                        status,
                         &HeaderMap::new(),
                         ConnectionHeaderMode::Close,
                     )
@@ -277,7 +283,14 @@ where
     loop {
         let mut headers = [httparse::EMPTY_HEADER; 128];
         let mut request = httparse::Request::new(&mut headers);
-        match request.parse(buf.as_ref())? {
+        let parsed = match request.parse(buf.as_ref()) {
+            Ok(parsed) => parsed,
+            Err(httparse::Error::TooManyHeaders) => {
+                return Err(RequestHeaderFieldsTooLarge.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        match parsed {
             httparse::Status::Complete(consumed) => {
                 let method = request
                     .method
@@ -314,9 +327,7 @@ where
             }
             httparse::Status::Partial => {
                 if buf.len() >= MAX_HEADER_BYTES {
-                    return Err(anyhow!(
-                        "HTTP/1 request header block exceeded configured limit"
-                    ));
+                    return Err(RequestHeaderFieldsTooLarge.into());
                 }
                 let n = match timeout(header_read_timeout, reader.read_buf(buf)).await {
                     Ok(Ok(n)) => n,
@@ -333,6 +344,10 @@ where
         }
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("HTTP/1 request header fields exceeded configured limits")]
+struct RequestHeaderFieldsTooLarge;
 
 #[doc(hidden)]
 pub(crate) fn fuzz_parse_http1_request_head(bytes: &[u8]) {

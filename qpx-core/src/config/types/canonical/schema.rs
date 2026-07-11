@@ -19,6 +19,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
             "telemetry": {"type": "object"},
             "security": {"type": "object"},
             "http": {"type": "object"},
+            "origins": {"type": "object"},
             "traffic": {"type": "object"},
             "upstreams": {"type": "array", "items": {"type": "object"}},
             "caches": {"type": "array", "items": {"type": "object"}},
@@ -61,6 +62,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                     {"type": "object", "required": ["type", "backends"], "additionalProperties": false, "properties": {"type": {"const": "weighted"}, "backends": {"type": "array", "items": {"type": "object"}}}},
                     {"type": "object", "required": ["type", "endpoint"], "additionalProperties": false, "properties": {"type": {"const": "ipc"}, "endpoint": {"type": "string"}, "mode": {"enum": ["shm", "tcp"]}, "timeout_ms": {"type": "integer", "minimum": 1}, "body": {"$ref": "#/$defs/ipcBodyLimit"}}},
                     {"type": "object", "required": ["type", "response"], "additionalProperties": false, "properties": {"type": {"const": "local_response"}, "response": {"type": "object"}}},
+                    {"type": "object", "required": ["type", "origin"], "additionalProperties": false, "properties": {"type": {"const": "webdav"}, "origin": {"type": "string", "minLength": 1}}},
                     {"type": "object", "required": ["type", "upstreams"], "additionalProperties": false, "properties": {"type": {"const": "tls_passthrough"}, "upstreams": {"type": "array", "items": {"type": "string"}}, "lb": {"type": "string"}}}
                 ]
             },
@@ -94,7 +96,46 @@ pub fn canonical_schema_value() -> serde_json::Value {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "response_rules": {"type": "array", "items": {"type": "object"}}
+                    "response_rules": {"type": "array", "items": {"type": "object"}},
+                    "require_precondition": {"type": "boolean"},
+                    "capport": {"type": "boolean"},
+                    "forwarded": {
+                        "type": "object",
+                        "required": ["trusted_peers", "by"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "trusted_peers": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                            "by": {"type": "string", "minLength": 1},
+                            "untrusted_chain": {"enum": ["discard", "reject"]}
+                        }
+                    },
+                    "api_metadata": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "deprecation_unix_seconds": {"type": "integer"},
+                            "sunset_unix_seconds": {"type": "integer"},
+                            "links": {"type": "array", "items": {
+                                "type": "object",
+                                "required": ["target", "relation"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "target": {"type": "string", "minLength": 1},
+                                    "relation": {"type": "string", "minLength": 1},
+                                    "media_type": {"type": "string", "minLength": 1}
+                                }
+                            }}
+                        }
+                    },
+                    "hsts": {
+                        "type": "object",
+                        "required": ["max_age_seconds"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "max_age_seconds": {"type": "integer", "minimum": 1},
+                            "include_subdomains": {"type": "boolean"}
+                        }
+                    }
                 }
             },
             "streamingConfig": {
@@ -167,6 +208,28 @@ pub fn canonical_schema_value() -> serde_json::Value {
                 "properties": {
                     "guard_profiles": {"type": "array", "items": {"type": "object"}},
                     "module_chains": {"type": "array", "items": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "modules": {"type": "array", "items": {"$ref": "#/$defs/httpModule"}}}}}
+                }
+            },
+            "origins": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "webdav": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["name", "root", "metadata"],
+                            "properties": {
+                                "name": {"type": "string", "minLength": 1},
+                                "root": {"type": "string", "minLength": 1},
+                                "metadata": {"type": "string", "minLength": 1},
+                                "max_depth": {"type": "integer", "minimum": 1},
+                                "max_multistatus_entries": {"type": "integer", "minimum": 1},
+                                "max_lock_timeout_seconds": {"type": "integer", "minimum": 1}
+                            }
+                        }
+                    }
                 }
             },
             "traffic": {"type": "object"},

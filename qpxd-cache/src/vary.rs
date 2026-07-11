@@ -51,11 +51,17 @@ pub fn request_header_values(headers: &http::HeaderMap, name: &str) -> String {
     values.join(",")
 }
 
-pub fn matches_vary(request_headers: &http::HeaderMap, envelope: &CachedResponseEnvelope) -> bool {
-    envelope
-        .vary_values
-        .iter()
-        .all(|(name, value)| request_header_values(request_headers, name.as_str()) == *value)
+pub fn matches_vary(
+    request_headers: &http::HeaderMap,
+    content_digest: Option<&str>,
+    envelope: &CachedResponseEnvelope,
+) -> bool {
+    envelope.vary_values.iter().all(|(name, value)| {
+        if name == "@query-content" {
+            return content_digest == Some(value.as_str());
+        }
+        request_header_values(request_headers, name.as_str()) == *value
+    })
 }
 
 pub fn variant_storage_key(primary: &str, vary_values: &[(String, String)]) -> String {

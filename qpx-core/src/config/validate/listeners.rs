@@ -365,6 +365,73 @@ pub(super) fn validate_ingress_edge_configs(
                     }
                 }
             }
+            if let Some(connect_ip) = http3.connect_ip.as_ref() {
+                if !connect_ip.uri_template.is_ascii()
+                    || !connect_ip.uri_template.starts_with("https://")
+                    || !connect_ip.uri_template.contains("{target}")
+                    || !connect_ip.uri_template.contains("{ipproto}")
+                {
+                    return Err(anyhow!(
+                        "edge {} http3.connect_ip.uri_template must be an ASCII HTTPS template containing target and ipproto",
+                        edge.name
+                    ));
+                }
+                if connect_ip.mtu < 1280 {
+                    return Err(anyhow!(
+                        "edge {} http3.connect_ip.mtu must be >= 1280",
+                        edge.name
+                    ));
+                }
+                if connect_ip.idle_timeout_secs == 0 || connect_ip.max_capsule_buffer_bytes == 0 {
+                    return Err(anyhow!(
+                        "edge {} http3.connect_ip limits must be greater than zero",
+                        edge.name
+                    ));
+                }
+                for cidr in connect_ip
+                    .allowed_source_cidrs
+                    .iter()
+                    .chain(&connect_ip.allowed_destination_cidrs)
+                {
+                    cidr.parse::<cidr::IpCidr>().map_err(|error| {
+                        anyhow!(
+                            "edge {} http3.connect_ip CIDR {} is invalid: {}",
+                            edge.name,
+                            cidr,
+                            error
+                        )
+                    })?;
+                }
+                if connect_ip.enabled
+                    && (connect_ip.allowed_source_cidrs.is_empty()
+                        || connect_ip.allowed_destination_cidrs.is_empty())
+                {
+                    return Err(anyhow!(
+                        "edge {} enabled CONNECT-IP requires explicit source and destination CIDR allowlists",
+                        edge.name
+                    ));
+                }
+                if connect_ip
+                    .device
+                    .as_ref()
+                    .is_some_and(|device| device.trim().is_empty())
+                {
+                    return Err(anyhow!(
+                        "edge {} http3.connect_ip.device must not be empty",
+                        edge.name
+                    ));
+                }
+                if connect_ip
+                    .wintun_dll
+                    .as_ref()
+                    .is_some_and(|path| !std::path::Path::new(path).is_absolute())
+                {
+                    return Err(anyhow!(
+                        "edge {} http3.connect_ip.wintun_dll must be absolute",
+                        edge.name
+                    ));
+                }
+            }
         }
     }
     Ok(())

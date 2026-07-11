@@ -373,6 +373,10 @@ fn reverse_target_json(target: &runtime::CompiledReverseRouteTarget) -> Value {
             "type": "local_response",
             "status": status,
         }),
+        runtime::CompiledReverseRouteTarget::Webdav { origin } => json!({
+            "type": "webdav",
+            "origin": origin.to_string(),
+        }),
         runtime::CompiledReverseRouteTarget::TlsPassthrough { upstreams, lb } => json!({
             "type": "tls_passthrough",
             "lb": lb.to_string(),
@@ -556,6 +560,10 @@ fn append_reverse_target(
         runtime::CompiledReverseRouteTarget::LocalResponse { status } => {
             output.push_str("    type: local_response\n");
             output.push_str(&format!("    status: {status}\n"));
+        }
+        runtime::CompiledReverseRouteTarget::Webdav { origin } => {
+            output.push_str("    type: webdav\n");
+            output.push_str(&format!("    origin: {origin}\n"));
         }
         runtime::CompiledReverseRouteTarget::TlsPassthrough { upstreams, lb } => {
             output.push_str("    type: tls_passthrough\n");

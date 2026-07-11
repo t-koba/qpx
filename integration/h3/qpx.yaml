@@ -1,0 +1,22 @@
+state_dir: "${QPX_STATE_DIR}"
+edges:
+- kind: reverse
+  name: external-h3-interop
+  listen: "[::]:18443"
+  tls:
+    certificates:
+    - sni: localhost
+      cert: "${QPX_TLS_CERT}"
+      key: "${QPX_TLS_KEY}"
+  http3:
+    enabled: true
+    listen: "[::]:18443"
+  routes:
+  - match:
+      host: [localhost, 127.0.0.1]
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: text/plain
+        body: qpx-h3-external-interop

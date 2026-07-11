@@ -105,7 +105,7 @@ async fn vary_controls_cache_hits() {
             .headers()
             .get(CACHE_HEADER)
             .and_then(|v| v.to_str().ok()),
-        Some("MISS")
+        Some("qpx; fwd=miss")
     );
 
     let out = lookup(
@@ -298,6 +298,6 @@ async fn stale_no_cache_entry_revalidates_and_updates() {
             .headers()
             .get(CACHE_HEADER)
             .and_then(|v| v.to_str().ok()),
-        Some("REVALIDATED")
+        Some("qpx; fwd=stale; fwd-status=304")
     );
 }

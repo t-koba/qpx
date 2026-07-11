@@ -153,6 +153,8 @@ fn signed_assertion_accepts_es256_public_key_tokens() {
         claims: AssertionClaimsMapConfig {
             user_from_sub: true,
             groups: Some("groups".to_string()),
+            roles: Some("roles".to_string()),
+            entitlements: Some("entitlements".to_string()),
             groups_separator: Some(",".to_string()),
             tenant: Some("tenant".to_string()),
             ..Default::default()
@@ -165,6 +167,8 @@ fn signed_assertion_accepts_es256_public_key_tokens() {
         json!({
             "sub": "alice",
             "groups": ["eng", "ops"],
+            "roles": ["admin"],
+            "entitlements": ["app:erp:read"],
             "tenant": "acme",
             "exp": i64::MAX,
         }),
@@ -178,6 +182,8 @@ fn signed_assertion_accepts_es256_public_key_tokens() {
     let identity = compiled.extract(&headers).expect("valid assertion");
 
     assert_eq!(identity.user.as_deref(), Some("alice"));
+    assert_eq!(identity.roles, vec!["admin"]);
+    assert_eq!(identity.entitlements, vec!["app:erp:read"]);
     assert_eq!(identity.groups, vec!["eng".to_string(), "ops".to_string()]);
     assert_eq!(identity.tenant.as_deref(), Some("acme"));
     assert_eq!(identity.identity_source.as_deref(), Some("signed-jwt"));

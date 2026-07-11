@@ -70,7 +70,7 @@ fn ensure_rustls_provider() {
 /// RFC 911x / related RFCs contract tests.
 ///
 /// Scope: provides black-box e2e/contract tests that detect regressions in
-/// qpxd's implemented RFC compliance points (see docs/rfc911x-compliance.md).
+/// qpxd's implemented RFC compliance points (see docs/http-rfc-compliance.md).
 mod cache;
 mod hop_via;
 mod http1;
@@ -420,7 +420,7 @@ async fn run_tcp_echo_once(listener: TcpListener, tx: oneshot::Sender<Vec<u8>>) 
     Ok(())
 }
 
-async fn serve_websocket_stub_once() -> Result<(
+async fn serve_websocket_origin_once() -> Result<(
     SocketAddr,
     oneshot::Receiver<Vec<u8>>,
     oneshot::Receiver<Vec<u8>>,
@@ -432,25 +432,29 @@ async fn serve_websocket_stub_once() -> Result<(
     let (captured_tx, captured_rx) = oneshot::channel();
     let (upgraded_tx, upgraded_rx) = oneshot::channel();
     tokio::spawn(async move {
-        let _ = run_websocket_stub_once(listener, captured_tx, upgraded_tx).await;
+        let _ = run_websocket_origin_once(listener, captured_tx, upgraded_tx).await;
     });
     Ok((addr, captured_rx, upgraded_rx))
 }
 
-async fn run_websocket_stub_once(
+async fn run_websocket_origin_once(
     listener: TcpListener,
     captured_tx: oneshot::Sender<Vec<u8>>,
     upgraded_tx: oneshot::Sender<Vec<u8>>,
 ) -> Result<()> {
     let (mut stream, _) = listener.accept().await?;
     let req = read_until(&mut stream, b"\r\n\r\n", 128 * 1024, Duration::from_secs(3)).await?;
+    let accept = websocket_accept_for_request(&req)?;
     let _ = captured_tx.send(req);
 
-    let response = b"HTTP/1.1 101 Switching Protocols\r\n\
+    let response = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
 Connection: Upgrade\r\n\
 Upgrade: websocket\r\n\
-\r\n";
-    stream.write_all(response).await?;
+Sec-WebSocket-Accept: {accept}\r\n\
+\r\n"
+    );
+    stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
 
     let mut buf = [0u8; 128];
@@ -460,6 +464,22 @@ Upgrade: websocket\r\n\
     stream.write_all(b"server-bytes").await?;
     let _ = stream.shutdown().await;
     Ok(())
+}
+
+fn websocket_accept_for_request(request: &[u8]) -> Result<String> {
+    let request = std::str::from_utf8(request)?;
+    let key = request
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("sec-websocket-key")
+                .then(|| value.trim())
+        })
+        .context("WebSocket request key is missing")?;
+    let material = format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, material.as_bytes());
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(digest.as_ref()))
 }
 
 async fn start_origin_server(hits: Arc<AtomicUsize>) -> Result<(SocketAddr, oneshot::Sender<()>)> {

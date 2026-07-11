@@ -45,13 +45,22 @@ impl DecisionServiceCache {
     }
 
     pub(super) fn insert(&self, key: String, enforcement: DecisionServiceEnforcement) {
+        self.insert_with_ttl(key, enforcement, self.ttl);
+    }
+
+    pub(super) fn insert_with_ttl(
+        &self,
+        key: String,
+        enforcement: DecisionServiceEnforcement,
+        ttl: Duration,
+    ) {
         let Ok(mut entries) = self.entries.lock() else {
             return;
         };
         entries.put(
             key,
             CachedDecision {
-                expires_at: Instant::now() + self.ttl,
+                expires_at: Instant::now() + ttl.min(self.ttl),
                 enforcement,
             },
         );

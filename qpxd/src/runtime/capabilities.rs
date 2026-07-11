@@ -149,6 +149,17 @@ fn validate_ingress_edge_capabilities(
         .unwrap_or(false)
     {
         validate_http3_listener_capabilities(&edge_context, caps, violations);
+        if edge
+            .http3
+            .as_ref()
+            .and_then(|http3| http3.connect_ip.as_ref())
+            .is_some_and(|connect_ip| connect_ip.enabled)
+            && !caps.http3_backend_qpx
+        {
+            violations.push(format!(
+                "{edge_context} http3.connect_ip.enabled requires qpxd feature http3-backend-qpx"
+            ));
+        }
         if matches!(edge.mode, IngressEdgeMode::Forward) && !caps.mitm {
             violations.push(format!(
                 "{edge_context} http3.enabled currently requires qpxd feature mitm for generated forward HTTP/3 TLS certificates"

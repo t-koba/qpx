@@ -129,7 +129,11 @@ where
         && request_version == Version::HTTP_11
         && !matches!(body_kind, ResponseBodyKind::CloseDelimited)
         && parts.status != StatusCode::SWITCHING_PROTOCOLS
-        && !(request_method == Method::CONNECT && parts.status.is_success());
+        // RFC 9931 requires an HTTP/1.1 proxy server to close the connection
+        // after every rejected CONNECT request. Successful CONNECT also takes
+        // ownership of the connection as a tunnel, so no CONNECT response can
+        // return to the HTTP/1.1 request loop.
+        && request_method != Method::CONNECT;
     let connection_mode = determine_connection_header_mode(
         request_version,
         request_method,

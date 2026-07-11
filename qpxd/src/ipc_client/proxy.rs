@@ -51,6 +51,8 @@ pub(crate) async fn proxy_ipc(
             backend: &backend,
             mode,
             conn: ClientConnInfo::default(),
+            verified_identity: None,
+            authorization_decision: None,
             max_request_bytes: None,
             max_response_bytes: None,
             timeout_dur: Duration::from_secs(30),
@@ -59,22 +61,30 @@ pub(crate) async fn proxy_ipc(
     .await
 }
 
+pub(crate) struct IpcUpstreamRequestContext {
+    pub(crate) conn: ClientConnInfo,
+    pub(crate) verified_identity: Option<qpx_core::ipc::meta::VerifiedIdentityContext>,
+    pub(crate) authorization_decision: Option<qpx_core::ipc::meta::AuthorizationDecisionContext>,
+    pub(crate) route_timeout: Duration,
+}
+
 pub(crate) async fn proxy_ipc_upstream(
     pools: &crate::pool::PoolRegistry,
     req: Request<Body>,
     upstream: &IpcUpstream,
     _proxy_name: &str,
-    conn: ClientConnInfo,
-    route_timeout: Duration,
+    context: IpcUpstreamRequestContext,
 ) -> Result<Response<Body>> {
-    let timeout_dur = upstream.effective_timeout(route_timeout);
+    let timeout_dur = upstream.effective_timeout(context.route_timeout);
     proxy_ipc_backend(
         pools.ipc.clone(),
         req,
         IpcBackendRequest {
             backend: &upstream.backend,
             mode: upstream.mode.clone(),
-            conn,
+            conn: context.conn,
+            verified_identity: context.verified_identity,
+            authorization_decision: context.authorization_decision,
             max_request_bytes: upstream.max_request_bytes,
             max_response_bytes: upstream.max_response_bytes,
             timeout_dur,
@@ -87,6 +97,8 @@ struct IpcBackendRequest<'a> {
     backend: &'a IpcBackend,
     mode: IpcMode,
     conn: ClientConnInfo,
+    verified_identity: Option<qpx_core::ipc::meta::VerifiedIdentityContext>,
+    authorization_decision: Option<qpx_core::ipc::meta::AuthorizationDecisionContext>,
     max_request_bytes: Option<usize>,
     max_response_bytes: Option<usize>,
     timeout_dur: Duration,
@@ -101,11 +113,13 @@ async fn proxy_ipc_backend(
         backend,
         mode,
         conn,
+        verified_identity,
+        authorization_decision,
         max_request_bytes,
         max_response_bytes,
         timeout_dur,
     } = backend_request;
-    let mut meta = build_ipc_meta(&req, conn);
+    let mut meta = build_ipc_meta(&req, conn, verified_identity, authorization_decision);
 
     let (pool_key, mut conn) = checkout_stream(&ipc_pool, backend, timeout_dur).await?;
     let mut pending_req_ring = None;

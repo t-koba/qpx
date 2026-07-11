@@ -410,6 +410,7 @@ fn reverse_router_rejects_compiled_route_count_mismatch() {
     let err = expect_router_error(ReverseRouter::new_with_plan(
         cfg,
         &[],
+        &[],
         registry.as_ref(),
         &bad,
     ));
@@ -423,6 +424,7 @@ fn reverse_router_rejects_compiled_route_identity_mismatch() {
 
     let err = expect_router_error(ReverseRouter::new_with_plan(
         cfg,
+        &[],
         &[],
         registry.as_ref(),
         &compiled,
@@ -441,6 +443,7 @@ fn reverse_router_rejects_compiled_route_target_kind_mismatch() {
     let err = expect_router_error(ReverseRouter::new_with_plan(
         cfg,
         &[],
+        &[],
         registry.as_ref(),
         &bad,
     ));
@@ -456,6 +459,7 @@ fn reverse_router_rejects_compiled_tls_passthrough_count_mismatch() {
 
     let err = expect_router_error(ReverseRouter::new_with_plan(
         cfg,
+        &[],
         &[],
         registry.as_ref(),
         &bad,
@@ -587,4 +591,62 @@ fn retry_budget_requires_success_to_replenish() {
     assert!(!budget.try_consume_retry());
     budget.record_success();
     assert!(budget.try_consume_retry());
+}
+
+#[test]
+fn webdav_target_embeds_real_origin_service() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let data = directory.path().join("data");
+    let metadata = directory.path().join("metadata.redb");
+    let config_path = directory.path().join("qpx.yaml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"origins:
+  webdav:
+  - name: documents
+    root: {}
+    metadata: {}
+edges:
+- kind: reverse
+  name: dav
+  listen: 127.0.0.1:19080
+  routes:
+  - match:
+      path: ["/dav/**"]
+    target:
+      type: webdav
+      origin: documents
+"#,
+            data.display(),
+            metadata.display()
+        ),
+    )
+    .expect("write config");
+    let config = qpx_core::config::load_config(&config_path).expect("load config");
+    let reverse = config.reverse_edge_configs()[0].clone();
+    let origins = config.http.origins.webdav.clone();
+    let registry = crate::http::modules::default_http_module_registry();
+    let state =
+        crate::runtime::RuntimeState::build_with_http_module_registry(config, registry.clone())
+            .expect("runtime state");
+    let compiled = state.plan.reverse_edge("dav").expect("compiled route");
+    let router = ReverseRouter::new_with_plan(reverse, &[], &origins, registry.as_ref(), compiled)
+        .expect("WebDAV router");
+    let service = router
+        .route_at(0)
+        .and_then(|route| route.webdav.as_ref())
+        .expect("embedded WebDAV origin");
+    let request = http::Request::builder()
+        .method("OPTIONS")
+        .uri("/dav/")
+        .body(Vec::new())
+        .expect("request");
+    assert_eq!(
+        service
+            .handle(request, &qpx_webdav::WebDavRequestContext::default())
+            .expect("DAV response")
+            .status(),
+        http::StatusCode::NO_CONTENT
+    );
 }

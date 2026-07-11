@@ -1,0 +1,8 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: qpx_proxy
+  rules:
+  - actions: ["GET"]
+    effect: EFFECT_ALLOW
+    roles: ["qpx"]

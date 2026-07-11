@@ -83,6 +83,11 @@ async fn forward_response_rule_matches_request_derived_rpc_fields() {
                         ..Default::default()
                     },
                 }],
+                forwarded: None,
+                api_metadata: None,
+                hsts: None,
+                require_precondition: false,
+                capport: false,
             }),
             http_guard_profile: None,
             destination_resolution: None,
@@ -220,6 +225,11 @@ async fn assert_forward_response_rule_matches_streaming(
                         ..Default::default()
                     },
                 }],
+                forwarded: None,
+                api_metadata: None,
+                hsts: None,
+                require_precondition: false,
+                capport: false,
             }),
             http_guard_profile: None,
             destination_resolution: None,

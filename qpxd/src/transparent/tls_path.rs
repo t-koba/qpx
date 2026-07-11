@@ -82,7 +82,8 @@ where
         .ingress_edge_execution_plan(listener_name, None)
         .ok_or_else(|| anyhow!("listener plan not found"))?;
     let effective_policy = base_plan.policy_context.clone();
-    let identity = resolve_identity(&state, &effective_policy, remote_addr.ip(), None, None)?;
+    let identity =
+        resolve_identity(&state, &effective_policy, remote_addr.ip(), None, None).await?;
     let listener_trust = listener_upstream_trust(listener_cfg)?;
     let mut decision = evaluate_tls_policy_decision(TransparentTlsPolicyInput {
         runtime: &runtime,

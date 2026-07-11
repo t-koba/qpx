@@ -9,7 +9,7 @@ use super::freshness::{
 use super::types::{
     CACHE_HEADER, CacheBackend, CacheEntryDisposition, CacheRequestKey, CachedResponseEnvelope,
     LookupOutcome, RequestDirectives, ResponseDirectives, RevalidationState,
-    cache_body_storage_key, decode_cached_response_metadata,
+    cache_body_storage_key, cache_status_header, decode_cached_response_metadata,
 };
 use super::util::{cache_namespace, load_variant_index, now_millis};
 use super::vary::matches_vary;
@@ -54,7 +54,7 @@ pub async fn lookup(
     for (variant_key, envelope) in
         load_variant_metadata_batch(backend.as_ref(), namespace.as_str(), &variant_keys).await?
     {
-        if !matches_vary(request_headers, &envelope) {
+        if !matches_vary(request_headers, key.content_digest.as_deref(), &envelope) {
             continue;
         }
         let disposition = classify_for_request(&req, &envelope, now);
@@ -179,7 +179,9 @@ pub async fn lookup(
 }
 
 fn lookup_precheck(request_method: &Method, req: &RequestDirectives) -> Option<LookupOutcome> {
-    if *request_method != Method::GET && *request_method != Method::HEAD
+    if *request_method != Method::GET
+        && *request_method != Method::HEAD
+        && request_method.as_str() != "QUERY"
         || req.has_unsupported_conditionals
         || req.no_store
     {
@@ -315,9 +317,11 @@ pub fn build_only_if_cached_miss_response(message: &str) -> Response<Body> {
         .status(StatusCode::GATEWAY_TIMEOUT)
         .body(Body::from(message.to_owned()))
         .unwrap_or_else(|_| Response::new(Body::from(message.to_owned())));
-    response
-        .headers_mut()
-        .insert(CACHE_HEADER, http::HeaderValue::from_static("BYPASS"));
+    response.headers_mut().insert(
+        CACHE_HEADER,
+        cache_status_header("BYPASS", None)
+            .expect("the static bypass Cache-Status value must be valid"),
+    );
     response
 }
 
@@ -382,7 +386,7 @@ pub fn classify_for_request(
     };
     let fresh = fresh_by_age && fresh_by_req && fresh_by_min_fresh;
 
-    if fresh && !req.no_cache && !resp.no_cache {
+    if fresh && (!req.no_cache || resp.immutable) && !resp.no_cache {
         return CacheEntryDisposition::ServeFresh;
     }
 

@@ -45,6 +45,7 @@ fn event_stream_compression_requires_explicit_force() {
         zstd_level: 1,
         worker_count: 1,
         low_latency_flush: false,
+        dictionary: None,
     };
 
     let selected = select_response_encoding(&request, &config, &response).expect("select encoding");
@@ -70,6 +71,7 @@ fn no_body_success_responses_are_not_compressed() {
         zstd_level: 1,
         worker_count: 1,
         low_latency_flush: false,
+        dictionary: None,
     };
 
     let connect_request = hyper::Request::builder()

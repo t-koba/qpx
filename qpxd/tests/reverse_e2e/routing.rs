@@ -4,7 +4,7 @@ use super::*;
 async fn reverse_websocket_upstream_tunnels_upgraded_bytes() -> Result<()> {
     let dir = temp_dir("qpxd-reverse-websocket-e2e")?;
     let cfg = dir.join("reverse-websocket.yaml");
-    let (backend_addr, captured_rx, upgraded_rx) = serve_websocket_stub_once().await?;
+    let (backend_addr, captured_rx, upgraded_rx) = serve_websocket_origin_once().await?;
     let _ = tokio::net::TcpStream::connect(backend_addr).await?;
 
     let (port, _qpxd) =

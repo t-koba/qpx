@@ -53,6 +53,7 @@ fn validate_rejects_cgi_zero_timeout_and_byte_limits() {
                 path_regex: None,
                 host: None,
             },
+            verified_context: Default::default(),
             backend: BackendConfig::Cgi(CgiBackendConfig {
                 root: PathBuf::from("/tmp"),
                 timeout_ms: 1000,
@@ -106,6 +107,7 @@ fn validate_rejects_wasm_zero_limits_and_reserved_env() {
                 path_regex: None,
                 host: None,
             },
+            verified_context: Default::default(),
             backend: BackendConfig::Wasm(WasmBackendConfig {
                 module: PathBuf::from("/tmp/app.wasm"),
                 precompile: false,

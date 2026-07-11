@@ -1,0 +1,19 @@
+state_dir: "${QPX_STATE_DIR}"
+origins:
+  webdav:
+  - name: compliance
+    root: "${QPX_WEBDAV_ROOT}"
+    metadata: "${QPX_WEBDAV_METADATA}"
+    max_depth: 32
+    max_multistatus_entries: 10000
+    max_lock_timeout_seconds: 86400
+edges:
+- kind: reverse
+  name: webdav-compliance
+  listen: 127.0.0.1:18086
+  routes:
+  - match:
+      path: ["/dav/**"]
+    target:
+      type: webdav
+      origin: compliance

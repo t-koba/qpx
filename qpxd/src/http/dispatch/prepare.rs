@@ -108,7 +108,8 @@ pub(crate) async fn prepare_dispatch_request(
         input.remote_ip,
         Some(&sanitized_headers),
         None,
-    )?;
+    )
+    .await?;
     let request_rpc = if observation_plan.needs_rpc {
         Some(crate::http::rpc::inspect_request(&req).await)
     } else {

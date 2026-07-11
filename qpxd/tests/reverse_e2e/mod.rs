@@ -201,23 +201,23 @@ async fn start_raw_backend(response: Vec<u8>) -> Result<SocketAddr> {
     Ok(addr)
 }
 
-async fn serve_websocket_stub_once() -> Result<(
+async fn serve_websocket_origin_once() -> Result<(
     SocketAddr,
     oneshot::Receiver<Vec<u8>>,
     oneshot::Receiver<Vec<u8>>,
 )> {
     let listener =
-        StdTcpListener::bind(("127.0.0.1", 0)).context("bind websocket stub listener")?;
+        StdTcpListener::bind(("127.0.0.1", 0)).context("bind websocket origin listener")?;
     let addr = listener.local_addr()?;
     let (captured_tx, captured_rx) = oneshot::channel();
     let (upgraded_tx, upgraded_rx) = oneshot::channel();
     std::thread::spawn(move || {
-        let _ = run_websocket_stub_once(listener, captured_tx, upgraded_tx);
+        let _ = run_websocket_origin_once(listener, captured_tx, upgraded_tx);
     });
     Ok((addr, captured_rx, upgraded_rx))
 }
 
-fn run_websocket_stub_once(
+fn run_websocket_origin_once(
     listener: StdTcpListener,
     captured_tx: oneshot::Sender<Vec<u8>>,
     upgraded_tx: oneshot::Sender<Vec<u8>>,
@@ -230,14 +230,17 @@ fn run_websocket_stub_once(
         if req.is_empty() {
             continue;
         }
+        let accept = websocket_accept_for_request(&req)?;
         let _ = captured_tx.send(req);
 
-        let response = b"HTTP/1.1 101 Switching Protocols\r\n\
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\n\
 Connection: Upgrade\r\n\
 Upgrade: websocket\r\n\
-Sec-WebSocket-Accept: dummy\r\n\
-\r\n";
-        std::io::Write::write_all(&mut stream, response)?;
+Sec-WebSocket-Accept: {accept}\r\n\
+\r\n"
+        );
+        std::io::Write::write_all(&mut stream, response.as_bytes())?;
         std::io::Write::flush(&mut stream)?;
 
         let mut buf = [0u8; 64];
@@ -248,6 +251,22 @@ Sec-WebSocket-Accept: dummy\r\n\
         let _ = stream.shutdown(std::net::Shutdown::Both);
         return Ok(());
     }
+}
+
+fn websocket_accept_for_request(request: &[u8]) -> Result<String> {
+    let request = std::str::from_utf8(request)?;
+    let key = request
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("sec-websocket-key")
+                .then(|| value.trim())
+        })
+        .context("WebSocket request key is missing")?;
+    let material = format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, material.as_bytes());
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(digest.as_ref()))
 }
 
 fn read_until_blocking(

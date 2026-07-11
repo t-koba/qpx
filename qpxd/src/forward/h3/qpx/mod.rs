@@ -5,7 +5,9 @@ use crate::http3::quinn_socket::{
 use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
 use anyhow::{Result, anyhow};
-use qpx_core::config::{ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig};
+use qpx_core::config::{
+    ConnectIpConfig, ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig,
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -54,6 +56,17 @@ pub(crate) async fn run_http3_listener(
         max_capsule_buffer_bytes: 256 * 1024,
         uri_template: None,
     });
+    let connect_ip = http3_cfg.connect_ip.unwrap_or(ConnectIpConfig {
+        enabled: false,
+        uri_template: "https://invalid/.well-known/masque/ip/{target}/{ipproto}/".to_owned(),
+        allowed_source_cidrs: Vec::new(),
+        allowed_destination_cidrs: Vec::new(),
+        mtu: 1280,
+        idle_timeout_secs: 30,
+        max_capsule_buffer_bytes: 256 * 1024,
+        device: None,
+        wintun_dll: None,
+    });
 
     let tls_config = build_forward_tls_config(&listener, &runtime, listen_addr)?;
     let max_bidi = runtime
@@ -71,6 +84,7 @@ pub(crate) async fn run_http3_listener(
         runtime,
         listener_name: Arc::<str>::from(listener.name.as_str()),
         connect_udp,
+        connect_ip,
     };
     let connection_semaphore = handler.runtime.state().connection_semaphore.clone();
 
@@ -78,6 +92,7 @@ pub(crate) async fn run_http3_listener(
         listener = %listener.name,
         addr = %listen_addr,
         connect_udp = handler.connect_udp.enabled,
+        connect_ip = handler.connect_ip.enabled,
         "forward HTTP/3 listener starting (qpx-h3)"
     );
 

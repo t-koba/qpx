@@ -154,13 +154,16 @@ pub enum ReverseRouteTargetConfig {
     LocalResponse {
         response: Box<LocalResponseConfig>,
     },
+    Webdav {
+        origin: String,
+    },
 }
 
 impl ReverseRouteTargetConfig {
     pub fn lb(&self) -> Option<&str> {
         match self {
             Self::Upstream { lb, .. } | Self::Weighted { lb, .. } => Some(lb.as_str()),
-            Self::Ipc { .. } | Self::LocalResponse { .. } => None,
+            Self::Ipc { .. } | Self::LocalResponse { .. } | Self::Webdav { .. } => None,
         }
     }
 

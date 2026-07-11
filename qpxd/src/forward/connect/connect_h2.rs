@@ -52,6 +52,11 @@ pub(super) async fn handle_h2_extended_connect(
         .get::<H2Protocol>()
         .cloned()
         .ok_or_else(|| anyhow!("missing HTTP/2 extended CONNECT protocol"))?;
+    let websocket_protocols =
+        crate::http::protocol::websocket::validate_extended_connect_websocket_request(
+            protocol.as_str(),
+            req.headers(),
+        )?;
     let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let req_version = req.version();
@@ -92,7 +97,8 @@ pub(super) async fn handle_h2_extended_connect(
         remote_addr.ip(),
         Some(&sanitized_headers),
         None,
-    )?;
+    )
+    .await?;
     let destination = state.classify_destination(
         &DestinationInputs {
             host: Some(host.as_str()),
@@ -413,6 +419,13 @@ pub(super) async fn handle_h2_extended_connect(
         response,
         send_stream,
     } = upstream;
+    if let Some(offered) = websocket_protocols.as_deref() {
+        crate::http::protocol::websocket::validate_extended_connect_websocket_response(
+            response.status(),
+            &h1_headers_to_http(response.headers())?,
+            offered,
+        )?;
+    }
     let downstream_body = req.into_body();
     if !response.status().is_success() {
         let mut response = finalize_response_with_headers(

@@ -1,7 +1,7 @@
 use crate::http::dispatch::ProxyKind;
 use crate::policy_context::decision_service::*;
 use crate::policy_context::identity::ResolvedIdentity;
-use http::HeaderMap;
+use hyper::HeaderMap;
 use qpx_core::config::{
     ActionConfig, ActionKind, DecisionServiceAuthorityConfig, DecisionServiceConstraintsConfig,
     DecisionServiceMappingTargetDocument, HeaderControl,
@@ -17,6 +17,7 @@ use url::Url;
 fn test_cfg() -> CompiledDecisionService {
     CompiledDecisionService {
         name: "test".to_string(),
+        driver: qpx_core::config::DecisionServiceDriver::SchemaMappedHttp,
         endpoint: Url::parse("http://127.0.0.1/check").expect("url"),
         timeout: Duration::from_millis(100),
         max_response_bytes: 1024,
@@ -33,6 +34,7 @@ fn test_cfg() -> CompiledDecisionService {
                 target: "/decision".to_string(),
                 source: Some("$.decision_response.decision".to_string()),
                 literal: None,
+                value_map: Default::default(),
                 optional: false,
             },
             qpx_core::config::DecisionServiceMappingRuleConfig {
@@ -40,6 +42,7 @@ fn test_cfg() -> CompiledDecisionService {
                 target: "/cache_bypass".to_string(),
                 source: Some("$.decision_response.cache_bypass".to_string()),
                 literal: None,
+                value_map: Default::default(),
                 optional: true,
             },
             qpx_core::config::DecisionServiceMappingRuleConfig {
@@ -47,6 +50,7 @@ fn test_cfg() -> CompiledDecisionService {
                 target: "/policy_tags".to_string(),
                 source: Some("$.decision_response.policy_tags".to_string()),
                 literal: None,
+                value_map: Default::default(),
                 optional: true,
             },
         ])
@@ -70,6 +74,7 @@ fn test_cfg() -> CompiledDecisionService {
         allowed_effects: HashSet::from(["allow".to_string(), "cache_bypass".to_string()]),
         upstream_trust: None,
         bearer_token: None,
+        oauth2_client_credentials: None,
         signature: None,
         cache: None,
     }
@@ -115,6 +120,116 @@ fn decision_service_response_mapping_builds_enforceable_effect() {
 }
 
 #[test]
+fn decision_service_value_map_translates_external_enum_and_fails_closed() {
+    let mut cfg = test_cfg();
+    cfg.response_mapping =
+        compile_mapping_rules(&[qpx_core::config::DecisionServiceMappingRuleConfig {
+            target_document: DecisionServiceMappingTargetDocument::EnforceableEffect,
+            target: "/decision".to_string(),
+            source: Some("$.decision_response.results[0].effect".to_string()),
+            literal: None,
+            value_map: [
+                ("EFFECT_ALLOW".to_string(), json!("allow")),
+                ("EFFECT_DENY".to_string(), json!("deny")),
+            ]
+            .into_iter()
+            .collect(),
+            optional: false,
+        }])
+        .expect("mapping");
+
+    let allow =
+        map_remote_decision_response(&cfg, json!({"results": [{"effect": "EFFECT_ALLOW"}]}))
+            .expect("mapped allow");
+    assert!(matches!(allow, DecisionServiceEnforcement::Continue(_)));
+
+    let err =
+        map_remote_decision_response(&cfg, json!({"results": [{"effect": "EFFECT_UNKNOWN"}]}))
+            .expect_err("unknown external enum must fail closed");
+    assert!(err.to_string().contains("unmapped value EFFECT_UNKNOWN"));
+}
+
+#[test]
+fn authzen_request_uses_native_subject_resource_action_context_shape() {
+    let mut cfg = test_cfg();
+    cfg.driver = qpx_core::config::DecisionServiceDriver::Authzen;
+    cfg.request_mapping.clear();
+    let identity = ResolvedIdentity {
+        user: Some("alice".to_string()),
+        tenant: Some("tenant-a".to_string()),
+        groups: vec!["finance".to_string()],
+        roles: vec!["reviewer".to_string()],
+        idp: Some("https://issuer.example".to_string()),
+        identity_source: Some("bearer".to_string()),
+        ..Default::default()
+    };
+    let input = DecisionServiceInput {
+        mode: DecisionServiceMode::ReverseHttp,
+        proxy_kind: ProxyKind::Reverse,
+        proxy_name: "edge",
+        scope_name: "default",
+        remote_ip: "192.0.2.10".parse().unwrap(),
+        dst_port: Some(443),
+        host: Some("api.example"),
+        sni: Some("api.example"),
+        method: Some("GET"),
+        path: Some("/reports"),
+        uri: Some("https://api.example/reports"),
+        matched_rule: Some("api"),
+        matched_route: Some("reports"),
+        action: None,
+        headers: None,
+        identity: &identity,
+    };
+
+    let request = build_remote_decision_request(&cfg, &input).unwrap();
+    assert_eq!(request["subject"]["id"], "alice");
+    assert_eq!(request["subject"]["properties"]["groups"][0], "finance");
+    assert_eq!(request["resource"]["id"], "https://api.example/reports");
+    assert_eq!(request["action"]["name"], "GET");
+    assert_eq!(request["context"]["remote_ip"], "192.0.2.10");
+    assert!(request.get("pep_signal").is_none());
+}
+
+#[test]
+fn authzen_boolean_decision_and_mapped_context_build_enforceable_effect() {
+    let mut cfg = test_cfg();
+    cfg.driver = qpx_core::config::DecisionServiceDriver::Authzen;
+    cfg.response_mapping = compile_mapping_rules(&[
+        qpx_core::config::DecisionServiceMappingRuleConfig {
+            target_document: DecisionServiceMappingTargetDocument::EnforceableEffect,
+            target: "/external_decision_id".to_string(),
+            source: Some("$.decision_response.context.decision_id".to_string()),
+            literal: None,
+            value_map: Default::default(),
+            optional: false,
+        },
+        qpx_core::config::DecisionServiceMappingRuleConfig {
+            target_document: DecisionServiceMappingTargetDocument::EnforceableEffect,
+            target: "/policy_id".to_string(),
+            source: Some("$.decision_response.context.policy_id".to_string()),
+            literal: None,
+            value_map: Default::default(),
+            optional: false,
+        },
+    ])
+    .unwrap();
+    let enforcement = map_remote_decision_response(
+        &cfg,
+        json!({
+            "decision": true,
+            "context": {"decision_id": "d-1", "policy_id": "p-1"}
+        }),
+    )
+    .unwrap();
+    let DecisionServiceEnforcement::Continue(allow) = enforcement else {
+        panic!("expected allow");
+    };
+    assert_eq!(allow.external_decision_id.as_deref(), Some("d-1"));
+    assert_eq!(allow.policy_id.as_deref(), Some("p-1"));
+}
+
+#[test]
 fn decision_service_empty_effects_allow_only() {
     let mut cfg = test_cfg();
     cfg.allowed_effects.clear();
@@ -139,6 +254,7 @@ fn decision_service_response_mapping_keeps_complex_jsonpath() {
             target: "/decision".to_string(),
             source: Some("$.decision_response.items[0].decision".to_string()),
             literal: None,
+            value_map: Default::default(),
             optional: false,
         }])
         .expect("mapping");
@@ -169,6 +285,7 @@ fn decision_service_request_mapping_uses_builtin_sources() {
             target: "/subject/id".to_string(),
             source: Some("$.pep_signal.identity.user".to_string()),
             literal: None,
+            value_map: Default::default(),
             optional: false,
         },
         qpx_core::config::DecisionServiceMappingRuleConfig {
@@ -176,6 +293,7 @@ fn decision_service_request_mapping_uses_builtin_sources() {
             target: "/subject/groups".to_string(),
             source: Some("$.pep_signal.identity.groups".to_string()),
             literal: None,
+            value_map: Default::default(),
             optional: false,
         },
         qpx_core::config::DecisionServiceMappingRuleConfig {
@@ -183,6 +301,7 @@ fn decision_service_request_mapping_uses_builtin_sources() {
             target: "/action/name".to_string(),
             source: Some("$.pep_signal.request.method".to_string()),
             literal: None,
+            value_map: Default::default(),
             optional: false,
         },
         qpx_core::config::DecisionServiceMappingRuleConfig {
@@ -190,6 +309,7 @@ fn decision_service_request_mapping_uses_builtin_sources() {
             target: "/resource/path".to_string(),
             source: Some("$.pep_signal.request.path".to_string()),
             literal: None,
+            value_map: Default::default(),
             optional: false,
         },
     ])
@@ -236,6 +356,34 @@ fn decision_service_request_mapping_uses_builtin_sources() {
             }
         })
     );
+}
+
+#[test]
+fn decision_service_never_exports_credentials_or_sensitive_headers() {
+    let mut cfg = test_cfg();
+    cfg.selected_headers = vec![
+        http::header::AUTHORIZATION,
+        http::header::PROXY_AUTHORIZATION,
+        http::header::COOKIE,
+        http::HeaderName::from_static("x-private-assertion"),
+        http::HeaderName::from_static("x-request-class"),
+    ];
+    cfg.sensitive_headers = HashSet::from([http::HeaderName::from_static("x-private-assertion")]);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::AUTHORIZATION,
+        "Bearer secret".parse().unwrap(),
+    );
+    headers.insert(
+        http::header::PROXY_AUTHORIZATION,
+        "Basic secret".parse().unwrap(),
+    );
+    headers.insert(http::header::COOKIE, "sid=secret".parse().unwrap());
+    headers.insert("x-private-assertion", "secret".parse().unwrap());
+    headers.insert("x-request-class", "interactive".parse().unwrap());
+    let exported = build_selected_headers(&cfg, Some(&headers));
+    assert_eq!(exported.len(), 1);
+    assert_eq!(exported["x-request-class"], json!(["interactive"]));
 }
 
 #[test]

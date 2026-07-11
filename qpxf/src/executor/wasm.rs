@@ -88,6 +88,7 @@ impl Executor for WasmExecutor {
                 remote_addr: req.remote_addr,
                 remote_port: req.remote_port,
                 http_headers: req.http_headers,
+                identity_env: req.identity_env,
             })
             .await?;
         let done = tokio::spawn(async move {

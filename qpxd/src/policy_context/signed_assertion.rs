@@ -27,9 +27,11 @@ pub(super) struct CompiledSignedAssertion {
 }
 
 #[derive(Debug, Clone)]
-struct CompiledAssertionClaims {
+pub(super) struct CompiledAssertionClaims {
     user: Option<String>,
     groups: Option<String>,
+    roles: Option<String>,
+    entitlements: Option<String>,
     device_id: Option<String>,
     posture: Option<String>,
     tenant: Option<String>,
@@ -162,10 +164,12 @@ fn default_signed_assertion_algorithms(
 }
 
 impl CompiledAssertionClaims {
-    fn from_config(config: &AssertionClaimsMapConfig) -> Self {
+    pub(super) fn from_config(config: &AssertionClaimsMapConfig) -> Self {
         Self {
             user: config.user.clone(),
             groups: config.groups.clone(),
+            roles: config.roles.clone(),
+            entitlements: config.entitlements.clone(),
             device_id: config.device_id.clone(),
             posture: config.posture.clone(),
             tenant: config.tenant.clone(),
@@ -176,7 +180,11 @@ impl CompiledAssertionClaims {
         }
     }
 
-    fn extract(&self, source_name: &str, payload: &JsonValue) -> Result<ResolvedIdentity> {
+    pub(super) fn extract(
+        &self,
+        source_name: &str,
+        payload: &JsonValue,
+    ) -> Result<ResolvedIdentity> {
         let mut identity = ResolvedIdentity::default();
         if self.user_from_sub {
             identity.user = json_string_claim(payload, "sub");
@@ -191,6 +199,16 @@ impl CompiledAssertionClaims {
             .groups
             .as_deref()
             .map(|claim| json_list_claim(payload, claim, self.groups_separator.as_deref()))
+            .unwrap_or_default();
+        identity.roles = self
+            .roles
+            .as_deref()
+            .map(|claim| json_list_claim(payload, claim, None))
+            .unwrap_or_default();
+        identity.entitlements = self
+            .entitlements
+            .as_deref()
+            .map(|claim| json_list_claim(payload, claim, None))
             .unwrap_or_default();
         identity.device_id = self
             .device_id
@@ -215,6 +233,8 @@ impl CompiledAssertionClaims {
             .and_then(|claim| json_string_claim(payload, claim));
         if identity.user.is_some()
             || !identity.groups.is_empty()
+            || !identity.roles.is_empty()
+            || !identity.entitlements.is_empty()
             || identity.device_id.is_some()
             || !identity.posture.is_empty()
             || identity.tenant.is_some()

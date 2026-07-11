@@ -102,6 +102,8 @@ async fn proxy_wss(
     tunnel_idle_timeout: Duration,
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<Response<Body>> {
+    let (expected_accept, offered_protocols) =
+        crate::http::protocol::websocket::websocket_response_expectation(req.headers())?;
     let client_upgrade = crate::http::protocol::upgrade::on(&mut req);
     let tcp = timeout(timeout_dur, TcpStream::connect(connect_authority)).await??;
     let _ = tcp.set_nodelay(true);
@@ -125,6 +127,11 @@ async fn proxy_wss(
     let mut response = timeout(timeout_dur, sender.send_request(req))
         .await??
         .map(Body::from);
+    crate::http::protocol::websocket::validate_websocket_switching_response(
+        &response,
+        &expected_accept,
+        &offered_protocols,
+    )?;
     normalize_websocket_switching_protocols_response(&mut response);
     spawn_upgrade_tunnel(
         &mut response,

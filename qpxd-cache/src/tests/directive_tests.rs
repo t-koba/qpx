@@ -97,6 +97,65 @@ fn parse_response_directives_rfc5861_extensions() {
 }
 
 #[test]
+fn parse_response_directives_supports_immutable() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        CACHE_CONTROL,
+        http::HeaderValue::from_static("public, max-age=60, immutable"),
+    );
+    let parsed = parse_response_directives(&headers);
+    assert!(parsed.immutable);
+    assert_eq!(parsed.max_age, Some(60));
+}
+
+#[test]
+fn qpx_targeted_cache_control_takes_precedence() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(CACHE_CONTROL, http::HeaderValue::from_static("no-store"));
+    headers.insert(
+        "cdn-cache-control",
+        http::HeaderValue::from_static("max-age=120"),
+    );
+    headers.insert(
+        "qpx-cache-control",
+        http::HeaderValue::from_static("max-age=600, immutable"),
+    );
+
+    let parsed = parse_response_directives(&headers);
+    assert_eq!(parsed.max_age, Some(600));
+    assert!(parsed.immutable);
+    assert!(!parsed.no_store);
+}
+
+#[test]
+fn cdn_targeted_cache_control_takes_precedence_over_cache_control() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(CACHE_CONTROL, http::HeaderValue::from_static("no-store"));
+    headers.insert(
+        "cdn-cache-control",
+        http::HeaderValue::from_static("max-age=120"),
+    );
+
+    let parsed = parse_response_directives(&headers);
+    assert_eq!(parsed.max_age, Some(120));
+    assert!(!parsed.no_store);
+}
+
+#[test]
+fn invalid_targeted_cache_control_fails_closed() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(CACHE_CONTROL, http::HeaderValue::from_static("max-age=30"));
+    headers.insert(
+        "qpx-cache-control",
+        http::HeaderValue::from_static("max-age=1.5"),
+    );
+
+    let parsed = parse_response_directives(&headers);
+    assert!(parsed.no_store);
+    assert!(parsed.invalid_freshness);
+}
+
+#[test]
 fn parse_response_directives_marks_invalid_or_duplicate_freshness_stale() {
     let mut headers = http::HeaderMap::new();
     headers.insert(CACHE_CONTROL, http::HeaderValue::from_static("max-age=abc"));

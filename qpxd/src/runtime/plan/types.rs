@@ -275,6 +275,9 @@ pub enum CompiledReverseRouteTarget {
     LocalResponse {
         status: u16,
     },
+    Webdav {
+        origin: Arc<str>,
+    },
     TlsPassthrough {
         upstreams: Arc<[Arc<str>]>,
         lb: Arc<str>,
@@ -288,6 +291,7 @@ impl CompiledReverseRouteTarget {
             Self::Weighted { .. } => "weighted",
             Self::Ipc { .. } => "ipc",
             Self::LocalResponse { .. } => "local_response",
+            Self::Webdav { .. } => "webdav",
             Self::TlsPassthrough { .. } => "tls_passthrough",
         }
     }
@@ -425,10 +429,21 @@ pub struct ExecutionPlan {
     pub(crate) modules: Arc<CompiledHttpModuleChain>,
     pub(crate) cache: Option<qpx_core::config::CachePolicyConfig>,
     pub(crate) response_rules: Option<Arc<HttpResponseRuleEngine>>,
+    pub(crate) forwarded: Option<Arc<CompiledForwardedPolicy>>,
+    pub(crate) api_metadata: Option<Arc<qpx_http::api_metadata::ApiMetadata>>,
+    pub(crate) hsts: Option<qpx_http::hsts::HstsPolicy>,
+    pub(crate) require_precondition: bool,
     pub(crate) guard: Option<Arc<CompiledHttpGuardProfile>>,
     pub(crate) destination_resolution: Option<DestinationResolutionOverrideConfig>,
     pub(crate) policy_context: EffectivePolicyContext,
     pub(crate) rate_limits: CompiledRateLimitPlan,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledForwardedPolicy {
+    pub(crate) trusted_peers: Arc<[cidr::IpCidr]>,
+    pub(crate) by: Arc<str>,
+    pub(crate) untrusted_chain: qpx_core::config::UntrustedForwardedChainPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +484,10 @@ impl ExecutionPlan {
             modules: Arc::new(CompiledHttpModuleChain::default()),
             cache: None,
             response_rules: None,
+            forwarded: None,
+            api_metadata: None,
+            hsts: None,
+            require_precondition: false,
             guard: None,
             destination_resolution: None,
             policy_context: EffectivePolicyContext::default(),

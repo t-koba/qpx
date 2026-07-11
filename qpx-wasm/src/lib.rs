@@ -116,6 +116,8 @@ pub struct WasmRequest {
     pub remote_port: Option<u16>,
     /// HTTP headers converted to CGI-style names.
     pub http_headers: HashMap<String, String>,
+    /// Verified identity environment supplied through QPX-IPC, never client headers.
+    pub identity_env: HashMap<String, String>,
 }
 
 /// Running WASM execution handles and I/O streams.
@@ -749,6 +751,9 @@ fn build_wasi_ctx(req: &WasmRequest, extra_env: &HashMap<String, String>) -> Was
     if req.content_length > 0 {
         builder.env("CONTENT_LENGTH", req.content_length.to_string());
     }
+    for (key, value) in &req.identity_env {
+        builder.env(key, value);
+    }
     let connection_tokens = parse_connection_tokens(&req.http_headers);
     for (key, value) in &req.http_headers {
         let lower = key.to_ascii_lowercase();
@@ -881,6 +886,7 @@ mod tests {
                 remote_addr: None,
                 remote_port: None,
                 http_headers: HashMap::new(),
+                identity_env: HashMap::new(),
             })
             .await
             .expect("start execution");
@@ -919,6 +925,7 @@ mod tests {
                 remote_addr: None,
                 remote_port: None,
                 http_headers: HashMap::new(),
+                identity_env: HashMap::new(),
             })
             .await
             .expect("start execution");

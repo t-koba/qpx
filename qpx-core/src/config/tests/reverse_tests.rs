@@ -1,6 +1,112 @@
 use super::*;
 
 #[test]
+fn load_config_allows_named_webdav_origin_target() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("webdav-origin.yaml");
+    write_config(
+        &cfg,
+        r#"origins:
+  webdav:
+  - name: documents
+    root: /srv/qpx/documents
+    metadata: /var/lib/qpx/documents.redb
+    max_depth: 32
+    max_multistatus_entries: 10000
+    max_lock_timeout_seconds: 86400
+edges:
+- kind: reverse
+  name: dav
+  listen: 127.0.0.1:19080
+  routes:
+  - match:
+      path:
+      - /dav/**
+    http:
+      require_precondition: true
+    target:
+      type: webdav
+      origin: documents"#,
+    )
+    .expect("write");
+
+    let loaded = load_config(&cfg).expect("load WebDAV config");
+    fs::remove_dir_all(&dir).ok();
+    assert_eq!(loaded.http.origins.webdav[0].name, "documents");
+    assert!(
+        loaded.reverse_edge_configs()[0].routes[0]
+            .http
+            .as_ref()
+            .is_some_and(|http| http.require_precondition)
+    );
+    assert!(matches!(
+        loaded.reverse_edge_configs()[0].routes[0].target,
+        ReverseRouteTargetConfig::Webdav { ref origin } if origin == "documents"
+    ));
+}
+
+#[test]
+fn load_config_rejects_webdav_metadata_inside_served_root() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("webdav-origin-unsafe.yaml");
+    write_config(
+        &cfg,
+        r#"origins:
+  webdav:
+  - name: documents
+    root: /srv/qpx/documents
+    metadata: /srv/qpx/documents/private.redb
+edges:
+- kind: reverse
+  name: dav
+  listen: 127.0.0.1:19080
+  routes:
+  - match:
+      path: [/dav/**]
+    target:
+      type: webdav
+      origin: documents"#,
+    )
+    .expect("write");
+    let error = load_config(&cfg).expect_err("unsafe metadata placement must fail");
+    fs::remove_dir_all(&dir).ok();
+    assert!(error.to_string().contains("outside its served root"));
+}
+
+#[test]
+fn load_config_limits_511_to_explicit_capport_local_routes() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let rejected = dir.join("capport-rejected.yaml");
+    let config = |capport: bool| {
+        format!(
+            r#"edges:
+- kind: reverse
+  name: captive
+  listen: 127.0.0.1:19080
+  routes:
+  - match:
+      path: [/**]
+    http:
+      capport: {capport}
+    target:
+      type: local_response
+      response:
+        status: 511
+        body: network authentication required"#
+        )
+    };
+    write_config(&rejected, &config(false)).expect("write");
+    assert!(load_config(&rejected).is_err());
+    let accepted = dir.join("capport-accepted.yaml");
+    write_config(&accepted, &config(true)).expect("write");
+    load_config(&accepted).expect("explicit CAPPORT route");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn load_config_allows_reverse_path_rewrite() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");

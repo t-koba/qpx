@@ -109,6 +109,8 @@ handlers:
             server_protocol: "HTTP/2".to_string(),
             headers: vec![("Host".to_string(), "localhost".to_string())],
             params,
+            verified_identity: None,
+            authorization_decision: None,
             req_body_shm_path: None,
             req_body_shm_size_bytes: None,
             res_body_shm_path: None,

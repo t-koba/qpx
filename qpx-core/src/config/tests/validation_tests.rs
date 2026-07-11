@@ -271,3 +271,47 @@ fn load_config_rejects_unknown_keys() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn load_config_validates_connect_ip_device_and_network_policy() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("connect-ip.yaml");
+    let config = |device: &str| {
+        format!(
+            r#"edges:
+- kind: forward
+  name: masque
+  listen: 127.0.0.1:18080
+  default_action:
+    type: direct
+  http3:
+    enabled: true
+    connect_ip:
+      enabled: true
+      uri_template: https://masque.example/.well-known/masque/ip/{{target}}/{{ipproto}}/
+      allowed_source_cidrs: [192.0.2.0/24]
+      allowed_destination_cidrs: [198.51.100.0/24]
+      device: "{device}""#
+        )
+    };
+    write_config(&cfg, &config("auto")).expect("write");
+    let loaded = load_config(&cfg).expect("valid CONNECT-IP configuration");
+    assert_eq!(
+        loaded.edges[0]
+            .as_ingress()
+            .and_then(|edge| edge.http3.as_ref())
+            .and_then(|http3| http3.connect_ip.as_ref())
+            .and_then(|connect_ip| connect_ip.device.as_deref()),
+        Some("auto")
+    );
+    write_config(&cfg, &config("")).expect("write");
+    assert!(load_config(&cfg).is_err());
+    let relative_dll = config("auto").replace(
+        "      device: \"auto\"",
+        "      device: \"auto\"\n      wintun_dll: relative/wintun.dll",
+    );
+    write_config(&cfg, &relative_dll).expect("write");
+    assert!(load_config(&cfg).is_err());
+    fs::remove_dir_all(&dir).ok();
+}

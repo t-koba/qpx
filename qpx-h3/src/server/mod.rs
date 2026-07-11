@@ -42,6 +42,8 @@ pub enum SupportLevel {
 pub enum Protocol {
     /// CONNECT-UDP.
     ConnectUdp,
+    /// CONNECT-IP.
+    ConnectIp,
     /// WebTransport over HTTP/3.
     WebTransport,
     /// Other extended CONNECT protocol token.
@@ -53,6 +55,7 @@ impl Protocol {
     pub fn as_str(&self) -> &str {
         match self {
             Self::ConnectUdp => "connect-udp",
+            Self::ConnectIp => "connect-ip",
             Self::WebTransport => "webtransport",
             Self::Other(other) => other.as_str(),
         }

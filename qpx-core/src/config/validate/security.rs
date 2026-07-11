@@ -3,13 +3,24 @@ use cidr::IpCidr;
 use std::collections::HashSet;
 
 use super::super::types::{
-    AuthConfig, DecisionServiceConfig, DestinationResolutionConfig,
+    AuthConfig, BearerIdentitySourceConfig, DecisionServiceConfig, DecisionServiceDriver,
+    DecisionServiceMappingTargetDocument, DestinationResolutionConfig,
     DestinationResolutionOverrideConfig, HttpGuardProfileConfig, IdentitySourceConfig,
-    IdentitySourceKind, NamedSetConfig, RateLimitProfileConfig, SignedAssertionConfig,
-    UpstreamTlsTrustProfileConfig,
+    IdentitySourceKind, NamedSetConfig, OAuth2ClientAuthMethod, RateLimitProfileConfig,
+    SignedAssertionConfig, UpstreamTlsTrustProfileConfig,
 };
 use super::rules::{validate_header_name, validate_rate_limit_config};
 use super::upstreams::validate_upstream_tls_trust_config;
+
+fn validate_secure_or_loopback_url(value: &str, context: &str) -> Result<()> {
+    let url = url::Url::parse(value).map_err(|error| anyhow!("{context} is invalid: {error}"))?;
+    let loopback =
+        url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1" | "::1" | "localhost"));
+    if url.scheme() != "https" && !loopback {
+        return Err(anyhow!("{context} must use https or loopback http"));
+    }
+    Ok(())
+}
 
 pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig]) -> Result<()> {
     let mut names = HashSet::new();
@@ -45,7 +56,120 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
         }
 
         match source.kind {
+            IdentitySourceKind::Bearer => {
+                if !source.from.trusted_peers.is_empty()
+                    || source.from.client_ca.is_some()
+                    || source.headers.is_some()
+                    || source.map.is_some()
+                    || source.assertion.is_some()
+                {
+                    return Err(anyhow!(
+                        "identity_sources {} type=bearer only supports bearer configuration",
+                        source.name
+                    ));
+                }
+                let bearer = source.bearer.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "identity_sources {} type=bearer requires bearer configuration",
+                        source.name
+                    )
+                })?;
+                validate_header_name(
+                    bearer.header.as_deref().unwrap_or("authorization"),
+                    &format!("identity_sources {} bearer.header", source.name),
+                )?;
+                match &bearer.source {
+                    BearerIdentitySourceConfig::Jwt {
+                        issuer,
+                        audience,
+                        algorithms,
+                        jwks_url,
+                        public_key_env,
+                        ..
+                    } => {
+                        if issuer.trim().is_empty() || audience.trim().is_empty() {
+                            return Err(anyhow!(
+                                "identity_sources {} bearer JWT issuer and audience are required",
+                                source.name
+                            ));
+                        }
+                        if jwks_url.is_some() == public_key_env.is_some() {
+                            return Err(anyhow!(
+                                "identity_sources {} bearer JWT requires exactly one of jwks_url or public_key_env",
+                                source.name
+                            ));
+                        }
+                        for algorithm in algorithms {
+                            if !matches!(
+                                algorithm.as_str(),
+                                "RS256" | "RS384" | "RS512" | "ES256" | "ES384"
+                            ) {
+                                return Err(anyhow!(
+                                    "identity_sources {} bearer JWT algorithm is unsupported: {}",
+                                    source.name,
+                                    algorithm
+                                ));
+                            }
+                        }
+                        if let Some(url) = jwks_url {
+                            validate_secure_or_loopback_url(
+                                url,
+                                &format!("identity_sources {} bearer.jwks_url", source.name),
+                            )?;
+                        }
+                    }
+                    BearerIdentitySourceConfig::Introspection {
+                        endpoint,
+                        client_id,
+                        client_secret_env,
+                        positive_cache_seconds,
+                        negative_cache_seconds,
+                    } => {
+                        if client_id.trim().is_empty() || client_secret_env.trim().is_empty() {
+                            return Err(anyhow!(
+                                "identity_sources {} introspection client credentials are required",
+                                source.name
+                            ));
+                        }
+                        if *positive_cache_seconds == 0 || *negative_cache_seconds == 0 {
+                            return Err(anyhow!(
+                                "identity_sources {} introspection cache limits must be positive",
+                                source.name
+                            ));
+                        }
+                        validate_secure_or_loopback_url(
+                            endpoint,
+                            &format!(
+                                "identity_sources {} bearer.introspection.endpoint",
+                                source.name
+                            ),
+                        )?;
+                    }
+                }
+                if !bearer.claims.user_from_sub
+                    && bearer.claims.user.is_none()
+                    && bearer.claims.groups.is_none()
+                    && bearer.claims.roles.is_none()
+                    && bearer.claims.entitlements.is_none()
+                    && bearer.claims.device_id.is_none()
+                    && bearer.claims.posture.is_none()
+                    && bearer.claims.tenant.is_none()
+                    && bearer.claims.auth_strength.is_none()
+                    && bearer.claims.idp.is_none()
+                {
+                    return Err(anyhow!(
+                        "identity_sources {} bearer requires at least one claim mapping",
+                        source.name
+                    ));
+                }
+            }
             IdentitySourceKind::TrustedHeaders => {
+                if source.bearer.is_some() || source.assertion.is_some() || source.map.is_some() {
+                    return Err(anyhow!(
+                        "identity_sources {} type=trusted_headers contains fields for another identity source type",
+                        source.name
+                    ));
+                }
                 if source.from.trusted_peers.is_empty() {
                     return Err(anyhow!(
                         "identity_sources {} type=trusted_headers requires from.trusted_peers",
@@ -68,6 +192,8 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                 for header in [
                     headers.user.as_deref(),
                     headers.groups.as_deref(),
+                    headers.roles.as_deref(),
+                    headers.entitlements.as_deref(),
                     headers.device_id.as_deref(),
                     headers.posture.as_deref(),
                     headers.tenant.as_deref(),
@@ -91,6 +217,12 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                 }
             }
             IdentitySourceKind::MtlsSubject => {
+                if source.bearer.is_some() || source.assertion.is_some() {
+                    return Err(anyhow!(
+                        "identity_sources {} type=mtls_subject contains fields for another identity source type",
+                        source.name
+                    ));
+                }
                 #[cfg(not(feature = "tls-rustls"))]
                 {
                     return Err(anyhow!(
@@ -155,6 +287,12 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                 }
             }
             IdentitySourceKind::SignedAssertion => {
+                if source.bearer.is_some() {
+                    return Err(anyhow!(
+                        "identity_sources {} type=signed_assertion does not support bearer configuration",
+                        source.name
+                    ));
+                }
                 if !source.from.trusted_peers.is_empty() || source.from.client_ca.is_some() {
                     return Err(anyhow!(
                         "identity_sources {} type=signed_assertion does not support from.*",
@@ -551,6 +689,12 @@ pub(super) fn validate_decision_service_configs(
                 cfg.name
             ));
         }
+        if cfg.auth.bearer_token_env.is_some() && cfg.auth.oauth2_client_credentials.is_some() {
+            return Err(anyhow!(
+                "decision_service {} must configure at most one credential source",
+                cfg.name
+            ));
+        }
         if cfg.contract.profile_id.trim().is_empty() {
             return Err(anyhow!(
                 "decision_service {} contract.profile_id must not be empty",
@@ -633,10 +777,28 @@ pub(super) fn validate_decision_service_configs(
             &cfg.request_mapping,
             &format!("decision_service {} request_mapping", cfg.name),
         )?;
+        if cfg.contract.driver == DecisionServiceDriver::Authzen && !cfg.request_mapping.is_empty()
+        {
+            return Err(anyhow!(
+                "decision_service {} authzen uses its native request and requires empty request_mapping",
+                cfg.name
+            ));
+        }
         validate_mapping_rules(
             &cfg.response_mapping,
             &format!("decision_service {} response_mapping", cfg.name),
         )?;
+        if cfg.contract.driver == DecisionServiceDriver::Authzen
+            && cfg.response_mapping.iter().any(|mapping| {
+                mapping.target_document == DecisionServiceMappingTargetDocument::EnforceableEffect
+                    && mapping.target == "/decision"
+            })
+        {
+            return Err(anyhow!(
+                "decision_service {} authzen decision is native and must not be remapped",
+                cfg.name
+            ));
+        }
         for header in &cfg.pep_signal.selected_headers {
             validate_header_name(
                 header,
@@ -699,11 +861,75 @@ pub(super) fn validate_decision_service_configs(
                 cfg.name
             ));
         }
-        if cfg.auth.bearer_token_env.is_some() && url.scheme() != "https" {
+        let loopback_http = url.scheme() == "http"
+            && matches!(url.host_str(), Some("127.0.0.1" | "::1" | "localhost"));
+        if cfg.auth.bearer_token_env.is_some() && url.scheme() != "https" && !loopback_http {
             return Err(anyhow!(
                 "decision_service {} auth.bearer_token_env requires an https endpoint",
                 cfg.name
             ));
+        }
+        if let Some(oauth) = cfg.auth.oauth2_client_credentials.as_ref() {
+            if oauth.client_id.trim().is_empty() {
+                return Err(anyhow!(
+                    "decision_service {} OAuth client_id must not be empty",
+                    cfg.name
+                ));
+            }
+            let has_secret = oauth
+                .client_secret_env
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            let has_private_key = oauth
+                .private_key_env
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            match oauth.client_auth_method {
+                OAuth2ClientAuthMethod::ClientSecretBasic
+                | OAuth2ClientAuthMethod::ClientSecretPost
+                    if has_secret && !has_private_key => {}
+                OAuth2ClientAuthMethod::PrivateKeyJwt if has_private_key && !has_secret => {}
+                OAuth2ClientAuthMethod::TlsClientAuth
+                    if !has_secret && !has_private_key && cfg.auth.mtls.is_some() => {}
+                _ => {
+                    return Err(anyhow!(
+                        "decision_service {} OAuth client authentication credentials do not match client_auth_method",
+                        cfg.name
+                    ));
+                }
+            }
+            if oauth
+                .scope
+                .as_deref()
+                .is_some_and(|scope| scope.trim().is_empty())
+                || oauth
+                    .resource
+                    .as_deref()
+                    .is_some_and(|resource| resource.trim().is_empty())
+            {
+                return Err(anyhow!(
+                    "decision_service {} OAuth scope and resource must not be empty when set",
+                    cfg.name
+                ));
+            }
+            let token_url = url::Url::parse(&oauth.token_endpoint).map_err(|error| {
+                anyhow!(
+                    "decision_service {} OAuth token_endpoint is invalid: {}",
+                    cfg.name,
+                    error
+                )
+            })?;
+            let token_loopback = token_url.scheme() == "http"
+                && matches!(
+                    token_url.host_str(),
+                    Some("127.0.0.1" | "::1" | "localhost")
+                );
+            if token_url.scheme() != "https" && !token_loopback {
+                return Err(anyhow!(
+                    "decision_service {} OAuth token_endpoint must use https or loopback http",
+                    cfg.name
+                ));
+            }
         }
         if let Some(mtls) = cfg.auth.mtls.as_ref() {
             let context = format!("decision_service {} auth.mtls", cfg.name);
@@ -868,6 +1094,11 @@ fn validate_mapping_rules(
         if rule.source.is_some() == rule.literal.is_some() {
             return Err(anyhow!(
                 "{context} must set exactly one of source or literal"
+            ));
+        }
+        if rule.literal.is_some() && !rule.value_map.is_empty() {
+            return Err(anyhow!(
+                "{context}.value_map is only valid for source mappings"
             ));
         }
         if let Some(source) = rule.source.as_deref()

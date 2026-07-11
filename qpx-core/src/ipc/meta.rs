@@ -13,6 +13,12 @@ pub struct IpcRequestMeta {
     pub headers: Vec<(String, String)>,
     pub params: HashMap<String, String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_identity: Option<VerifiedIdentityContext>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_decision: Option<AuthorizationDecisionContext>,
+
     /// Shared Memory Ring Buffer identifier for reading request body.
     ///
     /// Security note: the receiver (qpxf) MUST NOT treat this as an arbitrary filesystem path
@@ -43,6 +49,56 @@ pub struct IpcRequestMeta {
     /// for later requests on the same IPC stream.
     #[serde(default, skip_serializing_if = "is_false")]
     pub shm_reusable: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedIdentityContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entitlements: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assurance: Option<String>,
+}
+
+impl VerifiedIdentityContext {
+    pub fn is_empty(&self) -> bool {
+        self.subject.is_none()
+            && self.issuer.is_none()
+            && self.tenant.is_none()
+            && self.groups.is_empty()
+            && self.roles.is_empty()
+            && self.entitlements.is_empty()
+            && self.assurance.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationDecisionContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_decision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_tags: Vec<String>,
+}
+
+impl AuthorizationDecisionContext {
+    pub fn is_empty(&self) -> bool {
+        self.external_decision_id.is_none()
+            && self.policy_id.is_none()
+            && self.policy_tags.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

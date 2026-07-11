@@ -320,6 +320,7 @@ mod tests {
                     enabled: true,
                     listen: Some("127.0.0.1:0".to_string()),
                     connect_udp: None,
+                    connect_ip: None,
                 }),
                 ftp: Default::default(),
                 xdp: None,

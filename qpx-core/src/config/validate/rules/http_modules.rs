@@ -58,6 +58,25 @@ pub(crate) fn validate_http_modules(modules: &[HttpModuleConfig], context: &str)
                         format!("{module_context} content_types[]").as_str(),
                     )?;
                 }
+                if let Some(dictionary) = &config.dictionary {
+                    if !std::path::Path::new(&dictionary.path).is_absolute() {
+                        return Err(anyhow!("{module_context} dictionary.path must be absolute"));
+                    }
+                    if !matches!(dictionary.encoding.as_str(), "dcb" | "dcz") {
+                        return Err(anyhow!(
+                            "{module_context} dictionary.encoding must be dcb or dcz"
+                        ));
+                    }
+                    if dictionary
+                        .id
+                        .as_ref()
+                        .is_some_and(|id| id.chars().count() > 1024)
+                    {
+                        return Err(anyhow!(
+                            "{module_context} dictionary.id must not exceed 1024 characters"
+                        ));
+                    }
+                }
             }
             "subrequest" => {
                 let config: SubrequestModuleConfig = module

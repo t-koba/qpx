@@ -10,6 +10,7 @@ use crate::http::dispatch::{
     DispatchError, ProxyKind, concurrency_limited_response_for_parts,
     prepare_http_module_local_response,
 };
+use crate::http::protocol::forwarded::apply_forwarded_policy;
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::http::protocol::websocket::is_websocket_upgrade;
 use crate::policy_context::strip_untrusted_identity_headers;
@@ -43,7 +44,16 @@ pub(super) async fn prepare_forward_dispatch(
         remote_addr.ip(),
         req.headers_mut(),
     )?;
-    let websocket = is_websocket_upgrade(req.headers());
+    let forwarded_scheme = req.uri().scheme_str().unwrap_or("http").to_string();
+    let http_authority = forward_authority(host, None);
+    apply_forwarded_policy(
+        req.headers_mut(),
+        selected_plan.forwarded.as_deref(),
+        remote_addr.ip(),
+        forwarded_scheme.as_str(),
+        Some(http_authority.as_str()),
+    )?;
+    let websocket = is_websocket_upgrade(req.method(), req.headers())?;
     prepare_request_with_headers_in_place(&mut req, proxy_name, headers, websocket);
     ensure_forward_host_header(&mut req, host)?;
     let mut http_modules = selected_plan.modules.start(
@@ -97,7 +107,6 @@ pub(super) async fn prepare_forward_dispatch(
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
     });
-    let http_authority = forward_authority(host, None);
     let export_session = state.export_session_for_plan(selected_plan, remote_addr, &http_authority);
     if websocket {
         let connect_authority = forward_authority(host, Some(80));

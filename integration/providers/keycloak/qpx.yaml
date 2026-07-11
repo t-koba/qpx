@@ -1,0 +1,28 @@
+state_dir: "${QPX_STATE_DIR}"
+security:
+  identity_sources:
+  - name: keycloak-jwt
+    type: bearer
+    bearer:
+      source:
+        mode: jwt
+        issuer: http://127.0.0.1:18081/realms/qpx-ci
+        audience: qpx
+        algorithms: [RS256]
+        jwks_url: http://127.0.0.1:18081/realms/qpx-ci/protocol/openid-connect/certs
+      claims:
+        user_from_sub: true
+edges:
+- kind: forward
+  name: keycloak-resource-server
+  listen: 127.0.0.1:18082
+  default_action: { type: block }
+  rules:
+  - name: authenticated
+    match:
+      host: ["*"]
+      identity:
+        user: ["*"]
+    action: { type: direct }
+  policy_context:
+    identity_sources: [keycloak-jwt]

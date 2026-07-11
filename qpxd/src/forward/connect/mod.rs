@@ -90,7 +90,8 @@ pub(super) async fn handle_connect(
         remote_addr.ip(),
         Some(&sanitized_headers),
         None,
-    )?;
+    )
+    .await?;
     let destination = state.classify_destination(
         &DestinationInputs {
             host: Some(host.as_str()),

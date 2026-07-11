@@ -85,10 +85,7 @@ pub async fn invalidate_primary(
 }
 
 fn is_unsafe_method(method: &Method) -> bool {
-    matches!(
-        *method,
-        Method::POST | Method::PUT | Method::DELETE | Method::PATCH
-    )
+    !qpx_http::protocol::method::method_semantics(method).safe
 }
 
 fn is_invalidation_status(status: StatusCode) -> bool {
@@ -128,6 +125,7 @@ fn collect_invalidation_targets(
                     scheme: url.scheme().to_ascii_lowercase(),
                     authority: authority.clone(),
                     path_and_query: path_and_query.clone(),
+                    content_digest: None,
                 });
             }
         }
@@ -143,6 +141,7 @@ fn invalidation_keys_for_target(target: &CacheRequestKey) -> Vec<CacheRequestKey
             scheme: target.scheme.clone(),
             authority: target.authority.clone(),
             path_and_query: target.path_and_query.clone(),
+            content_digest: None,
         })
         .collect()
 }

@@ -233,5 +233,5 @@ fn vary_matching_works() {
         vary_values: vec![("accept-language".to_string(), "ja".to_string())],
         header_map: Default::default(),
     };
-    assert!(matches_vary(&req_headers, &envelope));
+    assert!(matches_vary(&req_headers, None, &envelope));
 }

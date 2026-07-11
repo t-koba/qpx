@@ -11,7 +11,7 @@ use crate::policy_context::{resolve_identity, sanitize_headers_for_policy};
 use crate::rate_limit::RateLimitContext;
 use anyhow::{Result, anyhow};
 use hyper::StatusCode;
-use qpx_core::config::{ActionConfig, ConnectUdpConfig};
+use qpx_core::config::{ActionConfig, ConnectIpConfig, ConnectUdpConfig};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_observability::access_log::RequestLogContext;
 use std::sync::Arc;
@@ -45,6 +45,7 @@ pub(super) struct PrepareQpxConnectInput<'a> {
     pub(super) conn: &'a qpx_h3::ConnectionInfo,
     pub(super) protocol: Option<&'a qpx_h3::Protocol>,
     pub(super) connect_udp_cfg: Option<&'a ConnectUdpConfig>,
+    pub(super) connect_ip_cfg: Option<&'a ConnectIpConfig>,
 }
 
 pub(super) struct ValidatedQpxConnect {
@@ -87,7 +88,7 @@ pub(super) async fn prepare_qpx_connect_request(
     let Some(validated) = validate_connect_request(&mut input).await? else {
         return Ok(None);
     };
-    let context = build_connect_policy_context(&input, validated)?;
+    let context = build_connect_policy_context(&input, validated).await?;
     let Some(evaluated) = evaluate_connect_policy(&mut input, context).await? else {
         return Ok(None);
     };
@@ -105,9 +106,11 @@ async fn validate_connect_request(
     let handler = input.handler;
     let protocol = input.protocol;
     let connect_udp_cfg = input.connect_udp_cfg;
+    let connect_ip_cfg = input.connect_ip_cfg;
     let state = handler.runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let is_connect_udp = protocol == Some(&qpx_h3::Protocol::ConnectUdp);
+    let is_connect_ip = protocol == Some(&qpx_h3::Protocol::ConnectIp);
     let is_extended_connect = protocol.is_some();
 
     if is_connect_udp && !connect_udp_cfg.is_some_and(|cfg| cfg.enabled) {
@@ -115,6 +118,29 @@ async fn validate_connect_request(
             req_stream,
             StatusCode::NOT_IMPLEMENTED,
             state.messages.connect_udp_disabled.as_bytes(),
+            proxy_name,
+        )
+        .await;
+    }
+    if is_connect_ip && !connect_ip_cfg.is_some_and(|cfg| cfg.enabled) {
+        return reject_qpx_connect(
+            req_stream,
+            StatusCode::NOT_IMPLEMENTED,
+            b"CONNECT-IP is disabled",
+            proxy_name,
+        )
+        .await;
+    }
+    if is_connect_ip
+        && req_head
+            .headers()
+            .get("capsule-protocol")
+            .and_then(|value| value.to_str().ok())
+            != Some("?1")
+    {
+        return reject_bad_qpx_connect(
+            req_stream,
+            b"CONNECT-IP requires Capsule-Protocol: ?1",
             proxy_name,
         )
         .await;
@@ -132,15 +158,17 @@ async fn validate_connect_request(
         }
     };
 
-    let Some(target) = resolve_qpx_connect_target(
+    let Some(target) = resolve_qpx_connect_target(ResolveQpxConnectTargetInput {
         req_head,
         req_stream,
         connect_udp_cfg,
-        req_authority.as_str(),
+        connect_ip_cfg,
+        req_authority: req_authority.as_str(),
         is_connect_udp,
+        is_connect_ip,
         is_extended_connect,
         proxy_name,
-    )
+    })
     .await?
     else {
         return Ok(None);
@@ -207,20 +235,47 @@ async fn reject_bad_qpx_connect<T>(
     reject_qpx_connect(req_stream, StatusCode::BAD_REQUEST, message, proxy_name).await
 }
 
-async fn resolve_qpx_connect_target(
-    req_head: &http::Request<()>,
-    req_stream: &mut qpx_h3::RequestStream,
-    connect_udp_cfg: Option<&ConnectUdpConfig>,
-    req_authority: &str,
+struct ResolveQpxConnectTargetInput<'a> {
+    req_head: &'a http::Request<()>,
+    req_stream: &'a mut qpx_h3::RequestStream,
+    connect_udp_cfg: Option<&'a ConnectUdpConfig>,
+    connect_ip_cfg: Option<&'a ConnectIpConfig>,
+    req_authority: &'a str,
     is_connect_udp: bool,
+    is_connect_ip: bool,
     is_extended_connect: bool,
-    proxy_name: &str,
+    proxy_name: &'a str,
+}
+
+async fn resolve_qpx_connect_target(
+    input: ResolveQpxConnectTargetInput<'_>,
 ) -> Result<Option<ValidatedQpxConnectTarget>> {
+    let ResolveQpxConnectTargetInput {
+        req_head,
+        req_stream,
+        connect_udp_cfg,
+        connect_ip_cfg,
+        req_authority,
+        is_connect_udp,
+        is_connect_ip,
+        is_extended_connect,
+        proxy_name,
+    } = input;
     if is_connect_udp {
         return resolve_qpx_connect_udp_target(
             req_head,
             req_stream,
             connect_udp_cfg,
+            req_authority,
+            proxy_name,
+        )
+        .await;
+    }
+    if is_connect_ip {
+        return resolve_qpx_connect_ip_target(
+            req_head,
+            req_stream,
+            connect_ip_cfg,
             req_authority,
             proxy_name,
         )
@@ -253,6 +308,61 @@ async fn resolve_qpx_connect_target(
         auth_uri,
         host,
         port,
+    }))
+}
+
+async fn resolve_qpx_connect_ip_target(
+    req_head: &http::Request<()>,
+    req_stream: &mut qpx_h3::RequestStream,
+    connect_ip_cfg: Option<&ConnectIpConfig>,
+    req_authority: &str,
+    proxy_name: &str,
+) -> Result<Option<ValidatedQpxConnectTarget>> {
+    let Some(config) = connect_ip_cfg else {
+        return reject_bad_qpx_connect(req_stream, b"CONNECT-IP has no configuration", proxy_name)
+            .await;
+    };
+    let template = qpx_core::uri_template::UriTemplate::parse(&config.uri_template)?;
+    let variables = match template.match_scalars(&req_head.uri().to_string()) {
+        Ok(variables) => variables,
+        Err(_) => {
+            return reject_bad_qpx_connect(req_stream, b"invalid CONNECT-IP target", proxy_name)
+                .await;
+        }
+    };
+    let target = variables
+        .get("target")
+        .ok_or_else(|| anyhow!("CONNECT-IP URI template did not recover target"))?;
+    let target_ip = target
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| anyhow!("CONNECT-IP target must be an IP address"))?;
+    let ipproto = variables
+        .get("ipproto")
+        .ok_or_else(|| anyhow!("CONNECT-IP URI template did not recover ipproto"))?
+        .parse::<u8>()
+        .map_err(|_| anyhow!("CONNECT-IP ipproto must be in range 0..=255"))?;
+    let (authority_host, authority_port) =
+        match parse_connect_authority_with_default(req_authority, Some(443)) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return reject_bad_qpx_connect(
+                    req_stream,
+                    b"invalid CONNECT-IP authority",
+                    proxy_name,
+                )
+                .await;
+            }
+        };
+    if req_head.uri().scheme_str() != Some("https") {
+        return reject_bad_qpx_connect(req_stream, b"CONNECT-IP :scheme must be https", proxy_name)
+            .await;
+    }
+    Ok(Some(ValidatedQpxConnectTarget {
+        host: target_ip.to_string(),
+        port: authority_port,
+        authority_host_for_validation: authority_host,
+        authority_port_for_validation: authority_port,
+        auth_uri: format!("{}#ipproto={ipproto}", req_head.uri()),
     }))
 }
 
@@ -310,7 +420,7 @@ async fn resolve_qpx_connect_udp_target(
     }))
 }
 
-fn build_connect_policy_context(
+async fn build_connect_policy_context(
     input: &PrepareQpxConnectInput<'_>,
     validated: ValidatedQpxConnect,
 ) -> Result<ConnectPolicyContext> {
@@ -320,6 +430,7 @@ fn build_connect_policy_context(
     let protocol = input.protocol;
     let state = handler.runtime.state();
     let is_connect_udp = protocol == Some(&qpx_h3::Protocol::ConnectUdp);
+    let is_connect_ip = protocol == Some(&qpx_h3::Protocol::ConnectIp);
     let ValidatedQpxConnect {
         req_authority,
         host,
@@ -347,13 +458,14 @@ fn build_connect_policy_context(
         conn.peer_certificates
             .as_deref()
             .map(|certs| certs.as_slice()),
-    )?;
+    )
+    .await?;
     let destination = state.classify_destination(
         &DestinationInputs {
             host: Some(host.as_str()),
             ip: host.parse().ok(),
             sni: Some(host.as_str()),
-            scheme: if is_connect_udp {
+            scheme: if is_connect_udp || is_connect_ip {
                 req_head.uri().scheme_str()
             } else {
                 Some("https")

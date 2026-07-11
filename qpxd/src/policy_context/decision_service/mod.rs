@@ -1,6 +1,8 @@
 use crate::http::dispatch::ProxyKind;
 use crate::runtime::RuntimeState;
 use anyhow::{Context, Result, anyhow};
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
 use http::header::HeaderName;
 use http_body_util::BodyExt;
 use hyper::{HeaderMap, Request};
@@ -9,7 +11,7 @@ use qpx_core::config::{
     ActionConfig, ActionKind, DecisionServiceAuthorityConfig, DecisionServiceConfig,
     DecisionServiceConstraintsConfig, DecisionServiceDriver, DecisionServiceMappingRuleConfig,
     DecisionServiceMappingTargetDocument, HeaderControl, LocalResponseConfig,
-    UpstreamTlsTrustConfig,
+    OAuth2ClientAuthMethod, UpstreamTlsTrustConfig,
 };
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_core::tls::CompiledUpstreamTlsTrust;
@@ -23,9 +25,10 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout};
 use tracing::warn;
 use url::Url;
+use zeroize::Zeroizing;
 
 use super::identity::{EffectivePolicyContext, ResolvedIdentity};
 use super::util::{normalize_string_list, selected_headers_map};
@@ -44,6 +47,7 @@ use self::validation::{
 #[derive(Debug)]
 pub(crate) struct CompiledDecisionService {
     name: String,
+    driver: DecisionServiceDriver,
     endpoint: Url,
     timeout: Duration,
     max_response_bytes: usize,
@@ -65,12 +69,46 @@ pub(crate) struct CompiledDecisionService {
     allowed_effects: HashSet<String>,
     upstream_trust: Option<Arc<CompiledUpstreamTlsTrust>>,
     bearer_token: Option<String>,
+    oauth2_client_credentials: Option<OAuth2ClientCredentialsProvider>,
     signature: Option<CompiledSignature>,
     cache: Option<Arc<DecisionServiceCache>>,
 }
 
+struct OAuth2ClientCredentialsProvider {
+    endpoint: Url,
+    client_id: String,
+    client_secret: Option<Zeroizing<String>>,
+    private_key: Option<Zeroizing<Vec<u8>>>,
+    key_id: Option<String>,
+    scope: Option<String>,
+    resource: Option<String>,
+    client_auth_method: OAuth2ClientAuthMethod,
+    token: tokio::sync::Mutex<Option<CachedOAuth2Token>>,
+}
+
+struct CachedOAuth2Token {
+    access_token: Zeroizing<String>,
+    refresh_at: Instant,
+}
+
+impl std::fmt::Debug for OAuth2ClientCredentialsProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OAuth2ClientCredentialsProvider")
+            .field("endpoint", &self.endpoint)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[redacted]")
+            .field("private_key", &"[redacted]")
+            .field("scope", &self.scope)
+            .field("resource", &self.resource)
+            .field("client_auth_method", &self.client_auth_method)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DecisionServiceAllow {
+    pub(crate) external_decision_id: Option<String>,
     pub(crate) policy_id: Option<String>,
     pub(crate) override_upstream: Option<String>,
     pub(crate) headers: Option<Arc<CompiledHeaderControl>>,
@@ -178,9 +216,6 @@ impl CompiledDecisionService {
         config: &DecisionServiceConfig,
         trust_profiles: &HashMap<String, UpstreamTlsTrustConfig>,
     ) -> Result<Self> {
-        match config.contract.driver {
-            DecisionServiceDriver::SchemaMappedHttp => {}
-        }
         let selected_headers = config
             .pep_signal
             .selected_headers
@@ -223,6 +258,7 @@ impl CompiledDecisionService {
         let cache = compile_cache(config)?;
         Ok(Self {
             name: config.name.clone(),
+            driver: config.contract.driver,
             endpoint: Url::parse(&config.endpoint)?,
             timeout: Duration::from_millis(config.timeout_ms),
             max_response_bytes: config.max_response_bytes,
@@ -267,6 +303,51 @@ impl CompiledDecisionService {
                         config.name
                     )
                 })?,
+            oauth2_client_credentials: config
+                .auth
+                .oauth2_client_credentials
+                .as_ref()
+                .map(|oauth| {
+                    Ok::<OAuth2ClientCredentialsProvider, anyhow::Error>(
+                        OAuth2ClientCredentialsProvider {
+                            endpoint: Url::parse(&oauth.token_endpoint)?,
+                            client_id: oauth.client_id.clone(),
+                            client_secret: oauth
+                                .client_secret_env
+                                .as_ref()
+                                .map(std::env::var)
+                                .transpose()
+                                .with_context(|| {
+                                    format!(
+                                        "decision_service {} OAuth client secret could not be read",
+                                        config.name
+                                    )
+                                })?
+                                .map(Zeroizing::new),
+                            private_key: oauth
+                                .private_key_env
+                                .as_ref()
+                                .map(std::env::var)
+                                .transpose()
+                                .with_context(|| {
+                                    format!(
+                                        "decision_service {} OAuth private key could not be read",
+                                        config.name
+                                    )
+                                })?
+                                .map(|value| BASE64.decode(value))
+                                .transpose()
+                                .with_context(|| "OAuth private key must be base64 PKCS#8")?
+                                .map(Zeroizing::new),
+                            key_id: oauth.key_id.clone(),
+                            scope: oauth.scope.clone(),
+                            resource: oauth.resource.clone(),
+                            client_auth_method: oauth.client_auth_method,
+                            token: tokio::sync::Mutex::new(None),
+                        },
+                    )
+                })
+                .transpose()?,
             signature,
             cache,
         })
@@ -320,8 +401,17 @@ async fn decision_service_round_trip(
         .method(http::Method::POST)
         .uri(cfg.endpoint.as_str())
         .header(http::header::CONTENT_TYPE, "application/json");
-    if let Some(token) = cfg.bearer_token.as_deref() {
-        builder = builder.header(http::header::AUTHORIZATION, format!("Bearer {token}"));
+    let access_token = if let Some(provider) = cfg.oauth2_client_credentials.as_ref() {
+        Some(fetch_oauth2_client_credentials_token(pools, cfg, provider).await?)
+    } else {
+        cfg.bearer_token
+            .as_ref()
+            .map(|token| Zeroizing::new(token.clone()))
+    };
+    if let Some(token) = access_token.as_deref() {
+        let mut authorization = http::HeaderValue::from_str(&format!("Bearer {token}"))?;
+        authorization.set_sensitive(true);
+        builder = builder.header(http::header::AUTHORIZATION, authorization);
     }
     builder = apply_http_message_signature(builder, cfg, &body)?;
     let request = builder.body(Body::from(body))?;
@@ -380,10 +470,168 @@ async fn decision_service_round_trip(
     Ok(enforcement)
 }
 
+#[derive(Deserialize)]
+struct OAuth2TokenResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: u64,
+}
+
+async fn fetch_oauth2_client_credentials_token(
+    pools: &crate::pool::PoolRegistry,
+    cfg: &CompiledDecisionService,
+    provider: &OAuth2ClientCredentialsProvider,
+) -> Result<Zeroizing<String>> {
+    let mut cached = provider.token.lock().await;
+    if let Some(token) = cached.as_ref()
+        && Instant::now() < token.refresh_at
+    {
+        return Ok(token.access_token.clone());
+    }
+    let body = {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        serializer.append_pair("grant_type", "client_credentials");
+        if provider.client_auth_method == OAuth2ClientAuthMethod::ClientSecretPost {
+            let secret = provider
+                .client_secret
+                .as_deref()
+                .ok_or_else(|| anyhow!("OAuth client secret is unavailable"))?;
+            serializer
+                .append_pair("client_id", &provider.client_id)
+                .append_pair("client_secret", secret);
+        } else if provider.client_auth_method == OAuth2ClientAuthMethod::PrivateKeyJwt {
+            serializer
+                .append_pair("client_id", &provider.client_id)
+                .append_pair(
+                    "client_assertion_type",
+                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                )
+                .append_pair("client_assertion", &oauth_private_key_jwt(provider)?);
+        } else if provider.client_auth_method == OAuth2ClientAuthMethod::TlsClientAuth {
+            serializer.append_pair("client_id", &provider.client_id);
+        }
+        if let Some(resource) = provider.resource.as_deref() {
+            serializer.append_pair("resource", resource);
+        }
+        if let Some(scope) = provider.scope.as_deref() {
+            serializer.append_pair("scope", scope);
+        }
+        serializer.finish()
+    };
+    let mut request = Request::builder()
+        .method(http::Method::POST)
+        .uri(provider.endpoint.as_str())
+        .header(
+            http::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        );
+    if provider.client_auth_method == OAuth2ClientAuthMethod::ClientSecretBasic {
+        let secret = provider
+            .client_secret
+            .as_deref()
+            .ok_or_else(|| anyhow!("OAuth client secret is unavailable"))?;
+        let credentials = base64::engine::general_purpose::STANDARD
+            .encode(format!("{}:{}", provider.client_id, secret));
+        let mut authorization = http::HeaderValue::from_str(&format!("Basic {credentials}"))?;
+        authorization.set_sensitive(true);
+        request = request.header(http::header::AUTHORIZATION, authorization);
+    }
+    let request = request.body(Body::from(body))?;
+    let response = match provider.endpoint.scheme() {
+        "http" => {
+            timeout(cfg.timeout, async {
+                crate::http::protocol::common::request_with_shared_client(request).await
+            })
+            .await??
+        }
+        "https" => {
+            timeout(cfg.timeout, async {
+                crate::upstream::origin::shared_reverse_https_request_with_trust(
+                    pools,
+                    request,
+                    cfg.upstream_trust.as_deref(),
+                )
+                .await
+            })
+            .await??
+        }
+        scheme => return Err(anyhow!("unsupported OAuth token endpoint scheme: {scheme}")),
+    };
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "OAuth token endpoint returned {}",
+            response.status()
+        ));
+    }
+    let (_, value) = parse_decision_service_response_body(
+        response.into_body(),
+        cfg.max_response_bytes.min(64 * 1024),
+    )
+    .await?;
+    let response: OAuth2TokenResponse =
+        serde_json::from_value(value).with_context(|| "failed to parse OAuth token response")?;
+    if response.access_token.trim().is_empty()
+        || !response.token_type.eq_ignore_ascii_case("bearer")
+    {
+        return Err(anyhow!("OAuth token response is invalid"));
+    }
+    if response.expires_in == 0 {
+        return Err(anyhow!("OAuth token response expires_in must be positive"));
+    }
+    let access_token = Zeroizing::new(response.access_token);
+    let refresh_after = response.expires_in.saturating_sub(60);
+    *cached = Some(CachedOAuth2Token {
+        access_token: access_token.clone(),
+        refresh_at: Instant::now() + Duration::from_secs(refresh_after),
+    });
+    Ok(access_token)
+}
+
+fn oauth_private_key_jwt(provider: &OAuth2ClientCredentialsProvider) -> Result<String> {
+    use ring::signature::Ed25519KeyPair;
+    let pkcs8 = provider
+        .private_key
+        .as_deref()
+        .ok_or_else(|| anyhow!("OAuth private key is unavailable"))?;
+    let key = Ed25519KeyPair::from_pkcs8(pkcs8)
+        .map_err(|_| anyhow!("OAuth private_key_jwt key is not Ed25519 PKCS#8"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .with_context(|| "system clock is before the Unix epoch")?
+        .as_secs();
+    let header = json!({
+        "alg": "EdDSA",
+        "typ": "JWT",
+        "kid": provider.key_id
+    });
+    let claims = json!({
+        "iss": provider.client_id,
+        "sub": provider.client_id,
+        "aud": provider.endpoint.as_str(),
+        "iat": now,
+        "exp": now + 300,
+        "jti": uuid::Uuid::new_v4().to_string()
+    });
+    let signing_input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?),
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?)
+    );
+    let signature = key.sign(signing_input.as_bytes());
+    Ok(format!(
+        "{}.{}",
+        signing_input,
+        URL_SAFE_NO_PAD.encode(signature.as_ref())
+    ))
+}
+
 fn build_remote_decision_request(
     cfg: &CompiledDecisionService,
     input: &DecisionServiceInput<'_>,
 ) -> Result<Value> {
+    if cfg.driver == DecisionServiceDriver::Authzen {
+        return Ok(build_authzen_request(cfg, input));
+    }
     let source = if mapping_rules_need_json_source(&cfg.request_mapping) {
         let pep_signal = build_pep_signal(cfg, input);
         let effect_capability = build_effect_capability(cfg, input.mode);
@@ -417,6 +665,52 @@ fn build_remote_decision_request(
         validate_schema(schema, &request, "decision_request")?;
     }
     Ok(request)
+}
+
+fn build_authzen_request(cfg: &CompiledDecisionService, input: &DecisionServiceInput<'_>) -> Value {
+    let resource_id = input.uri.or(input.path).or(input.host).unwrap_or("unknown");
+    json!({
+        "subject": {
+            "type": input.identity.identity_source.as_deref().unwrap_or("identity"),
+            "id": input.identity.user.as_deref().unwrap_or("anonymous"),
+            "properties": {
+                "issuer": input.identity.idp,
+                "tenant": input.identity.tenant,
+                "groups": input.identity.groups,
+                "roles": input.identity.roles,
+                "entitlements": input.identity.entitlements,
+                "assurance": input.identity.auth_strength,
+                "device_id": input.identity.device_id,
+                "posture": input.identity.posture
+            }
+        },
+        "resource": {
+            "type": input.proxy_kind.as_str(),
+            "id": resource_id,
+            "properties": {
+                "host": input.host,
+                "sni": input.sni,
+                "port": input.dst_port,
+                "path": input.path,
+                "matched_rule": input.matched_rule,
+                "matched_route": input.matched_route
+            }
+        },
+        "action": {
+            "name": input.method.unwrap_or(input.mode.as_str()),
+            "properties": {
+                "mode": input.mode.as_str(),
+                "proxy": input.proxy_name,
+                "scope": input.scope_name
+            }
+        },
+        "context": {
+            "remote_ip": input.remote_ip.to_string(),
+            "profile_id": cfg.profile_id,
+            "contract_id": cfg.contract_id,
+            "extensions": cfg.signal_extensions
+        }
+    })
 }
 
 impl CompiledDecisionService {
@@ -459,6 +753,14 @@ fn map_remote_decision_response(
         None
     };
     let mut docs = MappingDocuments::default();
+    if cfg.driver == DecisionServiceDriver::Authzen {
+        let decision = raw_response
+            .get("decision")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow!("AuthZEN response decision must be boolean"))?;
+        docs.enforceable_effect["decision"] =
+            Value::String(if decision { "allow" } else { "deny" }.to_string());
+    }
     let builtins = MappingBuiltins {
         cfg,
         input: None,
@@ -477,11 +779,11 @@ fn map_remote_decision_response(
 
 fn build_pep_signal(cfg: &CompiledDecisionService, input: &DecisionServiceInput<'_>) -> Value {
     let mut headers = selected_headers_map(input.headers, &cfg.selected_headers);
+    for forbidden in ["authorization", "proxy-authorization", "cookie"] {
+        headers.remove(forbidden);
+    }
     for sensitive in &cfg.sensitive_headers {
-        if let Some(values) = headers.get_mut(sensitive.as_str()) {
-            values.clear();
-            values.push("[redacted]".to_string());
-        }
+        headers.remove(sensitive.as_str());
     }
     json!({
         "proxy": {
@@ -518,8 +820,12 @@ fn build_pep_signal(cfg: &CompiledDecisionService, input: &DecisionServiceInput<
 }
 
 fn build_effect_capability(cfg: &CompiledDecisionService, mode: DecisionServiceMode) -> Value {
+    let driver = match cfg.driver {
+        DecisionServiceDriver::Authzen => "authzen",
+        DecisionServiceDriver::SchemaMappedHttp => "schema_mapped_http",
+    };
     json!({
-        "driver": "schema_mapped_http",
+        "driver": driver,
         "profile_id": cfg.profile_id,
         "contract_id": cfg.contract_id,
         "mode": mode.as_str(),
@@ -545,6 +851,7 @@ struct CompiledMappingRule {
     target: String,
     source: Option<CompiledMappingSource>,
     literal: Option<Value>,
+    value_map: std::collections::BTreeMap<String, Value>,
     optional: bool,
 }
 
@@ -637,6 +944,7 @@ fn compile_mapping_rules(
             target: rule.target.clone(),
             source,
             literal: rule.literal.clone(),
+            value_map: rule.value_map.clone(),
             optional: rule.optional,
         });
     }
@@ -854,6 +1162,22 @@ fn apply_mapping(
                 ));
             }
         };
+        let value = if rule.value_map.is_empty() {
+            value
+        } else {
+            let key = value.as_str().ok_or_else(|| {
+                anyhow!(
+                    "mapping source for {} must be a string when value_map is configured",
+                    rule.target
+                )
+            })?;
+            rule.value_map.get(key).cloned().ok_or_else(|| {
+                anyhow!(
+                    "mapping source for {} produced unmapped value {key}",
+                    rule.target
+                )
+            })?
+        };
         let target = match rule.target_document {
             DecisionServiceMappingTargetDocument::DecisionRequest => &mut docs.decision_request,
             DecisionServiceMappingTargetDocument::EnforceableEffect => &mut docs.enforceable_effect,
@@ -995,11 +1319,11 @@ fn build_selected_headers(
     headers: Option<&HeaderMap>,
 ) -> Map<String, Value> {
     let mut selected = selected_headers_map(headers, &cfg.selected_headers);
+    for forbidden in ["authorization", "proxy-authorization", "cookie"] {
+        selected.remove(forbidden);
+    }
     for sensitive in &cfg.sensitive_headers {
-        if let Some(values) = selected.get_mut(sensitive.as_str()) {
-            values.clear();
-            values.push("[redacted]".to_string());
-        }
+        selected.remove(sensitive.as_str());
     }
     selected
         .into_iter()
@@ -1171,6 +1495,8 @@ where
 struct EnforceableEffect {
     decision: String,
     #[serde(default)]
+    external_decision_id: Option<String>,
+    #[serde(default)]
     policy_id: Option<String>,
     #[serde(default)]
     override_upstream: Option<String>,
@@ -1248,6 +1574,7 @@ impl EnforceableEffect {
                     return Err(anyhow!("decision_service is not authorized to allow"));
                 }
                 Ok(DecisionServiceEnforcement::Continue(DecisionServiceAllow {
+                    external_decision_id: self.external_decision_id,
                     policy_id: self.policy_id,
                     override_upstream,
                     headers,
@@ -1541,6 +1868,7 @@ fn qpx_enforceable_effect_schema() -> Value {
         "additionalProperties": false,
         "properties": {
             "decision": {"enum": ["allow", "deny", "local_response", "challenge"]},
+            "external_decision_id": {"type": "string", "minLength": 1},
             "policy_id": {"type": "string"},
             "override_upstream": {"type": "string"},
             "inject_headers": {"type": "object"},

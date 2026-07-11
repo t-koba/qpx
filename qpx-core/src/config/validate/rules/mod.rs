@@ -15,7 +15,7 @@ mod resilience;
 
 pub(super) use action::{
     validate_action_config, validate_http_response_effects,
-    validate_proxy_tunnel_upstream_requirement,
+    validate_local_response_config_with_capport, validate_proxy_tunnel_upstream_requirement,
 };
 pub(super) use header::{validate_header_control, validate_header_name};
 pub(super) use http_modules::{has_cache_purge_module, validate_http_modules};

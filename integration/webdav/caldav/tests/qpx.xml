@@ -1,0 +1,31 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE caldavtest SYSTEM "caldavtest.dtd">
+<caldavtest>
+  <start/>
+  <test-suite name="qpx CalDAV origin">
+    <test name="create calendar">
+      <request auth="no" end-delete="yes">
+        <method>MKCALENDAR</method>
+        <ruri>/dav/calendar/</ruri>
+        <verify><callback>statusCode</callback><arg><name>status</name><value>201</value></arg></verify>
+      </request>
+    </test>
+    <test name="store calendar object">
+      <request auth="no">
+        <method>PUT</method>
+        <ruri>/dav/calendar/event.ics</ruri>
+        <data><content-type>text/calendar; charset=utf-8</content-type><filepath>event.ics</filepath></data>
+        <verify><callback>statusCode</callback><arg><name>status</name><value>201</value><value>204</value></arg></verify>
+      </request>
+    </test>
+    <test name="calendar query">
+      <request auth="no">
+        <method>REPORT</method>
+        <ruri>/dav/calendar/</ruri>
+        <header><name>Depth</name><value>1</value></header>
+        <data><content-type>application/xml; charset=utf-8</content-type><filepath>calendar-query.xml</filepath></data>
+        <verify><callback>statusCode</callback><arg><name>status</name><value>207</value></arg></verify>
+      </request>
+    </test>
+  </test-suite>
+</caldavtest>

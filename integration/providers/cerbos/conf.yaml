@@ -1,0 +1,10 @@
+server:
+  httpListenAddr: ":18083"
+  grpcListenAddr: ":18085"
+storage:
+  driver: disk
+  disk:
+    directory: /policies
+    watchForChanges: false
+audit:
+  enabled: false

@@ -1,0 +1,47 @@
+state_dir: "${QPX_STATE_DIR}"
+security:
+  decisions:
+    services:
+    - name: cerbos
+      endpoint: http://127.0.0.1:18083/api/check/resources
+      timeout_ms: 1000
+      contract:
+        driver: schema_mapped_http
+        profile_id: cerbos.check-resources.v1
+        schemas: {}
+      capability:
+        effects: [allow, deny]
+      request_mapping:
+      - target_document: decision_request
+        target: /requestId
+        literal: qpx-ci
+      - target_document: decision_request
+        target: /principal/id
+        literal: qpx
+      - target_document: decision_request
+        target: /principal/roles
+        literal: [qpx]
+      - target_document: decision_request
+        target: /resources/0/resource/kind
+        literal: qpx_proxy
+      - target_document: decision_request
+        target: /resources/0/resource/id
+        source: $.pep_signal.request.path
+      - target_document: decision_request
+        target: /resources/0/actions/0
+        source: $.pep_signal.request.method
+      response_mapping:
+      - target_document: enforceable_effect
+        target: /decision
+        source: $.decision_response.results[0].actions.GET
+        value_map:
+          EFFECT_ALLOW: allow
+          EFFECT_DENY: deny
+edges:
+- kind: forward
+  name: cerbos-pep
+  listen: 127.0.0.1:18084
+  default_action: { type: direct }
+  rules: []
+  policy_context:
+    decision_service: cerbos

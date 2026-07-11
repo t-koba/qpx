@@ -89,6 +89,7 @@ fn test_request(script_name: &str, path_info: &str, matched_prefix: Option<&str>
         remote_port: None,
         http_headers: HashMap::new(),
         matched_prefix: matched_prefix.map(str::to_string),
+        identity_env: HashMap::new(),
     }
 }
 

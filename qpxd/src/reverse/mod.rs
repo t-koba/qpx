@@ -22,7 +22,7 @@ use crate::transparent::quic::{
 };
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
-use qpx_core::config::{Config, ReverseEdgeConfig, UpstreamConfig};
+use qpx_core::config::{Config, ReverseEdgeConfig, UpstreamConfig, WebDavOriginConfig};
 use qpx_core::rules::RuleMatchContext;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,12 +42,14 @@ pub(crate) struct CompiledReverse {
 pub(crate) fn compile_reverse(
     reverse: &ReverseEdgeConfig,
     upstreams: &[UpstreamConfig],
+    webdav_origins: &[WebDavOriginConfig],
     http_module_registry: &crate::http::modules::HttpModuleRegistry,
     compiled_edge: &CompiledReverseEdge,
 ) -> Result<CompiledReverse> {
     let router = Arc::new(router::ReverseRouter::new_with_plan(
         reverse.clone(),
         upstreams,
+        webdav_origins,
         http_module_registry,
         compiled_edge,
     )?);
@@ -107,6 +109,7 @@ impl ReloadableReverse {
         let compiled = compile_reverse(
             &reverse,
             current_operational.upstreams.as_slice(),
+            current_operational.http.origins.webdav.as_slice(),
             state.http_module_registry().as_ref(),
             state
                 .plan
@@ -156,6 +159,7 @@ impl ReloadableReverse {
                         compile_reverse(
                             reverse_cfg,
                             current_operational.upstreams.as_slice(),
+                            current_operational.http.origins.webdav.as_slice(),
                             state.http_module_registry().as_ref(),
                             compiled_edge,
                         )
@@ -280,6 +284,7 @@ pub(in crate::reverse) fn reverse_quic_connection_filter_match(
 pub(crate) fn check_reverse_runtime(
     reverse: &ReverseEdgeConfig,
     upstreams: &[UpstreamConfig],
+    webdav_origins: &[WebDavOriginConfig],
     http_module_registry: &crate::http::modules::HttpModuleRegistry,
     compiled_edge: &CompiledReverseEdge,
 ) -> Result<()> {
@@ -287,7 +292,13 @@ pub(crate) fn check_reverse_runtime(
         .listen
         .parse()
         .map_err(|e| anyhow!("reverse {} listen is invalid: {}", reverse.name, e))?;
-    let _ = compile_reverse(reverse, upstreams, http_module_registry, compiled_edge)?;
+    let _ = compile_reverse(
+        reverse,
+        upstreams,
+        webdav_origins,
+        http_module_registry,
+        compiled_edge,
+    )?;
 
     if reverse.http3.as_ref().map(|h| h.enabled).unwrap_or(false) {
         #[cfg(feature = "http3")]

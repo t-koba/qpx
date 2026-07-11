@@ -54,6 +54,29 @@ pub(super) fn validate_decision_service_local_response(
             anyhow!("decision_service local_response.headers contains invalid value")
         })?;
     }
+    if local.status == 451
+        && !local.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("link")
+                && value.split(';').skip(1).any(|parameter| {
+                    parameter
+                        .trim()
+                        .strip_prefix("rel=")
+                        .map(|value| value.trim_matches('"').split_ascii_whitespace())
+                        .is_some_and(|mut relations| {
+                            relations.any(|relation| relation.eq_ignore_ascii_case("blocked-by"))
+                        })
+                })
+        })
+    {
+        return Err(anyhow!(
+            "decision_service local_response status 451 requires Link rel=blocked-by"
+        ));
+    }
+    if local.status == 511 {
+        return Err(anyhow!(
+            "decision_service local_response status 511 is reserved for CAPPORT routes"
+        ));
+    }
     if let Some(rpc) = local.rpc.as_ref() {
         validate_decision_service_rpc_local_response(rpc)?;
     }

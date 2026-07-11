@@ -10,6 +10,7 @@ use crate::ipc_client::IpcUpstream;
 use crate::reverse::health::UpstreamEndpoint;
 use anyhow::Result;
 use hyper::Request;
+use qpx_core::config::WebDavOriginConfig;
 use qpx_core::config::{ReverseRouteConfig, ReverseRouteTargetConfig, UpstreamConfig};
 use qpx_core::prefilter::{MatchPrefilterContext, MatchPrefilterHint, StringInterner};
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
@@ -22,6 +23,7 @@ impl HttpRoute {
     pub(in crate::reverse) fn from_config(
         config: ReverseRouteConfig,
         upstreams: &HashMap<&str, &UpstreamConfig>,
+        webdav_origins: &HashMap<&str, &WebDavOriginConfig>,
         interner: &mut StringInterner,
         _http_module_registry: &crate::http::modules::HttpModuleRegistry,
         compiled_route: &crate::runtime::CompiledReverseRoute,
@@ -43,10 +45,11 @@ impl HttpRoute {
             .transpose()?
             .map(Arc::new);
 
-        let (local_response, ipc, backends) = match config.target {
+        let (local_response, ipc, webdav, backends) = match config.target {
             ReverseRouteTargetConfig::Upstream {
                 upstreams: refs, ..
             } => (
+                None,
                 None,
                 None,
                 compile_backends(refs, Vec::new(), upstreams, &policy.lifecycle)?,
@@ -54,13 +57,31 @@ impl HttpRoute {
             ReverseRouteTargetConfig::Weighted { backends, .. } => (
                 None,
                 None,
+                None,
                 compile_backends(Vec::new(), backends, upstreams, &policy.lifecycle)?,
             ),
-            ReverseRouteTargetConfig::Ipc { config } => {
-                (None, Some(IpcUpstream::from_config(&config)?), Vec::new())
-            }
+            ReverseRouteTargetConfig::Ipc { config } => (
+                None,
+                Some(IpcUpstream::from_config(&config)?),
+                None,
+                Vec::new(),
+            ),
             ReverseRouteTargetConfig::LocalResponse { response } => {
-                (Some(*response), None, Vec::new())
+                (Some(*response), None, None, Vec::new())
+            }
+            ReverseRouteTargetConfig::Webdav { origin } => {
+                let origin = webdav_origins.get(origin.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("unknown WebDAV origin during route compilation: {origin}")
+                })?;
+                let data = qpx_webdav::FileSystemDataStore::open(&origin.root)?;
+                let metadata = qpx_webdav::RedbMetadataStore::open(&origin.metadata)?;
+                let store = qpx_webdav::PersistentWebDavStore::new(data, metadata);
+                let service = qpx_webdav::WebDavService::new(Arc::new(store)).with_limits(
+                    origin.max_depth,
+                    origin.max_multistatus_entries,
+                    origin.max_lock_timeout_seconds,
+                )?;
+                (None, None, Some(Arc::new(service)), Vec::new())
             }
         };
         let mirrors = compile_mirrors(config.mirrors, upstreams, &policy.lifecycle)?;
@@ -81,6 +102,7 @@ impl HttpRoute {
                 local_response,
                 headers,
                 ipc,
+                webdav,
                 backends,
                 mirrors,
                 response_rules,

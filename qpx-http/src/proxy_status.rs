@@ -1,0 +1,82 @@
+//! RFC 9209 `Proxy-Status` field handling.
+
+use crate::structured_fields::{
+    BareItem, Item, ListEntry, ListSerializer, SfvString, Token, parse_list_fields,
+};
+use http::{HeaderMap, HeaderName, HeaderValue};
+use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProxyStatusError {
+    #[error("Proxy-Status is not a valid RFC 9651 List: {0}")]
+    StructuredField(String),
+    #[error("Proxy-Status member must identify a proxy with a String or Token")]
+    InvalidMember,
+    #[error("proxy identifier is not a valid RFC 9651 String")]
+    InvalidProxyIdentifier,
+    #[error("Proxy-Status cannot be represented as an HTTP field value")]
+    InvalidHeaderValue,
+}
+
+pub fn append_proxy_status(
+    headers: &mut HeaderMap,
+    proxy_identifier: &str,
+) -> Result<(), ProxyStatusError> {
+    let name = HeaderName::from_static("proxy-status");
+    let mut list = parse_list_fields(headers, &name)
+        .map_err(|error| ProxyStatusError::StructuredField(error.to_string()))?
+        .unwrap_or_default();
+    for entry in &list {
+        let ListEntry::Item(item) = entry else {
+            return Err(ProxyStatusError::InvalidMember);
+        };
+        if !matches!(item.bare_item, BareItem::String(_) | BareItem::Token(_)) {
+            return Err(ProxyStatusError::InvalidMember);
+        }
+    }
+    let bare_item = match Token::try_from(proxy_identifier.to_string()) {
+        Ok(token) => BareItem::Token(token),
+        Err(_) => BareItem::String(
+            SfvString::try_from(proxy_identifier.to_string())
+                .map_err(|_| ProxyStatusError::InvalidProxyIdentifier)?,
+        ),
+    };
+    list.push(ListEntry::Item(Item::new(bare_item)));
+    let mut serializer = ListSerializer::new();
+    serializer.members(&list);
+    let value = serializer
+        .finish()
+        .ok_or(ProxyStatusError::InvalidHeaderValue)?;
+    headers.remove(&name);
+    headers.insert(
+        name,
+        HeaderValue::from_str(&value).map_err(|_| ProxyStatusError::InvalidHeaderValue)?,
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appends_current_proxy_after_existing_chain() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "proxy-status",
+            HeaderValue::from_static("origin-gateway;received-status=200"),
+        );
+        append_proxy_status(&mut headers, "edge.example").expect("append");
+        assert_eq!(
+            headers.get("proxy-status").expect("field"),
+            "origin-gateway;received-status=200, edge.example"
+        );
+    }
+
+    #[test]
+    fn serializes_non_token_identifier_as_string() {
+        let mut headers = HeaderMap::new();
+        append_proxy_status(&mut headers, "qpx edge").expect("append");
+        assert_eq!(headers.get("proxy-status").expect("field"), "\"qpx edge\"");
+    }
+}

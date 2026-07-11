@@ -6,12 +6,12 @@ mod visitors;
 
 use budget::TOTAL_LOC_BUDGETS;
 use checks::{
-    check_dependency_duplicate_baseline, check_dependency_policy_config,
-    check_dispatch_dependency_direction, check_documented_unsafe_blocks,
-    check_finalize_entrypoints, check_http_body_spool_failure_handling,
-    check_library_anyhow_boundaries, check_loc_budgets, check_metric_cardinality_policy,
-    check_phase3_architecture_baselines, check_phase4_ci_acceptance_gates, check_production_panics,
-    check_production_unwraps, check_public_api_snapshot_script, check_qpx_core_tls_baseline,
+    check_architecture_baselines, check_ci_acceptance_gates, check_dependency_duplicate_baseline,
+    check_dependency_policy_config, check_dispatch_dependency_direction,
+    check_documented_unsafe_blocks, check_finalize_entrypoints,
+    check_http_body_spool_failure_handling, check_library_anyhow_boundaries, check_loc_budgets,
+    check_metric_cardinality_policy, check_production_panics, check_production_unwraps,
+    check_public_api_snapshot_script, check_qpx_core_tls_baseline,
     check_qpxr_capture_publish_order, check_raw_metric_macro_baseline, check_refactor_docs,
     check_response_capture_after_finalize, check_secret_zeroize_boundaries,
     check_security_qa_fuzz_targets, check_test_helper_duplicate_baseline, check_total_loc_budgets,
@@ -55,9 +55,9 @@ fn run_structure() -> Result<()> {
     check_metric_cardinality_policy(&root)?;
     check_test_helper_duplicate_baseline(&root)?;
     check_dispatch_dependency_direction(&root)?;
-    check_phase3_architecture_baselines(&root)?;
+    check_architecture_baselines(&root)?;
     check_refactor_docs(&root)?;
-    check_phase4_ci_acceptance_gates(&root)?;
+    check_ci_acceptance_gates(&root)?;
     check_public_api_snapshot_script(&root)?;
     check_security_qa_fuzz_targets(&root)?;
     check_secret_zeroize_boundaries(&root)?;

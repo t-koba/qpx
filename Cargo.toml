@@ -9,13 +9,14 @@ members = [
   "qpx-acme",
   "qpx-observability",
   "qpxd-cache",
+  "qpx-webdav",
   "qpxd",
   "qpxr",
   "qpxc",
   "qpxf",
   "xtask"
 ]
-exclude = ["fuzz"]
+exclude = ["fuzz", "vendor/quinn-proto"]
 
 [workspace.package]
 edition = "2024"
@@ -46,6 +47,9 @@ globset = "0.4"
 url = "2"
 percent-encoding = "2"
 httpdate = "1"
+sfv = "0.14"
+quick-xml = "0.38"
+redb = "4"
 bytes = "1"
 memchr = "2"
 brotli = "8"
@@ -132,3 +136,6 @@ byteorder_slice = "3"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[patch.crates-io]
+quinn-proto = { path = "vendor/quinn-proto" }

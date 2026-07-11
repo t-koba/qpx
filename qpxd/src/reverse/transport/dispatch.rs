@@ -13,6 +13,7 @@ use crate::upstream::origin::{OriginEndpoint, proxy_http, proxy_http_with_interi
 use anyhow::{Result, anyhow};
 use hyper::{Request, Response};
 use qpx_http::body::Body;
+use std::sync::Arc;
 use tokio::time::{Duration, timeout};
 use url::Url;
 
@@ -72,7 +73,29 @@ pub(super) async fn dispatch_reverse_request(
         Ok(prepared) => prepared,
         Err(response) => return Ok(response),
     };
-    execute_reverse_request(prepared, base, reverse, runtime, conn).await
+    let api_metadata = prepared
+        .context
+        .router
+        .route_at(prepared.route.route_idx)
+        .and_then(|route| route.plan.api_metadata.clone());
+    let hsts = prepared
+        .context
+        .router
+        .route_at(prepared.route.route_idx)
+        .and_then(|route| route.plan.hsts);
+    let secure_transport = conn.tls_sni.is_some();
+    let (interim, mut response) =
+        execute_reverse_request(prepared, base, reverse, runtime, conn).await?;
+    if let Some(metadata) = api_metadata {
+        metadata.apply(response.headers_mut())?;
+    }
+    if secure_transport && let Some(hsts) = hsts {
+        response.headers_mut().insert(
+            http::header::STRICT_TRANSPORT_SECURITY,
+            hsts.to_header_value()?,
+        );
+    }
+    Ok((interim, response))
 }
 
 async fn execute_reverse_request(
@@ -172,9 +195,22 @@ async fn execute_reverse_request(
         route_timeout,
         cache_bypass,
         decision_service_mirror_upstreams,
+        authorization_decision,
         request_limit_ctx,
         mut request_limits,
     } = access;
+
+    crate::http::protocol::forwarded::apply_forwarded_policy(
+        req.headers_mut(),
+        route.plan.forwarded.as_deref(),
+        conn.remote_addr.ip(),
+        if conn.tls_sni.is_some() {
+            "https"
+        } else {
+            "http"
+        },
+        Some(host.as_str()),
+    )?;
 
     if let Some(response) = annotated_max_forwards_response(
         &mut req,
@@ -238,6 +274,7 @@ async fn execute_reverse_request(
         request_version,
         request_rpc: request_rpc.as_ref(),
         identity: &identity,
+        authorization_decision: authorization_decision.as_ref(),
         route_headers,
         override_upstream: override_upstream.as_deref(),
         decision_service_mirror_upstreams,
@@ -257,11 +294,13 @@ fn debug_assert_reverse_route_target(route: &HttpRoute) {
     debug_assert!(match &route.target {
         crate::runtime::CompiledReverseRouteTarget::Upstream { .. }
         | crate::runtime::CompiledReverseRouteTarget::Weighted { .. } =>
-            route.local_response.is_none() && route.ipc.is_none(),
+            route.local_response.is_none() && route.ipc.is_none() && route.webdav.is_none(),
         crate::runtime::CompiledReverseRouteTarget::Ipc { .. } =>
-            route.local_response.is_none() && route.ipc.is_some(),
+            route.local_response.is_none() && route.ipc.is_some() && route.webdav.is_none(),
         crate::runtime::CompiledReverseRouteTarget::LocalResponse { .. } =>
-            route.local_response.is_some() && route.ipc.is_none(),
+            route.local_response.is_some() && route.ipc.is_none() && route.webdav.is_none(),
+        crate::runtime::CompiledReverseRouteTarget::Webdav { .. } =>
+            route.local_response.is_none() && route.ipc.is_none() && route.webdav.is_some(),
         crate::runtime::CompiledReverseRouteTarget::TlsPassthrough { .. } => false,
     });
 }
@@ -285,6 +324,7 @@ async fn complete_reverse_after_modules(
         request_version,
         request_rpc,
         identity,
+        authorization_decision,
         route_headers,
         override_upstream,
         decision_service_mirror_upstreams,
@@ -296,7 +336,24 @@ async fn complete_reverse_after_modules(
         request_limit_ctx,
         audit_ctx,
     } = input;
-    if is_websocket_upgrade(req.headers()) {
+    if override_upstream.is_none()
+        && let Some(webdav) = route.webdav.as_ref()
+    {
+        let response = dispatch_reverse_webdav(ReverseWebDavDispatch {
+            req,
+            service: webdav.clone(),
+            identity,
+            request_method,
+            request_version,
+            proxy_name,
+            route_headers: route_headers.as_deref(),
+            http_modules: &mut http_modules,
+            max_request_body_bytes: route.plan.streaming.max_request_body_bytes,
+        })
+        .await?;
+        return Ok(empty_interim_response(response));
+    }
+    if is_websocket_upgrade(req.method(), req.headers())? {
         return handle_reverse_websocket_upgrade(ReverseWebsocketDispatch {
             req,
             state,
@@ -387,6 +444,7 @@ async fn complete_reverse_after_modules(
             request_version,
             request_rpc,
             identity,
+            authorization_decision,
             route_headers,
             cache_policy,
             request_headers_snapshot: request_headers_snapshot.as_ref(),
@@ -442,6 +500,72 @@ async fn complete_reverse_after_modules(
         audit_ctx,
     })
     .await
+}
+
+struct ReverseWebDavDispatch<'a> {
+    req: Request<Body>,
+    service: Arc<crate::reverse::router::WebDavOriginService>,
+    identity: &'a crate::policy_context::ResolvedIdentity,
+    request_method: &'a http::Method,
+    request_version: http::Version,
+    proxy_name: &'a str,
+    route_headers: Option<&'a qpx_core::rules::CompiledHeaderControl>,
+    http_modules: &'a mut crate::http::modules::HttpModuleExecution,
+    max_request_body_bytes: usize,
+}
+
+async fn dispatch_reverse_webdav(input: ReverseWebDavDispatch<'_>) -> Result<Response<Body>> {
+    let ReverseWebDavDispatch {
+        req,
+        service,
+        identity,
+        request_method,
+        request_version,
+        proxy_name,
+        route_headers,
+        http_modules,
+        max_request_body_bytes,
+    } = input;
+    let (parts, mut body) = req.into_parts();
+    let mut collected = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let chunk = chunk?;
+        let next = collected
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| anyhow!("WebDAV request body length overflow"))?;
+        if next > max_request_body_bytes {
+            return Err(anyhow!(
+                "WebDAV request body exceeds route limit of {} bytes",
+                max_request_body_bytes
+            ));
+        }
+        collected.extend_from_slice(&chunk);
+    }
+    let request = Request::from_parts(parts, collected);
+    let context = qpx_webdav::WebDavRequestContext {
+        subject: identity.user.clone(),
+        tenant: identity.tenant.clone(),
+        groups: identity.groups.clone(),
+        roles: identity.roles.clone(),
+        entitlements: identity.entitlements.clone(),
+        assurance: identity.auth_strength.clone(),
+    };
+    let response = tokio::task::spawn_blocking(move || service.handle(request, &context))
+        .await
+        .map_err(|error| anyhow!("WebDAV origin task failed: {error}"))??;
+    let (parts, body) = response.into_parts();
+    let response = Response::from_parts(parts, Body::from(body));
+    let mut response = http_modules.on_upstream_response(response).await?;
+    crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        request_method,
+        request_version,
+        proxy_name,
+        &mut response,
+        route_headers,
+        false,
+    );
+    Ok(response)
 }
 
 async fn reverse_continue_response_rule(

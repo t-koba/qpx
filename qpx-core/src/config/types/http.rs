@@ -57,6 +57,17 @@ pub struct ResponseCompressionModuleConfig {
     pub worker_count: usize,
     #[serde(default)]
     pub low_latency_flush: bool,
+    #[serde(default)]
+    pub dictionary: Option<ResponseCompressionDictionaryConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseCompressionDictionaryConfig {
+    pub path: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    pub encoding: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -143,6 +154,61 @@ pub struct CachePurgeModuleConfig {
 pub struct HttpPolicyConfig {
     #[serde(default)]
     pub response_rules: Vec<HttpResponseRuleConfig>,
+    #[serde(default)]
+    pub forwarded: Option<ForwardedConfig>,
+    #[serde(default)]
+    pub api_metadata: Option<ApiMetadataConfig>,
+    #[serde(default)]
+    pub hsts: Option<HstsConfig>,
+    #[serde(default)]
+    pub require_precondition: bool,
+    #[serde(default)]
+    pub capport: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HstsConfig {
+    pub max_age_seconds: u64,
+    #[serde(default)]
+    pub include_subdomains: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ApiMetadataConfig {
+    #[serde(default)]
+    pub deprecation_unix_seconds: Option<i64>,
+    #[serde(default)]
+    pub sunset_unix_seconds: Option<i64>,
+    #[serde(default)]
+    pub links: Vec<ApiMetadataLinkConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApiMetadataLinkConfig {
+    pub target: String,
+    pub relation: String,
+    #[serde(default)]
+    pub media_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ForwardedConfig {
+    pub trusted_peers: Vec<String>,
+    pub by: String,
+    #[serde(default)]
+    pub untrusted_chain: UntrustedForwardedChainPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UntrustedForwardedChainPolicy {
+    #[default]
+    Discard,
+    Reject,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

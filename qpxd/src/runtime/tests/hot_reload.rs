@@ -130,6 +130,11 @@ fn hot_reload_requires_server_restart_for_reverse_http3_startup_change() {
                 policy_context: None,
                 http: Some(HttpPolicyConfig {
                     response_rules: Vec::new(),
+                    forwarded: None,
+                    api_metadata: None,
+                    hsts: None,
+                    require_precondition: false,
+                    capport: false,
                 }),
                 http_guard_profile: None,
                 destination_resolution: None,

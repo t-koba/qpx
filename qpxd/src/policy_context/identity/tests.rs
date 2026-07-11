@@ -18,6 +18,8 @@ fn trusted_headers_source(name: &str, trusted_peers: Vec<&str>) -> IdentitySourc
         headers: Some(IdentitySourceHeadersConfig {
             user: Some("x-user".to_string()),
             groups: Some("x-groups".to_string()),
+            roles: Some("x-roles".to_string()),
+            entitlements: Some("x-entitlements".to_string()),
             device_id: Some("x-device".to_string()),
             posture: Some("x-posture".to_string()),
             tenant: Some("x-tenant".to_string()),
@@ -26,6 +28,7 @@ fn trusted_headers_source(name: &str, trusted_peers: Vec<&str>) -> IdentitySourc
         }),
         map: None,
         assertion: None,
+        bearer: None,
         strip_from_untrusted: true,
     }
 }
@@ -209,8 +212,8 @@ fn sanitize_empty_headers() {
     assert!(headers.is_empty());
 }
 
-#[test]
-fn resolve_identity_extracts_trusted_headers() {
+#[tokio::test]
+async fn resolve_identity_extracts_trusted_headers() {
     let state = runtime_with_sources(vec![trusted_headers_source(
         "headers",
         vec!["127.0.0.1/32"],
@@ -229,6 +232,7 @@ fn resolve_identity_extracts_trusted_headers() {
         Some(&headers),
         None,
     )
+    .await
     .unwrap();
     assert_eq!(identity.user.as_deref(), Some("alice"));
     assert_eq!(identity.groups, vec!["eng".to_string(), "ops".to_string()]);

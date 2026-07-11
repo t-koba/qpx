@@ -139,6 +139,12 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
     http_modules.on_upstream_request(&mut input.req).await?;
     input.req =
         emit_request_for_export(input.req, selected_plan, export_session.as_ref(), true).await;
+    let websocket_expectation = input
+        .websocket
+        .then(|| {
+            crate::http::protocol::websocket::websocket_response_expectation(input.req.headers())
+        })
+        .transpose()?;
     let mut guard = input.sender.lock().await;
     let upstream_result = timeout(upstream_timeout, guard.send_request(input.req)).await;
     record_upstream_request_duration(input.audit.kind, upstream_started.elapsed());
@@ -155,6 +161,13 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
             return Err(err);
         }
     };
+    if let Some((expected_accept, offered_protocols)) = websocket_expectation.as_ref() {
+        crate::http::protocol::websocket::validate_websocket_switching_response(
+            &response,
+            expected_accept,
+            offered_protocols,
+        )?;
+    }
     response = http_modules.on_upstream_response(response).await?;
     let response_engine = selected_plan.response_rules.as_deref();
     let response_candidates = response_engine

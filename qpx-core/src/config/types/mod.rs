@@ -13,6 +13,7 @@ mod core;
 mod http;
 mod listener;
 mod observability;
+mod origin;
 mod policy;
 mod reverse;
 mod rules;
@@ -36,16 +37,18 @@ pub use self::core::{
     SseStreamingPolicy, StreamingConfig, StreamingRequirement, UnknownLengthExactSizePolicy,
 };
 pub use self::http::{
-    CachePurgeModuleConfig, HeaderCaptureConfig, HttpGuardJsonConfig, HttpGuardLimitsConfig,
+    ApiMetadataConfig, ApiMetadataLinkConfig, CachePurgeModuleConfig, ForwardedConfig,
+    HeaderCaptureConfig, HstsConfig, HttpGuardJsonConfig, HttpGuardLimitsConfig,
     HttpGuardMultipartConfig, HttpGuardNormalizeConfig, HttpGuardProfileConfig,
     HttpGuardProtocolSafetyConfig, HttpModuleConfig, HttpPolicyConfig,
     HttpResponseCacheEffectsConfig, HttpResponseEffectsConfig, HttpResponseMirrorEffectsConfig,
-    HttpResponseRetryEffectsConfig, HttpResponseRuleConfig, ResponseCompressionModuleConfig,
-    SubrequestModuleConfig, SubrequestPhase, SubrequestResponseMode,
+    HttpResponseRetryEffectsConfig, HttpResponseRuleConfig, ResponseCompressionDictionaryConfig,
+    ResponseCompressionModuleConfig, SubrequestModuleConfig, SubrequestPhase,
+    SubrequestResponseMode, UntrustedForwardedChainPolicy,
 };
 pub use self::listener::{
-    ConnectUdpConfig, FtpConfig, Http3IngressEdgeConfig, IngressEdgeConfig, IngressEdgeMode,
-    OriginalDstConfig, OriginalDstSource, TlsInspectionConfig, XdpConfig,
+    ConnectIpConfig, ConnectUdpConfig, FtpConfig, Http3IngressEdgeConfig, IngressEdgeConfig,
+    IngressEdgeMode, OriginalDstConfig, OriginalDstSource, TlsInspectionConfig, XdpConfig,
 };
 pub use self::observability::{
     AccessLogConfig, AcmeConfig, AcmeDnsHookConfig, AuditIncludeField, AuditLogConfig,
@@ -53,6 +56,7 @@ pub use self::observability::{
     ExporterCaptureConfig, ExporterConfig, LogOutputConfig, MetricsConfig, OtelConfig,
     SystemLogConfig,
 };
+pub use self::origin::{OriginConfig, WebDavOriginConfig};
 pub use self::policy::{
     DestinationConflictMode, DestinationEvidenceSourceKind, DestinationMergeMode,
     DestinationMinConfidenceConfig, DestinationResolutionConfig,
@@ -74,18 +78,19 @@ pub use self::rules::{
     TlsFingerprintMatchConfig,
 };
 pub use self::security::{
-    AssertionClaimsMapConfig, AuthConfig, DecisionServiceAuthConfig,
-    DecisionServiceAuthorityConfig, DecisionServiceCacheConfig, DecisionServiceCapabilityConfig,
-    DecisionServiceConfig, DecisionServiceConstraintsConfig, DecisionServiceContractConfig,
-    DecisionServiceDriver, DecisionServiceHttpMessageSignaturesConfig,
-    DecisionServiceMappingRuleConfig, DecisionServiceMappingTargetDocument,
-    DecisionServiceMtlsConfig, DecisionServicePepSignalConfig,
-    DecisionServicePolicyCompositionConfig, DecisionServiceQpxSchemasConfig,
-    DecisionServiceRemoteSchemasConfig, DecisionServiceSchemaRefConfig,
-    DecisionServiceSchemaResolutionConfig, DecisionServiceSchemasConfig,
-    DecisionServiceSignatureAlgorithm, IdentitySourceConfig, IdentitySourceFromConfig,
-    IdentitySourceHeadersConfig, IdentitySourceKind, LdapConfig, LocalUser, MtlsIdentityMapConfig,
-    NamedSetConfig, NamedSetKind, PolicyContextConfig, SignedAssertionConfig,
+    AssertionClaimsMapConfig, AuthConfig, BearerIdentityConfig, BearerIdentitySourceConfig,
+    DecisionServiceAuthConfig, DecisionServiceAuthorityConfig, DecisionServiceCacheConfig,
+    DecisionServiceCapabilityConfig, DecisionServiceConfig, DecisionServiceConstraintsConfig,
+    DecisionServiceContractConfig, DecisionServiceDriver,
+    DecisionServiceHttpMessageSignaturesConfig, DecisionServiceMappingRuleConfig,
+    DecisionServiceMappingTargetDocument, DecisionServiceMtlsConfig,
+    DecisionServicePepSignalConfig, DecisionServicePolicyCompositionConfig,
+    DecisionServiceQpxSchemasConfig, DecisionServiceRemoteSchemasConfig,
+    DecisionServiceSchemaRefConfig, DecisionServiceSchemaResolutionConfig,
+    DecisionServiceSchemasConfig, DecisionServiceSignatureAlgorithm, IdentitySourceConfig,
+    IdentitySourceFromConfig, IdentitySourceHeadersConfig, IdentitySourceKind, LdapConfig,
+    LocalUser, MtlsIdentityMapConfig, NamedSetConfig, NamedSetKind, OAuth2ClientAuthMethod,
+    OAuth2ClientCredentialsConfig, PolicyContextConfig, SignedAssertionConfig,
     UpstreamTlsTrustConfig, UpstreamTlsTrustProfileConfig,
 };
 pub use self::upstream::{UpstreamConfig, UpstreamDiscoveryConfig, UpstreamDiscoveryKind};

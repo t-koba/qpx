@@ -5,7 +5,7 @@ use super::{
     HeaderControl, HealthCheckConfig, Http3IngressEdgeConfig, HttpGuardProfileConfig,
     HttpModuleConfig, HttpPolicyConfig, IdentityConfig, IdentitySourceConfig, IngressEdgeConfig,
     IngressEdgeMode, IpcBodyLimitConfig, IpcMode, IpcUpstreamConfig, LocalResponseConfig,
-    MatchConfig, MessagesConfig, NamedSetConfig, OriginalDstConfig, RateLimitConfig,
+    MatchConfig, MessagesConfig, NamedSetConfig, OriginConfig, OriginalDstConfig, RateLimitConfig,
     RateLimitProfileConfig, ResilienceConfig, ReverseAffinityConfig, ReverseEdgeConfig,
     ReverseHttp3Config, ReverseRouteBackendConfig, ReverseRouteConfig, ReverseRouteMirrorConfig,
     ReverseRouteTargetConfig, ReverseTlsConfig, ReverseTlsPassthroughRouteConfig, RuleConfig,
@@ -40,6 +40,8 @@ impl<'de> Deserialize<'de> for Config {
             security: SecurityConfig,
             #[serde(default)]
             http: HttpGlobalConfig,
+            #[serde(default)]
+            origins: OriginConfig,
             #[serde(default)]
             traffic: TrafficConfig,
             #[serde(default)]
@@ -79,6 +81,8 @@ impl<'de> Deserialize<'de> for Config {
             }
         }
 
+        let mut http = fields.http;
+        http.origins = fields.origins;
         Ok(Config {
             state_dir: fields.state_dir,
             identity: fields.identity,
@@ -86,7 +90,7 @@ impl<'de> Deserialize<'de> for Config {
             runtime: fields.runtime,
             telemetry: fields.telemetry,
             security: fields.security,
-            http: fields.http,
+            http,
             traffic: fields.traffic,
             acme: fields.acme,
             edges,
@@ -179,6 +183,8 @@ pub struct DecisionConfig {
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HttpGlobalConfig {
+    #[serde(skip)]
+    pub origins: OriginConfig,
     #[serde(default)]
     pub guard_profiles: Vec<HttpGuardProfileConfig>,
     #[serde(default)]
@@ -543,6 +549,7 @@ impl ReverseRouteInputConfig {
             RouteTargetConfig::LocalResponse { response } => {
                 ReverseRouteTargetConfig::LocalResponse { response }
             }
+            RouteTargetConfig::Webdav { origin } => ReverseRouteTargetConfig::Webdav { origin },
         };
         let http_modules = expand_module_refs(
             &self.modules,
@@ -607,6 +614,9 @@ enum RouteTargetConfig {
     },
     LocalResponse {
         response: Box<LocalResponseConfig>,
+    },
+    Webdav {
+        origin: String,
     },
     TlsPassthrough {
         upstreams: Vec<String>,

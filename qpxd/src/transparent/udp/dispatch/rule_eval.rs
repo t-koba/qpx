@@ -1,5 +1,5 @@
 use crate::destination::DestinationInputs;
-use crate::policy_context::{EffectivePolicyContext, ResolvedIdentity, resolve_identity};
+use crate::policy_context::{EffectivePolicyContext, ResolvedIdentity};
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use crate::runtime::{PlanFlags, RuntimeState};
 use crate::transparent::destination::ConnectTarget;
@@ -64,7 +64,13 @@ pub(super) fn prepare_udp_rule_evaluation<'a>(
     };
     let authority = connect_target.authority();
     let scheme = if is_quic { "quic" } else { "udp" };
-    let identity = resolve_identity(state, effective_policy, client_addr.ip(), None, None)?;
+    let identity = crate::policy_context::resolve_identity_local(
+        state,
+        effective_policy,
+        client_addr.ip(),
+        None,
+        None,
+    )?;
     let destination = state.classify_destination(
         &DestinationInputs {
             host: host_for_match_owned.as_deref(),

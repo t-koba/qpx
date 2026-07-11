@@ -50,6 +50,7 @@ pub(crate) fn check_with_runtime(
             crate::reverse::check_reverse_runtime(
                 reverse,
                 state.resources.operational.upstreams.as_slice(),
+                state.resources.operational.http.origins.webdav.as_slice(),
                 state.http_module_registry().as_ref(),
                 state
                     .plan
@@ -488,6 +489,7 @@ pub(crate) fn validate_runtime_state(state: &crate::runtime::RuntimeState) -> Re
         crate::reverse::check_reverse_runtime(
             reverse,
             state.resources.operational.upstreams.as_slice(),
+            state.resources.operational.http.origins.webdav.as_slice(),
             state.http_module_registry().as_ref(),
             state
                 .plan

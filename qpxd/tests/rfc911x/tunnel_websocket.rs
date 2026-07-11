@@ -46,15 +46,14 @@ pub(crate) async fn connect_tunnel_contract(forward_port: u16) -> Result<()> {
 }
 
 pub(crate) async fn websocket_upgrade_contract(forward_port: u16) -> Result<()> {
-    let (backend_addr, captured_rx, upgraded_rx) = serve_websocket_stub_once().await?;
+    let (backend_addr, captured_rx, upgraded_rx) = serve_websocket_origin_once().await?;
 
     let proxy_addr: SocketAddr = format!("127.0.0.1:{forward_port}").parse()?;
     let mut stream = timeout(Duration::from_secs(3), TcpStream::connect(proxy_addr))
         .await
         .context("connect to forward proxy timed out")??;
 
-    // Minimal WS transparent relay request. The proxy preserves the RFC 6455 upgrade tunnel but
-    // does not terminate the handshake or validate Sec-WebSocket-Accept.
+    // The proxy preserves the RFC 6455 upgrade tunnel and validates the origin handshake.
     let req = format!(
         "GET ws://{backend}/ws HTTP/1.1\r\n\
 Host: {backend}\r\n\

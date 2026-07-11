@@ -121,6 +121,25 @@ async fn serve_http1_with_interim_parse_error_sends_connection_close() {
 }
 
 #[tokio::test]
+async fn request_header_count_overflow_is_typed_for_431() {
+    let mut request = String::from("GET / HTTP/1.1\r\nHost: example.com\r\n");
+    for index in 0..130 {
+        request.push_str(&format!("X-Test-{index}: value\r\n"));
+    }
+    request.push_str("\r\n");
+    let mut reader = tokio::io::empty();
+    let mut buffer = BytesMut::from(request.as_bytes());
+    let error = read_http1_request_head(&mut reader, &mut buffer, Duration::from_secs(1))
+        .await
+        .expect_err("header count must be capped");
+    assert!(
+        error
+            .downcast_ref::<RequestHeaderFieldsTooLarge>()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn send_http1_response_with_interim_preserves_upgrade_connection_header() {
     let (mut client, server) = tokio::io::duplex(4096);
     let (read_half, mut write_half) = tokio::io::split(server);
@@ -152,6 +171,38 @@ async fn send_http1_response_with_interim_preserves_upgrade_connection_header() 
     assert!(text.starts_with("HTTP/1.1 101"));
     assert!(text.contains("Connection: upgrade"));
     assert!(!text.contains("Connection: close"));
+}
+
+#[tokio::test]
+async fn rejected_connect_closes_http1_connection() {
+    let (mut client, server) = tokio::io::duplex(4096);
+    let (read_half, mut write_half) = tokio::io::split(server);
+    let response = Response::builder()
+        .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+        .header(CONTENT_LENGTH, "0")
+        .body(Body::empty())
+        .expect("response");
+
+    let keep_alive = send_http1_response_with_interim(
+        &mut write_half,
+        Version::HTTP_11,
+        &Method::CONNECT,
+        response,
+        &[],
+        true,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("send response");
+    drop(write_half);
+    drop(read_half);
+
+    assert!(!keep_alive);
+    let mut raw = Vec::new();
+    client.read_to_end(&mut raw).await.expect("read response");
+    let text = String::from_utf8(raw).expect("utf8");
+    assert!(text.starts_with("HTTP/1.1 407"));
+    assert!(text.contains("Connection: close"));
 }
 
 #[tokio::test]

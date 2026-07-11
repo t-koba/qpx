@@ -323,6 +323,9 @@ fn build_gateway_env(req: &CgiRequest, body_len: Option<usize>) -> Vec<(String, 
     if let Some(port) = req.remote_port {
         push_env(&mut env, "REMOTE_PORT", port.to_string());
     }
+    for (name, value) in &req.identity_env {
+        push_env(&mut env, name.clone(), value.clone());
+    }
 
     let connection_tokens = parse_connection_tokens(&req.http_headers);
     for (key, value) in req.http_headers.iter().take(100) {

@@ -88,7 +88,8 @@ pub(super) async fn handle_qpx_webtransport_connect(
         conn.peer_certificates
             .as_deref()
             .map(|certs| certs.as_slice()),
-    )?;
+    )
+    .await?;
 
     let destination = state.classify_destination(
         &crate::destination::DestinationInputs {

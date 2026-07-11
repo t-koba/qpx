@@ -3,7 +3,10 @@ use super::connect_upstream::{
     OpenUpstreamQpxExtendedConnectInput, build_qpx_connect_success_head,
     open_upstream_qpx_extended_connect_stream,
 };
-use super::relay::relay_qpx_extended_connect_stream;
+use super::relay::{
+    ChainedConnectIpRelay, relay_qpx_connect_ip_device, relay_qpx_connect_ip_stream_chained,
+    relay_qpx_extended_connect_stream,
+};
 use super::response::{
     QpxPolicyResponseContext, finalize_qpx_connect_head_response, send_qpx_policy_response,
     send_qpx_response_stream, send_qpx_static_response,
@@ -44,6 +47,7 @@ pub(super) async fn handle_qpx_connect_stream(
         conn: &conn,
         protocol: Some(&protocol),
         connect_udp_cfg: Some(&handler.connect_udp),
+        connect_ip_cfg: Some(&handler.connect_ip),
     })
     .await?
     {
@@ -54,6 +58,18 @@ pub(super) async fn handle_qpx_connect_stream(
     match protocol {
         qpx_h3::Protocol::ConnectUdp => {
             udp::run_connect_udp_relay(handler, prepared, req_stream, conn, datagrams).await
+        }
+        qpx_h3::Protocol::ConnectIp => {
+            handle_qpx_extended_connect_stream(
+                handler,
+                prepared,
+                req_head,
+                req_stream,
+                conn,
+                "connect-ip".to_owned(),
+                datagrams,
+            )
+            .await
         }
         qpx_h3::Protocol::Other(protocol_name) => {
             handle_qpx_extended_connect_stream(
@@ -93,6 +109,7 @@ pub(super) async fn handle_qpx_traditional_connect_stream(
         conn: &conn,
         protocol: None,
         connect_udp_cfg: None,
+        connect_ip_cfg: None,
     })
     .await?
     {
@@ -298,6 +315,40 @@ async fn handle_qpx_extended_connect_stream(
     datagrams: Option<qpx_h3::StreamDatagrams>,
 ) -> Result<()> {
     let state = handler.runtime.state();
+    let mut connect_ip_policies = if protocol_name == "connect-ip" {
+        let sources = handler
+            .connect_ip
+            .allowed_source_cidrs
+            .iter()
+            .map(|value| value.parse())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let destinations = handler
+            .connect_ip
+            .allowed_destination_cidrs
+            .iter()
+            .map(|value| value.parse())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Some(ConnectIpRelayPolicies {
+            downstream: qpx_http::connect_ip::ConnectIpPacketPolicy::new(
+                sources.clone(),
+                destinations.clone(),
+                usize::from(handler.connect_ip.mtu),
+            )?,
+            upstream: qpx_http::connect_ip::ConnectIpPacketPolicy::new(
+                destinations,
+                sources,
+                usize::from(handler.connect_ip.mtu),
+            )?,
+            max_capsule_buffer_bytes: handler.connect_ip.max_capsule_buffer_bytes,
+        })
+    } else {
+        None
+    };
+    let websocket_protocols =
+        crate::http::protocol::websocket::validate_extended_connect_websocket_request(
+            protocol_name.as_str(),
+            req_head.headers(),
+        )?;
     let proxy_name = state.plan.identity.proxy_name.to_string();
     let tunnel_idle_timeout =
         Duration::from_millis(state.plan.limits.timeouts.tunnel_idle_timeout_ms.max(1));
@@ -385,6 +436,53 @@ async fn handle_qpx_extended_connect_stream(
         }
     };
 
+    if connect_ip_policies.is_some() && action.kind != ActionKind::Proxy {
+        let Some(device_name) = handler.connect_ip.device.as_deref() else {
+            let response = finalize_response_with_headers(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
+                proxy_name.as_str(),
+                Response::builder()
+                    .status(StatusCode::NOT_IMPLEMENTED)
+                    .body(Body::from("CONNECT-IP local termination requires a device"))?,
+                response_headers.as_deref(),
+                false,
+            );
+            send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
+            return Ok(());
+        };
+        let device = crate::connect_ip::SystemIpDevice::open(
+            Some(device_name),
+            handler.connect_ip.wintun_dll.as_deref(),
+        )?;
+        let interface_name = device.name().to_owned();
+        let established =
+            build_qpx_connect_success_head(proxy_name.as_str(), true, response_headers.as_deref())?;
+        timeout(
+            upstream_timeout,
+            req_stream.send_response_head(&established),
+        )
+        .await
+        .map_err(|_| anyhow!("CONNECT-IP response send timed out"))??;
+        let policies = connect_ip_policies
+            .take()
+            .ok_or_else(|| anyhow!("CONNECT-IP packet policies are unavailable"))?;
+        if let Err(error) = relay_qpx_connect_ip_device(
+            req_stream,
+            datagrams,
+            device,
+            policies.downstream,
+            policies.upstream,
+            policies.max_capsule_buffer_bytes,
+            tunnel_idle_timeout,
+        )
+        .await
+        {
+            warn!(error = ?error, interface = %interface_name, "CONNECT-IP device relay failed");
+        }
+        return Ok(());
+    }
+
     let listener_cfg = state
         .ingress_edge_settings(handler.listener_name.as_ref())
         .ok_or_else(|| anyhow!("listener not found"))?;
@@ -447,6 +545,8 @@ async fn handle_qpx_extended_connect_stream(
         decision_service_policy_id: decision_service_policy_id.as_deref(),
         log_context: &log_context,
         tunnel_idle_timeout,
+        websocket_protocols,
+        connect_ip_policies,
     })
     .await
 }
@@ -466,6 +566,14 @@ struct FinishQpxExtendedConnectInput<'a> {
     decision_service_policy_id: Option<&'a str>,
     log_context: &'a qpx_observability::access_log::RequestLogContext,
     tunnel_idle_timeout: Duration,
+    websocket_protocols: Option<Vec<String>>,
+    connect_ip_policies: Option<ConnectIpRelayPolicies>,
+}
+
+struct ConnectIpRelayPolicies {
+    downstream: qpx_http::connect_ip::ConnectIpPacketPolicy,
+    upstream: qpx_http::connect_ip::ConnectIpPacketPolicy,
+    max_capsule_buffer_bytes: usize,
 }
 
 async fn finish_qpx_extended_connect_stream(
@@ -486,6 +594,8 @@ async fn finish_qpx_extended_connect_stream(
         decision_service_policy_id,
         log_context,
         tunnel_idle_timeout,
+        websocket_protocols,
+        connect_ip_policies,
     } = input;
     let qpx_h3::ExtendedConnectStream {
         interim,
@@ -496,6 +606,25 @@ async fn finish_qpx_extended_connect_stream(
         datagram_task,
         ..
     } = upstream;
+    if let Some(offered) = websocket_protocols.as_deref() {
+        crate::http::protocol::websocket::validate_extended_connect_websocket_response(
+            response.status(),
+            response.headers(),
+            offered,
+        )?;
+    }
+    if connect_ip_policies.is_some()
+        && response.status().is_success()
+        && response
+            .headers()
+            .get("capsule-protocol")
+            .and_then(|value| value.to_str().ok())
+            != Some("?1")
+    {
+        return Err(anyhow!(
+            "successful upstream CONNECT-IP response requires Capsule-Protocol: ?1"
+        ));
+    }
     let h3_timeout = Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1));
     for interim in interim {
         let interim = crate::http3::codec::sanitize_interim_response_for_h3(interim)?;
@@ -545,15 +674,29 @@ async fn finish_qpx_extended_connect_stream(
         },
         log_context,
     );
-    if let Err(err) = relay_qpx_extended_connect_stream(
-        req_stream,
-        datagrams,
-        upstream_stream,
-        upstream_datagrams,
-        tunnel_idle_timeout,
-    )
-    .await
-    {
+    let relay = if let Some(policies) = connect_ip_policies {
+        relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
+            downstream: req_stream,
+            downstream_datagrams: datagrams,
+            upstream: upstream_stream,
+            upstream_datagrams,
+            downstream_policy: policies.downstream,
+            upstream_policy: policies.upstream,
+            max_capsule_buffer_bytes: policies.max_capsule_buffer_bytes,
+            idle_timeout: tunnel_idle_timeout,
+        })
+        .await
+    } else {
+        relay_qpx_extended_connect_stream(
+            req_stream,
+            datagrams,
+            upstream_stream,
+            upstream_datagrams,
+            tunnel_idle_timeout,
+        )
+        .await
+    };
+    if let Err(err) = relay {
         warn!(error = ?err, "forward HTTP/3 qpx-h3 extended CONNECT relay failed");
     }
     abort_qpx_extended_driver(datagram_task, driver).await;

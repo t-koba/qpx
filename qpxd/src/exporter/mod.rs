@@ -289,7 +289,6 @@ async fn run_export_loop(
     lossy: bool,
     mut rx: mpsc::Receiver<CaptureEvent>,
 ) {
-    // Thread name setting is removed because qpxd doesn't have a generic `util` module for it.
     let mut prefix = Vec::<u8>::new();
     while let Some(event) = rx.recv().await {
         if let Err(err) = event.encode_wire_prefix(&mut prefix) {

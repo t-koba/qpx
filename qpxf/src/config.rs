@@ -62,7 +62,18 @@ pub struct QpxfConfig {
 #[serde(deny_unknown_fields)]
 pub struct HandlerConfig {
     pub r#match: MatchConfig,
+    #[serde(default)]
+    pub verified_context: VerifiedContextMode,
     pub backend: BackendConfig,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifiedContextMode {
+    #[default]
+    None,
+    CgiEnv,
+    Wasi,
 }
 
 #[derive(Debug, Clone, Deserialize)]

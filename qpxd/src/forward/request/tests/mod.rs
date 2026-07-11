@@ -42,6 +42,7 @@ fn test_decision_service_config(name: &str, endpoint: String) -> DecisionService
                 target: "/decision".to_string(),
                 source: Some("$.decision_response.decision".to_string()),
                 literal: None,
+                value_map: Default::default(),
                 optional: false,
             },
             DecisionServiceMappingRuleConfig {
@@ -49,6 +50,7 @@ fn test_decision_service_config(name: &str, endpoint: String) -> DecisionService
                 target: "/rate_limit_profile".to_string(),
                 source: Some("$.decision_response.rate_limit_profile".to_string()),
                 literal: None,
+                value_map: Default::default(),
                 optional: true,
             },
         ],

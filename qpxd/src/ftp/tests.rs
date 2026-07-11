@@ -40,7 +40,7 @@ fn list_reader_rejects_over_limit_before_normalizing() {
 }
 
 #[test]
-fn normalize_ftp_listing_body_matches_legacy_join_shape() {
+fn normalize_ftp_listing_body_preserves_line_boundaries() {
     let out = normalize_ftp_listing_body(b"one\r\n\r\ntwo\n".to_vec());
     assert_eq!(out, b"one\ntwo");
 }

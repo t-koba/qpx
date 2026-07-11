@@ -14,7 +14,7 @@ use std::time::Duration;
 use backend::{IpcBackend, parse_ipc_address};
 
 pub(crate) use pool::IpcConnectionPool;
-pub(crate) use proxy::{proxy_ipc, proxy_ipc_upstream};
+pub(crate) use proxy::{IpcUpstreamRequestContext, proxy_ipc, proxy_ipc_upstream};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ClientConnInfo {

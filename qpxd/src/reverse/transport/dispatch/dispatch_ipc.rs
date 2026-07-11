@@ -19,7 +19,7 @@ use crate::http::dispatch::{
     write_dispatch_cache_result,
 };
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
-use crate::ipc_client::{ClientConnInfo, proxy_ipc_upstream};
+use crate::ipc_client::{ClientConnInfo, IpcUpstreamRequestContext, proxy_ipc_upstream};
 use crate::upstream::origin::{OriginEndpoint, proxy_websocket};
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
@@ -40,6 +40,7 @@ pub(super) async fn dispatch_reverse_ipc_route(
         request_version,
         request_rpc,
         identity,
+        authorization_decision,
         route_headers,
         cache_policy,
         request_headers_snapshot,
@@ -78,6 +79,16 @@ pub(super) async fn dispatch_reverse_ipc_route(
     let ipc_conn = ClientConnInfo {
         remote_addr: Some(conn.remote_addr),
     };
+    let verified_identity = qpx_core::ipc::meta::VerifiedIdentityContext {
+        subject: identity.user.clone(),
+        issuer: identity.idp.clone(),
+        tenant: identity.tenant.clone(),
+        groups: identity.groups.clone(),
+        roles: identity.roles.clone(),
+        entitlements: identity.entitlements.clone(),
+        assurance: identity.auth_strength.clone(),
+    };
+    let verified_identity = (!verified_identity.is_empty()).then_some(verified_identity);
     let timeout_dur = std::cmp::min(route_timeout, ipc.timeout());
     let mut last_err = None;
     for attempt_idx in 0..attempts {
@@ -115,8 +126,12 @@ pub(super) async fn dispatch_reverse_ipc_route(
                 req_for_upstream,
                 ipc,
                 proxy_name,
-                ipc_conn,
-                route_timeout,
+                IpcUpstreamRequestContext {
+                    conn: ipc_conn,
+                    verified_identity: verified_identity.clone(),
+                    authorization_decision: authorization_decision.cloned(),
+                    route_timeout,
+                },
             ),
         )
         .await;

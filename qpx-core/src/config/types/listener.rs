@@ -86,6 +86,8 @@ pub struct Http3IngressEdgeConfig {
     pub listen: Option<String>,
     #[serde(default)]
     pub connect_udp: Option<ConnectUdpConfig>,
+    #[serde(default)]
+    pub connect_ip: Option<ConnectIpConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -124,6 +126,32 @@ pub struct ConnectUdpConfig {
     pub max_capsule_buffer_bytes: usize,
     #[serde(default)]
     pub uri_template: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectIpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub uri_template: String,
+    #[serde(default)]
+    pub allowed_source_cidrs: Vec<String>,
+    #[serde(default)]
+    pub allowed_destination_cidrs: Vec<String>,
+    #[serde(default = "default_connect_ip_mtu")]
+    pub mtu: u16,
+    #[serde(default = "default_connect_udp_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_connect_udp_max_capsule_buffer_bytes")]
+    pub max_capsule_buffer_bytes: usize,
+    #[serde(default)]
+    pub device: Option<String>,
+    #[serde(default)]
+    pub wintun_dll: Option<String>,
+}
+
+fn default_connect_ip_mtu() -> u16 {
+    1280
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

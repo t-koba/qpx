@@ -128,7 +128,8 @@ pub(crate) async fn prepare_h3_connect_request(
         conn.peer_certificates
             .as_deref()
             .map(|certs| certs.as_slice()),
-    )?;
+    )
+    .await?;
     let destination = state.classify_destination(
         &DestinationInputs {
             host: Some(host.as_str()),

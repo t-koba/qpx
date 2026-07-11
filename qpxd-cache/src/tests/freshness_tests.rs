@@ -24,6 +24,33 @@ fn stale_can_be_served_with_max_stale() {
 }
 
 #[test]
+fn immutable_fresh_response_ignores_request_no_cache() {
+    let req = RequestDirectives {
+        no_cache: true,
+        ..RequestDirectives::default()
+    };
+    let envelope = CachedResponseEnvelope {
+        status: 200,
+        headers: vec![(
+            "cache-control".to_string(),
+            "max-age=60, immutable".to_string(),
+        )],
+        body: CachedBody::default(),
+        body_len: 0,
+        stored_at_ms: 0,
+        initial_age_secs: 0,
+        response_delay_secs: 0,
+        freshness_lifetime_secs: 60,
+        vary_headers: Vec::new(),
+        vary_values: Vec::new(),
+        header_map: Default::default(),
+    };
+
+    let disposition = classify_for_request(&req, &envelope, 30_000);
+    assert!(matches!(disposition, CacheEntryDisposition::ServeFresh));
+}
+
+#[test]
 fn stale_while_revalidate_allows_serving_stale_without_max_stale() {
     let req = RequestDirectives::default();
     let envelope = CachedResponseEnvelope {

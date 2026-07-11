@@ -38,7 +38,12 @@ fn parse_connection_tokens(headers: &hyper::HeaderMap) -> HashSet<String> {
     out
 }
 
-pub(super) fn build_ipc_meta(req: &Request<Body>, conn: ClientConnInfo) -> IpcRequestMeta {
+pub(super) fn build_ipc_meta(
+    req: &Request<Body>,
+    conn: ClientConnInfo,
+    verified_identity: Option<qpx_core::ipc::meta::VerifiedIdentityContext>,
+    authorization_decision: Option<qpx_core::ipc::meta::AuthorizationDecisionContext>,
+) -> IpcRequestMeta {
     let mut headers = Vec::new();
     let connection_tokens = parse_connection_tokens(req.headers());
     let mut has_host = false;
@@ -76,6 +81,8 @@ pub(super) fn build_ipc_meta(req: &Request<Body>, conn: ClientConnInfo) -> IpcRe
             .to_string(),
         headers,
         params,
+        verified_identity,
+        authorization_decision,
         req_body_shm_path: None,
         req_body_shm_size_bytes: None,
         res_body_shm_path: None,

@@ -29,6 +29,7 @@ pub struct CgiRequest {
     pub http_headers: HashMap<String, String>,
     /// The matched route prefix (if any), used for prefix-stripping in executors.
     pub matched_prefix: Option<String>,
+    pub identity_env: HashMap<String, String>,
 }
 
 /// A running execution instance: stdin is fed by the IPC server, stdout/stderr

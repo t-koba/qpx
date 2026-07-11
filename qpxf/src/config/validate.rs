@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use std::net::SocketAddr;
 
-use super::{BackendConfig, QpxfConfig};
+use super::{BackendConfig, QpxfConfig, VerifiedContextMode};
 
 const MAX_WASM_MODULE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_WASM_MEMORY_MB: u64 = 4096;
@@ -30,6 +30,23 @@ impl QpxfConfig {
             return Err(anyhow!("conn_idle_timeout_ms must be >= 1"));
         }
         for (idx, handler) in self.handlers.iter().enumerate() {
+            match (handler.verified_context, &handler.backend) {
+                (VerifiedContextMode::Wasi, BackendConfig::Wasm(_))
+                | (VerifiedContextMode::CgiEnv, BackendConfig::Cgi(_))
+                | (VerifiedContextMode::CgiEnv, BackendConfig::FastCgi(_))
+                | (VerifiedContextMode::CgiEnv, BackendConfig::Scgi(_))
+                | (VerifiedContextMode::None, _) => {}
+                (VerifiedContextMode::Wasi, _) => {
+                    return Err(anyhow!(
+                        "handlers[{idx}] verified_context=wasi requires a wasm backend"
+                    ));
+                }
+                (VerifiedContextMode::CgiEnv, BackendConfig::Wasm(_)) => {
+                    return Err(anyhow!(
+                        "handlers[{idx}] wasm identity context must use wasi"
+                    ));
+                }
+            }
             match &handler.backend {
                 BackendConfig::FastCgi(config) => {
                     validate_persistent_backend(PersistentBackendValidation {

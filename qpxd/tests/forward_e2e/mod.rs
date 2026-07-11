@@ -33,11 +33,6 @@ use sha2::{Digest, Sha256};
     all(feature = "http3", feature = "tls-rustls", feature = "mitm")
 ))]
 use std::fs;
-#[cfg(all(
-    feature = "http3-backend-qpx",
-    feature = "tls-rustls",
-    feature = "mitm"
-))]
 use std::net::SocketAddr;
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 use std::path::Path;

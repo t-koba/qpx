@@ -96,6 +96,7 @@ fn signed_assertion_public_key_without_algorithms_is_valid() {
                 ..Default::default()
             },
         }),
+        bearer: None,
         strip_from_untrusted: false,
     }])
     .expect("public-key signed assertion should validate");

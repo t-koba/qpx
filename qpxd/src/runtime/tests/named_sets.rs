@@ -131,6 +131,11 @@ fn expand_named_sets_from_external_feed_files() {
                 policy_context: None,
                 http: Some(HttpPolicyConfig {
                     response_rules: Vec::new(),
+                    forwarded: None,
+                    api_metadata: None,
+                    hsts: None,
+                    require_precondition: false,
+                    capport: false,
                 }),
                 http_guard_profile: None,
                 destination_resolution: None,

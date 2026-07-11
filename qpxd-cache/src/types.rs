@@ -9,12 +9,34 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Notify;
 
-pub const CACHE_HEADER: &str = "x-qpx-cache";
+pub const CACHE_HEADER: &str = "cache-status";
 pub const INDEX_TTL_SECS: u64 = 24 * 60 * 60;
 pub const MAX_CACHE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_VARIANTS_PER_PRIMARY: usize = 256;
 const BACKGROUND_REVALIDATIONS_SHARDS: usize = 64;
 const REQUEST_COLLAPSE_SHARDS: usize = 64;
+
+pub(crate) fn cache_status_header(
+    state: &'static str,
+    ttl: Option<u64>,
+) -> Result<http::HeaderValue> {
+    let value = match state {
+        "HIT" => match ttl {
+            Some(ttl) => format!("qpx; hit; ttl={ttl}"),
+            None => "qpx; hit".to_string(),
+        },
+        "MISS" => "qpx; fwd=miss".to_string(),
+        "BYPASS" => "qpx; fwd=bypass".to_string(),
+        "REVALIDATED" => "qpx; fwd=stale; fwd-status=304".to_string(),
+        _ => return Err(anyhow!("unsupported internal cache status: {state}")),
+    };
+    // Validate every emitted value with the shared RFC 9651 parser. This also
+    // prevents future state additions from introducing an invalid field value.
+    qpx_http::structured_fields::parse_list(value.as_bytes())
+        .map_err(|err| anyhow!("invalid generated Cache-Status field: {err}"))?;
+    http::HeaderValue::from_str(value.as_str())
+        .map_err(|err| anyhow!("invalid generated Cache-Status header value: {err}"))
+}
 
 /// Tracks which `(namespace, variant)` entries currently have an in-flight
 /// background revalidation, so duplicates are suppressed. Owned per-runtime by
@@ -125,6 +147,7 @@ pub struct CacheRequestKey {
     pub scheme: String,
     pub authority: String,
     pub path_and_query: String,
+    pub content_digest: Option<String>,
 }
 
 #[derive(Debug)]
@@ -322,6 +345,7 @@ pub struct ResponseDirectives {
     pub public: bool,
     pub must_revalidate: bool,
     pub proxy_revalidate: bool,
+    pub immutable: bool,
     pub max_age: Option<u64>,
     pub s_maxage: Option<u64>,
     pub invalid_freshness: bool,

@@ -148,7 +148,7 @@ async fn maybe_store_does_not_block_downstream_on_idle_cacheable_body() {
             .headers()
             .get(CACHE_HEADER)
             .and_then(|v| v.to_str().ok()),
-        Some("MISS")
+        Some("qpx; fwd=miss")
     );
     drop(sender);
 

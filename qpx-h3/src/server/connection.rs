@@ -474,7 +474,9 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
             abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
             return Ok(());
         }
-        if *protocol == Protocol::ConnectUdp && !ctx.settings.enable_datagram {
+        if matches!(protocol, Protocol::ConnectUdp | Protocol::ConnectIp)
+            && !ctx.settings.enable_datagram
+        {
             abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
             return Ok(());
         }
@@ -561,7 +563,9 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
     if decoded.request.method() == http::Method::CONNECT
         && let Some(protocol) = protocol.clone()
     {
-        if protocol == Protocol::ConnectUdp && !peer_settings.enable_datagram {
+        if matches!(protocol, Protocol::ConnectUdp | Protocol::ConnectIp)
+            && !peer_settings.enable_datagram
+        {
             abort_stream_with_code(&mut send, &mut recv, H3_SETTINGS_ERROR).await?;
             return Ok(());
         }

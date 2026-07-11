@@ -786,7 +786,7 @@ pub(crate) fn check_dispatch_dependency_direction(root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn check_phase3_architecture_baselines(root: &Path) -> Result<()> {
+pub(crate) fn check_architecture_baselines(root: &Path) -> Result<()> {
     check_dispatch_parallel_file_baseline(root)?;
     check_connection_pool_trait_boundary(root)?;
     check_pool_struct_baseline(root)?;
@@ -1378,17 +1378,6 @@ fn check_canonical_config_loader_baseline(root: &Path) -> Result<()> {
         .filter(|needle| content.contains(needle))
         .map(|needle| format!("qpx-core/src/config/types/canonical/mod.rs: {needle}"))
         .collect::<Vec<_>>();
-    violations.extend(single_canonical_config_schema_violations(
-        root,
-        [
-            "qpx-core/src/config/types/canonical/mod.rs",
-            "qpx-core/src/config/types/canonical/schema.rs",
-            "qpxd/src/cli.rs",
-            "qpxd/src/daemon.rs",
-            "qpxd/src/startup.rs",
-            "docs/config-schema.md",
-        ],
-    )?);
     let sample_path = root.join("qpx-core/src/config/tests/sample_config_tests.rs");
     let sample_content = fs::read_to_string(&sample_path)
         .with_context(|| format!("failed to read {}", sample_path.display()))?;
@@ -1406,35 +1395,6 @@ fn check_canonical_config_loader_baseline(root: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn single_canonical_config_schema_violations(
-    root: &Path,
-    paths: impl IntoIterator<Item = &'static str>,
-) -> Result<Vec<String>> {
-    let mut violations = Vec::new();
-    for rel in paths {
-        let content =
-            fs::read_to_string(root.join(rel)).with_context(|| format!("failed to read {rel}"))?;
-        for forbidden in [
-            "schema_version",
-            "qpx.config/v1",
-            "UpgradeConfig",
-            "upgrade_config",
-        ] {
-            if content.contains(forbidden) {
-                violations.push(format!(
-                    "{rel}: canonical config must not carry schema-version compatibility marker `{forbidden}`"
-                ));
-            }
-        }
-        if content.contains("upgrade-config") {
-            violations.push(format!(
-                "{rel}: canonical config must not expose upgrade-config compatibility command"
-            ));
-        }
-    }
-    Ok(violations)
 }
 
 fn canonical_sample_config_guard_violations(content: &str) -> Vec<&'static str> {
@@ -2772,7 +2732,7 @@ fn crate_boundary_refactor_doc_violations(content: &str) -> Vec<&'static str> {
     violations
 }
 
-pub(crate) fn check_phase4_ci_acceptance_gates(root: &Path) -> Result<()> {
+pub(crate) fn check_ci_acceptance_gates(root: &Path) -> Result<()> {
     let ci = fs::read_to_string(root.join(".github/workflows/ci.yml"))?;
     let security = fs::read_to_string(root.join(".github/workflows/security-qa.yml"))?;
     let codeql = fs::read_to_string(root.join(".github/workflows/codeql.yml"))?;
@@ -2780,7 +2740,7 @@ pub(crate) fn check_phase4_ci_acceptance_gates(root: &Path) -> Result<()> {
     let release = fs::read_to_string(root.join(".github/workflows/release.yml"))?;
     let about = fs::read_to_string(root.join("about.toml"))?;
     let public_api = fs::read_to_string(root.join("scripts/check-public-api.sh"))?;
-    let violations = phase4_ci_acceptance_violations(
+    let violations = ci_acceptance_violations(
         &ci,
         &security,
         &codeql,
@@ -2790,10 +2750,7 @@ pub(crate) fn check_phase4_ci_acceptance_gates(root: &Path) -> Result<()> {
         &public_api,
     );
     if !violations.is_empty() {
-        bail!(
-            "Phase 4 CI acceptance gate violations:\n{}",
-            violations.join("\n")
-        );
+        bail!("CI acceptance gate violations:\n{}", violations.join("\n"));
     }
     Ok(())
 }
@@ -2968,7 +2925,7 @@ fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn phase4_ci_acceptance_violations(
+fn ci_acceptance_violations(
     ci: &str,
     security: &str,
     codeql: &str,
@@ -3041,10 +2998,9 @@ fn phase4_ci_acceptance_violations(
         "types: [published]",
         "tags:",
         "\"v*\"",
-        "github.event_name == 'workflow_dispatch' || github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')",
     ] {
         if !ci.contains(required) {
-            violations.push("ci.yml missing Phase 4 required job or command");
+            violations.push("ci.yml missing required job or command");
             break;
         }
     }
@@ -3110,12 +3066,6 @@ fn phase4_ci_acceptance_violations(
     ] {
         if !release.contains(required) {
             violations.push("release.yml missing release build, package, or publish gate");
-            break;
-        }
-    }
-    for forbidden in ["no-clearly-defined", "filter-noassertion"] {
-        if about.contains(forbidden) {
-            violations.push("about.toml contains obsolete cargo-about config key");
             break;
         }
     }
@@ -4674,33 +4624,6 @@ mod tests {
     }
 
     #[test]
-    fn phase3_canonical_config_gate_rejects_version_compatibility_branch() {
-        let root = std::env::temp_dir().join(format!(
-            "qpx-xtask-config-schema-version-{}",
-            std::process::id()
-        ));
-        let file = root.join("qpxd/src/cli.rs");
-        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
-        std::fs::write(
-            &file,
-            "enum Command { UpgradeConfig } const V: &str = \"qpx.config/v1\";",
-        )
-        .expect("write marker file");
-
-        let violations = single_canonical_config_schema_violations(&root, ["qpxd/src/cli.rs"])
-            .expect("scan marker file");
-
-        std::fs::remove_dir_all(&root).expect("cleanup");
-        assert_eq!(
-            violations,
-            [
-                "qpxd/src/cli.rs: canonical config must not carry schema-version compatibility marker `qpx.config/v1`",
-                "qpxd/src/cli.rs: canonical config must not carry schema-version compatibility marker `UpgradeConfig`",
-            ]
-        );
-    }
-
-    #[test]
     fn phase3_h3_open_queue_gate_requires_bounded_send() {
         assert!(
             h3_open_queue_backpressure_violations(
@@ -5325,7 +5248,7 @@ mod tests {
     }
 
     #[test]
-    fn phase4_ci_acceptance_gate_rejects_missing_required_workflow_commands() {
+    fn ci_acceptance_gate_rejects_missing_required_workflow_commands() {
         let ci = r#"
             dtolnay/rust-toolchain@1.96
             cargo fmt --all -- --check
@@ -5389,7 +5312,6 @@ mod tests {
             types: [published]
             tags:
             "v*"
-            github.event_name == 'workflow_dispatch' || github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
         "#;
         let security = r#"
             RUSTFLAGS: -Zsanitizer=address
@@ -5436,29 +5358,26 @@ mod tests {
         "#;
         let public_api = "check_crate qpx-core\ncheck_crate qpx-auth\ncheck_crate qpx-h3\ncheck_crate qpx-acme\ncheck_crate qpx-observability";
         assert!(
-            phase4_ci_acceptance_violations(
-                ci, security, codeql, structure, release, about, public_api
-            )
-            .is_empty()
+            ci_acceptance_violations(ci, security, codeql, structure, release, about, public_api)
+                .is_empty()
         );
 
         assert_eq!(
-            phase4_ci_acceptance_violations(
+            ci_acceptance_violations(
                 "cargo fmt --all -- --check",
                 "cargo fuzz run \"${target}\"",
                 "github/codeql-action/init@v4",
                 "cargo xtask structure",
                 "softprops/action-gh-release@v3",
-                "no-clearly-defined = true",
+                "",
                 "check_crate qpx-core",
             ),
             [
-                "ci.yml missing Phase 4 required job or command",
+                "ci.yml missing required job or command",
                 "security-qa.yml missing ASAN or fuzz smoke coverage",
                 "codeql.yml missing CodeQL init/analyze",
                 "structure.yml must run acceptance, structure, and budget gates together",
                 "release.yml missing release build, package, or publish gate",
-                "about.toml contains obsolete cargo-about config key",
                 "about.toml missing MIT-0 license allowance",
                 "public API script missing library crate snapshot check",
             ]

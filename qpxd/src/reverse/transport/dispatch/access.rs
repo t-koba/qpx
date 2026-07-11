@@ -147,6 +147,13 @@ pub(super) async fn enforce_reverse_access_control(
     )? {
         return Ok(ReverseAccessOutcome::Response(Box::new(response)));
     }
+    let authorization_decision = qpx_core::ipc::meta::AuthorizationDecisionContext {
+        external_decision_id: allowed.external_decision_id.clone(),
+        policy_id: allowed.policy_id.clone(),
+        policy_tags: allowed.policy_tags.clone(),
+    };
+    let authorization_decision =
+        (!authorization_decision.is_empty()).then_some(authorization_decision);
     Ok(ReverseAccessOutcome::Continue(Box::new(
         ReverseAccessControl {
             req,
@@ -156,6 +163,7 @@ pub(super) async fn enforce_reverse_access_control(
             route_timeout,
             cache_bypass: allowed.cache_bypass,
             decision_service_mirror_upstreams: allowed.mirror_upstreams,
+            authorization_decision,
             request_limit_ctx,
             request_limits,
         },

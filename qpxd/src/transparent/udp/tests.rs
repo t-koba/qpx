@@ -240,6 +240,7 @@ fn runtime_for_quic_block(ja4: &str) -> Runtime {
                 enabled: true,
                 listen: None,
                 connect_udp: None,
+                connect_ip: None,
             }),
             ftp: Default::default(),
             xdp: None,

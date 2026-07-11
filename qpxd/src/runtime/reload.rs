@@ -109,10 +109,16 @@ fn listener_http3_signature(
     bool,
     Option<String>,
     Option<qpx_core::config::ConnectUdpConfig>,
+    Option<qpx_core::config::ConnectIpConfig>,
 ) {
     match listener.http3.as_ref() {
-        Some(cfg) => (cfg.enabled, cfg.listen.clone(), cfg.connect_udp.clone()),
-        None => (false, None, None),
+        Some(cfg) => (
+            cfg.enabled,
+            cfg.listen.clone(),
+            cfg.connect_udp.clone(),
+            cfg.connect_ip.clone(),
+        ),
+        None => (false, None, None, None),
     }
 }
 

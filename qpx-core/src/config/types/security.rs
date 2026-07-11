@@ -49,15 +49,66 @@ pub struct IdentitySourceConfig {
     #[serde(default)]
     pub assertion: Option<SignedAssertionConfig>,
     #[serde(default)]
+    pub bearer: Option<BearerIdentityConfig>,
+    #[serde(default)]
     pub strip_from_untrusted: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentitySourceKind {
+    Bearer,
     TrustedHeaders,
     MtlsSubject,
     SignedAssertion,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BearerIdentityConfig {
+    #[serde(default)]
+    pub header: Option<String>,
+    pub source: BearerIdentitySourceConfig,
+    #[serde(default)]
+    pub claims: AssertionClaimsMapConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BearerIdentitySourceConfig {
+    Jwt {
+        issuer: String,
+        audience: String,
+        #[serde(default)]
+        algorithms: Vec<String>,
+        #[serde(default)]
+        jwks_url: Option<String>,
+        #[serde(default)]
+        public_key_env: Option<String>,
+        #[serde(default = "default_bearer_clock_skew_seconds")]
+        clock_skew_seconds: u64,
+    },
+    Introspection {
+        endpoint: String,
+        client_id: String,
+        client_secret_env: String,
+        #[serde(default = "default_introspection_positive_cache_seconds")]
+        positive_cache_seconds: u64,
+        #[serde(default = "default_introspection_negative_cache_seconds")]
+        negative_cache_seconds: u64,
+    },
+}
+
+fn default_bearer_clock_skew_seconds() -> u64 {
+    60
+}
+
+fn default_introspection_positive_cache_seconds() -> u64 {
+    60
+}
+
+fn default_introspection_negative_cache_seconds() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -76,6 +127,10 @@ pub struct IdentitySourceHeadersConfig {
     pub user: Option<String>,
     #[serde(default)]
     pub groups: Option<String>,
+    #[serde(default)]
+    pub roles: Option<String>,
+    #[serde(default)]
+    pub entitlements: Option<String>,
     #[serde(default)]
     pub device_id: Option<String>,
     #[serde(default)]
@@ -128,6 +183,10 @@ pub struct AssertionClaimsMapConfig {
     pub user: Option<String>,
     #[serde(default)]
     pub groups: Option<String>,
+    #[serde(default)]
+    pub roles: Option<String>,
+    #[serde(default)]
+    pub entitlements: Option<String>,
     #[serde(default)]
     pub device_id: Option<String>,
     #[serde(default)]
@@ -184,9 +243,10 @@ pub struct DecisionServiceContractConfig {
     pub schemas: DecisionServiceSchemasConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionServiceDriver {
+    Authzen,
     SchemaMappedHttp,
 }
 
@@ -252,6 +312,8 @@ pub struct DecisionServiceMappingRuleConfig {
     pub source: Option<String>,
     #[serde(default)]
     pub literal: Option<Value>,
+    #[serde(default)]
+    pub value_map: std::collections::BTreeMap<String, Value>,
     #[serde(default)]
     pub optional: bool,
 }
@@ -349,11 +411,42 @@ pub struct DecisionServiceAuthConfig {
     #[serde(default)]
     pub bearer_token_env: Option<String>,
     #[serde(default)]
+    pub oauth2_client_credentials: Option<OAuth2ClientCredentialsConfig>,
+    #[serde(default)]
     pub mtls: Option<DecisionServiceMtlsConfig>,
     #[serde(default)]
     pub http_message_signatures: Option<DecisionServiceHttpMessageSignaturesConfig>,
     #[serde(default)]
     pub expected_auth_context: Value,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OAuth2ClientCredentialsConfig {
+    pub token_endpoint: String,
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret_env: Option<String>,
+    #[serde(default)]
+    pub private_key_env: Option<String>,
+    #[serde(default)]
+    pub key_id: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub resource: Option<String>,
+    #[serde(default)]
+    pub client_auth_method: OAuth2ClientAuthMethod,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuth2ClientAuthMethod {
+    #[default]
+    ClientSecretBasic,
+    ClientSecretPost,
+    PrivateKeyJwt,
+    TlsClientAuth,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -379,6 +472,8 @@ pub struct DecisionServiceHttpMessageSignaturesConfig {
 pub enum DecisionServiceSignatureAlgorithm {
     HmacSha256,
     Ed25519,
+    EcdsaP256Sha256,
+    RsaPssSha256,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]

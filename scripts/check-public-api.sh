@@ -40,8 +40,8 @@ check_crate() {
 
 case "$(uname -s)" in
   Darwin)
-    qpx_core_api_hash=afd4263749c5a42d340752298f4db9c0c3b07c039658beb1b3bb1958442f66b6
-    qpx_h3_api_hash=dbcdbf4cbf5bec53cb9518144ee1bfaa7c2893b0ade0d0af4b91b69bd390153b
+    qpx_core_api_hash=08e679eac4748b717ffe7fb4edcf71480143893bdf2adcbd3ebc650d8897371e
+    qpx_h3_api_hash=400fc73c391d6a5963c922c2053bb7c18776d9ab5997762b7e2cac3a3b2376cb
     ;;
   *)
     qpx_core_api_hash=6e8f17363a28460d4ca85fc814a3d860dec88fa71613624b49a64da0fb084885

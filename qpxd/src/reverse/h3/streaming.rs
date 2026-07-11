@@ -1,6 +1,6 @@
 use crate::destination::{DestinationInputs, DestinationMetadata};
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
-use crate::policy_context::{resolve_identity, sanitize_headers_for_policy};
+use crate::policy_context::sanitize_headers_for_policy;
 use crate::reverse::ReloadableReverse;
 use crate::reverse::router::normalize_host_for_match;
 use crate::runtime::ResolvedStreamingLimits;
@@ -153,7 +153,7 @@ pub(super) fn request_streaming_limits_for_head(
             fallback_to_edge = true;
             return Ok::<bool, ()>(true);
         }
-        let identity = match resolve_identity(
+        let identity = match crate::policy_context::resolve_identity_local(
             &state,
             &effective_policy,
             peer.remote_addr.ip(),

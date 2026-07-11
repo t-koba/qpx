@@ -4,7 +4,6 @@ use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 #[cfg(any(test, feature = "http3"))]
 use std::collections::VecDeque;
-
 #[cfg(any(test, feature = "http3"))]
 #[derive(Debug, Default)]
 pub(crate) struct CapsuleBuffer {
@@ -153,8 +152,13 @@ impl CapsuleBuffer {
 
 #[cfg(any(test, feature = "http3"))]
 pub(crate) fn encode_datagram_capsule_header(value_len: usize) -> Result<Bytes> {
+    encode_capsule_header(0, value_len)
+}
+
+#[cfg(any(test, feature = "http3"))]
+pub(crate) fn encode_capsule_header(capsule_type: u64, value_len: usize) -> Result<Bytes> {
     let mut capsule = Vec::with_capacity(9);
-    encode_quic_varint(0, &mut capsule)?; // DATAGRAM capsule type
+    encode_quic_varint(capsule_type, &mut capsule)?;
     encode_quic_varint(value_len as u64, &mut capsule)?;
     Ok(Bytes::from(capsule))
 }

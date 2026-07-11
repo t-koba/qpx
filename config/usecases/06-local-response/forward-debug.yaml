@@ -44,6 +44,8 @@ edges:
         status: 451
         content_type: text/plain; charset=utf-8
         body: blocked by security policy
+        headers:
+          Link: '<https://policy.example.invalid/security>; rel="blocked-by"'
     headers:
       response_set:
         X-Policy-Reason: security-category

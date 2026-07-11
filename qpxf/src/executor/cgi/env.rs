@@ -26,6 +26,9 @@ impl CgiExecutor {
         if let Some(port) = req.remote_port {
             env.insert("REMOTE_PORT".into(), port.to_string());
         }
+        for (name, value) in &req.identity_env {
+            env.insert(name.clone(), value.clone());
+        }
 
         if !req.content_type.is_empty() {
             env.insert("CONTENT_TYPE".into(), req.content_type.clone());

@@ -14,11 +14,13 @@ use crate::reverse::router::HttpRoute;
 use crate::runtime;
 use crate::runtime::Runtime;
 use crate::upstream::origin::{OriginEndpoint, proxy_http};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use http::header::{CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE};
 use hyper::{Method, Request, Response};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::{Duration, timeout};
@@ -44,9 +46,21 @@ pub(super) async fn prepare_reverse_cache(
         http_modules,
         audit_ctx,
     } = input;
+    let query_digest = if request_cache_policy.is_some() && request_method.as_str() == "QUERY" {
+        let (buffered, digest) =
+            buffer_query_for_cache_key(req, route.plan.streaming.max_request_body_bytes).await?;
+        req = buffered;
+        Some(digest)
+    } else {
+        None
+    };
     let cache_default_scheme = if conn.tls_terminated { "https" } else { "http" };
-    let (request_headers_snapshot, cache_lookup_key, cache_target_key) =
+    let (request_headers_snapshot, mut cache_lookup_key, mut cache_target_key) =
         prepare_dispatch_cache_keys(&req, request_cache_policy, cache_default_scheme)?;
+    if let Some(digest) = query_digest {
+        cache_lookup_key = cache_lookup_key.map(|key| key.with_content_digest(digest.clone()));
+        cache_target_key = cache_target_key.map(|key| key.with_content_digest(digest));
+    }
     let mut revalidation_state = None;
     if let (Some(snapshot), Some(policy)) =
         (request_headers_snapshot.as_ref(), request_cache_policy)
@@ -119,6 +133,43 @@ pub(super) async fn prepare_reverse_cache(
         revalidation_state,
         cache_collapse_guard: guard,
     })))
+}
+
+async fn buffer_query_for_cache_key(
+    req: Request<Body>,
+    max_body_bytes: usize,
+) -> Result<(Request<Body>, String)> {
+    let (parts, mut body) = req.into_parts();
+    let mut content = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let chunk = chunk?;
+        let next = content
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| anyhow!("QUERY request body length overflow"))?;
+        if next > max_body_bytes {
+            return Err(anyhow!(
+                "QUERY request body exceeds route limit of {} bytes",
+                max_body_bytes
+            ));
+        }
+        content.extend_from_slice(&chunk);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"qpx-query-cache-key-v1\0");
+    for name in [CONTENT_TYPE, CONTENT_ENCODING, CONTENT_LANGUAGE] {
+        hasher.update(name.as_str().as_bytes());
+        hasher.update([0]);
+        for value in parts.headers.get_all(&name) {
+            hasher.update((value.as_bytes().len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+        hasher.update([0xff]);
+    }
+    hasher.update((content.len() as u64).to_be_bytes());
+    hasher.update(&content);
+    let digest = format!("sha-256:{:x}", hasher.finalize());
+    Ok((Request::from_parts(parts, Body::from(content)), digest))
 }
 
 struct ReverseCacheLookupInput<'a> {
@@ -453,4 +504,27 @@ async fn reverse_cache_collapse_response(
         audit: input.audit_ctx,
     })
     .await
+}
+
+#[cfg(test)]
+mod query_cache_tests {
+    use super::*;
+
+    async fn digest(content_type: &str, body: &'static str) -> String {
+        let request = Request::builder()
+            .method("QUERY")
+            .uri("https://example.com/search")
+            .header(CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .unwrap();
+        buffer_query_for_cache_key(request, 1024).await.unwrap().1
+    }
+
+    #[tokio::test]
+    async fn query_cache_digest_includes_content_and_representation_metadata() {
+        let first = digest("application/sql", "select 1").await;
+        assert_ne!(first, digest("application/sql", "select 2").await);
+        assert_ne!(first, digest("text/plain", "select 1").await);
+        assert_eq!(first, digest("application/sql", "select 1").await);
+    }
 }
