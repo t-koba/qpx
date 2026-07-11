@@ -178,7 +178,7 @@ jobs:
         run: cargo build -p qpxd --locked
       - name: run real provider matrix
         env:
-          QID_REPO_DIR: ${{ github.workspace }}/qid
+          SISTER_QID_REPO_DIR: ${{ github.workspace }}/qid
           QPXD_BIN: ${{ github.workspace }}/target/debug/qpxd
         run: bash ./scripts/e2e-provider-matrix.sh
   webdav_external_compliance:
@@ -193,17 +193,18 @@ jobs:
       - name: install build and runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y automake autoconf libtool make gcc libneon27-dev netcat-openbsd python3 python3-venv
+          sudo apt-get install -y automake autoconf libtool make gcc netcat-openbsd python3 python3-venv
       - name: build qpxd
         env:
           RUSTFLAGS: "-D warnings"
         run: cargo build -p qpxd --locked
       - name: build pinned DAV litmus
         run: |
-          git clone https://github.com/notroj/litmus.git "$RUNNER_TEMP/litmus"
+          git clone --recurse-submodules https://github.com/notroj/litmus.git "$RUNNER_TEMP/litmus"
           git -C "$RUNNER_TEMP/litmus" checkout --detach 46a541de1e57735edaa85708042a413a3594557f
+          git -C "$RUNNER_TEMP/litmus" submodule update --init --recursive
           cd "$RUNNER_TEMP/litmus"
-          autoreconf -i
+          ./autogen.sh
           ./configure --prefix="$RUNNER_TEMP/litmus-install"
           make -j2
           make install
@@ -260,7 +261,7 @@ jobs:
       - name: install common dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf automake libtool make gcc g++ pkg-config libev-dev libgnutls28-dev libssl-dev libcunit1-dev nettle-dev openssl python3 python3-venv
+          sudo apt-get install -y autoconf automake libtool make gcc g++-14 pkg-config libev-dev libgnutls28-dev libssl-dev libcunit1-dev nettle-dev openssl python3 python3-venv
       - name: build qpxd backend
         env:
           RUSTFLAGS: "-D warnings"
@@ -284,12 +285,13 @@ jobs:
           git clone --recurse-submodules https://github.com/cloudflare/quiche.git "$RUNNER_TEMP/quiche"
           git -C "$RUNNER_TEMP/quiche" checkout --detach b9d7b96e727045448b8110234d74cdff84115203
           git -C "$RUNNER_TEMP/quiche" submodule update --init --recursive
-          cargo build --manifest-path "$RUNNER_TEMP/quiche/Cargo.toml" --release --example http3-client
+          cargo build --manifest-path "$RUNNER_TEMP/quiche/Cargo.toml" --release --package quiche-apps --bin quiche-client
       - name: build pinned ngtcp2 stack
         if: matrix.client == 'ngtcp2' || matrix.client == 'curl'
         run: |
-          git clone https://github.com/ngtcp2/nghttp3.git "$RUNNER_TEMP/nghttp3"
+          git clone --recurse-submodules https://github.com/ngtcp2/nghttp3.git "$RUNNER_TEMP/nghttp3"
           git -C "$RUNNER_TEMP/nghttp3" checkout --detach 37c0a24f67b539392cd0de8a7e089f0542514926
+          git -C "$RUNNER_TEMP/nghttp3" submodule update --init --recursive
           cd "$RUNNER_TEMP/nghttp3"
           autoreconf -i
           ./configure --prefix="$RUNNER_TEMP/nghttp3-install" --enable-lib-only
@@ -298,7 +300,7 @@ jobs:
           git -C "$RUNNER_TEMP/ngtcp2" checkout --detach ac14c5180486404ecda2a4e3d00bbd918112f79c
           cd "$RUNNER_TEMP/ngtcp2"
           autoreconf -i
-          PKG_CONFIG_PATH="$RUNNER_TEMP/nghttp3-install/lib/pkgconfig" \
+          CXX=g++-14 PKG_CONFIG_PATH="$RUNNER_TEMP/nghttp3-install/lib/pkgconfig" \
             ./configure --prefix="$RUNNER_TEMP/ngtcp2-install" --with-gnutls
           make -j2 && make install
       - name: build pinned curl HTTP/3 client
@@ -323,7 +325,7 @@ jobs:
           AIOQUIC_DIR: ${{ runner.temp }}/aioquic
           CURL_HTTP3_BIN: ${{ runner.temp }}/curl-install/bin/curl
           NGTCP2_CLIENT_BIN: ${{ runner.temp }}/ngtcp2/examples/client
-          QUICHE_CLIENT_BIN: ${{ runner.temp }}/quiche/target/release/examples/http3-client
+          QUICHE_CLIENT_BIN: ${{ runner.temp }}/quiche/target/release/quiche-client
           CHROMIUM_BIN: /usr/bin/google-chrome
         run: |
           if [ "${{ matrix.client }}" = aioquic ]; then

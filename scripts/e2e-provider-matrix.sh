@@ -89,7 +89,7 @@ test_cerbos() {
 }
 
 test_qid() {
-  local qid_dir="${QID_REPO_DIR:?QID_REPO_DIR is required}"
+  local qid_dir="${SISTER_QID_REPO_DIR:?SISTER_QID_REPO_DIR is required}"
   QPXD_BIN="$QPXD_BIN" bash "$qid_dir/examples/qpx-e2e/run.sh"
 }
 

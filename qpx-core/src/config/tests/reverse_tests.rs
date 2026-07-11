@@ -5,13 +5,18 @@ fn load_config_allows_named_webdav_origin_target() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");
     let cfg = dir.join("webdav-origin.yaml");
+    let root = dir.join("documents");
+    let metadata = dir.join("documents.redb");
+    let root = root.to_string_lossy().replace('\\', "/");
+    let metadata = metadata.to_string_lossy().replace('\\', "/");
     write_config(
         &cfg,
-        r#"origins:
+        &format!(
+            r#"origins:
   webdav:
   - name: documents
-    root: /srv/qpx/documents
-    metadata: /var/lib/qpx/documents.redb
+    root: {root}
+    metadata: {metadata}
     max_depth: 32
     max_multistatus_entries: 10000
     max_lock_timeout_seconds: 86400
@@ -27,7 +32,8 @@ edges:
       require_precondition: true
     target:
       type: webdav
-      origin: documents"#,
+      origin: documents"#
+        ),
     )
     .expect("write");
 
@@ -51,13 +57,18 @@ fn load_config_rejects_webdav_metadata_inside_served_root() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");
     let cfg = dir.join("webdav-origin-unsafe.yaml");
+    let root = dir.join("documents");
+    let metadata = root.join("private.redb");
+    let root = root.to_string_lossy().replace('\\', "/");
+    let metadata = metadata.to_string_lossy().replace('\\', "/");
     write_config(
         &cfg,
-        r#"origins:
+        &format!(
+            r#"origins:
   webdav:
   - name: documents
-    root: /srv/qpx/documents
-    metadata: /srv/qpx/documents/private.redb
+    root: {root}
+    metadata: {metadata}
 edges:
 - kind: reverse
   name: dav
@@ -67,7 +78,8 @@ edges:
       path: [/dav/**]
     target:
       type: webdav
-      origin: documents"#,
+      origin: documents"#
+        ),
     )
     .expect("write");
     let error = load_config(&cfg).expect_err("unsafe metadata placement must fail");

@@ -18,6 +18,10 @@ trap cleanup EXIT
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -keyout "$TMP_DIR/key.pem" -out "$TMP_DIR/cert.pem" \
   -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' >/dev/null 2>&1
+SPKI_HASH="$(openssl x509 -in "$TMP_DIR/cert.pem" -pubkey -noout \
+  | openssl pkey -pubin -outform DER \
+  | openssl dgst -sha256 -binary \
+  | openssl base64 -A)"
 mkdir -p "$TMP_DIR/state"
 QPX_STATE_DIR="$TMP_DIR/state" QPX_TLS_CERT="$TMP_DIR/cert.pem" QPX_TLS_KEY="$TMP_DIR/key.pem" \
   "$QPXD_BIN" run -c "$ROOT_DIR/integration/h3/qpx.yaml" >"$TMP_DIR/qpxd.log" 2>&1 &
@@ -52,7 +56,7 @@ case "$CLIENT" in
     : "${CHROMIUM_BIN:?CHROMIUM_BIN is required}"
     timeout 45 "$CHROMIUM_BIN" --headless --disable-gpu --no-sandbox \
       --enable-quic --origin-to-force-quic-on=localhost:18443 \
-      --ignore-certificate-errors --dump-dom "$URL" >"$TMP_DIR/client.out"
+      --ignore-certificate-errors-spki-list="$SPKI_HASH" --dump-dom "$URL" >"$TMP_DIR/client.out"
     ;;
   *)
     echo "unknown external H3 client: $CLIENT" >&2

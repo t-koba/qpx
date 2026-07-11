@@ -13,9 +13,11 @@ pub(crate) use decision_service::{
     DecisionServiceInput, DecisionServiceMode, enforce_decision_service, merge_header_controls,
     prepare_decision_service_allow,
 };
+#[cfg(feature = "http3")]
+pub(crate) use identity::resolve_identity_local;
 pub(crate) use identity::{
     CompiledIdentitySource, EffectivePolicyContext, ResolvedIdentity, resolve_identity,
-    resolve_identity_local, sanitize_headers_for_policy, strip_untrusted_identity_headers,
+    sanitize_headers_for_policy, strip_untrusted_identity_headers,
 };
 
 pub(crate) fn attach_log_context(

@@ -1,7 +1,11 @@
 use anyhow::{Context, Result, anyhow};
 #[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const DARWIN_AF_INET: u32 = 2;
+const DARWIN_AF_INET6: u32 = 30;
 
 #[cfg(unix)]
 pub(crate) struct SystemIpDevice {
@@ -102,7 +106,7 @@ fn decode_device_packet(framing: DeviceFraming, framed: &[u8], output: &mut [u8]
                 return Err(anyhow!("utun packet is missing its address-family header"));
             }
             let family = u32::from_be_bytes(framed[..4].try_into()?);
-            if family != libc::AF_INET as u32 && family != libc::AF_INET6 as u32 {
+            if family != DARWIN_AF_INET && family != DARWIN_AF_INET6 {
                 return Err(anyhow!("utun packet has an unsupported address family"));
             }
             &framed[4..]
@@ -120,12 +124,12 @@ fn encode_device_packet(framing: DeviceFraming, packet: &[u8]) -> Result<Vec<u8>
         DeviceFraming::Raw => Ok(packet.to_vec()),
         DeviceFraming::DarwinAddressFamily => {
             let family = match packet.first().map(|byte| byte >> 4) {
-                Some(4) => libc::AF_INET,
-                Some(6) => libc::AF_INET6,
+                Some(4) => DARWIN_AF_INET,
+                Some(6) => DARWIN_AF_INET6,
                 _ => return Err(anyhow!("utun packet is not IPv4 or IPv6")),
             };
             let mut framed = Vec::with_capacity(packet.len() + 4);
-            framed.extend_from_slice(&(family as u32).to_be_bytes());
+            framed.extend_from_slice(&family.to_be_bytes());
             framed.extend_from_slice(packet);
             Ok(framed)
         }

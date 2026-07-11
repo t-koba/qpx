@@ -8,6 +8,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use http::{HeaderMap, Method, Request, Response, StatusCode};
+use quick_xml::XmlVersion;
 use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
@@ -965,7 +966,9 @@ fn parse_report(body: &[u8]) -> Result<ReportRequest> {
                     for attribute in element.attributes() {
                         let attribute = attribute?;
                         if attribute.key.local_name().as_ref() == b"name" {
-                            let value = attribute.unescape_value()?.into_owned();
+                            let value = attribute
+                                .normalized_value(XmlVersion::Implicit1_0)?
+                                .into_owned();
                             if value != "VCALENDAR" {
                                 component = Some(value);
                             }
@@ -975,7 +978,7 @@ fn parse_report(body: &[u8]) -> Result<ReportRequest> {
                 if namespace == CALDAV_NAMESPACE && name == "time-range" {
                     for attribute in element.attributes() {
                         let attribute = attribute?;
-                        let value = attribute.unescape_value()?;
+                        let value = attribute.normalized_value(XmlVersion::Implicit1_0)?;
                         match attribute.key.local_name().as_ref() {
                             b"start" => start = Some(parse_datetime(&value)?),
                             b"end" => end = Some(parse_datetime(&value)?),
@@ -995,7 +998,9 @@ fn parse_report(body: &[u8]) -> Result<ReportRequest> {
                     for attribute in element.attributes() {
                         let attribute = attribute?;
                         if attribute.key.local_name().as_ref() == b"name" {
-                            let value = attribute.unescape_value()?.into_owned();
+                            let value = attribute
+                                .normalized_value(XmlVersion::Implicit1_0)?
+                                .into_owned();
                             if value != "VCALENDAR" {
                                 component = Some(value);
                             }
@@ -1005,7 +1010,7 @@ fn parse_report(body: &[u8]) -> Result<ReportRequest> {
                 if namespace == CALDAV_NAMESPACE && name == "time-range" {
                     for attribute in element.attributes() {
                         let attribute = attribute?;
-                        let value = attribute.unescape_value()?;
+                        let value = attribute.normalized_value(XmlVersion::Implicit1_0)?;
                         match attribute.key.local_name().as_ref() {
                             b"start" => start = Some(parse_datetime(&value)?),
                             b"end" => end = Some(parse_datetime(&value)?),
