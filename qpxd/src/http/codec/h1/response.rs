@@ -2,7 +2,7 @@ use super::{RESPONSE_WRITE_TIMEOUT, has_chunked_transfer_encoding, parse_declare
 use crate::http::codec::h1_common::serialize_headers;
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http::{Method, Response, StatusCode, Version};
 use hyper::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderValue, TRAILER, TRANSFER_ENCODING,
@@ -29,6 +29,10 @@ pub(super) enum ConnectionHeaderMode {
     Preserve,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "response relay keeps protocol state and the reusable connection buffer explicit"
+)]
 pub(super) async fn send_http1_response_with_interim<W>(
     writer: &mut WriteHalf<W>,
     request_version: Version,
@@ -37,6 +41,7 @@ pub(super) async fn send_http1_response_with_interim<W>(
     interim: &[InterimResponseHead],
     request_keep_alive: bool,
     body_read_timeout: Duration,
+    head_buf: &mut BytesMut,
 ) -> Result<bool>
 where
     W: AsyncRead + AsyncWrite + Unpin,
@@ -56,6 +61,7 @@ where
             qpx_http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
             write_status_and_headers(
                 writer,
+                head_buf,
                 Version::HTTP_11,
                 head.status,
                 &headers,
@@ -141,28 +147,34 @@ where
         &headers,
         keep_alive,
     );
-    let head =
-        serialize_status_and_headers(request_version, parts.status, &headers, connection_mode);
+    serialize_status_and_headers(
+        head_buf,
+        request_version,
+        parts.status,
+        &headers,
+        connection_mode,
+    );
+    let head = head_buf.as_ref();
 
     match body_kind {
-        ResponseBodyKind::Empty => write_all_with_timeout(writer, &head).await?,
+        ResponseBodyKind::Empty => write_all_with_timeout(writer, head).await?,
         ResponseBodyKind::ContentLength(length) => {
             if let Some(err) = first_body_error.take() {
-                write_all_with_timeout(writer, &head).await?;
+                write_all_with_timeout(writer, head).await?;
                 return Err(err);
             }
             let remaining =
-                write_head_and_first_content_length_chunk(writer, &head, first_chunk, length)
+                write_head_and_first_content_length_chunk(writer, head, first_chunk, length)
                     .await?;
             write_content_length_response_body(writer, &mut body, remaining, body_read_timeout)
                 .await?;
         }
         ResponseBodyKind::Chunked => {
             if let Some(err) = first_body_error.take() {
-                write_all_with_timeout(writer, &head).await?;
+                write_all_with_timeout(writer, head).await?;
                 return Err(err);
             }
-            write_head_and_first_chunked_chunk(writer, &head, first_chunk).await?;
+            write_head_and_first_chunked_chunk(writer, head, first_chunk).await?;
             write_chunked_response_body(
                 writer,
                 &mut body,
@@ -175,10 +187,10 @@ where
         }
         ResponseBodyKind::CloseDelimited => {
             if let Some(err) = first_body_error.take() {
-                write_all_with_timeout(writer, &head).await?;
+                write_all_with_timeout(writer, head).await?;
                 return Err(err);
             }
-            write_head_and_first_close_delimited_chunk(writer, &head, first_chunk).await?;
+            write_head_and_first_close_delimited_chunk(writer, head, first_chunk).await?;
             write_close_delimited_response_body(writer, &mut body, None, body_read_timeout).await?;
         }
     }
@@ -188,6 +200,7 @@ where
 
 pub(super) async fn write_status_and_headers<W>(
     writer: &mut WriteHalf<W>,
+    head_buf: &mut BytesMut,
     version: Version,
     status: StatusCode,
     headers: &HeaderMap,
@@ -196,18 +209,20 @@ pub(super) async fn write_status_and_headers<W>(
 where
     W: AsyncRead + AsyncWrite + Unpin,
 {
-    let head = serialize_status_and_headers(version, status, headers, connection_mode);
-    write_all_with_timeout(writer, &head).await?;
+    serialize_status_and_headers(head_buf, version, status, headers, connection_mode);
+    write_all_with_timeout(writer, head_buf).await?;
     Ok(())
 }
 
 fn serialize_status_and_headers(
+    head: &mut BytesMut,
     version: Version,
     status: StatusCode,
     headers: &HeaderMap,
     connection_mode: ConnectionHeaderMode,
-) -> Vec<u8> {
-    let mut head = Vec::with_capacity(512);
+) {
+    head.clear();
+    head.reserve(512);
     let version = match version {
         Version::HTTP_10 => "HTTP/1.0",
         _ => "HTTP/1.1",
@@ -248,7 +263,6 @@ fn serialize_status_and_headers(
         }
     }
     head.extend_from_slice(b"\r\n");
-    head
 }
 
 async fn write_content_length_response_body<W>(

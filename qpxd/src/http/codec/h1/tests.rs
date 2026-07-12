@@ -149,6 +149,7 @@ async fn send_http1_response_with_interim_preserves_upgrade_connection_header() 
         .header(hyper::header::UPGRADE, "websocket")
         .body(Body::empty())
         .expect("response");
+    let mut head_buf = BytesMut::new();
 
     let keep_alive = send_http1_response_with_interim(
         &mut write_half,
@@ -158,6 +159,7 @@ async fn send_http1_response_with_interim_preserves_upgrade_connection_header() 
         &[],
         true,
         Duration::from_secs(30),
+        &mut head_buf,
     )
     .await
     .expect("send response");
@@ -182,6 +184,7 @@ async fn rejected_connect_closes_http1_connection() {
         .header(CONTENT_LENGTH, "0")
         .body(Body::empty())
         .expect("response");
+    let mut head_buf = BytesMut::new();
 
     let keep_alive = send_http1_response_with_interim(
         &mut write_half,
@@ -191,6 +194,7 @@ async fn rejected_connect_closes_http1_connection() {
         &[],
         true,
         Duration::from_secs(30),
+        &mut head_buf,
     )
     .await
     .expect("send response");
@@ -215,6 +219,7 @@ async fn send_http1_head_preserves_content_length_and_removes_trailer() {
         .header(TRAILER, "x-end")
         .body(Body::from("not serialized"))
         .expect("response");
+    let mut head_buf = BytesMut::new();
 
     let keep_alive = send_http1_response_with_interim(
         &mut write_half,
@@ -224,6 +229,7 @@ async fn send_http1_head_preserves_content_length_and_removes_trailer() {
         &[],
         true,
         Duration::from_secs(30),
+        &mut head_buf,
     )
     .await
     .expect("send response");
@@ -251,6 +257,7 @@ async fn send_http1_no_body_status_removes_trailer_metadata() {
         .header(TRAILER, "x-end")
         .body(Body::empty())
         .expect("response");
+    let mut head_buf = BytesMut::new();
 
     let keep_alive = send_http1_response_with_interim(
         &mut write_half,
@@ -260,6 +267,7 @@ async fn send_http1_no_body_status_removes_trailer_metadata() {
         &[],
         true,
         Duration::from_secs(30),
+        &mut head_buf,
     )
     .await
     .expect("send response");
@@ -284,6 +292,7 @@ async fn send_http1_response_stops_when_response_body_limit_is_exceeded() {
         .status(StatusCode::OK)
         .body(Body::from("abcde").limit_bytes(4))
         .expect("response");
+    let mut head_buf = BytesMut::new();
 
     let err = send_http1_response_with_interim(
         &mut write_half,
@@ -293,6 +302,7 @@ async fn send_http1_response_stops_when_response_body_limit_is_exceeded() {
         &[],
         true,
         Duration::from_secs(30),
+        &mut head_buf,
     )
     .await
     .expect_err("response body cap should fail the send");
@@ -316,6 +326,7 @@ async fn response_data_pending_does_not_trigger_destructive_trailer_poll() {
         .header(CONTENT_LENGTH, "7")
         .body(Body::wrap(PendingThenDataBody { state: 0 }))
         .expect("response");
+    let mut head_buf = BytesMut::new();
 
     let keep_alive = send_http1_response_with_interim(
         &mut write_half,
@@ -325,6 +336,7 @@ async fn response_data_pending_does_not_trigger_destructive_trailer_poll() {
         &[],
         true,
         Duration::from_secs(30),
+        &mut head_buf,
     )
     .await
     .expect("send response");

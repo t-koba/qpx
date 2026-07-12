@@ -89,6 +89,7 @@ where
 {
     let (mut read_half, mut write_half) = tokio::io::split(io);
     let mut read_buf = BytesMut::new();
+    let mut response_head_buf = BytesMut::with_capacity(512);
 
     loop {
         let parsed =
@@ -104,6 +105,7 @@ where
                     };
                     write_status_and_headers(
                         &mut write_half,
+                        &mut response_head_buf,
                         Version::HTTP_11,
                         status,
                         &HeaderMap::new(),
@@ -127,6 +129,7 @@ where
             if parsed.body_kind != RequestBodyKind::Empty {
                 write_status_and_headers(
                     &mut write_half,
+                    &mut response_head_buf,
                     parsed.version,
                     StatusCode::BAD_REQUEST,
                     &HeaderMap::new(),
@@ -156,6 +159,7 @@ where
                 &interim,
                 parsed.keep_alive,
                 header_read_timeout,
+                &mut response_head_buf,
             )
             .await?;
             if http1_upgrade_accepted(parsed.upgrade, &parsed.method, status) {
@@ -203,6 +207,7 @@ where
             &interim,
             parsed.keep_alive,
             header_read_timeout,
+            &mut response_head_buf,
         )
         .await?;
 
