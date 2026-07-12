@@ -335,11 +335,7 @@ async fn fetch_jwks(state: &RuntimeState, url: &Url) -> Result<CachedJwks> {
         .await?
         .to_bytes();
     let document: JwksDocument = serde_json::from_slice(&body)?;
-    let keys = document
-        .keys
-        .into_iter()
-        .map(JwkVerificationKey::try_from)
-        .collect::<Result<Vec<_>>>()?;
+    let keys = verification_keys(document)?;
     if keys.is_empty() {
         return Err(anyhow!("JWKS contains no supported verification keys"));
     }
@@ -483,6 +479,10 @@ struct Jwk {
     kid: Option<String>,
     #[serde(default)]
     alg: Option<String>,
+    #[serde(default, rename = "use")]
+    key_use: Option<String>,
+    #[serde(default)]
+    key_ops: Option<Vec<String>>,
     #[serde(default)]
     crv: Option<String>,
     #[serde(default)]
@@ -495,12 +495,35 @@ struct Jwk {
     e: Option<String>,
 }
 
-impl TryFrom<Jwk> for JwkVerificationKey {
-    type Error = anyhow::Error;
+fn verification_keys(document: JwksDocument) -> Result<Vec<JwkVerificationKey>> {
+    document
+        .keys
+        .into_iter()
+        .filter_map(|jwk| match JwkVerificationKey::try_from(jwk) {
+            Ok(Some(key)) => Some(Ok(key)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .collect()
+}
 
-    fn try_from(jwk: Jwk) -> Result<Self> {
+impl JwkVerificationKey {
+    fn try_from(jwk: Jwk) -> Result<Option<Self>> {
+        if jwk.key_use.as_deref().is_some_and(|value| value != "sig")
+            || jwk
+                .key_ops
+                .as_ref()
+                .is_some_and(|operations| !operations.iter().any(|operation| operation == "verify"))
+        {
+            return Ok(None);
+        }
         match jwk.kty.as_str() {
-            "EC" if jwk.crv.as_deref() == Some("P-256") => {
+            "EC" if jwk.crv.as_deref() == Some("P-256")
+                && jwk
+                    .alg
+                    .as_deref()
+                    .is_none_or(|algorithm| algorithm == "ES256") =>
+            {
                 let mut key = vec![4];
                 key.extend(
                     URL_SAFE_NO_PAD.decode(jwk.x.ok_or_else(|| anyhow!("JWK x is missing"))?)?,
@@ -511,31 +534,30 @@ impl TryFrom<Jwk> for JwkVerificationKey {
                 if key.len() != 65 {
                     return Err(anyhow!("P-256 JWK coordinates have invalid length"));
                 }
-                Ok(Self {
+                Ok(Some(Self {
                     kid: jwk.kid,
                     algorithm: JwtAlgorithm::Es256,
                     key: Arc::from(key),
-                })
+                }))
             }
-            "RSA" => {
+            "RSA"
+                if jwk
+                    .alg
+                    .as_deref()
+                    .is_none_or(|algorithm| matches!(algorithm, "RS256" | "RS384" | "RS512")) =>
+            {
                 let n =
                     URL_SAFE_NO_PAD.decode(jwk.n.ok_or_else(|| anyhow!("JWK n is missing"))?)?;
                 let e =
                     URL_SAFE_NO_PAD.decode(jwk.e.ok_or_else(|| anyhow!("JWK e is missing"))?)?;
                 let algorithm = JwtAlgorithm::parse(jwk.alg.as_deref().unwrap_or("RS256"))?;
-                if !matches!(
-                    algorithm,
-                    JwtAlgorithm::Rs256 | JwtAlgorithm::Rs384 | JwtAlgorithm::Rs512
-                ) {
-                    return Err(anyhow!("RSA JWK algorithm is invalid"));
-                }
-                Ok(Self {
+                Ok(Some(Self {
                     kid: jwk.kid,
                     algorithm,
                     key: Arc::from(der_rsa_public_key(&n, &e)),
-                })
+                }))
             }
-            _ => Err(anyhow!("unsupported JWK key type")),
+            _ => Ok(None),
         }
     }
 }
@@ -581,4 +603,51 @@ fn der_tlv(tag: u8, body: &[u8]) -> Vec<u8> {
     }
     output.extend(body);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_jwks(json: &str) -> JwksDocument {
+        serde_json::from_str(json).expect("JWKS should parse")
+    }
+
+    #[test]
+    fn ignores_encryption_keys_and_accepts_signature_keys() {
+        let document = parse_jwks(
+            r#"{"keys":[
+                {"kty":"RSA","kid":"enc","use":"enc","alg":"RSA-OAEP","n":"AQ","e":"AQAB"},
+                {"kty":"RSA","kid":"sig","use":"sig","key_ops":["verify"],"alg":"RS256","n":"AQ","e":"AQAB"}
+            ]}"#,
+        );
+
+        let keys = verification_keys(document).expect("verification keys should convert");
+
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].kid.as_deref(), Some("sig"));
+        assert_eq!(keys[0].algorithm, JwtAlgorithm::Rs256);
+    }
+
+    #[test]
+    fn ignores_keys_without_verify_operation() {
+        let document = parse_jwks(
+            r#"{"keys":[{"kty":"RSA","kid":"sign-only","use":"sig","key_ops":["sign"],"alg":"RS256","n":"AQ","e":"AQAB"}]}"#,
+        );
+
+        let keys = verification_keys(document).expect("non-verification keys should be ignored");
+
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_supported_signature_key() {
+        let document = parse_jwks(
+            r#"{"keys":[{"kty":"RSA","kid":"broken","use":"sig","alg":"RS256","e":"AQAB"}]}"#,
+        );
+
+        let err = verification_keys(document).expect_err("missing modulus must fail");
+
+        assert!(err.to_string().contains("JWK n is missing"));
+    }
 }

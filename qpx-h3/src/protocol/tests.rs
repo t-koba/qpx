@@ -3,9 +3,45 @@ use super::{
     FRAME_PRIORITY_UPDATE_PUSH, FRAME_PRIORITY_UPDATE_REQUEST, FRAME_PUSH_PROMISE,
     FRAME_WINDOW_UPDATE, H3_EXCESSIVE_LOAD, H3_FRAME_ERROR, H3_FRAME_UNEXPECTED, H3_ID_ERROR,
     MAX_BUFFERED_PRIORITY_UPDATES, PeerControlState, StreamPriority, decode_settings_frame,
-    encode_varint, parse_priority, push_varint, read_frame, read_varint_slice,
-    validate_control_stream_frame, validate_message_stream_frame,
+    encode_varint, parse_priority, push_varint, read_frame, read_frame_header_after_idle,
+    read_varint_slice, validate_control_stream_frame, validate_message_stream_frame,
 };
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+
+#[tokio::test]
+async fn control_frame_header_allows_idle_before_next_frame() {
+    let (mut reader, mut writer) = tokio::io::duplex(16);
+    let write_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        writer
+            .write_all(&[FRAME_PING as u8, 0])
+            .await
+            .expect("frame header should write");
+    });
+
+    let header = read_frame_header_after_idle(&mut reader, Duration::from_millis(10))
+        .await
+        .expect("idle time must not consume the partial-frame timeout");
+
+    assert_eq!(header, Some((FRAME_PING, 0)));
+    write_task.await.expect("writer task should complete");
+}
+
+#[tokio::test]
+async fn control_frame_header_times_out_after_partial_varint() {
+    let (mut reader, mut writer) = tokio::io::duplex(16);
+    writer
+        .write_all(&[0x40])
+        .await
+        .expect("partial frame type should write");
+
+    let err = read_frame_header_after_idle(&mut reader, Duration::from_millis(10))
+        .await
+        .expect_err("partial frame header must time out");
+
+    assert!(matches!(err, super::ControlFrameHeaderError::Timeout));
+}
 
 #[test]
 fn quic_varint_roundtrip() {

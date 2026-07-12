@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 mod dispatch;
@@ -181,11 +182,11 @@ impl OriginEndpoint {
             .unwrap_or(443)
     }
 
-    fn parsed(&self) -> Result<ParsedOriginTarget> {
-        self.parsed
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(|| parse_origin_target(self.upstream.as_str()))
+    fn parsed(&self) -> Result<Cow<'_, ParsedOriginTarget>> {
+        match self.parsed.as_ref() {
+            Some(parsed) => Ok(Cow::Borrowed(parsed)),
+            None => parse_origin_target(self.upstream.as_str()).map(Cow::Owned),
+        }
     }
 }
 

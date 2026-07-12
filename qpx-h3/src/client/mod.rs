@@ -190,7 +190,6 @@ impl ClientSession {
             settings.qpack_max_blocked_streams,
             settings.max_field_section_size,
             settings.max_encoder_stream_buffer_bytes,
-            settings.read_timeout,
         );
         let control_state = PeerControlState::default();
         let registry: SessionRegistry = Arc::new(ShardedSessionRegistry::new());
@@ -297,7 +296,6 @@ pub async fn open_extended_connect_stream(
         settings.qpack_max_blocked_streams,
         settings.max_field_section_size,
         settings.max_encoder_stream_buffer_bytes,
-        settings.read_timeout,
     );
     let control_state = PeerControlState::default();
 

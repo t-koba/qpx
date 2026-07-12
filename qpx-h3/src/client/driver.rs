@@ -1,12 +1,12 @@
 use super::registry::SessionRegistry;
 use crate::H3Result as Result;
 use crate::protocol::{
-    ConnectionClose, FRAME_SETTINGS, H3_CLOSED_CRITICAL_STREAM, H3_FRAME_UNEXPECTED, H3_ID_ERROR,
-    H3_MESSAGE_ERROR, H3_MISSING_SETTINGS, H3_SETTINGS_ERROR, H3_STREAM_CREATION_ERROR,
-    PeerControlState, PeerSettings, STREAM_CONTROL, STREAM_PUSH, STREAM_QPACK_DECODER,
-    STREAM_QPACK_ENCODER, STREAM_WEBTRANSPORT_BIDI, STREAM_WEBTRANSPORT_UNI,
-    decode_settings_frame_from_reader, discard_frame_payload, read_frame_header, read_varint,
-    write_frame, write_varint,
+    ConnectionClose, ControlFrameHeaderError, FRAME_SETTINGS, H3_CLOSED_CRITICAL_STREAM,
+    H3_FRAME_UNEXPECTED, H3_ID_ERROR, H3_MESSAGE_ERROR, H3_MISSING_SETTINGS, H3_SETTINGS_ERROR,
+    H3_STREAM_CREATION_ERROR, PeerControlState, PeerSettings, STREAM_CONTROL, STREAM_PUSH,
+    STREAM_QPACK_DECODER, STREAM_QPACK_ENCODER, STREAM_WEBTRANSPORT_BIDI, STREAM_WEBTRANSPORT_UNI,
+    decode_settings_frame_from_reader, discard_frame_payload, read_frame_header,
+    read_frame_header_after_idle, read_varint, write_frame, write_varint,
 };
 use crate::qpack::QpackConnection;
 use crate::server::{Protocol, Settings};
@@ -302,7 +302,11 @@ async fn route_uni_stream(
             control_state.register_control_stream().await?;
             let mut saw_settings = false;
             loop {
-                let Some((frame_ty, frame_len)) =
+                let frame_header = if saw_settings {
+                    read_frame_header_after_idle(&mut recv, limits.read_timeout)
+                        .await
+                        .map_err(ControlFrameHeaderError::into_connection_close)?
+                } else {
                     timeout(limits.read_timeout, read_frame_header(&mut recv))
                         .await
                         .map_err(|_| {
@@ -312,7 +316,8 @@ async fn route_uni_stream(
                             )
                         })?
                         .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
-                else {
+                };
+                let Some((frame_ty, frame_len)) = frame_header else {
                     return Err(ConnectionClose::new(
                         if saw_settings {
                             crate::protocol::H3_CLOSED_CRITICAL_STREAM
@@ -397,14 +402,7 @@ async fn route_uni_stream(
         }
         STREAM_QPACK_DECODER => {
             control_state.register_decoder_stream().await?;
-            discard_uni_stream(
-                &mut recv,
-                limits.max_control_frame_payload_bytes,
-                limits.read_timeout,
-                H3_CLOSED_CRITICAL_STREAM,
-                "QPACK decoder stream",
-            )
-            .await?;
+            consume_qpack_decoder_stream(&mut recv).await?;
             return Err(ConnectionClose::new(
                 H3_CLOSED_CRITICAL_STREAM,
                 "peer closed QPACK decoder stream",
@@ -427,6 +425,21 @@ async fn route_uni_stream(
         }
     }
     Ok(())
+}
+
+async fn consume_qpack_decoder_stream(
+    recv: &mut quinn::RecvStream,
+) -> std::result::Result<(), ConnectionClose> {
+    let mut buf = [0u8; 4096];
+    loop {
+        let Some(_) = recv
+            .read(&mut buf)
+            .await
+            .map_err(|err| ConnectionClose::new(H3_CLOSED_CRITICAL_STREAM, err.to_string()))?
+        else {
+            return Ok(());
+        };
+    }
 }
 
 async fn route_bidi_stream(

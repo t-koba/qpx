@@ -25,17 +25,22 @@ pub(crate) struct DestinationMetadata {
 
 impl DestinationMetadata {
     pub(crate) fn decision_trace(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if let Some(trace) = self.category_trace.as_deref() {
-            parts.push(trace.to_string());
+        let mut traces = [
+            self.category_trace.as_deref(),
+            self.reputation_trace.as_deref(),
+            self.application_trace.as_deref(),
+        ]
+        .into_iter()
+        .flatten();
+        let first = traces.next()?;
+        let capacity = first.len() + traces.clone().map(str::len).sum::<usize>() + 6;
+        let mut output = String::with_capacity(capacity);
+        output.push_str(first);
+        for trace in traces {
+            output.push_str(" | ");
+            output.push_str(trace);
         }
-        if let Some(trace) = self.reputation_trace.as_deref() {
-            parts.push(trace.to_string());
-        }
-        if let Some(trace) = self.application_trace.as_deref() {
-            parts.push(trace.to_string());
-        }
-        (!parts.is_empty()).then(|| parts.join(" | "))
+        Some(output)
     }
 }
 

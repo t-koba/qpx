@@ -39,6 +39,7 @@ pub(super) async fn dispatch_reverse_http_route(
         request_method,
         request_version,
         request_rpc,
+        request_destination,
         identity,
         route_headers,
         cache_policy,
@@ -148,6 +149,7 @@ pub(super) async fn dispatch_reverse_http_route(
                     request_method,
                     request_version,
                     request_rpc,
+                    request_destination,
                     identity,
                     route_headers: route_headers.clone(),
                     cache_policy,
@@ -248,6 +250,7 @@ async fn handle_reverse_http_success(
         request_method,
         request_version,
         request_rpc,
+        request_destination,
         identity,
         route_headers,
         cache_policy,
@@ -273,19 +276,25 @@ async fn handle_reverse_http_success(
         export_session,
     } = input;
     let resp = http_modules.on_upstream_response(response).await?;
-    let response_destination = classify_reverse_destination(
-        state,
-        conn,
-        host,
-        upstream_cert.as_ref(),
-        resolution_override,
-    );
+    let classified_response_destination;
+    let response_destination = if upstream_cert.is_some() {
+        classified_response_destination = classify_reverse_destination(
+            state,
+            conn,
+            host,
+            upstream_cert.as_ref(),
+            resolution_override,
+        );
+        &classified_response_destination
+    } else {
+        request_destination
+    };
     let response_rule = apply_dispatch_response_rules(DispatchResponseRuleInput {
         rule: ResponseRuleInput {
             route,
             base,
             conn,
-            destination: &response_destination,
+            destination: response_destination,
             upstream_cert: upstream_cert.as_ref(),
             identity,
             request_rpc,

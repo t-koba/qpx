@@ -24,7 +24,6 @@ pub(crate) struct QpackConnection {
     decoder_instructions: mpsc::Sender<Bytes>,
     notify: Arc<Notify>,
     max_encoder_stream_buffer_bytes: usize,
-    encoder_stream_read_timeout: Duration,
 }
 
 impl std::fmt::Debug for QpackConnection {
@@ -40,7 +39,6 @@ impl QpackConnection {
         max_blocked_streams: u64,
         max_field_section_size: u64,
         max_encoder_stream_buffer_bytes: usize,
-        encoder_stream_read_timeout: Duration,
     ) -> Self {
         let (decoder_instructions, decoder_instruction_rx) =
             mpsc::channel(DECODER_INSTRUCTION_QUEUE_DEPTH);
@@ -57,7 +55,6 @@ impl QpackConnection {
             decoder_instructions,
             notify: Arc::new(Notify::new()),
             max_encoder_stream_buffer_bytes,
-            encoder_stream_read_timeout,
         }
     }
 
@@ -67,13 +64,10 @@ impl QpackConnection {
     ) -> std::result::Result<(), EncoderStreamError> {
         let mut buffered = EncoderStreamBuffer::new(self.max_encoder_stream_buffer_bytes);
         loop {
-            let chunk = match timeout(
-                self.encoder_stream_read_timeout,
-                recv.read_chunk(self.max_encoder_stream_buffer_bytes.max(1), true),
-            )
-            .await
-            .map_err(|_| EncoderStreamError::closed("QPACK encoder stream read timed out"))?
-            .map_err(|err| EncoderStreamError::closed(err.to_string()))?
+            let chunk = match recv
+                .read_chunk(self.max_encoder_stream_buffer_bytes.max(1), true)
+                .await
+                .map_err(|err| EncoderStreamError::closed(err.to_string()))?
             {
                 Some(chunk) => chunk.bytes,
                 None => {

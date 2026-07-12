@@ -38,7 +38,7 @@ pub(crate) use plan::{PlanCompiler, RuntimePlan};
 pub use policy_rt::PolicyRuntime;
 pub(crate) use reload::{ensure_hot_reload_compatible, requires_server_restart};
 pub use security_rt::SecurityRuntime;
-pub use views::{AcceptorView, CacheView, DispatchView, ObservabilityView};
+pub use views::{AcceptorView, CacheView, ObservabilityView};
 
 #[cfg(test)]
 use config_rt::{expand_named_sets_in_config, expand_upstream_trust_profiles_in_config};
@@ -105,10 +105,6 @@ impl Runtime {
 
     pub fn state(&self) -> Arc<RuntimeState> {
         self.state.load_full()
-    }
-
-    pub fn dispatch_view(&self) -> DispatchView {
-        RuntimeState::dispatch_view_from_arc(self.state())
     }
 
     pub fn acceptor_view(&self) -> AcceptorView {
@@ -211,10 +207,6 @@ impl RuntimeState {
             observability,
             pools,
         })
-    }
-
-    pub fn dispatch_view_from_arc(state: Arc<Self>) -> DispatchView {
-        DispatchView::from_state(state)
     }
 
     pub fn acceptor_view_from_arc(state: Arc<Self>) -> AcceptorView {

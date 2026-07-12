@@ -32,16 +32,11 @@ where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let listener_name = listener_name.to_string();
-    let dispatch_view = runtime.dispatch_view();
-    let header_read_timeout = Duration::from_millis(
-        dispatch_view
-            .plan
-            .limits
-            .timeouts
-            .http_header_read_timeout_ms,
-    );
-    let body_channel_capacity = dispatch_view.plan.limits.body.body_channel_capacity;
-    let access_cfg = dispatch_view.resources.access_log.clone();
+    let state = runtime.state();
+    let header_read_timeout =
+        Duration::from_millis(state.plan.limits.timeouts.http_header_read_timeout_ms);
+    let body_channel_capacity = state.plan.limits.body.body_channel_capacity;
+    let access_cfg = state.resources.access_log.clone();
     let access_name = Arc::<str>::from(listener_name.as_str());
 
     let request_runtime = runtime.clone();
@@ -95,7 +90,7 @@ where
     let preface = sniff_h2_preface(&mut stream, header_read_timeout).await?;
     let stream = crate::http::protocol::io_prefix::PrefixedIo::new(stream, preface.clone());
     if preface.as_ref() == H2_PREFACE {
-        let h2_limits = dispatch_view.plan.limits.h2;
+        let h2_limits = state.plan.limits.h2;
         let h2_tuning = crate::http::codec::h2::H2TransportTuning {
             initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
             initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,

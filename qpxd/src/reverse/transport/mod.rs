@@ -123,17 +123,17 @@ pub(crate) async fn handle_request_inner(
     runtime: Runtime,
     conn: ReverseConnInfo,
 ) -> Result<(InterimList, Response<Body>)> {
-    let dispatch_view = runtime.dispatch_view();
-    let proxy_name = dispatch_view.plan.identity.proxy_name.as_ref();
+    let state = runtime.state();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
     if let PreflightOutcome::Reject(response) = preflight_validate(
         &req,
         proxy_name,
         PreflightOptions {
-            trace_enabled: dispatch_view.plan.limits.general.trace_enabled,
-            trace_disabled_message: dispatch_view.messages.trace_disabled.as_str(),
+            trace_enabled: state.plan.limits.general.trace_enabled,
+            trace_disabled_message: state.messages.trace_disabled.as_str(),
             connect_policy: ConnectPolicy::Reject {
                 status: StatusCode::METHOD_NOT_ALLOWED,
-                body: dispatch_view.messages.reverse_error.as_str(),
+                body: state.messages.reverse_error.as_str(),
             },
         },
     ) {

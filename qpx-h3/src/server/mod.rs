@@ -244,7 +244,6 @@ pub async fn serve_connection<H: RequestHandler>(
         settings.qpack_max_blocked_streams,
         settings.max_field_section_size,
         settings.max_encoder_stream_buffer_bytes,
-        settings.read_timeout,
     );
     let _critical_streams = (control, encoder);
     let control_state = PeerControlState::default();

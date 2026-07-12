@@ -21,14 +21,14 @@ pub(crate) async fn handle_request_inner(
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
 ) -> Result<Response<Body>> {
-    let dispatch_view = runtime.dispatch_view();
-    let proxy_name = dispatch_view.plan.identity.proxy_name.as_ref();
+    let state = runtime.state();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
     if let PreflightOutcome::Reject(response) = preflight_validate(
         &req,
         proxy_name,
         PreflightOptions::allow_connect(
-            dispatch_view.plan.limits.general.trace_enabled,
-            dispatch_view.messages.trace_disabled.as_str(),
+            state.plan.limits.general.trace_enabled,
+            state.messages.trace_disabled.as_str(),
         ),
     ) {
         return Ok(*response);

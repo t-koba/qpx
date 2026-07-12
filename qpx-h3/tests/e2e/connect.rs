@@ -2,6 +2,71 @@ use super::*;
 use anyhow::anyhow;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_session_survives_idle_critical_streams() -> Result<()> {
+    let (addr, client_config, server_task) = start_server(ExtendedEchoHandler).await?;
+    let (client_endpoint, connection) = connect_client(addr, client_config).await?;
+    let session = qpx_h3::ClientSession::new(
+        client_endpoint,
+        connection,
+        Settings {
+            enable_extended_connect: true,
+            enable_datagram: true,
+            read_timeout: Duration::from_millis(25),
+            ..Default::default()
+        },
+        TEST_TIMEOUT,
+    )
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let request = http::Request::builder()
+        .method(http::Method::CONNECT)
+        .uri("https://localhost/test")
+        .body(())?;
+    let mut stream = session
+        .open_extended_connect_stream(
+            request,
+            Some(Protocol::Other("websocket".to_string())),
+            TEST_TIMEOUT,
+        )
+        .await?;
+    assert_eq!(stream.response.status(), http::StatusCode::OK);
+    stream
+        .request_stream
+        .send_data(Bytes::from_static(b"ping"))
+        .await?;
+    let echoed = timeout(TEST_TIMEOUT, stream.request_stream.recv_data())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for idle-session echo"))??
+        .ok_or_else(|| anyhow!("missing idle-session echo"))?;
+    assert_eq!(echoed, Bytes::from_static(b"ping"));
+    let datagrams = stream
+        .datagrams
+        .as_mut()
+        .ok_or_else(|| anyhow!("missing idle-session datagrams"))?;
+    send_test_datagram(datagrams, Bytes::from_static(b"dg"))?;
+    let echoed_datagram = timeout(
+        TEST_TIMEOUT,
+        stream
+            .datagrams
+            .as_mut()
+            .expect("checked above")
+            .receiver
+            .recv(),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for idle-session datagram echo"))?
+    .ok_or_else(|| anyhow!("missing idle-session datagram echo"))?;
+    assert_eq!(echoed_datagram, Bytes::from_static(b"dg"));
+
+    shutdown_extended_stream(stream).await?;
+    server_task.abort();
+    let _ = server_task.await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn extended_connect_relays_bytes_and_datagrams() -> Result<()> {
     let (addr, client_config, server_task) = start_server(ExtendedEchoHandler).await?;
     let (client_endpoint, connection) = connect_client(addr, client_config).await?;

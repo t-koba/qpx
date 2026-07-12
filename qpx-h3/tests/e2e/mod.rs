@@ -19,6 +19,7 @@ const FRAME_DATA: u64 = 0x0;
 const FRAME_HEADERS: u64 = 0x1;
 const FRAME_SETTINGS: u64 = 0x4;
 const STREAM_QPACK_ENCODER: u64 = 0x2;
+const STREAM_QPACK_DECODER: u64 = 0x3;
 const H3_FRAME_UNEXPECTED: u64 = 0x105;
 const H3_SETTINGS_ERROR: u64 = 0x109;
 const H3_MESSAGE_ERROR: u64 = 0x10e;
@@ -400,6 +401,34 @@ impl RequestHandler for HeadBodyAttemptHandler {
 }
 
 #[derive(Clone, Default)]
+struct IdleCriticalStreamsHandler;
+
+impl RequestHandler for IdleCriticalStreamsHandler {
+    fn settings(&self) -> Settings {
+        Settings {
+            read_timeout: Duration::from_millis(25),
+            ..Default::default()
+        }
+    }
+
+    async fn handle_request(
+        &self,
+        request: Request,
+        _conn: ConnectionInfo,
+        mut stream: RequestStream,
+    ) -> H3Result<()> {
+        if request.head.method() != http::Method::HEAD {
+            return Err(anyhow!("expected HEAD request").into());
+        }
+        let response = http::Response::builder()
+            .status(http::StatusCode::NO_CONTENT)
+            .body(())?;
+        stream.send_response_head(&response).await?;
+        stream.finish().await
+    }
+}
+
+#[derive(Clone, Default)]
 struct ExtendedConnectDisabledHandler;
 
 impl RequestHandler for ExtendedConnectDisabledHandler {
@@ -689,6 +718,18 @@ async fn open_client_control_stream(connection: &quinn::Connection) -> Result<()
     control.write_all(&control_stream).await?;
     tokio::spawn(async move {
         let _control = control;
+        std::future::pending::<()>().await;
+    });
+    Ok(())
+}
+
+async fn open_client_qpack_streams(connection: &quinn::Connection) -> Result<()> {
+    let mut encoder = connection.open_uni().await?;
+    encoder.write_all(&[STREAM_QPACK_ENCODER as u8]).await?;
+    let mut decoder = connection.open_uni().await?;
+    decoder.write_all(&[STREAM_QPACK_DECODER as u8]).await?;
+    tokio::spawn(async move {
+        let _critical_streams = (encoder, decoder);
         std::future::pending::<()>().await;
     });
     Ok(())

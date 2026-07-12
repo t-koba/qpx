@@ -476,6 +476,7 @@ async fn complete_reverse_after_modules(
         request_method,
         request_version,
         request_rpc,
+        request_destination,
         identity,
         route_headers,
         cache_policy,

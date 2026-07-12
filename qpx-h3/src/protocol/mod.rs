@@ -68,13 +68,17 @@ pub(crate) async fn read_varint<R: AsyncRead + Unpin>(reader: &mut R) -> Result<
         Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(err) => return Err(err.into()),
     };
+    read_varint_after_first(reader, first).await.map(Some)
+}
+
+async fn read_varint_after_first<R: AsyncRead + Unpin>(reader: &mut R, first: u8) -> Result<u64> {
     let prefix = first >> 6;
     let len = 1usize << prefix;
     let mut value = (first & 0x3f) as u64;
     for _ in 1..len {
         value = (value << 8) | reader.read_u8().await? as u64;
     }
-    Ok(Some(value))
+    Ok(value)
 }
 
 pub(crate) fn read_varint_slice(input: &[u8]) -> Result<(u64, usize)> {
@@ -169,6 +173,45 @@ pub(crate) async fn read_frame_header<R: AsyncRead + Unpin>(
         .await?
         .ok_or_else(|| anyhow!("truncated frame length"))?;
     Ok(Some((ty, len)))
+}
+
+#[derive(Debug)]
+pub(crate) enum ControlFrameHeaderError {
+    Timeout,
+    Protocol(crate::H3Error),
+}
+
+impl ControlFrameHeaderError {
+    pub(crate) fn into_connection_close(self) -> ConnectionClose {
+        match self {
+            Self::Timeout => ConnectionClose::new(
+                H3_CLOSED_CRITICAL_STREAM,
+                "control stream partial frame header timed out",
+            ),
+            Self::Protocol(error) => ConnectionClose::new(H3_MESSAGE_ERROR, error.to_string()),
+        }
+    }
+}
+
+pub(crate) async fn read_frame_header_after_idle<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    partial_timeout: std::time::Duration,
+) -> std::result::Result<Option<(u64, u64)>, ControlFrameHeaderError> {
+    let first = match reader.read_u8().await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(err) => return Err(ControlFrameHeaderError::Protocol(err.into())),
+    };
+    tokio::time::timeout(partial_timeout, async {
+        let ty = read_varint_after_first(reader, first).await?;
+        let len = read_varint(reader)
+            .await?
+            .ok_or_else(|| anyhow!("truncated frame length"))?;
+        Ok(Some((ty, len)))
+    })
+    .await
+    .map_err(|_| ControlFrameHeaderError::Timeout)?
+    .map_err(ControlFrameHeaderError::Protocol)
 }
 
 pub(crate) async fn discard_frame_payload<R: AsyncRead + Unpin>(

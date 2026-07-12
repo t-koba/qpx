@@ -14,18 +14,18 @@ pub(super) enum OriginScheme {
 }
 
 pub(super) fn origin_scheme(origin: &OriginEndpoint) -> Result<OriginScheme> {
-    scheme_from_upstream(origin.upstream.as_str())
-}
-
-pub(super) fn scheme_from_upstream(upstream: &str) -> Result<OriginScheme> {
-    if upstream.starts_with("ipc+unix://") {
+    if origin.upstream.starts_with("ipc+unix://") {
         return Ok(OriginScheme::IpcUnix);
     }
-    if upstream.starts_with("ipc://") {
+    if origin.upstream.starts_with("ipc://") {
         return Ok(OriginScheme::Ipc);
     }
-    let parsed = super::parse_origin_target(upstream)?;
-    match parsed.scheme.as_deref() {
+    let parsed = origin.parsed()?;
+    scheme_from_parsed(parsed.scheme.as_deref())
+}
+
+fn scheme_from_parsed(scheme: Option<&str>) -> Result<OriginScheme> {
+    match scheme {
         Some("http") | Some("h2c") => Ok(OriginScheme::Http),
         Some("https") | Some("h2") => Ok(OriginScheme::Https),
         Some("h3") => Ok(OriginScheme::H3),

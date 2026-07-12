@@ -2,6 +2,7 @@ use qpx_core::config::{
     DestinationConflictMode, DestinationEvidenceSourceKind, DestinationMergeMode,
     DestinationResolutionOverrideConfig, DestinationResolutionPolicyConfig, NamedSetKind,
 };
+use std::fmt::Write as _;
 use std::net::IpAddr;
 
 use super::compile::{DestinationClassifier, LabeledPatternSet};
@@ -561,31 +562,37 @@ fn format_resolution_trace(
     selected_source: Option<&str>,
     selected_confidence: Option<u8>,
 ) -> String {
-    let selected = selected_value
-        .map(|value| {
-            format!(
-                "selected={value}@{}:{}",
-                selected_source.unwrap_or(""),
-                selected_confidence.unwrap_or(0)
-            )
-        })
-        .unwrap_or_else(|| "selected=none".to_string());
-    let considered = if candidates.is_empty() {
-        "candidates=none".to_string()
-    } else {
-        format!(
-            "candidates={}",
-            candidates
-                .iter()
-                .map(|candidate| format!(
-                    "{}@{}:{}",
-                    candidate.label,
-                    candidate.source.as_str(),
-                    candidate.confidence
-                ))
-                .collect::<Vec<_>>()
-                .join(",")
+    let mut output = String::with_capacity(96);
+    write!(output, "{dimension}(").expect("writing to String cannot fail");
+    if let Some(value) = selected_value {
+        write!(
+            output,
+            "selected={value}@{}:{}",
+            selected_source.unwrap_or(""),
+            selected_confidence.unwrap_or(0)
         )
-    };
-    format!("{dimension}({selected}; {considered})")
+        .expect("writing to String cannot fail");
+    } else {
+        output.push_str("selected=none");
+    }
+    output.push_str("; candidates=");
+    if candidates.is_empty() {
+        output.push_str("none");
+    } else {
+        for (index, candidate) in candidates.iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            write!(
+                output,
+                "{}@{}:{}",
+                candidate.label,
+                candidate.source.as_str(),
+                candidate.confidence
+            )
+            .expect("writing to String cannot fail");
+        }
+    }
+    output.push(')');
+    output
 }
