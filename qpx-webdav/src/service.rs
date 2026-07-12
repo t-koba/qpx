@@ -3,8 +3,8 @@ use crate::caldav::{
     validate_calendar,
 };
 use crate::{
-    AclPolicy, BindingAlreadyExists, DavPrivilege, DeadProperty, LockDepth, LockRecord, ResourceId,
-    VersionRecord, WebDavStore,
+    AclPolicy, BindingAlreadyExists, DavPrivilege, DeadProperty, LockDepth, LockRecord, LockScope,
+    ResourceId, VersionRecord, WebDavStore,
 };
 use anyhow::{Result, anyhow};
 use http::{HeaderMap, Method, Request, Response, StatusCode};
@@ -111,7 +111,7 @@ impl<S: WebDavStore> WebDavService<S> {
             "DELETE" => self.delete(&resource, request.headers()),
             "MKCOL" => self.mkcol(&resource, request.headers(), request.body()),
             "MKCALENDAR" => self.mkcalendar(&resource, request.headers(), request.body()),
-            "PROPFIND" => self.propfind(&resource, request.headers()),
+            "PROPFIND" => self.propfind(&resource, request.headers(), request.body()),
             "PROPPATCH" => self.proppatch(&resource, request.headers(), request.body()),
             "LOCK" => self.lock(&resource, request.headers(), request.body()),
             "UNLOCK" => self.unlock(&resource, request.headers()),
@@ -176,8 +176,11 @@ impl<S: WebDavStore> WebDavService<S> {
         headers: &HeaderMap,
         body: &[u8],
     ) -> Result<Response<Vec<u8>>> {
-        if !self.lock_tokens_satisfy(resource, headers)? {
-            return response(locked_status(), Vec::new());
+        if !self.parent_collection_exists(resource)? {
+            return response(StatusCode::CONFLICT, Vec::new());
+        }
+        if let Some(status) = self.lock_failure_status(resource, headers)? {
+            return response(status, Vec::new());
         }
         if self.is_calendar_collection_parent(resource)? {
             let content_type = headers
@@ -210,8 +213,8 @@ impl<S: WebDavStore> WebDavService<S> {
         if self.store.metadata(resource)?.is_none() {
             return response(StatusCode::NOT_FOUND, Vec::new());
         }
-        if !self.lock_tokens_satisfy(resource, headers)? {
-            return response(locked_status(), Vec::new());
+        if let Some(status) = self.lock_failure_status(resource, headers)? {
+            return response(status, Vec::new());
         }
         self.store.delete(resource)?;
         self.store.remove_resource_metadata(resource)?;
@@ -224,8 +227,11 @@ impl<S: WebDavStore> WebDavService<S> {
         headers: &HeaderMap,
         body: &[u8],
     ) -> Result<Response<Vec<u8>>> {
-        if !self.lock_tokens_satisfy(resource, headers)? {
-            return response(locked_status(), Vec::new());
+        if !self.parent_collection_exists(resource)? {
+            return response(StatusCode::CONFLICT, Vec::new());
+        }
+        if let Some(status) = self.lock_failure_status(resource, headers)? {
+            return response(status, Vec::new());
         }
         if self.store.metadata(resource)?.is_some() {
             return response(StatusCode::METHOD_NOT_ALLOWED, Vec::new());
@@ -262,6 +268,9 @@ impl<S: WebDavStore> WebDavService<S> {
         headers: &HeaderMap,
         body: &[u8],
     ) -> Result<Response<Vec<u8>>> {
+        if !self.parent_collection_exists(resource)? {
+            return response(StatusCode::CONFLICT, Vec::new());
+        }
         if self.store.metadata(resource)?.is_some() {
             return response(StatusCode::METHOD_NOT_ALLOWED, Vec::new());
         }
@@ -302,7 +311,25 @@ impl<S: WebDavStore> WebDavService<S> {
         }))
     }
 
-    fn propfind(&self, resource: &ResourceId, headers: &HeaderMap) -> Result<Response<Vec<u8>>> {
+    fn parent_collection_exists(&self, resource: &ResourceId) -> Result<bool> {
+        let Some(parent) = resource.parent() else {
+            return Ok(false);
+        };
+        Ok(self
+            .store
+            .metadata(&parent)?
+            .is_some_and(|metadata| metadata.is_collection))
+    }
+
+    fn propfind(
+        &self,
+        resource: &ResourceId,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<Response<Vec<u8>>> {
+        if !body.is_empty() && validate_propfind_body(body).is_err() {
+            return response(StatusCode::BAD_REQUEST, Vec::new());
+        }
         let depth = parse_depth(headers, self.max_depth)?;
         let mut resources = vec![resource.clone()];
         self.collect_descendants(resource, depth, &mut resources)?;
@@ -367,13 +394,23 @@ impl<S: WebDavStore> WebDavService<S> {
                         "WebDAV property name is not a valid XML local name"
                     ));
                 }
-                xml.push_str("<Q:");
-                xml.push_str(&property.name);
-                xml.push_str(" xmlns:Q=\"");
-                xml.push_str(&escape_xml(&property.namespace));
-                xml.push_str("\">");
+                if property.namespace.is_empty() {
+                    xml.push('<');
+                    xml.push_str(&property.name);
+                    xml.push('>');
+                } else {
+                    xml.push_str("<Q:");
+                    xml.push_str(&property.name);
+                    xml.push_str(" xmlns:Q=\"");
+                    xml.push_str(&escape_xml(&property.namespace));
+                    xml.push_str("\">");
+                }
                 xml.push_str(&escape_xml(&property.value_xml));
-                xml.push_str("</Q:");
+                xml.push_str(if property.namespace.is_empty() {
+                    "</"
+                } else {
+                    "</Q:"
+                });
                 xml.push_str(&property.name);
                 xml.push('>');
             }
@@ -810,8 +847,8 @@ impl<S: WebDavStore> WebDavService<S> {
         if self.store.metadata(resource)?.is_none() {
             return response(StatusCode::NOT_FOUND, Vec::new());
         }
-        if !self.lock_tokens_satisfy(resource, headers)? {
-            return response(locked_status(), Vec::new());
+        if let Some(status) = self.lock_failure_status(resource, headers)? {
+            return response(status, Vec::new());
         }
         let patch = parse_property_update(body)?;
         if patch.set.iter().any(is_protected_live_property)
@@ -865,6 +902,45 @@ impl<S: WebDavStore> WebDavService<S> {
             Some("infinity") | None => LockDepth::Infinity,
             _ => return response(StatusCode::BAD_REQUEST, Vec::new()),
         };
+        if body.is_empty() {
+            let supplied = headers
+                .get("if")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            let Some(mut lock) = self
+                .store
+                .locks(resource, true)?
+                .into_iter()
+                .find(|lock| supplied.contains(&lock.token))
+            else {
+                return response(StatusCode::PRECONDITION_FAILED, Vec::new());
+            };
+            lock.expires_unix_seconds = SystemTime::now()
+                .duration_since(UNIX_EPOCH)?
+                .as_secs()
+                .saturating_add(timeout_seconds);
+            self.store.put_lock(&lock)?;
+            return lock_response(&lock, timeout_seconds, StatusCode::OK);
+        }
+        let scope = if String::from_utf8_lossy(body).contains("shared") {
+            LockScope::Shared
+        } else {
+            LockScope::Exclusive
+        };
+        let existing = self.store.locks(resource, true)?;
+        if existing
+            .iter()
+            .any(|lock| lock.scope == LockScope::Exclusive || scope == LockScope::Exclusive)
+        {
+            return response(locked_status(), Vec::new());
+        }
+        let created = self.store.metadata(resource)?.is_none();
+        if created {
+            if !self.parent_collection_exists(resource)? {
+                return response(StatusCode::CONFLICT, Vec::new());
+            }
+            self.store.put(resource, &[], None)?;
+        }
         let token = format!("opaquelocktoken:{}", Uuid::new_v4());
         let expires_unix_seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
@@ -875,20 +951,19 @@ impl<S: WebDavStore> WebDavService<S> {
             resource: resource.clone(),
             owner_xml: (!body.is_empty()).then(|| String::from_utf8_lossy(body).into_owned()),
             depth,
+            scope,
             expires_unix_seconds,
         };
         self.store.put_lock(&lock)?;
-        let body = format!(
-            r#"<?xml version="1.0" encoding="utf-8"?><D:prop xmlns:D="DAV:"><D:lockdiscovery><D:activelock><D:locktoken><D:href>{}</D:href></D:locktoken><D:timeout>Second-{}</D:timeout></D:activelock></D:lockdiscovery></D:prop>"#,
-            escape_xml(&token),
-            timeout_seconds
-        );
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("lock-token", format!("<{token}>"))
-            .header(http::header::CONTENT_TYPE, "application/xml; charset=utf-8")
-            .body(body.into_bytes())
-            .map_err(Into::into)
+        lock_response(
+            &lock,
+            timeout_seconds,
+            if created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            },
+        )
     }
 
     fn unlock(&self, resource: &ResourceId, headers: &HeaderMap) -> Result<Response<Vec<u8>>> {
@@ -926,15 +1001,55 @@ impl<S: WebDavStore> WebDavService<S> {
             .parse::<http::Uri>()
             .map_err(|_| anyhow!("WebDAV Destination is not a valid URI"))?;
         let destination = ResourceId::parse(destination_uri.path())?;
-        let overwrite = headers
+        let overwrite = match headers
             .get("overwrite")
             .and_then(|value| value.to_str().ok())
-            .is_none_or(|value| value.eq_ignore_ascii_case("T"));
-        let created = self.store.metadata(&destination)?.is_none();
+        {
+            None | Some("T" | "t") => true,
+            Some("F" | "f") => false,
+            Some(_) => return response(StatusCode::BAD_REQUEST, Vec::new()),
+        };
+        let Some(source_metadata) = self.store.metadata(source)? else {
+            return response(StatusCode::NOT_FOUND, Vec::new());
+        };
+        if source == &destination {
+            return response(StatusCode::FORBIDDEN, Vec::new());
+        }
+        if !self.parent_collection_exists(&destination)? {
+            return response(StatusCode::CONFLICT, Vec::new());
+        }
+        let destination_exists = self.store.metadata(&destination)?.is_some();
+        if destination_exists && !overwrite {
+            return response(StatusCode::PRECONDITION_FAILED, Vec::new());
+        }
+        let depth = headers
+            .get("depth")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("infinity");
+        if (move_resource && depth != "infinity") || !matches!(depth, "0" | "infinity") {
+            return response(StatusCode::BAD_REQUEST, Vec::new());
+        }
+        let created = !destination_exists;
+        if let Some(status) = self.lock_failure_status(&destination, headers)? {
+            return response(status, Vec::new());
+        }
+        if move_resource && let Some(status) = self.lock_failure_status(source, headers)? {
+            return response(status, Vec::new());
+        }
         if move_resource {
             self.store.move_resource(source, &destination, overwrite)?;
             if let Err(error) = self.store.move_resource_metadata(source, &destination) {
                 let _ = self.store.move_resource(&destination, source, true);
+                return Err(error);
+            }
+        } else if source_metadata.is_collection && depth == "0" {
+            if destination_exists {
+                self.store.delete(&destination)?;
+                self.store.remove_resource_metadata(&destination)?;
+            }
+            self.store.create_collection(&destination)?;
+            if let Err(error) = self.store.copy_resource_metadata(source, &destination) {
+                let _ = self.store.delete(&destination);
                 return Err(error);
             }
         } else {
@@ -954,17 +1069,107 @@ impl<S: WebDavStore> WebDavService<S> {
         )
     }
 
-    fn lock_tokens_satisfy(&self, resource: &ResourceId, headers: &HeaderMap) -> Result<bool> {
+    fn lock_failure_status(
+        &self,
+        resource: &ResourceId,
+        headers: &HeaderMap,
+    ) -> Result<Option<StatusCode>> {
         let locks = self.store.locks(resource, true)?;
-        if locks.is_empty() {
-            return Ok(true);
-        }
-        let supplied = headers
-            .get(http::header::IF_MATCH)
-            .or_else(|| headers.get("if"))
+        let if_header = headers
+            .get("if")
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
-        Ok(locks.iter().all(|lock| supplied.contains(&lock.token)))
+        if !if_header.is_empty() && !self.if_header_satisfied(resource, if_header, &locks)? {
+            return Ok(Some(StatusCode::PRECONDITION_FAILED));
+        }
+        if locks.is_empty() {
+            return Ok(None);
+        }
+        let if_match = headers
+            .get(http::header::IF_MATCH)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if locks.iter().all(|lock| {
+            if_header_tokens(if_header).any(|token| token == lock.token)
+                || if_match.contains(&lock.token)
+        }) {
+            Ok(None)
+        } else if headers.contains_key("if") {
+            Ok(Some(StatusCode::PRECONDITION_FAILED))
+        } else {
+            Ok(Some(locked_status()))
+        }
+    }
+
+    fn if_header_satisfied(
+        &self,
+        resource: &ResourceId,
+        header: &str,
+        locks: &[LockRecord],
+    ) -> Result<bool> {
+        let etag = self.store.metadata(resource)?.map(|metadata| metadata.etag);
+        let mut lists = Vec::new();
+        let mut remaining = header;
+        while let Some(start) = remaining.find('(') {
+            remaining = &remaining[start + 1..];
+            let Some(end) = remaining.find(')') else {
+                break;
+            };
+            lists.push(&remaining[..end]);
+            remaining = &remaining[end + 1..];
+        }
+        if lists.is_empty() {
+            return Ok(false);
+        }
+        if let Some(etag) = etag.as_deref()
+            && lists.iter().any(|list| {
+                locks
+                    .iter()
+                    .any(|lock| list.contains(&format!("<{}>", lock.token)))
+                    && list.contains(&format!("[{etag}]"))
+            })
+        {
+            return Ok(true);
+        }
+        Ok(lists.into_iter().any(|list| {
+            let mut cursor = list.trim();
+            let mut satisfied = true;
+            let mut conditions = 0usize;
+            while !cursor.is_empty() {
+                let (negate, rest) = if let Some(rest) = cursor.strip_prefix("Not ") {
+                    (true, rest.trim_start())
+                } else {
+                    (false, cursor)
+                };
+                let (value, rest, is_token) = if let Some(rest) = rest.strip_prefix('<') {
+                    let Some(end) = rest.find('>') else {
+                        return false;
+                    };
+                    (&rest[..end], &rest[end + 1..], true)
+                } else if let Some(rest) = rest.strip_prefix('[') {
+                    let Some(end) = rest.find(']') else {
+                        return false;
+                    };
+                    (&rest[..end], &rest[end + 1..], false)
+                } else {
+                    return false;
+                };
+                let mut condition = if is_token {
+                    locks.iter().any(|lock| lock.token == value)
+                } else {
+                    etag.as_deref().is_some_and(|etag| {
+                        etag == value || etag.trim_matches('"') == value.trim_matches('"')
+                    })
+                };
+                if negate {
+                    condition = !condition;
+                }
+                satisfied &= condition;
+                conditions += 1;
+                cursor = rest.trim_start();
+            }
+            conditions > 0 && satisfied
+        }))
     }
 }
 
@@ -998,6 +1203,52 @@ fn reject_unsafe_xml(body: &[u8]) -> Result<()> {
     let upper = String::from_utf8_lossy(body).to_ascii_uppercase();
     if upper.contains("<!DOCTYPE") || upper.contains("<!ENTITY") {
         return Err(anyhow!("WebDAV XML entity declarations are forbidden"));
+    }
+    Ok(())
+}
+
+fn validate_propfind_body(body: &[u8]) -> Result<()> {
+    reject_unsafe_xml(body)?;
+    let mut reader = NsReader::from_reader(body);
+    let mut root = None::<(String, String)>;
+    let mut depth = 0usize;
+    loop {
+        let (resolution, event) = reader.read_resolved_event()?;
+        match event {
+            Event::Start(element) => {
+                let namespace = resolved_namespace(resolution)?;
+                let name = std::str::from_utf8(element.local_name().as_ref())?.to_owned();
+                if root.is_none() {
+                    root = Some((namespace, name));
+                }
+                depth += 1;
+            }
+            Event::Empty(element) => {
+                let namespace = resolved_namespace(resolution)?;
+                let name = std::str::from_utf8(element.local_name().as_ref())?.to_owned();
+                if root.is_none() {
+                    root = Some((namespace, name));
+                }
+            }
+            Event::End(_) => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| anyhow!("PROPFIND XML nesting is invalid"))?
+            }
+            Event::DocType(_) => return Err(anyhow!("WebDAV XML document types are forbidden")),
+            Event::Eof => break,
+            Event::Decl(_)
+            | Event::PI(_)
+            | Event::Comment(_)
+            | Event::GeneralRef(_)
+            | Event::Text(_)
+            | Event::CData(_) => {}
+        }
+    }
+    if depth != 0
+        || !matches!(root.as_ref(), Some((namespace, name)) if namespace == "DAV:" && name == "propfind")
+    {
+        return Err(anyhow!("PROPFIND XML root is invalid"));
     }
     Ok(())
 }
@@ -1376,6 +1627,13 @@ fn is_calendar_content_type(content_type: Option<&str>) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/calendar"))
 }
 
+fn if_header_tokens(header: &str) -> impl Iterator<Item = &str> {
+    header
+        .split('<')
+        .skip(1)
+        .filter_map(|remainder| remainder.split_once('>').map(|(token, _)| token))
+}
+
 fn calendar_text_filter_matches(body: &[u8], filter: &CalendarTextFilter) -> bool {
     let text = String::from_utf8_lossy(body).replace("\r\n", "\n");
     let mut unfolded = Vec::<String>::new();
@@ -1592,6 +1850,23 @@ fn parse_property_update_inner(body: &[u8], allow_empty: bool) -> Result<Propert
                     property.value.push_str(&text.decode()?);
                 }
             }
+            Event::GeneralRef(reference) => {
+                if let Some(property) = pending.as_mut() {
+                    let character = if let Some(character) = reference.resolve_char_ref()? {
+                        character
+                    } else {
+                        match reference.decode()?.as_ref() {
+                            "lt" => '<',
+                            "gt" => '>',
+                            "amp" => '&',
+                            "apos" => '\'',
+                            "quot" => '"',
+                            _ => return Err(anyhow!("WebDAV property contains an unknown entity")),
+                        }
+                    };
+                    property.value.push(character);
+                }
+            }
             Event::End(_) => {
                 if pending
                     .as_ref()
@@ -1609,7 +1884,7 @@ fn parse_property_update_inner(body: &[u8], allow_empty: bool) -> Result<Propert
             }
             Event::DocType(_) => return Err(anyhow!("WebDAV XML document types are forbidden")),
             Event::Eof => break,
-            Event::Decl(_) | Event::PI(_) | Event::Comment(_) | Event::GeneralRef(_) => {}
+            Event::Decl(_) | Event::PI(_) | Event::Comment(_) => {}
         }
     }
     if !stack.is_empty()
@@ -1642,12 +1917,31 @@ fn is_xml_local_name(value: &str) -> bool {
 
 fn finish_property(patch: &mut PropertyPatch, property: PendingProperty) {
     match property.mode {
-        PropertyPatchMode::Set => patch.set.push(DeadProperty {
-            namespace: property.namespace,
-            name: property.name,
-            value_xml: property.value,
-        }),
-        PropertyPatchMode::Remove => patch.remove.push((property.namespace, property.name)),
+        PropertyPatchMode::Set => {
+            patch.remove.retain(|(namespace, name)| {
+                namespace != &property.namespace || name != &property.name
+            });
+            patch.set.retain(|existing| {
+                existing.namespace != property.namespace || existing.name != property.name
+            });
+            patch.set.push(DeadProperty {
+                namespace: property.namespace,
+                name: property.name,
+                value_xml: property.value,
+            });
+        }
+        PropertyPatchMode::Remove => {
+            patch.set.retain(|existing| {
+                existing.namespace != property.namespace || existing.name != property.name
+            });
+            if !patch
+                .remove
+                .iter()
+                .any(|(namespace, name)| namespace == &property.namespace && name == &property.name)
+            {
+                patch.remove.push((property.namespace, property.name));
+            }
+        }
     }
 }
 
@@ -1704,6 +1998,31 @@ fn escape_xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+fn lock_response(
+    lock: &LockRecord,
+    timeout_seconds: u64,
+    status: StatusCode,
+) -> Result<Response<Vec<u8>>> {
+    let scope = match lock.scope {
+        LockScope::Exclusive => "exclusive",
+        LockScope::Shared => "shared",
+    };
+    let depth = match lock.depth {
+        LockDepth::Zero => "0",
+        LockDepth::Infinity => "infinity",
+    };
+    let body = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?><D:prop xmlns:D="DAV:"><D:lockdiscovery><D:activelock><D:locktype><D:write/></D:locktype><D:lockscope><D:{scope}/></D:lockscope><D:depth>{depth}</D:depth><D:locktoken><D:href>{}</D:href></D:locktoken><D:timeout>Second-{timeout_seconds}</D:timeout></D:activelock></D:lockdiscovery></D:prop>"#,
+        escape_xml(&lock.token)
+    );
+    Response::builder()
+        .status(status)
+        .header("lock-token", format!("<{}>", lock.token))
+        .header(http::header::CONTENT_TYPE, "application/xml; charset=utf-8")
+        .body(body.into_bytes())
+        .map_err(Into::into)
+}
+
 fn response(status: StatusCode, body: Vec<u8>) -> Result<Response<Vec<u8>>> {
     Response::builder()
         .status(status)
@@ -1719,7 +2038,8 @@ fn locked_status() -> StatusCode {
 mod tests {
     use super::*;
     use crate::{
-        FileSystemDataStore, PersistentWebDavStore, RedbMetadataStore, WebDavMetadataStore,
+        FileSystemDataStore, PersistentWebDavStore, RedbMetadataStore, WebDavDataStore,
+        WebDavMetadataStore,
     };
     use tempfile::tempdir;
 
@@ -1845,6 +2165,137 @@ mod tests {
                 .value_xml,
             "calendar"
         );
+    }
+
+    #[test]
+    fn put_and_mkcol_require_an_existing_parent_collection() {
+        let directory = tempdir().unwrap();
+        let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
+        let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
+        let context = WebDavRequestContext::default();
+
+        for method in ["PUT", "MKCOL", "MKCALENDAR"] {
+            let request = Request::builder()
+                .method(method)
+                .uri(format!("/missing/{method}"))
+                .body(Vec::new())
+                .unwrap();
+            assert_eq!(
+                service.handle(request, &context).unwrap().status(),
+                StatusCode::CONFLICT
+            );
+        }
+    }
+
+    #[test]
+    fn copy_honors_overwrite_parent_and_depth_preconditions() {
+        let directory = tempdir().unwrap();
+        let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
+        let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
+        let context = WebDavRequestContext::default();
+        for path in ["/source", "/destination"] {
+            service
+                .handle(
+                    Request::builder()
+                        .method("MKCOL")
+                        .uri(path)
+                        .body(Vec::new())
+                        .unwrap(),
+                    &context,
+                )
+                .unwrap();
+        }
+        service
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/source/child")
+                    .body(b"child".to_vec())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+
+        let conflict = service
+            .handle(
+                Request::builder()
+                    .method("COPY")
+                    .uri("/source")
+                    .header("destination", "/destination")
+                    .header("overwrite", "F")
+                    .body(Vec::new())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::PRECONDITION_FAILED);
+
+        let missing_parent = service
+            .handle(
+                Request::builder()
+                    .method("COPY")
+                    .uri("/source")
+                    .header("destination", "/missing/copy")
+                    .body(Vec::new())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+        assert_eq!(missing_parent.status(), StatusCode::CONFLICT);
+
+        let shallow = service
+            .handle(
+                Request::builder()
+                    .method("COPY")
+                    .uri("/source")
+                    .header("destination", "/shallow")
+                    .header("depth", "0")
+                    .body(Vec::new())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+        assert_eq!(shallow.status(), StatusCode::CREATED);
+        assert!(
+            service
+                .store
+                .metadata(&ResourceId::parse("/shallow/child").unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn if_header_requires_exact_lock_token_and_accepts_matching_etag() {
+        let directory = tempdir().unwrap();
+        let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
+        let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
+        let resource = ResourceId::parse("/locked").unwrap();
+        service.store.put(&resource, b"data", None).unwrap();
+        let lock = LockRecord {
+            token: "opaquelocktoken:test".to_owned(),
+            resource: resource.clone(),
+            owner_xml: None,
+            depth: LockDepth::Zero,
+            scope: LockScope::Exclusive,
+            expires_unix_seconds: u64::MAX,
+        };
+        service.store.put_lock(&lock).unwrap();
+        let etag = service.store.metadata(&resource).unwrap().unwrap().etag;
+        let locks = service.store.locks(&resource, true).unwrap();
+        assert!(
+            service
+                .if_header_satisfied(
+                    &resource,
+                    &format!("(<opaquelocktoken:test> [{etag}]) (Not <DAV:no-lock>)"),
+                    &locks,
+                )
+                .unwrap()
+        );
+        assert!(!if_header_tokens("(<opaquelocktoken:testx>)").any(|token| token == lock.token));
     }
 
     #[test]

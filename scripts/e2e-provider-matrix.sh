@@ -37,6 +37,20 @@ wait_tcp() {
   return 1
 }
 
+wait_authenticated_proxy() {
+  local port="$1" token="$2" log="$3"
+  for _ in $(seq 1 60); do
+    if curl -fsS -x "http://127.0.0.1:$port" \
+      -H "Authorization: Bearer $token" "http://127.0.0.1:$ORIGIN_PORT/" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "authenticated proxy request did not become ready on port $port" >&2
+  cat "$TMP_DIR/$log.log" >&2
+  return 1
+}
+
 start_origin() {
   python3 -m http.server "$ORIGIN_PORT" --bind 127.0.0.1 --directory "$TMP_DIR" >"$TMP_DIR/origin.log" 2>&1 &
   PIDS+=("$!")
@@ -65,7 +79,7 @@ test_keycloak() {
     | jq -er .access_token)"
   start_qpx "$ROOT_DIR/integration/providers/keycloak/qpx.yaml" keycloak-qpx
   wait_tcp 18082
-  curl -fsS -x http://127.0.0.1:18082 -H "Authorization: Bearer $token" "http://127.0.0.1:$ORIGIN_PORT/" >/dev/null
+  wait_authenticated_proxy 18082 "$token" keycloak-qpx
   if curl -fsS -x http://127.0.0.1:18082 "http://127.0.0.1:$ORIGIN_PORT/" >/dev/null 2>&1; then
     echo "Keycloak resource server accepted an unauthenticated request" >&2
     return 1

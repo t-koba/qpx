@@ -323,7 +323,7 @@ jobs:
           QPXD_BIN: ${{ github.workspace }}/target/debug/qpxd
           AIOQUIC_DIR: ${{ runner.temp }}/aioquic
           CURL_HTTP3_BIN: ${{ runner.temp }}/curl-install/bin/curl
-          NGTCP2_CLIENT_BIN: ${{ runner.temp }}/ngtcp2/examples/client
+          NGTCP2_CLIENT_BIN: ${{ runner.temp }}/ngtcp2/examples/gtlsclient
           QUICHE_CLIENT_BIN: ${{ runner.temp }}/quiche/target/release/quiche-client
           CHROMIUM_BIN: /usr/bin/google-chrome
         run: |

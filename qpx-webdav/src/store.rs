@@ -37,12 +37,20 @@ pub enum LockDepth {
     Infinity,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockScope {
+    Exclusive,
+    Shared,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockRecord {
     pub token: String,
     pub resource: ResourceId,
     pub owner_xml: Option<String>,
     pub depth: LockDepth,
+    pub scope: LockScope,
     pub expires_unix_seconds: u64,
 }
 
