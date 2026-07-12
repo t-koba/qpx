@@ -46,11 +46,17 @@ case "$CLIENT" in
     ;;
   ngtcp2)
     : "${NGTCP2_CLIENT_BIN:?NGTCP2_CLIENT_BIN is required}"
-    timeout 45 "$NGTCP2_CLIENT_BIN" localhost 18443 "$URL" >"$TMP_DIR/client.out"
+    mkdir -p "$TMP_DIR/ngtcp2-output"
+    timeout 45 "$NGTCP2_CLIENT_BIN" --exit-on-first-stream-close \
+      --download="$TMP_DIR/ngtcp2-output" localhost 18443 "$URL"
+    cp "$TMP_DIR/ngtcp2-output/index.html" "$TMP_DIR/client.out"
     ;;
   quiche)
     : "${QUICHE_CLIENT_BIN:?QUICHE_CLIENT_BIN is required}"
-    timeout 45 "$QUICHE_CLIENT_BIN" --no-verify "$URL" >"$TMP_DIR/client.out"
+    if ! timeout 45 "$QUICHE_CLIENT_BIN" --no-verify "$URL" >"$TMP_DIR/client.out"; then
+      cat "$TMP_DIR/qpxd.log" >&2
+      exit 1
+    fi
     ;;
   chromium)
     : "${CHROMIUM_BIN:?CHROMIUM_BIN is required}"

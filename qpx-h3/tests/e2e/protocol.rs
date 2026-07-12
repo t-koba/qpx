@@ -23,6 +23,27 @@ async fn idle_critical_streams_survive_request_read_timeout() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_frame_before_request_headers_is_ignored() -> Result<()> {
+    let (addr, client_config, server_task) = start_server(IdleCriticalStreamsHandler).await?;
+    let (_client_endpoint, connection) = connect_client(addr, client_config).await?;
+    open_client_control_stream(&connection).await?;
+    open_client_qpack_streams(&connection).await?;
+
+    let (mut send, mut recv) = connection.open_bi().await?;
+    write_frame_raw(&mut send, 0x21, b"grease").await?;
+    let headers = build_head_request_headers(&format!("localhost:{}", addr.port()));
+    write_frame_raw(&mut send, FRAME_HEADERS, &headers).await?;
+    send.finish()?;
+
+    let (frame_type, _) = read_frame_raw(&mut recv, "response after unknown frame").await?;
+    assert_eq!(frame_type, FRAME_HEADERS);
+
+    server_task.abort();
+    let _ = server_task.await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dynamic_qpack_request_reaches_handler() -> Result<()> {
     let (seen_tx, seen_rx) = oneshot::channel();
     let handler = DynamicHeaderHandler {

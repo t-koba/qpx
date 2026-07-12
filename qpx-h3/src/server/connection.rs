@@ -367,23 +367,68 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
     ctx: RequestStreamContext,
 ) -> Result<()> {
     let via_received_by = handler.via_received_by();
-    let first_type = match timeout(ctx.settings.read_timeout, read_varint(&mut recv)).await {
-        Ok(result) => result?,
-        Err(_) => {
-            send_simple_response(
-                &mut send,
-                http::StatusCode::REQUEST_TIMEOUT,
-                b"",
-                via_received_by.as_ref(),
-            )
-            .await?;
+    let first_type = loop {
+        let frame_type = match timeout(ctx.settings.read_timeout, read_varint(&mut recv)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                send_simple_response(
+                    &mut send,
+                    http::StatusCode::REQUEST_TIMEOUT,
+                    b"",
+                    via_received_by.as_ref(),
+                )
+                .await?;
+                send.finish()?;
+                return Ok(());
+            }
+        };
+        let Some(frame_type) = frame_type else {
             send.finish()?;
             return Ok(());
+        };
+        if frame_type == FRAME_HEADERS
+            || (frame_type == STREAM_WEBTRANSPORT_BIDI && ctx.settings.enable_webtransport)
+        {
+            break frame_type;
         }
-    };
-    let Some(first_type) = first_type else {
-        send.finish()?;
-        return Ok(());
+        if frame_type == crate::protocol::FRAME_DATA {
+            abort_stream_with_code(&mut send, &mut recv, H3_FRAME_UNEXPECTED).await?;
+            return Ok(());
+        }
+        if let Err(close) = crate::protocol::validate_message_stream_frame(frame_type) {
+            abort_stream_with_code(&mut send, &mut recv, close.code).await?;
+            return Ok(());
+        }
+        let frame_len = match read_known_frame_len(
+            &mut recv,
+            frame_type,
+            ctx.settings.read_timeout,
+            ctx.settings.max_control_frame_payload_bytes,
+        )
+        .await
+        {
+            Ok(len) => len,
+            Err(err) => {
+                warn!(error = ?err, "qpx-h3 rejected malformed leading request frame");
+                abort_stream_with_code(&mut send, &mut recv, H3_FRAME_ERROR).await?;
+                return Ok(());
+            }
+        };
+        if !matches!(
+            timeout(
+                ctx.settings.read_timeout,
+                discard_frame_payload(
+                    &mut recv,
+                    frame_len as u64,
+                    ctx.settings.max_control_frame_payload_bytes,
+                ),
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            abort_stream_with_code(&mut send, &mut recv, H3_FRAME_ERROR).await?;
+            return Ok(());
+        }
     };
     if first_type == STREAM_WEBTRANSPORT_BIDI && ctx.settings.enable_webtransport {
         let peer_settings =
