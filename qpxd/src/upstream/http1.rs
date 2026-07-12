@@ -3,7 +3,7 @@ use crate::http::protocol::header_control::set_proxy_authorization_header;
 use crate::http::protocol::websocket::spawn_upgrade_tunnel;
 use crate::upstream::origin::OriginEndpoint;
 use crate::upstream::pool::send_via_upstream_proxy;
-use crate::upstream::raw_http1::{Http1ResponseWithInterim, send_http1_request_with_interim};
+use crate::upstream::raw_http1::Http1ResponseWithInterim;
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -14,7 +14,7 @@ use qpx_http::body::Body;
 use qpx_http::tls::builder::connect_client_http1;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::time::{Instant, timeout};
+use tokio::time::timeout;
 use tracing::warn;
 use url::Url;
 
@@ -382,10 +382,11 @@ pub(crate) async fn proxy_http1_request_with_interim(
     upstream_proxy: Option<&crate::upstream::pool::ResolvedUpstreamProxy>,
     direct_authority: &str,
     timeout_dur: Duration,
+    pools: &crate::pool::PoolRegistry,
 ) -> Result<Http1ResponseWithInterim> {
-    ensure_absolute_uri(&mut req, "http", direct_authority)?;
     *req.version_mut() = http::Version::HTTP_11;
     if let Some(upstream) = upstream_proxy {
+        ensure_absolute_uri(&mut req, "http", direct_authority)?;
         return crate::upstream::pool::send_via_upstream_proxy_with_interim(
             req,
             upstream,
@@ -394,14 +395,16 @@ pub(crate) async fn proxy_http1_request_with_interim(
         .await;
     }
 
-    let started = Instant::now();
-    let deadline = started.checked_add(timeout_dur);
-    let stream = timeout(timeout_dur, TcpStream::connect(direct_authority)).await??;
-    let _ = stream.set_nodelay(true);
-    let remaining = deadline
-        .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
-        .unwrap_or(timeout_dur);
-    timeout(remaining, send_http1_request_with_interim(stream, req)).await?
+    timeout(
+        timeout_dur,
+        crate::upstream::origin::proxy_direct_plain_http1_with_interim(
+            pools,
+            req,
+            direct_authority,
+            direct_authority,
+        ),
+    )
+    .await?
 }
 
 #[cfg(test)]
@@ -436,6 +439,7 @@ mod tests {
             None,
             authority.as_str(),
             Duration::from_millis(20),
+            &crate::pool::PoolRegistry::new(),
         )
         .await;
         let Err(err) = result else {

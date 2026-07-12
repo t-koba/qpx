@@ -338,8 +338,14 @@ pub(super) async fn proxy_transparent_http1(
         true,
     )
     .await;
-    let proxied_result =
-        proxy_http1_request_with_interim(req, upstream, authority, upstream_timeout).await;
+    let proxied_result = proxy_http1_request_with_interim(
+        req,
+        upstream,
+        authority,
+        upstream_timeout,
+        input.state.pools.as_ref(),
+    )
+    .await;
     record_upstream_request_duration(input.audit.kind, upstream_started.elapsed());
     let proxied = match proxied_result {
         Ok(proxied) => proxied,

@@ -91,8 +91,14 @@ pub(super) async fn execute_forward_upstream(
         true,
     )
     .await;
-    let proxied_result =
-        proxy_http1_request_with_interim(req, upstream, http_authority, upstream_timeout).await;
+    let proxied_result = proxy_http1_request_with_interim(
+        req,
+        upstream,
+        http_authority,
+        upstream_timeout,
+        state.pools.as_ref(),
+    )
+    .await;
     record_upstream_request_duration(audit.kind, upstream_started.elapsed());
     let proxied = match proxied_result {
         Ok(resp) => resp,

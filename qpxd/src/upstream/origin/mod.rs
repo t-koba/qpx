@@ -20,8 +20,8 @@ pub(crate) use dns::resolve_upstream_socket_addr;
 #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 pub(crate) use http_backend::H3OriginPool;
 pub(crate) use http_backend::{
-    DirectOriginPools, proxy_http, proxy_http_with_interim_timeout,
-    shared_reverse_https_request_with_trust,
+    DirectOriginPools, proxy_direct_plain_http1_with_interim, proxy_http,
+    proxy_http_with_interim_timeout, shared_reverse_https_request_with_trust,
 };
 pub(crate) use ws_backend::proxy_websocket;
 

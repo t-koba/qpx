@@ -137,14 +137,32 @@ async fn proxy_plain_http(
     let default_port = origin.default_port_hint();
     let connect_authority = origin.connect_authority(default_port)?;
     let host_authority = origin.host_header_authority(default_port)?;
-    let slot = pools.direct_origin.plain_slot(plain_http_origin_pool_key(
+    let req = prepare_proxy_http1_request(req, host_authority.as_str(), proxy_name)?;
+    proxy_direct_plain_http1_with_interim(
+        pools,
+        req,
         connect_authority.as_str(),
         host_authority.as_str(),
+    )
+    .await
+}
+
+pub(crate) async fn proxy_direct_plain_http1_with_interim(
+    pools: &crate::pool::PoolRegistry,
+    mut req: Request<Body>,
+    connect_authority: &str,
+    host_authority: &str,
+) -> Result<Http1ResponseWithInterim> {
+    let slot = pools.direct_origin.plain_slot(plain_http_origin_pool_key(
+        connect_authority,
+        host_authority,
     ));
-    let req = prepare_proxy_http1_request(req, host_authority.as_str(), proxy_name)?;
+    crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
+    crate::upstream::http1::ensure_host_header(&mut req, host_authority)?;
+    *req.version_mut() = http::Version::HTTP_11;
     let connection = match take_reusable_plain_http_stream(&slot).await {
         Some(connection) => connection,
-        None => open_plain_http_origin_stream(connect_authority.as_str()).await?,
+        None => open_plain_http_origin_stream(connect_authority).await?,
     };
     let recycle_slot = slot.clone();
     send_http1_request_with_interim_reusable(
