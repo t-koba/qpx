@@ -34,6 +34,7 @@ enum ChunkState {
 pub(super) struct Http1ResponseBody<S> {
     stream: Option<S>,
     buf: BytesMut,
+    write_buf: BytesMut,
     state: BodyState,
     recycler: Option<Http1ConnectionRecycler<S>>,
     read_timeout: Duration,
@@ -45,6 +46,7 @@ impl<S> Http1ResponseBody<S> {
         stream: S,
         prefix: BytesMut,
         kind: ResponseBodyKind,
+        write_buf: BytesMut,
         recycler: Option<Http1ConnectionRecycler<S>>,
     ) -> Self {
         let state = match kind {
@@ -59,6 +61,7 @@ impl<S> Http1ResponseBody<S> {
         Self {
             stream: Some(stream),
             buf: prefix,
+            write_buf,
             state,
             recycler,
             read_timeout: RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
@@ -73,7 +76,11 @@ impl<S> Http1ResponseBody<S> {
         if self.buf.is_empty()
             && let Some(recycler) = self.recycler.take()
         {
-            recycler.recycle(stream, std::mem::take(&mut self.buf));
+            recycler.recycle(
+                stream,
+                std::mem::take(&mut self.buf),
+                std::mem::take(&mut self.write_buf),
+            );
         }
     }
 

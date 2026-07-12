@@ -47,11 +47,13 @@ pub(super) struct PlainHttpOriginSlot {
 pub(super) struct PlainHttp1OriginConnection {
     pub(super) stream: TcpStream,
     pub(super) read_buf: BytesMut,
+    pub(super) write_buf: BytesMut,
 }
 
 pub(super) struct TlsHttp1OriginConnection {
     pub(super) stream: qpx_http::tls::builder::BoxTlsStream,
     pub(super) read_buf: BytesMut,
+    pub(super) write_buf: BytesMut,
     pub(super) upstream_cert: UpstreamCertificateInfo,
 }
 
@@ -588,6 +590,7 @@ pub(super) async fn acquire_https_connection(
                 return Ok(HttpsConnectionAcquisition::H1(TlsHttp1OriginConnection {
                     stream: tls,
                     read_buf: BytesMut::new(),
+                    write_buf: BytesMut::new(),
                     upstream_cert,
                 }));
             }
@@ -664,6 +667,7 @@ pub(super) async fn acquire_https_connection(
     Ok(HttpsConnectionAcquisition::H1(TlsHttp1OriginConnection {
         stream: tls,
         read_buf: BytesMut::new(),
+        write_buf: BytesMut::new(),
         upstream_cert,
     }))
 }

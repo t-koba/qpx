@@ -125,6 +125,7 @@ async fn open_plain_http_origin_stream(
     Ok(pool::PlainHttp1OriginConnection {
         stream,
         read_buf: bytes::BytesMut::new(),
+        write_buf: bytes::BytesMut::new(),
     })
 }
 
@@ -168,9 +169,14 @@ pub(crate) async fn proxy_direct_plain_http1_with_interim(
     send_http1_request_with_interim_reusable(
         connection.stream,
         connection.read_buf,
+        connection.write_buf,
         req,
-        Http1ConnectionRecycler::new(move |stream, read_buf| {
-            recycle_slot.recycle_idle(pool::PlainHttp1OriginConnection { stream, read_buf });
+        Http1ConnectionRecycler::new(move |stream, read_buf, write_buf| {
+            recycle_slot.recycle_idle(pool::PlainHttp1OriginConnection {
+                stream,
+                read_buf,
+                write_buf,
+            });
         }),
     )
     .await

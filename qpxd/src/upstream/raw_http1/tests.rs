@@ -206,6 +206,7 @@ async fn chunked_response_build_removes_conflicting_content_length() {
             body_kind: ResponseBodyKind::Chunked,
         },
         BytesMut::new(),
+        BytesMut::new(),
         None,
     );
     assert!(!response.headers().contains_key(CONTENT_LENGTH));
@@ -216,8 +217,10 @@ async fn inline_content_length_response_recycles_before_body_poll() {
     let (stream, _peer) = tokio::io::duplex(64);
     let recycled = Arc::new(AtomicUsize::new(0));
     let recycled_capacity = Arc::new(AtomicUsize::new(0));
+    let recycled_write_capacity = Arc::new(AtomicUsize::new(0));
     let recycled_in_closure = recycled.clone();
     let capacity_in_closure = recycled_capacity.clone();
+    let write_capacity_in_closure = recycled_write_capacity.clone();
     let mut prefix = BytesMut::with_capacity(4096);
     prefix.extend_from_slice(b"OK");
     let response = build_response(
@@ -229,14 +232,19 @@ async fn inline_content_length_response_recycles_before_body_poll() {
             body_kind: ResponseBodyKind::ContentLength(2),
         },
         prefix,
-        Some(Http1ConnectionRecycler::new(move |_stream, read_buf| {
-            recycled_in_closure.fetch_add(1, Ordering::SeqCst);
-            capacity_in_closure.store(read_buf.capacity(), Ordering::SeqCst);
-        })),
+        BytesMut::with_capacity(512),
+        Some(Http1ConnectionRecycler::new(
+            move |_stream, read_buf, write_buf| {
+                recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+                capacity_in_closure.store(read_buf.capacity(), Ordering::SeqCst);
+                write_capacity_in_closure.store(write_buf.capacity(), Ordering::SeqCst);
+            },
+        )),
     );
 
     assert_eq!(recycled.load(Ordering::SeqCst), 1);
     assert!(recycled_capacity.load(Ordering::SeqCst) >= INITIAL_READ_BUF_SIZE);
+    assert!(recycled_write_capacity.load(Ordering::SeqCst) >= 512);
     assert_eq!(
         to_bytes(response.into_body()).await.expect("body bytes"),
         Bytes::from_static(b"OK")
@@ -257,9 +265,12 @@ async fn pull_content_length_response_recycles_after_complete_body() {
             body_kind: ResponseBodyKind::ContentLength(2),
         },
         BytesMut::from(&b"O"[..]),
-        Some(Http1ConnectionRecycler::new(move |_stream, _read_buf| {
-            recycled_in_closure.fetch_add(1, Ordering::SeqCst);
-        })),
+        BytesMut::new(),
+        Some(Http1ConnectionRecycler::new(
+            move |_stream, _read_buf, _write_buf| {
+                recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+            },
+        )),
     );
     origin.write_all(b"K").await.expect("write body");
 
@@ -283,6 +294,7 @@ async fn short_content_length_response_uses_bounded_read_capacity() {
             body_kind: ResponseBodyKind::ContentLength(2),
         },
         BytesMut::with_capacity(INITIAL_READ_BUF_SIZE),
+        BytesMut::new(),
         None,
     );
 
@@ -310,9 +322,12 @@ async fn pull_content_length_response_does_not_recycle_with_leftover_bytes() {
             body_kind: ResponseBodyKind::ContentLength(2),
         },
         BytesMut::from(&b"O"[..]),
-        Some(Http1ConnectionRecycler::new(move |_stream, _read_buf| {
-            recycled_in_closure.fetch_add(1, Ordering::SeqCst);
-        })),
+        BytesMut::new(),
+        Some(Http1ConnectionRecycler::new(
+            move |_stream, _read_buf, _write_buf| {
+                recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+            },
+        )),
     );
     origin.write_all(b"KEXTRA").await.expect("write body");
 

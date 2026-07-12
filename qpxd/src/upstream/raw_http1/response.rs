@@ -104,6 +104,7 @@ pub(super) fn build_response<S>(
     stream: S,
     mut head: ParsedResponseHead,
     mut prefix: BytesMut,
+    write_buf: BytesMut,
     recycler: Option<Http1ConnectionRecycler<S>>,
 ) -> Response<Body>
 where
@@ -119,7 +120,7 @@ where
                 && prefix.is_empty()
                 && response_keep_alive(head.version, &head.headers)
             {
-                recycler.recycle(stream, prefix);
+                recycler.recycle(stream, prefix, write_buf);
             }
             Body::empty()
         }
@@ -131,7 +132,7 @@ where
                 && prefix.is_empty()
                 && response_keep_alive(head.version, &head.headers)
             {
-                recycler.recycle(stream, prefix);
+                recycler.recycle(stream, prefix, write_buf);
             }
             body
         }
@@ -139,6 +140,7 @@ where
             stream,
             prefix,
             kind,
+            write_buf,
             recycler.filter(|_| {
                 response_body_allows_reuse(kind) && response_keep_alive(head.version, &head.headers)
             }),

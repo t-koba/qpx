@@ -139,9 +139,8 @@ async fn execute_reverse_request(
         .unwrap_or(max_observed_request_body_bytes);
     let override_key = destination_override_key(resolution_override);
     let request_destination = request_destination_cache
-        .iter()
-        .find(|(key, _)| *key == override_key)
-        .map(|(_, destination)| destination.clone())
+        .get(override_key)
+        .cloned()
         .unwrap_or_else(|| {
             classify_reverse_destination(&state, &conn, host.as_str(), None, resolution_override)
         });

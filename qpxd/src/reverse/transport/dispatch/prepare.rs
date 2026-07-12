@@ -1,6 +1,6 @@
 use super::{
-    PreparedReverseRequest, ReversePreparedContext, ReversePreparedRoute, ReverseRetryDispatch,
-    ReverseRetryPrepareInput,
+    InlineCache, PreparedReverseRequest, ReversePreparedContext, ReversePreparedRoute,
+    ReverseRetryDispatch, ReverseRetryPrepareInput,
 };
 use crate::http::body::observation::RequestObservationPlan;
 use crate::http::body::size::{limit_request_body, observed_request_size};
@@ -40,10 +40,10 @@ struct ReverseRouteSelection {
     // Keyed by the identity of the route's compiled `destination_resolution`
     // override (stable for the request lifetime); avoids cloning and hashing
     // the override config on every request.
-    request_destination_cache: Vec<(usize, crate::destination::DestinationMetadata)>,
+    request_destination_cache: InlineCache<crate::destination::DestinationMetadata>,
     // Keyed by the address of the route's compiled policy context. The compiled
     // router is immutable for the request lifetime, so the address is stable.
-    identity_cache: Vec<(usize, crate::policy_context::ResolvedIdentity)>,
+    identity_cache: InlineCache<crate::policy_context::ResolvedIdentity>,
     observation_plan: RequestObservationPlan,
     max_observed_request_body_bytes: usize,
     collect_observation_from_remaining: bool,
@@ -216,7 +216,7 @@ pub(super) async fn prepare_reverse_retry_dispatch(
 async fn scan_reverse_routes(
     router: &ReverseRouter,
     sanitized_headers: &http::HeaderMap,
-    guard_buffering: &[(usize, bool)],
+    guard_buffering: &InlineCache<bool>,
     base: &BaseRequestFields,
     state: &Arc<crate::runtime::RuntimeState>,
     conn: &ReverseConnInfo,
@@ -226,19 +226,12 @@ async fn scan_reverse_routes(
     request_rpc: Option<&crate::http::rpc::RpcMatchContext>,
     selection: &mut ReverseRouteSelection,
 ) -> Result<()> {
-    let mut unresolved_policies = Vec::new();
+    let mut unresolved_policies = InlineCache::new();
     router.try_for_each_candidate_route(prefilter_ctx.clone(), |_, route| {
         let policy = &route.plan.policy_context;
         let key = policy_context_cache_key(policy);
-        if !selection
-            .identity_cache
-            .iter()
-            .any(|(existing, _)| *existing == key)
-            && !unresolved_policies
-                .iter()
-                .any(|(existing, _): &(usize, EffectivePolicyContext)| *existing == key)
-        {
-            unresolved_policies.push((key, policy.clone()));
+        if !selection.identity_cache.contains(key) && !unresolved_policies.contains(key) {
+            unresolved_policies.push(key, policy.clone());
         }
         Ok::<bool, anyhow::Error>(false)
     })?;
@@ -253,33 +246,25 @@ async fn scan_reverse_routes(
                 .map(|certs| certs.as_slice()),
         )
         .await?;
-        selection.identity_cache.push((policy_key, identity));
+        selection.identity_cache.push(policy_key, identity);
     }
     router.try_for_each_candidate_route(prefilter_ctx.clone(), |idx, route| {
         let resolution_override = route.plan.destination_resolution.as_ref();
         let effective_policy = &route.plan.policy_context;
         let policy_key = policy_context_cache_key(effective_policy);
-        let identity = match selection
-            .identity_cache
-            .iter()
-            .find(|(key, _)| *key == policy_key)
-        {
-            Some((_, identity)) => identity.clone(),
+        let identity = match selection.identity_cache.get(policy_key) {
+            Some(identity) => identity.clone(),
             None => return Err(anyhow!("identity cache was not populated for route policy")),
         };
         let override_key = super::destination_override_key(resolution_override);
-        let request_destination = match selection
-            .request_destination_cache
-            .iter()
-            .find(|(key, _)| *key == override_key)
-        {
-            Some((_, destination)) => destination.clone(),
+        let request_destination = match selection.request_destination_cache.get(override_key) {
+            Some(destination) => destination.clone(),
             None => {
                 let destination =
                     classify_reverse_destination(state, conn, host, None, resolution_override);
                 selection
                     .request_destination_cache
-                    .push((override_key, destination.clone()));
+                    .push(override_key, destination.clone());
                 destination
             }
         };
@@ -306,10 +291,7 @@ async fn scan_reverse_routes(
             return Ok::<bool, anyhow::Error>(false);
         }
         let route_http_guard = route.plan.guard.as_deref();
-        let guard_requires_buffering = guard_buffering
-            .iter()
-            .find_map(|(route_idx, required)| (*route_idx == idx).then_some(*required))
-            .unwrap_or(false);
+        let guard_requires_buffering = guard_buffering.get(idx).copied().unwrap_or(false);
         let response_rule_candidates = route.response_rule_candidate_profile(prefilter_ctx.clone());
         let response_rule_request_observation = response_request_obs(
             route.response_rules.as_deref(),
@@ -428,29 +410,28 @@ pub(super) async fn prepare_reverse_request(
         selected_policy: EffectivePolicyContext::default(),
         selected_identity: None,
         selected_headers: None,
-        request_destination_cache: Vec::new(),
-        identity_cache: Vec::new(),
+        request_destination_cache: InlineCache::new(),
+        identity_cache: InlineCache::new(),
         observation_plan: RequestObservationPlan::default(),
         max_observed_request_body_bytes: state.plan.limits.body.max_observed_request_body_bytes,
         collect_observation_from_remaining: false,
     };
-    let sanitized_route_headers =
-        sanitized_headers_for_route_scan(&req, &state, conn)?.into_owned();
-    let mut guard_buffering = Vec::new();
+    let sanitized_route_headers = sanitized_headers_for_route_scan(&req, &state, conn)?;
+    let mut guard_buffering = InlineCache::new();
     router.try_for_each_candidate_route(prefilter_ctx.clone(), |idx, route| {
-        guard_buffering.push((
+        guard_buffering.push(
             idx,
             route
                 .plan
                 .guard
                 .as_deref()
                 .is_some_and(|profile| profile.requires_request_body_buffering(&req)),
-        ));
+        );
         Ok::<bool, anyhow::Error>(false)
     })?;
     scan_reverse_routes(
         &router,
-        &sanitized_route_headers,
+        sanitized_route_headers.as_ref(),
         &guard_buffering,
         base,
         &state,
@@ -462,6 +443,10 @@ pub(super) async fn prepare_reverse_request(
         &mut selection,
     )
     .await?;
+    let sanitized_route_headers = selection
+        .route_idx
+        .is_none()
+        .then(|| sanitized_route_headers.into_owned());
 
     if selection.route_idx.is_none() && !selection.observation_plan.is_empty() {
         req = match selection
@@ -489,7 +474,9 @@ pub(super) async fn prepare_reverse_request(
     if selection.route_idx.is_none() {
         scan_reverse_routes(
             &router,
-            &sanitized_route_headers,
+            sanitized_route_headers
+                .as_ref()
+                .ok_or_else(|| anyhow!("sanitized route headers missing for rescan"))?,
             &guard_buffering,
             base,
             &state,

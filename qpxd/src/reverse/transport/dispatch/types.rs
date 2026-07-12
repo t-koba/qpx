@@ -14,6 +14,55 @@ use qpxd_cache::CacheRequestKey;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 
+pub(super) struct InlineCache<T> {
+    first: Option<(usize, T)>,
+    additional: Vec<(usize, T)>,
+}
+
+impl<T> InlineCache<T> {
+    pub(super) fn new() -> Self {
+        Self {
+            first: None,
+            additional: Vec::new(),
+        }
+    }
+
+    pub(super) fn contains(&self, key: usize) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub(super) fn get(&self, key: usize) -> Option<&T> {
+        self.first
+            .as_ref()
+            .filter(|(existing, _)| *existing == key)
+            .map(|(_, value)| value)
+            .or_else(|| {
+                self.additional
+                    .iter()
+                    .find(|(existing, _)| *existing == key)
+                    .map(|(_, value)| value)
+            })
+    }
+
+    pub(super) fn push(&mut self, key: usize, value: T) {
+        if self.first.is_none() {
+            self.first = Some((key, value));
+        } else {
+            self.additional.push((key, value));
+        }
+    }
+}
+
+impl<T> IntoIterator for InlineCache<T> {
+    type Item = (usize, T);
+    type IntoIter =
+        std::iter::Chain<std::option::IntoIter<(usize, T)>, std::vec::IntoIter<(usize, T)>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.first.into_iter().chain(self.additional)
+    }
+}
+
 pub(super) struct PreparedReverseRequest {
     pub(super) req: Request<Body>,
     pub(super) context: ReversePreparedContext,
@@ -39,7 +88,7 @@ pub(super) struct ReversePreparedRoute {
     pub(super) sanitized_headers: http::HeaderMap,
     // Keyed by `destination_override_key` (identity of the route's compiled
     // override); see `prepare.rs`.
-    pub(super) request_destination_cache: Vec<(usize, crate::destination::DestinationMetadata)>,
+    pub(super) request_destination_cache: InlineCache<crate::destination::DestinationMetadata>,
     pub(super) max_observed_request_body_bytes: usize,
 }
 

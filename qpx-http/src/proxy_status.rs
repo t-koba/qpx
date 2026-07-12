@@ -23,6 +23,14 @@ pub fn append_proxy_status(
     proxy_identifier: &str,
 ) -> Result<(), ProxyStatusError> {
     let name = HeaderName::from_static("proxy-status");
+    if !headers.contains_key(&name) && is_sfv_token(proxy_identifier.as_bytes()) {
+        headers.insert(
+            name,
+            HeaderValue::from_str(proxy_identifier)
+                .map_err(|_| ProxyStatusError::InvalidHeaderValue)?,
+        );
+        return Ok(());
+    }
     let mut list = parse_list_fields(headers, &name)
         .map_err(|error| ProxyStatusError::StructuredField(error.to_string()))?
         .unwrap_or_default();
@@ -55,6 +63,35 @@ pub fn append_proxy_status(
     Ok(())
 }
 
+fn is_sfv_token(value: &[u8]) -> bool {
+    let Some((&first, rest)) = value.split_first() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'*')
+        && rest.iter().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                        | b':'
+                        | b'/'
+                )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +115,15 @@ mod tests {
         let mut headers = HeaderMap::new();
         append_proxy_status(&mut headers, "qpx edge").expect("append");
         assert_eq!(headers.get("proxy-status").expect("field"), "\"qpx edge\"");
+    }
+
+    #[test]
+    fn serializes_extended_token_identifier_without_quoting() {
+        let mut headers = HeaderMap::new();
+        append_proxy_status(&mut headers, "edge_1:8443/path").expect("append");
+        assert_eq!(
+            headers.get("proxy-status").expect("field"),
+            "edge_1:8443/path"
+        );
     }
 }

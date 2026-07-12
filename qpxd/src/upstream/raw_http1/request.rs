@@ -1,7 +1,7 @@
 use super::parse_declared_content_length;
 use crate::http::codec::h1_common::serialize_headers;
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use hyper::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, TRAILER, TRANSFER_ENCODING,
 };
@@ -12,7 +12,11 @@ use std::io::{Error as IoError, ErrorKind, IoSlice};
 use std::task::Poll;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-pub(super) async fn write_http1_request<S>(stream: &mut S, req: Request<Body>) -> Result<()>
+pub(super) async fn write_http1_request<S>(
+    stream: &mut S,
+    req: Request<Body>,
+    head: &mut BytesMut,
+) -> Result<()>
 where
     S: AsyncWrite + Unpin,
 {
@@ -58,7 +62,8 @@ where
         headers.remove(CONTENT_LENGTH);
     }
 
-    let mut head = Vec::with_capacity(512);
+    head.clear();
+    head.reserve(512);
     let version = match parts.version {
         Version::HTTP_10 => "HTTP/1.0",
         _ => "HTTP/1.1",
@@ -69,9 +74,9 @@ where
     head.extend_from_slice(b" ");
     head.extend_from_slice(version.as_bytes());
     head.extend_from_slice(b"\r\n");
-    serialize_headers(&headers, &mut head)?;
+    serialize_headers(&headers, head)?;
     head.extend_from_slice(b"\r\n");
-    stream.write_all(&head).await?;
+    stream.write_all(head).await?;
 
     match declared_length {
         Some(length) => write_content_length_body(stream, &mut body, length).await?,

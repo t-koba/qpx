@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use hyper::Version;
 use hyper::header::{CONNECTION, HeaderMap, HeaderName, HeaderValue, TRANSFER_ENCODING};
 use memchr::memchr;
@@ -44,12 +44,12 @@ pub(crate) fn has_only_chunked_transfer_encoding(headers: &HeaderMap) -> Result<
     }
 }
 
-pub(crate) fn serialize_headers(headers: &HeaderMap, out: &mut Vec<u8>) -> Result<()> {
+pub(crate) fn serialize_headers(headers: &HeaderMap, out: &mut impl BufMut) -> Result<()> {
     for (name, value) in headers {
-        out.extend_from_slice(name.as_str().as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(value.as_bytes());
-        out.extend_from_slice(b"\r\n");
+        out.put_slice(name.as_str().as_bytes());
+        out.put_slice(b": ");
+        out.put_slice(value.as_bytes());
+        out.put_slice(b"\r\n");
     }
     Ok(())
 }
