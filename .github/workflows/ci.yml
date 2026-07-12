@@ -374,7 +374,7 @@ jobs:
           fi
           exit "$failed"
       - name: upload perf smoke artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: qpx-perf-smoke-jsonl
@@ -528,7 +528,7 @@ jobs:
           check_step "callgrind hot path profile" "$CALLGRIND_HOT_PATH_PROFILE"
           exit "$failed"
       - name: upload perf audit artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: qpx-perf-audit-jsonl

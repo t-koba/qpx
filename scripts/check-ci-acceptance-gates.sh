@@ -12,6 +12,16 @@ require() {
   fi
 }
 
+check_artifact_action_runtime() {
+  local deprecated
+  deprecated="$(grep -REn 'actions/(upload|download)-artifact@v([1-5])([^0-9]|$)' .github/workflows || true)"
+  if [ -n "$deprecated" ]; then
+    echo "artifact actions must use a Node.js 24 runtime release:" >&2
+    echo "$deprecated" >&2
+    exit 1
+  fi
+}
+
 require docs/http-rfc-compliance.md '# qpx HTTP RFC compliance matrix'
 require docs/http-rfc-compliance.md '## Complete RFC inventory'
 require docs/http-rfc-compliance.md '## Product-role applicability'
@@ -287,7 +297,8 @@ require .github/workflows/ci.yml 'id: perf_smoke_release'
 require .github/workflows/ci.yml 'id: advanced_transport_perf_release'
 require .github/workflows/ci.yml 'continue-on-error: true'
 require .github/workflows/ci.yml 'fail if any perf smoke evaluation failed'
-require .github/workflows/ci.yml 'actions/upload-artifact@v4'
+require .github/workflows/ci.yml 'actions/upload-artifact@v7'
+check_artifact_action_runtime
 require .github/workflows/ci.yml 'qpx-perf-smoke-jsonl'
 require .github/workflows/ci.yml 'target/perf/perf-audit-criterion.jsonl'
 require .github/workflows/ci.yml 'cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10'
