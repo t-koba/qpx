@@ -72,13 +72,15 @@ pub(super) async fn send_tls_http1_with_recycle(
     let upstream_cert = entry.upstream_cert.clone();
     let mut proxied = send_http1_request_with_interim_reusable(
         entry.stream,
+        entry.read_buf,
         req,
         Http1ConnectionRecycler::new({
             let slot = slot.clone();
-            move |stream| {
+            move |stream, read_buf| {
                 let upstream_cert = upstream_cert.clone();
                 slot.recycle_http1_idle(TlsHttp1OriginConnection {
                     stream,
+                    read_buf,
                     upstream_cert,
                 });
             }

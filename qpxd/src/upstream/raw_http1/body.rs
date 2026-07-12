@@ -73,7 +73,7 @@ impl<S> Http1ResponseBody<S> {
         if self.buf.is_empty()
             && let Some(recycler) = self.recycler.take()
         {
-            recycler.recycle(stream);
+            recycler.recycle(stream, std::mem::take(&mut self.buf));
         }
     }
 

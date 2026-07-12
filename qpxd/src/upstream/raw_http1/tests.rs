@@ -215,7 +215,11 @@ async fn chunked_response_build_removes_conflicting_content_length() {
 async fn inline_content_length_response_recycles_before_body_poll() {
     let (stream, _peer) = tokio::io::duplex(64);
     let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_capacity = Arc::new(AtomicUsize::new(0));
     let recycled_in_closure = recycled.clone();
+    let capacity_in_closure = recycled_capacity.clone();
+    let mut prefix = BytesMut::with_capacity(4096);
+    prefix.extend_from_slice(b"OK");
     let response = build_response(
         stream,
         ParsedResponseHead {
@@ -224,13 +228,15 @@ async fn inline_content_length_response_recycles_before_body_poll() {
             headers: HeaderMap::new(),
             body_kind: ResponseBodyKind::ContentLength(2),
         },
-        BytesMut::from(&b"OK"[..]),
-        Some(Http1ConnectionRecycler::new(move |_stream| {
+        prefix,
+        Some(Http1ConnectionRecycler::new(move |_stream, read_buf| {
             recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+            capacity_in_closure.store(read_buf.capacity(), Ordering::SeqCst);
         })),
     );
 
     assert_eq!(recycled.load(Ordering::SeqCst), 1);
+    assert!(recycled_capacity.load(Ordering::SeqCst) >= INITIAL_READ_BUF_SIZE);
     assert_eq!(
         to_bytes(response.into_body()).await.expect("body bytes"),
         Bytes::from_static(b"OK")
@@ -251,7 +257,7 @@ async fn pull_content_length_response_recycles_after_complete_body() {
             body_kind: ResponseBodyKind::ContentLength(2),
         },
         BytesMut::from(&b"O"[..]),
-        Some(Http1ConnectionRecycler::new(move |_stream| {
+        Some(Http1ConnectionRecycler::new(move |_stream, _read_buf| {
             recycled_in_closure.fetch_add(1, Ordering::SeqCst);
         })),
     );
@@ -304,7 +310,7 @@ async fn pull_content_length_response_does_not_recycle_with_leftover_bytes() {
             body_kind: ResponseBodyKind::ContentLength(2),
         },
         BytesMut::from(&b"O"[..]),
-        Some(Http1ConnectionRecycler::new(move |_stream| {
+        Some(Http1ConnectionRecycler::new(move |_stream, _read_buf| {
             recycled_in_closure.fetch_add(1, Ordering::SeqCst);
         })),
     );

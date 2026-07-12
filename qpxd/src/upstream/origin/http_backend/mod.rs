@@ -117,10 +117,15 @@ async fn proxy_h3(
     }
 }
 
-async fn open_plain_http_origin_stream(connect_authority: &str) -> Result<TcpStream> {
+async fn open_plain_http_origin_stream(
+    connect_authority: &str,
+) -> Result<pool::PlainHttp1OriginConnection> {
     let stream = TcpStream::connect(connect_authority).await?;
     let _ = stream.set_nodelay(true);
-    Ok(stream)
+    Ok(pool::PlainHttp1OriginConnection {
+        stream,
+        read_buf: bytes::BytesMut::new(),
+    })
 }
 
 async fn proxy_plain_http(
@@ -137,26 +142,31 @@ async fn proxy_plain_http(
         host_authority.as_str(),
     ));
     let req = prepare_proxy_http1_request(req, host_authority.as_str(), proxy_name)?;
-    let stream = match take_reusable_plain_http_stream(&slot).await {
-        Some(stream) => stream,
+    let connection = match take_reusable_plain_http_stream(&slot).await {
+        Some(connection) => connection,
         None => open_plain_http_origin_stream(connect_authority.as_str()).await?,
     };
     let recycle_slot = slot.clone();
     send_http1_request_with_interim_reusable(
-        stream,
+        connection.stream,
+        connection.read_buf,
         req,
-        Http1ConnectionRecycler::new(move |stream| recycle_slot.recycle_idle(stream)),
+        Http1ConnectionRecycler::new(move |stream, read_buf| {
+            recycle_slot.recycle_idle(pool::PlainHttp1OriginConnection { stream, read_buf });
+        }),
     )
     .await
 }
 
-async fn take_reusable_plain_http_stream(slot: &pool::PlainHttpOriginSlot) -> Option<TcpStream> {
+async fn take_reusable_plain_http_stream(
+    slot: &pool::PlainHttpOriginSlot,
+) -> Option<pool::PlainHttp1OriginConnection> {
     loop {
-        let mut stream = slot.pop_idle()?;
-        if idle_connection_closed_or_dirty(&mut stream).await {
+        let mut connection = slot.pop_idle()?;
+        if idle_connection_closed_or_dirty(&mut connection.stream).await {
             continue;
         }
-        return Some(stream);
+        return Some(connection);
     }
 }
 

@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use bytes::BytesMut;
 use hyper::header::{CONTENT_LENGTH, HeaderMap};
 use hyper::{Request, Response, StatusCode};
 use qpx_core::tls::UpstreamCertificateInfo;
@@ -36,7 +37,7 @@ pub(crate) struct Http1ResponseWithInterim {
     pub(crate) upstream_cert: Option<UpstreamCertificateInfo>,
 }
 
-type RecycleFn<S> = dyn Fn(S) + Send + Sync;
+type RecycleFn<S> = dyn Fn(S, BytesMut) + Send + Sync;
 
 #[derive(Clone)]
 pub(crate) struct Http1ConnectionRecycler<S> {
@@ -46,15 +47,15 @@ pub(crate) struct Http1ConnectionRecycler<S> {
 impl<S> Http1ConnectionRecycler<S> {
     pub(crate) fn new<F>(recycle: F) -> Self
     where
-        F: Fn(S) + Send + Sync + 'static,
+        F: Fn(S, BytesMut) + Send + Sync + 'static,
     {
         Self {
             recycle: Arc::new(recycle),
         }
     }
 
-    fn recycle(&self, stream: S) {
-        (self.recycle)(stream);
+    fn recycle(&self, stream: S, read_buf: BytesMut) {
+        (self.recycle)(stream, read_buf);
     }
 }
 
@@ -81,22 +82,30 @@ pub(crate) async fn send_http1_request_with_interim<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    send_http1_request_with_interim_inner(stream, req, None).await
+    send_http1_request_with_interim_inner(
+        stream,
+        BytesMut::with_capacity(INITIAL_READ_BUF_SIZE),
+        req,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn send_http1_request_with_interim_reusable<S>(
     stream: S,
+    read_buf: BytesMut,
     req: Request<Body>,
     recycler: Http1ConnectionRecycler<S>,
 ) -> Result<Http1ResponseWithInterim>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    send_http1_request_with_interim_inner(stream, req, Some(recycler)).await
+    send_http1_request_with_interim_inner(stream, read_buf, req, Some(recycler)).await
 }
 
 async fn send_http1_request_with_interim_inner<S>(
     mut stream: S,
+    read_buf: BytesMut,
     req: Request<Body>,
     recycler: Option<Http1ConnectionRecycler<S>>,
 ) -> Result<Http1ResponseWithInterim>
@@ -106,7 +115,7 @@ where
     let request_method = req.method().clone();
     request::write_http1_request(&mut stream, req).await?;
     let (interim, final_head, buffered_body) =
-        response::read_response_head_with_interim(&mut stream, &request_method).await?;
+        response::read_response_head_with_interim(&mut stream, read_buf, &request_method).await?;
     let response = response::build_response(stream, final_head, buffered_body, recycler);
     Ok(Http1ResponseWithInterim {
         interim,

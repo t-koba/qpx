@@ -40,12 +40,14 @@ pub(super) struct ParsedResponseHead {
 
 pub(super) async fn read_response_head_with_interim<S>(
     stream: &mut S,
+    mut buf: BytesMut,
     request_method: &Method,
 ) -> Result<(Vec<InterimResponseHead>, ParsedResponseHead, BytesMut)>
 where
     S: AsyncRead + Unpin,
 {
-    let mut buf = BytesMut::with_capacity(INITIAL_READ_BUF_SIZE);
+    buf.clear();
+    buf.reserve(INITIAL_READ_BUF_SIZE);
     let mut interim = Vec::new();
     loop {
         let parsed = loop {
@@ -117,7 +119,7 @@ where
                 && prefix.is_empty()
                 && response_keep_alive(head.version, &head.headers)
             {
-                recycler.recycle(stream);
+                recycler.recycle(stream, prefix);
             }
             Body::empty()
         }
@@ -129,7 +131,7 @@ where
                 && prefix.is_empty()
                 && response_keep_alive(head.version, &head.headers)
             {
-                recycler.recycle(stream);
+                recycler.recycle(stream, prefix);
             }
             body
         }

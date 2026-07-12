@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
 use std::future::{Future, poll_fn};
 use std::hash::Hash;
@@ -40,12 +40,18 @@ pub(super) struct HttpsOriginPoolKey {
 }
 
 pub(super) struct PlainHttpOriginSlot {
-    idle: Arc<StdMutex<Vec<TcpStream>>>,
+    idle: Arc<StdMutex<Vec<PlainHttp1OriginConnection>>>,
     max_http1_idle: Arc<AtomicUsize>,
+}
+
+pub(super) struct PlainHttp1OriginConnection {
+    pub(super) stream: TcpStream,
+    pub(super) read_buf: BytesMut,
 }
 
 pub(super) struct TlsHttp1OriginConnection {
     pub(super) stream: qpx_http::tls::builder::BoxTlsStream,
+    pub(super) read_buf: BytesMut,
     pub(super) upstream_cert: UpstreamCertificateInfo,
 }
 
@@ -184,20 +190,20 @@ impl HttpsOriginSlot {
 }
 
 impl PlainHttpOriginSlot {
-    pub(super) fn pop_idle(&self) -> Option<TcpStream> {
+    pub(super) fn pop_idle(&self) -> Option<PlainHttp1OriginConnection> {
         self.idle
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pop()
     }
 
-    pub(super) fn recycle_idle(&self, stream: TcpStream) {
+    pub(super) fn recycle_idle(&self, connection: PlainHttp1OriginConnection) {
         let mut idle = self
             .idle
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if idle.len() < self.max_http1_idle.load(Ordering::Relaxed) {
-            idle.push(stream);
+            idle.push(connection);
         }
     }
 }
@@ -581,6 +587,7 @@ pub(super) async fn acquire_https_connection(
                 drop(reservation);
                 return Ok(HttpsConnectionAcquisition::H1(TlsHttp1OriginConnection {
                     stream: tls,
+                    read_buf: BytesMut::new(),
                     upstream_cert,
                 }));
             }
@@ -656,6 +663,7 @@ pub(super) async fn acquire_https_connection(
     drop(reservation);
     Ok(HttpsConnectionAcquisition::H1(TlsHttp1OriginConnection {
         stream: tls,
+        read_buf: BytesMut::new(),
         upstream_cert,
     }))
 }
