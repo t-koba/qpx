@@ -50,6 +50,20 @@ fn init_logging_inner(
     system_filter = system_filter
         .add_directive("access_log=off".parse::<Directive>()?)
         .add_directive("audit_log=off".parse::<Directive>()?);
+    if system.format.eq_ignore_ascii_case("json") && !otel.is_some_and(|config| config.enabled) {
+        for span_name in [
+            "dispatch_forward_request",
+            "dispatch_reverse_request",
+            "dispatch_transparent_request",
+            "dispatch_mitm_request",
+        ] {
+            system_filter = system_filter.add_directive(
+                format!("[{span_name}]=off")
+                    .parse::<Directive>()
+                    .with_context(|| format!("invalid request span filter for {span_name}"))?,
+            );
+        }
+    }
 
     let system_layer = if system.format.eq_ignore_ascii_case("json") {
         tracing_subscriber::fmt::layer()
