@@ -154,20 +154,18 @@ pub(super) async fn enforce_reverse_access_control(
     };
     let authorization_decision =
         (!authorization_decision.is_empty()).then_some(authorization_decision);
-    Ok(ReverseAccessOutcome::Continue(Box::new(
-        ReverseAccessControl {
-            req,
-            audit_ctx,
-            route_headers: allowed.headers,
-            override_upstream: allowed.override_upstream,
-            route_timeout,
-            cache_bypass: allowed.cache_bypass,
-            decision_service_mirror_upstreams: allowed.mirror_upstreams,
-            authorization_decision,
-            request_limit_ctx,
-            request_limits,
-        },
-    )))
+    Ok(ReverseAccessOutcome::Continue(ReverseAccessControl {
+        req,
+        audit_ctx,
+        route_headers: allowed.headers,
+        override_upstream: allowed.override_upstream,
+        route_timeout,
+        cache_bypass: allowed.cache_bypass,
+        decision_service_mirror_upstreams: allowed.mirror_upstreams,
+        authorization_decision,
+        request_limit_ctx,
+        request_limits,
+    }))
 }
 
 fn reverse_local_route_response(

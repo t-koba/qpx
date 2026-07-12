@@ -185,7 +185,7 @@ async fn execute_reverse_request(
                 streaming,
             ));
         }
-        ReverseAccessOutcome::Continue(access) => *access,
+        ReverseAccessOutcome::Continue(access) => access,
     };
     let ReverseAccessControl {
         mut req,
@@ -251,7 +251,7 @@ async fn execute_reverse_request(
                 streaming,
             ));
         }
-        ReverseModuleOutcome::Continue(dispatch) => *dispatch,
+        ReverseModuleOutcome::Continue(dispatch) => dispatch,
     };
     let ReverseModuleDispatch {
         req,
@@ -404,7 +404,7 @@ async fn complete_reverse_after_modules(
             .await;
             return Ok(empty_interim_response(response));
         }
-        ReverseCacheOutcome::Continue(state) => *state,
+        ReverseCacheOutcome::Continue(state) => state,
     };
     let ReverseCacheState {
         req,

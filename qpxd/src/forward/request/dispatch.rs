@@ -60,7 +60,7 @@ async fn execute_forward_request(
         ForwardPrepareOutcome::Response(response) => Ok(*response),
         ForwardPrepareOutcome::Prepared(prepared) => {
             let streaming = prepared.policy.selected_plan.streaming;
-            let mut response = complete_forward_request(*prepared).await?;
+            let mut response = complete_forward_request(prepared).await?;
             response.extensions_mut().insert(streaming);
             Ok(response)
         }
@@ -324,7 +324,7 @@ async fn prepare_forward_request(
         matched_rule,
         identity,
     } = match policy_outcome {
-        PolicyStage::Decision(allowed) => *allowed,
+        PolicyStage::Decision(allowed) => allowed,
         PolicyStage::Observe(_) => {
             return Err(anyhow!(
                 "forward policy still requires request body observation after observation pass"
@@ -373,48 +373,46 @@ async fn prepare_forward_request(
             response: Box::new(response),
         });
     }
-    Ok(ForwardPrepareOutcome::Prepared(Box::new(
-        ForwardPreparedRequest {
-            req,
-            base,
-            context: crate::http::pipeline::types::RequestContext {
-                runtime: Some(runtime),
-                state,
-                proxy_name: proxy_name_owned,
-                listener_name: listener_name.to_string(),
-                listener_cfg,
-                remote_addr,
-            },
-            policy: crate::http::pipeline::types::ResolvedPolicy {
-                effective_policy,
-                destination,
-                identity,
-                sanitized_headers,
-                response_engine,
-                selected_plan,
-                action,
-                headers,
-                matched_rule: matched_rule.map(|rule| rule.to_string()),
-                cache_policy,
-            },
-            limits: crate::http::pipeline::types::RequestLimits {
-                request_limits,
-                request_limit_ctx,
-                max_observed_request_body_bytes,
-                body_read_timeout,
-            },
-            observation: crate::http::pipeline::types::RequestObservation {
-                request_rpc,
-                response_request_observation,
-                request_body_observed,
-                request_rpc_observed,
-            },
-            mode: ForwardPreparedMode {
-                host,
-                is_ftp_request,
-            },
+    Ok(ForwardPrepareOutcome::Prepared(ForwardPreparedRequest {
+        req,
+        base,
+        context: crate::http::pipeline::types::RequestContext {
+            runtime: Some(runtime),
+            state,
+            proxy_name: proxy_name_owned,
+            listener_name: listener_name.to_string(),
+            listener_cfg,
+            remote_addr,
         },
-    )))
+        policy: crate::http::pipeline::types::ResolvedPolicy {
+            effective_policy,
+            destination,
+            identity,
+            sanitized_headers,
+            response_engine,
+            selected_plan,
+            action,
+            headers,
+            matched_rule: matched_rule.map(|rule| rule.to_string()),
+            cache_policy,
+        },
+        limits: crate::http::pipeline::types::RequestLimits {
+            request_limits,
+            request_limit_ctx,
+            max_observed_request_body_bytes,
+            body_read_timeout,
+        },
+        observation: crate::http::pipeline::types::RequestObservation {
+            request_rpc,
+            response_request_observation,
+            request_body_observed,
+            request_rpc_observed,
+        },
+        mode: ForwardPreparedMode {
+            host,
+            is_ftp_request,
+        },
+    }))
 }
 
 async fn complete_forward_request(
@@ -631,7 +629,7 @@ async fn complete_forward_request(
             );
             return Ok(response);
         }
-        ForwardDispatchPrepareOutcome::Prepared(ready) => *ready,
+        ForwardDispatchPrepareOutcome::Prepared(ready) => ready,
     };
     execute_forward_http_after_prepare(ForwardPreparedHttpInput {
         ready,

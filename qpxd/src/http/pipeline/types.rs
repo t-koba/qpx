@@ -12,7 +12,7 @@ use tokio::time::Duration;
 
 pub enum PrepareOutcome<P> {
     Response(Box<Response<Body>>),
-    Prepared(Box<P>),
+    Prepared(P),
 }
 
 pub(crate) enum PolicyStage<D> {

@@ -65,7 +65,7 @@ pub(super) struct ReverseWebsocketDispatch<'a> {
 /// finalized response or continue with stage-specific state.
 pub(super) enum ReverseStageOutcome<T> {
     Response(Box<Response<Body>>),
-    Continue(Box<T>),
+    Continue(T),
 }
 
 pub(super) type ReverseAccessOutcome = ReverseStageOutcome<ReverseAccessControl>;

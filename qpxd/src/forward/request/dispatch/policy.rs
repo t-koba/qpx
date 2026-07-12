@@ -71,12 +71,12 @@ pub(super) async fn evaluate_forward_policy_outcome(
             ForwardPolicyDecision::Allow(allowed) => {
                 let mut identity = response_input.identity.clone();
                 identity.supplement_builtin_auth(allowed.authenticated_user.as_ref());
-                Ok(PolicyStage::Decision(Box::new(ForwardAllowedPolicy {
+                Ok(PolicyStage::Decision(ForwardAllowedPolicy {
                     action: allowed.action,
                     headers: allowed.headers,
                     matched_rule: allowed.matched_rule.map(|rule| rule.to_string()),
                     identity,
-                })))
+                }))
             }
             #[cfg(feature = "auth-basic")]
             ForwardPolicyDecision::Challenge(chal) => {

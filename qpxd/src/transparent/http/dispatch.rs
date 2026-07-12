@@ -57,7 +57,7 @@ async fn execute_transparent_request(
     {
         TransparentPrepareOutcome::Response(response) => Ok(*response),
         TransparentPrepareOutcome::Prepared(prepared) => {
-            complete_transparent_request(*prepared).await
+            complete_transparent_request(prepared).await
         }
     }
 }

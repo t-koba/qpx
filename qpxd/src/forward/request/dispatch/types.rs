@@ -21,8 +21,7 @@ pub(super) struct ForwardPreparedMode {
     pub(super) is_ftp_request: bool,
 }
 
-pub(super) type ForwardPolicyOutcome =
-    crate::http::pipeline::PolicyStage<Box<ForwardAllowedPolicy>>;
+pub(super) type ForwardPolicyOutcome = crate::http::pipeline::PolicyStage<ForwardAllowedPolicy>;
 
 pub(super) struct ForwardAllowedPolicy {
     pub(super) action: qpx_core::config::ActionConfig,

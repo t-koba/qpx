@@ -106,7 +106,7 @@ pub(super) fn build_transparent_prepared(
             crate::http::capture::stream::limit_response_body_for_plan(response, &selected_plan);
         return Ok(TransparentPrepareOutcome::Response(Box::new(response)));
     }
-    Ok(TransparentPrepareOutcome::Prepared(Box::new(
+    Ok(TransparentPrepareOutcome::Prepared(
         TransparentPreparedRequest {
             req,
             context: crate::http::pipeline::types::RequestContext {
@@ -146,5 +146,5 @@ pub(super) fn build_transparent_prepared(
                 matched_rule,
             },
         },
-    )))
+    ))
 }

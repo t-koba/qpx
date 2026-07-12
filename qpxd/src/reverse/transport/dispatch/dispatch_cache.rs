@@ -125,14 +125,14 @@ pub(super) async fn prepare_reverse_cache(
             guard,
         } => (revalidation_state.map(|state| *state), guard),
     };
-    Ok(ReverseCacheOutcome::Continue(Box::new(ReverseCacheState {
+    Ok(ReverseCacheOutcome::Continue(ReverseCacheState {
         req,
         request_headers_snapshot,
         cache_lookup_key,
         cache_target_key,
         revalidation_state,
         cache_collapse_guard: guard,
-    })))
+    }))
 }
 
 async fn buffer_query_for_cache_key(

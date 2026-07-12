@@ -132,7 +132,7 @@ pub(super) async fn prepare_forward_dispatch(
         .await?;
         return Ok(ForwardDispatchPrepareOutcome::Response(Box::new(response)));
     }
-    Ok(ForwardDispatchPrepareOutcome::Prepared(Box::new(
+    Ok(ForwardDispatchPrepareOutcome::Prepared(
         ForwardDispatchReady {
             req,
             http_modules,
@@ -145,5 +145,5 @@ pub(super) async fn prepare_forward_dispatch(
             export_session,
             _concurrency_permits,
         },
-    )))
+    ))
 }

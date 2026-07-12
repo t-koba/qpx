@@ -47,13 +47,13 @@ pub(super) async fn prepare_reverse_modules(
         },
     );
     match http_modules.on_request_headers(&mut req).await? {
-        crate::http::modules::RequestHeadersOutcome::Continue => Ok(
-            ReverseModuleOutcome::Continue(Box::new(ReverseModuleDispatch {
+        crate::http::modules::RequestHeadersOutcome::Continue => {
+            Ok(ReverseModuleOutcome::Continue(ReverseModuleDispatch {
                 req,
                 http_modules,
                 request_cache_policy,
-            })),
-        ),
+            }))
+        }
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
             let response = prepare_http_module_local_response(
                 &mut http_modules,

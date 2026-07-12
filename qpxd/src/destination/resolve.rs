@@ -342,67 +342,58 @@ fn resolve_candidate(
         DestinationEvidenceKind::Reputation => policy.min_confidence.reputation,
         DestinationEvidenceKind::Application => policy.min_confidence.application,
     };
-    let filtered = candidates
-        .iter()
-        .filter(|candidate| threshold.is_none_or(|min| candidate.confidence >= min))
-        .cloned()
-        .collect::<Vec<_>>();
-    if filtered.is_empty() {
-        return None;
-    }
+    let eligible = || {
+        candidates
+            .iter()
+            .filter(|candidate| threshold.is_none_or(|min| candidate.confidence >= min))
+    };
+    let first = eligible().next()?;
     if matches!(
         policy.conflict_mode,
         DestinationConflictMode::RequireAgreement
-    ) {
-        let mut labels = filtered
-            .iter()
-            .map(|candidate| candidate.label.as_str())
-            .collect::<std::collections::HashSet<_>>();
-        if labels.len() > 1 {
-            return None;
-        }
-        let _ = labels.drain();
+    ) && eligible().any(|candidate| candidate.label != first.label)
+    {
+        return None;
     }
     match policy.merge_mode {
         DestinationMergeMode::FirstWins => {
             for class in &policy.precedence {
-                if let Some(best) = filtered
-                    .iter()
+                if let Some(best) = eligible()
                     .filter(|candidate| &candidate.class == class)
                     .max_by_key(|candidate| candidate.confidence)
                 {
                     return Some(best.clone());
                 }
             }
-            filtered
-                .into_iter()
+            eligible()
                 .max_by_key(|candidate| candidate.confidence)
+                .cloned()
         }
         DestinationMergeMode::StrongestPerDimension => match policy.conflict_mode {
-            DestinationConflictMode::PreferPrecedence => {
-                filtered.into_iter().min_by_key(|candidate| {
+            DestinationConflictMode::PreferPrecedence => eligible()
+                .min_by_key(|candidate| {
                     (
                         precedence_rank(policy, candidate.class),
                         std::cmp::Reverse(candidate.confidence),
                     )
                 })
-            }
-            DestinationConflictMode::PreferHighestConfidence => {
-                filtered.into_iter().max_by_key(|candidate| {
+                .cloned(),
+            DestinationConflictMode::PreferHighestConfidence => eligible()
+                .max_by_key(|candidate| {
                     (
                         candidate.confidence,
                         std::cmp::Reverse(precedence_rank(policy, candidate.class)),
                     )
                 })
-            }
-            DestinationConflictMode::RequireAgreement => {
-                filtered.into_iter().max_by_key(|candidate| {
+                .cloned(),
+            DestinationConflictMode::RequireAgreement => eligible()
+                .max_by_key(|candidate| {
                     (
                         candidate.confidence,
                         std::cmp::Reverse(precedence_rank(policy, candidate.class)),
                     )
                 })
-            }
+                .cloned(),
         },
     }
 }
