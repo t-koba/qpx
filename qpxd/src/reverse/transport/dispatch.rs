@@ -200,6 +200,7 @@ async fn execute_reverse_request(
             return Ok(attach_streaming_limits(
                 empty_interim_response(*response),
                 streaming,
+                request_version,
             ));
         }
         ReverseAccessOutcome::Continue(access) => access,
@@ -242,6 +243,7 @@ async fn execute_reverse_request(
         return Ok(attach_streaming_limits(
             empty_interim_response(response),
             streaming,
+            request_version,
         ));
     }
 
@@ -266,6 +268,7 @@ async fn execute_reverse_request(
             return Ok(attach_streaming_limits(
                 empty_interim_response(response),
                 streaming,
+                request_version,
             ));
         }
         ReverseModuleOutcome::Continue(dispatch) => dispatch,
@@ -304,7 +307,7 @@ async fn execute_reverse_request(
         audit_ctx: &audit_ctx,
     })
     .await?;
-    Ok(attach_streaming_limits(result, streaming))
+    Ok(attach_streaming_limits(result, streaming, request_version))
 }
 
 fn debug_assert_reverse_route_target(route: &HttpRoute) {

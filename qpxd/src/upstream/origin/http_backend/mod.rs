@@ -28,10 +28,7 @@ use self::backend_h2::{prepare_proxy_h2_request, send_h2_request_with_sender};
 #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 pub(crate) use self::h3_pool::H3OriginPool;
 pub(crate) use self::pool::DirectOriginPools;
-use self::pool::{
-    HttpsConnectionAcquisition, acquire_https_connection, https_origin_pool_key,
-    plain_http_origin_pool_key,
-};
+use self::pool::{HttpsConnectionAcquisition, acquire_https_connection, https_origin_pool_key};
 pub(crate) use self::shared::shared_reverse_https_request_with_trust;
 
 pub(crate) async fn proxy_http(
@@ -136,14 +133,14 @@ async fn proxy_plain_http(
     proxy_name: &str,
 ) -> Result<Http1ResponseWithInterim> {
     let default_port = origin.default_port_hint();
-    let connect_authority = origin.connect_authority(default_port)?;
-    let host_authority = origin.host_header_authority(default_port)?;
-    let req = prepare_proxy_http1_request(req, host_authority.as_str(), proxy_name)?;
+    let connect_authority = origin.connect_authority_ref(default_port)?;
+    let host_authority = origin.host_header_authority_ref(default_port)?;
+    let req = prepare_proxy_http1_request(req, host_authority.as_ref(), proxy_name)?;
     proxy_direct_plain_http1_with_interim(
         pools,
         req,
-        connect_authority.as_str(),
-        host_authority.as_str(),
+        connect_authority.as_ref(),
+        host_authority.as_ref(),
     )
     .await
 }
@@ -154,10 +151,9 @@ pub(crate) async fn proxy_direct_plain_http1_with_interim(
     connect_authority: &str,
     host_authority: &str,
 ) -> Result<Http1ResponseWithInterim> {
-    let slot = pools.direct_origin.plain_slot(plain_http_origin_pool_key(
-        connect_authority,
-        host_authority,
-    ));
+    let slot = pools
+        .direct_origin
+        .plain_slot_for(connect_authority, host_authority);
     crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
     crate::upstream::http1::ensure_host_header(&mut req, host_authority)?;
     *req.version_mut() = http::Version::HTTP_11;

@@ -77,23 +77,22 @@ pub(super) async fn capture_reverse_response_outcome(
     export_session: Option<&crate::exporter::ExportSession>,
 ) -> super::ReverseAttemptOutcome {
     match outcome {
-        super::ReverseAttemptOutcome::Response(response) => {
-            let (interim, response) = *response;
-            let response = match export_session {
+        super::ReverseAttemptOutcome::Response(mut response) => {
+            let current = std::mem::replace(&mut response.1, Response::new(Body::empty()));
+            response.1 = match export_session {
                 Some(session) => {
                     crate::http::capture::stream::emit_response_for_export(
-                        response,
+                        current,
                         &route.plan,
                         session,
                     )
                     .await
                 }
-                None => crate::http::capture::stream::limit_response_body_for_plan(
-                    response,
-                    &route.plan,
-                ),
+                None => {
+                    crate::http::capture::stream::limit_response_body_for_plan(current, &route.plan)
+                }
             };
-            super::ReverseAttemptOutcome::Response(Box::new((interim, response)))
+            super::ReverseAttemptOutcome::Response(response)
         }
         outcome => outcome,
     }

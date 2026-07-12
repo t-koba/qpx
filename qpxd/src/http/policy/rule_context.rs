@@ -93,13 +93,13 @@ pub(crate) fn attach_destination_trace(
 
 fn apply_destination<'a>(ctx: &mut RuleMatchContext<'a>, destination: &'a DestinationMetadata) {
     ctx.destination_category = destination.category.as_deref();
-    ctx.destination_category_source = destination.category_source.as_deref();
+    ctx.destination_category_source = destination.category_source;
     ctx.destination_category_confidence = destination.category_confidence.map(u64::from);
     ctx.destination_reputation = destination.reputation.as_deref();
-    ctx.destination_reputation_source = destination.reputation_source.as_deref();
+    ctx.destination_reputation_source = destination.reputation_source;
     ctx.destination_reputation_confidence = destination.reputation_confidence.map(u64::from);
     ctx.destination_application = destination.application.as_deref();
-    ctx.destination_application_source = destination.application_source.as_deref();
+    ctx.destination_application_source = destination.application_source;
     ctx.destination_application_confidence = destination.application_confidence.map(u64::from);
 }
 

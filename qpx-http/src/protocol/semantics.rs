@@ -23,17 +23,30 @@ pub fn validate_http_status_class(status: StatusCode, context: &str) -> anyhow::
 
 pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bool) {
     let mut keep_upgrade = false;
+    let mut extension_headers = Vec::new();
 
-    let connection_tokens = parse_connection_tokens(headers);
-    for token in connection_tokens {
-        let lower = token.to_ascii_lowercase();
-        if preserve_upgrade && lower == "upgrade" {
-            keep_upgrade = true;
-            continue;
+    for value in headers.get_all(CONNECTION) {
+        if let Ok(value) = value.to_str() {
+            for token in value
+                .split(',')
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+            {
+                if token.eq_ignore_ascii_case("upgrade") {
+                    keep_upgrade |= preserve_upgrade;
+                } else if !WELL_KNOWN_HOP_HEADERS
+                    .iter()
+                    .any(|known| token.eq_ignore_ascii_case(known))
+                    && let Ok(name) = HeaderName::from_bytes(token.as_bytes())
+                {
+                    extension_headers.push(name);
+                }
+            }
         }
-        if let Ok(name) = HeaderName::from_bytes(lower.as_bytes()) {
-            headers.remove(name);
-        }
+    }
+
+    for name in extension_headers {
+        headers.remove(name);
     }
 
     for header in WELL_KNOWN_HOP_HEADERS {
@@ -61,21 +74,6 @@ pub fn sync_host_header_from_absolute_target(headers: &mut HeaderMap, target: &h
     {
         headers.insert(HOST, value);
     }
-}
-
-fn parse_connection_tokens(headers: &HeaderMap) -> Vec<String> {
-    let mut out = Vec::new();
-    for value in headers.get_all(CONNECTION) {
-        if let Ok(s) = value.to_str() {
-            for token in s.split(',') {
-                let token = token.trim();
-                if !token.is_empty() {
-                    out.push(token.to_string());
-                }
-            }
-        }
-    }
-    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

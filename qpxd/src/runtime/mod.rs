@@ -286,7 +286,13 @@ impl RuntimeState {
             .policy
             .destination_resolution_defaults
             .with_override(resolution_override);
-        self.policy.destination_classifier.classify(inputs, &policy)
+        let include_trace = self.plan.limits.general.trace_enabled
+            || self.resources.access_log.output.enabled
+            || self.resources.audit_log.output.enabled
+            || qpx_observability::otel_enabled();
+        self.policy
+            .destination_classifier
+            .classify(inputs, &policy, include_trace)
     }
 
     pub fn tls_verify_exception_matches(&self, listener: &str, host: &str) -> bool {

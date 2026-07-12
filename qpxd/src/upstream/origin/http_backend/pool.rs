@@ -44,6 +44,12 @@ pub(super) struct PlainHttpOriginSlot {
     max_http1_idle: Arc<AtomicUsize>,
 }
 
+#[derive(Hash)]
+struct PlainHttpOriginPoolLookup<'a> {
+    connect_authority: &'a str,
+    host_authority: &'a str,
+}
+
 pub(super) struct PlainHttp1OriginConnection {
     pub(super) stream: TcpStream,
     pub(super) read_buf: BytesMut,
@@ -276,6 +282,34 @@ impl DirectOriginPools {
             idle: Arc::new(StdMutex::new(Vec::new())),
             max_http1_idle: self.http1_max_idle_per_origin.clone(),
         })
+    }
+
+    pub(super) fn plain_slot_for(
+        &self,
+        connect_authority: &str,
+        host_authority: &str,
+    ) -> Arc<PlainHttpOriginSlot> {
+        let lookup = PlainHttpOriginPoolLookup {
+            connect_authority,
+            host_authority,
+        };
+        let shard = &self.plain[qpx_http::sharding::modulo(&lookup, DIRECT_ORIGIN_POOL_SHARDS)];
+        if let Some(slot) = shard
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|(key, _)| {
+                key.connect_authority.as_ref() == connect_authority
+                    && key.host_authority.as_ref() == host_authority
+            })
+            .map(|(_, slot)| slot.clone())
+        {
+            return slot;
+        }
+        self.plain_slot(plain_http_origin_pool_key(
+            connect_authority,
+            host_authority,
+        ))
     }
 
     pub(super) fn https_slot(&self, key: HttpsOriginPoolKey) -> Arc<HttpsOriginSlot> {

@@ -52,8 +52,11 @@ struct ReverseRouteSelection {
 pub(super) fn attach_streaming_limits(
     mut result: (InterimList, Response<Body>),
     streaming: crate::runtime::ResolvedStreamingLimits,
+    downstream_version: http::Version,
 ) -> (InterimList, Response<Body>) {
-    result.1.extensions_mut().insert(streaming);
+    if downstream_version == http::Version::HTTP_3 {
+        result.1.extensions_mut().insert(streaming);
+    }
     result
 }
 

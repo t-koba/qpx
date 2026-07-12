@@ -37,6 +37,8 @@ pub struct OriginEndpoint {
     pub(crate) upstream: String,
     label: Arc<str>,
     parsed: Option<ParsedOriginTarget>,
+    connect_authority: Option<Arc<str>>,
+    logical_authority: Option<Arc<str>>,
     connect_host: Option<String>,
     connect_port: Option<u16>,
     logical_host: Option<String>,
@@ -55,11 +57,26 @@ impl OriginEndpoint {
     pub(crate) fn direct(upstream: impl Into<String>) -> Self {
         let upstream = upstream.into();
         let parsed = parse_origin_target(upstream.as_str()).ok();
+        let default_port = parsed.as_ref().and_then(|target| {
+            target
+                .scheme
+                .as_deref()
+                .map(dispatch::default_port_for_scheme)
+                .or(target.port)
+        });
+        let authority = parsed.as_ref().zip(default_port).map(|(target, port)| {
+            Arc::<str>::from(qpx_http::protocol::address::format_authority_host_port(
+                target.host.as_str(),
+                target.port.unwrap_or(port),
+            ))
+        });
         let label = Arc::<str>::from(upstream.as_str());
         Self {
             upstream,
             label,
             parsed,
+            connect_authority: authority.clone(),
+            logical_authority: authority,
             connect_host: None,
             connect_port: None,
             logical_host: None,
@@ -100,6 +117,8 @@ impl OriginEndpoint {
             upstream,
             label,
             parsed,
+            connect_authority: Some(Arc::from(connect)),
+            logical_authority: Some(Arc::from(logical)),
             connect_host: Some(connect_host),
             connect_port: Some(connect_port),
             logical_host: Some(logical_host),
@@ -120,11 +139,31 @@ impl OriginEndpoint {
             || self.tls_name.is_some()
     }
 
+    pub(crate) fn connect_authority_ref(&self, default_port: u16) -> Result<Cow<'_, str>> {
+        if let Some(authority) = self.connect_authority.as_ref() {
+            return Ok(Cow::Borrowed(authority.as_ref()));
+        }
+        let (host, port) = self.connect_parts(default_port)?;
+        Ok(Cow::Owned(
+            qpx_http::protocol::address::format_authority_host_port(host.as_str(), port),
+        ))
+    }
+
     pub(crate) fn connect_authority(&self, default_port: u16) -> Result<String> {
         let (host, port) = self.connect_parts(default_port)?;
         Ok(qpx_http::protocol::address::format_authority_host_port(
             host.as_str(),
             port,
+        ))
+    }
+
+    pub(crate) fn host_header_authority_ref(&self, default_port: u16) -> Result<Cow<'_, str>> {
+        if let Some(authority) = self.logical_authority.as_ref() {
+            return Ok(Cow::Borrowed(authority.as_ref()));
+        }
+        let (host, port) = self.logical_parts(default_port)?;
+        Ok(Cow::Owned(
+            qpx_http::protocol::address::format_authority_host_port(host.as_str(), port),
         ))
     }
 
@@ -136,14 +175,21 @@ impl OriginEndpoint {
         ))
     }
 
-    pub(crate) fn tls_server_name(&self) -> Result<String> {
+    pub(crate) fn tls_server_name_ref(&self) -> Result<Cow<'_, str>> {
         if let Some(name) = self.tls_name.as_ref() {
-            return Ok(name.clone());
+            return Ok(Cow::Borrowed(name.as_str()));
         }
         if let Some(host) = self.logical_host.as_ref() {
-            return Ok(host.clone());
+            return Ok(Cow::Borrowed(host.as_str()));
         }
-        Ok(self.parsed()?.host.clone())
+        match self.parsed()? {
+            Cow::Borrowed(parsed) => Ok(Cow::Borrowed(parsed.host.as_str())),
+            Cow::Owned(parsed) => Ok(Cow::Owned(parsed.host)),
+        }
+    }
+
+    pub(crate) fn tls_server_name(&self) -> Result<String> {
+        self.tls_server_name_ref().map(Cow::into_owned)
     }
 
     pub(super) fn connect_parts(&self, default_port: u16) -> Result<(String, u16)> {

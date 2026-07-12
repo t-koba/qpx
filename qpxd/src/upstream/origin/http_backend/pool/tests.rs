@@ -13,6 +13,14 @@ fn test_https_origin_slot() -> HttpsOriginSlot {
 }
 
 #[test]
+fn plain_origin_borrowed_lookup_reuses_existing_slot() {
+    let pools = DirectOriginPools::new();
+    let first = pools.plain_slot_for("127.0.0.1:80", "example.test");
+    let second = pools.plain_slot_for("127.0.0.1:80", "example.test");
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[test]
 fn https_origin_pool_key_uses_stable_trust_policy_key() {
     let trust_a =
         CompiledUpstreamTlsTrust::from_config(Some(&qpx_core::config::UpstreamTlsTrustConfig {

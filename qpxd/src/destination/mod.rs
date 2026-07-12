@@ -10,13 +10,13 @@ use std::net::IpAddr;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DestinationMetadata {
     pub(crate) category: Option<String>,
-    pub(crate) category_source: Option<String>,
+    pub(crate) category_source: Option<&'static str>,
     pub(crate) category_confidence: Option<u8>,
     pub(crate) reputation: Option<String>,
-    pub(crate) reputation_source: Option<String>,
+    pub(crate) reputation_source: Option<&'static str>,
     pub(crate) reputation_confidence: Option<u8>,
     pub(crate) application: Option<String>,
-    pub(crate) application_source: Option<String>,
+    pub(crate) application_source: Option<&'static str>,
     pub(crate) application_confidence: Option<u8>,
     pub(crate) category_trace: Option<String>,
     pub(crate) reputation_trace: Option<String>,

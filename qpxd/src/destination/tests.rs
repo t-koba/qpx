@@ -69,12 +69,13 @@ fn classifier_uses_prefixed_named_sets_and_application_heuristics() {
             ..Default::default()
         },
         &policy,
+        true,
     );
     assert_eq!(openai.category.as_deref(), Some("ai"));
-    assert_eq!(openai.category_source.as_deref(), Some("host"));
+    assert_eq!(openai.category_source, Some("host"));
     assert_eq!(openai.category_confidence, Some(100));
     assert_eq!(openai.application.as_deref(), Some("https"));
-    assert_eq!(openai.application_source.as_deref(), Some("heuristic"));
+    assert_eq!(openai.application_source, Some("heuristic"));
     assert_eq!(openai.application_confidence, Some(40));
     assert_eq!(
         openai.category_trace.as_deref(),
@@ -92,9 +93,10 @@ fn classifier_uses_prefixed_named_sets_and_application_heuristics() {
             ..Default::default()
         },
         &policy,
+        true,
     );
     assert_eq!(malware.reputation.as_deref(), Some("high"));
-    assert_eq!(malware.reputation_source.as_deref(), Some("host"));
+    assert_eq!(malware.reputation_source, Some("host"));
     assert_eq!(malware.reputation_confidence, Some(100));
 
     let slack = classifier.classify(
@@ -105,9 +107,10 @@ fn classifier_uses_prefixed_named_sets_and_application_heuristics() {
             ..Default::default()
         },
         &policy,
+        true,
     );
     assert_eq!(slack.application.as_deref(), Some("slack"));
-    assert_eq!(slack.application_source.as_deref(), Some("host"));
+    assert_eq!(slack.application_source, Some("host"));
     assert_eq!(slack.application_confidence, Some(92));
 
     let dns = classifier.classify(
@@ -116,10 +119,24 @@ fn classifier_uses_prefixed_named_sets_and_application_heuristics() {
             ..Default::default()
         },
         &policy,
+        true,
     );
     assert_eq!(dns.application.as_deref(), Some("dns"));
-    assert_eq!(dns.application_source.as_deref(), Some("heuristic"));
+    assert_eq!(dns.application_source, Some("heuristic"));
     assert_eq!(dns.application_confidence, Some(40));
+
+    let untraced = classifier.classify(
+        &DestinationInputs {
+            port: Some(443),
+            ..Default::default()
+        },
+        &policy,
+        false,
+    );
+    assert_eq!(untraced.application.as_deref(), Some("https"));
+    assert!(untraced.category_trace.is_none());
+    assert!(untraced.reputation_trace.is_none());
+    assert!(untraced.application_trace.is_none());
 }
 
 #[test]
@@ -165,15 +182,16 @@ fn classifier_uses_ip_sni_cert_and_fingerprint_precedence() {
             ..Default::default()
         },
         &policy,
+        true,
     );
     assert_eq!(destination.category.as_deref(), Some("web"));
-    assert_eq!(destination.category_source.as_deref(), Some("host"));
+    assert_eq!(destination.category_source, Some("host"));
     assert_eq!(destination.category_confidence, Some(100));
     assert_eq!(destination.reputation.as_deref(), Some("suspicious"));
-    assert_eq!(destination.reputation_source.as_deref(), Some("ip"));
+    assert_eq!(destination.reputation_source, Some("ip"));
     assert_eq!(destination.reputation_confidence, Some(94));
     assert_eq!(destination.application.as_deref(), Some("chrome"));
-    assert_eq!(destination.application_source.as_deref(), Some("ja4"));
+    assert_eq!(destination.application_source, Some("ja4"));
     assert_eq!(destination.application_confidence, Some(100));
 }
 
@@ -213,7 +231,8 @@ fn resolution_override_can_prefer_certificate_evidence() {
             ..Default::default()
         },
         &override_policy,
+        true,
     );
     assert_eq!(destination.category.as_deref(), Some("cert"));
-    assert_eq!(destination.category_source.as_deref(), Some("cert_issuer"));
+    assert_eq!(destination.category_source, Some("cert_issuer"));
 }

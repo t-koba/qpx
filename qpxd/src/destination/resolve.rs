@@ -40,6 +40,7 @@ impl DestinationClassifier {
         &self,
         inputs: &DestinationInputs<'_>,
         policy: &CompiledDestinationResolutionPolicy,
+        include_trace: bool,
     ) -> DestinationMetadata {
         let mut out = DestinationMetadata::default();
         let category = collect_candidates(
@@ -53,16 +54,18 @@ impl DestinationClassifier {
             policy,
         ) {
             out.category = Some(candidate.label);
-            out.category_source = Some(candidate.source.as_str().to_string());
+            out.category_source = Some(candidate.source.as_str());
             out.category_confidence = Some(candidate.confidence);
         }
-        out.category_trace = Some(format_resolution_trace(
-            "category",
-            category.as_slice(),
-            out.category.as_deref(),
-            out.category_source.as_deref(),
-            out.category_confidence,
-        ));
+        if include_trace {
+            out.category_trace = Some(format_resolution_trace(
+                "category",
+                category.as_slice(),
+                out.category.as_deref(),
+                out.category_source,
+                out.category_confidence,
+            ));
+        }
         let reputation = collect_candidates(
             self.reputation.as_slice(),
             DestinationEvidenceKind::Reputation,
@@ -74,22 +77,51 @@ impl DestinationClassifier {
             policy,
         ) {
             out.reputation = Some(candidate.label);
-            out.reputation_source = Some(candidate.source.as_str().to_string());
+            out.reputation_source = Some(candidate.source.as_str());
             out.reputation_confidence = Some(candidate.confidence);
         }
-        out.reputation_trace = Some(format_resolution_trace(
-            "reputation",
-            reputation.as_slice(),
-            out.reputation.as_deref(),
-            out.reputation_source.as_deref(),
-            out.reputation_confidence,
-        ));
+        if include_trace {
+            out.reputation_trace = Some(format_resolution_trace(
+                "reputation",
+                reputation.as_slice(),
+                out.reputation.as_deref(),
+                out.reputation_source,
+                out.reputation_confidence,
+            ));
+        }
+        let inferred_application = infer_application(inputs.scheme, inputs.port, inputs.alpn);
+        if self.application.is_empty()
+            && let Some(label) = inferred_application
+        {
+            out.application = Some(label.to_string());
+            out.application_source = Some(DestinationEvidenceSource::Heuristic.as_str());
+            out.application_confidence = Some(score_for_source(
+                DestinationEvidenceKind::Application,
+                DestinationEvidenceSource::Heuristic,
+            ));
+            if include_trace {
+                let candidate = DestinationCandidate {
+                    label: label.to_string(),
+                    confidence: out.application_confidence.unwrap_or(0),
+                    source: DestinationEvidenceSource::Heuristic,
+                    class: DestinationEvidenceClass::Heuristic,
+                };
+                out.application_trace = Some(format_resolution_trace(
+                    "application",
+                    std::slice::from_ref(&candidate),
+                    out.application.as_deref(),
+                    out.application_source,
+                    out.application_confidence,
+                ));
+            }
+            return out;
+        }
         let mut application = collect_candidates(
             self.application.as_slice(),
             DestinationEvidenceKind::Application,
             inputs,
         );
-        if let Some(label) = infer_application(inputs.scheme, inputs.port, inputs.alpn) {
+        if let Some(label) = inferred_application {
             application.push(DestinationCandidate {
                 label: label.to_string(),
                 confidence: score_for_source(
@@ -106,16 +138,18 @@ impl DestinationClassifier {
             policy,
         ) {
             out.application = Some(candidate.label);
-            out.application_source = Some(candidate.source.as_str().to_string());
+            out.application_source = Some(candidate.source.as_str());
             out.application_confidence = Some(candidate.confidence);
         }
-        out.application_trace = Some(format_resolution_trace(
-            "application",
-            application.as_slice(),
-            out.application.as_deref(),
-            out.application_source.as_deref(),
-            out.application_confidence,
-        ));
+        if include_trace {
+            out.application_trace = Some(format_resolution_trace(
+                "application",
+                application.as_slice(),
+                out.application.as_deref(),
+                out.application_source,
+                out.application_confidence,
+            ));
+        }
         out
     }
 }

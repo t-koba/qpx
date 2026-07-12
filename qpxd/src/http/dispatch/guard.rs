@@ -18,16 +18,22 @@ pub(crate) struct DispatchGuardInput<'a> {
 pub(crate) fn evaluate_http_guard(
     input: DispatchGuardInput<'_>,
 ) -> impl std::future::Future<Output = Result<Option<Response<Body>>>> + Send + 'static {
-    let method = input.req.method().clone();
-    let version = input.req.version();
-    let proxy_name = input.proxy_name.to_string();
-    let mut audit = input.audit;
-    attach_destination_trace(&mut audit.log_context, input.destination);
-    let evaluated = input
-        .profile
-        .map(|profile| profile.evaluate_request_async(input.req));
+    let prepared = input.profile.map(|profile| {
+        let method = input.req.method().clone();
+        let version = input.req.version();
+        let proxy_name = input.proxy_name.to_string();
+        let mut audit = input.audit;
+        attach_destination_trace(&mut audit.log_context, input.destination);
+        (
+            profile.evaluate_request_async(input.req),
+            method,
+            version,
+            proxy_name,
+            audit,
+        )
+    });
     async move {
-        let Some(evaluated) = evaluated else {
+        let Some((evaluated, method, version, proxy_name, audit)) = prepared else {
             return Ok(None);
         };
         let Some(reject) = evaluated.await? else {
