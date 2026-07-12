@@ -76,6 +76,14 @@ fn classifier_uses_prefixed_named_sets_and_application_heuristics() {
     assert_eq!(openai.application.as_deref(), Some("https"));
     assert_eq!(openai.application_source.as_deref(), Some("heuristic"));
     assert_eq!(openai.application_confidence, Some(40));
+    assert_eq!(
+        openai.category_trace.as_deref(),
+        Some("category(selected=ai@host:100; candidates=ai@host:100)")
+    );
+    assert_eq!(
+        openai.application_trace.as_deref(),
+        Some("application(selected=https@heuristic:40; candidates=https@heuristic:40)")
+    );
 
     let malware = classifier.classify(
         &DestinationInputs {

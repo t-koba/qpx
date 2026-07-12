@@ -2,7 +2,6 @@ use qpx_core::config::{
     DestinationConflictMode, DestinationEvidenceSourceKind, DestinationMergeMode,
     DestinationResolutionOverrideConfig, DestinationResolutionPolicyConfig, NamedSetKind,
 };
-use std::fmt::Write as _;
 use std::net::IpAddr;
 
 use super::compile::{DestinationClassifier, LabeledPatternSet};
@@ -563,15 +562,15 @@ fn format_resolution_trace(
     selected_confidence: Option<u8>,
 ) -> String {
     let mut output = String::with_capacity(96);
-    write!(output, "{dimension}(").expect("writing to String cannot fail");
+    output.push_str(dimension);
+    output.push('(');
     if let Some(value) = selected_value {
-        write!(
-            output,
-            "selected={value}@{}:{}",
-            selected_source.unwrap_or(""),
-            selected_confidence.unwrap_or(0)
-        )
-        .expect("writing to String cannot fail");
+        output.push_str("selected=");
+        output.push_str(value);
+        output.push('@');
+        output.push_str(selected_source.unwrap_or(""));
+        output.push(':');
+        append_decimal_u8(&mut output, selected_confidence.unwrap_or(0));
     } else {
         output.push_str("selected=none");
     }
@@ -583,16 +582,23 @@ fn format_resolution_trace(
             if index != 0 {
                 output.push(',');
             }
-            write!(
-                output,
-                "{}@{}:{}",
-                candidate.label,
-                candidate.source.as_str(),
-                candidate.confidence
-            )
-            .expect("writing to String cannot fail");
+            output.push_str(candidate.label.as_str());
+            output.push('@');
+            output.push_str(candidate.source.as_str());
+            output.push(':');
+            append_decimal_u8(&mut output, candidate.confidence);
         }
     }
     output.push(')');
     output
+}
+
+fn append_decimal_u8(output: &mut String, value: u8) {
+    if value >= 100 {
+        output.push(char::from(b'0' + value / 100));
+    }
+    if value >= 10 {
+        output.push(char::from(b'0' + value / 10 % 10));
+    }
+    output.push(char::from(b'0' + value % 10));
 }
