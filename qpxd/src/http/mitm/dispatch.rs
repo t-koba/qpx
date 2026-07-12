@@ -43,8 +43,29 @@ enum MitmEarlyResponse {
     Local(LocalResponseConfig),
 }
 
-#[tracing::instrument(skip_all, fields(kind = "mitm", host = %route.host, method = %base.method))]
 pub(super) async fn dispatch_mitm_request(
+    req: Request<Body>,
+    base: BaseRequestFields,
+    runtime: Runtime,
+    sender: Arc<Mutex<SendRequest<Body>>>,
+    route: MitmRouteContext<'_>,
+) -> Result<Response<Body>> {
+    use tracing::Instrument as _;
+    if qpx_observability::request_spans_enabled() {
+        let span = tracing::info_span!(
+            "dispatch_mitm_request",
+            kind = "mitm",
+            host = %route.host,
+            method = %base.method,
+        );
+        return execute_mitm_request(req, base, runtime, sender, route)
+            .instrument(span)
+            .await;
+    }
+    execute_mitm_request(req, base, runtime, sender, route).await
+}
+
+async fn execute_mitm_request(
     mut req: Request<Body>,
     base: BaseRequestFields,
     runtime: Runtime,

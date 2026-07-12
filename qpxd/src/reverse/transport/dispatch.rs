@@ -57,11 +57,29 @@ use self::prepare::{
 };
 use self::types::*;
 
-#[tracing::instrument(
-    skip_all,
-    fields(kind = "reverse", host = %base.host.as_deref().unwrap_or(""), method = %base.method)
-)]
 pub(super) async fn dispatch_reverse_request(
+    req: Request<Body>,
+    base: BaseRequestFields,
+    reverse: ReloadableReverse,
+    runtime: Runtime,
+    conn: ReverseConnInfo,
+) -> Result<(InterimList, Response<Body>)> {
+    use tracing::Instrument as _;
+    if qpx_observability::request_spans_enabled() {
+        let span = tracing::info_span!(
+            "dispatch_reverse_request",
+            kind = "reverse",
+            host = %base.host.as_deref().unwrap_or(""),
+            method = %base.method,
+        );
+        return execute_reverse_dispatch(req, base, reverse, runtime, conn)
+            .instrument(span)
+            .await;
+    }
+    execute_reverse_dispatch(req, base, reverse, runtime, conn).await
+}
+
+async fn execute_reverse_dispatch(
     req: Request<Body>,
     base: BaseRequestFields,
     reverse: ReloadableReverse,

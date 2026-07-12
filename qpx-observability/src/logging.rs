@@ -50,20 +50,10 @@ fn init_logging_inner(
     system_filter = system_filter
         .add_directive("access_log=off".parse::<Directive>()?)
         .add_directive("audit_log=off".parse::<Directive>()?);
-    if system.format.eq_ignore_ascii_case("json") && !otel.is_some_and(|config| config.enabled) {
-        for span_name in [
-            "dispatch_forward_request",
-            "dispatch_reverse_request",
-            "dispatch_transparent_request",
-            "dispatch_mitm_request",
-        ] {
-            system_filter = system_filter.add_directive(
-                format!("[{span_name}]=off")
-                    .parse::<Directive>()
-                    .with_context(|| format!("invalid request span filter for {span_name}"))?,
-            );
-        }
-    }
+    super::set_request_spans_enabled(request_spans_are_consumed(
+        system.format.as_str(),
+        otel.is_some_and(|config| config.enabled),
+    ));
 
     let system_layer = if system.format.eq_ignore_ascii_case("json") {
         tracing_subscriber::fmt::layer()
@@ -195,6 +185,23 @@ fn init_logging_inner(
         _audit: audit_guard,
         _otel: otel_guard,
     })
+}
+
+fn request_spans_are_consumed(system_format: &str, otel_enabled: bool) -> bool {
+    !system_format.eq_ignore_ascii_case("json") || otel_enabled
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_spans_are_consumed;
+
+    #[test]
+    fn request_spans_follow_configured_consumers() {
+        assert!(!request_spans_are_consumed("json", false));
+        assert!(request_spans_are_consumed("json", true));
+        assert!(request_spans_are_consumed("pretty", false));
+        assert!(request_spans_are_consumed("compact", false));
+    }
 }
 
 fn expand_tilde_path(input: &str) -> PathBuf {

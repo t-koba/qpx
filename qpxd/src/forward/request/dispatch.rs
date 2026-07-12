@@ -35,10 +35,6 @@ use self::target::{
 };
 use self::types::*;
 
-#[tracing::instrument(
-    skip_all,
-    fields(kind = "forward", host = %base.host.as_deref().unwrap_or(""), method = %base.method)
-)]
 pub(super) async fn dispatch_forward_request(
     req: Request<Body>,
     base: BaseRequestFields,
@@ -46,7 +42,20 @@ pub(super) async fn dispatch_forward_request(
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
 ) -> std::result::Result<Response<Body>, DispatchError> {
-    execute_forward_request(req, base, runtime, listener_name, remote_addr).await
+    use tracing::Instrument as _;
+    if qpx_observability::request_spans_enabled() {
+        let span = tracing::info_span!(
+            "dispatch_forward_request",
+            kind = "forward",
+            host = %base.host.as_deref().unwrap_or(""),
+            method = %base.method,
+        );
+        execute_forward_request(req, base, runtime, listener_name, remote_addr)
+            .instrument(span)
+            .await
+    } else {
+        execute_forward_request(req, base, runtime, listener_name, remote_addr).await
+    }
 }
 
 async fn execute_forward_request(

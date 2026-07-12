@@ -31,10 +31,6 @@ use self::prepare_helpers::{
 use self::prepared::{TransparentBuildInput, build_transparent_prepared};
 use self::types::*;
 
-#[tracing::instrument(
-    skip_all,
-    fields(kind = "transparent", host = tracing::field::Empty, method = %req.method())
-)]
 pub(super) async fn dispatch_transparent_request(
     req: Request<Body>,
     runtime: Runtime,
@@ -42,7 +38,20 @@ pub(super) async fn dispatch_transparent_request(
     original_target: Option<ConnectTarget>,
     listener_name: &str,
 ) -> Result<hyper::Response<Body>> {
-    execute_transparent_request(req, runtime, remote_addr, original_target, listener_name).await
+    use tracing::Instrument as _;
+    if qpx_observability::request_spans_enabled() {
+        let span = tracing::info_span!(
+            "dispatch_transparent_request",
+            kind = "transparent",
+            host = tracing::field::Empty,
+            method = %req.method(),
+        );
+        execute_transparent_request(req, runtime, remote_addr, original_target, listener_name)
+            .instrument(span)
+            .await
+    } else {
+        execute_transparent_request(req, runtime, remote_addr, original_target, listener_name).await
+    }
 }
 
 async fn execute_transparent_request(
