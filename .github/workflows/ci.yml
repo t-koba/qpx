@@ -91,7 +91,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: bnjbvr/cargo-machete@v0.6.0
+      - name: install cargo-machete
+        run: cargo install cargo-machete --version 0.6.0 --locked
+      - name: check unused dependencies
+        run: cargo machete
 
   coverage:
     name: coverage

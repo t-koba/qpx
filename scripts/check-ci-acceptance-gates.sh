@@ -12,11 +12,15 @@ require() {
   fi
 }
 
-check_artifact_action_runtime() {
+check_deprecated_node_actions() {
   local deprecated
-  deprecated="$(grep -REn 'actions/(upload|download)-artifact@v([1-5])([^0-9]|$)' .github/workflows || true)"
+  deprecated="$(grep -REn \
+    -e 'actions/(upload|download)-artifact@v([1-5])([^0-9]|$)' \
+    -e 'actions-rs/' \
+    -e 'bnjbvr/cargo-machete@' \
+    .github/workflows || true)"
   if [ -n "$deprecated" ]; then
-    echo "artifact actions must use a Node.js 24 runtime release:" >&2
+    echo "workflow contains an action with a deprecated Node.js runtime:" >&2
     echo "$deprecated" >&2
     exit 1
   fi
@@ -277,7 +281,8 @@ require .github/workflows/ci.yml 'cargo clippy --workspace --all-targets --locke
 require .github/workflows/ci.yml 'cargo clippy -p "${pkg}" --locked --all-targets --no-default-features --features "${features}" -- -D warnings'
 require .github/workflows/ci.yml '"http3-backend-qpx"'
 require .github/workflows/ci.yml '"http3-backend-h3,http3-backend-qpx,mitm,acme"'
-require .github/workflows/ci.yml 'bnjbvr/cargo-machete@v0.6.0'
+require .github/workflows/ci.yml 'cargo install cargo-machete --version 0.6.0 --locked'
+require .github/workflows/ci.yml 'cargo machete'
 require .github/workflows/ci.yml 'cargo audit'
 require .github/workflows/ci.yml 'cargo deny check'
 require .github/workflows/ci.yml 'bash ./scripts/e2e-control-plane.sh'
@@ -298,7 +303,7 @@ require .github/workflows/ci.yml 'id: advanced_transport_perf_release'
 require .github/workflows/ci.yml 'continue-on-error: true'
 require .github/workflows/ci.yml 'fail if any perf smoke evaluation failed'
 require .github/workflows/ci.yml 'actions/upload-artifact@v7'
-check_artifact_action_runtime
+check_deprecated_node_actions
 require .github/workflows/ci.yml 'qpx-perf-smoke-jsonl'
 require .github/workflows/ci.yml 'target/perf/perf-audit-criterion.jsonl'
 require .github/workflows/ci.yml 'cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10'
