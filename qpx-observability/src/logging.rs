@@ -191,19 +191,6 @@ fn request_spans_are_consumed(system_format: &str, otel_enabled: bool) -> bool {
     !system_format.eq_ignore_ascii_case("json") || otel_enabled
 }
 
-#[cfg(test)]
-mod tests {
-    use super::request_spans_are_consumed;
-
-    #[test]
-    fn request_spans_follow_configured_consumers() {
-        assert!(!request_spans_are_consumed("json", false));
-        assert!(request_spans_are_consumed("json", true));
-        assert!(request_spans_are_consumed("pretty", false));
-        assert!(request_spans_are_consumed("compact", false));
-    }
-}
-
 fn expand_tilde_path(input: &str) -> PathBuf {
     if let Some(stripped) = input.strip_prefix("~/")
         && let Some(home) = dirs_next::home_dir()
@@ -337,5 +324,18 @@ fn cleanup_old_logs(cleanup: &RotationCleanup) {
                 "failed to remove old log file"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_spans_are_consumed;
+
+    #[test]
+    fn request_spans_follow_configured_consumers() {
+        assert!(!request_spans_are_consumed("json", false));
+        assert!(request_spans_are_consumed("json", true));
+        assert!(request_spans_are_consumed("pretty", false));
+        assert!(request_spans_are_consumed("compact", false));
     }
 }
