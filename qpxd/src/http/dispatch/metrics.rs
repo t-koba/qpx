@@ -1,5 +1,6 @@
 use super::{DispatchOutcome, ProxyKind};
-use metrics::{counter, histogram};
+use metrics::{Histogram, counter, histogram};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 pub(super) fn record_dispatch_outcome(kind: ProxyKind, outcome: DispatchOutcome) {
@@ -37,8 +38,29 @@ pub(crate) fn record_cache_lookup_result(kind: ProxyKind, result: &'static str) 
 }
 
 pub(crate) fn record_upstream_request_duration(kind: ProxyKind, duration: Duration) {
-    histogram!("qpx_upstream_request_duration_seconds", "kind" => kind.as_str())
-        .record(duration.as_secs_f64());
+    struct UpstreamDurationHistograms {
+        forward: Histogram,
+        reverse: Histogram,
+        transparent: Histogram,
+        #[cfg(feature = "mitm")]
+        mitm: Histogram,
+    }
+    static HISTOGRAMS: OnceLock<UpstreamDurationHistograms> = OnceLock::new();
+    let histograms = HISTOGRAMS.get_or_init(|| UpstreamDurationHistograms {
+        forward: histogram!("qpx_upstream_request_duration_seconds", "kind" => "forward"),
+        reverse: histogram!("qpx_upstream_request_duration_seconds", "kind" => "reverse"),
+        transparent: histogram!("qpx_upstream_request_duration_seconds", "kind" => "transparent"),
+        #[cfg(feature = "mitm")]
+        mitm: histogram!("qpx_upstream_request_duration_seconds", "kind" => "mitm"),
+    });
+    let histogram = match kind {
+        ProxyKind::Forward => &histograms.forward,
+        ProxyKind::Reverse => &histograms.reverse,
+        ProxyKind::Transparent => &histograms.transparent,
+        #[cfg(feature = "mitm")]
+        ProxyKind::Mitm => &histograms.mitm,
+    };
+    histogram.record(duration.as_secs_f64());
 }
 
 pub(crate) fn record_response_policy_action(kind: ProxyKind, action: &'static str) {

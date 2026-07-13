@@ -428,6 +428,9 @@ fn wrap_body_validating_request_trailers(request: &mut Request<Body>) {
 }
 
 fn wrap_body_sanitizing_response_trailers(response: &mut Response<Body>) {
+    if response.body().trailers_are_sanitized() {
+        return;
+    }
     let inner = std::mem::take(response.body_mut());
     *response.body_mut() = trailer_body::sanitizing_response(inner);
 }

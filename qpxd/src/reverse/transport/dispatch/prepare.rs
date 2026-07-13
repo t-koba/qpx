@@ -36,7 +36,6 @@ struct ReverseRouteSelection {
     route_idx: Option<usize>,
     selected_policy: EffectivePolicyContext,
     selected_identity: Option<crate::policy_context::ResolvedIdentity>,
-    selected_headers: Option<http::HeaderMap>,
     // Keyed by the identity of the route's compiled `destination_resolution`
     // override (stable for the request lifetime); avoids cloning and hashing
     // the override config on every request.
@@ -288,7 +287,6 @@ async fn scan_reverse_routes(
                 selection.route_idx = Some(idx);
                 selection.selected_policy = effective_policy.clone();
                 selection.selected_identity = Some(identity);
-                selection.selected_headers = Some(sanitized_headers.clone());
                 return Ok::<bool, anyhow::Error>(true);
             }
             return Ok::<bool, anyhow::Error>(false);
@@ -334,7 +332,6 @@ async fn scan_reverse_routes(
             selection.route_idx = Some(idx);
             selection.selected_policy = effective_policy.clone();
             selection.selected_identity = Some(identity);
-            selection.selected_headers = Some(sanitized_headers.clone());
             return Ok::<bool, anyhow::Error>(true);
         }
         Ok::<bool, anyhow::Error>(false)
@@ -412,7 +409,6 @@ pub(super) async fn prepare_reverse_request(
         route_idx: None,
         selected_policy: EffectivePolicyContext::default(),
         selected_identity: None,
-        selected_headers: None,
         request_destination_cache: InlineCache::new(),
         identity_cache: InlineCache::new(),
         observation_plan: RequestObservationPlan::default(),
@@ -446,10 +442,10 @@ pub(super) async fn prepare_reverse_request(
         &mut selection,
     )
     .await?;
-    let sanitized_route_headers = selection
-        .route_idx
-        .is_none()
-        .then(|| sanitized_route_headers.into_owned());
+    let mut owned_sanitized_headers = match sanitized_route_headers {
+        std::borrow::Cow::Borrowed(_) => None,
+        std::borrow::Cow::Owned(headers) => Some(headers),
+    };
 
     if selection.route_idx.is_none() && !selection.observation_plan.is_empty() {
         req = match selection
@@ -477,9 +473,9 @@ pub(super) async fn prepare_reverse_request(
     if selection.route_idx.is_none() {
         scan_reverse_routes(
             &router,
-            sanitized_route_headers
+            owned_sanitized_headers
                 .as_ref()
-                .ok_or_else(|| anyhow!("sanitized route headers missing for rescan"))?,
+                .unwrap_or_else(|| req.headers()),
             &guard_buffering,
             base,
             &state,
@@ -550,9 +546,7 @@ pub(super) async fn prepare_reverse_request(
             identity: selection
                 .selected_identity
                 .ok_or_else(|| anyhow!("identity missing for selected reverse route"))?,
-            sanitized_headers: selection
-                .selected_headers
-                .ok_or_else(|| anyhow!("sanitized headers missing for selected reverse route"))?,
+            sanitized_headers: owned_sanitized_headers.take(),
             request_destination_cache: selection.request_destination_cache,
             max_observed_request_body_bytes: selection.max_observed_request_body_bytes,
         },

@@ -169,7 +169,7 @@ pub(super) async fn dispatch_reverse_ipc_route(
                 })
                 .await?
                 {
-                    ReverseAttemptOutcome::Response(response) => return Ok(*response),
+                    ReverseAttemptOutcome::Response(response) => return Ok(response),
                     ReverseAttemptOutcome::Retry(err) => {
                         last_err = Some(err);
                         continue;
@@ -181,12 +181,27 @@ pub(super) async fn dispatch_reverse_ipc_route(
                 }
             }
             Ok(Err(err)) => {
-                last_err = Some(record_reverse_loop_error(state, http_modules, err, "error").await);
+                last_err = Some(
+                    record_reverse_loop_error(
+                        state,
+                        http_modules,
+                        err,
+                        super::super::metrics::ReverseResult::Error,
+                    )
+                    .await,
+                );
             }
             Err(_) => {
                 let err = anyhow!("upstream timeout");
-                last_err =
-                    Some(record_reverse_loop_error(state, http_modules, err, "timeout").await);
+                last_err = Some(
+                    record_reverse_loop_error(
+                        state,
+                        http_modules,
+                        err,
+                        super::super::metrics::ReverseResult::Timeout,
+                    )
+                    .await,
+                );
             }
         }
         if attempt_idx + 1 < attempts {
@@ -312,7 +327,7 @@ async fn handle_reverse_ipc_success(
         .await?
     {
         return Ok(capture_reverse_response_outcome(
-            ReverseAttemptOutcome::Response(Box::new(empty_interim_response(stale))),
+            ReverseAttemptOutcome::Response(empty_interim_response(stale)),
             route,
             export_session,
         )
@@ -382,8 +397,8 @@ async fn handle_reverse_ipc_success(
         DispatchOutcome::Allow,
         policy_tags.as_ref(),
     );
-    Ok(ReverseAttemptOutcome::Response(Box::new(
-        empty_interim_response(resp),
+    Ok(ReverseAttemptOutcome::Response(empty_interim_response(
+        resp,
     )))
 }
 
@@ -481,7 +496,7 @@ pub(super) async fn handle_reverse_websocket_upgrade(
                 );
             }
             super::super::metrics::upstream_latency(state, started.elapsed());
-            super::super::metrics::reverse_result(state, "ok");
+            super::super::metrics::reverse_result(state, super::super::metrics::ReverseResult::Ok);
             resp = http_modules.on_upstream_response(resp).await?;
             resp = http_modules.prepare_downstream_response(resp).await?;
             let keep_upgrade = resp.status() == StatusCode::SWITCHING_PROTOCOLS;
@@ -508,7 +523,10 @@ pub(super) async fn handle_reverse_websocket_upgrade(
             if let Some(upstream) = selected_upstream.as_ref() {
                 record_reverse_upstream_error(upstream, &route.policy, &err);
             }
-            super::super::metrics::reverse_result(state, "error");
+            super::super::metrics::reverse_result(
+                state,
+                super::super::metrics::ReverseResult::Error,
+            );
             Err(err)
         }
         Err(_) => {
@@ -517,7 +535,10 @@ pub(super) async fn handle_reverse_websocket_upgrade(
             if let Some(upstream) = selected_upstream.as_ref() {
                 record_reverse_upstream_timeout(upstream, &route.policy);
             }
-            super::super::metrics::reverse_result(state, "timeout");
+            super::super::metrics::reverse_result(
+                state,
+                super::super::metrics::ReverseResult::Timeout,
+            );
             Err(err)
         }
     }

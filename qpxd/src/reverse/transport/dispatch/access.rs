@@ -50,7 +50,7 @@ pub(super) async fn enforce_reverse_access_control(
             matched_rule: None,
             matched_route: route.name.as_deref(),
             action: None,
-            headers: Some(sanitized_headers),
+            headers: Some(sanitized_headers.unwrap_or_else(|| req.headers())),
             identity,
         },
     )

@@ -63,6 +63,7 @@ pub struct Body {
     close_signal: Option<Arc<BodyCloseSignal>>,
     pending_trailers: Option<Box<HeaderMap>>,
     stream_finished: bool,
+    trailers_sanitized: bool,
 }
 
 #[derive(Debug)]
@@ -92,6 +93,7 @@ impl Body {
             close_signal: None,
             pending_trailers: None,
             stream_finished: true,
+            trailers_sanitized: false,
         }
     }
 
@@ -114,6 +116,7 @@ impl Body {
                 close_signal: Some(close_signal),
                 pending_trailers: None,
                 stream_finished: false,
+                trailers_sanitized: false,
             },
         )
     }
@@ -130,6 +133,7 @@ impl Body {
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
+            trailers_sanitized: false,
         }
     }
 
@@ -151,6 +155,7 @@ impl Body {
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
+            trailers_sanitized: false,
         }
     }
 
@@ -163,19 +168,34 @@ impl Body {
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
+            trailers_sanitized: false,
         }
+    }
+
+    /// Marks that every trailer emitted by this body is already sanitized.
+    pub fn mark_trailers_sanitized(mut self) -> Self {
+        self.trailers_sanitized = true;
+        self
+    }
+
+    /// Returns whether trailer sanitization is guaranteed by the body producer.
+    pub fn trailers_are_sanitized(&self) -> bool {
+        self.trailers_sanitized
     }
 
     pub fn limit_bytes(self, max_bytes: usize) -> Self {
         if max_bytes == usize::MAX {
             return self;
         }
-        Self::wrap(LimitedBody {
+        let trailers_sanitized = self.trailers_sanitized;
+        let mut body = Self::wrap(LimitedBody {
             inner: self,
             max_bytes,
             seen: 0,
             exceeded: false,
-        })
+        });
+        body.trailers_sanitized = trailers_sanitized;
+        body
     }
 
     pub async fn data(&mut self) -> Option<Result<Bytes, BodyError>> {
@@ -301,6 +321,7 @@ impl From<hyper::body::Incoming> for Body {
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
+            trailers_sanitized: false,
         }
     }
 }
@@ -542,6 +563,12 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::time::{Duration, timeout};
+
+    #[test]
+    fn byte_limit_preserves_trailer_sanitization_guarantee() {
+        let body = Body::from("body").mark_trailers_sanitized().limit_bytes(16);
+        assert!(body.trailers_are_sanitized());
+    }
 
     #[tokio::test]
     async fn trailers_after_channel_body_end_returns_none_without_panicking() {

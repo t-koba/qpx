@@ -1,6 +1,21 @@
 use super::*;
 use bytes::Bytes;
 
+#[test]
+fn finalize_response_preserves_pre_sanitized_body() {
+    let mut response = Response::new(Body::from("ok").mark_trailers_sanitized());
+
+    finalize_response_in_place(
+        &Method::GET,
+        http::Version::HTTP_11,
+        "qpx",
+        &mut response,
+        false,
+    );
+
+    assert!(response.body().trailers_are_sanitized());
+}
+
 #[tokio::test]
 async fn finalize_response_sanitizes_h2_trailers_for_h1_downstream() {
     let (mut sender, body) = Body::channel_with_capacity(16);

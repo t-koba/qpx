@@ -145,7 +145,8 @@ where
                 response_body_allows_reuse(kind) && response_keep_alive(head.version, &head.headers)
             }),
         )),
-    };
+    }
+    .mark_trailers_sanitized();
     let mut response = Response::builder()
         .status(head.status)
         .body(body)

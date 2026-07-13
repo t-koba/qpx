@@ -85,7 +85,7 @@ pub(super) struct ReversePreparedRoute {
     pub(super) route_idx: usize,
     pub(super) selected_policy: EffectivePolicyContext,
     pub(super) identity: crate::policy_context::ResolvedIdentity,
-    pub(super) sanitized_headers: http::HeaderMap,
+    pub(super) sanitized_headers: Option<http::HeaderMap>,
     // Keyed by `destination_override_key` (identity of the route's compiled
     // override); see `prepare.rs`.
     pub(super) request_destination_cache: InlineCache<crate::destination::DestinationMetadata>,
@@ -145,7 +145,7 @@ pub(super) struct ReverseAccessInput<'a> {
     pub(super) route: &'a HttpRoute,
     pub(super) selected_policy: &'a EffectivePolicyContext,
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
-    pub(super) sanitized_headers: &'a http::HeaderMap,
+    pub(super) sanitized_headers: Option<&'a http::HeaderMap>,
     pub(super) request_destination: &'a crate::destination::DestinationMetadata,
 }
 
@@ -321,7 +321,7 @@ pub(super) struct ReversePostModuleInput<'a> {
 }
 
 pub(super) enum ReverseAttemptOutcome {
-    Response(Box<(InterimList, Response<Body>)>),
+    Response((InterimList, Response<Body>)),
     Retry(anyhow::Error),
     Stop(anyhow::Error),
 }

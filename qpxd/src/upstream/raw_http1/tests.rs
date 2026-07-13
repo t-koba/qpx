@@ -8,6 +8,7 @@ use super::{
     parse_declared_content_length, send_http1_request_with_interim,
 };
 use bytes::{Bytes, BytesMut};
+use http_body_util::BodyExt;
 use hyper::header::{CONTENT_LENGTH, HeaderName, HeaderValue, TRANSFER_ENCODING};
 use hyper::{HeaderMap, Method, Request, StatusCode, Version};
 use qpx_http::body::Body;
@@ -360,6 +361,38 @@ async fn chunked_response_reader_rejects_oversized_chunk_before_payload_allocati
         err.to_string().contains("chunked response body exceeds"),
         "{err}"
     );
+}
+
+#[tokio::test]
+async fn chunked_response_reader_sanitizes_trailers_before_exposure() {
+    let (proxy, origin) = tokio::io::duplex(64);
+    drop(origin);
+    let response = build_response(
+        proxy,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body_kind: ResponseBodyKind::Chunked,
+        },
+        BytesMut::from(&b"0\r\nContent-Length: 9\r\nX-Checksum: valid\r\n\r\n"[..]),
+        BytesMut::new(),
+        None,
+    );
+    let mut body = response.into_body();
+
+    let frame = body
+        .frame()
+        .await
+        .expect("trailer frame")
+        .expect("valid trailer frame");
+    let trailers = frame.into_trailers().expect("trailers");
+    assert!(!trailers.contains_key(CONTENT_LENGTH));
+    assert_eq!(
+        trailers.get("x-checksum"),
+        Some(&HeaderValue::from_static("valid"))
+    );
+    assert!(body.frame().await.is_none());
 }
 
 #[tokio::test]

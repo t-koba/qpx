@@ -1,19 +1,48 @@
 use crate::runtime::RuntimeState;
-use metrics::{counter, histogram};
+use metrics::{Counter, counter, histogram};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+struct ReverseResultCounters {
+    ok: Counter,
+    error: Counter,
+    timeout: Counter,
+}
+
+pub(super) enum ReverseResult {
+    Ok,
+    Error,
+    Timeout,
+}
+
+fn reverse_result_counters(state: &RuntimeState) -> &'static ReverseResultCounters {
+    static COUNTERS: OnceLock<ReverseResultCounters> = OnceLock::new();
+    COUNTERS.get_or_init(|| {
+        let name = state
+            .observability
+            .metric_names
+            .reverse_requests_total
+            .clone();
+        ReverseResultCounters {
+            ok: counter!(name.clone(), "result" => "ok"),
+            error: counter!(name.clone(), "result" => "error"),
+            timeout: counter!(name, "result" => "timeout"),
+        }
+    })
+}
 
 pub(super) fn retry_budget_exhausted(state: &RuntimeState) {
     let names = &state.observability.metric_names;
     counter!(names.reverse_retry_budget_exhausted_total.clone()).increment(1);
 }
 
-pub(super) fn reverse_result(state: &RuntimeState, result: &'static str) {
-    let names = &state.observability.metric_names;
-    counter!(
-        names.reverse_requests_total.clone(),
-        "result" => result
-    )
-    .increment(1);
+pub(super) fn reverse_result(state: &RuntimeState, result: ReverseResult) {
+    let counters = reverse_result_counters(state);
+    match result {
+        ReverseResult::Ok => counters.ok.increment(1),
+        ReverseResult::Error => counters.error.increment(1),
+        ReverseResult::Timeout => counters.timeout.increment(1),
+    }
 }
 
 pub(super) fn upstream_latency(state: &RuntimeState, elapsed: Duration) {

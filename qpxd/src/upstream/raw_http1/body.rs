@@ -304,7 +304,17 @@ where
                                 this.buf.advance(consumed);
                                 this.state = BodyState::Done;
                                 this.finish();
-                                if let Some(trailers) = trailers {
+                                if let Some(mut trailers) = trailers {
+                                    let removed =
+                                        qpx_http::protocol::semantics::sanitize_response_trailers(
+                                            &mut trailers,
+                                        );
+                                    if removed > 0 {
+                                        tracing::warn!(
+                                            removed,
+                                            "dropping forbidden upstream response trailers"
+                                        );
+                                    }
                                     return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
                                 }
                                 return Poll::Ready(None);

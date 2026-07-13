@@ -56,7 +56,7 @@ pub(super) fn record_reverse_success_metrics(state: &runtime::RuntimeState, star
     let elapsed = started.elapsed();
     record_upstream_request_duration(ProxyKind::Reverse, elapsed);
     super::super::metrics::upstream_latency(state, elapsed);
-    super::super::metrics::reverse_result(state, "ok");
+    super::super::metrics::reverse_result(state, super::super::metrics::ReverseResult::Ok);
 }
 
 pub(super) fn acquire_reverse_upstream_concurrency(
@@ -102,7 +102,7 @@ pub(super) async fn record_reverse_loop_error(
     state: &runtime::RuntimeState,
     http_modules: &mut crate::http::modules::HttpModuleExecution,
     err: anyhow::Error,
-    result: &'static str,
+    result: super::super::metrics::ReverseResult,
 ) -> anyhow::Error {
     http_modules.on_error(&err).await;
     super::super::metrics::reverse_result(state, result);
@@ -120,7 +120,7 @@ pub(super) async fn record_reverse_http_loop_error(
     if let Some(upstream) = selected_upstream {
         record_reverse_upstream_error(upstream, &route.policy, &err);
     }
-    super::super::metrics::reverse_result(state, "error");
+    super::super::metrics::reverse_result(state, super::super::metrics::ReverseResult::Error);
     err
 }
 
@@ -135,7 +135,7 @@ pub(super) async fn record_reverse_http_loop_timeout(
     if let Some(upstream) = selected_upstream {
         record_reverse_upstream_timeout(upstream, &route.policy);
     }
-    super::super::metrics::reverse_result(state, "timeout");
+    super::super::metrics::reverse_result(state, super::super::metrics::ReverseResult::Timeout);
     err
 }
 

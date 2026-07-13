@@ -508,7 +508,9 @@ start_squid() {
   local service_name
   run_group="$(id -gn)"
   run_user="$(id -un)"
-  service_name="qpxproxycompare$$"
+  # Squid embeds this name in POSIX shared-memory object names. Keep it short
+  # enough for platforms with conservative shm_open name limits, such as macOS.
+  service_name="qpx$$"
   mkdir -p "$root/cache" "$root/logs" "$root/run"
   cat >"$config" <<SQUID
 pid_filename $root/run/squid.pid

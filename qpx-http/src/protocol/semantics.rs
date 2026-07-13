@@ -137,11 +137,12 @@ pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), Reques
         && req.method() == Method::CONNECT
         && req.extensions().get::<h2::ext::Protocol>().is_some();
 
-    let host_values: Vec<_> = req.headers().get_all(HOST).iter().collect();
-    if host_values.len() > 1 {
+    let mut host_values = req.headers().get_all(HOST).iter();
+    let host_value = host_values.next();
+    if host_values.next().is_some() {
         return Err(RequestValidationError::MultipleHostHeaders);
     }
-    let host = if let Some(value) = host_values.first() {
+    let host = if let Some(value) = host_value {
         let raw = value
             .to_str()
             .map_err(|_| RequestValidationError::InvalidHostHeader)?

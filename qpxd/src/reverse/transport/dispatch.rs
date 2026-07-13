@@ -191,7 +191,7 @@ async fn execute_reverse_request(
         route,
         selected_policy: &selected_policy,
         identity: &identity,
-        sanitized_headers: &sanitized_headers,
+        sanitized_headers: sanitized_headers.as_ref(),
         request_destination: &request_destination,
     })
     .await?
@@ -635,7 +635,7 @@ async fn reverse_continue_response_rule(
             Ok(Ok((response, headers, cache_bypass, policy_tags, mirror)))
         }
         DispatchResponsePolicyOutcome::Response(response) => Ok(Err(
-            ReverseAttemptOutcome::Response(Box::new(empty_interim_response(response))),
+            ReverseAttemptOutcome::Response(empty_interim_response(response)),
         )),
     }
 }
