@@ -63,6 +63,9 @@ impl RetryBudgetRuntime {
     }
 
     pub(in crate::reverse) fn record_success(&self) {
+        if self.balance.load(Ordering::Relaxed) >= self.max_balance {
+            return;
+        }
         let _ = self
             .balance
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -181,10 +184,16 @@ impl UpstreamEndpointSet {
         discovery: Vec<DynamicDiscovery>,
         lifecycle: EndpointLifecycleRuntime,
     ) -> Arc<Self> {
+        let fixed = discovery.is_empty()
+            && static_endpoints.len() == seed_endpoints.len()
+            && static_endpoints.iter().zip(seed_endpoints.iter()).all(
+                |(static_endpoint, seed_endpoint)| Arc::ptr_eq(static_endpoint, seed_endpoint),
+            );
         Arc::new(Self {
             static_endpoints: Arc::new(static_endpoints),
             endpoints: ArcSwap::from_pointee(seed_endpoints),
             discovery,
+            fixed,
             lifecycle,
             discovery_started: AtomicBool::new(false),
         })
@@ -192,6 +201,24 @@ impl UpstreamEndpointSet {
 
     pub(in crate::reverse) fn endpoints(&self) -> Arc<Vec<Arc<UpstreamEndpoint>>> {
         self.endpoints.load_full()
+    }
+
+    fn fixed_endpoints(&self) -> Option<&[Arc<UpstreamEndpoint>]> {
+        self.fixed.then_some(self.static_endpoints.as_slice())
+    }
+
+    fn is_single_static_endpoint(&self) -> bool {
+        self.fixed && self.static_endpoints.len() == 1
+    }
+
+    fn single_static_endpoint(&self) -> Option<&Arc<UpstreamEndpoint>> {
+        if !self.fixed {
+            return None;
+        }
+        let [endpoint] = self.static_endpoints.as_slice() else {
+            return None;
+        };
+        Some(endpoint)
     }
 
     pub(in crate::reverse) fn spawn_discovery(self: &Arc<Self>, mut shutdown: watch::Receiver<()>) {

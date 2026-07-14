@@ -39,6 +39,7 @@ use self::selection::{feed, feed_ip, fnv_offset};
 pub(crate) struct ReverseRouter {
     http_routes: Vec<HttpRoute>,
     http_prefilter: MatchPrefilterIndex,
+    has_single_plain_http_route: bool,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_routes: Vec<TlsPassthroughRoute>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -102,6 +103,7 @@ struct UpstreamEndpointSet {
     static_endpoints: Arc<Vec<Arc<UpstreamEndpoint>>>,
     endpoints: ArcSwap<Vec<Arc<UpstreamEndpoint>>>,
     discovery: Vec<DynamicDiscovery>,
+    fixed: bool,
     lifecycle: EndpointLifecycleRuntime,
     discovery_started: AtomicBool,
 }
@@ -343,10 +345,13 @@ impl ReverseRouter {
             (tls_routes, tls_prefilter)
         };
 
+        let has_single_plain_http_route =
+            matches!(http_routes.as_slice(), [route] if route.supports_plain_http_dispatch());
         let (health_shutdown, _) = watch::channel(());
         Ok(Self {
             http_routes,
             http_prefilter,
+            has_single_plain_http_route,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_routes,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -502,6 +507,11 @@ impl ReverseRouter {
 
     pub(super) fn route_at(&self, idx: usize) -> Option<&HttpRoute> {
         self.http_routes.get(idx)
+    }
+
+    pub(super) fn single_plain_http_route(&self) -> Option<&HttpRoute> {
+        self.has_single_plain_http_route
+            .then(|| &self.http_routes[0])
     }
 
     pub(super) fn mirror_targets(&self) -> Vec<String> {

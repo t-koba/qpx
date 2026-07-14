@@ -4,8 +4,39 @@ use http_body::Frame;
 use hyper::header::{CONNECTION, CONTENT_LENGTH, HeaderValue, TRAILER, TRANSFER_ENCODING};
 use qpx_observability::RequestHandler;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::net::{TcpListener, TcpStream};
+
+#[test]
+fn request_head_parser_promotes_storage_for_many_headers() {
+    let mut raw = b"GET / HTTP/1.1\r\nHost: example.test\r\n".to_vec();
+    for index in 0..40 {
+        raw.extend_from_slice(format!("X-Test-{index}: value\r\n").as_bytes());
+    }
+    raw.extend_from_slice(b"\r\n");
+
+    let parsed = try_parse_http1_request_head(&raw)
+        .expect("parse")
+        .expect("complete");
+    assert_eq!(parsed.headers.len(), 41);
+}
+
+#[test]
+fn request_head_parser_rejects_more_than_maximum_headers() {
+    let mut raw = b"GET / HTTP/1.1\r\nHost: example.test\r\n".to_vec();
+    for index in 0..MAX_HTTP1_REQUEST_HEADERS {
+        raw.extend_from_slice(format!("X-Test-{index}: value\r\n").as_bytes());
+    }
+    raw.extend_from_slice(b"\r\n");
+
+    let error = try_parse_http1_request_head(&raw).expect_err("header limit");
+    assert!(
+        error
+            .downcast_ref::<RequestHeaderFieldsTooLarge>()
+            .is_some()
+    );
+}
 
 struct PendingThenDataBody {
     state: u8,
@@ -31,6 +62,32 @@ impl http_body::Body for PendingThenDataBody {
             }
             _ => Poll::Ready(None),
         }
+    }
+}
+
+struct CompleteAfterDataBody {
+    emitted: bool,
+}
+
+impl http_body::Body for CompleteAfterDataBody {
+    type Data = Bytes;
+    type Error = qpx_http::body::BodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        assert!(!self.emitted, "completed body must not be polled again");
+        self.emitted = true;
+        Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"complete")))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.emitted
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(if self.emitted { 0 } else { 8 })
     }
 }
 
@@ -94,6 +151,34 @@ async fn serve_http1_with_interim_emits_early_hints() {
     assert!(!interim_head.contains("Content-Length"));
     assert!(!interim_head.contains("Transfer-Encoding"));
     assert!(!interim_head.contains("Trailer"));
+    assert!(text.contains("HTTP/1.1 200"));
+    assert!(text.ends_with("OK"));
+}
+
+#[tokio::test]
+async fn tcp_owned_halves_serve_prefetched_http1_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        serve_http1_tcp_with_interim_and_capacity(
+            socket,
+            Bytes::from_static(
+                b"GET /asset HTTP/1.1\r\nHost: reverse_edges.test\r\nConnection: close\r\n\r\n",
+            ),
+            StaticInterimService,
+            Duration::from_secs(1),
+            16,
+        )
+        .await
+        .expect("serve");
+    });
+
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read response");
+    let text = String::from_utf8(raw).expect("utf8");
+    assert!(text.contains("HTTP/1.1 103"));
     assert!(text.contains("HTTP/1.1 200"));
     assert!(text.ends_with("OK"));
 }
@@ -173,6 +258,198 @@ async fn send_http1_response_with_interim_preserves_upgrade_connection_header() 
     assert!(text.starts_with("HTTP/1.1 101"));
     assert!(text.contains("Connection: upgrade"));
     assert!(!text.contains("Connection: close"));
+}
+
+#[tokio::test]
+async fn content_length_response_does_not_repoll_completed_body() {
+    let (mut client, server) = tokio::io::duplex(4096);
+    let (read_half, mut write_half) = tokio::io::split(server);
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_LENGTH, "8")
+        .body(Body::wrap(CompleteAfterDataBody { emitted: false }))
+        .expect("response");
+    let mut head_buf = BytesMut::new();
+
+    let keep_alive = send_http1_response_with_interim(
+        &mut write_half,
+        Version::HTTP_11,
+        &Method::GET,
+        response,
+        &[],
+        true,
+        Duration::from_secs(30),
+        &mut head_buf,
+    )
+    .await
+    .expect("send response");
+    drop(write_half);
+    drop(read_half);
+
+    assert!(keep_alive);
+    let mut raw = Vec::new();
+    client.read_to_end(&mut raw).await.expect("read response");
+    assert!(raw.ends_with(b"\r\n\r\ncomplete"));
+}
+
+#[tokio::test]
+async fn finalized_raw_response_head_uses_direct_http1_serialization() {
+    let (mut client, server) = tokio::io::duplex(4096);
+    let (read_half, mut write_half) = tokio::io::split(server);
+    let parsed = [
+        httparse::Header {
+            name: "Content-Length",
+            value: b"4",
+        },
+        httparse::Header {
+            name: "Connection",
+            value: b"X-Hop",
+        },
+        httparse::Header {
+            name: "X-Hop",
+            value: b"discard",
+        },
+        httparse::Header {
+            name: "Content-Type",
+            value: b"text/plain",
+        },
+    ];
+    let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+        &parsed,
+        &Method::GET,
+        StatusCode::OK,
+        Version::HTTP_11,
+    )
+    .expect("raw response head");
+    raw_head.finalize(Version::HTTP_11, "qpx");
+    let mut response = Response::new(Body::from("body"));
+    response.extensions_mut().insert(Arc::new(raw_head));
+    let mut head_buf = BytesMut::new();
+
+    let keep_alive = send_http1_response_with_interim(
+        &mut write_half,
+        Version::HTTP_11,
+        &Method::GET,
+        response,
+        &[],
+        true,
+        Duration::from_secs(30),
+        &mut head_buf,
+    )
+    .await
+    .expect("send response");
+    drop(write_half);
+    drop(read_half);
+
+    assert!(keep_alive);
+    let mut encoded = Vec::new();
+    client
+        .read_to_end(&mut encoded)
+        .await
+        .expect("read response");
+    let text = String::from_utf8(encoded).expect("UTF-8 response");
+    assert!(text.contains("Content-Length: 4\r\n"));
+    assert!(text.contains("Content-Type: text/plain\r\n"));
+    assert!(text.contains("Proxy-Status: qpx\r\n"));
+    assert!(text.contains("Via: 1.1 qpx\r\n"));
+    assert!(!text.contains("Connection: X-Hop"));
+    assert!(!text.contains("X-Hop:"));
+    assert!(text.ends_with("\r\n\r\nbody"));
+}
+
+#[tokio::test]
+async fn direct_content_length_relay_preserves_pipelined_upstream_bytes() {
+    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let upstream_addr = upstream_listener.local_addr().expect("upstream address");
+    let upstream_server = tokio::spawn(async move {
+        let (mut stream, _) = upstream_listener.accept().await.expect("accept upstream");
+        stream.write_all(b"BODYNEXT").await.expect("write upstream");
+    });
+    let upstream = TcpStream::connect(upstream_addr)
+        .await
+        .expect("connect upstream");
+
+    let parsed = [httparse::Header {
+        name: "Content-Length",
+        value: b"4",
+    }];
+    let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+        &parsed,
+        &Method::GET,
+        StatusCode::OK,
+        Version::HTTP_11,
+    )
+    .expect("raw response head");
+    raw_head.finalize(Version::HTTP_11, "qpx");
+
+    let (recycled_tx, mut recycled_rx) = tokio::sync::mpsc::unbounded_channel();
+    let relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
+        interim: Vec::new(),
+        version: Version::HTTP_11,
+        status: StatusCode::OK,
+        raw: Arc::new(raw_head),
+        stream: Some(upstream),
+        read_buf: BytesMut::new(),
+        write_buf: BytesMut::new(),
+        recycler: Some(crate::upstream::raw_http1::Http1ConnectionRecycler::new(
+            move |stream, read_buf, _write_buf| {
+                recycled_tx
+                    .send((stream, read_buf))
+                    .expect("send recycled connection");
+            },
+        )),
+    };
+
+    let downstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind downstream");
+    let downstream_addr = downstream_listener
+        .local_addr()
+        .expect("downstream address");
+    let downstream_server = tokio::spawn(async move {
+        let (mut stream, _) = downstream_listener
+            .accept()
+            .await
+            .expect("accept downstream");
+        let mut head_buf = BytesMut::new();
+        let keep_alive = send_raw_http1_response_relay_with_interim(
+            &mut stream,
+            Version::HTTP_11,
+            &Method::GET,
+            relay,
+            true,
+            &mut head_buf,
+        )
+        .await
+        .expect("relay response");
+        assert!(keep_alive);
+    });
+
+    let mut downstream = TcpStream::connect(downstream_addr)
+        .await
+        .expect("connect downstream");
+    let mut encoded = Vec::new();
+    downstream
+        .read_to_end(&mut encoded)
+        .await
+        .expect("read downstream");
+    downstream_server.await.expect("downstream task");
+    upstream_server.await.expect("upstream task");
+    assert!(encoded.ends_with(b"\r\n\r\nBODY"));
+
+    let (mut recycled, read_buf) = tokio::time::timeout(Duration::from_secs(1), recycled_rx.recv())
+        .await
+        .expect("recycle timeout")
+        .expect("recycled connection");
+    assert!(read_buf.is_empty());
+    let mut next = [0_u8; 4];
+    recycled
+        .read_exact(&mut next)
+        .await
+        .expect("read pipelined bytes");
+    assert_eq!(&next, b"NEXT");
 }
 
 #[tokio::test]

@@ -107,6 +107,10 @@ impl Runtime {
         self.state.load_full()
     }
 
+    pub(crate) fn is_current_state(&self, state: &Arc<RuntimeState>) -> bool {
+        Arc::ptr_eq(&self.state.load(), state)
+    }
+
     pub fn acceptor_view(&self) -> AcceptorView {
         RuntimeState::acceptor_view_from_arc(self.state())
     }
@@ -286,13 +290,17 @@ impl RuntimeState {
             .policy
             .destination_resolution_defaults
             .with_override(resolution_override);
-        let include_trace = self.plan.limits.general.trace_enabled
-            || self.resources.access_log.output.enabled
-            || self.resources.audit_log.output.enabled
-            || qpx_observability::otel_enabled();
+        let include_trace = self.destination_trace_enabled();
         self.policy
             .destination_classifier
-            .classify(inputs, &policy, include_trace)
+            .classify(inputs, policy.as_ref(), include_trace)
+    }
+
+    pub(crate) fn destination_trace_enabled(&self) -> bool {
+        self.plan.limits.general.trace_enabled
+            || self.resources.access_log.output.enabled
+            || self.resources.audit_log.output.enabled
+            || qpx_observability::otel_enabled()
     }
 
     pub fn tls_verify_exception_matches(&self, listener: &str, host: &str) -> bool {

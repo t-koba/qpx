@@ -1,27 +1,29 @@
 use crate::http::codec::h1_common::{
     MAX_HEADER_BYTES, has_connection_token, has_only_chunked_transfer_encoding, parse_header_map,
-    parse_version, request_keep_alive,
+    parse_header_map_recycled, parse_version, request_keep_alive,
 };
 use crate::http::codec::h1_request_body::{
     forward_chunked_request_body, forward_content_length_request_body,
 };
+use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use hyper::header::{CONTENT_LENGTH, EXPECT, HeaderMap};
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 
 mod response;
 
-use self::response::{
-    ConnectionHeaderMode, http1_upgrade_accepted, send_http1_response_with_interim,
-    write_status_and_headers,
+use self::response::{ConnectionHeaderMode, http1_upgrade_accepted, write_status_and_headers};
+pub(crate) use self::response::{
+    send_http1_response_with_interim, send_raw_http1_response_relay_with_interim,
 };
 const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -45,17 +47,14 @@ struct ParsedRequestHead {
     send_continue: bool,
 }
 
-type BodyReadResult<I> = Result<(ReadHalf<I>, BytesMut)>;
+type BodyReadResult<R> = Result<(R, BytesMut)>;
 
-enum RequestBodyRead<I>
+enum RequestBodyRead<R>
 where
-    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
 {
-    Inline {
-        read_half: ReadHalf<I>,
-        read_buf: BytesMut,
-    },
-    Spawned(JoinHandle<BodyReadResult<I>>),
+    Inline { read_half: R, read_buf: BytesMut },
+    Spawned(JoinHandle<BodyReadResult<R>>),
 }
 
 #[cfg(test)]
@@ -87,8 +86,72 @@ where
         + Sync
         + 'static,
 {
-    let (mut read_half, mut write_half) = tokio::io::split(io);
-    let mut read_buf = BytesMut::new();
+    let (read_half, write_half) = tokio::io::split(io);
+    serve_http1_parts(
+        read_half,
+        write_half,
+        BytesMut::new(),
+        service,
+        header_read_timeout,
+        body_channel_capacity,
+        |read_half, write_half| Ok(read_half.unsplit(write_half)),
+    )
+    .await
+}
+
+pub(crate) async fn serve_http1_tcp_with_interim_and_capacity<S>(
+    io: TcpStream,
+    prefix: Bytes,
+    service: S,
+    header_read_timeout: Duration,
+    body_channel_capacity: usize,
+) -> Result<()>
+where
+    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Send
+        + Sync
+        + 'static,
+{
+    let read_buf = prefix
+        .try_into_mut()
+        .unwrap_or_else(|prefix| BytesMut::from(prefix.as_ref()));
+    let (read_half, write_half) = io.into_split();
+    serve_http1_parts(
+        read_half,
+        write_half,
+        read_buf,
+        service,
+        header_read_timeout,
+        body_channel_capacity,
+        |read_half, write_half| {
+            read_half
+                .reunite(write_half)
+                .map_err(|_| anyhow!("failed to reunite HTTP/1 TCP stream"))
+        },
+    )
+    .await
+}
+
+async fn serve_http1_parts<R, W, S, U, I>(
+    mut read_half: R,
+    mut write_half: W,
+    mut read_buf: BytesMut,
+    service: S,
+    header_read_timeout: Duration,
+    body_channel_capacity: usize,
+    reunite: U,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Send
+        + Sync
+        + 'static,
+    U: FnOnce(R, W) -> Result<I>,
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut reunite = Some(reunite);
     let mut response_head_buf = BytesMut::with_capacity(512);
 
     loop {
@@ -118,13 +181,11 @@ where
             };
 
         read_buf.advance(parsed.consumed);
-        let mut request = Request::builder()
-            .method(parsed.method.clone())
-            .uri(parsed.uri)
-            .body(Body::empty())?;
+        let mut request = Request::new(Body::empty());
+        *request.method_mut() = parsed.method.clone();
+        *request.uri_mut() = parsed.uri;
         *request.version_mut() = parsed.version;
         *request.headers_mut() = parsed.headers;
-
         if parsed.upgrade || parsed.method == Method::CONNECT {
             if parsed.body_kind != RequestBodyKind::Empty {
                 write_status_and_headers(
@@ -163,7 +224,10 @@ where
             )
             .await?;
             if http1_upgrade_accepted(parsed.upgrade, &parsed.method, status) {
-                let io = read_half.unsplit(write_half);
+                let reunite = reunite
+                    .take()
+                    .ok_or_else(|| anyhow!("HTTP/1 stream was already reunited"))?;
+                let io = reunite(read_half, write_half)?;
                 let io = crate::http::protocol::io_prefix::PrefixedIo::new(io, read_buf.freeze());
                 upgrade_commit.resolve_with_io(io);
                 return Ok(());
@@ -235,15 +299,15 @@ where
     }
 }
 
-fn prepare_request_body<I>(
-    read_half: ReadHalf<I>,
+fn prepare_request_body<R>(
+    read_half: R,
     read_buf: BytesMut,
     kind: RequestBodyKind,
     read_timeout: Duration,
     body_channel_capacity: usize,
-) -> (Body, RequestBodyRead<I>)
+) -> (Body, RequestBodyRead<R>)
 where
-    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
 {
     match kind {
         RequestBodyKind::Empty => (
@@ -286,55 +350,24 @@ where
     R: AsyncRead + Unpin,
 {
     loop {
-        let mut headers = [httparse::EMPTY_HEADER; 128];
-        let mut request = httparse::Request::new(&mut headers);
-        let parsed = match request.parse(buf.as_ref()) {
-            Ok(parsed) => parsed,
-            Err(httparse::Error::TooManyHeaders) => {
-                return Err(RequestHeaderFieldsTooLarge.into());
+        if buf.is_empty() {
+            let n = match timeout_after_pending(header_read_timeout, reader.read_buf(buf)).await {
+                Ok(Ok(n)) => n,
+                Ok(Err(err)) => return Err(err.into()),
+                Err(_) => return Err(anyhow!("HTTP/1 request header read timed out")),
+            };
+            if n == 0 {
+                return Ok(None);
             }
-            Err(error) => return Err(error.into()),
-        };
-        match parsed {
-            httparse::Status::Complete(consumed) => {
-                let method = request
-                    .method
-                    .ok_or_else(|| anyhow!("missing request method"))?
-                    .parse::<Method>()
-                    .map_err(|_| anyhow!("invalid request method"))?;
-                let target = request
-                    .path
-                    .ok_or_else(|| anyhow!("missing request target"))?;
-                let uri = target
-                    .parse::<Uri>()
-                    .or_else(|_| Uri::builder().path_and_query(target).build())
-                    .map_err(|err| anyhow!("invalid request target: {err}"))?;
-                let version = parse_version(request.version, "missing HTTP version")?;
-                let headers = parse_header_map(request.headers)?;
-                let body_kind = determine_request_body_kind(&headers)?;
-                let keep_alive = request_keep_alive(version, &headers);
-                let upgrade = request_has_upgrade(&headers);
-                let send_continue = version == Version::HTTP_11
-                    && body_kind != RequestBodyKind::Empty
-                    && expect_continue(&headers)
-                    && qpx_http::protocol::semantics::validate_expect_header(&headers).is_ok();
-                return Ok(Some(ParsedRequestHead {
-                    method,
-                    uri,
-                    version,
-                    headers,
-                    body_kind,
-                    consumed,
-                    keep_alive,
-                    upgrade,
-                    send_continue,
-                }));
-            }
-            httparse::Status::Partial => {
+        }
+        match try_parse_http1_request_head(buf.as_ref())? {
+            Some(parsed) => return Ok(Some(parsed)),
+            None => {
                 if buf.len() >= MAX_HEADER_BYTES {
                     return Err(RequestHeaderFieldsTooLarge.into());
                 }
-                let n = match timeout(header_read_timeout, reader.read_buf(buf)).await {
+                let n = match timeout_after_pending(header_read_timeout, reader.read_buf(buf)).await
+                {
                     Ok(Ok(n)) => n,
                     Ok(Err(err)) => return Err(err.into()),
                     Err(_) => return Err(anyhow!("HTTP/1 request header read timed out")),
@@ -348,6 +381,81 @@ where
             }
         }
     }
+}
+
+const COMMON_HTTP1_REQUEST_HEADERS: usize = 32;
+const MAX_HTTP1_REQUEST_HEADERS: usize = 128;
+
+fn try_parse_http1_request_head(buf: &[u8]) -> Result<Option<ParsedRequestHead>> {
+    let mut common_headers =
+        [const { std::mem::MaybeUninit::uninit() }; COMMON_HTTP1_REQUEST_HEADERS];
+    let mut request = httparse::Request::new(&mut []);
+    match httparse::ParserConfig::default().parse_request_with_uninit_headers(
+        &mut request,
+        buf,
+        &mut common_headers,
+    ) {
+        Ok(httparse::Status::Complete(consumed)) => {
+            return finish_parsed_http1_request(&request, consumed).map(Some);
+        }
+        Ok(httparse::Status::Partial) => return Ok(None),
+        Err(httparse::Error::TooManyHeaders) => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let mut maximum_headers =
+        [const { std::mem::MaybeUninit::uninit() }; MAX_HTTP1_REQUEST_HEADERS];
+    let mut request = httparse::Request::new(&mut []);
+    match httparse::ParserConfig::default().parse_request_with_uninit_headers(
+        &mut request,
+        buf,
+        &mut maximum_headers,
+    ) {
+        Ok(httparse::Status::Complete(consumed)) => {
+            finish_parsed_http1_request(&request, consumed).map(Some)
+        }
+        Ok(httparse::Status::Partial) => Ok(None),
+        Err(httparse::Error::TooManyHeaders) => Err(RequestHeaderFieldsTooLarge.into()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn finish_parsed_http1_request(
+    request: &httparse::Request<'_, '_>,
+    consumed: usize,
+) -> Result<ParsedRequestHead> {
+    let method = request
+        .method
+        .ok_or_else(|| anyhow!("missing request method"))?
+        .parse::<Method>()
+        .map_err(|_| anyhow!("invalid request method"))?;
+    let target = request
+        .path
+        .ok_or_else(|| anyhow!("missing request target"))?;
+    let uri = target
+        .parse::<Uri>()
+        .or_else(|_| Uri::builder().path_and_query(target).build())
+        .map_err(|err| anyhow!("invalid request target: {err}"))?;
+    let version = parse_version(request.version, "missing HTTP version")?;
+    let headers = parse_header_map_recycled(request.headers)?;
+    let body_kind = determine_request_body_kind(&headers)?;
+    let keep_alive = request_keep_alive(version, &headers);
+    let upgrade = request_has_upgrade(&headers);
+    let send_continue = version == Version::HTTP_11
+        && body_kind != RequestBodyKind::Empty
+        && expect_continue(&headers)
+        && qpx_http::protocol::semantics::validate_expect_header(&headers).is_ok();
+    Ok(ParsedRequestHead {
+        method,
+        uri,
+        version,
+        headers,
+        body_kind,
+        consumed,
+        keep_alive,
+        upgrade,
+        send_continue,
+    })
 }
 
 #[derive(Debug, thiserror::Error)]

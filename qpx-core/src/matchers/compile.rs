@@ -35,7 +35,8 @@ impl CompiledMatch {
         let (http_version, _) = compile_text_patterns(&config.http_version, true, false, interner)?;
         let (alpn, _) = compile_text_patterns(&config.alpn, true, false, interner)?;
         let (tls_version, _) = compile_text_patterns(&config.tls_version, true, false, interner)?;
-        let destination = CompiledDestinationMatch::compile(config.destination.as_ref(), interner)?;
+        let destination = CompiledDestinationMatch::compile(config.destination.as_ref(), interner)?
+            .filter(|matcher| !matcher.is_empty());
         let request_size = compile_numeric_matchers(&config.request_size)?;
         let response_status = compile_numeric_matchers(&config.response_status)?;
         let response_size = compile_numeric_matchers(&config.response_size)?;

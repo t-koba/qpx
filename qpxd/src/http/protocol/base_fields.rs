@@ -1,8 +1,11 @@
 use crate::http::protocol::common::http_version_label;
-use hyper::{Method, Request};
+use http::Method;
+use http::uri::{Authority, Scheme};
+use hyper::Request;
 use qpx_core::rules::RuleMatchContext;
-use qpx_http::protocol::address::parse_authority_host_port;
+use qpx_http::protocol::address::parse_authority_with_default_port;
 use std::net::IpAddr;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Default)]
 pub(crate) struct BaseRequestContext<'a> {
@@ -10,37 +13,93 @@ pub(crate) struct BaseRequestContext<'a> {
     pub(crate) dst_port: Option<u16>,
     pub(crate) host: Option<&'a str>,
     pub(crate) sni: Option<&'a str>,
-    pub(crate) authority: Option<&'a str>,
-    pub(crate) scheme: Option<&'a str>,
+    pub(crate) shared_sni: Option<Arc<str>>,
+    pub(crate) scheme: Option<Scheme>,
+    pub(crate) validated_request: Option<qpx_http::protocol::semantics::ValidatedIncomingRequest>,
+}
+
+#[derive(Debug, Clone)]
+enum BaseAuthority {
+    Parsed(Authority),
+    InvalidPort(Authority),
+    InvalidHeader(String),
+}
+
+impl BaseAuthority {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Parsed(authority) | Self::InvalidPort(authority) => authority.as_str(),
+            Self::InvalidHeader(value) => value.as_str(),
+        }
+    }
+
+    fn host(&self) -> &str {
+        match self {
+            Self::Parsed(authority) => authority.host(),
+            Self::InvalidPort(authority) => authority.as_str(),
+            Self::InvalidHeader(value) => value.as_str(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct BaseRequestFields {
     pub(crate) peer_ip: Option<IpAddr>,
     pub(crate) dst_port: Option<u16>,
-    pub(crate) host: Option<String>,
-    pub(crate) sni: Option<String>,
+    host_override: Option<String>,
+    normalized_host: Option<String>,
+    pub(crate) sni: Option<Arc<str>>,
     pub(crate) method: Method,
-    pub(crate) path: Option<String>,
-    pub(crate) query: Option<String>,
-    pub(crate) authority: Option<String>,
-    pub(crate) scheme: Option<String>,
-    pub(crate) request_uri: String,
+    authority: Option<BaseAuthority>,
+    pub(crate) scheme: Option<Scheme>,
+    pub(crate) uri: http::Uri,
+    request_uri: OnceLock<String>,
     pub(crate) http_version: &'static str,
 }
 
 impl BaseRequestFields {
+    pub(crate) fn path(&self) -> Option<&str> {
+        Some(self.uri.path())
+    }
+
+    pub(crate) fn query(&self) -> Option<&str> {
+        self.uri.query()
+    }
+
+    pub(crate) fn request_uri(&self) -> &str {
+        if self.uri.scheme().is_some()
+            || (self.uri.authority().is_some() && self.uri.path_and_query().is_none())
+        {
+            return self.request_uri.get_or_init(|| self.uri.to_string());
+        }
+        self.uri
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or("")
+    }
+
+    pub(crate) fn host(&self) -> Option<&str> {
+        self.host_override
+            .as_deref()
+            .or(self.normalized_host.as_deref())
+            .or_else(|| self.authority.as_ref().map(BaseAuthority::host))
+    }
+
+    pub(crate) fn authority(&self) -> Option<&str> {
+        self.authority.as_ref().map(BaseAuthority::as_str)
+    }
+
     pub(crate) fn rule_match_context(&self) -> RuleMatchContext<'_> {
         RuleMatchContext {
             src_ip: self.peer_ip,
             dst_port: self.dst_port,
-            host: self.host.as_deref(),
+            host: self.host(),
             sni: self.sni.as_deref(),
             method: Some(self.method.as_str()),
-            path: self.path.as_deref(),
-            query: self.query.as_deref(),
-            authority: self.authority.as_deref(),
-            scheme: self.scheme.as_deref(),
+            path: self.path(),
+            query: self.query(),
+            authority: self.authority(),
+            scheme: self.scheme.as_ref().map(Scheme::as_str),
             http_version: Some(self.http_version),
             ..Default::default()
         }
@@ -51,55 +110,77 @@ pub(crate) fn extract_base_request_fields<B>(
     req: &Request<B>,
     ctx: BaseRequestContext<'_>,
 ) -> BaseRequestFields {
-    let scheme = ctx
-        .scheme
-        .map(str::to_string)
-        .or_else(|| req.uri().scheme_str().map(str::to_string));
-    let derived_authority = req
-        .uri()
-        .authority()
-        .map(|authority| authority.as_str().to_string())
-        .or_else(|| {
-            req.headers()
-                .get(http::header::HOST)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string)
-        });
-    let (derived_host, derived_port) =
-        extract_host_port(req, scheme.as_deref(), derived_authority.as_deref());
+    let uri = req.uri().clone();
+    let scheme = ctx.scheme.or_else(|| req.uri().scheme().cloned());
+    let default_port = default_port_for_scheme(
+        scheme
+            .as_ref()
+            .map(Scheme::as_str)
+            .or_else(|| req.uri().scheme_str()),
+    );
+    let (derived_authority, derived_port) =
+        extract_authority(req, default_port, ctx.validated_request);
+    let normalized_host = ctx.host.is_none().then(|| {
+        let host = derived_authority.as_ref()?.host();
+        host.bytes()
+            .any(|byte| byte.is_ascii_uppercase())
+            .then(|| host.to_ascii_lowercase())
+    });
 
     BaseRequestFields {
         peer_ip: ctx.peer_ip,
         dst_port: ctx.dst_port.or(derived_port),
-        host: ctx.host.map(str::to_string).or(derived_host),
-        sni: ctx.sni.map(str::to_string),
+        host_override: ctx.host.map(str::to_string),
+        normalized_host: normalized_host.flatten(),
+        sni: ctx.shared_sni.or_else(|| ctx.sni.map(Arc::<str>::from)),
         method: req.method().clone(),
-        path: Some(req.uri().path().to_string()),
-        query: req
-            .uri()
-            .path_and_query()
-            .and_then(|value| value.query())
-            .map(str::to_string),
-        authority: ctx.authority.map(str::to_string).or(derived_authority),
+        authority: derived_authority,
         scheme,
-        request_uri: req.uri().to_string(),
+        uri,
+        request_uri: OnceLock::new(),
         http_version: http_version_label(req.version()),
     }
 }
 
-fn extract_host_port<B>(
+fn extract_authority<B>(
     req: &Request<B>,
-    scheme: Option<&str>,
-    authority: Option<&str>,
-) -> (Option<String>, Option<u16>) {
-    let default_port = default_port_for_scheme(scheme.or_else(|| req.uri().scheme_str()));
-    if let Some(authority) = authority {
-        if let Some((host, port)) = parse_authority_host_port(authority, default_port) {
-            return (Some(host), Some(port));
+    default_port: u16,
+    validated_request: Option<qpx_http::protocol::semantics::ValidatedIncomingRequest>,
+) -> (Option<BaseAuthority>, Option<u16>) {
+    if let Some(authority) = req.uri().authority() {
+        if authority_has_explicit_port(authority.as_str()) && authority.port_u16().is_none() {
+            return (Some(BaseAuthority::InvalidPort(authority.clone())), None);
         }
-        return (Some(authority.to_string()), None);
+        let port = authority.port_u16().unwrap_or(default_port);
+        return (Some(BaseAuthority::Parsed(authority.clone())), Some(port));
     }
-    (None, None)
+    if let Some(authority) = validated_request.and_then(|validated| validated.into_authority()) {
+        if authority_has_explicit_port(authority.as_str()) && authority.port_u16().is_none() {
+            return (Some(BaseAuthority::InvalidPort(authority)), None);
+        }
+        let port = authority.port_u16().unwrap_or(default_port);
+        return (Some(BaseAuthority::Parsed(authority)), Some(port));
+    }
+    let Some(value) = req.headers().get(http::header::HOST) else {
+        return (None, None);
+    };
+    let Ok(raw) = value.to_str() else {
+        return (None, None);
+    };
+    match parse_authority_with_default_port(raw, Some(default_port)) {
+        Some((authority, port)) => (Some(BaseAuthority::Parsed(authority)), Some(port)),
+        None => (Some(BaseAuthority::InvalidHeader(raw.to_owned())), None),
+    }
+}
+
+fn authority_has_explicit_port(authority: &str) -> bool {
+    if let Some(suffix) = authority
+        .strip_prefix('[')
+        .and_then(|value| value.find(']').map(|close| &value[close + 1..]))
+    {
+        return suffix.starts_with(':');
+    }
+    authority.contains(':')
 }
 
 fn default_port_for_scheme(scheme: Option<&str>) -> u16 {
@@ -131,11 +212,97 @@ mod tests {
             },
         );
 
-        assert_eq!(fields.path.as_deref(), Some("/foo/bar"));
-        assert_eq!(fields.query.as_deref(), Some("a=1&b=2"));
+        assert_eq!(fields.path(), Some("/foo/bar"));
+        assert_eq!(fields.query(), Some("a=1&b=2"));
+        assert_eq!(fields.request_uri(), "https://example.com/foo/bar?a=1&b=2");
+        assert_eq!(fields.host(), Some("example.com"));
 
         let ctx = fields.rule_match_context();
         assert_eq!(ctx.path, Some("/foo/bar"));
         assert_eq!(ctx.query, Some("a=1&b=2"));
+        assert_eq!(ctx.authority, Some("example.com"));
+        assert_eq!(ctx.scheme, Some("https"));
+    }
+
+    #[test]
+    fn origin_form_request_uri_borrows_path_and_query() {
+        let req = Request::builder()
+            .uri("/foo/bar?a=1&b=2")
+            .body(())
+            .expect("request");
+
+        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+
+        assert!(fields.request_uri.get().is_none());
+        assert_eq!(fields.request_uri(), "/foo/bar?a=1&b=2");
+    }
+
+    #[test]
+    fn lowercase_host_does_not_require_normalized_storage() {
+        let req = Request::builder()
+            .uri("/")
+            .header(http::header::HOST, "example.com:8080")
+            .body(())
+            .expect("request");
+
+        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+
+        assert_eq!(fields.host(), Some("example.com"));
+        assert!(fields.normalized_host.is_none());
+        assert_eq!(fields.dst_port, Some(8080));
+    }
+
+    #[test]
+    fn uppercase_host_is_normalized_once() {
+        let req = Request::builder()
+            .uri("/")
+            .header(http::header::HOST, "EXAMPLE.COM")
+            .body(())
+            .expect("request");
+
+        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+
+        assert_eq!(fields.host(), Some("example.com"));
+        assert_eq!(fields.normalized_host.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn uri_service_name_port_is_not_treated_as_the_default_numeric_port() {
+        let req = Request::builder()
+            .uri("http://example.com:http/resource")
+            .body(())
+            .expect("request");
+
+        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+
+        assert_eq!(fields.host(), Some("example.com:http"));
+        assert_eq!(fields.dst_port, None);
+    }
+
+    #[test]
+    fn extraction_reuses_preflight_authority_metadata() {
+        let req = Request::builder()
+            .version(http::Version::HTTP_11)
+            .uri("/")
+            .header(http::header::HOST, "example.com:http")
+            .body(())
+            .expect("request");
+        let validated =
+            qpx_http::protocol::semantics::validate_incoming_request_with_metadata(&req)
+                .expect("validated request");
+        let fields = extract_base_request_fields(
+            &req,
+            BaseRequestContext {
+                validated_request: Some(validated),
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(
+            fields.authority,
+            Some(BaseAuthority::InvalidPort(_))
+        ));
+        assert_eq!(fields.host(), Some("example.com:http"));
+        assert_eq!(fields.dst_port, None);
     }
 }

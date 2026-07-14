@@ -1,4 +1,4 @@
-use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
+use crate::http::codec::h1::serve_http1_tcp_with_interim_and_capacity;
 use crate::http::codec::interim::{
     H2_PREFACE, serve_h2_with_interim_and_capacity_and_tuning, sniff_h2_preface,
 };
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod connect;
 #[cfg(feature = "http3")]
@@ -213,7 +213,7 @@ async fn run_forward_acceptor(
                     return;
                 }
             };
-            let stream = crate::http::protocol::io_prefix::PrefixedIo::new(stream, preface.clone());
+            let (stream, preface) = stream.into_inner_with_leading_prefix(preface);
             let access_cfg = runtime.state().resources.access_log.clone();
             let limits = runtime.state().plan.limits;
             let body_channel_capacity = limits.body.body_channel_capacity;
@@ -241,6 +241,7 @@ async fn run_forward_acceptor(
                 &access_cfg,
             );
             let result = if preface.as_ref() == H2_PREFACE {
+                let stream = crate::http::protocol::io_prefix::PrefixedIo::new(stream, preface);
                 serve_h2_with_interim_and_capacity_and_tuning(
                     stream,
                     service,
@@ -251,8 +252,9 @@ async fn run_forward_acceptor(
                 )
                 .await
             } else {
-                serve_http1_with_interim_and_capacity(
+                serve_http1_tcp_with_interim_and_capacity(
                     stream,
+                    preface,
                     service,
                     header_read_timeout,
                     body_channel_capacity,
@@ -260,7 +262,11 @@ async fn run_forward_acceptor(
                 .await
             };
             if let Err(err) = result {
-                warn!(error = ?err, "forward connection failed");
+                if crate::http::codec::is_expected_peer_disconnect(&err) {
+                    debug!(error = ?err, "forward peer disconnected");
+                } else {
+                    warn!(error = ?err, "forward connection failed");
+                }
             }
         });
     }

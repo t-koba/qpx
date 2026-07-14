@@ -85,6 +85,7 @@ pub(super) async fn send_h2_request_with_sender(
         interim,
         response,
         upstream_cert,
+        response_finalized: false,
     })
 }
 

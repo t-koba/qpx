@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout};
 use tracing::warn;
 
 const MIRROR_MAX_INFLIGHT_PER_ENDPOINT: usize = 256;
@@ -66,14 +66,16 @@ pub(super) fn record_reverse_upstream_status(
     upstream: &UpstreamEndpoint,
     policy: &RoutePolicy,
     status: StatusCode,
-    elapsed: Duration,
+    started: Option<Instant>,
 ) {
     let Some(passive) = policy.passive_health.as_ref() else {
         if status.is_server_error() {
             upstream.mark_failure(&policy.health);
         } else {
-            policy.retry_budget.record_success();
-            upstream.mark_success(&policy.lifecycle);
+            if policy.retry_attempts > 1 {
+                policy.retry_budget.record_success();
+            }
+            upstream.mark_response_success(&policy.lifecycle);
         }
         return;
     };
@@ -81,9 +83,15 @@ pub(super) fn record_reverse_upstream_status(
         upstream.mark_passive_failure(Some(passive), PassiveFailureKind::Http5xx);
         return;
     }
-    policy.retry_budget.record_success();
+    if policy.retry_attempts > 1 {
+        policy.retry_budget.record_success();
+    }
     upstream.mark_passive_success(&policy.lifecycle);
-    upstream.mark_passive_latency(Some(passive), elapsed);
+    if passive.latency_threshold.is_some()
+        && let Some(started) = started
+    {
+        upstream.mark_passive_latency(Some(passive), started.elapsed());
+    }
 }
 
 pub(super) fn record_reverse_upstream_error(
@@ -192,7 +200,7 @@ pub(super) fn dispatch_mirrors(
             .await;
             upstream_for_task.inflight.fetch_sub(1, Ordering::Relaxed);
             match response {
-                Ok(Ok(_)) => upstream_for_task.mark_success(&lifecycle),
+                Ok(Ok(_)) => upstream_for_task.mark_response_success(&lifecycle),
                 Ok(Err(_)) | Err(_) => upstream_for_task.mark_failure(&health_policy),
             }
         });
@@ -251,7 +259,7 @@ pub(super) fn dispatch_streaming_mirrors(input: StreamingMirrorDispatch<'_>) {
             .await;
             upstream_for_task.inflight.fetch_sub(1, Ordering::Relaxed);
             match response {
-                Ok(Ok(_)) => upstream_for_task.mark_success(&lifecycle),
+                Ok(Ok(_)) => upstream_for_task.mark_response_success(&lifecycle),
                 Ok(Err(_)) | Err(_) => upstream_for_task.mark_failure(&health_policy),
             }
         });

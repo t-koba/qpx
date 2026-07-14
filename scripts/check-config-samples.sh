@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-config-check.XXXXXX")"
-RUSTLS_TARGET_DIR="${QPX_CONFIG_CHECK_TARGET_DIR:-$TMP_DIR/target-rustls}"
-NATIVE_TARGET_DIR="${QPX_CONFIG_CHECK_NATIVE_TARGET_DIR:-$TMP_DIR/target-native}"
+RUSTLS_TARGET_DIR="${QPX_CONFIG_CHECK_TARGET_DIR:-$ROOT_DIR/target}"
+NATIVE_TARGET_DIR="${QPX_CONFIG_CHECK_NATIVE_TARGET_DIR:-$ROOT_DIR/target/config-check-native}"
 QPXD_BUILD_BIN="$RUSTLS_TARGET_DIR/debug/qpxd"
 QPXF_BUILD_BIN="$RUSTLS_TARGET_DIR/debug/qpxf"
 QPXD_BIN="$TMP_DIR/qpxd-rustls"

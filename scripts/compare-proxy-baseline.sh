@@ -8,7 +8,7 @@ THRESHOLD=""
 usage() {
   cat >&2 <<'USAGE'
 usage:
-  scripts/compare-proxy-baseline.sh [--threshold 0.10] <proxy-jsonl> [baseline-json]
+  scripts/compare-proxy-baseline.sh [--threshold 0.10] <proxy-jsonl> [baseline-json] [objectives-json]
   scripts/compare-proxy-baseline.sh --generate-baseline [--threshold 0.10] <proxy-jsonl> <baseline-json>
 USAGE
 }
@@ -48,23 +48,24 @@ done
 
 JSONL="${1:-${QPX_PROXY_COMPARE_JSON:-}}"
 BASELINE="${2:-${QPX_PROXY_COMPARE_BASELINE:-$ROOT_DIR/perf/baseline-proxy-compare.json}}"
+OBJECTIVES="${3:-${QPX_PROXY_PERFORMANCE_OBJECTIVES:-$ROOT_DIR/perf/proxy-performance-objectives.json}}"
 
 if [ -z "$JSONL" ] || [ -z "$BASELINE" ]; then
   usage
   exit 2
 fi
 
-python3 - "$MODE" "$JSONL" "$BASELINE" "$THRESHOLD" <<'PY'
+python3 - "$MODE" "$JSONL" "$BASELINE" "$OBJECTIVES" "$THRESHOLD" <<'PY'
 import json
 import math
 import os
 import sys
 from collections import defaultdict
 
-MODE, JSONL_PATH, BASELINE_PATH, THRESHOLD_ARG = sys.argv[1:5]
+MODE, JSONL_PATH, BASELINE_PATH, OBJECTIVES_PATH, THRESHOLD_ARG = sys.argv[1:6]
 BENCH = "proxy_compare_http1_reverse"
-METRIC = "qpxd_requests_per_sec / external_proxy_median_requests_per_sec"
-DEFAULT_THRESHOLD = 0.10
+METRIC = "multi_axis_proxy_dominance"
+DEFAULT_THRESHOLD = 0.05
 EXTERNAL_PROXIES = ("nginx", "apache", "lighttpd")
 
 
@@ -119,10 +120,44 @@ def nonnegative_int(record, field):
     return value
 
 
+def positive_int(record, field):
+    value = nonnegative_int(record, field)
+    if value == 0:
+        fail(f"{field} must be positive")
+    return value
+
+
+def nested_number(record, container, field):
+    nested = record.get(container)
+    if not isinstance(nested, dict):
+        fail(
+            f"record for proxy {record.get('proxy', '<missing>')} "
+            f"is missing object {container}"
+        )
+    return number(nested, field)
+
+
 def require_valid_sample(record):
     proxy = record.get("proxy", "<missing>")
     if record.get("valid") is not True:
         fail(f"proxy comparison record for {proxy} is marked invalid")
+    sample_attempts = nonnegative_int(record, "sample_attempts")
+    valid_samples = nonnegative_int(record, "valid_samples")
+    if sample_attempts == 0:
+        fail(f"proxy comparison record for {proxy} has no sample attempts")
+    if valid_samples > sample_attempts:
+        fail(f"proxy comparison record for {proxy} has impossible valid sample count")
+    if valid_samples < sample_attempts // 2 + 1:
+        fail(f"proxy comparison record for {proxy} lacks a majority of valid samples")
+    if record.get("aggregation") != "conservative_median_per_metric":
+        fail(f"proxy comparison record for {proxy} uses an unsupported aggregation")
+    if record.get("sampling_order") != "round_robin_interleaved":
+        fail(f"proxy comparison record for {proxy} uses an unsupported sampling order")
+    if positive_int(record, "benchmark_schema_version") != 2:
+        fail(f"proxy comparison record for {proxy} uses an unsupported benchmark schema")
+    positive_int(record, "backend_workers")
+    positive_int(record, "health_check_interval_ms")
+    positive_int(record, "logical_cpus")
     if nonnegative_int(record, "complete_requests") != nonnegative_int(record, "requests"):
         fail(f"proxy comparison record for {proxy} did not complete all requests")
     connect_errors = nonnegative_int(record, "connect_errors")
@@ -146,6 +181,11 @@ def require_valid_sample(record):
         fail(f"proxy comparison record for {proxy} has bad response lengths")
     if str(record.get("status_before")) != "200" or str(record.get("status_after")) != "200":
         fail(f"proxy comparison record for {proxy} failed status probes")
+    throughput_spread = nested_number(record, "sample_spread", "requests_per_sec_ratio")
+    cpu_spread = nested_number(record, "sample_spread", "requests_per_cpu_second_ratio")
+    nested_number(record, "sample_spread", "latency_p99_ratio")
+    if throughput_spread < 1.0 or cpu_spread < 1.0:
+        fail(f"proxy comparison record for {proxy} has an invalid sample spread")
 
 
 def sample_dimension(record):
@@ -192,33 +232,86 @@ def collect_ratios(records, target_keys=None):
         if target_keys is not None and key not in target_keys:
             continue
         require_valid_sample(record)
+        if proxy in grouped[key]:
+            fail(f"duplicate proxy comparison record for lane {key} and {proxy}")
         grouped[key][proxy] = record
 
     ratios = []
     for key in sorted(grouped):
         proxies = grouped[key]
-        missing = [proxy for proxy in ("qpxd", *EXTERNAL_PROXIES) if proxy not in proxies]
+        missing = [
+            proxy
+            for proxy in ("direct-backend", "qpxd", *EXTERNAL_PROXIES)
+            if proxy not in proxies
+        ]
         if missing:
             fail(f"missing proxy comparison records for lane {key}: {', '.join(missing)}")
+        metadata_fields = (
+            "duration_seconds",
+            "threads",
+            "concurrency",
+            "sample_attempts",
+            "backend_workers",
+            "health_check_interval_ms",
+            "logical_cpus",
+            "benchmark_schema_version",
+            "sampling_order",
+            "aggregation",
+        )
+        for field in metadata_fields:
+            values = {record.get(field) for record in proxies.values()}
+            if len(values) != 1:
+                fail(f"proxy comparison records for lane {key} disagree on {field}")
         qpxd_rps = number(proxies["qpxd"], "requests_per_sec")
-        external_rps = sorted(number(proxies[proxy], "requests_per_sec") for proxy in EXTERNAL_PROXIES)
-        external_median_rps = external_rps[len(external_rps) // 2]
-        ratio = qpxd_rps / external_median_rps
+        external_requests_per_sec = {
+            proxy: number(proxies[proxy], "requests_per_sec") for proxy in EXTERNAL_PROXIES
+        }
+        external_best_rps = max(external_requests_per_sec.values())
+        throughput_ratio = qpxd_rps / external_best_rps
+        qpxd_cpu_efficiency = number(proxies["qpxd"], "requests_per_cpu_second")
+        external_cpu_efficiency = {
+            proxy: number(proxies[proxy], "requests_per_cpu_second") for proxy in EXTERNAL_PROXIES
+        }
+        external_best_cpu_efficiency = max(external_cpu_efficiency.values())
+        cpu_efficiency_ratio = qpxd_cpu_efficiency / external_best_cpu_efficiency
+        qpxd_p99_ms = number(proxies["qpxd"], "latency_p99_ms")
+        external_latency_p99_ms = {
+            proxy: number(proxies[proxy], "latency_p99_ms") for proxy in EXTERNAL_PROXIES
+        }
+        external_best_p99_ms = min(external_latency_p99_ms.values())
+        p99_latency_ratio = qpxd_p99_ms / external_best_p99_ms
+        dominance_score = (
+            throughput_ratio * cpu_efficiency_ratio / p99_latency_ratio
+        ) ** (1.0 / 3.0)
+        direct_backend_rps = number(proxies["direct-backend"], "requests_per_sec")
+        fastest_proxy_rps = max(qpxd_rps, external_best_rps)
+        direct_headroom_ratio = direct_backend_rps / fastest_proxy_rps
         bench, dimension_name, dimension_value, concurrency, body_bytes = key
         ratio_record = {
             "bench": bench,
             dimension_name: dimension_value,
             "concurrency": concurrency,
             "body_bytes": body_bytes,
-            "baseline_ratio": round(ratio, 6),
+            "throughput_ratio": round(throughput_ratio, 6),
+            "cpu_efficiency_ratio": round(cpu_efficiency_ratio, 6),
+            "p99_latency_ratio": round(p99_latency_ratio, 6),
+            "dominance_score": round(dominance_score, 6),
             "qpxd_requests_per_sec": qpxd_rps,
-            "external_proxy_median_requests_per_sec": external_median_rps,
-            "external_proxy_requests_per_sec": {
-                proxy: number(proxies[proxy], "requests_per_sec") for proxy in EXTERNAL_PROXIES
+            "qpxd_requests_per_cpu_second": qpxd_cpu_efficiency,
+            "qpxd_latency_p99_ms": qpxd_p99_ms,
+            "external_proxy_best_requests_per_sec": external_best_rps,
+            "external_proxy_best_requests_per_cpu_second": external_best_cpu_efficiency,
+            "external_proxy_best_latency_p99_ms": external_best_p99_ms,
+            "external_proxy_requests_per_sec": external_requests_per_sec,
+            "external_proxy_requests_per_cpu_second": external_cpu_efficiency,
+            "external_proxy_latency_p99_ms": external_latency_p99_ms,
+            "direct_backend_requests_per_sec": direct_backend_rps,
+            "direct_efficiency_ratio": round(qpxd_rps / direct_backend_rps, 6),
+            "direct_headroom_ratio": round(direct_headroom_ratio, 6),
+            "sample_spread": {
+                proxy: proxies[proxy]["sample_spread"]
+                for proxy in ("direct-backend", "qpxd", *EXTERNAL_PROXIES)
             },
-            "direct_backend_requests_per_sec": number(proxies["direct-backend"], "requests_per_sec")
-            if "direct-backend" in proxies
-            else None,
             "source_commit": proxies["qpxd"].get("commit", "unknown"),
         }
         if dimension_name == "duration_seconds":
@@ -250,11 +343,12 @@ records = load_jsonl(JSONL_PATH)
 
 if MODE == "generate":
     threshold = parse_threshold(THRESHOLD_ARG, DEFAULT_THRESHOLD)
+    baselines = collect_ratios(records)
     baseline = {
-        "schema_version": 1,
+        "schema_version": 3,
         "metric": METRIC,
         "degradation_threshold": threshold,
-        "baselines": collect_ratios(records),
+        "baselines": baselines,
     }
     os.makedirs(os.path.dirname(os.path.abspath(BASELINE_PATH)), exist_ok=True)
     with open(BASELINE_PATH, "w", encoding="utf-8") as handle:
@@ -269,10 +363,29 @@ if MODE != "compare":
 with open(BASELINE_PATH, "r", encoding="utf-8") as handle:
     baseline = json.load(handle)
 
-if baseline.get("schema_version") != 1:
+if baseline.get("schema_version") != 3:
     fail("unsupported proxy baseline schema")
 if baseline.get("metric") != METRIC:
     fail("proxy baseline metric does not match this checker")
+
+with open(OBJECTIVES_PATH, "r", encoding="utf-8") as handle:
+    objectives = json.load(handle)
+if objectives.get("schema_version") != 1:
+    fail("unsupported proxy performance objectives schema")
+if objectives.get("metric") != METRIC:
+    fail("proxy performance objectives metric does not match this checker")
+objective_defaults = objectives.get("defaults", {})
+min_throughput_ratio = number(objective_defaults, "min_throughput_ratio")
+min_cpu_ratio = number(objective_defaults, "min_cpu_efficiency_ratio")
+max_p99_ratio = number(objective_defaults, "max_p99_latency_ratio")
+min_dominance_score = number(objective_defaults, "min_dominance_score")
+min_direct_headroom_ratio = number(objective_defaults, "min_direct_headroom_ratio")
+max_throughput_sample_spread_ratio = number(
+    objective_defaults, "max_throughput_sample_spread_ratio"
+)
+max_cpu_sample_spread_ratio = number(
+    objective_defaults, "max_cpu_sample_spread_ratio"
+)
 
 threshold = parse_threshold(THRESHOLD_ARG, float(baseline.get("degradation_threshold", DEFAULT_THRESHOLD)))
 baseline_entries = baseline.get("baselines", [])
@@ -286,20 +399,94 @@ for entry in baseline_entries:
     if current_entry is None:
         failures.append(f"missing current proxy comparison lane {key}")
         continue
-    baseline_ratio = number(entry, "baseline_ratio")
-    current_ratio = number(current_entry, "baseline_ratio")
-    required_ratio = baseline_ratio * (1.0 - threshold)
-    if current_ratio + 1e-12 < required_ratio:
+    baseline_throughput_ratio = number(entry, "throughput_ratio")
+    current_throughput_ratio = number(current_entry, "throughput_ratio")
+    required_throughput_ratio = baseline_throughput_ratio * (1.0 - threshold)
+    if current_throughput_ratio + 1e-12 < required_throughput_ratio:
         failures.append(
             "proxy baseline regression for "
-            f"{key}: current ratio {current_ratio:.6f} < required {required_ratio:.6f} "
-            f"(baseline {baseline_ratio:.6f}, threshold {threshold:.2%})"
+            f"{key}: current throughput ratio {current_throughput_ratio:.6f} "
+            f"< required {required_throughput_ratio:.6f} "
+            f"(baseline {baseline_throughput_ratio:.6f}, threshold {threshold:.2%})"
         )
     else:
         print(
             "proxy baseline ok for "
-            f"{key}: current ratio {current_ratio:.6f}, required {required_ratio:.6f}"
+            f"{key}: current throughput ratio {current_throughput_ratio:.6f}, "
+            f"required {required_throughput_ratio:.6f}"
         )
+    baseline_cpu_ratio = number(entry, "cpu_efficiency_ratio")
+    current_cpu_ratio = number(current_entry, "cpu_efficiency_ratio")
+    required_cpu_ratio = baseline_cpu_ratio * (1.0 - threshold)
+    if current_cpu_ratio + 1e-12 < required_cpu_ratio:
+        failures.append(
+            "proxy CPU efficiency regression for "
+            f"{key}: current ratio {current_cpu_ratio:.6f} < required {required_cpu_ratio:.6f} "
+            f"(baseline {baseline_cpu_ratio:.6f}, threshold {threshold:.2%})"
+        )
+    baseline_p99_ratio = number(entry, "p99_latency_ratio")
+    current_p99_ratio = number(current_entry, "p99_latency_ratio")
+    allowed_p99_ratio = baseline_p99_ratio * (1.0 + threshold)
+    if current_p99_ratio > allowed_p99_ratio + 1e-12:
+        failures.append(
+            "proxy p99 latency regression for "
+            f"{key}: current ratio {current_p99_ratio:.6f} > allowed {allowed_p99_ratio:.6f} "
+            f"(baseline {baseline_p99_ratio:.6f}, threshold {threshold:.2%})"
+        )
+    baseline_dominance_score = number(entry, "dominance_score")
+    current_dominance_score = number(current_entry, "dominance_score")
+    current_direct_headroom_ratio = number(current_entry, "direct_headroom_ratio")
+    required_dominance_score = baseline_dominance_score * (1.0 - threshold)
+    if current_dominance_score + 1e-12 < required_dominance_score:
+        failures.append(
+            "proxy dominance score regression for "
+            f"{key}: current score {current_dominance_score:.6f} "
+            f"< required {required_dominance_score:.6f} "
+            f"(baseline {baseline_dominance_score:.6f}, threshold {threshold:.2%})"
+        )
+    if current_throughput_ratio + 1e-12 < min_throughput_ratio:
+        failures.append(
+            "proxy throughput dominance objective failed for "
+            f"{key}: current ratio {current_throughput_ratio:.6f} "
+            f"< objective {min_throughput_ratio:.6f}"
+        )
+    if current_cpu_ratio + 1e-12 < min_cpu_ratio:
+        failures.append(
+            "proxy CPU efficiency dominance objective failed for "
+            f"{key}: current ratio {current_cpu_ratio:.6f} < objective {min_cpu_ratio:.6f}"
+        )
+    if current_p99_ratio > max_p99_ratio + 1e-12:
+        failures.append(
+            "proxy p99 latency dominance objective failed for "
+            f"{key}: current ratio {current_p99_ratio:.6f} > objective {max_p99_ratio:.6f}"
+        )
+    if current_dominance_score + 1e-12 < min_dominance_score:
+        failures.append(
+            "proxy aggregate dominance objective failed for "
+            f"{key}: current score {current_dominance_score:.6f} "
+            f"< objective {min_dominance_score:.6f}"
+        )
+    if current_direct_headroom_ratio + 1e-12 < min_direct_headroom_ratio:
+        failures.append(
+            "proxy benchmark backend headroom objective failed for "
+            f"{key}: current ratio {current_direct_headroom_ratio:.6f} "
+            f"< objective {min_direct_headroom_ratio:.6f}"
+        )
+    for proxy, spread in current_entry["sample_spread"].items():
+        throughput_spread = number(spread, "requests_per_sec_ratio")
+        cpu_spread = number(spread, "requests_per_cpu_second_ratio")
+        if throughput_spread > max_throughput_sample_spread_ratio + 1e-12:
+            failures.append(
+                "proxy benchmark throughput sample spread objective failed for "
+                f"{key} and {proxy}: current ratio {throughput_spread:.6f} "
+                f"> objective {max_throughput_sample_spread_ratio:.6f}"
+            )
+        if cpu_spread > max_cpu_sample_spread_ratio + 1e-12:
+            failures.append(
+                "proxy benchmark CPU sample spread objective failed for "
+                f"{key} and {proxy}: current ratio {cpu_spread:.6f} "
+                f"> objective {max_cpu_sample_spread_ratio:.6f}"
+            )
 
 if failures:
     for failure in failures:

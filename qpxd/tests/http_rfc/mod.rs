@@ -85,15 +85,15 @@ use http3::http3_reverse_terminate_smoke;
 use tunnel_websocket::{connect_tunnel_contract, websocket_upgrade_contract};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rfc911x_contract() -> Result<()> {
-    rfc911x_contract_inner().await
+async fn http_rfc_contract() -> Result<()> {
+    http_rfc_contract_inner().await
 }
 
-async fn rfc911x_contract_inner() -> Result<()> {
+async fn http_rfc_contract_inner() -> Result<()> {
     ensure_rustls_provider();
     // --- Scenario 1: HTTP/1.1 forward proxy semantics (RFC 9110/9112 + 6455) ---
     {
-        let dir = temp_dir("qpxd-rfc911x-forward")?;
+        let dir = temp_dir("qpxd-http-rfc-forward")?;
         let state_dir = dir.join("state");
         fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;

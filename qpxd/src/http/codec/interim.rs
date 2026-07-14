@@ -2,14 +2,13 @@ use crate::http::codec::h2::{H2TransportTuning, send_h2_response_with_interim};
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::Result;
 use bytes::Bytes;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use h2::Reason;
 use http::{Request, Response};
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use std::future::poll_fn;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::AsyncReadExt;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
@@ -83,74 +82,96 @@ where
         builder.enable_connect_protocol();
     }
     let mut conn = timeout(idle_timeout, builder.handshake(io)).await??;
-    let active_streams = Arc::new(AtomicUsize::new(0));
+    let mut streams = FuturesUnordered::new();
+    let idle_timer = tokio::time::sleep(idle_timeout);
+    tokio::pin!(idle_timer);
+    let mut connection_closed = false;
     loop {
-        let accepted = timeout(idle_timeout, conn.accept()).await;
-        let Some(result) = (match accepted {
-            Ok(next) => next,
-            Err(_) if active_streams.load(Ordering::Acquire) == 0 => return Ok(()),
-            Err(_) => continue,
-        }) else {
-            break;
-        };
-        let (request, respond) = result?;
-        active_streams.fetch_add(1, Ordering::AcqRel);
-        let guard = ActiveH2StreamGuard::new(active_streams.clone());
-        let service = service.clone();
-        tokio::spawn(async move {
-            let _guard = guard;
-            let request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
-                request,
-                body_channel_capacity,
-            ) {
-                Ok(request) => request,
-                Err(err) => {
-                    warn!(error = ?err, "invalid HTTP/2 request");
-                    let mut respond = respond;
-                    respond.send_reset(Reason::PROTOCOL_ERROR);
-                    return;
-                }
-            };
-            let request_method = request.method().clone();
-            let allow_successful_connect_body =
-                request.extensions().get::<h2::ext::Protocol>().is_some();
-
-            let mut response = match service.call(request).await {
-                Ok(response) => response,
-                Err(impossible) => match impossible {},
-            };
-            let interim = take_interim_response_heads(&mut response);
-            if let Err(err) = send_h2_response_with_interim(
-                respond,
-                response,
-                &interim,
-                &request_method,
-                allow_successful_connect_body,
-                idle_timeout,
-            )
-            .await
-            {
-                warn!(error = ?err, "HTTP/2 stream failed");
+        tokio::select! {
+            biased;
+            completed = streams.next(), if !streams.is_empty() => {
+                debug_assert!(completed.is_some());
+                idle_timer
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + idle_timeout);
             }
-        });
+            accepted = conn.accept(), if !connection_closed => {
+                let Some(result) = accepted else {
+                    connection_closed = true;
+                    continue;
+                };
+                let (request, respond) = result?;
+                idle_timer
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + idle_timeout);
+                streams.push(serve_h2_stream(
+                    request,
+                    respond,
+                    &service,
+                    body_channel_capacity,
+                    idle_timeout,
+                ));
+            }
+            () = idle_timer.as_mut() => {
+                if streams.is_empty() {
+                    return Ok(());
+                }
+                idle_timer
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + idle_timeout);
+            }
+        }
+        if connection_closed && streams.is_empty() {
+            break;
+        }
     }
     poll_fn(|cx| conn.poll_closed(cx)).await?;
     Ok(())
 }
 
-struct ActiveH2StreamGuard {
-    active_streams: Arc<AtomicUsize>,
-}
+async fn serve_h2_stream<S>(
+    request: Request<h2::RecvStream>,
+    respond: h2::server::SendResponse<Bytes>,
+    service: &S,
+    body_channel_capacity: usize,
+    idle_timeout: Duration,
+) where
+    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Send
+        + Sync
+        + 'static,
+{
+    let request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
+        request,
+        body_channel_capacity,
+    ) {
+        Ok(request) => request,
+        Err(err) => {
+            warn!(error = ?err, "invalid HTTP/2 request");
+            let mut respond = respond;
+            respond.send_reset(Reason::PROTOCOL_ERROR);
+            return;
+        }
+    };
+    let request_method = request.method().clone();
+    let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
 
-impl ActiveH2StreamGuard {
-    fn new(active_streams: Arc<AtomicUsize>) -> Self {
-        Self { active_streams }
-    }
-}
-
-impl Drop for ActiveH2StreamGuard {
-    fn drop(&mut self) {
-        self.active_streams.fetch_sub(1, Ordering::AcqRel);
+    let mut response = match service.call(request).await {
+        Ok(response) => response,
+        Err(impossible) => match impossible {},
+    };
+    let interim = take_interim_response_heads(&mut response);
+    if let Err(err) = send_h2_response_with_interim(
+        respond,
+        response,
+        &interim,
+        &request_method,
+        allow_successful_connect_body,
+        idle_timeout,
+    )
+    .await
+    {
+        warn!(error = ?err, "HTTP/2 stream failed");
     }
 }
 
@@ -197,8 +218,11 @@ mod tests {
     use qpx_http::body::Body;
     use qpx_observability::handler_fn;
     use std::convert::Infallible;
+    use std::sync::Arc;
     use tokio::io::AsyncWriteExt;
     use tokio::io::duplex;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Notify;
     use tokio::time::{Duration, sleep};
 
     #[tokio::test(flavor = "current_thread")]
@@ -282,5 +306,69 @@ mod tests {
         .await;
         assert!(result.is_ok(), "preface-only H2 must not stay open");
         drop(client_io);
+    }
+
+    #[tokio::test]
+    async fn h2_server_processes_a_second_stream_while_the_first_is_pending() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("listener address");
+        let first_started = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let server_first_started = first_started.clone();
+        let server_release_first = release_first.clone();
+        let service = handler_fn(move |req: Request<Body>| {
+            let first_started = server_first_started.clone();
+            let release_first = server_release_first.clone();
+            async move {
+                if req.uri().path() == "/first" {
+                    first_started.notify_one();
+                    release_first.notified().await;
+                }
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(200)
+                        .body(Body::from(req.uri().path().to_owned()))
+                        .expect("response"),
+                )
+            }
+        });
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept");
+            serve_h2_with_interim(socket, service, false, Duration::from_secs(5))
+                .await
+                .expect("serve h2");
+        });
+
+        let socket = TcpStream::connect(addr).await.expect("connect");
+        let (mut client, connection) = h2::client::handshake(socket).await.expect("handshake");
+        tokio::spawn(async move {
+            connection.await.expect("client connection");
+        });
+
+        client = client.ready().await.expect("first ready");
+        let first = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/first")
+            .body(())
+            .expect("first request");
+        let (first_response, _) = client.send_request(first, true).expect("send first");
+        first_started.notified().await;
+
+        client = client.ready().await.expect("second ready");
+        let second = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/second")
+            .body(())
+            .expect("second request");
+        let (second_response, _) = client.send_request(second, true).expect("send second");
+        let second_response = tokio::time::timeout(Duration::from_secs(1), second_response)
+            .await
+            .expect("second response must not wait for first")
+            .expect("second response");
+        assert_eq!(second_response.status(), ::http::StatusCode::OK);
+
+        release_first.notify_one();
+        let first_response = first_response.await.expect("first response");
+        assert_eq!(first_response.status(), ::http::StatusCode::OK);
     }
 }

@@ -16,23 +16,24 @@ mod dispatch;
 use self::dispatch::dispatch_forward_request;
 
 pub(crate) async fn handle_request_inner(
-    req: Request<Body>,
+    mut req: Request<Body>,
     runtime: Runtime,
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
 ) -> Result<Response<Body>> {
     let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
-    if let PreflightOutcome::Reject(response) = preflight_validate(
-        &req,
+    let validated_request = match preflight_validate(
+        &mut req,
         proxy_name,
         PreflightOptions::allow_connect(
             state.plan.limits.general.trace_enabled,
             state.messages.trace_disabled.as_str(),
         ),
     ) {
-        return Ok(*response);
-    }
+        PreflightOutcome::Continue(validated) => validated,
+        PreflightOutcome::Reject(response) => return Ok(*response),
+    };
     if req.method() == Method::CONNECT {
         return connect::handle_connect(req, runtime, listener_name, remote_addr).await;
     }
@@ -41,6 +42,7 @@ pub(crate) async fn handle_request_inner(
         &req,
         BaseRequestContext {
             peer_ip: Some(remote_addr.ip()),
+            validated_request: Some(validated_request),
             ..Default::default()
         },
     );

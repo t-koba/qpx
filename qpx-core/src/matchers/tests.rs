@@ -37,6 +37,35 @@ fn compiled_match_method_is_case_insensitive() {
 }
 
 #[test]
+fn empty_destination_match_does_not_require_destination_context() {
+    let cfg = MatchConfig {
+        destination: Some(DestinationMatchConfig::default()),
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+
+    assert!(!compiled.requires_destination_context());
+    assert!(compiled.matches(&RuleMatchContext::default()));
+}
+
+#[test]
+fn only_an_empty_match_is_unconditional() {
+    let mut interner = StringInterner::default();
+    let (empty, _) = CompiledMatch::compile(&MatchConfig::default(), &mut interner)
+        .expect("compile empty match");
+    assert!(empty.is_unconditional());
+
+    let configured = MatchConfig {
+        method: vec!["GET".to_string()],
+        ..Default::default()
+    };
+    let (configured, _) =
+        CompiledMatch::compile(&configured, &mut interner).expect("compile configured match");
+    assert!(!configured.is_unconditional());
+}
+
+#[test]
 fn compiled_match_path_requires_path() {
     let cfg = MatchConfig {
         path: vec!["/foo".to_string()],
@@ -84,6 +113,7 @@ fn compiled_match_supports_destination_source_and_confidence() {
     };
     let mut interner = StringInterner::default();
     let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    assert!(compiled.requires_destination_context());
     let ctx = RuleMatchContext {
         destination_category: Some("ai"),
         destination_category_source: Some("host"),

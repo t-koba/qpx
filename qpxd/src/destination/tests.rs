@@ -213,7 +213,8 @@ fn resolution_override_can_prefer_certificate_evidence() {
         },
     ];
     let classifier = DestinationClassifier::from_config(&config).expect("classifier");
-    let override_policy = CompiledDestinationResolutionPolicy::default().with_override(Some(
+    let default_policy = CompiledDestinationResolutionPolicy::default();
+    let override_policy = default_policy.with_override(Some(
         &qpx_core::config::DestinationResolutionOverrideConfig {
             precedence: Some(vec![
                 qpx_core::config::DestinationEvidenceSourceKind::Cert,

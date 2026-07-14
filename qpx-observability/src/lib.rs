@@ -21,6 +21,7 @@ pub use tracing_support::{extract_trace_context, inject_trace_context, otel_enab
 pub type ObservabilityResult<T> = std::result::Result<T, ObservabilityError>;
 
 static REQUEST_SPANS_ENABLED: AtomicBool = AtomicBool::new(false);
+static METRICS_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Returns whether the configured observability backends consume request spans.
 pub fn request_spans_enabled() -> bool {
@@ -29,6 +30,15 @@ pub fn request_spans_enabled() -> bool {
 
 fn set_request_spans_enabled(enabled: bool) {
     REQUEST_SPANS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Returns whether the process has installed a metrics recorder.
+pub fn metrics_enabled() -> bool {
+    METRICS_ENABLED.load(Ordering::Relaxed)
+}
+
+fn set_metrics_enabled(enabled: bool) {
+    METRICS_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
 /// Error returned by observability setup routines.

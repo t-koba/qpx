@@ -15,6 +15,13 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::yield_now;
 
+#[test]
+fn origin_authority_header_values_are_reused() {
+    let first = cached_origin_authority("example.test:8080").expect("first");
+    let second = cached_origin_authority("example.test:8080").expect("second");
+    assert_eq!(first.as_bytes().as_ptr(), second.as_bytes().as_ptr());
+}
+
 async fn spawn_counting_http1_origin(scheme: &str) -> Result<(OriginEndpoint, Arc<AtomicUsize>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
@@ -164,6 +171,78 @@ async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()>
         None,
     )
     .await?;
+    assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
+
+    assert_eq!(accepts.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bodyless_raw_response_path_retries_a_stale_idle_connection() -> Result<()> {
+    let (origin, accepts, closes, closed) = spawn_closing_keepalive_http1_origin().await?;
+    let pools = crate::pool::PoolRegistry::new();
+    let default_port = origin.default_port_hint();
+    let connect_authority = origin.connect_authority_ref(default_port)?;
+    let host_authority = origin.host_header_authority_ref(default_port)?;
+
+    let first = prepare_proxy_http1_request(
+        Request::builder()
+            .method(http::Method::GET)
+            .uri("/one")
+            .body(Body::empty())?,
+        host_authority.as_ref(),
+        "qpx-test",
+    )?;
+    let first = proxy_direct_plain_http1_raw_response_with_interim(
+        &pools,
+        first,
+        connect_authority.as_ref(),
+        host_authority.as_ref(),
+        http::Version::HTTP_2,
+        "qpx-test",
+    )
+    .await?;
+    assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
+    while closes.load(Ordering::SeqCst) == 0 {
+        let notified = closed.notified();
+        if closes.load(Ordering::SeqCst) == 0 {
+            notified.await;
+        }
+    }
+
+    let second = prepare_proxy_http1_request(
+        Request::builder()
+            .method(http::Method::GET)
+            .uri("/two")
+            .body(Body::empty())?,
+        host_authority.as_ref(),
+        "qpx-test",
+    )?;
+    let second = proxy_direct_plain_http1_raw_response_with_interim(
+        &pools,
+        second,
+        connect_authority.as_ref(),
+        host_authority.as_ref(),
+        http::Version::HTTP_2,
+        "qpx-test",
+    )
+    .await?;
+    assert!(second.response_finalized);
+    assert!(
+        second
+            .response
+            .extensions()
+            .get::<Arc<crate::upstream::raw_http1::RawHttp1ResponseHead>>()
+            .is_none()
+    );
+    assert_eq!(
+        second
+            .response
+            .headers()
+            .get(http::header::VIA)
+            .and_then(|value| value.to_str().ok()),
+        Some("2 qpx-test")
+    );
     assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
 
     assert_eq!(accepts.load(Ordering::SeqCst), 2);

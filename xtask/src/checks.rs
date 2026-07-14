@@ -2980,6 +2980,7 @@ fn ci_acceptance_violations(
         "scripts/perf-audit-allocation-profile.sh",
         "target/perf/perf-audit-allocation-profile.jsonl",
         "target/perf/allocations/**",
+        "scripts/check-allocation-budget.sh target/perf/perf-audit-allocation-profile.jsonl perf/allocation-budget.json",
         "scripts/perf-audit-netem-compare.sh \"$QPX_NETEM_COMPARE_JSON\"",
         "target/perf/perf-audit-netem-proxy-compare.jsonl",
         "target/perf/perf-audit-netem-profile.jsonl",
@@ -5294,6 +5295,7 @@ mod tests {
             scripts/perf-audit-allocation-profile.sh
             target/perf/perf-audit-allocation-profile.jsonl
             target/perf/allocations/**
+            scripts/check-allocation-budget.sh target/perf/perf-audit-allocation-profile.jsonl perf/allocation-budget.json
             scripts/perf-audit-netem-compare.sh "$QPX_NETEM_COMPARE_JSON"
             target/perf/perf-audit-netem-proxy-compare.jsonl
             target/perf/perf-audit-netem-profile.jsonl

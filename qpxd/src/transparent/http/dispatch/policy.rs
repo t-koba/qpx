@@ -24,7 +24,7 @@ pub(super) fn transparent_prefilter_context<'a>(
         src_ip: Some(remote_addr.ip()),
         host: host_for_match.as_deref(),
         sni: None,
-        path: base.path.as_deref(),
+        path: base.path(),
     }
 }
 

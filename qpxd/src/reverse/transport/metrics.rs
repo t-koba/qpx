@@ -1,5 +1,5 @@
 use crate::runtime::RuntimeState;
-use metrics::{Counter, counter, histogram};
+use metrics::{Counter, Histogram, counter, histogram};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -46,8 +46,17 @@ pub(super) fn reverse_result(state: &RuntimeState, result: ReverseResult) {
 }
 
 pub(super) fn upstream_latency(state: &RuntimeState, elapsed: Duration) {
-    let names = &state.observability.metric_names;
-    histogram!(names.reverse_upstream_latency_ms.clone()).record(elapsed.as_secs_f64() * 1000.0);
+    static HISTOGRAM: OnceLock<Histogram> = OnceLock::new();
+    let histogram = HISTOGRAM.get_or_init(|| {
+        histogram!(
+            state
+                .observability
+                .metric_names
+                .reverse_upstream_latency_ms
+                .clone()
+        )
+    });
+    histogram.record(elapsed.as_secs_f64() * 1000.0);
 }
 
 pub(super) fn local_response(state: &RuntimeState) {

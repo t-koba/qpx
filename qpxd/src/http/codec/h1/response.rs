@@ -1,8 +1,12 @@
 use super::{RESPONSE_WRITE_TIMEOUT, has_chunked_transfer_encoding, parse_declared_content_length};
 use crate::http::codec::h1_common::serialize_headers;
-use crate::upstream::raw_http1::InterimResponseHead;
+use crate::http::codec::lazy_timeout::timeout_after_pending;
+use crate::upstream::raw_http1::{
+    InterimResponseHead, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, READ_BUF_SIZE, RawHttp1BodyFraming,
+    RawHttp1ResponseHead, RawHttp1ResponseRelay,
+};
 use anyhow::{Result, anyhow};
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{Method, Response, StatusCode, Version};
 use hyper::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderValue, TRAILER, TRANSFER_ENCODING,
@@ -10,9 +14,10 @@ use hyper::header::{
 use qpx_http::body::Body;
 use std::future::{Future, poll_fn};
 use std::io::{Error as IoError, ErrorKind, IoSlice};
+use std::sync::Arc;
 use std::task::Poll;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, WriteHalf};
-use tokio::time::{Duration, timeout};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::Duration;
 
 enum ResponseBodyKind {
     Empty,
@@ -33,8 +38,8 @@ pub(super) enum ConnectionHeaderMode {
     clippy::too_many_arguments,
     reason = "response relay keeps protocol state and the reusable connection buffer explicit"
 )]
-pub(super) async fn send_http1_response_with_interim<W>(
-    writer: &mut WriteHalf<W>,
+pub(crate) async fn send_http1_response_with_interim<W>(
+    writer: &mut W,
     request_version: Version,
     request_method: &Method,
     response: Response<Body>,
@@ -44,7 +49,7 @@ pub(super) async fn send_http1_response_with_interim<W>(
     head_buf: &mut BytesMut,
 ) -> Result<bool>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     if request_version == Version::HTTP_11 {
         for head in interim {
@@ -71,7 +76,8 @@ where
         }
     }
 
-    let (parts, mut body) = response.into_parts();
+    let (mut parts, mut body) = response.into_parts();
+    let raw_head = parts.extensions.remove::<Arc<RawHttp1ResponseHead>>();
     let mut headers = parts.headers;
     let no_body = request_method == Method::HEAD
         || parts.status.is_informational()
@@ -79,29 +85,44 @@ where
         || parts.status == StatusCode::RESET_CONTENT
         || parts.status == StatusCode::NOT_MODIFIED
         || (request_method == Method::CONNECT && parts.status.is_success());
-    let declared_length = parse_declared_content_length(&headers)?;
-    let has_chunked = has_chunked_transfer_encoding(&headers)?;
-    let body_kind = if no_body {
-        if request_method != Method::HEAD {
-            headers.remove(CONTENT_LENGTH);
+    let body_kind = if let Some(raw) = raw_head.as_ref() {
+        if !raw.is_finalized() {
+            return Err(anyhow!("raw HTTP/1 response head was not finalized"));
         }
-        headers.remove(TRANSFER_ENCODING);
-        headers.remove(TRAILER);
-        ResponseBodyKind::Empty
-    } else if has_chunked {
-        ResponseBodyKind::Chunked
-    } else if let Some(length) = declared_length {
-        if length == 0 {
-            ResponseBodyKind::Empty
-        } else {
-            ResponseBodyKind::ContentLength(length)
+        match raw.framing() {
+            RawHttp1BodyFraming::Empty => ResponseBodyKind::Empty,
+            RawHttp1BodyFraming::ContentLength(length) => ResponseBodyKind::ContentLength(length),
+            RawHttp1BodyFraming::Chunked => ResponseBodyKind::Chunked,
+            RawHttp1BodyFraming::CloseDelimited if request_version == Version::HTTP_11 => {
+                ResponseBodyKind::Chunked
+            }
+            RawHttp1BodyFraming::CloseDelimited => ResponseBodyKind::CloseDelimited,
         }
-    } else if request_version == Version::HTTP_11 {
-        headers.remove(CONTENT_LENGTH);
-        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
-        ResponseBodyKind::Chunked
     } else {
-        ResponseBodyKind::CloseDelimited
+        let declared_length = parse_declared_content_length(&headers)?;
+        let has_chunked = has_chunked_transfer_encoding(&headers)?;
+        if no_body {
+            if request_method != Method::HEAD {
+                headers.remove(CONTENT_LENGTH);
+            }
+            headers.remove(TRANSFER_ENCODING);
+            headers.remove(TRAILER);
+            ResponseBodyKind::Empty
+        } else if has_chunked {
+            ResponseBodyKind::Chunked
+        } else if let Some(length) = declared_length {
+            if length == 0 {
+                ResponseBodyKind::Empty
+            } else {
+                ResponseBodyKind::ContentLength(length)
+            }
+        } else if request_version == Version::HTTP_11 {
+            headers.remove(CONTENT_LENGTH);
+            headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+            ResponseBodyKind::Chunked
+        } else {
+            ResponseBodyKind::CloseDelimited
+        }
     };
 
     let mut first_chunk = None;
@@ -147,13 +168,26 @@ where
         &headers,
         keep_alive,
     );
-    serialize_status_and_headers(
-        head_buf,
-        request_version,
-        parts.status,
-        &headers,
-        connection_mode,
-    );
+    if let Some(raw) = raw_head.as_ref() {
+        serialize_status_and_raw_headers(
+            head_buf,
+            request_version,
+            parts.status,
+            raw.header_lines(),
+            &headers,
+            connection_mode,
+            matches!(body_kind, ResponseBodyKind::Chunked),
+        );
+    } else {
+        serialize_status_and_headers(
+            head_buf,
+            request_version,
+            parts.status,
+            &headers,
+            connection_mode,
+        );
+    }
+    crate::http::codec::header_pool::recycle(headers);
     let head = head_buf.as_ref();
 
     match body_kind {
@@ -166,8 +200,10 @@ where
             let remaining =
                 write_head_and_first_content_length_chunk(writer, head, first_chunk, length)
                     .await?;
-            write_content_length_response_body(writer, &mut body, remaining, body_read_timeout)
-                .await?;
+            if remaining != 0 || !http_body::Body::is_end_stream(&body) {
+                write_content_length_response_body(writer, &mut body, remaining, body_read_timeout)
+                    .await?;
+            }
         }
         ResponseBodyKind::Chunked => {
             if let Some(err) = first_body_error.take() {
@@ -198,8 +234,193 @@ where
     Ok(keep_alive)
 }
 
+pub(crate) async fn send_raw_http1_response_relay_with_interim<W, S>(
+    writer: &mut W,
+    request_version: Version,
+    request_method: &Method,
+    mut response: RawHttp1ResponseRelay<S>,
+    request_keep_alive: bool,
+    head_buf: &mut BytesMut,
+) -> Result<bool>
+where
+    W: AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    if request_version == Version::HTTP_11 {
+        for head in &response.interim {
+            if !head.status.is_informational() {
+                return Err(anyhow!(
+                    "non-informational interim status for HTTP/1: {}",
+                    head.status
+                ));
+            }
+            if head.status == StatusCode::SWITCHING_PROTOCOLS {
+                return Err(anyhow!("HTTP/1 interim responses must not use 101"));
+            }
+            let mut headers = head.headers.clone();
+            qpx_http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
+            write_status_and_headers(
+                writer,
+                head_buf,
+                Version::HTTP_11,
+                head.status,
+                &headers,
+                ConnectionHeaderMode::Omit,
+            )
+            .await?;
+        }
+    }
+
+    if !response.raw.is_finalized() {
+        return Err(anyhow!("raw HTTP/1 response head was not finalized"));
+    }
+    let body_kind = match response.raw.framing() {
+        RawHttp1BodyFraming::Empty => ResponseBodyKind::Empty,
+        RawHttp1BodyFraming::ContentLength(length) => ResponseBodyKind::ContentLength(length),
+        RawHttp1BodyFraming::Chunked | RawHttp1BodyFraming::CloseDelimited => {
+            return Err(anyhow!("direct raw HTTP/1 relay requires bounded framing"));
+        }
+    };
+    let keep_alive = request_keep_alive
+        && request_version == Version::HTTP_11
+        && response.status != StatusCode::SWITCHING_PROTOCOLS
+        && request_method != Method::CONNECT;
+    let connection_mode = if keep_alive {
+        ConnectionHeaderMode::Omit
+    } else {
+        ConnectionHeaderMode::Close
+    };
+    let cached_head = (connection_mode == ConnectionHeaderMode::Omit
+        && request_version == Version::HTTP_11)
+        .then(|| response.raw.serialized_http11_head());
+    let head = match cached_head.as_ref() {
+        Some(head) => head.as_ref(),
+        None => {
+            serialize_status_and_raw_headers(
+                head_buf,
+                request_version,
+                response.status,
+                response.raw.header_lines(),
+                &HeaderMap::new(),
+                connection_mode,
+                false,
+            );
+            head_buf.as_ref()
+        }
+    };
+
+    match body_kind {
+        ResponseBodyKind::Empty => {
+            write_all_with_timeout(writer, head).await?;
+            recycle_direct_raw_upstream_if_clean(&mut response);
+        }
+        ResponseBodyKind::ContentLength(length) => {
+            relay_direct_content_length_response(writer, head, &mut response, length).await?;
+        }
+        ResponseBodyKind::Chunked | ResponseBodyKind::CloseDelimited => unreachable!(),
+    }
+    flush_with_timeout(writer).await?;
+    Ok(keep_alive)
+}
+
+async fn relay_direct_content_length_response<W, S>(
+    writer: &mut W,
+    head: &[u8],
+    response: &mut RawHttp1ResponseRelay<S>,
+    length: u64,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let first_len = response.read_buf.len().min(length as usize);
+    if first_len == 0 {
+        write_all_with_timeout(writer, head).await?;
+    } else {
+        write_vectored_all_with_timeout(writer, &[head, &response.read_buf[..first_len]]).await?;
+        response.read_buf.advance(first_len);
+    }
+
+    let mut remaining = length - first_len as u64;
+    while remaining > 0 {
+        if response.read_buf.is_empty() {
+            let read_size = remaining.min(READ_BUF_SIZE as u64) as usize;
+            response.read_buf.reserve(read_size);
+            let mut limited = (&mut response.read_buf).limit(read_size);
+            let Some(stream) = response.stream.as_mut() else {
+                return Err(anyhow!("raw HTTP/1 relay stream is unavailable"));
+            };
+            let read = timeout_after_pending(
+                RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
+                stream.read_buf(&mut limited),
+            )
+            .await
+            .map_err(|_| anyhow!("HTTP/1 response body read timed out"))??;
+            if read == 0 {
+                return Err(anyhow!(
+                    "response body ended before declared content-length was satisfied"
+                ));
+            }
+            drain_ready_direct_relay_bytes(response, read_size - read).await?;
+        }
+        let take = response.read_buf.len().min(remaining as usize);
+        write_all_with_timeout(writer, &response.read_buf[..take]).await?;
+        response.read_buf.advance(take);
+        remaining -= take as u64;
+    }
+    recycle_direct_raw_upstream_if_clean(response);
+    Ok(())
+}
+
+async fn drain_ready_direct_relay_bytes<S>(
+    response: &mut RawHttp1ResponseRelay<S>,
+    mut remaining_capacity: usize,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let Some(stream) = response.stream.as_mut() else {
+        return Err(anyhow!("raw HTTP/1 relay stream is unavailable"));
+    };
+    while remaining_capacity > 0 {
+        response.read_buf.reserve(remaining_capacity);
+        let mut limited = (&mut response.read_buf).limit(remaining_capacity);
+        let read = poll_fn(|cx| {
+            let future = stream.read_buf(&mut limited);
+            let mut future = std::pin::pin!(future);
+            match Future::poll(future.as_mut(), cx) {
+                Poll::Ready(result) => Poll::Ready(result.map(Some)),
+                Poll::Pending => Poll::Ready(Ok(None)),
+            }
+        })
+        .await?;
+        match read {
+            Some(0) | None => break,
+            Some(read) => remaining_capacity -= read,
+        }
+    }
+    Ok(())
+}
+
+fn recycle_direct_raw_upstream_if_clean<S>(response: &mut RawHttp1ResponseRelay<S>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    if !response.read_buf.is_empty() || !response.raw.upstream_keep_alive() {
+        return;
+    }
+    let (Some(stream), Some(recycler)) = (response.stream.take(), response.recycler.take()) else {
+        return;
+    };
+    recycler.recycle(
+        stream,
+        std::mem::take(&mut response.read_buf),
+        std::mem::take(&mut response.write_buf),
+    );
+}
+
 pub(super) async fn write_status_and_headers<W>(
-    writer: &mut WriteHalf<W>,
+    writer: &mut W,
     head_buf: &mut BytesMut,
     version: Version,
     status: StatusCode,
@@ -207,7 +428,7 @@ pub(super) async fn write_status_and_headers<W>(
     connection_mode: ConnectionHeaderMode,
 ) -> Result<()>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     serialize_status_and_headers(head_buf, version, status, headers, connection_mode);
     write_all_with_timeout(writer, head_buf).await?;
@@ -265,14 +486,68 @@ fn serialize_status_and_headers(
     head.extend_from_slice(b"\r\n");
 }
 
+fn serialize_status_and_raw_headers(
+    head: &mut BytesMut,
+    version: Version,
+    status: StatusCode,
+    raw_header_lines: &[u8],
+    additional_headers: &HeaderMap,
+    connection_mode: ConnectionHeaderMode,
+    chunked: bool,
+) {
+    head.clear();
+    head.reserve(raw_header_lines.len().saturating_add(128));
+    let version = match version {
+        Version::HTTP_10 => "HTTP/1.0",
+        _ => "HTTP/1.1",
+    };
+    let reason = status.canonical_reason().unwrap_or("");
+    head.extend_from_slice(version.as_bytes());
+    head.extend_from_slice(b" ");
+    head.extend_from_slice(status.as_str().as_bytes());
+    if !reason.is_empty() {
+        head.extend_from_slice(b" ");
+        head.extend_from_slice(reason.as_bytes());
+    }
+    head.extend_from_slice(b"\r\n");
+    head.extend_from_slice(raw_header_lines);
+    for (name, value) in additional_headers {
+        if name == CONNECTION || name.as_str().eq_ignore_ascii_case("proxy-connection") {
+            continue;
+        }
+        head.extend_from_slice(name.as_str().as_bytes());
+        head.extend_from_slice(b": ");
+        head.extend_from_slice(value.as_bytes());
+        head.extend_from_slice(b"\r\n");
+    }
+    if chunked {
+        head.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+    }
+    match connection_mode {
+        ConnectionHeaderMode::Omit => {}
+        ConnectionHeaderMode::Close => head.extend_from_slice(b"Connection: close\r\n"),
+        ConnectionHeaderMode::KeepAlive => {
+            head.extend_from_slice(b"Connection: keep-alive\r\n");
+        }
+        ConnectionHeaderMode::Preserve => {
+            for value in additional_headers.get_all(CONNECTION) {
+                head.extend_from_slice(b"Connection: ");
+                head.extend_from_slice(value.as_bytes());
+                head.extend_from_slice(b"\r\n");
+            }
+        }
+    }
+    head.extend_from_slice(b"\r\n");
+}
+
 async fn write_content_length_response_body<W>(
-    writer: &mut WriteHalf<W>,
+    writer: &mut W,
     body: &mut Body,
     mut remaining: u64,
     body_read_timeout: Duration,
 ) -> Result<()>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     while let Some(chunk) = read_response_body_chunk(body, body_read_timeout).await? {
         let chunk = chunk?;
@@ -302,7 +577,7 @@ where
 }
 
 async fn write_chunked_response_body<W>(
-    writer: &mut WriteHalf<W>,
+    writer: &mut W,
     body: &mut Body,
     first_chunk: Option<Bytes>,
     first_trailers: Option<HeaderMap>,
@@ -310,7 +585,7 @@ async fn write_chunked_response_body<W>(
     body_read_timeout: Duration,
 ) -> Result<()>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     if let Some(chunk) = first_chunk {
         write_chunk(writer, &chunk).await?;
@@ -336,13 +611,13 @@ where
 }
 
 async fn write_close_delimited_response_body<W>(
-    writer: &mut WriteHalf<W>,
+    writer: &mut W,
     body: &mut Body,
     first_chunk: Option<Bytes>,
     body_read_timeout: Duration,
 ) -> Result<()>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     if let Some(chunk) = first_chunk
         && !chunk.is_empty()
@@ -362,7 +637,7 @@ async fn read_response_body_chunk(
     body: &mut Body,
     body_read_timeout: Duration,
 ) -> Result<Option<Result<Bytes, qpx_http::body::BodyError>>> {
-    timeout(body_read_timeout, body.data())
+    timeout_after_pending(body_read_timeout, body.data())
         .await
         .map_err(|_| anyhow!("HTTP/1 response body read timed out"))
 }
@@ -371,15 +646,15 @@ async fn read_response_trailers(
     body: &mut Body,
     body_read_timeout: Duration,
 ) -> Result<Option<HeaderMap>> {
-    timeout(body_read_timeout, body.trailers())
+    timeout_after_pending(body_read_timeout, body.trailers())
         .await
         .map_err(|_| anyhow!("HTTP/1 response trailer read timed out"))?
         .map_err(Into::into)
 }
 
-async fn write_chunk<W>(writer: &mut WriteHalf<W>, chunk: &Bytes) -> Result<()>
+async fn write_chunk<W>(writer: &mut W, chunk: &Bytes) -> Result<()>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     if chunk.is_empty() {
         return Ok(());
@@ -391,13 +666,13 @@ where
 }
 
 async fn write_head_and_first_content_length_chunk<W>(
-    writer: &mut WriteHalf<W>,
+    writer: &mut W,
     head: &[u8],
     first_chunk: Option<Bytes>,
     length: u64,
 ) -> Result<u64>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     let Some(chunk) = first_chunk else {
         write_all_with_timeout(writer, head).await?;
@@ -416,12 +691,12 @@ where
 }
 
 async fn write_head_and_first_chunked_chunk<W>(
-    writer: &mut WriteHalf<W>,
+    writer: &mut W,
     head: &[u8],
     first_chunk: Option<Bytes>,
 ) -> Result<()>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     let Some(chunk) = first_chunk.filter(|chunk| !chunk.is_empty()) else {
         write_all_with_timeout(writer, head).await?;
@@ -433,12 +708,12 @@ where
 }
 
 async fn write_head_and_first_close_delimited_chunk<W>(
-    writer: &mut WriteHalf<W>,
+    writer: &mut W,
     head: &[u8],
     first_chunk: Option<Bytes>,
 ) -> Result<()>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     let Some(chunk) = first_chunk.filter(|chunk| !chunk.is_empty()) else {
         write_all_with_timeout(writer, head).await?;
@@ -447,24 +722,21 @@ where
     write_vectored_all_with_timeout(writer, &[head, &chunk]).await
 }
 
-async fn write_all_with_timeout<W>(writer: &mut WriteHalf<W>, bytes: &[u8]) -> Result<()>
+async fn write_all_with_timeout<W>(writer: &mut W, bytes: &[u8]) -> Result<()>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
-    timeout(RESPONSE_WRITE_TIMEOUT, writer.write_all(bytes))
+    timeout_after_pending(RESPONSE_WRITE_TIMEOUT, writer.write_all(bytes))
         .await
         .map_err(|_| anyhow!("HTTP/1 response write timed out"))?
         .map_err(Into::into)
 }
 
-async fn write_vectored_all_with_timeout<W>(
-    writer: &mut WriteHalf<W>,
-    slices: &[&[u8]],
-) -> Result<()>
+async fn write_vectored_all_with_timeout<W>(writer: &mut W, slices: &[&[u8]]) -> Result<()>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
-    timeout(RESPONSE_WRITE_TIMEOUT, write_vectored_all(writer, slices))
+    timeout_after_pending(RESPONSE_WRITE_TIMEOUT, write_vectored_all(writer, slices))
         .await
         .map_err(|_| anyhow!("HTTP/1 response write timed out"))?
         .map_err(Into::into)
@@ -570,11 +842,11 @@ async fn poll_response_trailers_now(body: &mut Body) -> Result<Option<HeaderMap>
     .await
 }
 
-async fn flush_with_timeout<W>(writer: &mut WriteHalf<W>) -> Result<()>
+async fn flush_with_timeout<W>(writer: &mut W) -> Result<()>
 where
-    W: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
-    timeout(RESPONSE_WRITE_TIMEOUT, writer.flush())
+    timeout_after_pending(RESPONSE_WRITE_TIMEOUT, writer.flush())
         .await
         .map_err(|_| anyhow!("HTTP/1 response flush timed out"))?
         .map_err(Into::into)

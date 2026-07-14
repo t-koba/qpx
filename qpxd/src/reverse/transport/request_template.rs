@@ -59,6 +59,18 @@ enum ReverseReplayRecorderState {
 }
 
 impl ReverseRequestTemplate {
+    pub(super) fn without_body(req: &Request<Body>) -> Self {
+        Self {
+            method: req.method().clone(),
+            uri: req.uri().clone(),
+            version: req.version(),
+            headers: req.headers().clone(),
+            body: ReverseRequestTemplateBody::Memory {
+                chunks: Arc::from([]),
+            },
+        }
+    }
+
     #[cfg(test)]
     pub(super) async fn from_request(
         req: Request<Body>,
@@ -314,7 +326,10 @@ fn is_retryable_method(method: &http::Method) -> bool {
     qpx_http::protocol::method::method_semantics(method).idempotent
 }
 
-fn request_may_have_body(req: &Request<Body>) -> bool {
+pub(super) fn request_may_have_body(req: &Request<Body>) -> bool {
+    if !http_body::Body::is_end_stream(req.body()) {
+        return true;
+    }
     if req.headers().contains_key(TRANSFER_ENCODING) {
         return true;
     }
@@ -432,6 +447,25 @@ mod tests {
         assert!(err.to_string().contains("timed out"));
     }
 
+    #[tokio::test]
+    async fn bodyless_template_replays_without_a_recorder_task() {
+        let req = Request::builder()
+            .method(http::Method::GET)
+            .uri("http://example.test/resource")
+            .header("x-test", "value")
+            .body(Body::empty())
+            .expect("request");
+
+        let replay = ReverseRequestTemplate::without_body(&req)
+            .build()
+            .expect("replay request");
+
+        assert_eq!(replay.method(), http::Method::GET);
+        assert_eq!(replay.uri(), "http://example.test/resource");
+        assert_eq!(replay.headers()["x-test"], "value");
+        assert!(replay.into_body().data().await.is_none());
+    }
+
     #[test]
     fn pre_header_retry_allows_small_declared_body_within_threshold() {
         let req = Request::builder()
@@ -442,6 +476,18 @@ mod tests {
             .expect("request");
         assert!(request_is_retryable(&req, &http::Method::PUT, 16));
         assert!(!request_is_retryable(&req, &http::Method::PUT, 15));
+    }
+
+    #[test]
+    fn an_unframed_live_body_is_not_treated_as_bodyless() {
+        let (_sender, body) = Body::channel();
+        let req = Request::builder()
+            .method(http::Method::GET)
+            .uri("http://example.test/resource")
+            .body(body)
+            .expect("request");
+
+        assert!(request_may_have_body(&req));
     }
 
     #[tokio::test]

@@ -7,10 +7,32 @@ PROFILE_JSON="${QPX_PERF_PROFILE_JSON:-$ROOT_DIR/target/perf/perf-audit-profile-
 PROFILE_EVENTS="${QPX_PERF_PROFILE_EVENTS:-$ROOT_DIR/target/perf/perf-audit-profile-events.jsonl}"
 PROFILE_REQUESTS="${QPX_PERF_PROFILE_REQUESTS:-32}"
 PROFILE_CONCURRENCY="${QPX_PERF_PROFILE_CONCURRENCY:-4}"
+MIN_INSTRUCTIONS="${QPX_PERF_PROFILE_MIN_INSTRUCTIONS:-1000000}"
+QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
+BACKEND_PORT="${QPX_PERF_PROFILE_BACKEND_PORT:-18480}"
+QPX_HTTP1_PORT="${QPX_PERF_PROFILE_HTTP1_PORT:-18481}"
+QPX_HTTP2_PORT="${QPX_PERF_PROFILE_HTTP2_PORT:-18482}"
 
-mkdir -p "$PROFILE_DIR" "$(dirname "$PROFILE_JSON")"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-perf-profile.XXXXXX")"
+LOG_DIR="$TMP_DIR/logs"
+mkdir -p "$PROFILE_DIR" "$LOG_DIR" "$(dirname "$PROFILE_JSON")"
 : >"$PROFILE_JSON"
 : >"$PROFILE_EVENTS"
+
+PIDS=()
+BACKEND_PID=""
+
+cleanup() {
+  local pid
+  for pid in "${PIDS[@]:-}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -19,124 +41,281 @@ require_cmd() {
   fi
 }
 
+positive_integer() {
+  case "$2" in
+    ''|*[!0-9]*)
+      echo "$1 must be a positive integer" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$2" -eq 0 ]; then
+    echo "$1 must be a positive integer" >&2
+    exit 1
+  fi
+}
+
 json_escape() {
   python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"
 }
 
-test_binary_from_messages() {
-  local messages="$1"
-  python3 - "$messages" <<'PY'
-import json
+make_certificate() {
+  openssl req \
+    -x509 \
+    -newkey rsa:2048 \
+    -sha256 \
+    -days 1 \
+    -nodes \
+    -subj "/CN=localhost" \
+    -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" \
+    -keyout "$TMP_DIR/server.key" \
+    -out "$TMP_DIR/server.crt" \
+    >"$LOG_DIR/openssl.log" 2>&1
+}
+
+start_backend() {
+  local prefix="$TMP_DIR/backend"
+  local config="$prefix/nginx.conf"
+  mkdir -p "$prefix/logs" "$prefix/www"
+  dd if=/dev/zero of="$prefix/www/bench" bs=1024 count=1 status=none
+  cat >"$config" <<NGINX
+pid $prefix/nginx.pid;
+error_log $prefix/logs/error.log warn;
+worker_processes 1;
+events { worker_connections 4096; }
+http {
+  access_log off;
+  sendfile on;
+  keepalive_requests 10000000;
+  keepalive_timeout 65;
+  server {
+    listen 127.0.0.1:${BACKEND_PORT};
+    location / {
+      default_type application/octet-stream;
+      root $prefix/www;
+    }
+  }
+}
+NGINX
+  nginx -p "$prefix" -c "$config" -g 'daemon off;' >"$LOG_DIR/backend.log" 2>&1 &
+  BACKEND_PID=$!
+  PIDS+=("$BACKEND_PID")
+  wait_http "backend" "$BACKEND_PORT" "$BACKEND_PID" "$LOG_DIR/backend.log" false
+}
+
+write_qpx_config() {
+  local protocol="$1"
+  local port="$2"
+  local config="$3"
+  local tls=""
+  if [ "$protocol" = http2 ]; then
+    tls="    enforce_sni_host_match: false
+    tls:
+      certificates:
+        - sni: localhost
+          cert: \"$TMP_DIR/server.crt\"
+          key: \"$TMP_DIR/server.key\""
+  fi
+  cat >"$config" <<YAML
+state_dir: "$TMP_DIR/state-${protocol}"
+telemetry:
+  system_log:
+    level: warn
+    format: json
+runtime:
+  worker_threads: 1
+  acceptor_tasks_per_listener: 1
+  reuse_port: false
+  upstream_proxy_max_concurrent_per_endpoint: 512
+  upstream_max_idle_connections_per_origin: 256
+edges:
+  - kind: reverse
+    name: profile-${protocol}
+    listen: 127.0.0.1:${port}
+${tls}
+    routes:
+      - name: bench
+        streaming_requirement: required
+        streaming:
+          max_response_body_bytes: 1048576
+        match: {}
+        target:
+          type: upstream
+          upstreams: [http://127.0.0.1:${BACKEND_PORT}]
+YAML
+}
+
+wait_http() {
+  local name="$1"
+  local port="$2"
+  local pid="$3"
+  local log_file="$4"
+  local tls="$5"
+  local tries=0
+  while [ "$tries" -lt 600 ]; do
+    if [ "$tls" = true ]; then
+      if curl -fsSk --http1.1 --max-time 2 --resolve "localhost:${port}:127.0.0.1" \
+        "https://localhost:${port}/bench" >/dev/null 2>&1; then
+        return
+      fi
+    elif curl -fsS --http1.1 --max-time 2 "http://127.0.0.1:${port}/bench" \
+      >/dev/null 2>&1; then
+      return
+    fi
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      echo "${name} exited before becoming ready" >&2
+      cat "$log_file" >&2 || true
+      exit 1
+    fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  echo "timeout waiting for ${name} on port ${port}" >&2
+  cat "$log_file" >&2 || true
+  exit 1
+}
+
+run_http1_load() {
+  local output="$1"
+  ab -n "$PROFILE_REQUESTS" -c "$PROFILE_CONCURRENCY" -k \
+    "http://127.0.0.1:${QPX_HTTP1_PORT}/bench" >"$output" 2>&1
+  python3 - "$output" "$PROFILE_REQUESTS" <<'PY'
+import re
 import sys
 
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    for line in handle:
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        profile = message.get("profile") or {}
-        executable = message.get("executable")
-        if profile.get("test") is True and executable:
-            print(executable)
-            sys.exit(0)
-sys.exit(1)
+text = open(sys.argv[1], encoding="utf-8").read()
+expected = int(sys.argv[2])
+complete = re.search(r"Complete requests:\s+([0-9]+)", text)
+failed = re.search(r"Failed requests:\s+([0-9]+)", text)
+if complete is None or failed is None:
+    raise SystemExit("ab output is missing request counters")
+if int(complete.group(1)) != expected or int(failed.group(1)) != 0:
+    raise SystemExit("HTTP/1 profile load did not complete successfully")
 PY
 }
 
-build_test_binary() {
-  local test_name="$1"
-  local features="$2"
-  local messages="$PROFILE_DIR/${test_name}.cargo-messages.jsonl"
-  if [ -n "$features" ]; then
-    cargo test -p qpxd --release --test "$test_name" --locked --features "$features" --no-run --message-format=json >"$messages"
-  else
-    cargo test -p qpxd --release --test "$test_name" --locked --no-run --message-format=json >"$messages"
-  fi
-  test_binary_from_messages "$messages"
+run_http2_load() {
+  local output="$1"
+  h2load -n "$PROFILE_REQUESTS" -c "$PROFILE_CONCURRENCY" -m "$PROFILE_CONCURRENCY" \
+    --connect-to "127.0.0.1:${QPX_HTTP2_PORT}" \
+    "https://localhost:${QPX_HTTP2_PORT}/bench" >"$output" 2>&1
+  python3 - "$output" "$PROFILE_REQUESTS" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+expected = int(sys.argv[2])
+row = re.search(
+    r"requests:\s+([0-9]+) total,\s+([0-9]+) started,\s+([0-9]+) done,\s+"
+    r"([0-9]+) succeeded,\s+([0-9]+) failed,\s+([0-9]+) errored,\s+([0-9]+) timeout",
+    text,
+)
+if row is None:
+    raise SystemExit("h2load output is missing request counters")
+values = [int(value) for value in row.groups()]
+total, started, done, succeeded, failed, errored, timed_out = values
+if (total, started, done, succeeded) != (expected, expected, expected, expected):
+    raise SystemExit("HTTP/2 profile load did not complete all requests")
+if failed != 0 or errored != 0 or timed_out != 0:
+    raise SystemExit("HTTP/2 profile load reported failures")
+PY
 }
 
-annotate_callgrind_outputs() {
+annotate_profile() {
   local target="$1"
-  local filter="$2"
+  local protocol="$2"
+  local file="$3"
   local commit="${GITHUB_SHA:-unknown}"
-  local file instructions annotated cmd_line failed annotated_outputs
-  failed=0
-  annotated_outputs=0
-  while IFS= read -r file; do
-    if [ ! -s "$file" ]; then
-      continue
-    fi
-    if ! grep -q '^events:' "$file"; then
-      echo "callgrind output missing events: ${file}" >&2
-      failed=1
-      continue
-    fi
-    instructions="$(awk '/^summary:/ { print $2; exit }' "$file")"
-    instructions="${instructions:-0}"
-    if ! [[ "$instructions" =~ ^[0-9]+$ ]] || [ "$instructions" -le 0 ]; then
-      echo "callgrind output has no instructions: ${file}" >&2
-      failed=1
-      continue
-    fi
-    cmd_line="$(awk -F':  ' '/^cmd:/ { print $2; exit }' "$file")"
-    cmd_line="${cmd_line:-unknown}"
-    annotated="${file}.annotated.txt"
-    if ! callgrind_annotate --threshold=99 "$file" >"$annotated" 2>"${annotated}.err"; then
-      echo "callgrind_annotate failed for ${file}" >&2
-      cat "${annotated}.err" >&2 || true
-      failed=1
-      continue
-    fi
-    annotated_outputs=$((annotated_outputs + 1))
-    printf '{"bench":"callgrind_hot_path_profile","target":%s,"filter":%s,"command":%s,"instructions":%s,"callgrind_file":%s,"annotated_file":%s,"commit":%s}\n' \
-      "$(json_escape "$target")" \
-      "$(json_escape "$filter")" \
-      "$(json_escape "$cmd_line")" \
-      "$instructions" \
-      "$(json_escape "${file#"$ROOT_DIR"/}")" \
-      "$(json_escape "${annotated#"$ROOT_DIR"/}")" \
-      "$(json_escape "$commit")" >>"$PROFILE_JSON"
-  done < <(find "$PROFILE_DIR" -type f -name "callgrind.${target}.${filter}.*.out" | sort)
-  if [ "$annotated_outputs" -eq 0 ]; then
-    echo "no valid callgrind outputs for ${target} ${filter}" >&2
+  local instructions command annotated
+  if [ ! -s "$file" ] || ! grep -q '^events:.*Ir' "$file"; then
+    echo "callgrind output is missing instruction events: ${file}" >&2
     return 1
   fi
-  return "$failed"
+  instructions="$(awk '/^summary:/ { print $2; exit }' "$file")"
+  instructions="${instructions:-0}"
+  if ! [[ "$instructions" =~ ^[0-9]+$ ]] || [ "$instructions" -lt "$MIN_INSTRUCTIONS" ]; then
+    echo "callgrind output has too few instructions (${instructions}): ${file}" >&2
+    return 1
+  fi
+  command="$(awk -F':  ' '/^cmd:/ { print $2; exit }' "$file")"
+  command="${command:-unknown}"
+  case "$command" in
+    *qpxd*" run --config "*) ;;
+    *)
+      echo "callgrind output does not profile qpxd directly: ${command}" >&2
+      return 1
+      ;;
+  esac
+  annotated="${file}.annotated.txt"
+  callgrind_annotate --threshold=99 "$file" >"$annotated" 2>"${annotated}.err"
+  printf '{"bench":"callgrind_hot_path_profile","target":%s,"protocol":%s,"command":%s,"instructions":%s,"callgrind_file":%s,"annotated_file":%s,"commit":%s}\n' \
+    "$(json_escape "$target")" \
+    "$(json_escape "$protocol")" \
+    "$(json_escape "$command")" \
+    "$instructions" \
+    "$(json_escape "${file#"$ROOT_DIR"/}")" \
+    "$(json_escape "${annotated#"$ROOT_DIR"/}")" \
+    "$(json_escape "$commit")" >>"$PROFILE_JSON"
 }
 
 run_profile() {
-  local test_name="$1"
-  local filter="$2"
-  local features="${3:-}"
-  local filter_slug="$filter"
-  local test_bin
-  filter_slug="${filter_slug:-all}"
-  filter_slug="${filter_slug//[^A-Za-z0-9_.-]/_}"
-  test_bin="$(build_test_binary "$test_name" "$features")"
-  echo "profiling ${test_name} ${filter_slug}" >&2
-  rm -f "$PROFILE_DIR/callgrind.${test_name}.${filter_slug}."*.out \
-    "$PROFILE_DIR/callgrind.${test_name}.${filter_slug}."*.out.annotated.txt \
-    "$PROFILE_DIR/callgrind.${test_name}.${filter_slug}."*.out.annotated.txt.err
-  QPX_PERF_PROFILE=1 \
-  QPX_PERF_PROFILE_REQUESTS="$PROFILE_REQUESTS" \
-  QPX_PERF_PROFILE_CONCURRENCY="$PROFILE_CONCURRENCY" \
-  QPX_PERF_SMOKE_JSON="$PROFILE_EVENTS" \
+  local protocol="$1"
+  local port="$2"
+  local config="$TMP_DIR/qpxd-${protocol}.yaml"
+  local output="$PROFILE_DIR/callgrind.qpxd_reverse_${protocol}.out"
+  local load_output="$LOG_DIR/load-${protocol}.txt"
+  local qpx_log="$LOG_DIR/qpxd-${protocol}.log"
+  local pid tls
+  tls=false
+  if [ "$protocol" = http2 ]; then tls=true; fi
+  write_qpx_config "$protocol" "$port" "$config"
+  rm -f "$output" "${output}.annotated.txt" "${output}.annotated.txt.err"
   valgrind \
     --tool=callgrind \
-    --trace-children=yes \
+    --instr-atstart=no \
     --child-silent-after-fork=yes \
-    --callgrind-out-file="$PROFILE_DIR/callgrind.${test_name}.${filter_slug}.%p.out" \
-    "$test_bin" ${filter:+"$filter"} --nocapture --test-threads=1
-  annotate_callgrind_outputs "$test_name" "$filter_slug"
+    --callgrind-out-file="$output" \
+    "$QPXD_BIN" run --config "$config" >"$qpx_log" 2>&1 &
+  pid=$!
+  PIDS+=("$pid")
+  wait_http "qpxd-${protocol}" "$port" "$pid" "$qpx_log" "$tls"
+  callgrind_control -i on "$pid" >/dev/null
+  if [ "$protocol" = http2 ]; then
+    run_http2_load "$load_output"
+  else
+    run_http1_load "$load_output"
+  fi
+  callgrind_control -i off "$pid" >/dev/null
+  kill -TERM "$pid"
+  wait "$pid"
+  annotate_profile "qpxd_reverse_${protocol}" "$protocol" "$output"
+  printf '{"bench":"callgrind_profile_load","target":%s,"requests":%s,"concurrency":%s,"valid":true,"commit":%s}\n' \
+    "$(json_escape "qpxd_reverse_${protocol}")" \
+    "$PROFILE_REQUESTS" \
+    "$PROFILE_CONCURRENCY" \
+    "$(json_escape "${GITHUB_SHA:-unknown}")" >>"$PROFILE_EVENTS"
 }
 
+require_cmd ab
 require_cmd callgrind_annotate
-require_cmd cargo
+require_cmd callgrind_control
+require_cmd curl
+require_cmd h2load
+require_cmd nginx
+require_cmd openssl
 require_cmd python3
 require_cmd valgrind
+positive_integer QPX_PERF_PROFILE_REQUESTS "$PROFILE_REQUESTS"
+positive_integer QPX_PERF_PROFILE_CONCURRENCY "$PROFILE_CONCURRENCY"
+positive_integer QPX_PERF_PROFILE_MIN_INSTRUCTIONS "$MIN_INSTRUCTIONS"
+if [ "$PROFILE_CONCURRENCY" -gt "$PROFILE_REQUESTS" ]; then
+  echo "QPX_PERF_PROFILE_CONCURRENCY must not exceed QPX_PERF_PROFILE_REQUESTS" >&2
+  exit 1
+fi
+if [ ! -x "$QPXD_BIN" ]; then
+  cargo build -p qpxd --release --locked --bin qpxd
+fi
 
-run_profile "perf_smoke" ""
-run_profile "perf_smoke" "reverse_http3" "http3-backend-h3"
-run_profile "perf_smoke" "reverse_http3" "http3-backend-qpx"
-run_profile "advanced_transport_perf" "" "http3-backend-qpx,mitm"
+make_certificate
+start_backend
+run_profile http1 "$QPX_HTTP1_PORT"
+run_profile http2 "$QPX_HTTP2_PORT"

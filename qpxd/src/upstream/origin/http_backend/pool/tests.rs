@@ -4,9 +4,9 @@ use tokio::io::duplex;
 
 fn test_https_origin_slot() -> HttpsOriginSlot {
     HttpsOriginSlot {
-        http1_idle: Arc::new(StdMutex::new(Vec::new())),
+        http1_idle: Arc::new(Mutex::new(Vec::new())),
         max_http1_idle: Arc::new(AtomicUsize::new(MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN)),
-        h2: StdMutex::new(H2PoolState::default()),
+        h2: Mutex::new(H2PoolState::default()),
         h2_ready: Arc::new(Notify::new()),
         h2_rr: AtomicUsize::new(0),
     }
@@ -18,6 +18,17 @@ fn plain_origin_borrowed_lookup_reuses_existing_slot() {
     let first = pools.plain_slot_for("127.0.0.1:80", "example.test");
     let second = pools.plain_slot_for("127.0.0.1:80", "example.test");
     assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[test]
+fn clearing_plain_origin_pool_invalidates_thread_cache() {
+    let pools = DirectOriginPools::new();
+    let first = pools.plain_slot_for("127.0.0.1:80", "example.test");
+
+    pools.clear();
+
+    let second = pools.plain_slot_for("127.0.0.1:80", "example.test");
+    assert!(!Arc::ptr_eq(&first, &second));
 }
 
 #[test]
@@ -121,9 +132,9 @@ fn h2_connection_reservation_drop_releases_connecting_slot() {
     let reservation = slot
         .try_reserve_h2_connection()
         .expect("reservation should succeed");
-    assert_eq!(slot.h2.lock().expect("pool").connecting, 1);
+    assert_eq!(slot.h2.lock().connecting, 1);
     drop(reservation);
-    let guard = slot.h2.lock().expect("pool");
+    let guard = slot.h2.lock();
     assert_eq!(guard.connecting, 0);
     assert!(guard.connections.is_empty());
 }
@@ -140,7 +151,7 @@ async fn h2_connection_reservation_complete_moves_connection_into_pool() -> Resu
         inflight_streams: Arc::new(AtomicUsize::new(0)),
     });
     reservation.complete(shared.clone());
-    let guard = slot.h2.lock().expect("pool");
+    let guard = slot.h2.lock();
     assert_eq!(guard.connecting, 0);
     assert_eq!(guard.connections.len(), 1);
     assert!(Arc::ptr_eq(&guard.connections[0], &shared));

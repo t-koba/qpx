@@ -11,6 +11,11 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 use tracing::Level;
 
+/// Returns whether request access-log or OpenTelemetry processing is enabled.
+pub fn access_log_service_required(config: &AccessLogConfig) -> bool {
+    config.output.enabled || crate::otel_enabled()
+}
+
 /// Static access-log identity for a listener or proxy surface.
 #[derive(Debug, Clone)]
 pub struct AccessLogContext {
@@ -132,6 +137,7 @@ impl<S> AccessLogService<S> {
 #[derive(Debug)]
 pub struct AccessLogFuture<F> {
     inner: F,
+    active: bool,
     start: Option<Instant>,
     snapshot: Option<AccessLogSnapshot>,
     span: Option<tracing::Span>,
@@ -157,6 +163,10 @@ where
     type Output = Result<Response<B>, E>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if !self.active {
+            // SAFETY: `AccessLogFuture` is pinned and `inner` is never moved.
+            return unsafe { self.as_mut().map_unchecked_mut(|state| &mut state.inner) }.poll(cx);
+        }
         let span = {
             // SAFETY: `AccessLogFuture` is pinned, and accessing the non-pinned span field
             // does not move the pinned `inner` future.
@@ -473,6 +483,7 @@ where
 
         AccessLogFuture {
             inner,
+            active: should_log || should_trace,
             start,
             snapshot,
             span,

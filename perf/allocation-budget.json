@@ -1,0 +1,6 @@
+{
+  "bench": "qpxd_allocation_profile_http1_reverse",
+  "max_alloc_bytes_per_request": 1800,
+  "max_alloc_count_per_request": 55,
+  "schema_version": 1
+}

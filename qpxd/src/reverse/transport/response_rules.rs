@@ -72,9 +72,9 @@ fn response_policy_parts<'a>(
                 method: Some(base.method.as_str()),
                 dst_port: base.dst_port,
                 src_ip: base.peer_ip,
-                host: base.host.as_deref(),
+                host: base.host(),
                 sni: base.sni.as_deref(),
-                path: base.path.as_deref(),
+                path: base.path(),
             })
         })
         .unwrap_or_default();

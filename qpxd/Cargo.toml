@@ -10,6 +10,7 @@ workspace = true
 
 [features]
 default = [
+  "mimalloc-allocator",
   "tls-rustls",
   "http3-backend-h3",
   "mitm",
@@ -17,6 +18,12 @@ default = [
   "auth-digest",
   "auth-ldap",
 ]
+
+# Production builds use mimalloc to reduce allocator contention and tail
+# latency. Profiling tools that interpose libc allocation can select the
+# system allocator explicitly without changing the production default.
+mimalloc-allocator = ["dep:mimalloc"]
+system-allocator = []
 
 tls-rustls = [
   "dep:rustls",
@@ -77,10 +84,13 @@ tracing.workspace = true
 metrics.workspace = true
 arc-swap.workspace = true
 crossbeam-channel.workspace = true
+parking_lot.workspace = true
 notify.workspace = true
 async-trait.workspace = true
+futures-util.workspace = true
 dirs-next.workspace = true
 zeroize.workspace = true
+mimalloc = { workspace = true, optional = true }
 
 # TLS
 rustls = { workspace = true, optional = true }

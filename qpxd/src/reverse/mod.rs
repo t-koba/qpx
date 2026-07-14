@@ -129,15 +129,38 @@ impl ReloadableReverse {
         })
     }
 
+    pub(crate) fn compiled_if_current(
+        &self,
+        state: &crate::runtime::RuntimeState,
+    ) -> Option<Arc<CompiledReverse>> {
+        let last_operational = self.last_operational.load();
+        Arc::ptr_eq(&state.resources.operational, &last_operational)
+            .then(|| self.compiled.load_full())
+    }
+
+    pub(crate) async fn compiled_snapshot(
+        &self,
+        state: Arc<crate::runtime::RuntimeState>,
+    ) -> (Arc<crate::runtime::RuntimeState>, Arc<CompiledReverse>) {
+        if let Some(compiled) = self.compiled_if_current(&state) {
+            return (state, compiled);
+        }
+
+        let compiled = self.compiled().await;
+        let current_state = self.runtime.state();
+        let compiled = self.compiled_if_current(&current_state).unwrap_or(compiled);
+        (current_state, compiled)
+    }
+
     pub(crate) async fn compiled(&self) -> Arc<CompiledReverse> {
-        let current_operational = self.runtime.state().resources.operational.clone();
-        if Arc::ptr_eq(&current_operational, &self.last_operational.load_full()) {
-            return self.compiled.load_full();
+        let state = self.runtime.state();
+        if let Some(compiled) = self.compiled_if_current(&state) {
+            return compiled;
         }
 
         let _guard = self.reload_lock.lock().await;
         let current_operational = self.runtime.state().resources.operational.clone();
-        if Arc::ptr_eq(&current_operational, &self.last_operational.load_full()) {
+        if Arc::ptr_eq(&current_operational, &self.last_operational.load()) {
             return self.compiled.load_full();
         }
 

@@ -42,14 +42,24 @@ pub struct TextPrefilterHint {
 impl TextPatternMatcher {
     pub fn matches(&self, input: &str) -> bool {
         let normalized_owned;
-        let normalized = if self.lowercase_input {
-            normalized_owned = input.to_ascii_lowercase();
-            normalized_owned.as_str()
-        } else {
-            input
-        };
+        let normalized =
+            if self.lowercase_input && input.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                normalized_owned = input.to_ascii_lowercase();
+                normalized_owned.as_str()
+            } else {
+                input
+            };
 
-        if !self.exact.is_empty() && self.exact.contains(normalized) {
+        let exact_match = match self.exact.len() {
+            0 => false,
+            1 => self
+                .exact
+                .iter()
+                .next()
+                .is_some_and(|exact| exact.as_ref() == normalized),
+            _ => self.exact.contains(normalized),
+        };
+        if exact_match {
             return true;
         }
 

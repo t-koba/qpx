@@ -46,6 +46,16 @@ pub(super) async fn prepare_reverse_cache(
         http_modules,
         audit_ctx,
     } = input;
+    if request_cache_policy.is_none() {
+        return Ok(ReverseCacheOutcome::Continue(ReverseCacheState {
+            req,
+            request_headers_snapshot: None,
+            cache_lookup_key: None,
+            cache_target_key: None,
+            revalidation_state: None,
+            cache_collapse_guard: None,
+        }));
+    }
     let query_digest = if request_cache_policy.is_some() && request_method.as_str() == "QUERY" {
         let (buffered, digest) =
             buffer_query_for_cache_key(req, route.plan.streaming.max_request_body_bytes).await?;

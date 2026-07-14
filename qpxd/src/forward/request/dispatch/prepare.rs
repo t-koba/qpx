@@ -57,7 +57,7 @@ pub(super) async fn prepare_forward_dispatch(
     prepare_request_with_headers_in_place(&mut req, proxy_name, headers, websocket);
     ensure_forward_host_header(&mut req, host)?;
     let mut http_modules = selected_plan.modules.start(
-        state.clone(),
+        &state,
         crate::http::modules::HttpModuleSessionInit {
             proxy_kind: ProxyKind::Forward,
             proxy_name,

@@ -5,7 +5,7 @@ use bytes::{Bytes, BytesMut};
 use hyper::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, TRAILER, TRANSFER_ENCODING,
 };
-use hyper::{Request, Version};
+use hyper::{Method, Request, Version};
 use qpx_http::body::Body;
 use std::future::{Future, poll_fn};
 use std::io::{Error as IoError, ErrorKind, IoSlice};
@@ -28,16 +28,18 @@ where
         .unwrap_or("/");
     let mut headers = parts.headers;
     let declared_length = parse_declared_content_length(&headers)?;
-    let first_chunk = if declared_length.is_none() {
+    let body_is_end_stream = http_body::Body::is_end_stream(&body);
+    let first_chunk = if declared_length.is_none() && !body_is_end_stream {
         poll_body_data_now(&mut body).await?
     } else {
         None
     };
-    let first_trailers = if declared_length.is_none() && first_chunk.is_none() {
-        poll_body_trailers_now(&mut body).await?
-    } else {
-        None
-    };
+    let first_trailers =
+        if declared_length.is_none() && first_chunk.is_none() && !body_is_end_stream {
+            poll_body_trailers_now(&mut body).await?
+        } else {
+            None
+        };
     let use_chunked = declared_length.is_none()
         && (first_chunk.is_some()
             || first_trailers.is_some()
@@ -77,6 +79,7 @@ where
     serialize_headers(&headers, head)?;
     head.extend_from_slice(b"\r\n");
     stream.write_all(head).await?;
+    crate::http::codec::header_pool::recycle(headers);
 
     match declared_length {
         Some(length) => write_content_length_body(stream, &mut body, length).await?,
@@ -94,6 +97,62 @@ where
     }
     stream.flush().await?;
     Ok(())
+}
+
+pub(super) async fn write_prepared_bodyless_http1_request<S>(
+    stream: &mut S,
+    req: Request<Body>,
+    head: &mut BytesMut,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    if !http_body::Body::is_end_stream(req.body())
+        || parse_declared_content_length(req.headers())?.is_some_and(|length| length != 0)
+    {
+        return write_http1_request(stream, req, head).await;
+    }
+
+    serialize_bodyless_http1_request(req, head)?;
+    stream.write_all(head).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+pub(crate) fn is_bodyless_http1_request(req: &Request<Body>) -> Result<bool> {
+    Ok(http_body::Body::is_end_stream(req.body())
+        && parse_declared_content_length(req.headers())?.is_none_or(|length| length == 0))
+}
+
+pub(crate) fn serialize_bodyless_http1_request(
+    req: Request<Body>,
+    head: &mut BytesMut,
+) -> Result<Method> {
+    if !is_bodyless_http1_request(&req)? {
+        return Err(anyhow!("request is not immediately bodyless"));
+    }
+    debug_assert!(!req.headers().contains_key(CONNECTION));
+    debug_assert!(!req.headers().contains_key("proxy-connection"));
+    debug_assert!(!req.headers().contains_key(TRANSFER_ENCODING));
+    debug_assert!(!req.headers().contains_key(TRAILER));
+
+    let (parts, _body) = req.into_parts();
+    let method = parts.method;
+    let target = parts
+        .uri
+        .path_and_query()
+        .map(|path_and_query| path_and_query.as_str())
+        .unwrap_or("/");
+    head.clear();
+    head.reserve(512);
+    head.extend_from_slice(method.as_str().as_bytes());
+    head.extend_from_slice(b" ");
+    head.extend_from_slice(target.as_bytes());
+    head.extend_from_slice(b" HTTP/1.1\r\n");
+    serialize_headers(&parts.headers, head)?;
+    head.extend_from_slice(b"\r\n");
+    crate::http::codec::header_pool::recycle(parts.headers);
+    Ok(method)
 }
 
 async fn poll_body_data_now(body: &mut Body) -> Result<Option<Bytes>> {

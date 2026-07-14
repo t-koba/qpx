@@ -110,6 +110,42 @@ fn validate_accepts_default_port_equivalence() {
 }
 
 #[test]
+fn validation_metadata_reuses_the_parsed_host_authority() {
+    let req = http::Request::builder()
+        .version(Version::HTTP_11)
+        .method(Method::GET)
+        .uri("/path")
+        .header(HOST, "example.com:8080")
+        .body(())
+        .expect("request");
+
+    let validated = validate_incoming_request_with_metadata(&req).expect("must pass");
+
+    assert_eq!(
+        validated.authority().map(http::uri::Authority::as_str),
+        Some("example.com:8080")
+    );
+}
+
+#[test]
+fn validation_metadata_prefers_the_absolute_target_authority() {
+    let req = http::Request::builder()
+        .version(Version::HTTP_11)
+        .method(Method::GET)
+        .uri("http://example.com:80/path")
+        .header(HOST, "example.com")
+        .body(())
+        .expect("request");
+
+    let validated = validate_incoming_request_with_metadata(&req).expect("must pass");
+
+    assert_eq!(
+        validated.authority().map(http::uri::Authority::as_str),
+        Some("example.com:80")
+    );
+}
+
+#[test]
 fn normalize_response_keeps_content_length_for_head() {
     let mut resp = http::Response::builder()
         .status(StatusCode::OK)

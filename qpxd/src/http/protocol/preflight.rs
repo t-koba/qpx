@@ -2,7 +2,7 @@ use crate::http::protocol::common::bad_request_response as bad_request;
 use crate::http::protocol::l7::finalize_response_for_request;
 use hyper::{Method, Request, Response, StatusCode};
 use qpx_http::body::Body;
-use qpx_http::protocol::semantics::validate_incoming_request;
+use qpx_http::protocol::semantics::validate_incoming_request_with_metadata;
 
 pub(crate) enum ConnectPolicy<'a> {
     Allow,
@@ -39,28 +39,30 @@ impl<'a> PreflightOptions<'a> {
 }
 
 pub(crate) enum PreflightOutcome {
-    Continue,
+    Continue(qpx_http::protocol::semantics::ValidatedIncomingRequest),
     Reject(Box<Response<Body>>),
 }
 
 pub(crate) fn preflight_validate<B>(
-    req: &Request<B>,
+    req: &mut Request<B>,
     proxy_name: &str,
     options: PreflightOptions<'_>,
 ) -> PreflightOutcome {
-    if let Err(err) = validate_incoming_request(req) {
-        return PreflightOutcome::Reject(Box::new(finalize_response_for_request(
-            req.method(),
-            req.version(),
-            proxy_name,
-            Response::builder()
-                .status(err.http_status())
-                .body(Body::from(err.to_string()))
-                .unwrap_or_else(|_| bad_request(err.to_string())),
-            false,
-        )));
-    }
-
+    let validated = match validate_incoming_request_with_metadata(req) {
+        Ok(validated) => validated,
+        Err(err) => {
+            return PreflightOutcome::Reject(Box::new(finalize_response_for_request(
+                req.method(),
+                req.version(),
+                proxy_name,
+                Response::builder()
+                    .status(err.http_status())
+                    .body(Body::from(err.to_string()))
+                    .unwrap_or_else(|_| bad_request(err.to_string())),
+                false,
+            )));
+        }
+    };
     if req.method() == Method::TRACE && !options.trace_enabled {
         return PreflightOutcome::Reject(Box::new(finalize_response_for_request(
             req.method(),
@@ -89,5 +91,5 @@ pub(crate) fn preflight_validate<B>(
         )));
     }
 
-    PreflightOutcome::Continue
+    PreflightOutcome::Continue(validated)
 }

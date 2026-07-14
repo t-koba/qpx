@@ -7,6 +7,9 @@ use qpx_http::protocol::semantics::{
     append_via_for_version, normalize_response_for_request_with_options,
     sanitize_hop_by_hop_headers, sync_host_header_from_absolute_target,
 };
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
 use tracing::warn;
@@ -35,6 +38,26 @@ pub(crate) fn finalize_response_in_place(
     response: &mut Response<Body>,
     preserve_upgrade: bool,
 ) {
+    if response
+        .extensions()
+        .get::<Arc<crate::upstream::raw_http1::RawHttp1ResponseHead>>()
+        .is_some()
+    {
+        if response.status().is_informational() {
+            *response.status_mut() = StatusCode::BAD_GATEWAY;
+            *response.body_mut() = Body::empty();
+        }
+        if let Some(raw) = response
+            .extensions_mut()
+            .get_mut::<Arc<crate::upstream::raw_http1::RawHttp1ResponseHead>>()
+        {
+            if !raw.is_finalized() {
+                Arc::make_mut(raw).finalize(request_version, proxy_name);
+            }
+            wrap_body_sanitizing_response_trailers(response);
+            return;
+        }
+    }
     finalize_response_headers_common(request_version, proxy_name, response, preserve_upgrade);
     normalize_response_for_request_with_options(request_method, response, preserve_upgrade);
     wrap_body_sanitizing_response_trailers(response);
@@ -103,10 +126,65 @@ fn ensure_date_header(headers: &mut http::HeaderMap) {
     if headers.contains_key(http::header::DATE) {
         return;
     }
-    let value = httpdate::fmt_http_date(SystemTime::now());
-    if let Ok(hv) = http::HeaderValue::from_str(value.as_str()) {
-        headers.insert(http::header::DATE, hv);
+    headers.insert(http::header::DATE, cached_date_header_value());
+}
+
+pub(crate) fn cached_date_header_value() -> http::HeaderValue {
+    let cached_epoch_second = CACHED_DATE_EPOCH_SECOND.load(Ordering::Relaxed);
+    let epoch_second = if cached_epoch_second == 0 {
+        current_epoch_second()
+    } else {
+        cached_epoch_second
+    };
+    CACHED_DATE_HEADER.with_borrow_mut(|cached| {
+        if let Some((cached_second, value)) = cached.as_ref()
+            && *cached_second == epoch_second
+        {
+            return value.clone();
+        }
+        let rounded = SystemTime::UNIX_EPOCH + Duration::from_secs(epoch_second);
+        let formatted = httpdate::fmt_http_date(rounded);
+        let value = match http::HeaderValue::from_str(&formatted) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(error = %error, "HTTP-date formatter produced an invalid field value");
+                http::HeaderValue::from_static("Thu, 01 Jan 1970 00:00:00 GMT")
+            }
+        };
+        *cached = Some((epoch_second, value.clone()));
+        value
+    })
+}
+
+pub(crate) fn start_cached_date_updater() {
+    if CACHED_DATE_UPDATER_STARTED.swap(true, Ordering::Relaxed) {
+        return;
     }
+    CACHED_DATE_EPOCH_SECOND.store(current_epoch_second(), Ordering::Relaxed);
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            CACHED_DATE_EPOCH_SECOND.store(current_epoch_second(), Ordering::Relaxed);
+        }
+    });
+}
+
+fn current_epoch_second() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+static CACHED_DATE_UPDATER_STARTED: AtomicBool = AtomicBool::new(false);
+static CACHED_DATE_EPOCH_SECOND: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static CACHED_DATE_HEADER: RefCell<Option<(u64, http::HeaderValue)>> = const {
+        RefCell::new(None)
+    };
 }
 
 fn finalize_extended_connect_response_in_place(
@@ -199,8 +277,10 @@ pub(crate) fn prepare_request_with_headers_in_place(
     let validate_trailers = request_version == http::Version::HTTP_2
         || request.headers().contains_key(http::header::TRAILER);
     apply_request_headers(request.headers_mut(), header_control);
-    let request_uri = request.uri().clone();
-    sync_host_header_from_absolute_target(request.headers_mut(), &request_uri);
+    if request.uri().authority().is_some() {
+        let request_uri = request.uri().clone();
+        sync_host_header_from_absolute_target(request.headers_mut(), &request_uri);
+    }
     sanitize_hop_by_hop_headers(request.headers_mut(), preserve_upgrade);
     append_via_for_version(request.headers_mut(), request_version, proxy_name);
     qpx_observability::inject_trace_context(request.headers_mut());
@@ -212,7 +292,7 @@ pub(crate) fn prepare_request_with_headers_in_place(
     {
         crate::http::rpc::apply_grpc_deadline_header(request.headers_mut(), deadline);
     }
-    if validate_trailers {
+    if validate_trailers && !http_body::Body::is_end_stream(request.body()) {
         wrap_body_validating_request_trailers(request);
     }
 }

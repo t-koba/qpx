@@ -59,6 +59,10 @@ impl CompiledDestinationMatch {
             ctx.destination_application_confidence,
         )
     }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.category.is_empty() && self.reputation.is_empty() && self.application.is_empty()
+    }
 }
 
 impl CompiledDestinationDimensionMatch {
@@ -83,5 +87,9 @@ impl CompiledDestinationDimensionMatch {
         match_optional_text(&self.value, value)
             && match_optional_text(&self.source, source)
             && match_optional_numeric(&self.confidence, confidence)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.value.is_none() && self.source.is_none() && self.confidence.is_none()
     }
 }

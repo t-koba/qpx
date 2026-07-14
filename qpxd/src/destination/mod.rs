@@ -6,6 +6,7 @@ pub(crate) use compile::DestinationClassifier;
 pub(crate) use resolve::CompiledDestinationResolutionPolicy;
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DestinationMetadata {
@@ -15,7 +16,7 @@ pub(crate) struct DestinationMetadata {
     pub(crate) reputation: Option<String>,
     pub(crate) reputation_source: Option<&'static str>,
     pub(crate) reputation_confidence: Option<u8>,
-    pub(crate) application: Option<String>,
+    pub(crate) application: Option<Arc<str>>,
     pub(crate) application_source: Option<&'static str>,
     pub(crate) application_confidence: Option<u8>,
     pub(crate) category_trace: Option<String>,

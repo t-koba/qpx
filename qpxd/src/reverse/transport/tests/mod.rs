@@ -111,19 +111,15 @@ fn make_base_request_fields(
         Some(query) => format!("https://{authority}{path}?{query}"),
         None => format!("https://{authority}{path}"),
     };
-    BaseRequestFields {
-        peer_ip: None,
-        dst_port: None,
-        host: Some(authority.to_string()),
-        sni: None,
-        method: method.parse().expect("method"),
-        path: Some(path.to_string()),
-        query: query.map(str::to_string),
-        authority: Some(authority.to_string()),
-        scheme: Some("https".to_string()),
-        request_uri,
-        http_version: crate::http::protocol::common::http_version_label(http::Version::HTTP_11),
-    }
+    let request = Request::builder()
+        .method(method)
+        .uri(request_uri)
+        .body(())
+        .expect("request");
+    crate::http::protocol::base_fields::extract_base_request_fields(
+        &request,
+        crate::http::protocol::base_fields::BaseRequestContext::default(),
+    )
 }
 
 async fn spawn_decision_service_server(response_body: String, accepts: usize) -> SocketAddr {
@@ -225,6 +221,13 @@ fn build_router(response_rules: Vec<HttpResponseRuleConfig>) -> ReverseRouter {
         registry.as_ref(),
     )
     .expect("router")
+}
+
+#[test]
+fn single_featureless_route_enables_plain_http_dispatch() {
+    let router = build_router(Vec::new());
+
+    assert!(router.single_plain_http_route().is_some());
 }
 
 mod authz_interim_tests;

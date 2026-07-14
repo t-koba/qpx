@@ -1,0 +1,25 @@
+{
+  "defaults": {
+    "max_lane_latency_ratio": 1.0,
+    "max_lane_mean_latency_ratio": 1.05,
+    "max_lane_p99_latency_ratio": 1.1,
+    "max_qpx_cpu_sample_spread_ratio": 1.1,
+    "max_qpx_throughput_sample_spread_ratio": 1.1,
+    "max_reference_cpu_sample_spread_ratio": 1.25,
+    "max_reference_throughput_sample_spread_ratio": 1.25,
+    "min_aggregate_dominance_score": 1.5,
+    "min_lane_dominance_score": 1.25,
+    "min_lane_throughput_ratio": 1.0,
+    "min_lane_total_cpu_efficiency_ratio": 1.0
+  },
+  "metric": "multi_axis_total_system_http2_dominance",
+  "required_body_bytes": [
+    1024,
+    1048576
+  ],
+  "required_max_concurrent_streams": [
+    1,
+    100
+  ],
+  "schema_version": 2
+}

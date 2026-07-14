@@ -33,7 +33,7 @@ pub(super) async fn prepare_reverse_modules(
     apply_request_header_control_in_place(&mut req, route_headers);
     let request_cache_policy = route.plan.cache.as_ref().filter(|_| !cache_bypass).cloned();
     let mut http_modules = route.plan.modules.start(
-        state.clone(),
+        state,
         crate::http::modules::HttpModuleSessionInit {
             proxy_kind: ProxyKind::Reverse,
             proxy_name,

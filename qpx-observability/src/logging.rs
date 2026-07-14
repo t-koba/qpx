@@ -122,9 +122,9 @@ fn init_logging_inner(
                 .with_filter(filter)
                 .boxed()
         };
-        (layer, Some(guard))
+        (Some(layer), Some(guard))
     } else {
-        (tracing_subscriber::layer::Identity::new().boxed(), None)
+        (None, None)
     };
 
     let (audit_layer, audit_guard) = if audit.output.enabled {
@@ -159,24 +159,23 @@ fn init_logging_inner(
                 .with_filter(filter)
                 .boxed()
         };
-        (layer, Some(guard))
+        (Some(layer), Some(guard))
     } else {
-        (tracing_subscriber::layer::Identity::new().boxed(), None)
+        (None, None)
     };
 
     let (otel_layer, otel_guard) = match otel {
         Some(cfg) if cfg.enabled => {
             let (layer, guard) = build_otel_layer(cfg)?;
-            (layer, Some(guard))
+            (Some(layer), Some(guard))
         }
-        _ => (tracing_subscriber::layer::Identity::new().boxed(), None),
+        _ => (None, None),
     };
 
-    let combined = system_layer
-        .and_then(access_layer)
-        .and_then(audit_layer)
-        .and_then(otel_layer)
-        .boxed();
+    let mut combined = vec![system_layer];
+    combined.extend(access_layer);
+    combined.extend(audit_layer);
+    combined.extend(otel_layer);
 
     tracing_subscriber::registry().with(combined).try_init()?;
 
@@ -330,6 +329,8 @@ fn cleanup_old_logs(cleanup: &RotationCleanup) {
 #[cfg(test)]
 mod tests {
     use super::request_spans_are_consumed;
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::layer::{Layer as _, SubscriberExt as _};
 
     #[test]
     fn request_spans_follow_configured_consumers() {
@@ -337,5 +338,26 @@ mod tests {
         assert!(request_spans_are_consumed("json", true));
         assert!(request_spans_are_consumed("pretty", false));
         assert!(request_spans_are_consumed("compact", false));
+    }
+
+    #[test]
+    fn absent_optional_layers_do_not_enable_filtered_callsites() {
+        let system = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::sink)
+            .with_filter(LevelFilter::WARN);
+        let system = system.boxed();
+        let active_layers = vec![system];
+        let subscriber = tracing_subscriber::registry().with(active_layers);
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!tracing::enabled!(
+                target: "qpx_optional_layer_filter_test",
+                tracing::Level::TRACE
+            ));
+            assert!(tracing::enabled!(
+                target: "qpx_optional_layer_filter_test",
+                tracing::Level::WARN
+            ));
+        });
     }
 }

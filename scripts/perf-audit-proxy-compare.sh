@@ -11,13 +11,18 @@ THREADS="${QPX_PROXY_COMPARE_THREADS:-2}"
 WRK_TIMEOUT="${QPX_PROXY_COMPARE_WRK_TIMEOUT:-30s}"
 BODY_SIZES="${QPX_PROXY_COMPARE_BODY_SIZES:-1024 1048576}"
 SAMPLE_ATTEMPTS="${QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS:-3}"
+MIN_VALID_SAMPLES="${QPX_PROXY_COMPARE_MIN_VALID_SAMPLES:-}"
+WARMUP_COOLDOWN_SECONDS="${QPX_PROXY_COMPARE_WARMUP_COOLDOWN_SECONDS:-0.25}"
 MAX_READ_ERROR_RATE_PPM="${QPX_PROXY_COMPARE_MAX_READ_ERROR_RATE_PPM:-1000}"
 HOST_HEADER="${QPX_PROXY_COMPARE_HOST:-bench.local}"
 APACHE_BIN="${QPX_PROXY_COMPARE_APACHE_BIN:-}"
 SCALE_WORKERS="${QPX_PROXY_COMPARE_SCALE_WORKERS:-}"
 MAX_SCALE_WORKERS="${QPX_PROXY_COMPARE_MAX_SCALE_WORKERS:-4}"
+PROXY_FILTER="${QPX_PROXY_COMPARE_PROXY_FILTER:-}"
 
 BACKEND_PORT="${QPX_PROXY_COMPARE_BACKEND_PORT:-18080}"
+BACKEND_WORKERS="${QPX_PROXY_COMPARE_BACKEND_WORKERS:-2}"
+HEALTH_CHECK_INTERVAL_MS="${QPX_PROXY_COMPARE_HEALTH_CHECK_INTERVAL_MS:-5000}"
 QPX_PORT="${QPX_PROXY_COMPARE_QPX_PORT:-18081}"
 NGINX_PORT="${QPX_PROXY_COMPARE_NGINX_PORT:-18082}"
 APACHE_PORT="${QPX_PROXY_COMPARE_APACHE_PORT:-18083}"
@@ -98,6 +103,8 @@ collect_artifacts() {
   cp "$TMP_DIR"/*.wrk "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.lua "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.warmup "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.valid-samples.tsv "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.jsonl "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.yaml "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   find "$TMP_DIR" -name '*.conf' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
 }
@@ -126,92 +133,7 @@ register_pid() {
   PIDS+=("$1")
 }
 
-clock_ticks() {
-  getconf CLK_TCK 2>/dev/null || echo 100
-}
-
-children_of_pid() {
-  local pid="$1"
-  if command -v pgrep >/dev/null 2>&1; then
-    pgrep -P "$pid" 2>/dev/null || true
-  elif ps -o pid= --ppid "$pid" >/dev/null 2>&1; then
-    ps -o pid= --ppid "$pid" 2>/dev/null | awk '{ print $1 }'
-  fi
-}
-
-process_tree_pids() {
-  local root="$1"
-  local child
-  if [ -z "$root" ]; then
-    return
-  fi
-  echo "$root"
-  for child in $(children_of_pid "$root"); do
-    process_tree_pids "$child"
-  done
-}
-
-proc_cpu_ticks() {
-  local pid="$1"
-  local stat="/proc/${pid}/stat"
-  if [ ! -r "$stat" ]; then
-    echo 0
-    return
-  fi
-  awk '{
-    comm_end = index($0, ") ")
-    if (comm_end == 0) {
-      print 0
-      exit
-    }
-    rest = substr($0, comm_end + 2)
-    split(rest, fields, " ")
-    print fields[12] + fields[13]
-  }' "$stat"
-}
-
-proc_status_value_kb() {
-  local pid="$1"
-  local key="$2"
-  local status="/proc/${pid}/status"
-  if [ ! -r "$status" ]; then
-    echo 0
-    return
-  fi
-  awk -v key="$key" '$1 == key ":" { print $2; found = 1; exit } END { if (!found) print 0 }' "$status"
-}
-
-process_tree_cpu_ms() {
-  local root="$1"
-  local hz pid ticks total_ticks
-  if [ -z "$root" ] || [ ! -d /proc ]; then
-    echo 0
-    return
-  fi
-  hz="$(clock_ticks)"
-  total_ticks=0
-  for pid in $(process_tree_pids "$root"); do
-    ticks="$(proc_cpu_ticks "$pid")"
-    total_ticks=$((total_ticks + ticks))
-  done
-  awk -v ticks="$total_ticks" -v hz="$hz" 'BEGIN { printf "%.0f", (ticks * 1000) / hz }'
-}
-
-process_tree_status_kb() {
-  local root="$1"
-  local key="$2"
-  local pid value total
-  if [ -z "$root" ] || [ ! -d /proc ]; then
-    echo 0
-    return
-  fi
-  total=0
-  for pid in $(process_tree_pids "$root"); do
-    value="$(proc_status_value_kb "$pid" "$key")"
-    total=$((total + value))
-  done
-  echo "$total"
-}
+source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"
 
 json_number_or_null() {
   local value="$1"
@@ -239,8 +161,8 @@ record_invalid_sample() {
   local error_code="$7"
   local commit
   commit="${GITHUB_SHA:-unknown}"
-  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"requests":0,"complete_requests":0,"failed_requests":1,"connect_errors":0,"read_errors":0,"write_errors":0,"timeout_errors":0,"max_read_error_rate_ppm":%s,"non_2xx_responses":0,"bad_length_responses":0,"status_before":"%s","status_after":"%s","requests_per_sec":0,"mean_time_per_request_ms":null,"latency_p50_ms":null,"latency_p90_ms":null,"latency_p95_ms":null,"latency_p99_ms":null,"latency_p999_ms":null,"transfer_kbytes_per_sec":0,"cpu_ms":null,"rss_kb":null,"rss_peak_kb":null,"requests_per_cpu_second":null,"valid":false,"error":"%s","commit":"%s"}\n' \
-    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$MAX_READ_ERROR_RATE_PPM" "$status_before" "$status_after" "$error_code" "$commit" >>"$OUT_JSON"
+  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":0,"aggregation":"single_sample","requests":0,"complete_requests":0,"failed_requests":1,"connect_errors":0,"read_errors":0,"write_errors":0,"timeout_errors":0,"max_read_error_rate_ppm":%s,"non_2xx_responses":0,"bad_length_responses":0,"status_before":"%s","status_after":"%s","requests_per_sec":0,"mean_time_per_request_ms":null,"latency_p50_ms":null,"latency_p90_ms":null,"latency_p95_ms":null,"latency_p99_ms":null,"latency_p999_ms":null,"transfer_kbytes_per_sec":0,"cpu_ms":null,"rss_kb":null,"rss_peak_kb":null,"requests_per_cpu_second":null,"valid":false,"error":"%s","commit":"%s"}\n' \
+    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$MAX_READ_ERROR_RATE_PPM" "$status_before" "$status_after" "$error_code" "$commit" >>"$OUT_JSON"
   INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
 }
 
@@ -302,7 +224,7 @@ start_backend() {
   cat >"$config" <<NGINX
 pid $prefix/backend-nginx.pid;
 error_log $prefix/logs/error.log warn;
-worker_processes 1;
+worker_processes ${BACKEND_WORKERS};
 events {
   worker_connections 4096;
 }
@@ -336,6 +258,10 @@ start_qpxd_reverse() {
   local config="$TMP_DIR/${name}.yaml"
   cat >"$config" <<YAML
 state_dir: "$STATE_DIR"
+telemetry:
+  system_log:
+    level: warn
+    format: json
 runtime:
   worker_threads: ${worker_threads}
   acceptor_tasks_per_listener: ${acceptor_tasks}
@@ -353,6 +279,7 @@ edges:
         match:
           host: [${HOST_HEADER}]
         health_check:
+          interval_ms: ${HEALTH_CHECK_INTERVAL_MS}
           fail_threshold: 1000000
           cooldown_ms: 1
         target:
@@ -375,6 +302,10 @@ start_qpxd_forward() {
   local config="$TMP_DIR/qpxd-forward.yaml"
   cat >"$config" <<YAML
 state_dir: "$STATE_DIR"
+telemetry:
+  system_log:
+    level: warn
+    format: json
 runtime:
   worker_threads: 1
   acceptor_tasks_per_listener: 1
@@ -409,12 +340,16 @@ events {
 }
 http {
   access_log off;
+  upstream qpx_benchmark_backend {
+    server 127.0.0.1:${BACKEND_PORT};
+    keepalive 256;
+  }
   server {
     listen 127.0.0.1:${NGINX_PORT};
     location / {
       proxy_http_version 1.1;
       proxy_set_header Connection "";
-      proxy_pass http://127.0.0.1:${BACKEND_PORT};
+      proxy_pass http://qpx_benchmark_backend;
     }
   }
 }
@@ -669,15 +604,21 @@ run_one() {
   local request_host="$6"
   local body_bytes="$7"
   local resource_pid="$8"
+  if [ -n "$PROXY_FILTER" ]; then
+    case ",${PROXY_FILTER}," in
+      *",${proxy},"*) ;;
+      *) return 0 ;;
+    esac
+  fi
   local body_kind
   local url="http://127.0.0.1:${port}/"
-  local artifact_name="${bench}.${proxy}.${body_bytes}"
+  local artifact_name="${bench}.${proxy}.${body_bytes}.round-${CURRENT_SAMPLE_ROUND:-0}"
   local out="$TMP_DIR/${artifact_name}.wrk"
   local warmup_out="$TMP_DIR/${artifact_name}.warmup"
   local lua="$TMP_DIR/${artifact_name}.lua"
   local status_before status_after
   local cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb
-  local attempt failed_sample
+  local attempt failed_sample samples_file valid_sample_count median_index selected_sample
   body_kind="$(body_profile "$body_bytes")"
 
   cat >"$lua" <<LUA
@@ -751,6 +692,7 @@ LUA
     record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "200" "200" "warmup_failed"
     return 0
   fi
+  sleep "$WARMUP_COOLDOWN_SECONDS"
   if [ "$mode" = "forward" ]; then
     status_before="$(safe_probe_forward_status "$port" "/bench-${body_bytes}")"
   else
@@ -758,6 +700,8 @@ LUA
   fi
   local complete summary_requests failed fatal_errors non_2xx bad_length write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
   local latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms requests_per_cpu_second
+  samples_file="$TMP_DIR/${artifact_name}.valid-samples.tsv"
+  : >"$samples_file"
   attempt=1
   failed_sample=""
   while [ "$attempt" -le "$SAMPLE_ATTEMPTS" ]; do
@@ -822,7 +766,10 @@ LUA
     requests_per_cpu_second="$(awk -v requests="$summary_requests" -v cpu_ms="$cpu_ms" 'BEGIN { if (cpu_ms > 0) printf "%.6f", requests / (cpu_ms / 1000); else printf "null" }')"
     valid="$([ "$complete" -gt 0 ] && [ "$summary_requests" = "$complete" ] && [ "$fatal_errors" = 0 ] && read_error_rate_allowed "$read_errors" "$complete" && [ "$non_2xx" = 0 ] && [ "$bad_length" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
     if [ "$valid" = true ]; then
-      break
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$rps" "$complete" "$summary_requests" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$non_2xx" "$bad_length" "$mean_ms" "$transfer_kbps" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$cpu_ms" "$rss_kb" "$rss_peak_kb" "$requests_per_cpu_second" "$status_before" "$status_after" >>"$samples_file"
+      attempt=$((attempt + 1))
+      continue
     fi
     failed_sample="$out"
     echo "${proxy} produced an invalid benchmark sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
@@ -830,32 +777,85 @@ LUA
     cat "$out" >&2 || true
     attempt=$((attempt + 1))
   done
-  if [ -z "${summary_requests:-}" ]; then
+  valid_sample_count="$(wc -l <"$samples_file" | tr -d '[:space:]')"
+  if [ "$valid_sample_count" -lt "$MIN_VALID_SAMPLES" ]; then
     if [ "$mode" = "forward" ]; then
       status_after="$(safe_probe_forward_status "$port" "/bench-${body_bytes}")"
     else
       status_after="$(safe_probe_status "$port" "/bench-${body_bytes}")"
     fi
-    record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "${status_before:-200}" "$status_after" "benchmark_failed"
-    cat "${failed_sample:-$out}" >&2 || true
+    echo "${proxy} produced ${valid_sample_count}/${SAMPLE_ATTEMPTS} valid benchmark samples; ${MIN_VALID_SAMPLES} required" >&2
+    record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "${status_before:-200}" "$status_after" "insufficient_valid_samples"
+    if [ -n "${failed_sample:-}" ]; then
+      cat "$failed_sample" >&2 || true
+    fi
     return 0
   fi
-  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_peak_kb":%s,"requests_per_cpu_second":%s,"valid":%s,"commit":"%s"}\n' \
-    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_peak_kb")" "$requests_per_cpu_second" "$valid" "$commit" >>"$OUT_JSON"
-
-  if [ "$valid" != true ]; then
-    echo "${proxy} produced an invalid benchmark sample" >&2
-    echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} connect_errors=${connect_errors} read_errors=${read_errors} write_errors=${write_errors} timeout_errors=${timeout_errors} max_read_error_rate_ppm=${MAX_READ_ERROR_RATE_PPM} non_2xx=${non_2xx} bad_length=${bad_length} status_before=${status_before} status_after=${status_after}" >&2
-    cat "${failed_sample:-$out}" >&2 || true
-    INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
+  median_index=$(((valid_sample_count + 1) / 2))
+  selected_sample="$(LC_ALL=C sort -t $'\t' -k1,1n "$samples_file" | sed -n "${median_index}p")"
+  if [ -z "$selected_sample" ]; then
+    record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "${status_before:-200}" "${status_after:-200}" "sample_aggregation_failed"
+    return 0
   fi
+  IFS=$'\t' read -r rps complete summary_requests failed connect_errors read_errors write_errors timeout_errors non_2xx bad_length mean_ms transfer_kbps latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms cpu_ms rss_kb rss_peak_kb requests_per_cpu_second status_before status_after <<<"$selected_sample"
+  commit="${GITHUB_SHA:-unknown}"
+  valid=true
+  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_peak_kb":%s,"requests_per_cpu_second":%s,"valid":%s,"commit":"%s"}\n' \
+    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_peak_kb")" "$requests_per_cpu_second" "$valid" "$commit" >>"$OUT_JSON"
 }
 
 require_cmd curl
 require_cmd lighttpd
 require_cmd nginx
+require_cmd jq
 require_cmd squid
 require_cmd wrk
+
+case "$BACKEND_WORKERS" in
+  ''|*[!0-9]*)
+    echo "QPX_PROXY_COMPARE_BACKEND_WORKERS must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$BACKEND_WORKERS" -eq 0 ]; then
+  echo "QPX_PROXY_COMPARE_BACKEND_WORKERS must be a positive integer" >&2
+  exit 1
+fi
+
+case "$HEALTH_CHECK_INTERVAL_MS" in
+  ''|*[!0-9]*)
+    echo "QPX_PROXY_COMPARE_HEALTH_CHECK_INTERVAL_MS must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$HEALTH_CHECK_INTERVAL_MS" -eq 0 ]; then
+  echo "QPX_PROXY_COMPARE_HEALTH_CHECK_INTERVAL_MS must be a positive integer" >&2
+  exit 1
+fi
+
+case "$SAMPLE_ATTEMPTS" in
+  ''|*[!0-9]*)
+    echo "QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$SAMPLE_ATTEMPTS" -eq 0 ]; then
+  echo "QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS must be a positive integer" >&2
+  exit 1
+fi
+if [ -z "$MIN_VALID_SAMPLES" ]; then
+  MIN_VALID_SAMPLES=$((SAMPLE_ATTEMPTS / 2 + 1))
+fi
+case "$MIN_VALID_SAMPLES" in
+  ''|*[!0-9]*)
+    echo "QPX_PROXY_COMPARE_MIN_VALID_SAMPLES must be a positive integer no greater than sample attempts" >&2
+    exit 1
+    ;;
+esac
+if [ "$MIN_VALID_SAMPLES" -eq 0 ] || [ "$MIN_VALID_SAMPLES" -gt "$SAMPLE_ATTEMPTS" ]; then
+  echo "QPX_PROXY_COMPARE_MIN_VALID_SAMPLES must be a positive integer no greater than sample attempts" >&2
+  exit 1
+fi
 
 case "$MAX_READ_ERROR_RATE_PPM" in
   ''|*[!0-9]*)
@@ -896,15 +896,52 @@ start_lighttpd
 start_qpxd_forward
 start_squid
 
-for body_bytes in $BODY_SIZES; do
-  run_one "proxy_compare_http1_reverse" "direct-backend" "$BACKEND_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$BACKEND_PID"
-  run_one "proxy_compare_http1_reverse" "qpxd" "$QPX_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$QPXD_PID"
-  run_one "proxy_compare_http1_reverse" "nginx" "$NGINX_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$NGINX_PID"
-  run_one "proxy_compare_http1_reverse" "apache" "$APACHE_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$APACHE_PID"
-  run_one "proxy_compare_http1_reverse" "lighttpd" "$LIGHTTPD_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$LIGHTTPD_PID"
+FINAL_OUT_JSON="$OUT_JSON"
+RAW_OUT_JSON="$TMP_DIR/interleaved-raw.jsonl"
+REQUESTED_SAMPLE_ATTEMPTS="$SAMPLE_ATTEMPTS"
+REQUESTED_MIN_VALID_SAMPLES="$MIN_VALID_SAMPLES"
+OUT_JSON="$RAW_OUT_JSON"
+SAMPLE_ATTEMPTS=1
+MIN_VALID_SAMPLES=1
+: >"$OUT_JSON"
 
-  run_one "proxy_compare_http1_forward" "qpxd-forward" "$QPX_FORWARD_PORT" "forward" "http://127.0.0.1:${BACKEND_PORT}/bench-${body_bytes}" "127.0.0.1:${BACKEND_PORT}" "$body_bytes" "$QPX_FORWARD_PID"
-  run_one "proxy_compare_http1_forward" "squid" "$SQUID_PORT" "forward" "http://127.0.0.1:${BACKEND_PORT}/bench-${body_bytes}" "127.0.0.1:${BACKEND_PORT}" "$body_bytes" "$SQUID_PID"
+run_reverse_proxy_by_index() {
+  local index="$1"
+  local body_bytes="$2"
+  case "$index" in
+    0) run_one "proxy_compare_http1_reverse" "direct-backend" "$BACKEND_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$BACKEND_PID" ;;
+    1) run_one "proxy_compare_http1_reverse" "qpxd" "$QPX_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$QPXD_PID" ;;
+    2) run_one "proxy_compare_http1_reverse" "nginx" "$NGINX_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$NGINX_PID" ;;
+    3) run_one "proxy_compare_http1_reverse" "apache" "$APACHE_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$APACHE_PID" ;;
+    4) run_one "proxy_compare_http1_reverse" "lighttpd" "$LIGHTTPD_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$LIGHTTPD_PID" ;;
+    *) echo "invalid reverse proxy benchmark index: ${index}" >&2; exit 1 ;;
+  esac
+}
+
+for body_bytes in $BODY_SIZES; do
+  round=1
+  while [ "$round" -le "$REQUESTED_SAMPLE_ATTEMPTS" ]; do
+    CURRENT_SAMPLE_ROUND="$round"
+    start_index=$((((round - 1) * 4) % 5))
+    offset=0
+    while [ "$offset" -lt 5 ]; do
+      if [ $((round % 2)) -eq 1 ]; then
+        proxy_index=$(((start_index + offset) % 5))
+      else
+        proxy_index=$(((start_index - offset + 5) % 5))
+      fi
+      run_reverse_proxy_by_index "$proxy_index" "$body_bytes"
+      offset=$((offset + 1))
+    done
+    if [ $((round % 2)) -eq 1 ]; then
+      run_one "proxy_compare_http1_forward" "qpxd-forward" "$QPX_FORWARD_PORT" "forward" "http://127.0.0.1:${BACKEND_PORT}/bench-${body_bytes}" "127.0.0.1:${BACKEND_PORT}" "$body_bytes" "$QPX_FORWARD_PID"
+      run_one "proxy_compare_http1_forward" "squid" "$SQUID_PORT" "forward" "http://127.0.0.1:${BACKEND_PORT}/bench-${body_bytes}" "127.0.0.1:${BACKEND_PORT}" "$body_bytes" "$SQUID_PID"
+    else
+      run_one "proxy_compare_http1_forward" "squid" "$SQUID_PORT" "forward" "http://127.0.0.1:${BACKEND_PORT}/bench-${body_bytes}" "127.0.0.1:${BACKEND_PORT}" "$body_bytes" "$SQUID_PID"
+      run_one "proxy_compare_http1_forward" "qpxd-forward" "$QPX_FORWARD_PORT" "forward" "http://127.0.0.1:${BACKEND_PORT}/bench-${body_bytes}" "127.0.0.1:${BACKEND_PORT}" "$body_bytes" "$QPX_FORWARD_PID"
+    fi
+    round=$((round + 1))
+  done
 done
 
 for workers in $SCALE_WORKERS; do
@@ -917,9 +954,93 @@ for workers in $SCALE_WORKERS; do
   fi
   scale_pid="$LAST_STARTED_PID"
   for body_bytes in $BODY_SIZES; do
-    run_one "proxy_scale_http1_reverse" "qpxd-workers-${workers}" "$scale_port" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$scale_pid"
+    round=1
+    while [ "$round" -le "$REQUESTED_SAMPLE_ATTEMPTS" ]; do
+      CURRENT_SAMPLE_ROUND="$round"
+      run_one "proxy_scale_http1_reverse" "qpxd-workers-${workers}" "$scale_port" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$scale_pid"
+      round=$((round + 1))
+    done
   done
 done
+
+jq -cs \
+  --argjson attempts "$REQUESTED_SAMPLE_ATTEMPTS" \
+  --argjson minimum "$REQUESTED_MIN_VALID_SAMPLES" \
+  --argjson backend_workers "$BACKEND_WORKERS" \
+  --argjson health_check_interval_ms "$HEALTH_CHECK_INTERVAL_MS" \
+  --argjson logical_cpus "$(cpu_count)" '
+    def lower_median:
+      map(select(type == "number"))
+      | sort
+      | if length == 0 then null else .[((length - 1) / 2 | floor)] end;
+    def upper_median:
+      map(select(type == "number"))
+      | sort
+      | if length == 0 then null else .[(length / 2 | floor)] end;
+    def maximum:
+      map(select(type == "number"))
+      | if length == 0 then null else max end;
+    def spread_ratio:
+      map(select(type == "number" and . > 0))
+      | if length == 0 then null else max / min end;
+    group_by([.bench, .proxy, .body_bytes])[]
+    | . as $all
+    | [$all[] | select(.valid == true)] as $valid
+    | if ($valid | length) >= $minimum then
+        ($valid | sort_by(.requests_per_sec)) as $ordered
+        | $ordered[((($ordered | length) - 1) / 2 | floor)]
+        | .aggregation = "conservative_median_per_metric"
+        | .sample_attempts = $attempts
+        | .valid_samples = ($valid | length)
+        | .sampling_order = "round_robin_interleaved"
+        | .benchmark_schema_version = 2
+        | .backend_workers = $backend_workers
+        | .health_check_interval_ms = $health_check_interval_ms
+        | .logical_cpus = $logical_cpus
+        | .requests = ([$valid[].requests] | lower_median)
+        | .complete_requests = ([$valid[].complete_requests] | lower_median)
+        | .connect_errors = ([$valid[].connect_errors] | maximum)
+        | .read_errors = ([$valid[].read_errors] | maximum)
+        | .write_errors = ([$valid[].write_errors] | maximum)
+        | .timeout_errors = ([$valid[].timeout_errors] | maximum)
+        | .failed_requests = (.connect_errors + .read_errors + .write_errors + .timeout_errors)
+        | .non_2xx_responses = ([$valid[].non_2xx_responses] | maximum)
+        | .bad_length_responses = ([$valid[].bad_length_responses] | maximum)
+        | .requests_per_sec = ([$valid[].requests_per_sec] | lower_median)
+        | .mean_time_per_request_ms = ([$valid[].mean_time_per_request_ms] | upper_median)
+        | .latency_p50_ms = ([$valid[].latency_p50_ms] | upper_median)
+        | .latency_p90_ms = ([$valid[].latency_p90_ms] | upper_median)
+        | .latency_p95_ms = ([$valid[].latency_p95_ms] | upper_median)
+        | .latency_p99_ms = ([$valid[].latency_p99_ms] | upper_median)
+        | .latency_p999_ms = ([$valid[].latency_p999_ms] | upper_median)
+        | .transfer_kbytes_per_sec = ([$valid[].transfer_kbytes_per_sec] | lower_median)
+        | .cpu_ms = ([$valid[].cpu_ms] | upper_median)
+        | .rss_kb = ([$valid[].rss_kb] | maximum)
+        | .rss_peak_kb = ([$valid[].rss_peak_kb] | maximum)
+        | .requests_per_cpu_second = ([$valid[].requests_per_cpu_second] | lower_median)
+        | .sample_spread = {
+            requests_per_sec_ratio: ([$valid[].requests_per_sec] | spread_ratio),
+            latency_p99_ratio: ([$valid[].latency_p99_ms] | spread_ratio),
+            requests_per_cpu_second_ratio: ([$valid[].requests_per_cpu_second] | spread_ratio)
+          }
+      else
+        $all[0]
+        | .aggregation = "conservative_median_per_metric"
+        | .sample_attempts = $attempts
+        | .valid_samples = ($valid | length)
+        | .sampling_order = "round_robin_interleaved"
+        | .benchmark_schema_version = 2
+        | .backend_workers = $backend_workers
+        | .health_check_interval_ms = $health_check_interval_ms
+        | .logical_cpus = $logical_cpus
+        | .valid = false
+        | .error = "insufficient_valid_samples"
+      end
+  ' "$RAW_OUT_JSON" >"$FINAL_OUT_JSON"
+OUT_JSON="$FINAL_OUT_JSON"
+SAMPLE_ATTEMPTS="$REQUESTED_SAMPLE_ATTEMPTS"
+MIN_VALID_SAMPLES="$REQUESTED_MIN_VALID_SAMPLES"
+INVALID_SAMPLES="$(jq -s '[.[] | select(.valid != true)] | length' "$OUT_JSON")"
 
 if [ "$INVALID_SAMPLES" -gt 0 ]; then
   echo "proxy comparison produced ${INVALID_SAMPLES} invalid sample(s)" >&2

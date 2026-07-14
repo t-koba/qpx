@@ -1,6 +1,6 @@
 use anyhow::Result;
 use hyper::header::{HOST, HeaderValue};
-use hyper::{Request, Response, Uri};
+use hyper::{Request, Response};
 use qpx_http::body::Body;
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
@@ -79,15 +79,9 @@ fn prepare_websocket_request(
     host_authority: &str,
     proxy_name: &str,
 ) -> Result<Request<Body>> {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or("/")
-        .to_string();
     prepare_request_with_headers_in_place(&mut req, proxy_name, None, true);
     *req.version_mut() = http::Version::HTTP_11;
-    *req.uri_mut() = Uri::builder().path_and_query(path.as_str()).build()?;
+    crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
     req.headers_mut()
         .insert(HOST, HeaderValue::from_str(host_authority)?);
     Ok(req)

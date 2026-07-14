@@ -11,12 +11,55 @@ use crate::tls::{extract_client_hello_info_with_fingerprints, read_client_hello_
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use anyhow::Result;
 use bytes::Bytes;
-use qpx_observability::access_log::{AccessLogContext, AccessLogService};
+use http::{Request, Response};
+use qpx_http::body::Body;
+use qpx_observability::RequestHandler;
+use qpx_observability::access_log::{
+    AccessLogContext, AccessLogService, access_log_service_required,
+};
+use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
+
+async fn serve_terminated_http<I, S>(
+    io: I,
+    service: S,
+    negotiated_h2: bool,
+    header_read_timeout: Duration,
+    body_channel_capacity: usize,
+    h2_tuning: crate::http::codec::h2::H2TransportTuning,
+) -> Result<()>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    if negotiated_h2 {
+        serve_h2_with_interim_and_capacity_and_tuning(
+            io,
+            service,
+            false,
+            header_read_timeout,
+            body_channel_capacity,
+            h2_tuning,
+        )
+        .await
+    } else {
+        serve_http1_with_interim_and_capacity(
+            io,
+            service,
+            header_read_timeout,
+            body_channel_capacity,
+        )
+        .await
+    }
+}
 
 #[cfg(feature = "tls-rustls")]
 struct ReverseTlsContext {
@@ -372,51 +415,42 @@ async fn handle_tls_connection(
     let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), peer_certificates);
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_name = reverse.name.clone();
-    if negotiated_h2 {
-        let service = AccessLogService::new(
-            ReverseInterimService {
-                reverse: reverse.clone(),
-                conn,
-            },
-            remote_addr,
-            AccessLogContext {
-                kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
-                name: reverse_name.clone(),
-            },
-            &access_cfg,
-        );
-        let h2_limits = reverse.runtime.state().plan.limits.h2;
-        let h2_tuning = crate::http::codec::h2::H2TransportTuning {
-            initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
-            initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
-        };
-        serve_h2_with_interim_and_capacity_and_tuning(
+    let service = ReverseInterimService {
+        reverse: reverse.clone(),
+        conn,
+    };
+    let h2_limits = reverse.runtime.state().plan.limits.h2;
+    let h2_tuning = crate::http::codec::h2::H2TransportTuning {
+        initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
+        initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
+    };
+    let body_channel_capacity = reverse_body_channel_capacity(&reverse);
+    if access_log_service_required(&access_cfg) {
+        serve_terminated_http(
             tls_stream,
-            service,
-            false,
+            AccessLogService::new(
+                service,
+                remote_addr,
+                AccessLogContext {
+                    kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
+                    name: reverse_name,
+                },
+                &access_cfg,
+            ),
+            negotiated_h2,
             header_read_timeout,
-            reverse_body_channel_capacity(&reverse),
+            body_channel_capacity,
             h2_tuning,
         )
         .await?;
     } else {
-        let service = AccessLogService::new(
-            ReverseInterimService {
-                reverse: reverse.clone(),
-                conn,
-            },
-            remote_addr,
-            AccessLogContext {
-                kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
-                name: reverse_name.clone(),
-            },
-            &access_cfg,
-        );
-        serve_http1_with_interim_and_capacity(
+        serve_terminated_http(
             tls_stream,
             service,
+            negotiated_h2,
             header_read_timeout,
-            reverse_body_channel_capacity(&reverse),
+            body_channel_capacity,
+            h2_tuning,
         )
         .await?;
     }
@@ -545,51 +579,42 @@ async fn handle_tls_connection(
     let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), None);
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_name = reverse.name.clone();
-    if negotiated_h2 {
-        let service = AccessLogService::new(
-            ReverseInterimService {
-                reverse: reverse.clone(),
-                conn,
-            },
-            remote_addr,
-            AccessLogContext {
-                kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
-                name: reverse_name.clone(),
-            },
-            &access_cfg,
-        );
-        let h2_limits = reverse.runtime.state().plan.limits.h2;
-        let h2_tuning = crate::http::codec::h2::H2TransportTuning {
-            initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
-            initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
-        };
-        serve_h2_with_interim_and_capacity_and_tuning(
+    let service = ReverseInterimService {
+        reverse: reverse.clone(),
+        conn,
+    };
+    let h2_limits = reverse.runtime.state().plan.limits.h2;
+    let h2_tuning = crate::http::codec::h2::H2TransportTuning {
+        initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
+        initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
+    };
+    let body_channel_capacity = reverse_body_channel_capacity(&reverse);
+    if access_log_service_required(&access_cfg) {
+        serve_terminated_http(
             tls_stream,
-            service,
-            false,
+            AccessLogService::new(
+                service,
+                remote_addr,
+                AccessLogContext {
+                    kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
+                    name: reverse_name,
+                },
+                &access_cfg,
+            ),
+            negotiated_h2,
             header_read_timeout,
-            reverse_body_channel_capacity(&reverse),
+            body_channel_capacity,
             h2_tuning,
         )
         .await?;
     } else {
-        let service = AccessLogService::new(
-            ReverseInterimService {
-                reverse: reverse.clone(),
-                conn,
-            },
-            remote_addr,
-            AccessLogContext {
-                kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
-                name: reverse_name.clone(),
-            },
-            &access_cfg,
-        );
-        serve_http1_with_interim_and_capacity(
+        serve_terminated_http(
             tls_stream,
             service,
+            negotiated_h2,
             header_read_timeout,
-            reverse_body_channel_capacity(&reverse),
+            body_channel_capacity,
+            h2_tuning,
         )
         .await?;
     }

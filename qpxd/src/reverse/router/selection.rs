@@ -17,6 +17,20 @@ pub(super) fn select_upstream_inner(
     if upstreams.is_empty() {
         return None;
     }
+    if upstreams.len() == 1 {
+        let endpoint = &upstreams[0];
+        if !endpoint.has_time_dependent_admission_state() {
+            return policy
+                .max_upstream_concurrency
+                .is_none_or(|max| endpoint.inflight.load(Ordering::Relaxed) < max)
+                .then(|| endpoint.clone());
+        }
+        let now_ms = now_millis();
+        let gate_seed = request_seed ^ sticky_seed;
+        return classify_endpoint(endpoint, policy, now_ms, gate_seed)
+            .is_some()
+            .then(|| endpoint.clone());
+    }
     let now_ms = now_millis();
     let gate_seed = request_seed ^ sticky_seed;
     let counts = count_candidates(upstreams, policy, now_ms, gate_seed);

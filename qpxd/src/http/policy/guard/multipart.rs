@@ -129,10 +129,6 @@ pub(super) async fn validate_multipart_limits_reader(
     .await
 }
 
-pub(super) fn multipart_boundary(req: &hyper::Request<qpx_http::body::Body>) -> Option<String> {
-    multipart_boundary_from_headers(req.headers())
-}
-
 pub(super) fn multipart_boundary_from_headers(headers: &http::HeaderMap) -> Option<String> {
     let value = headers.get(http::header::CONTENT_TYPE)?.to_str().ok()?;
     if !value

@@ -4,6 +4,7 @@ use crate::structured_fields::{
     BareItem, Item, ListEntry, ListSerializer, SfvString, Token, parse_list_fields,
 };
 use http::{HeaderMap, HeaderName, HeaderValue};
+use std::cell::RefCell;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -24,11 +25,8 @@ pub fn append_proxy_status(
 ) -> Result<(), ProxyStatusError> {
     let name = HeaderName::from_static("proxy-status");
     if !headers.contains_key(&name) && is_sfv_token(proxy_identifier.as_bytes()) {
-        headers.insert(
-            name,
-            HeaderValue::from_str(proxy_identifier)
-                .map_err(|_| ProxyStatusError::InvalidHeaderValue)?,
-        );
+        let value = proxy_identifier_value(proxy_identifier)?;
+        headers.insert(name, value);
         return Ok(());
     }
     let mut list = parse_list_fields(headers, &name)
@@ -61,6 +59,48 @@ pub fn append_proxy_status(
         HeaderValue::from_str(&value).map_err(|_| ProxyStatusError::InvalidHeaderValue)?,
     );
     Ok(())
+}
+
+const MAX_CACHED_PROXY_IDENTIFIERS: usize = 16;
+
+struct CachedProxyIdentifier {
+    identifier: String,
+    value: HeaderValue,
+}
+
+thread_local! {
+    static CACHED_PROXY_IDENTIFIERS: RefCell<Vec<CachedProxyIdentifier>> = const {
+        RefCell::new(Vec::new())
+    };
+}
+
+pub fn proxy_identifier_value(identifier: &str) -> Result<HeaderValue, ProxyStatusError> {
+    CACHED_PROXY_IDENTIFIERS.with_borrow_mut(|cached| {
+        if let Some(index) = cached
+            .iter()
+            .position(|entry| entry.identifier == identifier)
+        {
+            let value = cached[index].value.clone();
+            let last = cached.len() - 1;
+            if index != last {
+                cached.swap(index, last);
+            }
+            return Ok(value);
+        }
+        if !is_sfv_token(identifier.as_bytes()) {
+            return Err(ProxyStatusError::InvalidProxyIdentifier);
+        }
+        let value =
+            HeaderValue::from_str(identifier).map_err(|_| ProxyStatusError::InvalidHeaderValue)?;
+        if cached.len() == MAX_CACHED_PROXY_IDENTIFIERS {
+            cached.remove(0);
+        }
+        cached.push(CachedProxyIdentifier {
+            identifier: identifier.to_string(),
+            value: value.clone(),
+        });
+        Ok(value)
+    })
 }
 
 fn is_sfv_token(value: &[u8]) -> bool {

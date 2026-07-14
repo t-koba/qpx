@@ -18,12 +18,12 @@ use crate::reverse::transport::mirrors::{
     StreamingMirrorDispatch, dispatch_streaming_mirrors, request_is_templateable,
 };
 use crate::reverse::transport::request_template::{
-    ReverseReplayRecorder, ReverseRequestHeadTemplate, request_is_retryable,
+    ReverseReplayRecorder, ReverseRequestHeadTemplate, ReverseRequestTemplate,
+    request_is_retryable, request_may_have_body,
 };
 use crate::reverse::transport::{
     InterimList, ReverseConnInfo, ReverseRouter, empty_interim_response,
 };
-use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
 use hyper::{Method, Request, Response, StatusCode};
 use qpx_core::prefilter::MatchPrefilterContext;
@@ -31,6 +31,8 @@ use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::warn;
+
+type ReverseEarlyResult<T> = std::result::Result<T, (InterimList, Response<Body>)>;
 
 struct ReverseRouteSelection {
     route_idx: Option<usize>,
@@ -119,6 +121,21 @@ pub(super) async fn prepare_reverse_retry_dispatch(
         route_timeout,
         proxy_name,
     } = input;
+    if route.policy.retry_attempts == 1
+        && !route
+            .plan
+            .flags
+            .contains(crate::runtime::PlanFlags::MIRRORING)
+        && decision_service_mirror_upstreams.is_empty()
+    {
+        return Ok(ReverseRetryDispatch {
+            attempts: 1,
+            first_request: Some(req),
+            template: None,
+            replay_recorder: None,
+            mirror_upstreams: Vec::new(),
+        });
+    }
     let retry_body_threshold_bytes = if route.policy.retry_body_replay {
         route.policy.retry_body_threshold_bytes
     } else {
@@ -191,17 +208,21 @@ pub(super) async fn prepare_reverse_retry_dispatch(
         Request::from_parts(parts, primary_body)
     };
     let need_template = attempts > 1 || !mirror_upstreams.is_empty();
-    let (first_request, template, replay_recorder) = if need_template {
-        let (req, recorder) = ReverseReplayRecorder::wrap_first_request(
-            req,
-            max_template_body_bytes,
-            Duration::from_millis(route.plan.streaming.body_read_timeout_ms),
-            route.plan.streaming.body_channel_capacity,
-        );
-        (Some(req), None, Some(recorder))
-    } else {
-        (Some(req), None, None)
-    };
+    let (first_request, template, replay_recorder) =
+        if need_template && !request_may_have_body(&req) {
+            let template = ReverseRequestTemplate::without_body(&req);
+            (Some(req), Some(template), None)
+        } else if need_template {
+            let (req, recorder) = ReverseReplayRecorder::wrap_first_request(
+                req,
+                max_template_body_bytes,
+                Duration::from_millis(route.plan.streaming.body_read_timeout_ms),
+                route.plan.streaming.body_channel_capacity,
+            );
+            (Some(req), None, Some(recorder))
+        } else {
+            (Some(req), None, None)
+        };
     Ok(ReverseRetryDispatch {
         attempts,
         first_request,
@@ -217,8 +238,8 @@ pub(super) async fn prepare_reverse_retry_dispatch(
 )]
 async fn scan_reverse_routes(
     router: &ReverseRouter,
+    request_headers: &http::HeaderMap,
     sanitized_headers: &http::HeaderMap,
-    guard_buffering: &InlineCache<bool>,
     base: &BaseRequestFields,
     state: &Arc<crate::runtime::RuntimeState>,
     conn: &ReverseConnInfo,
@@ -228,27 +249,33 @@ async fn scan_reverse_routes(
     request_rpc: Option<&crate::http::rpc::RpcMatchContext>,
     selection: &mut ReverseRouteSelection,
 ) -> Result<()> {
-    let mut unresolved_policies = InlineCache::new();
-    router.try_for_each_candidate_route(prefilter_ctx.clone(), |_, route| {
-        let policy = &route.plan.policy_context;
-        let key = policy_context_cache_key(policy);
-        if !selection.identity_cache.contains(key) && !unresolved_policies.contains(key) {
-            unresolved_policies.push(key, policy.clone());
+    let empty_destination = crate::destination::DestinationMetadata::default();
+    if !state.security.identity_sources.sources.is_empty() {
+        let mut unresolved_policies = InlineCache::new();
+        router.try_for_each_candidate_route(prefilter_ctx.clone(), |_idx, route| {
+            let policy = &route.plan.policy_context;
+            let key = policy_context_cache_key(policy);
+            if !policy.identity_sources.is_empty()
+                && !selection.identity_cache.contains(key)
+                && !unresolved_policies.contains(key)
+            {
+                unresolved_policies.push(key, policy.clone());
+            }
+            Ok::<bool, anyhow::Error>(false)
+        })?;
+        for (policy_key, policy) in unresolved_policies {
+            let identity = resolve_identity(
+                state,
+                &policy,
+                conn.remote_addr.ip(),
+                Some(sanitized_headers),
+                conn.peer_certificates
+                    .as_deref()
+                    .map(|certs| certs.as_slice()),
+            )
+            .await?;
+            selection.identity_cache.push(policy_key, identity);
         }
-        Ok::<bool, anyhow::Error>(false)
-    })?;
-    for (policy_key, policy) in unresolved_policies {
-        let identity = resolve_identity(
-            state,
-            &policy,
-            conn.remote_addr.ip(),
-            Some(sanitized_headers),
-            conn.peer_certificates
-                .as_deref()
-                .map(|certs| certs.as_slice()),
-        )
-        .await?;
-        selection.identity_cache.push(policy_key, identity);
     }
     router.try_for_each_candidate_route(prefilter_ctx.clone(), |idx, route| {
         let resolution_override = route.plan.destination_resolution.as_ref();
@@ -256,25 +283,32 @@ async fn scan_reverse_routes(
         let policy_key = policy_context_cache_key(effective_policy);
         let identity = match selection.identity_cache.get(policy_key) {
             Some(identity) => identity.clone(),
+            None if effective_policy.identity_sources.is_empty() => {
+                crate::policy_context::ResolvedIdentity::default()
+            }
             None => return Err(anyhow!("identity cache was not populated for route policy")),
         };
-        let override_key = super::destination_override_key(resolution_override);
-        let request_destination = match selection.request_destination_cache.get(override_key) {
-            Some(destination) => destination.clone(),
-            None => {
+        let request_destination = if route.requires_destination_context() {
+            let override_key = super::destination_override_key(resolution_override);
+            if !selection.request_destination_cache.contains(override_key) {
                 let destination =
                     classify_reverse_destination(state, conn, host, None, resolution_override);
                 selection
                     .request_destination_cache
-                    .push(override_key, destination.clone());
-                destination
+                    .push(override_key, destination);
             }
+            selection
+                .request_destination_cache
+                .get(override_key)
+                .ok_or_else(|| anyhow!("destination cache was not populated for route"))?
+        } else {
+            &empty_destination
         };
         let ctx = crate::http::policy::rule_context::build_request_rule_match_context(
             crate::http::policy::rule_context::RequestRuleContextInput {
                 base,
                 headers: sanitized_headers,
-                destination: &request_destination,
+                destination: request_destination,
                 identity: &identity,
                 request_size,
                 rpc: request_rpc,
@@ -292,7 +326,9 @@ async fn scan_reverse_routes(
             return Ok::<bool, anyhow::Error>(false);
         }
         let route_http_guard = route.plan.guard.as_deref();
-        let guard_requires_buffering = guard_buffering.get(idx).copied().unwrap_or(false);
+        let guard_requires_buffering = route_http_guard.is_some_and(|profile| {
+            profile.requires_request_body_buffering_from_headers(request_headers)
+        });
         let response_rule_candidates = route.response_rule_candidate_profile(prefilter_ctx.clone());
         let response_rule_request_observation = response_request_obs(
             route.response_rules.as_deref(),
@@ -361,49 +397,153 @@ fn policy_context_cache_key(policy: &EffectivePolicyContext) -> usize {
     policy as *const EffectivePolicyContext as usize
 }
 
-pub(super) async fn prepare_reverse_request(
-    mut req: Request<Body>,
-    base: &BaseRequestFields,
-    runtime: &Runtime,
+pub(super) fn reverse_security_rejection(
+    req: &Request<Body>,
     conn: &ReverseConnInfo,
-    compiled: Arc<crate::reverse::CompiledReverse>,
-) -> Result<std::result::Result<PreparedReverseRequest, (InterimList, Response<Body>)>> {
-    let router: Arc<ReverseRouter> = compiled.router.clone();
-    let security_policy = compiled.security_policy.as_ref();
-    let state = runtime.state();
-    let proxy_name = state.plan.identity.proxy_name.to_string();
-    if let Err(err) =
-        security_policy.validate_request(&req, conn.tls_sni.as_deref(), conn.tls_terminated)
+    state: &crate::runtime::RuntimeState,
+    compiled: &crate::reverse::CompiledReverse,
+) -> Result<Option<(InterimList, Response<Body>)>> {
+    let Err(err) = compiled.security_policy.validate_request(
+        req,
+        conn.tls_sni.as_deref(),
+        conn.tls_terminated,
+    ) else {
+        return Ok(None);
+    };
+    warn!(error = ?err, "reverse TLS host policy rejected request");
+    Ok(Some(empty_interim_response(finalize_response_for_request(
+        req.method(),
+        req.version(),
+        state.plan.identity.proxy_name.as_ref(),
+        Response::builder()
+            .status(StatusCode::MISDIRECTED_REQUEST)
+            .body(Body::from("misdirected request"))?,
+        false,
+    ))))
+}
+
+pub(super) fn enforce_selected_reverse_route_constraints(
+    mut req: Request<Body>,
+    route: &crate::reverse::router::HttpRoute,
+    request_method: &Method,
+    state: &crate::runtime::RuntimeState,
+) -> Result<ReverseEarlyResult<Request<Body>>> {
+    let request_version = req.version();
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
+    if route.plan.require_precondition
+        && qpx_http::protocol::method::precondition_is_missing(request_method, req.headers())
     {
-        warn!(error = ?err, "reverse TLS host policy rejected request");
-        let request_method = req.method().clone();
+        let status = StatusCode::PRECONDITION_REQUIRED;
+        let body = qpx_http::problem::ProblemDetails::new(status, "Precondition required")
+            .with_detail("This route requires If-Match or If-Unmodified-Since")
+            .to_json()?;
+        let response = Response::builder()
+            .status(status)
+            .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
+            .body(Body::from(body))?;
         return Ok(Err(empty_interim_response(finalize_response_for_request(
-            &request_method,
-            req.version(),
-            state.plan.identity.proxy_name.as_ref(),
-            Response::builder()
-                .status(StatusCode::MISDIRECTED_REQUEST)
-                .body(Body::from("misdirected request"))?,
+            request_method,
+            request_version,
+            proxy_name,
+            response,
             false,
         ))));
     }
+    let max_request_body_bytes = route.plan.streaming.max_request_body_bytes;
+    if let Some(size) = observed_request_size(&req)
+        && size > max_request_body_bytes as u64
+    {
+        return Ok(Err(request_body_too_large_response(
+            request_method,
+            request_version,
+            proxy_name,
+            None,
+        )
+        .map(empty_interim_response)?));
+    }
+    req = match limit_request_body(req, max_request_body_bytes) {
+        Ok(req) => req,
+        Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
+            return Ok(Err(request_body_too_large_response(
+                request_method,
+                request_version,
+                proxy_name,
+                None,
+            )
+            .map(empty_interim_response)?));
+        }
+        Err(err) => return Err(err),
+    };
+    Ok(Ok(req))
+}
 
-    let host = base.host.clone().unwrap_or_default();
-    let request_method = req.method().clone();
+pub(super) fn prepare_single_plain_reverse_request(
+    req: Request<Body>,
+    base: &BaseRequestFields,
+    conn: &ReverseConnInfo,
+    state: &crate::runtime::RuntimeState,
+    compiled: &crate::reverse::CompiledReverse,
+) -> Result<ReverseEarlyResult<Option<Request<Body>>>> {
+    let Some(route) = compiled.router.single_plain_http_route() else {
+        return Ok(Ok(None));
+    };
+    if let Some(response) = reverse_security_rejection(&req, conn, state, compiled)? {
+        return Ok(Err(response));
+    }
+
+    if !route.matches_every_request() {
+        let destination = crate::destination::DestinationMetadata::default();
+        let identity = crate::policy_context::ResolvedIdentity::default();
+        let ctx = crate::http::policy::rule_context::build_request_rule_match_context(
+            crate::http::policy::rule_context::RequestRuleContextInput {
+                base,
+                headers: req.headers(),
+                destination: &destination,
+                identity: &identity,
+                request_size: None,
+                rpc: None,
+                client_cert: conn.peer_certificate_info.as_deref(),
+                upstream_cert: None,
+            },
+        );
+        if !route.matches(&ctx) {
+            return Ok(Ok(None));
+        }
+    }
+
+    match enforce_selected_reverse_route_constraints(req, route, &base.method, state)? {
+        Ok(req) => Ok(Ok(Some(req))),
+        Err(response) => Ok(Err(response)),
+    }
+}
+
+pub(super) async fn prepare_reverse_request(
+    mut req: Request<Body>,
+    base: &BaseRequestFields,
+    conn: &ReverseConnInfo,
+    state: Arc<crate::runtime::RuntimeState>,
+    compiled: Arc<crate::reverse::CompiledReverse>,
+) -> Result<std::result::Result<PreparedReverseRequest, (InterimList, Response<Body>)>> {
+    let router = &compiled.router;
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
+    if let Some(response) = reverse_security_rejection(&req, conn, &state, &compiled)? {
+        return Ok(Err(response));
+    }
+
+    let host = base.host().unwrap_or_default();
+    let request_method = &base.method;
     let request_version = req.version();
     let request_body_too_large = || {
-        request_body_too_large_response(&request_method, request_version, proxy_name.as_ref(), None)
+        request_body_too_large_response(request_method, request_version, proxy_name, None)
             .map(empty_interim_response)
     };
-    let path_owned = base.path.clone();
-    let request_uri = base.request_uri.clone();
     let prefilter_ctx = MatchPrefilterContext {
         method: Some(request_method.as_str()),
         dst_port: Some(conn.dst_port),
         src_ip: Some(conn.remote_addr.ip()),
-        host: (!host.is_empty()).then_some(host.as_str()),
+        host: (!host.is_empty()).then_some(host),
         sni: conn.tls_sni.as_deref(),
-        path: path_owned.as_deref(),
+        path: base.path(),
     };
     let mut selection = ReverseRouteSelection {
         route_idx: None,
@@ -416,26 +556,14 @@ pub(super) async fn prepare_reverse_request(
         collect_observation_from_remaining: false,
     };
     let sanitized_route_headers = sanitized_headers_for_route_scan(&req, &state, conn)?;
-    let mut guard_buffering = InlineCache::new();
-    router.try_for_each_candidate_route(prefilter_ctx.clone(), |idx, route| {
-        guard_buffering.push(
-            idx,
-            route
-                .plan
-                .guard
-                .as_deref()
-                .is_some_and(|profile| profile.requires_request_body_buffering(&req)),
-        );
-        Ok::<bool, anyhow::Error>(false)
-    })?;
     scan_reverse_routes(
-        &router,
+        router,
+        req.headers(),
         sanitized_route_headers.as_ref(),
-        &guard_buffering,
         base,
         &state,
         conn,
-        host.as_str(),
+        host,
         prefilter_ctx.clone(),
         None,
         None,
@@ -472,15 +600,15 @@ pub(super) async fn prepare_reverse_request(
 
     if selection.route_idx.is_none() {
         scan_reverse_routes(
-            &router,
+            router,
+            req.headers(),
             owned_sanitized_headers
                 .as_ref()
                 .unwrap_or_else(|| req.headers()),
-            &guard_buffering,
             base,
             &state,
             conn,
-            host.as_str(),
+            host,
             prefilter_ctx,
             observed_request_size(&req),
             request_rpc.as_ref(),
@@ -495,52 +623,37 @@ pub(super) async fn prepare_reverse_request(
     let selected_route = router
         .route_at(selected_route_idx)
         .ok_or_else(|| anyhow!("selected reverse route is unavailable"))?;
-    if selected_route.plan.require_precondition
-        && qpx_http::protocol::method::precondition_is_missing(&request_method, req.headers())
+    let selected_resolution_override = selected_route.plan.destination_resolution.as_ref();
+    let selected_override_key = super::destination_override_key(selected_resolution_override);
+    if !selection
+        .request_destination_cache
+        .contains(selected_override_key)
     {
-        let status = StatusCode::PRECONDITION_REQUIRED;
-        let body = qpx_http::problem::ProblemDetails::new(status, "Precondition required")
-            .with_detail("This route requires If-Match or If-Unmodified-Since")
-            .to_json()?;
-        let response = Response::builder()
-            .status(status)
-            .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
-            .body(Body::from(body))?;
-        return Ok(Err(empty_interim_response(finalize_response_for_request(
-            &request_method,
-            request_version,
-            state.plan.identity.proxy_name.as_ref(),
-            response,
-            false,
-        ))));
+        let destination = if selected_route.requires_destination_after_selection()
+            || state.destination_trace_enabled()
+        {
+            classify_reverse_destination(&state, conn, host, None, selected_resolution_override)
+        } else {
+            crate::destination::DestinationMetadata::default()
+        };
+        selection
+            .request_destination_cache
+            .push(selected_override_key, destination);
     }
-    let route_request_limit = selected_route.plan.streaming.max_request_body_bytes;
-    if let Some(size) = observed_request_size(&req)
-        && size > route_request_limit as u64
-    {
-        return Ok(Err(request_body_too_large()?));
-    }
-    req = match limit_request_body(req, route_request_limit) {
+    req = match enforce_selected_reverse_route_constraints(
+        req,
+        selected_route,
+        &base.method,
+        &state,
+    )? {
         Ok(req) => req,
-        Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
-            return Ok(Err(request_body_too_large()?));
-        }
-        Err(err) => return Err(err),
+        Err(response) => return Ok(Err(response)),
     };
 
     Ok(Ok(PreparedReverseRequest {
         req,
-        context: ReversePreparedContext {
-            router,
-            state,
-            proxy_name,
-        },
+        context: ReversePreparedContext { compiled, state },
         route: ReversePreparedRoute {
-            host,
-            request_method,
-            request_version,
-            path_owned,
-            request_uri,
             route_idx: selected_route_idx,
             selected_policy: selection.selected_policy,
             identity: selection

@@ -1,9 +1,9 @@
 #[cfg(windows)]
 mod imp;
 #[cfg(not(windows))]
-mod stub;
+mod unsupported;
 
 #[cfg(windows)]
 pub(crate) use imp::*;
 #[cfg(not(windows))]
-pub(crate) use stub::*;
+pub(crate) use unsupported::*;

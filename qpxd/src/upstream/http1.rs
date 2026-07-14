@@ -114,11 +114,14 @@ pub(crate) fn set_absolute_uri(
 }
 
 pub(crate) fn ensure_origin_form_uri(req: &mut Request<Body>) -> Result<()> {
+    if req.uri().scheme().is_none() && req.uri().authority().is_none() {
+        return Ok(());
+    }
     let origin_form = req
         .uri()
         .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
+        .cloned()
+        .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
     *req.uri_mut() = Uri::builder().path_and_query(origin_form).build()?;
     Ok(())
 }

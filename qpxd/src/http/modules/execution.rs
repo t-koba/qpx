@@ -396,27 +396,51 @@ impl HttpModuleContext {
     }
 }
 
-pub(crate) struct HttpModuleExecution {
-    chain: CompiledHttpModuleChain,
+pub(crate) enum HttpModuleExecution {
+    Empty,
+    Active(Box<ActiveHttpModuleExecution>),
+}
+
+pub(crate) struct ActiveHttpModuleExecution {
+    chain: Arc<CompiledHttpModuleChain>,
     context: HttpModuleContext,
 }
 
 impl HttpModuleExecution {
-    pub(super) fn new(chain: CompiledHttpModuleChain, context: HttpModuleContext) -> Self {
-        Self { chain, context }
+    pub(super) fn empty() -> Self {
+        Self::Empty
+    }
+
+    pub(super) fn new(chain: Arc<CompiledHttpModuleChain>, context: HttpModuleContext) -> Self {
+        Self::Active(Box::new(ActiveHttpModuleExecution { chain, context }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_context(&self) -> bool {
+        matches!(self, Self::Active(_))
+    }
+
+    fn active_mut(&mut self) -> Option<(&CompiledHttpModuleChain, &mut HttpModuleContext)> {
+        match self {
+            Self::Empty => None,
+            Self::Active(active) => Some((active.chain.as_ref(), &mut active.context)),
+        }
     }
 
     pub(crate) async fn on_request_headers(
         &mut self,
         req: &mut Request<Body>,
     ) -> Result<RequestHeadersOutcome> {
-        for module in self.chain.request_headers.iter() {
+        let Some((chain, context)) = self.active_mut() else {
+            return Ok(RequestHeadersOutcome::Continue);
+        };
+        for module in chain.request_headers.iter() {
             let label = module.label();
             let outcome = module
                 .module
                 .call(
                     HttpModuleStage::RequestHeaders,
-                    &mut self.context,
+                    context,
                     HttpModuleEvent::RequestHeaders(req),
                 )
                 .await
@@ -425,32 +449,35 @@ impl HttpModuleExecution {
             match outcome {
                 RequestHeadersOutcome::Continue => {}
                 RequestHeadersOutcome::Respond(response) => {
-                    if self.chain.aggregate.needs_frozen_request {
-                        self.context.sync_frozen_request(req);
+                    if chain.aggregate.needs_frozen_request {
+                        context.sync_frozen_request(req);
                     }
                     return Ok(RequestHeadersOutcome::Respond(response));
                 }
             }
         }
-        if self.chain.aggregate.needs_frozen_request {
-            self.context.sync_frozen_request(req);
+        if chain.aggregate.needs_frozen_request {
+            context.sync_frozen_request(req);
         }
         Ok(RequestHeadersOutcome::Continue)
     }
 
     pub(crate) async fn on_cache_lookup(&mut self, hit: bool) -> Result<()> {
+        let Some((chain, context)) = self.active_mut() else {
+            return Ok(());
+        };
         let status = if hit {
             CacheLookupStatus::Hit
         } else {
             CacheLookupStatus::Miss
         };
-        for module in self.chain.cache_lookup.iter() {
+        for module in chain.cache_lookup.iter() {
             let label = module.label();
             module
                 .module
                 .call(
                     HttpModuleStage::CacheLookup,
-                    &mut self.context,
+                    context,
                     HttpModuleEvent::CacheLookup(status),
                 )
                 .await
@@ -461,21 +488,24 @@ impl HttpModuleExecution {
     }
 
     pub(crate) async fn on_upstream_request(&mut self, req: &mut Request<Body>) -> Result<()> {
-        for module in self.chain.upstream_request.iter() {
+        let Some((chain, context)) = self.active_mut() else {
+            return Ok(());
+        };
+        for module in chain.upstream_request.iter() {
             let label = module.label();
             module
                 .module
                 .call(
                     HttpModuleStage::UpstreamRequest,
-                    &mut self.context,
+                    context,
                     HttpModuleEvent::UpstreamRequest(req),
                 )
                 .await
                 .with_context(|| format!("http module {label} upstream_request failed"))?
                 .into_complete(label.as_str(), HttpModuleStage::UpstreamRequest)?;
         }
-        if self.chain.aggregate.needs_frozen_request {
-            self.context.sync_frozen_request(req);
+        if chain.aggregate.needs_frozen_request {
+            context.sync_frozen_request(req);
         }
         Ok(())
     }
@@ -484,24 +514,25 @@ impl HttpModuleExecution {
         &mut self,
         mut response: Response<Body>,
     ) -> Result<Response<Body>> {
-        self.context.set_response_status(response.status());
-        self.context
-            .apply_pending_response_headers(response.headers_mut());
-        for module in self.chain.upstream_response.iter() {
+        let Some((chain, context)) = self.active_mut() else {
+            return Ok(response);
+        };
+        context.set_response_status(response.status());
+        context.apply_pending_response_headers(response.headers_mut());
+        for module in chain.upstream_response.iter() {
             let label = module.label();
             response = module
                 .module
                 .call(
                     HttpModuleStage::UpstreamResponse,
-                    &mut self.context,
+                    context,
                     HttpModuleEvent::UpstreamResponse(response),
                 )
                 .await
                 .with_context(|| format!("http module {label} upstream_response failed"))?
                 .upstream_response(label.as_str())?;
-            self.context.set_response_status(response.status());
-            self.context
-                .apply_pending_response_headers(response.headers_mut());
+            context.set_response_status(response.status());
+            context.apply_pending_response_headers(response.headers_mut());
         }
         Ok(response)
     }
@@ -510,37 +541,41 @@ impl HttpModuleExecution {
         &mut self,
         mut response: Response<Body>,
     ) -> Result<Response<Body>> {
-        self.context.set_response_status(response.status());
-        self.context
-            .apply_pending_response_headers(response.headers_mut());
-        for module in self.chain.downstream_response.iter() {
+        let Some((chain, context)) = self.active_mut() else {
+            return Ok(response);
+        };
+        context.set_response_status(response.status());
+        context.apply_pending_response_headers(response.headers_mut());
+        for module in chain.downstream_response.iter() {
             let label = module.label();
             response = module
                 .module
                 .call(
                     HttpModuleStage::DownstreamResponse,
-                    &mut self.context,
+                    context,
                     HttpModuleEvent::DownstreamResponse(response),
                 )
                 .await
                 .with_context(|| format!("http module {label} downstream_response failed"))?
                 .downstream_response(label.as_str())?;
-            self.context.set_response_status(response.status());
-            self.context
-                .apply_pending_response_headers(response.headers_mut());
+            context.set_response_status(response.status());
+            context.apply_pending_response_headers(response.headers_mut());
         }
         Ok(response)
     }
 
     pub(crate) async fn on_retry(&mut self, attempt: usize, reason: &str) -> Result<()> {
+        let Some((chain, context)) = self.active_mut() else {
+            return Ok(());
+        };
         let event = RetryEvent { attempt, reason };
-        for module in self.chain.retry.iter() {
+        for module in chain.retry.iter() {
             let label = module.label();
             module
                 .module
                 .call(
                     HttpModuleStage::Retry,
-                    &mut self.context,
+                    context,
                     HttpModuleEvent::Retry(event),
                 )
                 .await
@@ -551,15 +586,14 @@ impl HttpModuleExecution {
     }
 
     pub(crate) async fn on_error(&mut self, err: &anyhow::Error) {
-        for module in self.chain.error.iter() {
+        let Some((chain, context)) = self.active_mut() else {
+            return;
+        };
+        for module in chain.error.iter() {
             let label = module.label();
             if let Err(err) = module
                 .module
-                .call(
-                    HttpModuleStage::Error,
-                    &mut self.context,
-                    HttpModuleEvent::Error(err),
-                )
+                .call(HttpModuleStage::Error, context, HttpModuleEvent::Error(err))
                 .await
                 .and_then(|event| event.into_complete(label.as_str(), HttpModuleStage::Error))
             {
@@ -573,16 +607,19 @@ impl HttpModuleExecution {
         response_status: Option<StatusCode>,
         err: Option<&anyhow::Error>,
     ) {
+        let Some((chain, context)) = self.active_mut() else {
+            return;
+        };
         if let Some(status) = response_status {
-            self.context.set_response_status(status);
+            context.set_response_status(status);
         }
-        for module in self.chain.log.iter() {
+        for module in chain.log.iter() {
             let label = module.label();
             if let Err(err) = module
                 .module
                 .call(
                     HttpModuleStage::Log,
-                    &mut self.context,
+                    context,
                     HttpModuleEvent::Log {
                         response_status,
                         err,

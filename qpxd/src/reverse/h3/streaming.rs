@@ -2,7 +2,6 @@ use crate::destination::{DestinationInputs, DestinationMetadata};
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
 use crate::policy_context::sanitize_headers_for_policy;
 use crate::reverse::ReloadableReverse;
-use crate::reverse::router::normalize_host_for_match;
 use crate::runtime::ResolvedStreamingLimits;
 use http::Request;
 use qpx_core::prefilter::MatchPrefilterContext;
@@ -100,36 +99,24 @@ pub(super) fn request_streaming_limits_for_head(
     };
     let compiled = reverse.compiled.load_full();
     let router = compiled.router.as_ref();
-    let authority_owned = req_head
-        .uri()
-        .authority()
-        .map(|authority| authority.as_str().to_string())
-        .or_else(|| {
-            req_head
-                .headers()
-                .get(http::header::HOST)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string)
-        });
-    let host = normalize_host_for_match(authority_owned.as_deref().unwrap_or_default());
     let base = extract_base_request_fields(
         req_head,
         BaseRequestContext {
             peer_ip: Some(peer.remote_addr.ip()),
             dst_port: Some(peer.dst_port),
-            host: (!host.is_empty()).then_some(host.as_str()),
             sni: peer.tls_sni,
-            authority: authority_owned.as_deref(),
-            scheme: Some("https"),
+            scheme: Some(http::uri::Scheme::HTTPS),
+            ..Default::default()
         },
     );
+    let host = base.host().unwrap_or_default();
     let prefilter_ctx = MatchPrefilterContext {
         method: Some(base.method.as_str()),
         dst_port: Some(peer.dst_port),
         src_ip: Some(peer.remote_addr.ip()),
-        host: (!host.is_empty()).then_some(host.as_str()),
+        host: (!host.is_empty()).then_some(host),
         sni: peer.tls_sni,
-        path: base.path.as_deref(),
+        path: base.path(),
     };
     let mut deferred_limits: Option<ResolvedStreamingLimits> = None;
     let client_cert = peer
@@ -166,8 +153,7 @@ pub(super) fn request_streaming_limits_for_head(
                 return Ok(true);
             }
         };
-        let destination =
-            classify_reverse_h3_destination(&state, &peer, host.as_str(), resolution_override);
+        let destination = classify_reverse_h3_destination(&state, &peer, host, resolution_override);
         let ctx = crate::http::policy::rule_context::build_request_rule_match_context(
             crate::http::policy::rule_context::RequestRuleContextInput {
                 base: &base,

@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -20,6 +20,20 @@ impl<I> PrefixedIo<I> {
             prefix,
             pos: 0,
         }
+    }
+
+    pub fn into_inner_with_leading_prefix(self, leading: Bytes) -> (I, Bytes) {
+        let remaining = self.prefix.slice(self.pos..);
+        if remaining.is_empty() {
+            return (self.inner, leading);
+        }
+        if leading.is_empty() {
+            return (self.inner, remaining);
+        }
+        let mut combined = BytesMut::with_capacity(leading.len() + remaining.len());
+        combined.extend_from_slice(&leading);
+        combined.extend_from_slice(&remaining);
+        (self.inner, combined.freeze())
     }
 }
 
@@ -55,5 +69,24 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<I> {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leading_prefix_is_combined_with_unread_existing_prefix() {
+        let prefixed = PrefixedIo {
+            inner: 7_u8,
+            prefix: Bytes::from_static(b"abcdef"),
+            pos: 2,
+        };
+
+        let (inner, prefix) = prefixed.into_inner_with_leading_prefix(Bytes::from_static(b"12"));
+
+        assert_eq!(inner, 7);
+        assert_eq!(prefix, b"12cdef"[..]);
     }
 }

@@ -1,24 +1,77 @@
 {
   "baselines": [
     {
-      "baseline_ratio": 0.430479,
       "bench": "proxy_compare_http1_reverse",
       "body_bytes": 1024,
       "concurrency": 64,
-      "direct_backend_requests_per_sec": 41681.6,
-      "external_proxy_median_requests_per_sec": 32163.03,
+      "cpu_efficiency_ratio": 1.169517,
+      "direct_backend_requests_per_sec": 50710.647447,
+      "direct_efficiency_ratio": 0.345751,
+      "dominance_score": 0.787956,
+      "external_proxy_best_latency_p99_ms": 3.212,
+      "external_proxy_best_requests_per_sec": 29575.816967,
+      "external_proxy_best_requests_per_cpu_second": 14991.967871,
+      "external_proxy_latency_p99_ms": {
+        "apache": 3.212,
+        "lighttpd": 5.832,
+        "nginx": 13.369
+      },
+      "external_proxy_requests_per_cpu_second": {
+        "apache": 13098.759965,
+        "lighttpd": 14991.967871,
+        "nginx": 13988.654618
+      },
       "external_proxy_requests_per_sec": {
-        "apache": 25359.86,
-        "lighttpd": 32757.89,
-        "nginx": 32163.03
+        "apache": 29575.816967,
+        "lighttpd": 14924.80326,
+        "nginx": 13929.99758
       },
       "duration_seconds": 10,
-      "qpxd_requests_per_sec": 13845.51,
-      "requests": 5000,
-      "source_commit": "dfad0aec342a8ec3548fbac37ac0bd99662df707"
+      "p99_latency_ratio": 1.417186,
+      "qpxd_latency_p99_ms": 4.552,
+      "qpxd_requests_per_cpu_second": 17533.366337,
+      "qpxd_requests_per_sec": 17533.253499,
+      "requests": 177087,
+      "source_commit": "1a9f9fa742b4e3738c7f4fe42b281767e98733f7",
+      "throughput_ratio": 0.592824
+    },
+    {
+      "bench": "proxy_compare_http1_reverse",
+      "body_bytes": 1048576,
+      "concurrency": 64,
+      "cpu_efficiency_ratio": 1.552643,
+      "direct_backend_requests_per_sec": 2098.952942,
+      "direct_efficiency_ratio": 0.841119,
+      "dominance_score": 0.345617,
+      "external_proxy_best_latency_p99_ms": 67.368,
+      "external_proxy_best_requests_per_sec": 1737.001939,
+      "external_proxy_best_requests_per_cpu_second": 1192.992993,
+      "external_proxy_latency_p99_ms": {
+        "apache": 4807.607,
+        "lighttpd": 67.368,
+        "nginx": 130.745
+      },
+      "external_proxy_requests_per_cpu_second": {
+        "apache": 831.556402,
+        "lighttpd": 1192.992993,
+        "nginx": 604.1
+      },
+      "external_proxy_requests_per_sec": {
+        "apache": 1737.001939,
+        "lighttpd": 1186.968918,
+        "nginx": 603.845781
+      },
+      "duration_seconds": 10,
+      "p99_latency_ratio": 38.224929,
+      "qpxd_latency_p99_ms": 2575.137,
+      "qpxd_requests_per_cpu_second": 1852.291667,
+      "qpxd_requests_per_sec": 1765.469552,
+      "requests": 17782,
+      "source_commit": "1a9f9fa742b4e3738c7f4fe42b281767e98733f7",
+      "throughput_ratio": 1.016389
     }
   ],
-  "degradation_threshold": 0.1,
-  "metric": "qpxd_requests_per_sec / external_proxy_median_requests_per_sec",
-  "schema_version": 1
+  "degradation_threshold": 0.05,
+  "metric": "multi_axis_proxy_dominance",
+  "schema_version": 3
 }

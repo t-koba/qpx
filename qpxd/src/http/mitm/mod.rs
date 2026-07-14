@@ -25,23 +25,24 @@ pub struct MitmRouteContext<'a> {
 }
 
 pub(crate) async fn proxy_mitm_request(
-    req: Request<Body>,
+    mut req: Request<Body>,
     runtime: Runtime,
     sender: Arc<Mutex<SendRequest<Body>>>,
     route: MitmRouteContext<'_>,
 ) -> Result<Response<Body>> {
     let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
-    if let PreflightOutcome::Reject(response) = preflight_validate(
-        &req,
+    let validated_request = match preflight_validate(
+        &mut req,
         proxy_name,
         PreflightOptions::allow_connect(
             state.plan.limits.general.trace_enabled,
             state.messages.trace_disabled.as_str(),
         ),
     ) {
-        return Ok(*response);
-    }
+        PreflightOutcome::Continue(validated) => validated,
+        PreflightOutcome::Reject(response) => return Ok(*response),
+    };
     let base = extract_base_request_fields(
         &req,
         BaseRequestContext {
@@ -49,8 +50,9 @@ pub(crate) async fn proxy_mitm_request(
             dst_port: Some(route.dst_port),
             host: Some(route.host),
             sni: Some(route.sni),
-            scheme: Some("https"),
-            ..Default::default()
+            shared_sni: None,
+            scheme: Some(http::uri::Scheme::HTTPS),
+            validated_request: Some(validated_request),
         },
     );
     let response = dispatch_mitm_request(req, base, runtime, sender, route).await?;

@@ -7,6 +7,32 @@ use super::identity::match_optional_text;
 use super::numeric::match_optional_numeric;
 
 impl CompiledMatch {
+    pub fn is_unconditional(&self) -> bool {
+        self.src_ip.is_empty()
+            && self.dst_port.is_empty()
+            && self.host.is_none()
+            && self.sni.is_none()
+            && self.method.is_empty()
+            && self.path.is_none()
+            && self.query.is_none()
+            && self.authority.is_none()
+            && self.scheme.is_none()
+            && self.http_version.is_none()
+            && self.alpn.is_none()
+            && self.tls_version.is_none()
+            && self.destination.is_none()
+            && self.request_size.is_none()
+            && self.response_status.is_none()
+            && self.response_size.is_none()
+            && self.headers_fast.is_empty()
+            && self.headers_regex.is_empty()
+            && self.identity.is_none()
+            && self.tls_fingerprint.is_none()
+            && self.client_cert.is_none()
+            && self.upstream_cert.is_none()
+            && self.rpc.is_none()
+    }
+
     pub fn matches(&self, ctx: &RuleMatchContext<'_>) -> bool {
         self.matches_inner(ctx, ObservationMode::Full)
     }
@@ -191,6 +217,10 @@ impl CompiledMatch {
                 .unwrap_or(false)
     }
 
+    pub fn requires_destination_context(&self) -> bool {
+        self.destination.is_some()
+    }
+
     pub fn requires_request_size_matcher(&self) -> bool {
         self.request_size.is_some()
     }
@@ -204,6 +234,10 @@ impl CompiledMatch {
 
     pub fn requires_request_rpc_context(&self) -> bool {
         self.rpc.is_some()
+    }
+
+    pub fn requires_request_headers(&self) -> bool {
+        !self.headers_fast.is_empty() || !self.headers_regex.is_empty()
     }
 
     pub fn requires_response_size(&self) -> bool {

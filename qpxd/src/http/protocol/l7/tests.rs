@@ -16,6 +16,25 @@ fn finalize_response_preserves_pre_sanitized_body() {
     assert!(response.body().trailers_are_sanitized());
 }
 
+#[test]
+fn prepare_request_synchronizes_host_only_for_absolute_targets() {
+    let mut absolute = Request::builder()
+        .uri("https://example.com/resource")
+        .header(http::header::HOST, "stale.example")
+        .body(Body::empty())
+        .expect("absolute request");
+    prepare_request_with_headers_in_place(&mut absolute, "qpx", None, false);
+    assert_eq!(absolute.headers()[http::header::HOST], "example.com");
+
+    let mut origin = Request::builder()
+        .uri("/resource")
+        .header(http::header::HOST, "origin.example")
+        .body(Body::empty())
+        .expect("origin-form request");
+    prepare_request_with_headers_in_place(&mut origin, "qpx", None, false);
+    assert_eq!(origin.headers()[http::header::HOST], "origin.example");
+}
+
 #[tokio::test]
 async fn finalize_response_sanitizes_h2_trailers_for_h1_downstream() {
     let (mut sender, body) = Body::channel_with_capacity(16);

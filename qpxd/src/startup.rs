@@ -177,6 +177,7 @@ pub(crate) async fn run(
         &config.telemetry.audit_log,
         config.telemetry.otel.as_ref(),
     )?;
+    crate::http::protocol::l7::start_cached_date_updater();
     // Connection pools are owned per-runtime by `PoolRegistry`; a freshly built
     // `RuntimeState` starts with empty pools, so no global reset is needed here.
     info!(

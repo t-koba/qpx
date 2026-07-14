@@ -13,9 +13,9 @@ use super::{DispatchOutcome, ProxyKind};
 
 #[derive(Clone)]
 pub(crate) struct DispatchAuditContext {
-    pub(crate) state: Arc<RuntimeState>,
+    state: Option<Arc<RuntimeState>>,
     pub(crate) kind: ProxyKind,
-    pub(crate) scope_name: String,
+    pub(crate) scope_name: Option<Arc<str>>,
     pub(crate) remote_addr: SocketAddr,
     pub(crate) host: Option<String>,
     pub(crate) sni: Option<String>,
@@ -29,9 +29,9 @@ pub(crate) struct DispatchAuditContext {
 
 impl DispatchAuditContext {
     pub(crate) fn new(
-        state: Arc<RuntimeState>,
+        state: Option<Arc<RuntimeState>>,
         kind: ProxyKind,
-        scope_name: impl Into<String>,
+        scope_name: Option<Arc<str>>,
         remote_addr: SocketAddr,
         request_method: Method,
         path: Option<String>,
@@ -40,7 +40,7 @@ impl DispatchAuditContext {
         Self {
             state,
             kind,
-            scope_name: scope_name.into(),
+            scope_name,
             remote_addr,
             host: None,
             sni: None,
@@ -96,12 +96,15 @@ pub(crate) fn annotate_dispatch_response(
         merge_policy_tags(&mut annotated_context.policy_tags, extra_policy_tags);
         Cow::Owned(annotated_context)
     };
-    attach_log_context(&ctx.state, response, &annotated_context);
+    let Some(state) = ctx.state.as_deref() else {
+        return;
+    };
+    attach_log_context(state, response, &annotated_context);
     emit_audit_log(
-        &ctx.state,
+        state,
         AuditRecord {
             kind: ctx.kind,
-            name: ctx.scope_name.as_str(),
+            name: ctx.scope_name.as_deref().unwrap_or(""),
             remote_ip: ctx.remote_addr.ip(),
             host: ctx.host.as_deref(),
             sni: ctx.sni.as_deref(),

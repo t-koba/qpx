@@ -177,21 +177,38 @@ pub(crate) async fn emit_optional_response_for_export(
 }
 
 pub(crate) fn limit_response_body_for_plan(
-    response: Response<Body>,
+    mut response: Response<Body>,
     plan: &ExecutionPlan,
 ) -> Response<Body> {
+    limit_response_body_for_plan_in_place(&mut response, plan);
+    response
+}
+
+pub(crate) fn limit_response_body_for_plan_in_place(
+    response: &mut Response<Body>,
+    plan: &ExecutionPlan,
+) {
     let max_bytes = plan.streaming.max_response_body_bytes;
-    let (mut parts, body) = response.into_parts();
-    if let Some(len) = parts
-        .headers
+    if response_body_fits_limit(response.body(), max_bytes) {
+        return;
+    }
+    if let Some(len) = response
+        .headers()
         .get(http::header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<usize>().ok())
         && len > max_bytes
     {
-        parts.headers.remove(http::header::CONTENT_LENGTH);
+        response.headers_mut().remove(http::header::CONTENT_LENGTH);
     }
-    Response::from_parts(parts, body.limit_bytes(max_bytes))
+    let body = std::mem::replace(response.body_mut(), Body::empty());
+    *response.body_mut() = body.limit_bytes(max_bytes);
+}
+
+fn response_body_fits_limit(body: &Body, max_bytes: usize) -> bool {
+    http_body::Body::size_hint(body)
+        .exact()
+        .is_some_and(|len| len <= max_bytes as u64)
 }
 
 async fn copy_body_with_sample(
@@ -458,6 +475,19 @@ mod tests {
         append_sample(&mut sample, 4, &Bytes::from_static(b"ab"));
         append_sample(&mut sample, 4, &Bytes::from_static(b"cdef"));
         assert_eq!(sample.as_slice(), b"abcd");
+    }
+
+    #[test]
+    fn exact_response_body_within_limit_needs_no_runtime_wrapper() {
+        let body = Body::from(Bytes::from_static(b"abcd"));
+        assert!(response_body_fits_limit(&body, 4));
+        assert!(!response_body_fits_limit(&body, 3));
+    }
+
+    #[test]
+    fn streaming_response_body_always_keeps_runtime_limit() {
+        let (_sender, body) = Body::channel();
+        assert!(!response_body_fits_limit(&body, usize::MAX));
     }
 
     #[cfg(unix)]

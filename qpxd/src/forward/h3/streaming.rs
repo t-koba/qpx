@@ -79,11 +79,11 @@ pub(super) fn request_streaming_limits_for_head(
         req_head,
         BaseRequestContext {
             peer_ip: Some(remote_addr.ip()),
-            scheme: req_head.uri().scheme_str(),
+            scheme: req_head.uri().scheme().cloned(),
             ..Default::default()
         },
     );
-    let Some(host) = base.host.as_deref() else {
+    let Some(host) = base.host() else {
         return fallback;
     };
     let prefilter_ctx = qpx_core::prefilter::MatchPrefilterContext {
@@ -92,7 +92,7 @@ pub(super) fn request_streaming_limits_for_head(
         src_ip: Some(remote_addr.ip()),
         host: Some(host),
         sni: None,
-        path: base.path.as_deref(),
+        path: base.path(),
     };
     let Some(engine) = state.policy.rules_by_listener.get(listener_name) else {
         return fallback;
@@ -179,9 +179,9 @@ fn classify_forward_h3_destination(
 ) -> DestinationMetadata {
     state.classify_destination(
         &DestinationInputs {
-            host: base.host.as_deref(),
-            ip: base.host.as_deref().and_then(|host| host.parse().ok()),
-            scheme: base.scheme.as_deref(),
+            host: base.host(),
+            ip: base.host().and_then(|host| host.parse().ok()),
+            scheme: base.scheme.as_ref().map(http::uri::Scheme::as_str),
             port: base.dst_port,
             alpn: Some("h3"),
             ..Default::default()

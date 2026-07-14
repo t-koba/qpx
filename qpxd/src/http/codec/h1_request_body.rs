@@ -1,24 +1,25 @@
 use crate::http::codec::h1_common::{MAX_HEADER_BYTES, find_crlf, parse_header_map};
+use crate::http::codec::lazy_timeout::timeout_after_pending;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
 use hyper::HeaderMap;
 use qpx_http::body::Sender;
 use qpx_http::protocol::semantics::validate_request_trailers;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadHalf};
-use tokio::time::{Duration, timeout};
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::time::Duration;
 
 const READ_BUF_SIZE: usize = 16 * 1024;
 const MAX_CHUNKED_BODY_BYTES: u64 = 1024 * 1024 * 1024;
 
-pub(crate) async fn forward_content_length_request_body<I>(
-    mut read_half: ReadHalf<I>,
+pub(crate) async fn forward_content_length_request_body<R>(
+    mut read_half: R,
     mut read_buf: BytesMut,
     mut remaining: u64,
     mut sender: Sender,
     read_timeout: Duration,
-) -> Result<(ReadHalf<I>, BytesMut)>
+) -> Result<(R, BytesMut)>
 where
-    I: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + Unpin,
 {
     let mut deliver = true;
     if !read_buf.is_empty() {
@@ -51,14 +52,14 @@ where
     Ok((read_half, read_buf))
 }
 
-pub(crate) async fn forward_chunked_request_body<I>(
-    mut read_half: ReadHalf<I>,
+pub(crate) async fn forward_chunked_request_body<R>(
+    mut read_half: R,
     mut read_buf: BytesMut,
     mut sender: Sender,
     read_timeout: Duration,
-) -> Result<(ReadHalf<I>, BytesMut)>
+) -> Result<(R, BytesMut)>
 where
-    I: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + Unpin,
 {
     let mut deliver = true;
     let mut total_body_bytes = 0u64;
@@ -246,7 +247,7 @@ async fn read_buf_with_timeout<R>(
 where
     R: AsyncRead + Unpin,
 {
-    timeout(read_timeout, reader.read_buf(buf))
+    timeout_after_pending(read_timeout, reader.read_buf(buf))
         .await
         .map_err(|_| anyhow!("HTTP/1 request body read timed out"))?
         .map_err(Into::into)
@@ -262,7 +263,7 @@ where
     R: AsyncRead + Unpin,
 {
     let mut limited = reader.take(limit as u64);
-    timeout(read_timeout, limited.read_buf(buf))
+    timeout_after_pending(read_timeout, limited.read_buf(buf))
         .await
         .map_err(|_| anyhow!("HTTP/1 request body read timed out"))?
         .map_err(Into::into)

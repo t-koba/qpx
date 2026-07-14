@@ -154,7 +154,7 @@ pub(super) fn build_forward_rate_limit_audit_context(
     matched_rule: Option<&str>,
 ) -> DispatchAuditContext {
     build_dispatch_audit_context(DispatchAuditInput {
-        state,
+        state: &state,
         kind: ProxyKind::Forward,
         scope_name: policy.listener_name,
         remote_addr: policy.remote_addr,

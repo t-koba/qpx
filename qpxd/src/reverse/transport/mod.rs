@@ -1,4 +1,4 @@
-use super::router::{ReverseRouter, normalize_host_for_match};
+use super::router::ReverseRouter;
 use crate::http::dispatcher::InterimList;
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
 use crate::http::protocol::l7::finalize_response_for_request;
@@ -19,11 +19,16 @@ mod dispatch;
 mod metrics;
 mod mirrors;
 mod path_rewrite;
+mod raw_http1;
 mod request_template;
 mod response_rules;
 
-use self::dispatch::dispatch_reverse_request;
+use self::dispatch::{dispatch_reverse_request, try_dispatch_unconditional_plain_reverse_request};
 pub(super) use self::mirrors::prune_mirror_permits;
+pub(in crate::reverse) use self::raw_http1::{
+    PreparedRawHttp1Request, PreparedRawHttp1Response, RawHttp1ConnectionCache,
+    RawHttp1RequestView, dispatch_prepared_raw_http1_request, prepare_raw_http1_request,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReverseConnInfo {
@@ -91,19 +96,29 @@ pub(super) async fn handle_request(
     Ok(response)
 }
 
+#[cfg(any(feature = "http3", test))]
 pub(super) async fn handle_request_with_interim(
     req: Request<Body>,
     reverse: super::ReloadableReverse,
     conn: ReverseConnInfo,
 ) -> Result<(InterimList, Response<Body>), Infallible> {
-    let runtime = reverse.runtime.clone();
+    handle_request_with_interim_ref(req, &reverse, &conn).await
+}
+
+pub(super) async fn handle_request_with_interim_ref(
+    req: Request<Body>,
+    reverse: &super::ReloadableReverse,
+    conn: &ReverseConnInfo,
+) -> Result<(InterimList, Response<Body>), Infallible> {
+    let runtime = &reverse.runtime;
     let state = runtime.state();
     let request_method = req.method().clone();
     let request_version = req.version();
-    match handle_request_inner(req, reverse, runtime, conn).await {
+    match handle_request_inner(req, reverse, runtime, conn, state).await {
         Ok(response) => Ok(response),
         Err(err) => {
             warn!(error = ?err, "reverse handling failed");
+            let state = runtime.state();
             let mut response = Response::new(Body::from(state.messages.reverse_error.clone()));
             *response.status_mut() = StatusCode::BAD_GATEWAY;
             Ok(empty_interim_response(finalize_response_for_request(
@@ -118,15 +133,15 @@ pub(super) async fn handle_request_with_interim(
 }
 
 pub(crate) async fn handle_request_inner(
-    req: Request<Body>,
-    reverse: super::ReloadableReverse,
-    runtime: Runtime,
-    conn: ReverseConnInfo,
+    mut req: Request<Body>,
+    reverse: &super::ReloadableReverse,
+    runtime: &Runtime,
+    conn: &ReverseConnInfo,
+    state: Arc<crate::runtime::RuntimeState>,
 ) -> Result<(InterimList, Response<Body>)> {
-    let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
-    if let PreflightOutcome::Reject(response) = preflight_validate(
-        &req,
+    let validated_request = match preflight_validate(
+        &mut req,
         proxy_name,
         PreflightOptions {
             trace_enabled: state.plan.limits.general.trace_enabled,
@@ -137,32 +152,30 @@ pub(crate) async fn handle_request_inner(
             },
         },
     ) {
-        return Ok(empty_interim_response(*response));
-    }
-    let authority_owned = req
-        .uri()
-        .authority()
-        .map(|authority| authority.as_str().to_string())
-        .or_else(|| {
-            req.headers()
-                .get("host")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string)
-        });
-    let host_header = authority_owned.as_deref().unwrap_or_default();
-    let host = normalize_host_for_match(host_header);
+        PreflightOutcome::Continue(validated) => validated,
+        PreflightOutcome::Reject(response) => return Ok(empty_interim_response(*response)),
+    };
+    let req =
+        match try_dispatch_unconditional_plain_reverse_request(req, reverse, conn, &state).await? {
+            Ok(response) => return Ok(response),
+            Err(req) => req,
+        };
     let base = extract_base_request_fields(
         &req,
         BaseRequestContext {
             peer_ip: Some(conn.remote_addr.ip()),
             dst_port: Some(conn.dst_port),
-            host: (!host.is_empty()).then_some(host.as_str()),
-            sni: conn.tls_sni.as_deref(),
-            authority: authority_owned.as_deref(),
-            scheme: Some(if conn.tls_terminated { "https" } else { "http" }),
+            shared_sni: conn.tls_sni.clone(),
+            scheme: Some(if conn.tls_terminated {
+                http::uri::Scheme::HTTPS
+            } else {
+                http::uri::Scheme::HTTP
+            }),
+            validated_request: Some(validated_request),
+            ..Default::default()
         },
     );
-    dispatch_reverse_request(req, base, reverse, runtime, conn).await
+    dispatch_reverse_request(req, base, reverse, runtime, conn, state).await
 }
 
 #[cfg(test)]

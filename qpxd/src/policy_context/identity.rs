@@ -293,6 +293,9 @@ pub(crate) fn strip_untrusted_identity_headers(
     peer_ip: IpAddr,
     headers: &mut HeaderMap,
 ) -> Result<()> {
+    if state.security.identity_sources.sources.is_empty() {
+        return Ok(());
+    }
     let mut names_to_strip = HashSet::new();
 
     for source_name in &policy.identity_sources {

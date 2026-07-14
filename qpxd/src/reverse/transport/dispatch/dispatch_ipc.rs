@@ -92,7 +92,14 @@ pub(super) async fn dispatch_reverse_ipc_route(
     let timeout_dur = std::cmp::min(route_timeout, ipc.timeout());
     let mut last_err = None;
     for attempt_idx in 0..attempts {
-        let started = Instant::now();
+        let started = (qpx_observability::metrics_enabled()
+            || cache_policy.is_some()
+            || route
+                .policy
+                .passive_health
+                .as_ref()
+                .is_some_and(|policy| policy.latency_threshold.is_some()))
+        .then(Instant::now);
         let mut req_for_upstream = match build_reverse_attempt_request(
             attempt_idx,
             &mut first_request,
@@ -344,7 +351,9 @@ async fn handle_reverse_ipc_success(
         revalidation_state: revalidation_state.take(),
         request_collapse_guard: cache_collapse_guard.take(),
         request_method,
-        response_delay_secs: started.elapsed().as_secs(),
+        response_delay_secs: cache_policy
+            .and_then(|_| started.map(|started| started.elapsed().as_secs()))
+            .unwrap_or(0),
         state,
     })
     .await?;
@@ -492,11 +501,16 @@ pub(super) async fn handle_reverse_websocket_upgrade(
                     upstream,
                     &route.policy,
                     resp.status(),
-                    started.elapsed(),
+                    Some(started),
                 );
             }
-            super::super::metrics::upstream_latency(state, started.elapsed());
-            super::super::metrics::reverse_result(state, super::super::metrics::ReverseResult::Ok);
+            if qpx_observability::metrics_enabled() {
+                super::super::metrics::upstream_latency(state, started.elapsed());
+                super::super::metrics::reverse_result(
+                    state,
+                    super::super::metrics::ReverseResult::Ok,
+                );
+            }
             resp = http_modules.on_upstream_response(resp).await?;
             resp = http_modules.prepare_downstream_response(resp).await?;
             let keep_upgrade = resp.status() == StatusCode::SWITCHING_PROTOCOLS;

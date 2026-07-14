@@ -86,7 +86,7 @@ pub fn init_rustls_crypto_provider() {
     }
 }
 
-// --- Stub implementation when tls-rustls is not enabled ---
+// --- Unavailable implementation when tls-rustls is not enabled ---
 
 #[cfg(not(feature = "tls-rustls"))]
 use anyhow::anyhow;
@@ -121,14 +121,14 @@ impl From<regex::Error> for TlsError {
 }
 
 #[cfg(not(feature = "tls-rustls"))]
-/// Stub CA store used when rustls support is disabled.
+/// Unavailable CA store used when rustls support is disabled.
 #[derive(Clone)]
 pub struct CaStore {
     state_dir: PathBuf,
 }
 
 #[cfg(not(feature = "tls-rustls"))]
-/// Stub MITM TLS configuration used when rustls support is disabled.
+/// Unavailable MITM TLS configuration used when rustls support is disabled.
 #[derive(Clone)]
 pub struct MitmConfig;
 
@@ -158,7 +158,7 @@ pub fn init_rustls_crypto_provider() {}
 
 #[cfg(not(feature = "tls-rustls"))]
 impl CaStore {
-    /// State directory requested for this stub CA store.
+    /// State directory requested for this unavailable CA store.
     pub fn state_dir(&self) -> &Path {
         &self.state_dir
     }

@@ -1,7 +1,10 @@
-use super::destination::classify_reverse_destination;
-use super::mirrors::{record_reverse_upstream_status, request_seed};
+use super::mirrors::{
+    record_reverse_upstream_error, record_reverse_upstream_status, record_reverse_upstream_timeout,
+    request_seed,
+};
 use super::request_template::{ReverseReplayRecorder, ReverseRequestTemplate};
 use super::{InterimList, ReverseConnInfo, empty_interim_response};
+use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::http::dispatch::{DispatchResponsePolicyOutcome, annotated_max_forwards_response};
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::http::protocol::websocket::is_websocket_upgrade;
@@ -9,7 +12,11 @@ use crate::ipc_client::proxy_ipc;
 use crate::reverse::ReloadableReverse;
 use crate::reverse::router::HttpRoute;
 use crate::runtime::Runtime;
-use crate::upstream::origin::{OriginEndpoint, proxy_http, proxy_http_with_interim_timeout};
+use crate::upstream::origin::{
+    OriginEndpoint, prepare_proxy_http1_request,
+    proxy_direct_plain_http1_raw_response_with_interim, proxy_http,
+    proxy_http_with_interim_timeout,
+};
 use anyhow::{Result, anyhow};
 use hyper::{Request, Response};
 use qpx_http::body::Body;
@@ -52,55 +59,142 @@ use self::outcome::{
     reverse_retry_backoff,
 };
 use self::prepare::{
-    attach_streaming_limits, buffer_reverse_guarded_request, prepare_reverse_request,
-    prepare_reverse_retry_dispatch,
+    attach_streaming_limits, buffer_reverse_guarded_request,
+    enforce_selected_reverse_route_constraints, prepare_reverse_request,
+    prepare_reverse_retry_dispatch, prepare_single_plain_reverse_request,
+    reverse_security_rejection,
 };
 use self::types::*;
 
 pub(super) async fn dispatch_reverse_request(
     req: Request<Body>,
     base: BaseRequestFields,
-    reverse: ReloadableReverse,
-    runtime: Runtime,
-    conn: ReverseConnInfo,
+    reverse: &ReloadableReverse,
+    runtime: &Runtime,
+    conn: &ReverseConnInfo,
+    state: Arc<crate::runtime::RuntimeState>,
 ) -> Result<(InterimList, Response<Body>)> {
     use tracing::Instrument as _;
     if qpx_observability::request_spans_enabled() {
         let span = tracing::info_span!(
             "dispatch_reverse_request",
             kind = "reverse",
-            host = %base.host.as_deref().unwrap_or(""),
+            host = %base.host().unwrap_or(""),
             method = %base.method,
         );
-        return execute_reverse_dispatch(req, base, reverse, runtime, conn)
+        return execute_reverse_dispatch(req, base, reverse, runtime, conn, state)
             .instrument(span)
             .await;
     }
-    execute_reverse_dispatch(req, base, reverse, runtime, conn).await
+    execute_reverse_dispatch(req, base, reverse, runtime, conn, state).await
+}
+
+pub(super) async fn try_dispatch_unconditional_plain_reverse_request(
+    req: Request<Body>,
+    reverse: &ReloadableReverse,
+    conn: &ReverseConnInfo,
+    state: &Arc<crate::runtime::RuntimeState>,
+) -> Result<std::result::Result<(InterimList, Response<Body>), Request<Body>>> {
+    let request_version = req.version();
+    if state.destination_trace_enabled()
+        || qpx_observability::metrics_enabled()
+        || qpx_observability::request_spans_enabled()
+        || !state.security.identity_sources.sources.is_empty()
+        || req.method() == http::Method::CONNECT
+        || !matches!(
+            request_version,
+            http::Version::HTTP_11 | http::Version::HTTP_2
+        )
+        || req.headers().contains_key(http::header::UPGRADE)
+    {
+        return Ok(Err(req));
+    }
+    let Some(compiled) = reverse.compiled_if_current(state) else {
+        return Ok(Err(req));
+    };
+    let Some(route) = compiled.router.single_plain_http_route() else {
+        return Ok(Err(req));
+    };
+    if !route.matches_every_request() || route.available_plain_http_upstream().is_none() {
+        return Ok(Err(req));
+    }
+    if let Some(response) = reverse_security_rejection(&req, conn, state, &compiled)? {
+        return Ok(Ok(response));
+    }
+    let request_method = req.method().clone();
+    let req = match enforce_selected_reverse_route_constraints(req, route, &request_method, state)?
+    {
+        Ok(req) => req,
+        Err(response) => return Ok(Ok(response)),
+    };
+    dispatch_plain_reverse_http(
+        req,
+        state,
+        route,
+        &request_method,
+        request_version,
+        state.plan.identity.proxy_name.as_ref(),
+    )
+    .await
+    .map(Ok)
 }
 
 async fn execute_reverse_dispatch(
     req: Request<Body>,
     base: BaseRequestFields,
-    reverse: ReloadableReverse,
-    runtime: Runtime,
-    conn: ReverseConnInfo,
+    reverse: &ReloadableReverse,
+    runtime: &Runtime,
+    conn: &ReverseConnInfo,
+    state: Arc<crate::runtime::RuntimeState>,
 ) -> Result<(InterimList, Response<Body>)> {
-    let compiled = reverse.compiled().await;
-    let prepared = match prepare_reverse_request(req, &base, &runtime, &conn, compiled).await? {
+    let (state, compiled) = reverse.compiled_snapshot(state).await;
+    let request_version = req.version();
+    if !state.destination_trace_enabled()
+        && !qpx_observability::metrics_enabled()
+        && state.security.identity_sources.sources.is_empty()
+        && base.method != http::Method::CONNECT
+        && matches!(
+            request_version,
+            http::Version::HTTP_11 | http::Version::HTTP_2
+        )
+        && !req.headers().contains_key(http::header::UPGRADE)
+        && let Some(route) = compiled
+            .router
+            .single_plain_http_route()
+            .filter(|route| route.available_plain_http_upstream().is_some())
+    {
+        match prepare_single_plain_reverse_request(req, &base, conn, &state, &compiled)? {
+            Ok(Some(req)) => {
+                let secure_transport = conn.tls_sni.is_some();
+                let (interim, mut response) = dispatch_plain_reverse_http(
+                    req,
+                    &state,
+                    route,
+                    &base.method,
+                    request_version,
+                    state.plan.identity.proxy_name.as_ref(),
+                )
+                .await?;
+                apply_reverse_route_metadata(route, secure_transport, &mut response)?;
+                return Ok((interim, response));
+            }
+            Ok(None) => {
+                return Err(anyhow!("no route matched"));
+            }
+            Err(response) => return Ok(response),
+        }
+    }
+    let prepared = match prepare_reverse_request(req, &base, conn, state, compiled).await? {
         Ok(prepared) => prepared,
         Err(response) => return Ok(response),
     };
-    let api_metadata = prepared
+    let route = prepared
         .context
+        .compiled
         .router
-        .route_at(prepared.route.route_idx)
-        .and_then(|route| route.plan.api_metadata.clone());
-    let hsts = prepared
-        .context
-        .router
-        .route_at(prepared.route.route_idx)
-        .and_then(|route| route.plan.hsts);
+        .route_at(prepared.route.route_idx);
+    let api_metadata = route.and_then(|route| route.plan.api_metadata.clone());
+    let hsts = route.and_then(|route| route.plan.hsts);
     let secure_transport = conn.tls_sni.is_some();
     let (interim, mut response) =
         execute_reverse_request(prepared, base, reverse, runtime, conn).await?;
@@ -116,12 +210,29 @@ async fn execute_reverse_dispatch(
     Ok((interim, response))
 }
 
+fn apply_reverse_route_metadata(
+    route: &HttpRoute,
+    secure_transport: bool,
+    response: &mut Response<Body>,
+) -> Result<()> {
+    if let Some(metadata) = route.plan.api_metadata.as_deref() {
+        metadata.apply(response.headers_mut())?;
+    }
+    if secure_transport && let Some(hsts) = route.plan.hsts {
+        response.headers_mut().insert(
+            http::header::STRICT_TRANSPORT_SECURITY,
+            hsts.to_header_value()?,
+        );
+    }
+    Ok(())
+}
+
 async fn execute_reverse_request(
     prepared: PreparedReverseRequest,
     base: BaseRequestFields,
-    reverse: ReloadableReverse,
-    runtime: Runtime,
-    conn: ReverseConnInfo,
+    reverse: &ReloadableReverse,
+    runtime: &Runtime,
+    conn: &ReverseConnInfo,
 ) -> Result<(InterimList, Response<Body>)> {
     let PreparedReverseRequest {
         mut req,
@@ -129,14 +240,15 @@ async fn execute_reverse_request(
         route: prepared_route,
         observation,
     } = prepared;
-    let router = context.router;
+    let compiled = context.compiled;
+    let router = &compiled.router;
     let state = context.state;
-    let proxy_name = context.proxy_name;
-    let host = prepared_route.host;
-    let request_method = prepared_route.request_method;
-    let request_version = prepared_route.request_version;
-    let path_owned = prepared_route.path_owned;
-    let request_uri = prepared_route.request_uri;
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
+    let host = base.host().unwrap_or_default();
+    let request_method = &base.method;
+    let request_version = req.version();
+    let path = base.path();
+    let request_uri = base.request_uri();
     let route_idx = prepared_route.route_idx;
     let selected_policy = prepared_route.selected_policy;
     let identity = prepared_route.identity;
@@ -149,6 +261,27 @@ async fn execute_reverse_request(
         .ok_or_else(|| anyhow!("no route matched"))?;
     let streaming = route.plan.streaming;
     debug_assert_reverse_route_target(route);
+    if route.supports_plain_http_dispatch()
+        && route.available_plain_http_upstream().is_some()
+        && !state.destination_trace_enabled()
+        && !qpx_observability::metrics_enabled()
+        && request_method != http::Method::CONNECT
+        && matches!(
+            request_version,
+            http::Version::HTTP_11 | http::Version::HTTP_2
+        )
+        && !req.headers().contains_key(http::header::UPGRADE)
+    {
+        return dispatch_plain_reverse_http(
+            req,
+            &state,
+            route,
+            request_method,
+            request_version,
+            proxy_name,
+        )
+        .await;
+    }
     let resolution_override = route.plan.destination_resolution.as_ref();
     let route_http_guard = route.plan.guard.as_deref();
     let route_max_observed_request_body_bytes = route_http_guard
@@ -158,41 +291,44 @@ async fn execute_reverse_request(
     let override_key = destination_override_key(resolution_override);
     let request_destination = request_destination_cache
         .get(override_key)
-        .cloned()
-        .unwrap_or_else(|| {
-            classify_reverse_destination(&state, &conn, host.as_str(), None, resolution_override)
-        });
+        .ok_or_else(|| anyhow!("selected route destination context was not prepared"))?;
     req = match buffer_reverse_guarded_request(
         req,
         route_http_guard,
         route_max_observed_request_body_bytes,
         Duration::from_millis(streaming.body_read_timeout_ms),
-        &request_method,
+        request_method,
         request_version,
-        proxy_name.as_ref(),
+        proxy_name,
     )
     .await?
     {
         Ok(req) => req,
         Err(response) => return Ok(empty_interim_response(response)),
     };
-    let seed = request_seed(&conn, host.as_str(), &req);
-    let sticky_seed = route.affinity_seed(&conn, host.as_str(), &req, &identity);
+    let (seed, sticky_seed) = if route.selection_is_seed_independent() {
+        (0, 0)
+    } else {
+        (
+            request_seed(conn, host, &req),
+            route.affinity_seed(conn, host, &req, &identity),
+        )
+    };
     let access = match enforce_reverse_access_control(ReverseAccessInput {
         state: &state,
         reverse_name: reverse.name.as_ref(),
-        proxy_name: proxy_name.as_ref(),
-        conn: &conn,
-        host: host.as_str(),
-        request_method: &request_method,
-        path: path_owned.as_deref(),
-        request_uri: request_uri.as_str(),
+        proxy_name,
+        conn,
+        host,
+        request_method,
+        path,
+        request_uri,
         req,
         route,
         selected_policy: &selected_policy,
         identity: &identity,
         sanitized_headers: sanitized_headers.as_ref(),
-        request_destination: &request_destination,
+        request_destination,
     })
     .await?
     {
@@ -227,18 +363,20 @@ async fn execute_reverse_request(
         } else {
             "http"
         },
-        Some(host.as_str()),
+        Some(host),
     )?;
 
-    if let Some(response) = annotated_max_forwards_response(
-        &mut req,
-        proxy_name.as_str(),
-        state.plan.limits.general.trace_reflect_all_headers,
-        state.plan.limits.body.max_observed_request_body_bytes,
-        std::time::Duration::from_millis(streaming.body_read_timeout_ms),
-        &audit_ctx,
-    )
-    .await
+    if (*request_method == http::Method::TRACE || *request_method == http::Method::OPTIONS)
+        && req.headers().contains_key(http::header::MAX_FORWARDS)
+        && let Some(response) = annotated_max_forwards_response(
+            &mut req,
+            proxy_name,
+            state.plan.limits.general.trace_reflect_all_headers,
+            state.plan.limits.body.max_observed_request_body_bytes,
+            std::time::Duration::from_millis(streaming.body_read_timeout_ms),
+            &audit_ctx,
+        )
+        .await
     {
         return Ok(attach_streaming_limits(
             empty_interim_response(response),
@@ -251,10 +389,10 @@ async fn execute_reverse_request(
         req,
         state: &state,
         selected_policy: &selected_policy,
-        conn: &conn,
+        conn,
         route,
         reverse_name: reverse.name.as_ref(),
-        proxy_name: proxy_name.as_ref(),
+        proxy_name,
         identity: &identity,
         route_headers: route_headers.as_deref(),
         cache_bypass,
@@ -283,14 +421,14 @@ async fn execute_reverse_request(
         http_modules,
         request_cache_policy,
         base: &base,
-        runtime: &runtime,
+        runtime,
         state: &state,
-        conn: &conn,
-        host: host.as_str(),
+        conn,
+        host,
         route,
         resolution_override,
-        request_destination: &request_destination,
-        request_method: &request_method,
+        request_destination,
+        request_method,
         request_version,
         request_rpc: request_rpc.as_ref(),
         identity: &identity,
@@ -301,13 +439,79 @@ async fn execute_reverse_request(
         seed,
         sticky_seed,
         route_timeout,
-        proxy_name: proxy_name.as_str(),
+        proxy_name,
         request_limits: &mut request_limits,
         request_limit_ctx: &request_limit_ctx,
         audit_ctx: &audit_ctx,
     })
     .await?;
     Ok(attach_streaming_limits(result, streaming, request_version))
+}
+
+async fn dispatch_plain_reverse_http(
+    req: Request<Body>,
+    state: &crate::runtime::RuntimeState,
+    route: &HttpRoute,
+    request_method: &http::Method,
+    request_version: http::Version,
+    proxy_name: &str,
+) -> Result<(InterimList, Response<Body>)> {
+    let selected_upstream = route
+        .available_plain_http_upstream()
+        .ok_or_else(|| anyhow!("plain HTTP fast path requires one static HTTP upstream"))?;
+    let (connect_authority, host_authority) = selected_upstream
+        .origin
+        .direct_plain_http1_authorities()
+        .ok_or_else(|| anyhow!("plain HTTP fast path requires a precompiled HTTP authority"))?;
+    let req = prepare_proxy_http1_request(req, host_authority, proxy_name)?;
+    let started = route
+        .policy
+        .passive_health
+        .as_ref()
+        .is_some_and(|policy| policy.latency_threshold.is_some())
+        .then(tokio::time::Instant::now);
+    let response = timeout_after_pending(
+        route.policy.timeout,
+        proxy_direct_plain_http1_raw_response_with_interim(
+            &state.pools,
+            req,
+            connect_authority,
+            host_authority,
+            request_version,
+            proxy_name,
+        ),
+    )
+    .await;
+    let (interim, response, response_finalized) = match response {
+        Ok(Ok(response)) => (
+            response.interim,
+            response.response,
+            response.response_finalized,
+        ),
+        Ok(Err(err)) => {
+            record_reverse_upstream_error(selected_upstream, &route.policy, &err);
+            return Err(err);
+        }
+        Err(_) => {
+            record_reverse_upstream_timeout(selected_upstream, &route.policy);
+            return Err(anyhow!("upstream timeout"));
+        }
+    };
+    record_reverse_upstream_status(selected_upstream, &route.policy, response.status(), started);
+    let mut response = response;
+    crate::http::capture::stream::limit_response_body_for_plan_in_place(&mut response, &route.plan);
+    if !response_finalized {
+        crate::http::protocol::l7::finalize_response_with_headers_in_place(
+            request_method,
+            request_version,
+            proxy_name,
+            &mut response,
+            None,
+            false,
+        );
+    }
+    debug_assert_ne!(request_version, http::Version::HTTP_3);
+    Ok((interim, response))
 }
 
 fn debug_assert_reverse_route_target(route: &HttpRoute) {
@@ -618,7 +822,7 @@ async fn reverse_continue_response_rule(
                         upstream,
                         &route.policy,
                         response.status(),
-                        started.elapsed(),
+                        started,
                     );
                 }
                 let retry_reason = format!("upstream returned {}", response.status());

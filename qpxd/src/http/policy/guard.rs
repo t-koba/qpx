@@ -12,9 +12,7 @@ use self::json::validate_json_limits;
 use self::json::validate_json_limits_reader;
 #[cfg(test)]
 use self::multipart::validate_multipart_limits;
-use self::multipart::{
-    multipart_boundary, multipart_boundary_from_headers, validate_multipart_limits_reader,
-};
+use self::multipart::{multipart_boundary_from_headers, validate_multipart_limits_reader};
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledHttpGuardProfile {
@@ -45,9 +43,16 @@ impl CompiledHttpGuardProfile {
     }
 
     pub(crate) fn requires_request_body_buffering(&self, req: &Request<Body>) -> bool {
+        self.requires_request_body_buffering_from_headers(req.headers())
+    }
+
+    pub(crate) fn requires_request_body_buffering_from_headers(
+        &self,
+        headers: &http::HeaderMap,
+    ) -> bool {
         self.profile.json.max_depth.is_some()
             || self.profile.json.max_fields.is_some()
-            || (multipart_boundary(req).is_some()
+            || (multipart_boundary_from_headers(headers).is_some()
                 && (self.profile.multipart.max_parts.is_some()
                     || self.profile.multipart.max_name_bytes.is_some()
                     || self.profile.multipart.max_filename_bytes.is_some()))

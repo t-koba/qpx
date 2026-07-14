@@ -23,5 +23,6 @@ pub(super) async fn proxy_ipc_with_interim(
         interim: Vec::new(),
         response,
         upstream_cert: None,
+        response_finalized: false,
     })
 }

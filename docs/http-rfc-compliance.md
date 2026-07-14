@@ -13,7 +13,7 @@ conformance.
   are required by the release gates in this document.
 - `external-authority`: qpx implements the resource-server or PEP side while
   identity, token issuance, session, MFA, or policy authority remains external.
-- `transport-contract`: a pinned transport or TLS implementation owns wire-level
+- `transport-library-with-contract`: a pinned transport or TLS implementation owns wire-level
   mechanics and qpx owns configuration, limits, parity, and interoperability
   gates.
 - `not-applicable`: the specification assigns a responsibility to a user agent,
@@ -58,24 +58,24 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 
 | Area | RFCs | qpx status | Detailed scope |
 |---|---|---|---|
-| HTTP semantics and versions | 9110, 9111, 9112, 9113, 9114 | complete / transport-contract | semantics, cache, HTTP/1.1, HTTP/2, HTTP/3 |
+| HTTP semantics and versions | 9110, 9111, 9112, 9113, 9114 | complete / transport-library-with-contract | semantics, cache, HTTP/1.1, HTTP/2, HTTP/3 |
 | Methods and status codes | 5789, 6585, 7725, 8297, 8470, 10008 | complete | PATCH, additional status codes, Early Hints, early data, QUERY |
 | Fields and metadata | 6265, 6266, 7239, 7240, 7838, 8288, 8594, 9209, 9651, 9745, 9842 | complete | cookies, disposition, forwarding, preferences, links, proxy metadata, structured fields, dictionary compression |
 | Cache extensions | 5861, 8246, 9211, 9213 | complete | stale controls, immutable, Cache-Status, targeted controls |
 | Authentication and integrity | 6750, 6797, 7616, 7617, 9421, 9530, 9931 | complete / external-authority | resource-server Bearer handling, HSTS, Basic/Digest, signatures, digests, optimistic-data safety |
 | Provider-neutral security interfaces | 6749, 7517, 7519, 7662, 8705 | external-authority | client credentials, JWK/JWKS, JWT, introspection, mTLS client authentication |
 | HTTP API design | 9205, 9457 | complete | API design validation and Problem Details |
-| QUIC and HTTP/3 | 9000, 9001, 9002, 9204, 9218, 9221, 9368, 9369 | transport-contract / complete | QUIC transport, TLS, recovery, QPACK, priority, DATAGRAM, v2 negotiation |
+| QUIC and HTTP/3 | 9000, 9001, 9002, 9204, 9218, 9221, 9368, 9369 | transport-library-with-contract / complete | QUIC transport, TLS, recovery, QPACK, priority, DATAGRAM, v2 negotiation |
 | MASQUE and tunnels | 9297, 9298, 9484 | complete | capsules, CONNECT-UDP, CONNECT-IP |
 | WebSocket | 6455, 8441, 9220 | complete | HTTP/1.1, HTTP/2, and HTTP/3 WebSocket paths |
 | WebDAV and CalDAV | 3253, 3744, 4791, 4918, 5323, 5689, 5842 | complete | versioning, ACL, calendars, core DAV, search, MKCOL, bindings |
-| Shared foundations | 3986, 6838, 7301, 8446 | complete / transport-contract | URI, media types, ALPN, TLS 1.3 |
+| Shared foundations | 3986, 6838, 7301, 8446 | complete / transport-library-with-contract | URI, media types, ALPN, TLS 1.3 |
 
 ### HTTP core
 
 | RFC | Classification | Implemented contract | Evidence |
 |---|---|---|---|
-| 9110 | native | shared semantics, methods, status codes, fields, conditional requests, ranges, authentication framework | `qpx-http` protocol tests and `qpxd/tests/rfc911x_contract.rs` |
+| 9110 | native | shared semantics, methods, status codes, fields, conditional requests, ranges, authentication framework | `qpx-http` protocol tests and `qpxd/tests/http_rfc_contract.rs` |
 | 9111 | native | cache keying, freshness, validation, invalidation, Vary, Age, and warning behavior | `qpxd-cache` unit/scenario tests and RFC cache contracts |
 | 9112 | native | strict HTTP/1.1 framing, connection lifecycle, trailers, Upgrade, and CONNECT handling | H1 codec tests, smuggling regressions, and forward/reverse E2E |
 | 9113 | transport-library-with-contract | HTTP/2 framing, stream lifecycle, extended CONNECT, limits, and forward/reverse/transparent paths | HTTP/2 contract and E2E suites |

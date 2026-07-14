@@ -77,6 +77,17 @@ impl Default for CompiledHttpModuleChain {
 }
 
 impl CompiledHttpModuleChain {
+    fn is_empty(&self) -> bool {
+        self.request_headers.is_empty()
+            && self.cache_lookup.is_empty()
+            && self.upstream_request.is_empty()
+            && self.upstream_response.is_empty()
+            && self.downstream_response.is_empty()
+            && self.retry.is_empty()
+            && self.error.is_empty()
+            && self.log.is_empty()
+    }
+
     #[cfg(test)]
     pub(crate) fn test_with_body_access(body_access: super::BodyAccess) -> Self {
         let mut chain = Self::default();
@@ -157,11 +168,15 @@ impl CompiledHttpModuleChain {
     }
 
     pub(crate) fn start(
-        &self,
-        runtime: Arc<RuntimeState>,
+        self: &Arc<Self>,
+        runtime: &Arc<RuntimeState>,
         init: HttpModuleSessionInit<'_>,
     ) -> HttpModuleExecution {
-        HttpModuleExecution::new(self.clone(), HttpModuleContext::new(runtime, init))
+        if self.is_empty() {
+            HttpModuleExecution::empty()
+        } else {
+            HttpModuleExecution::new(self.clone(), HttpModuleContext::new(runtime.clone(), init))
+        }
     }
 }
 

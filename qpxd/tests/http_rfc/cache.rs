@@ -2,7 +2,7 @@ use super::*;
 use anyhow::anyhow;
 
 pub(crate) async fn cache_contract() -> Result<()> {
-    let dir = temp_dir("qpxd-rfc911x-cache")?;
+    let dir = temp_dir("qpxd-http-rfc-cache")?;
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)
         .with_context(|| format!("create state dir {}", state_dir.display()))?;

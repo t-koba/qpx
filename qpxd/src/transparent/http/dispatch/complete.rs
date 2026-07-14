@@ -84,8 +84,8 @@ pub(super) async fn complete_transparent_request(
             sni: None,
             request_method: &request_method,
             request_version,
-            path: base.path.as_deref(),
-            uri: Some(base.request_uri.as_str()),
+            path: base.path(),
+            uri: Some(base.request_uri()),
             matched_rule: matched_rule.as_deref(),
             matched_route: None,
             action: policy.as_ref().map(|policy| &policy.action),
@@ -98,9 +98,7 @@ pub(super) async fn complete_transparent_request(
                 &request_limit_ctx,
                 &state.policy.rate_limiters,
             )),
-            default_deny_response: crate::http::protocol::common::forbidden_response(
-                state.messages.forbidden.as_str(),
-            ),
+            default_deny_body: state.messages.forbidden.as_str(),
         })
         .await?;
     let (mut policy, audit, timeout_override) = match decision {
@@ -192,7 +190,7 @@ pub(super) async fn complete_transparent_request(
     let policy_headers = policy.headers.as_deref();
     prepare_request_with_headers_in_place(&mut req, proxy_name, policy_headers, websocket);
     let module_init = transparent_module_init(proxy_name, listener_name, remote_ip, &identity);
-    let mut http_modules = selected_plan.modules.start(state.clone(), module_init);
+    let mut http_modules = selected_plan.modules.start(&state, module_init);
     match http_modules.on_request_headers(&mut req).await? {
         crate::http::modules::RequestHeadersOutcome::Continue => {}
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
@@ -368,7 +366,7 @@ pub(super) async fn proxy_transparent_http1(
                 src_ip: Some(input.audit.remote_addr.ip()),
                 host: input.host_for_match.as_deref(),
                 sni: None,
-                path: input.base.path.as_deref(),
+                path: input.base.path(),
             })
         })
         .unwrap_or_default();

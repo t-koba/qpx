@@ -66,7 +66,7 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
     let effective_policy = &input.effective_policy;
     let req_method = &input.req_method;
     let route_headers = input.headers.as_deref();
-    let path = input.base.path.as_deref().unwrap_or("/");
+    let path = input.base.path().unwrap_or("/");
     let export_server = format_authority_host_port(input.route.host, input.route.dst_port);
     let rate_ctx = RateLimitContext::from_identity(
         src_ip,
@@ -111,7 +111,7 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
             .insert(http::header::HOST, http::HeaderValue::from_str(&authority)?);
     }
     let module_init = mitm_module_init(proxy_name, &input.route, &input.identity);
-    let mut http_modules = selected_plan.modules.start(state.clone(), module_init);
+    let mut http_modules = selected_plan.modules.start(&state, module_init);
     match http_modules.on_request_headers(&mut input.req).await? {
         crate::http::modules::RequestHeadersOutcome::Continue => {}
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {

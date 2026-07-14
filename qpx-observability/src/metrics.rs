@@ -98,6 +98,7 @@ fn start_metrics_inner(
     let handle = recorder.handle();
     metrics::set_global_recorder(recorder)
         .map_err(|e| anyhow::anyhow!("metrics recorder install failed: {}", e))?;
+    crate::set_metrics_enabled(true);
     let render_cache = Arc::new(AsyncMutex::new(MetricsRenderCache::default()));
 
     let runtime = tokio::runtime::Handle::try_current()

@@ -166,6 +166,9 @@ pub(super) fn select_weighted_backend_idx(
     if backends.is_empty() {
         return None;
     }
+    if backends.len() == 1 {
+        return (backends[0].weight != 0).then_some(0);
+    }
     let total = backends.iter().map(|b| b.weight as u64).sum::<u64>();
     if total == 0 {
         return None;

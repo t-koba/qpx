@@ -246,7 +246,7 @@ async fn apply_forward_response_policy(
         src_ip: Some(input.remote_addr.ip()),
         host: Some(input.host.host.as_str()),
         sni: None,
-        path: input.base.path.as_deref(),
+        path: input.base.path(),
     };
     let response_candidates = input
         .response_engine

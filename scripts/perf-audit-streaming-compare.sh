@@ -8,7 +8,9 @@ QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
 STREAM_BYTES="${QPX_STREAMING_COMPARE_BYTES:-104857600}"
 CHUNK_BYTES="${QPX_STREAMING_COMPARE_CHUNK_BYTES:-65536}"
 SLOW_READ_DELAY_MS="${QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS:-1}"
+FAST_TRANSFERS="${QPX_STREAMING_COMPARE_FAST_TRANSFERS:-8}"
 SAMPLE_ATTEMPTS="${QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS:-3}"
+MIN_VALID_SAMPLES="${QPX_STREAMING_COMPARE_MIN_VALID_SAMPLES:-}"
 BACKEND_PORT="${QPX_STREAMING_COMPARE_BACKEND_PORT:-18380}"
 QPX_PORT="${QPX_STREAMING_COMPARE_QPX_PORT:-18381}"
 NGINX_PORT="${QPX_STREAMING_COMPARE_NGINX_PORT:-18382}"
@@ -23,6 +25,7 @@ mkdir -p "$LOG_DIR" "$STATE_DIR" "$(dirname "$OUT_JSON")"
 
 PIDS=()
 ARTIFACTS_COLLECTED=0
+INVALID_SAMPLES=0
 BACKEND_PID=""
 QPXD_PID=""
 NGINX_PID=""
@@ -50,6 +53,7 @@ collect_artifacts() {
   cp -R "$LOG_DIR"/. "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.yaml "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   find "$TMP_DIR" -name '*.conf' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
+  find "$TMP_DIR" -name '*.valid-samples.jsonl' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
 }
 
 cleanup() {
@@ -65,92 +69,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-clock_ticks() {
-  getconf CLK_TCK 2>/dev/null || echo 100
-}
-
-children_of_pid() {
-  local pid="$1"
-  if command -v pgrep >/dev/null 2>&1; then
-    pgrep -P "$pid" 2>/dev/null || true
-  elif ps -o pid= --ppid "$pid" >/dev/null 2>&1; then
-    ps -o pid= --ppid "$pid" 2>/dev/null | awk '{ print $1 }'
-  fi
-}
-
-process_tree_pids() {
-  local root="$1"
-  local child
-  if [ -z "$root" ]; then
-    return
-  fi
-  echo "$root"
-  for child in $(children_of_pid "$root"); do
-    process_tree_pids "$child"
-  done
-}
-
-proc_cpu_ticks() {
-  local pid="$1"
-  local stat="/proc/${pid}/stat"
-  if [ ! -r "$stat" ]; then
-    echo 0
-    return
-  fi
-  awk '{
-    comm_end = index($0, ") ")
-    if (comm_end == 0) {
-      print 0
-      exit
-    }
-    rest = substr($0, comm_end + 2)
-    split(rest, fields, " ")
-    print fields[12] + fields[13]
-  }' "$stat"
-}
-
-proc_status_value_kb() {
-  local pid="$1"
-  local key="$2"
-  local status="/proc/${pid}/status"
-  if [ ! -r "$status" ]; then
-    echo 0
-    return
-  fi
-  awk -v key="$key" '$1 == key ":" { print $2; found = 1; exit } END { if (!found) print 0 }' "$status"
-}
-
-process_tree_cpu_ms() {
-  local root="$1"
-  local hz pid ticks total_ticks
-  if [ -z "$root" ] || [ ! -d /proc ]; then
-    echo 0
-    return
-  fi
-  hz="$(clock_ticks)"
-  total_ticks=0
-  for pid in $(process_tree_pids "$root"); do
-    ticks="$(proc_cpu_ticks "$pid")"
-    total_ticks=$((total_ticks + ticks))
-  done
-  awk -v ticks="$total_ticks" -v hz="$hz" 'BEGIN { printf "%.0f", (ticks * 1000) / hz }'
-}
-
-process_tree_status_kb() {
-  local root="$1"
-  local key="$2"
-  local pid value total
-  if [ -z "$root" ] || [ ! -d /proc ]; then
-    echo 0
-    return
-  fi
-  total=0
-  for pid in $(process_tree_pids "$root"); do
-    value="$(proc_status_value_kb "$pid" "$key")"
-    total=$((total + value))
-  done
-  echo "$total"
-}
+source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"
 
 start_streaming_backend() {
   cat >"$TMP_DIR/streaming_backend.py" <<'PY'
@@ -231,6 +150,10 @@ start_qpxd() {
   local config="$TMP_DIR/qpxd-streaming.yaml"
   cat >"$config" <<YAML
 state_dir: "$STATE_DIR"
+telemetry:
+  system_log:
+    level: warn
+    format: json
 runtime:
   worker_threads: 1
   acceptor_tasks_per_listener: 1
@@ -245,8 +168,7 @@ edges:
         streaming_requirement: required
         streaming:
           max_response_body_bytes: ${STREAM_BYTES}
-        match:
-          path_prefix: /
+        match: {}
         target:
           type: upstream
           upstreams: [http://127.0.0.1:${BACKEND_PORT}]
@@ -269,12 +191,16 @@ events { worker_connections 4096; }
 http {
   access_log off;
   proxy_buffering off;
+  upstream qpx_benchmark_backend {
+    server 127.0.0.1:${BACKEND_PORT};
+    keepalive 256;
+  }
   server {
     listen 127.0.0.1:${NGINX_PORT};
     location / {
       proxy_http_version 1.1;
       proxy_set_header Connection "";
-      proxy_pass http://127.0.0.1:${BACKEND_PORT};
+      proxy_pass http://qpx_benchmark_backend;
     }
   }
 }
@@ -357,53 +283,67 @@ run_client() {
   local port="$2"
   local read_mode="$3"
   local delay_ms="$4"
-  python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" <<'PY'
+  python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" <<'PY'
 import json
 import socket
 import statistics
 import sys
 import time
 
-proxy, port, read_mode, delay_ms, expected, chunk_bytes = sys.argv[1:7]
+proxy, port, read_mode, delay_ms, expected, chunk_bytes, fast_transfers = sys.argv[1:8]
 port = int(port)
 delay = float(delay_ms) / 1000.0
 expected = int(expected)
 chunk_bytes = int(chunk_bytes)
+transfers = 1 if read_mode == "slow" else int(fast_transfers)
 started = time.perf_counter()
-first_byte = None
-last_chunk = None
+first_byte_ms = []
 gaps = []
 received = 0
-head = b""
 
-sock = socket.create_connection(("127.0.0.1", port), timeout=10)
-sock.settimeout(120)
-sock.sendall(b"GET /stream HTTP/1.1\r\nHost: stream.local\r\nConnection: close\r\n\r\n")
-while b"\r\n\r\n" not in head:
-    data = sock.recv(1)
-    if not data:
-        raise SystemExit("connection closed before headers")
-    if first_byte is None:
-        first_byte = time.perf_counter()
-    head += data
-status_line = head.split(b"\r\n", 1)[0]
-status = status_line.decode("ascii", "replace")
-if not status.startswith("HTTP/1.1 200") and not status.startswith("HTTP/1.0 200"):
-    raise SystemExit(f"unexpected status: {status}")
-while True:
-    data = sock.recv(chunk_bytes)
-    if not data:
-        break
-    now = time.perf_counter()
-    if first_byte is None:
-        first_byte = now
-    if last_chunk is not None:
-        gaps.append((now - last_chunk) * 1000.0)
-    last_chunk = now
-    received += len(data)
-    if read_mode == "slow":
-        time.sleep(delay)
-sock.close()
+for _ in range(transfers):
+    transfer_started = time.perf_counter()
+    first_byte = None
+    last_observation = None
+    next_observation = chunk_bytes
+    transfer_received = 0
+    head = b""
+    sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+    sock.settimeout(120)
+    sock.sendall(b"GET /stream HTTP/1.1\r\nHost: stream.local\r\nConnection: close\r\n\r\n")
+    while b"\r\n\r\n" not in head:
+        data = sock.recv(1)
+        if not data:
+            raise SystemExit("connection closed before headers")
+        if first_byte is None:
+            first_byte = time.perf_counter()
+        head += data
+    status_line = head.split(b"\r\n", 1)[0]
+    status = status_line.decode("ascii", "replace")
+    if not status.startswith("HTTP/1.1 200") and not status.startswith("HTTP/1.0 200"):
+        raise SystemExit(f"unexpected status: {status}")
+    while True:
+        data = sock.recv(chunk_bytes)
+        if not data:
+            break
+        now = time.perf_counter()
+        if first_byte is None:
+            first_byte = now
+        transfer_received += len(data)
+        if transfer_received >= next_observation:
+            if last_observation is not None:
+                gaps.append((now - last_observation) * 1000.0)
+            last_observation = now
+            next_observation += chunk_bytes
+            if read_mode == "slow":
+                time.sleep(delay)
+    sock.close()
+    if transfer_received != expected:
+        raise SystemExit(
+            f"incomplete streaming transfer: received {transfer_received}, expected {expected}"
+        )
+    received += transfer_received
+    first_byte_ms.append((first_byte - transfer_started) * 1000.0)
 finished = time.perf_counter()
 gaps_sorted = sorted(gaps)
 def percentile(p):
@@ -414,15 +354,17 @@ def percentile(p):
 print(json.dumps({
     "proxy": proxy,
     "read_mode": read_mode,
-    "first_byte_ms": (first_byte - started) * 1000.0 if first_byte is not None else None,
+    "transfers": transfers,
+    "first_byte_ms": statistics.median(first_byte_ms),
     "p50_chunk_gap_ms": percentile(50),
     "p95_chunk_gap_ms": percentile(95),
     "p99_chunk_gap_ms": percentile(99),
     "max_chunk_gap_ms": max(gaps_sorted) if gaps_sorted else 0.0,
     "total_ms": (finished - started) * 1000.0,
     "bytes": received,
+    "gap_observation_bytes": chunk_bytes,
     "chunk_observations": len(gaps),
-    "valid": received == expected,
+    "valid": received == expected * transfers,
 }))
 PY
 }
@@ -433,25 +375,43 @@ run_one() {
   local resource_pid="$3"
   local read_mode="$4"
   local delay_ms="0"
-  local cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb metrics requests_per_cpu_second commit
-  local attempt valid
+  local cpu_before_ms cpu_after_ms cpu_ms backend_cpu_before_ms backend_cpu_after_ms
+  local backend_cpu_ms total_cpu_ms rss_kb rss_peak_kb metrics commit
+  local requests_per_cpu_second requests_per_total_cpu_second
+  local attempt valid samples_file valid_sample_count selected_sample
   if [ "$read_mode" = "slow" ]; then
     delay_ms="$SLOW_READ_DELAY_MS"
   fi
+  local artifact="streaming.${proxy}.${read_mode}.round-${CURRENT_SAMPLE_ROUND:-0}"
+  samples_file="$TMP_DIR/${artifact}.valid-samples.jsonl"
+  : >"$samples_file"
   attempt=1
   valid=false
   while [ "$attempt" -le "$SAMPLE_ATTEMPTS" ]; do
     cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
+    if [ "$resource_pid" = "$BACKEND_PID" ]; then
+      backend_cpu_before_ms="$cpu_before_ms"
+    else
+      backend_cpu_before_ms="$(process_tree_cpu_ms "$BACKEND_PID")"
+    fi
     if ! metrics="$(run_client "$proxy" "$port" "$read_mode" "$delay_ms")"; then
       echo "${proxy} streaming client failed on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
-      if [ "$attempt" -eq "$SAMPLE_ATTEMPTS" ]; then
-        exit 1
-      fi
       attempt=$((attempt + 1))
       continue
     fi
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
+    if [ "$resource_pid" = "$BACKEND_PID" ]; then
+      backend_cpu_after_ms="$cpu_after_ms"
+    else
+      backend_cpu_after_ms="$(process_tree_cpu_ms "$BACKEND_PID")"
+    fi
     cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    backend_cpu_ms="$(awk -v before="$backend_cpu_before_ms" -v after="$backend_cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    if [ "$resource_pid" = "$BACKEND_PID" ]; then
+      total_cpu_ms="$cpu_ms"
+    else
+      total_cpu_ms=$((cpu_ms + backend_cpu_ms))
+    fi
     rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
     rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
     valid="$(python3 - "$metrics" <<'PY'
@@ -459,35 +419,84 @@ import json
 import sys
 print("true" if json.loads(sys.argv[1])["valid"] else "false")
 PY
-)"
+    )"
     if [ "$valid" = true ]; then
-      break
+      requests_per_cpu_second="$(python3 - "$metrics" "$cpu_ms" <<'PY'
+import json
+import sys
+
+metrics = json.loads(sys.argv[1])
+cpu_ms = float(sys.argv[2])
+print("null" if cpu_ms <= 0 else f"{metrics['transfers'] * 1000.0 / cpu_ms:.6f}")
+PY
+)"
+      requests_per_total_cpu_second="$(python3 - "$metrics" "$total_cpu_ms" <<'PY'
+import json
+import sys
+
+metrics = json.loads(sys.argv[1])
+cpu_ms = float(sys.argv[2])
+print("null" if cpu_ms <= 0 else f"{metrics['transfers'] * 1000.0 / cpu_ms:.6f}")
+PY
+)"
+      python3 - "$samples_file" "$metrics" "$cpu_ms" "$backend_cpu_ms" "$total_cpu_ms" \
+        "$rss_kb" "$rss_peak_kb" "$requests_per_cpu_second" \
+        "$requests_per_total_cpu_second" <<'PY'
+import json
+import sys
+
+path, metrics, cpu_ms, backend_cpu_ms, total_cpu_ms, rss_kb, rss_peak_kb, rpcpu, total_rpcpu = sys.argv[1:10]
+record = json.loads(metrics)
+record["cpu_ms"] = int(cpu_ms)
+record["backend_cpu_ms"] = int(backend_cpu_ms)
+record["total_cpu_ms"] = int(total_cpu_ms)
+record["rss_kb"] = int(rss_kb)
+record["rss_peak_kb"] = int(rss_peak_kb)
+record["requests_per_cpu_second"] = None if rpcpu == "null" else float(rpcpu)
+record["requests_per_total_cpu_second"] = None if total_rpcpu == "null" else float(total_rpcpu)
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+      attempt=$((attempt + 1))
+      continue
     fi
     echo "${proxy} produced an invalid streaming sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}: ${metrics}" >&2
     attempt=$((attempt + 1))
   done
-  requests_per_cpu_second="$(awk -v cpu_ms="$cpu_ms" 'BEGIN { if (cpu_ms > 0) printf "%.6f", 1000 / cpu_ms; else printf "null" }')"
-  commit="${GITHUB_SHA:-unknown}"
-  python3 - "$OUT_JSON" "$metrics" "$STREAM_BYTES" "$CHUNK_BYTES" "$cpu_ms" "$rss_kb" "$rss_peak_kb" "$requests_per_cpu_second" "$commit" <<'PY'
+  valid_sample_count="$(wc -l <"$samples_file" | tr -d '[:space:]')"
+  if [ "$valid_sample_count" -lt "$MIN_VALID_SAMPLES" ]; then
+    echo "${proxy} produced ${valid_sample_count}/${SAMPLE_ATTEMPTS} valid streaming samples; ${MIN_VALID_SAMPLES} required" >&2
+    INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
+    return
+  fi
+  selected_sample="$(python3 - "$samples_file" <<'PY'
 import json
 import sys
 
-out, metrics, stream_bytes, chunk_bytes, cpu_ms, rss_kb, rss_peak_kb, rpcpu, commit = sys.argv[1:10]
-record = json.loads(metrics)
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    records = [json.loads(line) for line in handle if line.strip()]
+records.sort(key=lambda record: record["total_ms"])
+print(json.dumps(records[len(records) // 2], sort_keys=True, separators=(",", ":")))
+PY
+)"
+  commit="${GITHUB_SHA:-unknown}"
+  python3 - "$OUT_JSON" "$selected_sample" "$STREAM_BYTES" "$CHUNK_BYTES" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit" <<'PY'
+import json
+import sys
+
+out, sample, stream_bytes, chunk_bytes, attempts, valid_samples, commit = sys.argv[1:8]
+record = json.loads(sample)
 record.update({
     "bench": "proxy_compare_http1_streaming_reverse",
     "stream_bytes": int(stream_bytes),
     "chunk_bytes": int(chunk_bytes),
-    "cpu_ms": int(cpu_ms),
-    "rss_kb": int(rss_kb),
-    "rss_peak_kb": int(rss_peak_kb),
-    "requests_per_cpu_second": None if rpcpu == "null" else float(rpcpu),
+    "sample_attempts": int(attempts),
+    "valid_samples": int(valid_samples),
+    "aggregation": "single_sample",
     "commit": commit,
 })
 with open(out, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
-if not record["valid"]:
-    raise SystemExit(f"{record['proxy']} invalid streaming sample")
 PY
 }
 
@@ -495,6 +504,40 @@ require_cmd curl
 require_cmd lighttpd
 require_cmd nginx
 require_cmd python3
+
+case "$SAMPLE_ATTEMPTS" in
+  ''|*[!0-9]*)
+    echo "QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$SAMPLE_ATTEMPTS" -eq 0 ]; then
+  echo "QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS must be a positive integer" >&2
+  exit 1
+fi
+case "$FAST_TRANSFERS" in
+  ''|*[!0-9]*)
+    echo "QPX_STREAMING_COMPARE_FAST_TRANSFERS must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$FAST_TRANSFERS" -eq 0 ]; then
+  echo "QPX_STREAMING_COMPARE_FAST_TRANSFERS must be a positive integer" >&2
+  exit 1
+fi
+if [ -z "$MIN_VALID_SAMPLES" ]; then
+  MIN_VALID_SAMPLES=$((SAMPLE_ATTEMPTS / 2 + 1))
+fi
+case "$MIN_VALID_SAMPLES" in
+  ''|*[!0-9]*)
+    echo "QPX_STREAMING_COMPARE_MIN_VALID_SAMPLES must be a positive integer no greater than sample attempts" >&2
+    exit 1
+    ;;
+esac
+if [ "$MIN_VALID_SAMPLES" -eq 0 ] || [ "$MIN_VALID_SAMPLES" -gt "$SAMPLE_ATTEMPTS" ]; then
+  echo "QPX_STREAMING_COMPARE_MIN_VALID_SAMPLES must be a positive integer no greater than sample attempts" >&2
+  exit 1
+fi
 
 if [ -z "$APACHE_BIN" ]; then
   if command -v apache2 >/dev/null 2>&1; then
@@ -519,10 +562,153 @@ start_nginx
 start_apache
 start_lighttpd
 
+FINAL_OUT_JSON="$OUT_JSON"
+RAW_OUT_JSON="$TMP_DIR/interleaved-raw.jsonl"
+REQUESTED_SAMPLE_ATTEMPTS="$SAMPLE_ATTEMPTS"
+REQUESTED_MIN_VALID_SAMPLES="$MIN_VALID_SAMPLES"
+OUT_JSON="$RAW_OUT_JSON"
+SAMPLE_ATTEMPTS=1
+MIN_VALID_SAMPLES=1
+: >"$OUT_JSON"
+
+run_streaming_proxy_by_index() {
+  local index="$1"
+  local read_mode="$2"
+  case "$index" in
+    0) run_one "direct-backend" "$BACKEND_PORT" "$BACKEND_PID" "$read_mode" ;;
+    1) run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$read_mode" ;;
+    2) run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$read_mode" ;;
+    3) run_one "apache" "$APACHE_PORT" "$APACHE_PID" "$read_mode" ;;
+    4) run_one "lighttpd" "$LIGHTTPD_PORT" "$LIGHTTPD_PID" "$read_mode" ;;
+    *) echo "invalid streaming benchmark index: ${index}" >&2; exit 1 ;;
+  esac
+}
+
 for read_mode in fast slow; do
-  run_one "direct-backend" "$BACKEND_PORT" "$BACKEND_PID" "$read_mode"
-  run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$read_mode"
-  run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$read_mode"
-  run_one "apache" "$APACHE_PORT" "$APACHE_PID" "$read_mode"
-  run_one "lighttpd" "$LIGHTTPD_PORT" "$LIGHTTPD_PID" "$read_mode"
+  round=1
+  while [ "$round" -le "$REQUESTED_SAMPLE_ATTEMPTS" ]; do
+    CURRENT_SAMPLE_ROUND="$round"
+    start_index=$((((round - 1) * 4) % 5))
+    offset=0
+    while [ "$offset" -lt 5 ]; do
+      if [ $((round % 2)) -eq 1 ]; then
+        proxy_index=$(((start_index + offset) % 5))
+      else
+        proxy_index=$(((start_index - offset + 5) % 5))
+      fi
+      run_streaming_proxy_by_index "$proxy_index" "$read_mode"
+      offset=$((offset + 1))
+    done
+    round=$((round + 1))
+  done
 done
+
+python3 - "$RAW_OUT_JSON" "$FINAL_OUT_JSON" "$REQUESTED_SAMPLE_ATTEMPTS" \
+  "$REQUESTED_MIN_VALID_SAMPLES" <<'PY'
+import json
+import math
+import sys
+from collections import defaultdict
+
+raw_path, out_path, attempts, minimum = sys.argv[1:5]
+attempts = int(attempts)
+minimum = int(minimum)
+proxies = ("direct-backend", "qpxd", "nginx", "apache", "lighttpd")
+expected = {(read_mode, proxy) for read_mode in ("fast", "slow") for proxy in proxies}
+
+groups = defaultdict(list)
+with open(raw_path, "r", encoding="utf-8") as handle:
+    for line in handle:
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if record.get("valid") is True:
+            groups[(record["read_mode"], record["proxy"])].append(record)
+
+def values(records, field):
+    return sorted(
+        float(record[field])
+        for record in records
+        if record.get(field) is not None and math.isfinite(float(record[field]))
+    )
+
+def lower(records, field):
+    ordered = values(records, field)
+    return None if not ordered else ordered[(len(ordered) - 1) // 2]
+
+def upper(records, field):
+    ordered = values(records, field)
+    return None if not ordered else ordered[len(ordered) // 2]
+
+def maximum(records, field):
+    ordered = values(records, field)
+    return None if not ordered else ordered[-1]
+
+def spread(records, field):
+    ordered = [value for value in values(records, field) if value > 0]
+    return None if not ordered else ordered[-1] / ordered[0]
+
+aggregated = []
+for key in sorted(expected):
+    records = groups.get(key, [])
+    if len(records) < minimum:
+        raise SystemExit(
+            f"{key[1]} produced {len(records)}/{attempts} valid {key[0]} streaming samples; "
+            f"{minimum} required"
+        )
+    records.sort(key=lambda record: record["total_ms"])
+    record = dict(records[len(records) // 2])
+    for field in (
+        "total_ms",
+        "first_byte_ms",
+        "p50_chunk_gap_ms",
+        "p95_chunk_gap_ms",
+        "p99_chunk_gap_ms",
+        "max_chunk_gap_ms",
+        "cpu_ms",
+        "backend_cpu_ms",
+        "total_cpu_ms",
+    ):
+        record[field] = upper(records, field)
+    record["requests_per_cpu_second"] = lower(records, "requests_per_cpu_second")
+    record["requests_per_total_cpu_second"] = lower(
+        records, "requests_per_total_cpu_second"
+    )
+    for field in ("rss_kb", "rss_peak_kb"):
+        record[field] = maximum(records, field)
+    for field in (
+        "bytes",
+        "transfers",
+        "gap_observation_bytes",
+        "chunk_observations",
+        "stream_bytes",
+        "chunk_bytes",
+        "cpu_ms",
+        "backend_cpu_ms",
+        "total_cpu_ms",
+        "rss_kb",
+        "rss_peak_kb",
+    ):
+        if record.get(field) is not None:
+            record[field] = int(record[field])
+    record.update({
+        "aggregation": "conservative_median_per_metric",
+        "benchmark_schema_version": 3,
+        "sample_attempts": attempts,
+        "sampling_order": "round_robin_interleaved",
+        "sample_spread": {
+            "total_ms_ratio": spread(records, "total_ms"),
+            "requests_per_cpu_second_ratio": spread(records, "requests_per_cpu_second"),
+            "requests_per_total_cpu_second_ratio": spread(
+                records, "requests_per_total_cpu_second"
+            ),
+            "p99_chunk_gap_ms_ratio": spread(records, "p99_chunk_gap_ms"),
+        },
+        "valid_samples": len(records),
+    })
+    aggregated.append(record)
+
+with open(out_path, "w", encoding="utf-8") as handle:
+    for record in aggregated:
+        handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY

@@ -47,7 +47,7 @@ build_qpxd_for_allocation() {
   CARGO_PROFILE_RELEASE_DEBUG=1 \
     CARGO_PROFILE_RELEASE_STRIP=false \
     CARGO_TARGET_DIR="$ALLOCATION_TARGET_DIR" \
-    cargo build -p qpxd --release --locked
+    cargo build -p qpxd --release --locked --features system-allocator
   QPXD_BIN="$ALLOCATION_TARGET_DIR/release/qpxd"
   verify_qpxd_symbols "$QPXD_BIN"
 }
@@ -131,6 +131,10 @@ start_qpxd_under_dhat() {
   rm -f "$PROFILE_DIR/dhat.qpxd.${sample}."*.json
   cat >"$config" <<YAML
 state_dir: "$STATE_DIR"
+telemetry:
+  system_log:
+    level: warn
+    format: json
 runtime:
   worker_threads: 1
   acceptor_tasks_per_listener: 1
@@ -142,8 +146,7 @@ edges:
     routes:
       - name: bench
         streaming_requirement: required
-        match:
-          path_prefix: /
+        match: {}
         target:
           type: upstream
           upstreams: [http://127.0.0.1:${BACKEND_PORT}]

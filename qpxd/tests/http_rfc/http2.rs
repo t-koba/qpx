@@ -4,7 +4,7 @@ use anyhow::anyhow;
 pub(crate) async fn http2_h2c_contract() -> Result<()> {
     // Reverse h2c: local_response, verify Via token "2".
     {
-        let dir = temp_dir("qpxd-rfc911x-h2c-reverse")?;
+        let dir = temp_dir("qpxd-http-rfc-h2c-reverse")?;
         let state_dir = dir.join("state");
         fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
@@ -70,7 +70,7 @@ runtime:
 
     // Transparent h2c: incoming is HTTP/2, upstream is HTTP/1.1, verify Via token "2" and header rewrite.
     {
-        let dir = temp_dir("qpxd-rfc911x-h2c-transparent")?;
+        let dir = temp_dir("qpxd-http-rfc-h2c-transparent")?;
         let state_dir = dir.join("state");
         fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
@@ -160,7 +160,7 @@ runtime:
 }
 
 pub(crate) async fn http2_tls_alpn_contract() -> Result<()> {
-    let dir = temp_dir("qpxd-rfc911x-h2-tls")?;
+    let dir = temp_dir("qpxd-http-rfc-h2-tls")?;
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)
         .with_context(|| format!("create state dir {}", state_dir.display()))?;

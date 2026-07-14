@@ -24,7 +24,7 @@ use self::policy::{
 };
 use self::prepare_helpers::{
     body_read_timeout as transparent_body_read_timeout, destination as transparent_destination,
-    guard_input as transparent_guard_input, preflight_rejection as transparent_preflight_rejection,
+    guard_input as transparent_guard_input, preflight_result as transparent_preflight_result,
     request_observation_limit as transparent_request_observation_limit,
     response_request_observation as transparent_response_request_observation,
 };
@@ -81,14 +81,15 @@ async fn prepare_transparent_request(
     let state = runtime.state();
     let proxy_name_owned = state.plan.identity.proxy_name.to_string();
     let proxy_name = proxy_name_owned.as_str();
-    if let Some(response) = transparent_preflight_rejection(
-        &req,
+    let validated_request = match transparent_preflight_result(
+        &mut req,
         proxy_name,
         state.plan.limits.general.trace_enabled,
         state.messages.trace_disabled.as_str(),
     ) {
-        return Ok(TransparentPrepareOutcome::Response(response));
-    }
+        Ok(validated) => validated,
+        Err(response) => return Ok(TransparentPrepareOutcome::Response(response)),
+    };
     let engine = state
         .policy
         .rules_by_listener
@@ -112,7 +113,8 @@ async fn prepare_transparent_request(
             peer_ip: Some(remote_addr.ip()),
             dst_port: Some(connect_target.port()),
             host: host_for_match.as_deref(),
-            scheme: Some("http"),
+            scheme: Some(http::uri::Scheme::HTTP),
+            validated_request: Some(validated_request),
             ..Default::default()
         },
     );
@@ -157,7 +159,7 @@ async fn prepare_transparent_request(
     req = prepared_req;
     let mut request_body_observed = initial_observation_plan.needs_body;
     let mut request_rpc_observed = request_rpc.is_some();
-    let path = base.path.as_deref();
+    let path = base.path();
     let destination = transparent_destination(
         &state,
         &host_for_match,

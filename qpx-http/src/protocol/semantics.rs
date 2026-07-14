@@ -1,16 +1,17 @@
 use http::header::{CONNECTION, CONTENT_LENGTH, EXPECT, HOST, TRAILER, TRANSFER_ENCODING, VIA};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
+use std::cell::RefCell;
 use std::fmt;
 
-static WELL_KNOWN_HOP_HEADERS: &[&str] = &[
-    "proxy-connection",
-    "proxy-authorization",
-    "proxy-authenticate",
-    "proxy-authentication-info",
-    "keep-alive",
-    "te",
-    "trailer",
-    "transfer-encoding",
+static WELL_KNOWN_HOP_HEADERS: [HeaderName; 8] = [
+    HeaderName::from_static("proxy-connection"),
+    HeaderName::from_static("proxy-authorization"),
+    HeaderName::from_static("proxy-authenticate"),
+    HeaderName::from_static("proxy-authentication-info"),
+    HeaderName::from_static("keep-alive"),
+    HeaderName::from_static("te"),
+    HeaderName::from_static("trailer"),
+    HeaderName::from_static("transfer-encoding"),
 ];
 
 pub fn validate_http_status_class(status: StatusCode, context: &str) -> anyhow::Result<StatusCode> {
@@ -22,6 +23,9 @@ pub fn validate_http_status_class(status: StatusCode, context: &str) -> anyhow::
 }
 
 pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bool) {
+    if !headers.keys().any(is_hop_by_hop_header) {
+        return;
+    }
     let mut keep_upgrade = false;
     let mut extension_headers = Vec::new();
 
@@ -36,7 +40,7 @@ pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bo
                     keep_upgrade |= preserve_upgrade;
                 } else if !WELL_KNOWN_HOP_HEADERS
                     .iter()
-                    .any(|known| token.eq_ignore_ascii_case(known))
+                    .any(|known| token.eq_ignore_ascii_case(known.as_str()))
                     && let Ok(name) = HeaderName::from_bytes(token.as_bytes())
                 {
                     extension_headers.push(name);
@@ -49,8 +53,8 @@ pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bo
         headers.remove(name);
     }
 
-    for header in WELL_KNOWN_HOP_HEADERS {
-        headers.remove(*header);
+    for header in &WELL_KNOWN_HOP_HEADERS {
+        headers.remove(header);
     }
 
     if preserve_upgrade && keep_upgrade {
@@ -61,11 +65,68 @@ pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bo
     }
 }
 
+fn is_hop_by_hop_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authentication-info"
+            | "proxy-authorization"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
 pub fn append_via_for_version(headers: &mut HeaderMap, version: Version, proxy_name: &str) {
-    let value = format!("{} {}", via_version_token(version), proxy_name);
-    if let Ok(v) = HeaderValue::from_str(&value) {
-        headers.append(VIA, v);
+    if let Some(value) = via_header_value(version, proxy_name) {
+        headers.append(VIA, value);
     }
+}
+
+pub fn via_header_value(version: Version, proxy_name: &str) -> Option<HeaderValue> {
+    CACHED_VIA_VALUES.with_borrow_mut(|cached| {
+        if let Some(index) = cached
+            .iter()
+            .position(|entry| entry.version == version && entry.proxy_name == proxy_name)
+        {
+            let value = cached[index].value.clone();
+            let last = cached.len() - 1;
+            if index != last {
+                cached.swap(index, last);
+            }
+            return Some(value);
+        }
+        let value =
+            HeaderValue::from_str(&format!("{} {}", via_version_token(version), proxy_name))
+                .ok()?;
+        if cached.len() == MAX_CACHED_VIA_VALUES {
+            cached.remove(0);
+        }
+        cached.push(CachedViaValue {
+            version,
+            proxy_name: proxy_name.to_string(),
+            value: value.clone(),
+        });
+        Some(value)
+    })
+}
+
+const MAX_CACHED_VIA_VALUES: usize = 16;
+
+struct CachedViaValue {
+    version: Version,
+    proxy_name: String,
+    value: HeaderValue,
+}
+
+thread_local! {
+    static CACHED_VIA_VALUES: RefCell<Vec<CachedViaValue>> = const {
+        RefCell::new(Vec::new())
+    };
 }
 
 pub fn sync_host_header_from_absolute_target(headers: &mut HeaderMap, target: &http::Uri) {
@@ -129,7 +190,28 @@ impl RequestValidationError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedIncomingRequest {
+    authority: Option<http::uri::Authority>,
+}
+
+impl ValidatedIncomingRequest {
+    pub fn authority(&self) -> Option<&http::uri::Authority> {
+        self.authority.as_ref()
+    }
+
+    pub fn into_authority(self) -> Option<http::uri::Authority> {
+        self.authority
+    }
+}
+
 pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), RequestValidationError> {
+    validate_incoming_request_with_metadata(req).map(|_| ())
+}
+
+pub fn validate_incoming_request_with_metadata<B>(
+    req: &http::Request<B>,
+) -> Result<ValidatedIncomingRequest, RequestValidationError> {
     validate_request_body_length_headers(req.headers())?;
     validate_expect_header(req.headers())?;
     validate_h2_h3_request_headers(req.version(), req.headers())?;
@@ -150,19 +232,19 @@ pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), Reques
         if raw.is_empty() {
             return Err(RequestValidationError::EmptyHostHeader);
         }
-        parse_authority_parts(raw).ok_or(RequestValidationError::InvalidHostHeader)?;
-        Some(raw)
+        Some(parse_authority_parts(raw).ok_or(RequestValidationError::InvalidHostHeader)?)
     } else {
         None
     };
 
-    let uri_authority = req.uri().authority().map(|a| a.as_str());
+    let uri_authority = req.uri().authority();
+    let mut parsed_uri_authority = None;
     if req.method() == Method::CONNECT {
         let Some(authority) = uri_authority else {
             return Err(RequestValidationError::MissingConnectAuthority);
         };
-        let connect_authority =
-            parse_authority_parts(authority).ok_or(RequestValidationError::InvalidConnectTarget)?;
+        let connect_authority = authority_parts_from_uri(authority)
+            .ok_or(RequestValidationError::InvalidConnectTarget)?;
         let valid_connect_target = if is_h2_extended_connect {
             req.uri().scheme().is_some() && req.uri().path_and_query().is_some()
         } else {
@@ -173,12 +255,16 @@ pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), Reques
         if !valid_connect_target {
             return Err(RequestValidationError::InvalidConnectTarget);
         }
+        parsed_uri_authority = Some(connect_authority);
     } else {
         if req.uri().scheme().is_none() && uri_authority.is_some() {
             return Err(RequestValidationError::InvalidRequestTarget);
         }
         if let Some(authority) = uri_authority {
-            parse_authority_parts(authority).ok_or(RequestValidationError::InvalidRequestTarget)?;
+            parsed_uri_authority = Some(
+                authority_parts_from_uri(authority)
+                    .ok_or(RequestValidationError::InvalidRequestTarget)?,
+            );
         }
         let path = req.uri().path();
         if path == "*" && req.method() != Method::OPTIONS {
@@ -204,13 +290,15 @@ pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), Reques
         return Err(RequestValidationError::MissingHost);
     }
 
-    if let (Some(host), Some(authority)) = (host, uri_authority)
-        && !authority_equivalent(host, authority, req.uri().scheme_str())
+    if let (Some(host), Some(authority)) = (host.as_ref(), parsed_uri_authority.as_ref())
+        && !authority_parts_equivalent(host, authority, req.uri().scheme_str())
     {
         return Err(RequestValidationError::HostAuthorityMismatch);
     }
 
-    Ok(())
+    Ok(ValidatedIncomingRequest {
+        authority: parsed_uri_authority.or(host).map(|parts| parts.authority),
+    })
 }
 
 pub fn validate_request_trailers(trailers: &HeaderMap) -> Result<(), RequestValidationError> {
@@ -413,14 +501,12 @@ fn via_version_token(version: Version) -> &'static str {
     }
 }
 
-fn authority_equivalent(host_header: &str, authority: &str, scheme: Option<&str>) -> bool {
-    let Some(host) = parse_authority_parts(host_header) else {
-        return false;
-    };
-    let Some(auth) = parse_authority_parts(authority) else {
-        return false;
-    };
-    if host.host != auth.host {
+fn authority_parts_equivalent(
+    host: &AuthorityParts,
+    auth: &AuthorityParts,
+    scheme: Option<&str>,
+) -> bool {
+    if !host.host().eq_ignore_ascii_case(auth.host()) {
         return false;
     }
     if host.port == auth.port {
@@ -436,27 +522,35 @@ fn authority_equivalent(host_header: &str, authority: &str, scheme: Option<&str>
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AuthorityParts {
-    host: String,
+    authority: http::uri::Authority,
     port: Option<u16>,
 }
 
+impl AuthorityParts {
+    fn host(&self) -> &str {
+        self.authority.host()
+    }
+}
+
 fn parse_authority_parts(input: &str) -> Option<AuthorityParts> {
-    if input.contains('@') {
+    let input = input.trim();
+    if input.is_empty() || input.contains('@') {
         return None;
     }
-    let uri = http::Uri::builder()
-        .scheme("http")
-        .authority(input.trim())
-        .path_and_query("/")
-        .build()
-        .ok()?;
-    let authority = uri.authority()?;
-    let host = authority.host().to_ascii_lowercase();
-    if host.is_empty() {
+    let authority = input.parse::<http::uri::Authority>().ok()?;
+    if authority.host().is_empty() {
+        return None;
+    }
+    let port = authority.port_u16();
+    Some(AuthorityParts { authority, port })
+}
+
+fn authority_parts_from_uri(authority: &http::uri::Authority) -> Option<AuthorityParts> {
+    if authority.as_str().contains('@') || authority.host().is_empty() {
         return None;
     }
     Some(AuthorityParts {
-        host,
+        authority: authority.clone(),
         port: authority.port_u16(),
     })
 }

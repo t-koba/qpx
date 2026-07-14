@@ -12,6 +12,62 @@ require() {
   fi
 }
 
+require_json_number_at_least() {
+  local file="$1"
+  local path="$2"
+  local minimum="$3"
+  python3 - "$file" "$path" "$minimum" <<'PY'
+import json
+import math
+import sys
+
+file_name, dotted_path, minimum_raw = sys.argv[1:4]
+with open(file_name, "r", encoding="utf-8") as handle:
+    value = json.load(handle)
+for component in dotted_path.split("."):
+    if not isinstance(value, dict) or component not in value:
+        raise SystemExit(f"{file_name}: missing numeric objective {dotted_path}")
+    value = value[component]
+try:
+    number = float(value)
+    minimum = float(minimum_raw)
+except (TypeError, ValueError):
+    raise SystemExit(f"{file_name}: objective {dotted_path} is not numeric")
+if not math.isfinite(number) or number < minimum:
+    raise SystemExit(
+        f"{file_name}: objective {dotted_path}={number} is below required {minimum}"
+    )
+PY
+}
+
+require_json_number_at_most() {
+  local file="$1"
+  local path="$2"
+  local maximum="$3"
+  python3 - "$file" "$path" "$maximum" <<'PY'
+import json
+import math
+import sys
+
+file_name, dotted_path, maximum_raw = sys.argv[1:4]
+with open(file_name, "r", encoding="utf-8") as handle:
+    value = json.load(handle)
+for component in dotted_path.split("."):
+    if not isinstance(value, dict) or component not in value:
+        raise SystemExit(f"{file_name}: missing numeric objective {dotted_path}")
+    value = value[component]
+try:
+    number = float(value)
+    maximum = float(maximum_raw)
+except (TypeError, ValueError):
+    raise SystemExit(f"{file_name}: objective {dotted_path} is not numeric")
+if not math.isfinite(number) or number > maximum:
+    raise SystemExit(
+        f"{file_name}: objective {dotted_path}={number} exceeds allowed {maximum}"
+    )
+PY
+}
+
 check_deprecated_node_actions() {
   local deprecated
   deprecated="$(grep -REn \
@@ -321,11 +377,13 @@ require .github/workflows/ci.yml 'QPX_PROXY_COMPARE_JSON: ${{ github.workspace }
 require .github/workflows/ci.yml 'scripts/perf-audit-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"'
 require .github/workflows/ci.yml 'QPX_HTTP2_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-http2-compare.jsonl'
 require .github/workflows/ci.yml 'scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"'
+require .github/workflows/ci.yml 'scripts/check-http2-performance.sh target/perf/perf-audit-http2-compare.jsonl perf/http2-performance-objectives.json'
 require .github/workflows/ci.yml 'QPX_STREAMING_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-streaming-compare.jsonl'
 require .github/workflows/ci.yml 'scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"'
+require .github/workflows/ci.yml 'scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json'
 require .github/workflows/ci.yml 'QPX_ALLOCATION_PROFILE_JSON: ${{ github.workspace }}/target/perf/perf-audit-allocation-profile.jsonl'
 require .github/workflows/ci.yml 'scripts/perf-audit-allocation-profile.sh'
-require .github/workflows/ci.yml 'scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json'
+require .github/workflows/ci.yml 'scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json perf/proxy-performance-objectives.json'
 require .github/workflows/ci.yml 'QPX_NETEM_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-netem-proxy-compare.jsonl'
 require .github/workflows/ci.yml 'scripts/perf-audit-netem-compare.sh "$QPX_NETEM_COMPARE_JSON"'
 require .github/workflows/ci.yml 'target/perf/netem-proxy-compare-logs/**'
@@ -341,7 +399,9 @@ require .github/workflows/ci.yml 'id: qpx_http3_protocol_perf_benchmarks'
 require .github/workflows/ci.yml 'id: advanced_transport_perf_benchmarks'
 require .github/workflows/ci.yml 'id: external_proxy_comparison_bench'
 require .github/workflows/ci.yml 'id: external_http2_comparison_bench'
+require .github/workflows/ci.yml 'id: enforce_http2_performance_objectives'
 require .github/workflows/ci.yml 'id: external_long_streaming_comparison_bench'
+require .github/workflows/ci.yml 'id: enforce_streaming_performance_objectives'
 require .github/workflows/ci.yml 'id: allocation_profile'
 require .github/workflows/ci.yml 'id: compare_proxy_baseline'
 require .github/workflows/ci.yml 'id: netem_proxy_comparison_bench'
@@ -351,11 +411,13 @@ require .github/workflows/ci.yml 'fail if any perf audit evaluation failed'
 require .github/workflows/ci.yml 'steps.external_proxy_comparison_bench.outcome'
 require .github/workflows/ci.yml 'steps.callgrind_hot_path_profile.outcome'
 require scripts/perf-audit-proxy-compare.sh '"proxy_compare_http1_reverse"'
-require scripts/perf-audit-profile.sh 'run_profile "perf_smoke" ""'
-require scripts/perf-audit-profile.sh 'run_profile "perf_smoke" "reverse_http3" "http3-backend-h3"'
-require scripts/perf-audit-profile.sh 'run_profile "perf_smoke" "reverse_http3" "http3-backend-qpx"'
-require scripts/perf-audit-profile.sh 'run_profile "advanced_transport_perf" "" "http3-backend-qpx,mitm"'
-require scripts/perf-audit-profile.sh '--trace-children=yes'
+require scripts/perf-audit-profile.sh 'run_profile http1 "$QPX_HTTP1_PORT"'
+require scripts/perf-audit-profile.sh 'run_profile http2 "$QPX_HTTP2_PORT"'
+require scripts/perf-audit-profile.sh '--instr-atstart=no'
+require scripts/perf-audit-profile.sh 'callgrind_control -i on "$pid"'
+require scripts/perf-audit-profile.sh 'callgrind_control -i off "$pid"'
+require scripts/perf-audit-profile.sh 'callgrind output does not profile qpxd directly'
+require scripts/perf-audit-profile.sh 'callgrind output has too few instructions'
 require scripts/perf-audit-profile.sh 'callgrind_hot_path_profile'
 require scripts/perf-audit-proxy-compare.sh 'require_cmd nginx'
 require scripts/perf-audit-proxy-compare.sh 'APACHE_BIN="${QPX_PROXY_COMPARE_APACHE_BIN:-}"'
@@ -372,10 +434,15 @@ require scripts/perf-audit-proxy-compare.sh '"proxy_compare_http1_forward"'
 require scripts/perf-audit-proxy-compare.sh '"proxy_scale_http1_reverse"'
 require scripts/perf-audit-proxy-compare.sh 'BODY_SIZES="${QPX_PROXY_COMPARE_BODY_SIZES:-1024 1048576}"'
 require scripts/perf-audit-proxy-compare.sh 'SAMPLE_ATTEMPTS="${QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS:-3}"'
+require scripts/perf-audit-proxy-compare.sh 'MIN_VALID_SAMPLES="${QPX_PROXY_COMPARE_MIN_VALID_SAMPLES:-}"'
+require scripts/perf-audit-proxy-compare.sh 'conservative_median_per_metric'
+require scripts/perf-audit-proxy-compare.sh 'def lower_median:'
+require scripts/perf-audit-proxy-compare.sh 'def upper_median:'
+require scripts/perf-audit-proxy-compare.sh '.sample_spread = {'
+require scripts/perf-audit-proxy-compare.sh '*.valid-samples.tsv'
 require scripts/perf-audit-proxy-compare.sh 'MAX_READ_ERROR_RATE_PPM="${QPX_PROXY_COMPARE_MAX_READ_ERROR_RATE_PPM:-1000}"'
 require scripts/perf-audit-proxy-compare.sh 'MAX_SCALE_WORKERS="${QPX_PROXY_COMPARE_MAX_SCALE_WORKERS:-4}"'
 require scripts/perf-audit-proxy-compare.sh 'WRK_TIMEOUT="${QPX_PROXY_COMPARE_WRK_TIMEOUT:-30s}"'
-require scripts/perf-audit-proxy-compare.sh 'upstream_proxy_max_concurrent_per_endpoint: 512'
 require scripts/perf-audit-proxy-compare.sh 'max_response_body_bytes: 134217728'
 require scripts/perf-audit-proxy-compare.sh 'SCALE_WORKERS="$(default_scale_workers)"'
 require scripts/perf-audit-proxy-compare.sh '"body_profile"'
@@ -390,14 +457,29 @@ require scripts/perf-audit-proxy-compare.sh 'status_before'
 require scripts/perf-audit-proxy-compare.sh 'latency_p99_ms'
 require scripts/perf-audit-proxy-compare.sh 'requests_per_cpu_second'
 require scripts/perf-audit-proxy-compare.sh 'process_tree_cpu_ms'
+require scripts/perf-audit-proxy-compare.sh 'source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"'
 require scripts/perf-audit-proxy-compare.sh 'rss_peak_kb'
 require scripts/perf-audit-proxy-compare.sh 'dump_benchmark_logs'
 require scripts/perf-audit-proxy-compare.sh 'proxy-compare-logs'
+require scripts/compare-proxy-baseline.sh 'valid_samples < sample_attempts // 2 + 1'
+require scripts/compare-proxy-baseline.sh 'record.get("aggregation") != "conservative_median_per_metric"'
+require scripts/compare-proxy-baseline.sh 'proxy-performance-objectives.json'
+require_json_number_at_least perf/proxy-performance-objectives.json defaults.min_throughput_ratio 1.25
+require_json_number_at_least perf/proxy-performance-objectives.json defaults.min_cpu_efficiency_ratio 1.25
+require_json_number_at_least perf/proxy-performance-objectives.json defaults.min_dominance_score 1.25
+require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_p99_latency_ratio 0.8
 require scripts/perf-audit-http2-compare.sh 'h2load -D "$DURATION_SECONDS"'
-require scripts/perf-audit-http2-compare.sh 'MAX_CONCURRENT_STREAMS="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS:-1}"'
+require scripts/perf-audit-http2-compare.sh 'MAX_CONCURRENT_STREAMS_VALUES="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES:-1 100}"'
+require scripts/perf-audit-http2-compare.sh 'BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1024 1048576}"'
+require scripts/perf-audit-http2-compare.sh 'CLIENT_THREADS="${QPX_HTTP2_COMPARE_CLIENT_THREADS:-4}"'
+require scripts/perf-audit-http2-compare.sh '-t "$CLIENT_THREADS"'
 require scripts/perf-audit-http2-compare.sh 'SAMPLE_ATTEMPTS="${QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS:-3}"'
+require scripts/perf-audit-http2-compare.sh 'MIN_VALID_SAMPLES="${QPX_HTTP2_COMPARE_MIN_VALID_SAMPLES:-}"'
+require scripts/perf-audit-http2-compare.sh '"aggregation": "conservative_median_per_metric"'
+require scripts/perf-audit-http2-compare.sh '"direct-backend"'
+require scripts/perf-audit-http2-compare.sh '"sampling_order": "round_robin_interleaved"'
+require scripts/perf-audit-http2-compare.sh '*.valid-samples.jsonl'
 require scripts/perf-audit-http2-compare.sh 'TLS_HOST="${QPX_HTTP2_COMPARE_TLS_HOST:-localhost}"'
-require scripts/perf-audit-http2-compare.sh 'upstream_proxy_max_concurrent_per_endpoint: 512'
 require scripts/perf-audit-http2-compare.sh 'max_response_body_bytes: 134217728'
 require scripts/perf-audit-http2-compare.sh 'sni: ${TLS_HOST}'
 require scripts/perf-audit-http2-compare.sh 'https://${TLS_HOST}:${port}'
@@ -407,26 +489,57 @@ require scripts/perf-audit-http2-compare.sh '"proxy_compare_http2_reverse"'
 require scripts/perf-audit-http2-compare.sh '"qpxd"'
 require scripts/perf-audit-http2-compare.sh '"nginx"'
 require scripts/perf-audit-http2-compare.sh 'requests_per_cpu_second'
+require scripts/perf-audit-http2-compare.sh 'requests_per_total_cpu_second'
+require scripts/perf-audit-http2-compare.sh 'backend_cpu_ms'
+require scripts/perf-audit-http2-compare.sh '"benchmark_schema_version": 4'
 require scripts/perf-audit-http2-compare.sh 'rss_peak_kb'
 require scripts/perf-audit-http2-compare.sh 'latency_max_ms'
 require scripts/perf-audit-http2-compare.sh 'first_byte_mean_ms'
+require scripts/perf-audit-http2-compare.sh 'source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"'
+require scripts/check-http2-performance.sh 'multi_axis_total_system_http2_dominance'
+require scripts/check-http2-performance.sh 'client_threads'
+require scripts/check-http2-performance.sh 'min_lane_throughput_ratio'
+require scripts/check-http2-performance.sh 'min_lane_total_cpu_efficiency_ratio'
+require scripts/check-http2-performance.sh 'max_lane_p99_latency_ratio'
+require scripts/check-http2-performance.sh 'min_aggregate_dominance_score'
+require_json_number_at_least perf/http2-performance-objectives.json defaults.min_lane_dominance_score 1.25
+require_json_number_at_least perf/http2-performance-objectives.json defaults.min_aggregate_dominance_score 1.5
 require scripts/perf-audit-streaming-compare.sh '"proxy_compare_http1_streaming_reverse"'
 require scripts/perf-audit-streaming-compare.sh 'STREAM_BYTES="${QPX_STREAMING_COMPARE_BYTES:-104857600}"'
+require scripts/perf-audit-streaming-compare.sh 'FAST_TRANSFERS="${QPX_STREAMING_COMPARE_FAST_TRANSFERS:-8}"'
 require scripts/perf-audit-streaming-compare.sh 'SAMPLE_ATTEMPTS="${QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS:-3}"'
-require scripts/perf-audit-streaming-compare.sh 'upstream_proxy_max_concurrent_per_endpoint: 512'
+require scripts/perf-audit-streaming-compare.sh 'MIN_VALID_SAMPLES="${QPX_STREAMING_COMPARE_MIN_VALID_SAMPLES:-}"'
+require scripts/perf-audit-streaming-compare.sh '"aggregation": "conservative_median_per_metric"'
+require scripts/perf-audit-streaming-compare.sh '"sampling_order": "round_robin_interleaved"'
+require scripts/perf-audit-streaming-compare.sh '*.valid-samples.jsonl'
 require scripts/perf-audit-streaming-compare.sh 'max_response_body_bytes: ${STREAM_BYTES}'
 require scripts/perf-audit-streaming-compare.sh 'first_byte_ms'
 require scripts/perf-audit-streaming-compare.sh 'p95_chunk_gap_ms'
 require scripts/perf-audit-streaming-compare.sh 'read_mode'
 require scripts/perf-audit-streaming-compare.sh 'requests_per_cpu_second'
+require scripts/perf-audit-streaming-compare.sh 'requests_per_total_cpu_second'
+require scripts/perf-audit-streaming-compare.sh 'backend_cpu_ms'
+require scripts/perf-audit-streaming-compare.sh '"benchmark_schema_version": 3'
+require scripts/perf-audit-streaming-compare.sh 'gap_observation_bytes'
+require scripts/perf-audit-streaming-compare.sh 'source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"'
+require scripts/lib/perf-process-metrics.sh 'process_tree_cpu_ms()'
+require scripts/lib/perf-process-metrics.sh 'process_cpu_ms_portable()'
+require scripts/lib/perf-process-metrics.sh 'ps -o time='
+require scripts/check-streaming-performance.sh 'multi_axis_total_system_streaming_dominance'
+require scripts/check-streaming-performance.sh 'min_throughput_ratio'
+require scripts/check-streaming-performance.sh 'min_total_cpu_efficiency_ratio'
+require scripts/check-streaming-performance.sh 'max_p99_gap_ratio'
+require scripts/check-streaming-performance.sh 'max_total_time_ratio'
+require scripts/check-streaming-performance.sh 'competitive_frontier_total_ratio'
+require_json_number_at_least perf/streaming-performance-objectives.json fast.min_throughput_ratio 1.5
+require_json_number_at_least perf/streaming-performance-objectives.json fast.min_dominance_score 1.25
 require scripts/perf-audit-allocation-profile.sh '"qpxd_allocation_profile_http1_reverse"'
 require scripts/perf-audit-allocation-profile.sh '--tool=dhat'
 require scripts/perf-audit-allocation-profile.sh 'while [ "$tries" -lt 600 ]'
 require scripts/perf-audit-allocation-profile.sh 'alloc_bytes'
 require scripts/perf-audit-allocation-profile.sh 'alloc_count'
-require scripts/perf-audit-profile.sh 'callgrind_annotate failed for ${file}'
-require scripts/perf-audit-profile.sh 'if [ ! -s "$file" ]; then'
-require scripts/perf-audit-profile.sh 'no valid callgrind outputs for ${target} ${filter}'
+require scripts/perf-audit-profile.sh 'if [ ! -s "$file" ] || ! grep -q'
+require scripts/perf-audit-profile.sh 'callgrind_annotate --threshold=99'
 require scripts/perf-audit-netem-compare.sh 'tc qdisc add dev lo root netem'
 require scripts/perf-audit-netem-compare.sh '"network_condition_profile"'
 require scripts/perf-audit-netem-compare.sh 'QPX_PROXY_COMPARE_LOG_DIR="${QPX_NETEM_PROXY_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/netem-proxy-compare-logs}"'
@@ -449,15 +562,36 @@ require scripts/check-perf-runner.sh '"perf_runner_capacity"'
 require scripts/check-perf-runner.sh 'MIN_CORES="${QPX_PERF_MIN_CORES:-4}"'
 require scripts/check-perf-runner.sh 'MIN_MEM_MB="${QPX_PERF_MIN_MEM_MB:-16384}"'
 require scripts/check-perf-runner.sh 'REQUIRE_CAPACITY="${QPX_PERF_REQUIRE_CAPACITY:-0}"'
-require scripts/compare-proxy-baseline.sh 'qpxd_requests_per_sec / external_proxy_median_requests_per_sec'
+require scripts/compare-proxy-baseline.sh 'multi_axis_proxy_dominance'
+require scripts/compare-proxy-baseline.sh 'external_best_rps = max'
+require scripts/compare-proxy-baseline.sh 'external_best_p99_ms = min'
+require scripts/compare-proxy-baseline.sh 'dominance_score'
+require scripts/compare-proxy-baseline.sh 'min_cpu_efficiency_ratio'
+require scripts/compare-proxy-baseline.sh 'max_p99_latency_ratio'
+require scripts/compare-proxy-baseline.sh 'min_dominance_score'
 require scripts/compare-proxy-baseline.sh 'external_proxy_requests_per_sec'
 require scripts/compare-proxy-baseline.sh 'generate-baseline'
 require scripts/compare-proxy-baseline.sh 'require_valid_sample'
-require perf/baseline-proxy-compare.json '"degradation_threshold": 0.1'
-require perf/baseline-proxy-compare.json '"baseline_ratio"'
+require perf/baseline-proxy-compare.json '"degradation_threshold": 0.05'
+require perf/baseline-proxy-compare.json '"schema_version": 3'
+require perf/baseline-proxy-compare.json '"throughput_ratio"'
+require perf/baseline-proxy-compare.json '"dominance_score"'
+require perf/proxy-performance-objectives.json '"min_throughput_ratio"'
+require perf/proxy-performance-objectives.json '"min_cpu_efficiency_ratio"'
+require perf/proxy-performance-objectives.json '"max_p99_latency_ratio"'
+require perf/proxy-performance-objectives.json '"min_dominance_score"'
+require perf/proxy-performance-objectives.json '"min_direct_headroom_ratio"'
+require perf/proxy-performance-objectives.json '"max_throughput_sample_spread_ratio"'
+require perf/proxy-performance-objectives.json '"max_cpu_sample_spread_ratio"'
 require perf/baseline-proxy-compare.json '"duration_seconds": 10'
-require perf/baseline-proxy-compare.json '"external_proxy_median_requests_per_sec"'
+require perf/baseline-proxy-compare.json '"external_proxy_best_requests_per_sec"'
+require perf/baseline-proxy-compare.json '"external_proxy_best_latency_p99_ms"'
 require perf/baseline-proxy-compare.json '"source_commit"'
+require scripts/check-allocation-budget.sh 'alloc_bytes_per_request'
+require scripts/check-allocation-budget.sh 'alloc_count_per_request'
+require perf/allocation-budget.json '"max_alloc_bytes_per_request": 1800'
+require perf/allocation-budget.json '"max_alloc_count_per_request": 55'
+require .github/workflows/ci.yml 'enforce allocation budget'
 require .github/workflows/ci.yml 'target/perf/proxy-compare-logs/**'
 require .github/workflows/ci.yml 'target/perf/profiles/**'
 require .github/workflows/ci.yml 'qpx-perf-audit-jsonl'

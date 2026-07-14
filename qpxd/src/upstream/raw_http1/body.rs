@@ -1,7 +1,8 @@
 use super::response::ResponseBodyKind;
 use super::{
-    Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, MAX_CHUNKED_BODY_BYTES, MAX_HEADER_BYTES,
-    RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, READ_BUF_SIZE,
+    Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, MAX_CHUNKED_BODY_BYTES,
+    MAX_EMITTED_BODY_FRAME_SIZE, MAX_HEADER_BYTES, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
+    READ_BUF_SIZE,
 };
 use crate::http::codec::h1_common::{find_crlf, parse_header_map};
 use bytes::{Buf, Bytes, BytesMut};
@@ -39,6 +40,7 @@ pub(super) struct Http1ResponseBody<S> {
     recycler: Option<Http1ConnectionRecycler<S>>,
     read_timeout: Duration,
     read_timer: Option<Pin<Box<Sleep>>>,
+    read_timer_armed: bool,
 }
 
 impl<S> Http1ResponseBody<S> {
@@ -66,6 +68,7 @@ impl<S> Http1ResponseBody<S> {
             recycler,
             read_timeout: RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
             read_timer: None,
+            read_timer_armed: false,
         }
     }
 
@@ -89,6 +92,14 @@ impl<S> Http1ResponseBody<S> {
         self.recycler.take();
     }
 
+    fn is_complete(&self) -> bool {
+        self.buf.is_empty()
+            && matches!(
+                self.state,
+                BodyState::Done | BodyState::ContentLength { remaining: 0 }
+            )
+    }
+
     fn body_error(message: impl Into<String>) -> BodyError {
         BodyError::new(message)
     }
@@ -96,7 +107,11 @@ impl<S> Http1ResponseBody<S> {
 
 impl<S> Drop for Http1ResponseBody<S> {
     fn drop(&mut self) {
-        self.discard();
+        if self.is_complete() {
+            self.finish();
+        } else {
+            self.discard();
+        }
     }
 }
 
@@ -121,7 +136,11 @@ where
                         return Poll::Ready(None);
                     }
                     if !this.buf.is_empty() {
-                        let take = this.buf.len().min(*remaining as usize).min(READ_BUF_SIZE);
+                        let take = this
+                            .buf
+                            .len()
+                            .min(*remaining as usize)
+                            .min(MAX_EMITTED_BODY_FRAME_SIZE);
                         *remaining -= take as u64;
                         return Poll::Ready(Some(Ok(Frame::data(
                             this.buf.split_to(take).freeze(),
@@ -150,7 +169,7 @@ where
                 }
                 BodyState::CloseDelimited => {
                     if !this.buf.is_empty() {
-                        let take = this.buf.len().min(READ_BUF_SIZE);
+                        let take = this.buf.len().min(MAX_EMITTED_BODY_FRAME_SIZE);
                         return Poll::Ready(Some(Ok(Frame::data(
                             this.buf.split_to(take).freeze(),
                         ))));
@@ -228,7 +247,11 @@ where
                             continue;
                         }
                         if !this.buf.is_empty() {
-                            let take = this.buf.len().min(*remaining).min(READ_BUF_SIZE);
+                            let take = this
+                                .buf
+                                .len()
+                                .min(*remaining)
+                                .min(MAX_EMITTED_BODY_FRAME_SIZE);
                             *remaining -= take;
                             return Poll::Ready(Some(Ok(Frame::data(
                                 this.buf.split_to(take).freeze(),
@@ -364,6 +387,10 @@ where
         }
         hint
     }
+
+    fn is_end_stream(&self) -> bool {
+        self.is_complete()
+    }
 }
 
 fn poll_read_with_timeout<S>(
@@ -377,26 +404,32 @@ where
     let Some(stream) = body.stream.as_mut() else {
         return Poll::Ready(Ok(0));
     };
-    if body.read_timer.is_none() {
-        body.read_timer = Some(Box::pin(tokio::time::sleep(body.read_timeout)));
-    }
     if body.buf.capacity() == body.buf.len() {
         body.buf.reserve(read_size.max(1));
     }
     match tokio_util::io::poll_read_buf(Pin::new(stream), cx, &mut body.buf) {
         Poll::Ready(Ok(n)) => {
-            body.read_timer = None;
+            body.read_timer_armed = false;
             Poll::Ready(Ok(n))
         }
         Poll::Ready(Err(err)) => {
-            body.read_timer = None;
+            body.read_timer_armed = false;
             Poll::Ready(Err(BodyError::new(err.to_string())))
         }
         Poll::Pending => {
+            if !body.read_timer_armed {
+                let deadline = tokio::time::Instant::now() + body.read_timeout;
+                if let Some(timer) = body.read_timer.as_mut() {
+                    timer.as_mut().reset(deadline);
+                } else {
+                    body.read_timer = Some(Box::pin(tokio::time::sleep_until(deadline)));
+                }
+                body.read_timer_armed = true;
+            }
             if let Some(timer) = body.read_timer.as_mut()
                 && timer.as_mut().poll(cx).is_ready()
             {
-                body.read_timer = None;
+                body.read_timer_armed = false;
                 return Poll::Ready(Err(BodyError::new(
                     "raw HTTP/1 upstream body read timed out",
                 )));
@@ -416,4 +449,117 @@ fn parse_chunk_size(line: &[u8]) -> Result<usize, BodyError> {
         .trim();
     usize::from_str_radix(size_str, 16)
         .map_err(|_| BodyError::new(format!("invalid chunk-size: {size_str}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body::Body as _;
+    use http_body_util::BodyExt as _;
+    use std::future::poll_fn;
+    use tokio::io::AsyncWriteExt as _;
+
+    #[tokio::test]
+    async fn immediately_ready_body_read_does_not_allocate_timeout_timer() {
+        let (mut upstream, proxy) = tokio::io::duplex(64);
+        upstream.write_all(b"body").await.expect("write body");
+        let mut body = Http1ResponseBody::new(
+            proxy,
+            BytesMut::new(),
+            ResponseBodyKind::ContentLength(4),
+            BytesMut::new(),
+            None,
+        );
+
+        let frame = body
+            .frame()
+            .await
+            .expect("body frame")
+            .expect("read body frame");
+
+        assert_eq!(frame.into_data().expect("data frame"), b"body"[..]);
+        assert!(body.read_timer.is_none());
+        assert!(!body.read_timer_armed);
+    }
+
+    #[tokio::test]
+    async fn buffered_body_is_emitted_in_fair_bounded_frames() {
+        let (_upstream, proxy) = tokio::io::duplex(64);
+        let body_bytes = MAX_EMITTED_BODY_FRAME_SIZE * 2 + 7;
+        let mut body = Http1ResponseBody::new(
+            proxy,
+            BytesMut::from(vec![b'x'; body_bytes].as_slice()),
+            ResponseBodyKind::ContentLength(body_bytes as u64),
+            BytesMut::new(),
+            None,
+        );
+
+        for expected in [MAX_EMITTED_BODY_FRAME_SIZE, MAX_EMITTED_BODY_FRAME_SIZE, 7] {
+            let frame = body
+                .frame()
+                .await
+                .expect("body frame")
+                .expect("valid body frame")
+                .into_data()
+                .expect("data frame");
+            assert_eq!(frame.len(), expected);
+        }
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_body_read_arms_timeout_timer() {
+        let (_upstream, proxy) = tokio::io::duplex(64);
+        let mut body = Http1ResponseBody::new(
+            proxy,
+            BytesMut::new(),
+            ResponseBodyKind::ContentLength(4),
+            BytesMut::new(),
+            None,
+        );
+
+        poll_fn(|cx| {
+            assert!(Pin::new(&mut body).poll_frame(cx).is_pending());
+            assert!(body.read_timer.is_some());
+            assert!(body.read_timer_armed);
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn body_read_reuses_timeout_timer_across_pending_reads() {
+        let (mut upstream, proxy) = tokio::io::duplex(64);
+        let mut body = Http1ResponseBody::new(
+            proxy,
+            BytesMut::new(),
+            ResponseBodyKind::ContentLength(8),
+            BytesMut::new(),
+            None,
+        );
+
+        poll_fn(|cx| {
+            assert!(Pin::new(&mut body).poll_frame(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        upstream.write_all(b"body").await.expect("write body");
+
+        let frame = body
+            .frame()
+            .await
+            .expect("body frame")
+            .expect("read body frame");
+
+        assert_eq!(frame.into_data().expect("data frame"), b"body"[..]);
+        assert!(body.read_timer.is_some());
+        assert!(!body.read_timer_armed);
+        poll_fn(|cx| {
+            assert!(Pin::new(&mut body).poll_frame(cx).is_pending());
+            assert!(body.read_timer.is_some());
+            assert!(body.read_timer_armed);
+            Poll::Ready(())
+        })
+        .await;
+    }
 }

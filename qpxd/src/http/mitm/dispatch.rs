@@ -83,7 +83,7 @@ async fn execute_mitm_request(
     let http_guard = base_plan.guard.as_deref();
     let websocket = is_websocket_upgrade(req.method(), req.headers())?;
     let client_upgrade = websocket.then(|| crate::http::protocol::upgrade::on(&mut req));
-    let path_owned = base.path.clone().unwrap_or_else(|| "/".to_string());
+    let path = base.path().unwrap_or("/");
     let engine = state
         .policy
         .rules_by_listener
@@ -95,7 +95,7 @@ async fn execute_mitm_request(
         src_ip: Some(route.src_addr.ip()),
         host: Some(route.host),
         sni: Some(route.sni),
-        path: Some(path_owned.as_str()),
+        path: Some(path),
     };
     let response_engine = base_plan.response_rules.as_deref();
     let response_candidates_for_request = response_engine
@@ -138,7 +138,7 @@ async fn execute_mitm_request(
     req = prepared_req;
     let mut request_body_observed = initial_observation_plan.needs_body;
     let mut request_rpc_observed = request_rpc.is_some();
-    let request_uri = base.request_uri.as_str();
+    let request_uri = base.request_uri();
     let req_method = req.method().clone();
     let req_version = req.version();
     let mut identity = identity;
@@ -173,14 +173,14 @@ async fn execute_mitm_request(
         destination: &destination,
         proxy_name,
         audit: build_dispatch_audit_context(DispatchAuditInput {
-            state: state.clone(),
+            state: &state,
             kind: ProxyKind::Mitm,
             scope_name: route.listener_name,
             remote_addr: route.src_addr,
             host: Some(route.host),
             sni: Some(route.sni),
             request_method: req.method().clone(),
-            path: Some(path_owned.as_str()),
+            path: Some(path),
             matched_rule: None,
             matched_route: None,
             identity: &identity,
@@ -377,7 +377,7 @@ async fn execute_mitm_request(
                     host: Some(route.host),
                     sni: Some(route.sni),
                     method: Some(req.method().as_str()),
-                    path: Some(path_owned.as_str()),
+                    path: Some(path),
                     uri: Some(request_uri),
                     matched_rule: matched_rule.as_deref(),
                     matched_route: None,
@@ -392,14 +392,14 @@ async fn execute_mitm_request(
         None
     };
     let audit = build_dispatch_audit_context(DispatchAuditInput {
-        state: state.clone(),
+        state: &state,
         kind: ProxyKind::Mitm,
         scope_name: route.listener_name,
         remote_addr: route.src_addr,
         host: Some(route.host),
         sni: Some(route.sni),
         request_method: req_method.clone(),
-        path: Some(path_owned.as_str()),
+        path: Some(path),
         matched_rule: matched_rule.as_deref(),
         matched_route: None,
         identity: &identity,
@@ -426,7 +426,7 @@ async fn execute_mitm_request(
             )),
             request_head: (req.method(), req.version()),
             proxy_name,
-            default_deny_response: forbidden(state.messages.forbidden.as_str()),
+            default_deny_body: state.messages.forbidden.as_str(),
             audit: &audit,
         })? {
             DecisionServiceHttpAccessOutcome::Continue(allow) => {

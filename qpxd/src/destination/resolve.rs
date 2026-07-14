@@ -2,7 +2,9 @@ use qpx_core::config::{
     DestinationConflictMode, DestinationEvidenceSourceKind, DestinationMergeMode,
     DestinationResolutionOverrideConfig, DestinationResolutionPolicyConfig, NamedSetKind,
 };
+use std::borrow::Cow;
 use std::net::IpAddr;
+use std::sync::{Arc, LazyLock};
 
 use super::compile::{DestinationClassifier, LabeledPatternSet};
 use super::{DestinationInputs, DestinationMetadata};
@@ -93,7 +95,7 @@ impl DestinationClassifier {
         if self.application.is_empty()
             && let Some(label) = inferred_application
         {
-            out.application = Some(label.to_string());
+            out.application = Some(shared_inferred_application(label));
             out.application_source = Some(DestinationEvidenceSource::Heuristic.as_str());
             out.application_confidence = Some(score_for_source(
                 DestinationEvidenceKind::Application,
@@ -137,7 +139,7 @@ impl DestinationClassifier {
             DestinationEvidenceKind::Application,
             policy,
         ) {
-            out.application = Some(candidate.label);
+            out.application = Some(Arc::from(candidate.label));
             out.application_source = Some(candidate.source.as_str());
             out.application_confidence = Some(candidate.confidence);
         }
@@ -316,12 +318,12 @@ impl CompiledDestinationResolutionPolicy {
         }
     }
 
-    pub(crate) fn with_override(
-        &self,
+    pub(crate) fn with_override<'a>(
+        &'a self,
         override_cfg: Option<&DestinationResolutionOverrideConfig>,
-    ) -> Self {
+    ) -> Cow<'a, Self> {
         let Some(override_cfg) = override_cfg else {
-            return self.clone();
+            return Cow::Borrowed(self);
         };
         let mut merged = self.clone();
         if let Some(precedence) = override_cfg.precedence.as_ref() {
@@ -348,7 +350,7 @@ impl CompiledDestinationResolutionPolicy {
                     .or(merged.min_confidence.application),
             };
         }
-        merged
+        Cow::Owned(merged)
     }
 }
 
@@ -553,21 +555,32 @@ fn infer_application(
     port: Option<u16>,
     alpn: Option<&str>,
 ) -> Option<&'static str> {
-    let alpn = alpn.map(|value| value.trim().to_ascii_lowercase());
-    if let Some(alpn) = alpn.as_deref() {
-        if alpn.starts_with("h3") {
+    if let Some(alpn) = alpn.map(str::trim) {
+        if alpn
+            .get(..2)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("h3"))
+        {
             return Some("quic");
         }
-        if alpn == "h2" || alpn == "http/1.1" || alpn == "http/1.0" {
+        if alpn.eq_ignore_ascii_case("h2")
+            || alpn.eq_ignore_ascii_case("http/1.1")
+            || alpn.eq_ignore_ascii_case("http/1.0")
+        {
             return Some("https");
         }
     }
 
-    match scheme.map(|value| value.trim().to_ascii_lowercase()) {
-        Some(scheme) if scheme == "ftp" => Some("ftp"),
-        Some(scheme) if scheme == "http" => Some("http"),
-        Some(scheme) if scheme == "https" || scheme == "wss" || scheme == "h3" => Some("https"),
-        Some(scheme) if scheme == "ws" => Some("http"),
+    match scheme.map(str::trim) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("ftp") => Some("ftp"),
+        Some(scheme) if scheme.eq_ignore_ascii_case("http") => Some("http"),
+        Some(scheme)
+            if scheme.eq_ignore_ascii_case("https")
+                || scheme.eq_ignore_ascii_case("wss")
+                || scheme.eq_ignore_ascii_case("h3") =>
+        {
+            Some("https")
+        }
+        Some(scheme) if scheme.eq_ignore_ascii_case("ws") => Some("http"),
         _ => match port {
             Some(21) => Some("ftp"),
             Some(22) => Some("ssh"),
@@ -576,6 +589,25 @@ fn infer_application(
             Some(443) => Some("https"),
             _ => None,
         },
+    }
+}
+
+fn shared_inferred_application(label: &'static str) -> Arc<str> {
+    static DNS: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("dns"));
+    static FTP: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("ftp"));
+    static HTTP: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("http"));
+    static HTTPS: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("https"));
+    static QUIC: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("quic"));
+    static SSH: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from("ssh"));
+
+    match label {
+        "dns" => DNS.clone(),
+        "ftp" => FTP.clone(),
+        "http" => HTTP.clone(),
+        "https" => HTTPS.clone(),
+        "quic" => QUIC.clone(),
+        "ssh" => SSH.clone(),
+        _ => unreachable!("inferred application labels are closed over known values"),
     }
 }
 

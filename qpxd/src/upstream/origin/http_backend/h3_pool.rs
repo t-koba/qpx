@@ -291,6 +291,7 @@ pub(super) async fn proxy_h3_origin(
             .collect(),
         response,
         upstream_cert: Some(pooled.upstream_cert.clone()),
+        response_finalized: false,
     })
 }
 

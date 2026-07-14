@@ -5,7 +5,7 @@ use crate::rate_limit::RateLimitContext;
 use crate::reverse::health::UpstreamEndpoint;
 use crate::reverse::router::{HttpRoute, SelectedMirrorTarget};
 use crate::reverse::transport::request_template::{ReverseReplayRecorder, ReverseRequestTemplate};
-use crate::reverse::transport::{InterimList, ReverseConnInfo, ReverseRouter};
+use crate::reverse::transport::{InterimList, ReverseConnInfo};
 use crate::runtime::{self, Runtime};
 use hyper::{Method, Request, Response};
 use qpx_core::rules::CompiledHeaderControl;
@@ -71,17 +71,11 @@ pub(super) struct PreparedReverseRequest {
 }
 
 pub(super) struct ReversePreparedContext {
-    pub(super) router: Arc<ReverseRouter>,
+    pub(super) compiled: Arc<crate::reverse::CompiledReverse>,
     pub(super) state: Arc<runtime::RuntimeState>,
-    pub(super) proxy_name: String,
 }
 
 pub(super) struct ReversePreparedRoute {
-    pub(super) host: String,
-    pub(super) request_method: Method,
-    pub(super) request_version: http::Version,
-    pub(super) path_owned: Option<String>,
-    pub(super) request_uri: String,
     pub(super) route_idx: usize,
     pub(super) selected_policy: EffectivePolicyContext,
     pub(super) identity: crate::policy_context::ResolvedIdentity,
@@ -342,7 +336,7 @@ pub(super) struct ReverseResponseRuleInput<'a> {
     pub(super) selected_upstream: Option<&'a Arc<UpstreamEndpoint>>,
     pub(super) attempt_idx: usize,
     pub(super) attempts: usize,
-    pub(super) started: Instant,
+    pub(super) started: Option<Instant>,
 }
 
 pub(super) struct ReverseHttpSuccessInput<'a> {
@@ -375,7 +369,7 @@ pub(super) struct ReverseHttpSuccessInput<'a> {
     pub(super) audit_ctx: &'a DispatchAuditContext,
     pub(super) attempt_idx: usize,
     pub(super) selected_upstream: Option<&'a Arc<UpstreamEndpoint>>,
-    pub(super) started: Instant,
+    pub(super) started: Option<Instant>,
     pub(super) interim: InterimList,
     pub(super) response: Response<Body>,
     pub(super) upstream_cert: Option<qpx_core::tls::UpstreamCertificateInfo>,
@@ -408,7 +402,7 @@ pub(super) struct ReverseIpcSuccessInput<'a> {
     pub(super) http_modules: &'a mut crate::http::modules::HttpModuleExecution,
     pub(super) audit_ctx: &'a DispatchAuditContext,
     pub(super) attempt_idx: usize,
-    pub(super) started: Instant,
+    pub(super) started: Option<Instant>,
     pub(super) response: Response<Body>,
     pub(super) export_session: Option<&'a crate::exporter::ExportSession>,
 }

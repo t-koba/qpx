@@ -9,7 +9,7 @@ use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_d
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::reverse::router::HttpRoute;
 use anyhow::Result;
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, Response};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 
@@ -32,6 +32,42 @@ pub(super) async fn enforce_reverse_access_control(
         sanitized_headers,
         request_destination,
     } = input;
+    if selected_policy.decision_service.is_none()
+        && route.plan.guard.is_none()
+        && route
+            .plan
+            .rate_limits
+            .is_empty_for_scope(TransportScope::Request)
+        && route.local_response.is_none()
+    {
+        let audit_ctx = build_dispatch_audit_context(DispatchAuditInput {
+            state,
+            kind: ProxyKind::Reverse,
+            scope_name: reverse_name,
+            remote_addr: conn.remote_addr,
+            host: (!host.is_empty()).then_some(host),
+            sni: conn.tls_sni.as_deref(),
+            request_method: request_method.clone(),
+            path,
+            matched_rule: None,
+            matched_route: route.name.as_deref(),
+            identity,
+            destination: request_destination,
+            decision_service: None,
+        });
+        return Ok(ReverseAccessOutcome::Continue(ReverseAccessControl {
+            req,
+            audit_ctx,
+            route_headers: route.headers.clone(),
+            override_upstream: None,
+            route_timeout: route.policy.timeout,
+            cache_bypass: false,
+            decision_service_mirror_upstreams: Vec::new(),
+            authorization_decision: None,
+            request_limit_ctx: RateLimitContext::from_source(conn.remote_addr.ip()),
+            request_limits: Default::default(),
+        }));
+    }
     let decision_service = enforce_decision_service(
         state,
         selected_policy,
@@ -56,7 +92,7 @@ pub(super) async fn enforce_reverse_access_control(
     )
     .await?;
     let audit_ctx = build_dispatch_audit_context(DispatchAuditInput {
-        state: state.clone(),
+        state,
         kind: ProxyKind::Reverse,
         scope_name: reverse_name,
         remote_addr: conn.remote_addr,
@@ -70,14 +106,15 @@ pub(super) async fn enforce_reverse_access_control(
         destination: request_destination,
         decision_service: Some(&decision_service),
     });
-    if let Some(response) = evaluate_http_guard(DispatchGuardInput {
-        profile: route.plan.guard.as_deref(),
-        req: &req,
-        destination: request_destination,
-        proxy_name,
-        audit: audit_ctx.clone(),
-    })
-    .await?
+    if let Some(profile) = route.plan.guard.as_deref()
+        && let Some(response) = evaluate_http_guard(DispatchGuardInput {
+            profile: Some(profile),
+            req: &req,
+            destination: request_destination,
+            proxy_name,
+            audit: audit_ctx.clone(),
+        })
+        .await?
     {
         return Ok(ReverseAccessOutcome::Response(Box::new(response)));
     }
@@ -88,9 +125,7 @@ pub(super) async fn enforce_reverse_access_control(
         request_limit: None,
         request_head: (request_method, req.version()),
         proxy_name,
-        default_deny_response: Response::builder()
-            .status(StatusCode::FORBIDDEN)
-            .body(Body::from(state.messages.reverse_error.clone()))?,
+        default_deny_body: state.messages.reverse_error.as_str(),
         audit: &audit_ctx,
     })? {
         DecisionServiceHttpAccessOutcome::Continue(allow) => allow,
@@ -109,12 +144,21 @@ pub(super) async fn enforce_reverse_access_control(
             audit_ctx.clone(),
         )))
     };
-    let request_limit_ctx = RateLimitContext::from_identity(
-        conn.remote_addr.ip(),
-        identity,
-        route.name.as_deref(),
-        allowed.override_upstream.as_deref(),
-    );
+    let request_limit_ctx = if route
+        .plan
+        .rate_limits
+        .is_empty_for_scope(TransportScope::Request)
+        && allowed.rate_limit_profile.is_none()
+    {
+        RateLimitContext::from_source(conn.remote_addr.ip())
+    } else {
+        RateLimitContext::from_identity(
+            conn.remote_addr.ip(),
+            identity,
+            route.name.as_deref(),
+            allowed.override_upstream.as_deref(),
+        )
+    };
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,
         retry_after,
@@ -138,6 +182,7 @@ pub(super) async fn enforce_reverse_access_control(
         return Ok(rate_limited_response(retry_after));
     }
     if let Some(response) = reverse_local_route_response(
+        state,
         route,
         request_method,
         req.version(),
@@ -169,6 +214,7 @@ pub(super) async fn enforce_reverse_access_control(
 }
 
 fn reverse_local_route_response(
+    state: &crate::runtime::RuntimeState,
     route: &HttpRoute,
     request_method: &Method,
     request_version: http::Version,
@@ -179,7 +225,7 @@ fn reverse_local_route_response(
     let Some(local) = route.local_response.as_ref() else {
         return Ok(None);
     };
-    super::super::metrics::local_response(&audit_ctx.state);
+    super::super::metrics::local_response(state);
     annotated_local_response(
         request_method,
         request_version,

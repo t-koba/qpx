@@ -40,9 +40,8 @@ impl CompiledRateLimitPlan {
         out
     }
 
-    #[cfg(test)]
     pub(crate) fn is_empty_for_scope(&self, scope: TransportScope) -> bool {
-        self.collect(scope).is_empty()
+        self.base.is_empty_for_scope(scope) && self.selected.is_empty_for_scope(scope)
     }
 }
 
@@ -54,6 +53,18 @@ pub(crate) struct AppliedRateLimits {
     pub(crate) request_quota_limiters: Vec<Arc<QuotaLimiter>>,
     pub(crate) byte_quota_limiters: Vec<Arc<QuotaLimiter>>,
     pub(crate) session_quota_limiters: Vec<Arc<QuotaLimiter>>,
+}
+
+impl AppliedRateLimits {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.request_limiters.is_empty()
+            && self.byte_limiters.is_empty()
+            && self.concurrency_limiters.is_empty()
+            && self.request_quota_limiters.is_empty()
+            && self.byte_quota_limiters.is_empty()
+            && self.session_quota_limiters.is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -199,14 +210,8 @@ impl AppliedRateLimits {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.request_limiters.is_empty()
-            && self.byte_limiters.is_empty()
-            && self.concurrency_limiters.is_empty()
-            && self.request_quota_limiters.is_empty()
-            && self.byte_quota_limiters.is_empty()
-            && self.session_quota_limiters.is_empty()
+    pub(crate) fn has_concurrency_controls(&self) -> bool {
+        !self.concurrency_limiters.is_empty() || !self.session_quota_limiters.is_empty()
     }
 
     pub(crate) fn try_acquire_request(
@@ -278,6 +283,16 @@ impl AppliedRateLimits {
 }
 
 impl RateLimitSet {
+    fn is_empty_for_scope(&self, scope: TransportScope) -> bool {
+        !self.applies_to(scope)
+            || (self.requests.is_none()
+                && self.bytes.is_none()
+                && self.concurrency.is_none()
+                && self.request_quota.is_none()
+                && self.byte_quota.is_none()
+                && self.session_quota.is_none())
+    }
+
     fn parse_key_kind(raw: &str) -> KeyKind {
         match raw.trim().to_ascii_lowercase().as_str() {
             "global" => KeyKind::Global,

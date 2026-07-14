@@ -53,6 +53,7 @@ pub struct RegexReplace {
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct MatchConfig {
     #[serde(default)]
     pub src_ip: Vec<String>,

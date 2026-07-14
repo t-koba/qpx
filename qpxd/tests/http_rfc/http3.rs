@@ -2,7 +2,7 @@ use super::*;
 use anyhow::anyhow;
 
 pub(crate) async fn http3_reverse_terminate_smoke() -> Result<()> {
-    let dir = temp_dir("qpxd-rfc911x-h3")?;
+    let dir = temp_dir("qpxd-http-rfc-h3")?;
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)
         .with_context(|| format!("create state dir {}", state_dir.display()))?;

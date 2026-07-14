@@ -214,11 +214,30 @@ impl UpstreamEndpoint {
         unhealthy_until != 0 && unhealthy_until <= now_ms
     }
 
+    pub(super) fn has_time_dependent_admission_state(&self) -> bool {
+        self.unhealthy_until_ms.load(Ordering::Relaxed) != 0
+            || self.recovery_start_ms.load(Ordering::Relaxed) != 0
+            || self.warmup_until_ms.load(Ordering::Relaxed) != 0
+            || self.drain_deadline_ms.load(Ordering::Relaxed) != 0
+    }
+
     pub(super) fn mark_success(&self, lifecycle: &EndpointLifecycleRuntime) {
         let recovered = self.unhealthy_until_ms.swap(0, Ordering::Relaxed) != 0;
         self.failures.store(0, Ordering::Relaxed);
         self.reset_passive_counters();
         self.note_adaptive_success();
+        if recovered {
+            self.begin_recovery_window(lifecycle);
+            super::metrics::upstream_probe_success();
+        }
+    }
+
+    pub(super) fn mark_response_success(&self, lifecycle: &EndpointLifecycleRuntime) {
+        if self.failures.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let recovered = self.unhealthy_until_ms.swap(0, Ordering::Relaxed) != 0;
+        self.failures.store(0, Ordering::Relaxed);
         if recovered {
             self.begin_recovery_window(lifecycle);
             super::metrics::upstream_probe_success();
@@ -512,5 +531,35 @@ mod tests {
             endpoint.mark_passive_latency(Some(&policy), Duration::from_millis(25));
         }
         assert!(!endpoint.is_healthy(now_millis()));
+    }
+
+    #[test]
+    fn response_success_keeps_the_clean_path_free_of_adaptive_updates() {
+        let endpoint = UpstreamEndpoint::new("http://example".to_string());
+
+        endpoint.mark_response_success(&EndpointLifecycleRuntime::default());
+
+        assert_eq!(endpoint.adaptive_successes.load(Ordering::Relaxed), 0);
+        assert!(!endpoint.has_time_dependent_admission_state());
+        assert!(endpoint.is_healthy(now_millis()));
+    }
+
+    #[test]
+    fn response_success_recovers_a_failed_endpoint() {
+        let endpoint = UpstreamEndpoint::new("http://example".to_string());
+        let policy = HealthCheckRuntime {
+            interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(1),
+            fail_threshold: 1,
+            cooldown: Duration::from_secs(30),
+            http: None,
+        };
+        endpoint.mark_failure(&policy);
+        assert!(!endpoint.is_healthy(now_millis()));
+
+        endpoint.mark_response_success(&EndpointLifecycleRuntime::default());
+
+        assert!(endpoint.is_healthy(now_millis()));
+        assert_eq!(endpoint.failures.load(Ordering::Relaxed), 0);
     }
 }

@@ -1,4 +1,5 @@
-use crate::upstream::raw_http1::InterimResponseHead;
+use crate::http::codec::lazy_timeout::timeout_after_pending;
+use crate::upstream::raw_http1::{InterimResponseHead, RawHttp1ResponseHead};
 use ::http::{Request as Http1Request, Response as Http1Response};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
@@ -7,7 +8,7 @@ use h2::RecvStream;
 use h2::server::SendResponse;
 use http_body::Frame;
 use hyper::header::{CONTENT_LENGTH, COOKIE};
-use hyper::{Request, Response, Uri};
+use hyper::{Request, Response};
 use qpx_http::body::{Body, BodyError};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -73,26 +74,9 @@ pub(crate) fn h2_request_to_hyper_with_capacity(
     body_channel_capacity: usize,
 ) -> Result<Request<Body>> {
     let (parts, body) = req.into_parts();
-    let method = parts
-        .method
-        .as_str()
-        .parse::<http::Method>()
-        .map_err(|_| anyhow!("invalid HTTP/2 method"))?;
-    let uri = parts
-        .uri
-        .to_string()
-        .parse::<Uri>()
-        .or_else(|_| {
-            let path = parts
-                .uri
-                .path_and_query()
-                .map(|pq| pq.as_str())
-                .unwrap_or("/");
-            Uri::builder().path_and_query(path).build()
-        })
-        .map_err(|e| anyhow!("invalid HTTP/2 URI: {e}"))?;
-
-    let headers = h1_headers_to_http(&parts.headers)?;
+    let method = parts.method;
+    let uri = parts.uri;
+    let headers = h1_headers_into_http(parts.headers)?;
     // The h2 transport already enforces RFC 9113 content-length reconciliation
     // while decoding DATA / END_STREAM on the inbound stream. We still parse the
     // header locally to reject conflicting field-values before handing the
@@ -137,7 +121,7 @@ pub(crate) async fn send_h2_response_with_interim(
         respond.send_informational(informational)?;
     }
 
-    let (parts, mut body) = response.into_parts();
+    let (mut parts, mut body) = response.into_parts();
     let status =
         qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/2 response")?;
     let no_body = request_method == hyper::Method::HEAD
@@ -148,7 +132,11 @@ pub(crate) async fn send_h2_response_with_interim(
         || (request_method == hyper::Method::CONNECT
             && parts.status.is_success()
             && !allow_successful_connect_body);
-    let mut headers = parts.headers;
+    let mut headers = if let Some(raw) = parts.extensions.remove::<Arc<RawHttp1ResponseHead>>() {
+        raw.materialized_headers()?
+    } else {
+        parts.headers
+    };
     let declared_length = if no_body {
         if request_method == hyper::Method::HEAD {
             qpx_http::protocol::semantics::strip_message_body_framing_headers(&mut headers);
@@ -163,15 +151,41 @@ pub(crate) async fn send_h2_response_with_interim(
         parse_declared_content_length(&headers)?
     };
     let mut head = Http1Response::builder().status(status).body(())?;
-    *head.headers_mut() = http_headers_to_h1(&headers)?;
+    *head.headers_mut() = http_headers_into_h1(headers);
 
-    let mut send_stream = respond.send_response(head, no_body)?;
+    let body_ends_immediately = http_body::Body::is_end_stream(&body);
+    let end_stream_on_headers =
+        no_body || (body_ends_immediately && declared_length.is_none_or(|length| length == 0));
+    let single_frame = (!no_body)
+        .then(|| body.take_single_frame_without_trailers())
+        .flatten();
+    let mut send_stream = respond.send_response(head, end_stream_on_headers)?;
 
-    if no_body {
+    if end_stream_on_headers {
+        return Ok(());
+    }
+
+    if let Some(chunk) = single_frame {
+        if let Some(expected) = declared_length
+            && chunk.len() as u64 != expected
+        {
+            send_stream.send_reset(Reason::PROTOCOL_ERROR);
+            return if chunk.len() as u64 > expected {
+                Err(anyhow!(
+                    "HTTP/2 response body exceeded declared content-length"
+                ))
+            } else {
+                Err(anyhow!(
+                    "HTTP/2 response body ended before declared content-length was satisfied"
+                ))
+            };
+        }
+        send_stream.send_data(chunk, true)?;
         return Ok(());
     }
 
     let mut sent_len = 0u64;
+    let mut final_chunk = None;
     while let Some(chunk) = match read_h2_response_body_chunk(&mut body, body_read_timeout).await {
         Ok(chunk) => chunk,
         Err(err) => {
@@ -192,7 +206,31 @@ pub(crate) async fn send_h2_response_with_interim(
             ));
         }
         if !chunk.is_empty() {
+            if declared_length == Some(sent_len) {
+                final_chunk = Some(chunk);
+                break;
+            }
             send_stream.send_data(chunk, false)?;
+        }
+    }
+
+    if final_chunk.is_some() {
+        while let Some(chunk) =
+            match read_h2_response_body_chunk(&mut body, body_read_timeout).await {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    send_stream.send_reset(Reason::CANCEL);
+                    return Err(err);
+                }
+            }
+        {
+            let chunk = chunk?;
+            if !chunk.is_empty() {
+                send_stream.send_reset(Reason::PROTOCOL_ERROR);
+                return Err(anyhow!(
+                    "HTTP/2 response body exceeded declared content-length"
+                ));
+            }
         }
     }
 
@@ -217,12 +255,15 @@ pub(crate) async fn send_h2_response_with_interim(
             warn!(removed, "dropping forbidden HTTP/2 response trailers");
         }
         if trailers.is_empty() {
-            send_stream.send_data(Bytes::new(), true)?;
+            send_stream.send_data(final_chunk.unwrap_or_default(), true)?;
         } else {
-            send_stream.send_trailers(http_headers_to_h1(&trailers)?)?;
+            if let Some(chunk) = final_chunk {
+                send_stream.send_data(chunk, false)?;
+            }
+            send_stream.send_trailers(http_headers_into_h1(trailers))?;
         }
     } else {
-        send_stream.send_data(Bytes::new(), true)?;
+        send_stream.send_data(final_chunk.unwrap_or_default(), true)?;
     }
 
     Ok(())
@@ -232,7 +273,7 @@ async fn read_h2_response_body_chunk(
     body: &mut Body,
     body_read_timeout: Duration,
 ) -> Result<Option<Result<Bytes, qpx_http::body::BodyError>>> {
-    timeout(body_read_timeout, body.data())
+    timeout_after_pending(body_read_timeout, body.data())
         .await
         .map_err(|_| anyhow!("HTTP/2 response body read timed out"))
 }
@@ -241,7 +282,7 @@ async fn read_h2_response_trailers(
     body: &mut Body,
     body_read_timeout: Duration,
 ) -> Result<Option<http::HeaderMap>> {
-    timeout(body_read_timeout, body.trailers())
+    timeout_after_pending(body_read_timeout, body.trailers())
         .await
         .map_err(|_| anyhow!("HTTP/2 response trailer read timed out"))?
         .map_err(Into::into)
@@ -269,8 +310,19 @@ pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::Header
     Ok(headers)
 }
 
+fn h1_headers_into_http(src: ::http::HeaderMap) -> Result<http::HeaderMap> {
+    if src.get_all(COOKIE).iter().count() <= 1 {
+        return Ok(src);
+    }
+    h1_headers_to_http(&src)
+}
+
 pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {
     Ok(src.clone())
+}
+
+fn http_headers_into_h1(src: http::HeaderMap) -> ::http::HeaderMap {
+    src
 }
 
 pub(crate) fn parse_declared_content_length(headers: &http::HeaderMap) -> Result<Option<u64>> {
@@ -330,7 +382,7 @@ pub(crate) fn h2_response_to_hyper(
     let mut out = Response::builder()
         .status(status)
         .body(h2_response_body(body))?;
-    *out.headers_mut() = h1_headers_to_http(&parts.headers)?;
+    *out.headers_mut() = h1_headers_into_http(parts.headers)?;
     *out.version_mut() = http::Version::HTTP_2;
     Ok(out)
 }
@@ -345,7 +397,7 @@ pub(crate) fn h2_response_to_hyper_with_inflight(
     let mut out = Response::builder()
         .status(status)
         .body(h2_response_body_with_inflight(body, inflight))?;
-    *out.headers_mut() = h1_headers_to_http(&parts.headers)?;
+    *out.headers_mut() = h1_headers_into_http(parts.headers)?;
     *out.version_mut() = http::Version::HTTP_2;
     Ok(out)
 }

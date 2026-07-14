@@ -47,7 +47,7 @@ pub(super) async fn dispatch_forward_request(
         let span = tracing::info_span!(
             "dispatch_forward_request",
             kind = "forward",
-            host = %base.host.as_deref().unwrap_or(""),
+            host = %base.host().unwrap_or(""),
             method = %base.method,
         );
         execute_forward_request(req, base, runtime, listener_name, remote_addr)
@@ -138,7 +138,8 @@ async fn prepare_forward_request(
     let http_guard = compiled_edge.default_plan.guard.as_deref();
     let is_ftp_request = base
         .scheme
-        .as_deref()
+        .as_ref()
+        .map(http::uri::Scheme::as_str)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ftp"));
     let host = match resolve_forward_target_or_response(
         &req,
@@ -214,7 +215,7 @@ async fn prepare_forward_request(
     req = prepared_req;
     let mut request_body_observed = initial_observation_plan.needs_body;
     let mut request_rpc_observed = request_rpc.is_some();
-    let path = base.path.as_deref();
+    let path = base.path();
     let destination = forward_destination_metadata(
         &state,
         &base,
@@ -227,7 +228,7 @@ async fn prepare_forward_request(
         destination: &destination,
         proxy_name,
         audit: build_dispatch_audit_context(DispatchAuditInput {
-            state: state.clone(),
+            state: &state,
             kind: ProxyKind::Forward,
             scope_name: listener_name,
             remote_addr,
@@ -290,7 +291,7 @@ async fn prepare_forward_request(
                 sanitized_headers: &sanitized_headers,
                 response: policy_response,
                 auth_method: req.method().as_str(),
-                auth_uri: base.request_uri.as_str(),
+                auth_uri: base.request_uri(),
                 stage_observation: $stage_observation,
             })
         };
@@ -484,8 +485,8 @@ async fn complete_forward_request(
             sni: None,
             request_method: &request_method,
             request_version: client_version,
-            path: base.path.as_deref(),
-            uri: Some(base.request_uri.as_str()),
+            path: base.path(),
+            uri: Some(base.request_uri()),
             matched_rule: matched_rule.as_deref(),
             matched_route: None,
             action: Some(&action),
@@ -498,9 +499,7 @@ async fn complete_forward_request(
                 &request_limit_ctx,
                 &state.policy.rate_limiters,
             )),
-            default_deny_response: crate::http::protocol::common::forbidden_response(
-                state.messages.forbidden.as_str(),
-            ),
+            default_deny_body: state.messages.forbidden.as_str(),
         })
         .await?;
     let (audit, timeout_override) = match decision {

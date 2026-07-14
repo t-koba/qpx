@@ -450,12 +450,20 @@ jobs:
         env:
           QPX_HTTP2_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-http2-compare.jsonl
         run: scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
+      - name: enforce http2 performance objectives
+        id: enforce_http2_performance_objectives
+        continue-on-error: true
+        run: scripts/check-http2-performance.sh target/perf/perf-audit-http2-compare.jsonl perf/http2-performance-objectives.json
       - name: external long streaming comparison bench
         id: external_long_streaming_comparison_bench
         continue-on-error: true
         env:
           QPX_STREAMING_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-streaming-compare.jsonl
         run: scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"
+      - name: enforce streaming performance objectives
+        id: enforce_streaming_performance_objectives
+        continue-on-error: true
+        run: scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json
       - name: allocation profile
         id: allocation_profile
         continue-on-error: true
@@ -465,10 +473,14 @@ jobs:
           QPX_ALLOCATION_PROFILE_JSON: ${{ github.workspace }}/target/perf/perf-audit-allocation-profile.jsonl
           QPX_ALLOCATION_PROFILE_DIR: ${{ github.workspace }}/target/perf/allocations
         run: scripts/perf-audit-allocation-profile.sh
+      - name: enforce allocation budget
+        id: enforce_allocation_budget
+        continue-on-error: true
+        run: scripts/check-allocation-budget.sh target/perf/perf-audit-allocation-profile.jsonl perf/allocation-budget.json
       - name: compare proxy baseline
         id: compare_proxy_baseline
         continue-on-error: true
-        run: scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json
+        run: scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json perf/proxy-performance-objectives.json
       - name: netem proxy comparison bench
         id: netem_proxy_comparison_bench
         continue-on-error: true
@@ -501,8 +513,11 @@ jobs:
           ADVANCED_TRANSPORT_PERF_BENCHMARKS: ${{ steps.advanced_transport_perf_benchmarks.outcome }}
           EXTERNAL_PROXY_COMPARISON_BENCH: ${{ steps.external_proxy_comparison_bench.outcome }}
           EXTERNAL_HTTP2_COMPARISON_BENCH: ${{ steps.external_http2_comparison_bench.outcome }}
+          ENFORCE_HTTP2_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_http2_performance_objectives.outcome }}
           EXTERNAL_LONG_STREAMING_COMPARISON_BENCH: ${{ steps.external_long_streaming_comparison_bench.outcome }}
+          ENFORCE_STREAMING_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_streaming_performance_objectives.outcome }}
           ALLOCATION_PROFILE: ${{ steps.allocation_profile.outcome }}
+          ENFORCE_ALLOCATION_BUDGET: ${{ steps.enforce_allocation_budget.outcome }}
           COMPARE_PROXY_BASELINE: ${{ steps.compare_proxy_baseline.outcome }}
           NETEM_PROXY_COMPARISON_BENCH: ${{ steps.netem_proxy_comparison_bench.outcome }}
           HTTP3_INTEROP_MATRIX: ${{ steps.http3_interop_matrix.outcome }}
@@ -523,8 +538,11 @@ jobs:
           check_step "advanced transport perf benchmarks" "$ADVANCED_TRANSPORT_PERF_BENCHMARKS"
           check_step "external proxy comparison bench" "$EXTERNAL_PROXY_COMPARISON_BENCH"
           check_step "external http2 comparison bench" "$EXTERNAL_HTTP2_COMPARISON_BENCH"
+          check_step "http2 performance objectives" "$ENFORCE_HTTP2_PERFORMANCE_OBJECTIVES"
           check_step "external long streaming comparison bench" "$EXTERNAL_LONG_STREAMING_COMPARISON_BENCH"
+          check_step "streaming performance objectives" "$ENFORCE_STREAMING_PERFORMANCE_OBJECTIVES"
           check_step "allocation profile" "$ALLOCATION_PROFILE"
+          check_step "allocation budget" "$ENFORCE_ALLOCATION_BUDGET"
           check_step "compare proxy baseline" "$COMPARE_PROXY_BASELINE"
           check_step "netem proxy comparison bench" "$NETEM_PROXY_COMPARISON_BENCH"
           check_step "http3 interop matrix" "$HTTP3_INTEROP_MATRIX"
@@ -566,6 +584,7 @@ jobs:
       - name: audit qpxd compiled sample behavior
         env:
           RUSTFLAGS: "-D warnings"
+          QPXD_BIN: ${{ github.workspace }}/target/debug/qpxd
         run: bash ./scripts/audit-config-behavior.sh
 
   build_test:

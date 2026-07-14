@@ -1,9 +1,10 @@
 #[cfg(test)]
 use super::MAX_HEADER_BYTES;
-use super::{parse_declared_content_length, response::ResponseBodyKind};
+use super::{UpstreamConnectionClosed, parse_declared_content_length, response::ResponseBodyKind};
 #[cfg(test)]
 use crate::http::codec::h1_common::{find_crlf, parse_header_map};
 use crate::http::codec::h1_common::{has_connection_token, has_only_chunked_transfer_encoding};
+use crate::http::codec::lazy_timeout::timeout_after_pending;
 use anyhow::{Result, anyhow};
 #[cfg(test)]
 use bytes::Buf;
@@ -11,7 +12,7 @@ use bytes::BytesMut;
 use hyper::header::HeaderMap;
 use hyper::{Method, StatusCode, Version};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 
 #[cfg(test)]
 pub(super) async fn read_crlf_line<S>(
@@ -77,7 +78,7 @@ where
     while buf.len() < min_len {
         let n = read_buf_with_timeout(stream, buf, read_timeout, sender).await?;
         if n == 0 {
-            return Err(anyhow!("upstream connection closed unexpectedly"));
+            return Err(UpstreamConnectionClosed.into());
         }
     }
     Ok(())
@@ -100,7 +101,7 @@ where
         }
         let n = read_buf_with_timeout(stream, buf, read_timeout, sender).await?;
         if n == 0 {
-            return Err(anyhow!("upstream connection closed unexpectedly"));
+            return Err(UpstreamConnectionClosed.into());
         }
     }
     Ok(())
@@ -117,7 +118,7 @@ where
 {
     if let Some(sender) = sender {
         tokio::select! {
-            result = timeout(read_timeout, stream.read_buf(buf)) => {
+            result = timeout_after_pending(read_timeout, stream.read_buf(buf)) => {
                 result
                     .map_err(|_| anyhow!("raw HTTP/1 upstream body read timed out"))?
                     .map_err(Into::into)
@@ -125,7 +126,7 @@ where
             _ = sender.closed() => Err(anyhow!("downstream response body receiver closed")),
         }
     } else {
-        timeout(read_timeout, stream.read_buf(buf))
+        timeout_after_pending(read_timeout, stream.read_buf(buf))
             .await
             .map_err(|_| anyhow!("raw HTTP/1 upstream body read timed out"))?
             .map_err(Into::into)
@@ -144,7 +145,7 @@ where
 {
     if let Some(sender) = sender {
         tokio::select! {
-            result = timeout(read_timeout, stream.read(buf)) => {
+            result = timeout_after_pending(read_timeout, stream.read(buf)) => {
                 result
                     .map_err(|_| anyhow!("raw HTTP/1 upstream body read timed out"))?
                     .map_err(Into::into)
@@ -152,7 +153,7 @@ where
             _ = sender.closed() => Err(anyhow!("downstream response body receiver closed")),
         }
     } else {
-        timeout(read_timeout, stream.read(buf))
+        timeout_after_pending(read_timeout, stream.read(buf))
             .await
             .map_err(|_| anyhow!("raw HTTP/1 upstream body read timed out"))?
             .map_err(Into::into)

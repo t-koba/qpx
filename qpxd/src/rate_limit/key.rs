@@ -48,6 +48,13 @@ pub(crate) struct RateLimitContext {
 }
 
 impl RateLimitContext {
+    pub(crate) fn from_source(src_ip: IpAddr) -> Self {
+        Self {
+            src_ip: Some(src_ip),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn from_identity(
         src_ip: IpAddr,
         identity: &ResolvedIdentity,

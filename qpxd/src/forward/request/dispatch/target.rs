@@ -27,7 +27,7 @@ pub(super) fn resolve_forward_target_or_response(
             false,
         )));
     }
-    let Some(host) = base.host.as_deref() else {
+    let Some(host) = base.host() else {
         return Ok(Err(finalize_response_for_request(
             req.method(),
             req.version(),
@@ -55,7 +55,7 @@ pub(super) fn forward_prefilter_context<'a>(
         src_ip: base.peer_ip,
         host: Some(host.host.as_str()),
         sni: base.sni.as_deref(),
-        path: base.path.as_deref(),
+        path: base.path(),
     }
 }
 
@@ -69,7 +69,7 @@ pub(super) fn forward_destination_metadata(
         &DestinationInputs {
             host: Some(host.host.as_str()),
             ip: host.host.parse().ok(),
-            scheme: base.scheme.as_deref(),
+            scheme: base.scheme.as_ref().map(http::uri::Scheme::as_str),
             port: host.port,
             ..Default::default()
         },

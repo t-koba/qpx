@@ -183,6 +183,34 @@ impl Body {
         self.trailers_sanitized
     }
 
+    /// Takes an in-memory body represented by exactly one data frame and no trailers.
+    ///
+    /// Callers can use this to preserve a single-frame transport fast path without
+    /// weakening validation for streamed or trailer-bearing bodies.
+    pub fn take_single_frame_without_trailers(&mut self) -> Option<Bytes> {
+        if self.close_signal.is_some() || self.pending_trailers.is_some() || self.stream_finished {
+            return None;
+        }
+        let bytes = match &mut self.inner {
+            BodyInner::Once { bytes, trailers } if trailers.is_none() => bytes.take(),
+            BodyInner::Chunks {
+                chunks,
+                trailers,
+                remaining_len,
+            } if trailers.is_none() && chunks.len() == 1 => {
+                let bytes = chunks.pop_front();
+                *remaining_len = 0;
+                bytes
+            }
+            BodyInner::Empty
+            | BodyInner::Once { .. }
+            | BodyInner::Chunks { .. }
+            | BodyInner::Boxed(_) => None,
+        }?;
+        self.stream_finished = true;
+        Some(bytes)
+    }
+
     pub fn limit_bytes(self, max_bytes: usize) -> Self {
         if max_bytes == usize::MAX {
             return self;
@@ -568,6 +596,25 @@ mod tests {
     fn byte_limit_preserves_trailer_sanitization_guarantee() {
         let body = Body::from("body").mark_trailers_sanitized().limit_bytes(16);
         assert!(body.trailers_are_sanitized());
+    }
+
+    #[test]
+    fn single_frame_fast_path_only_takes_exact_trailerless_replay() {
+        let mut body = Body::from(Bytes::from_static(b"body"));
+        assert_eq!(
+            body.take_single_frame_without_trailers(),
+            Some(Bytes::from_static(b"body"))
+        );
+        assert!(http_body::Body::is_end_stream(&body));
+        assert!(body.take_single_frame_without_trailers().is_none());
+
+        let mut trailers = HeaderMap::new();
+        trailers.insert("x-checksum", http::HeaderValue::from_static("valid"));
+        let mut with_trailers = Body::replay(Bytes::from_static(b"body"), Some(trailers));
+        assert!(with_trailers.take_single_frame_without_trailers().is_none());
+
+        let (_sender, mut streamed) = Body::channel();
+        assert!(streamed.take_single_frame_without_trailers().is_none());
     }
 
     #[tokio::test]

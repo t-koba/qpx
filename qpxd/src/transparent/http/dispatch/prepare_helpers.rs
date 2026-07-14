@@ -64,7 +64,7 @@ pub(super) fn guard_input<'a>(
         destination,
         proxy_name,
         audit: build_dispatch_audit_context(DispatchAuditInput {
-            state: state.clone(),
+            state,
             kind: ProxyKind::Transparent,
             scope_name: listener_name,
             remote_addr,
@@ -81,12 +81,15 @@ pub(super) fn guard_input<'a>(
     }
 }
 
-pub(super) fn preflight_rejection(
-    req: &Request<Body>,
+pub(super) fn preflight_result(
+    req: &mut Request<Body>,
     proxy_name: &str,
     trace_enabled: bool,
     trace_disabled_message: &str,
-) -> Option<Box<hyper::Response<Body>>> {
+) -> std::result::Result<
+    qpx_http::protocol::semantics::ValidatedIncomingRequest,
+    Box<hyper::Response<Body>>,
+> {
     match preflight_validate(
         req,
         proxy_name,
@@ -97,8 +100,8 @@ pub(super) fn preflight_rejection(
             "transparent HTTP forward_edges do not support CONNECT",
         ),
     ) {
-        PreflightOutcome::Reject(response) => Some(response),
-        PreflightOutcome::Continue => None,
+        PreflightOutcome::Reject(response) => Err(response),
+        PreflightOutcome::Continue(validated) => Ok(validated),
     }
 }
 
@@ -131,7 +134,7 @@ pub(super) fn destination(
             ip: host_for_match
                 .as_deref()
                 .and_then(|value| value.parse().ok()),
-            scheme: base.scheme.as_deref(),
+            scheme: base.scheme.as_ref().map(http::uri::Scheme::as_str),
             port: Some(connect_target.port()),
             ..Default::default()
         },

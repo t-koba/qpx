@@ -13,6 +13,7 @@ use qpx_core::config::{
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use subrequest::SubrequestModule;
 
@@ -65,6 +66,55 @@ fn module_test_context() -> HttpModuleContext {
             cache_default_scheme: None,
         },
     )
+}
+
+#[tokio::test]
+async fn empty_module_chain_is_a_context_free_identity_transform() {
+    let runtime = module_test_runtime();
+    let chain = Arc::new(CompiledHttpModuleChain::default());
+    let state = runtime.state();
+    let mut execution = chain.start(
+        &state,
+        HttpModuleSessionInit {
+            proxy_kind: crate::http::dispatch::ProxyKind::Reverse,
+            proxy_name: "test-proxy",
+            scope_name: "test-scope",
+            route_name: Some("test-route"),
+            remote_ip: "127.0.0.1".parse::<IpAddr>().expect("ip"),
+            sni: Some("example.com"),
+            identity_user: Some("alice"),
+            cache_policy: None,
+            cache_default_scheme: Some("https"),
+        },
+    );
+    let mut request = Request::builder()
+        .uri("https://example.com/resource")
+        .body(Body::empty())
+        .expect("request");
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from("body"))
+        .expect("response");
+
+    assert!(!execution.has_context());
+    assert!(matches!(
+        execution
+            .on_request_headers(&mut request)
+            .await
+            .expect("request headers"),
+        RequestHeadersOutcome::Continue
+    ));
+    let response = execution
+        .on_upstream_response(response)
+        .await
+        .expect("upstream response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        qpx_http::body::to_bytes(response.into_body())
+            .await
+            .expect("body"),
+        "body"
+    );
 }
 
 #[test]

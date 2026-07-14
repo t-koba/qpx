@@ -77,7 +77,7 @@ qpxd/src/runtime/tests/mod.rs	168	r
 qpxd/src/reverse/transport/tests/mod.rs	220	r
 qpxd/src/forward/request/tests/mod.rs	63	r
 qpxd/tests/perf_smoke.rs	2	r
-qpxd/tests/rfc911x_contract.rs	2	r
+qpxd/tests/http_rfc_contract.rs	2	r
 qpxd/tests/forward_e2e.rs	2	r
 qpxd/tests/advanced_transport_perf.rs	823	r
 qpx-h3/tests/e2e.rs	2	r

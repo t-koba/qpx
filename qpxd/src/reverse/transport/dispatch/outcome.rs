@@ -52,7 +52,16 @@ pub(super) async fn prepare_reverse_http_retry(
     Ok(true)
 }
 
-pub(super) fn record_reverse_success_metrics(state: &runtime::RuntimeState, started: Instant) {
+pub(super) fn record_reverse_success_metrics(
+    state: &runtime::RuntimeState,
+    started: Option<Instant>,
+) {
+    if !qpx_observability::metrics_enabled() {
+        return;
+    }
+    let Some(started) = started else {
+        return;
+    };
     let elapsed = started.elapsed();
     record_upstream_request_duration(ProxyKind::Reverse, elapsed);
     super::super::metrics::upstream_latency(state, elapsed);
@@ -64,6 +73,9 @@ pub(super) fn acquire_reverse_upstream_concurrency(
     request_limit_ctx: &crate::rate_limit::RateLimitContext,
     selected_upstream: Option<&Arc<UpstreamEndpoint>>,
 ) -> Option<crate::rate_limit::ConcurrencyPermits> {
+    if !request_limits.has_concurrency_controls() {
+        return request_limits.acquire_concurrency(request_limit_ctx);
+    }
     let mut concurrency_ctx = request_limit_ctx.clone();
     if concurrency_ctx.upstream.is_none() {
         concurrency_ctx.upstream = selected_upstream.map(|upstream| upstream.target.clone());

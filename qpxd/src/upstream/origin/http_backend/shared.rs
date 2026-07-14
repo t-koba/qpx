@@ -103,14 +103,8 @@ fn prepare_internal_http1_request(
     mut req: Request<Body>,
     authority: &str,
 ) -> Result<Request<Body>> {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or("/")
-        .to_string();
     *req.version_mut() = http::Version::HTTP_11;
-    *req.uri_mut() = Uri::builder().path_and_query(path.as_str()).build()?;
+    crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
     if !req.headers().contains_key(HOST) {
         req.headers_mut()
             .insert(HOST, HeaderValue::from_str(authority)?);

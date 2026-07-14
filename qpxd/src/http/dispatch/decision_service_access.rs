@@ -27,7 +27,7 @@ pub(crate) struct DecisionServiceHttpAccessInput<'a> {
     pub(crate) request_limit: Option<DecisionServiceRateLimit<'a>>,
     pub(crate) request_head: (&'a Method, http::Version),
     pub(crate) proxy_name: &'a str,
-    pub(crate) default_deny_response: Response<Body>,
+    pub(crate) default_deny_body: &'a str,
     pub(crate) audit: &'a DispatchAuditContext,
 }
 
@@ -71,7 +71,7 @@ pub(crate) fn apply_decision_service_http_access(
                 input.request_head.0,
                 input.request_head.1,
                 input.proxy_name,
-                input.default_deny_response,
+                input.default_deny_body,
                 input.audit,
             )?,
             false,
@@ -85,7 +85,7 @@ fn decision_service_deny_response(
     request_method: &Method,
     request_version: http::Version,
     proxy_name: &str,
-    default_response: Response<Body>,
+    default_deny_body: &str,
     audit: &DispatchAuditContext,
 ) -> Result<Response<Body>> {
     let merged_headers = merge_header_controls(base_headers, deny.headers);
@@ -104,7 +104,7 @@ fn decision_service_deny_response(
         request_method,
         request_version,
         proxy_name,
-        default_response,
+        crate::http::protocol::common::forbidden_response(default_deny_body),
         merged_headers.as_deref(),
         false,
     );

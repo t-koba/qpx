@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub(crate) struct DispatchAuditInput<'a> {
-    pub(crate) state: Arc<RuntimeState>,
+    pub(crate) state: &'a Arc<RuntimeState>,
     pub(crate) kind: ProxyKind,
     pub(crate) scope_name: &'a str,
     pub(crate) remote_addr: SocketAddr,
@@ -28,6 +28,7 @@ pub(crate) fn build_dispatch_audit_context(input: DispatchAuditInput<'_>) -> Dis
         || input.state.resources.audit_log.output.enabled
         || qpx_observability::otel_enabled();
     let owned = |value: Option<&str>| value.filter(|_| observability_enabled).map(str::to_owned);
+    let scope_name = observability_enabled.then(|| Arc::<str>::from(input.scope_name));
     let decision_service_policy_id = input
         .decision_service
         .filter(|_| observability_enabled)
@@ -49,9 +50,9 @@ pub(crate) fn build_dispatch_audit_context(input: DispatchAuditInput<'_>) -> Dis
             .unwrap_or_default();
     }
     DispatchAuditContext::new(
-        input.state,
+        observability_enabled.then(|| input.state.clone()),
         input.kind,
-        input.scope_name,
+        scope_name,
         input.remote_addr,
         input.request_method,
         owned(input.path),

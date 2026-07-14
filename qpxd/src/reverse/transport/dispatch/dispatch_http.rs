@@ -99,7 +99,14 @@ pub(super) async fn dispatch_reverse_http_route(
         if let Some(upstream) = selected_upstream.as_ref() {
             upstream.inflight.fetch_add(1, Ordering::Relaxed);
         }
-        let started = Instant::now();
+        let started = (qpx_observability::metrics_enabled()
+            || cache_policy.is_some()
+            || route
+                .policy
+                .passive_health
+                .as_ref()
+                .is_some_and(|policy| policy.latency_threshold.is_some()))
+        .then(Instant::now);
         let mut req_for_upstream = match build_reverse_attempt_request(
             attempt_idx,
             &mut first_request,
@@ -277,7 +284,9 @@ async fn handle_reverse_http_success(
     } = input;
     let resp = http_modules.on_upstream_response(response).await?;
     let classified_response_destination;
-    let response_destination = if upstream_cert.is_some() {
+    let response_destination = if upstream_cert.is_some()
+        && (route.requires_destination_after_selection() || state.destination_trace_enabled())
+    {
         classified_response_destination = classify_reverse_destination(
             state,
             conn,
@@ -346,12 +355,7 @@ async fn handle_reverse_http_success(
         .await?
     {
         if let Some(upstream) = selected_upstream {
-            record_reverse_upstream_status(
-                upstream,
-                &route.policy,
-                resp.status(),
-                started.elapsed(),
-            );
+            record_reverse_upstream_status(upstream, &route.policy, resp.status(), started);
         }
         return Ok(capture_reverse_response_outcome(
             ReverseAttemptOutcome::Response(empty_interim_response(stale)),
@@ -361,7 +365,7 @@ async fn handle_reverse_http_success(
         .await);
     }
     if let Some(upstream) = selected_upstream {
-        record_reverse_upstream_status(upstream, &route.policy, resp.status(), started.elapsed());
+        record_reverse_upstream_status(upstream, &route.policy, resp.status(), started);
     }
     record_reverse_success_metrics(state, started);
     resp = write_dispatch_cache_result(DispatchCacheWriteInput {
@@ -374,7 +378,9 @@ async fn handle_reverse_http_success(
         revalidation_state: revalidation_state.take(),
         request_collapse_guard: cache_collapse_guard.take(),
         request_method,
-        response_delay_secs: started.elapsed().as_secs(),
+        response_delay_secs: cache_policy
+            .and_then(|_| started.map(|started| started.elapsed().as_secs()))
+            .unwrap_or(0),
         state,
     })
     .await?;

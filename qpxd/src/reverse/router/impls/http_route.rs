@@ -119,6 +119,10 @@ impl HttpRoute {
         self.matcher.matches(ctx)
     }
 
+    pub(in crate::reverse) fn matches_every_request(&self) -> bool {
+        self.matcher.is_unconditional()
+    }
+
     pub(in crate::reverse) fn matches_without_request_body_observation(
         &self,
         ctx: &RuleMatchContext<'_>,
@@ -128,6 +132,16 @@ impl HttpRoute {
 
     pub(in crate::reverse) fn requires_request_size(&self) -> bool {
         self.matcher.requires_request_size()
+    }
+
+    pub(in crate::reverse) fn requires_destination_context(&self) -> bool {
+        self.matcher.requires_destination_context()
+    }
+
+    pub(in crate::reverse) fn requires_destination_after_selection(&self) -> bool {
+        self.response_rules
+            .as_deref()
+            .is_some_and(|rules| rules.any_rule_requires_destination_context())
     }
 
     pub(in crate::reverse) fn requires_request_body_observation(&self) -> bool {
@@ -158,6 +172,64 @@ impl HttpRoute {
         self.affinity.seed_http(conn, host, req, identity)
     }
 
+    pub(in crate::reverse) fn selection_is_seed_independent(&self) -> bool {
+        self.mirrors.is_empty()
+            && self.backends.len() == 1
+            && self.backends[0].upstreams.is_single_static_endpoint()
+    }
+
+    pub(in crate::reverse) fn single_plain_http_upstream(&self) -> Option<&UpstreamEndpoint> {
+        let [backend] = self.backends.as_slice() else {
+            return None;
+        };
+        let endpoint = backend.upstreams.single_static_endpoint()?;
+        endpoint
+            .origin
+            .direct_plain_http1_authorities()
+            .map(|_| endpoint.as_ref())
+    }
+
+    pub(in crate::reverse) fn available_plain_http_upstream(&self) -> Option<&UpstreamEndpoint> {
+        let endpoint = self.single_plain_http_upstream()?;
+        (!endpoint.has_time_dependent_admission_state()).then_some(endpoint)
+    }
+
+    pub(in crate::reverse) fn supports_plain_http_dispatch(&self) -> bool {
+        self.plan.flags.bits() == 0
+            && self.plan.api_metadata.is_none()
+            && self.plan.hsts.is_none()
+            && self.plan.forwarded.is_none()
+            && self
+                .plan
+                .rate_limits
+                .is_empty_for_scope(crate::rate_limit::TransportScope::Request)
+            && self.headers.is_none()
+            && self.local_response.is_none()
+            && self.ipc.is_none()
+            && self.webdav.is_none()
+            && self.response_rules.is_none()
+            && self.path_rewrite.is_none()
+            && self.policy.retry_attempts == 1
+            && self.policy.max_upstream_concurrency.is_none()
+            && self.selection_is_seed_independent()
+            && self.single_plain_http_upstream().is_some()
+            && !self.requires_destination_context()
+            && !self.requires_request_size()
+            && !self.requires_request_body_observation()
+            && !self.requires_request_rpc_context()
+            && matches!(
+                self.target,
+                crate::runtime::CompiledReverseRouteTarget::Upstream { .. }
+                    | crate::runtime::CompiledReverseRouteTarget::Weighted { .. }
+            )
+    }
+
+    pub(in crate::reverse) fn supports_raw_http1_dispatch(&self) -> bool {
+        self.supports_plain_http_dispatch()
+            && !self.matcher.requires_request_headers()
+            && !self.plan.require_precondition
+    }
+
     pub(in crate::reverse) fn select_upstream(
         &self,
         request_seed: u64,
@@ -165,6 +237,15 @@ impl HttpRoute {
     ) -> Option<Arc<UpstreamEndpoint>> {
         let idx = select_weighted_backend_idx(&self.backends, request_seed)?;
         let backend = &self.backends[idx];
+        if let Some(endpoints) = backend.upstreams.fixed_endpoints() {
+            return select_upstream_inner(
+                endpoints,
+                &self.policy,
+                &backend.rr_counter,
+                request_seed,
+                sticky_seed,
+            );
+        }
         let endpoints = backend.upstreams.endpoints();
         select_upstream_inner(
             endpoints.as_slice(),

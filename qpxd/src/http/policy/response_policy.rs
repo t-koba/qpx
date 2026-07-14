@@ -221,6 +221,10 @@ impl HttpResponseRuleEngine {
         self.any_rule_requires(|rule| rule.matcher.requires_response_size_matcher())
     }
 
+    pub(crate) fn any_rule_requires_destination_context(&self) -> bool {
+        self.any_rule_requires(|rule| rule.matcher.requires_destination_context())
+    }
+
     pub(crate) fn any_rule_requires_response_rpc_observation(&self) -> bool {
         self.any_rule_requires(|rule| rule.matcher.requires_response_rpc_observation())
     }

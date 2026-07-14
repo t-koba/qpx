@@ -48,7 +48,7 @@ pub(crate) struct HttpAccessInput<'a> {
     pub(crate) destination: &'a DestinationMetadata,
     pub(crate) base_headers: Option<Arc<CompiledHeaderControl>>,
     pub(crate) request_limit: Option<DecisionServiceRateLimit<'a>>,
-    pub(crate) default_deny_response: Response<Body>,
+    pub(crate) default_deny_body: &'a str,
 }
 
 pub(crate) enum HttpAccessDecision {
@@ -98,7 +98,7 @@ pub(crate) async fn enforce_http_access(input: HttpAccessInput<'_>) -> Result<Ht
         None
     };
     let audit = build_dispatch_audit_context(DispatchAuditInput {
-        state: input.state.clone(),
+        state: input.state,
         kind: input.kind,
         scope_name: input.scope_name,
         remote_addr: input.remote_addr,
@@ -125,7 +125,7 @@ pub(crate) async fn enforce_http_access(input: HttpAccessInput<'_>) -> Result<Ht
         request_limit: input.request_limit,
         request_head: (input.request_method, input.request_version),
         proxy_name: input.proxy_name,
-        default_deny_response: input.default_deny_response,
+        default_deny_body: input.default_deny_body,
         audit: &audit,
     })? {
         DecisionServiceHttpAccessOutcome::Continue(controls) => {

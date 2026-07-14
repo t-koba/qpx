@@ -236,14 +236,14 @@ serve_once() {
       break
     fi
     if ! kill -0 "$pid" >/dev/null 2>&1; then
-      echo "backend stub exited before serving port $port" >&2
+      echo "backend fixture exited before serving port $port" >&2
       return 1
     fi
     tries=$((tries + 1))
     sleep 0.05
   done
   if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "backend stub did not open port $port in time" >&2
+    echo "backend fixture did not open port $port in time" >&2
     return 1
   fi
   LAST_PID="$pid"
@@ -292,7 +292,7 @@ run_forward_suite() {
   serve_once 19091 "$response_file" "$capture_file"
   backend_pid="$LAST_PID"
   # Forward may perform background connections (e.g. proxy readiness checks) that can consume our
-  # one-shot backend stub. If that happens, restart it before issuing the request.
+  # one-shot backend fixture. If that happens, restart it before issuing the request.
   for _ in {1..5}; do
     sleep 0.1
     if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
@@ -356,7 +356,7 @@ run_reverse_suite() {
   backend_pid="$LAST_PID"
 
   # Reverse has background upstream health checks that may connect immediately on startup.
-  # If the first probe consumes our one-shot backend stub, restart it before issuing the request.
+  # If the first probe consumes our one-shot backend fixture, restart it before issuing the request.
   for _ in {1..5}; do
     sleep 0.1
     if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
@@ -408,7 +408,7 @@ run_transparent_suite() {
   backend_pid="$LAST_PID"
 
   # Transparent may perform background connections (e.g. upstream readiness checks) that can consume
-  # our one-shot backend stub. If that happens, restart it before issuing the request.
+  # our one-shot backend fixture. If that happens, restart it before issuing the request.
   for _ in {1..5}; do
     sleep 0.1
     if ! kill -0 "$backend_pid" >/dev/null 2>&1; then

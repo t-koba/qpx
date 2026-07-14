@@ -1,11 +1,11 @@
 use super::io::{determine_response_body_kind, response_body_allows_reuse};
 use super::response::{
-    ParsedResponseHead, ResponseBodyKind, build_response, forward_chunked_body,
-    forward_close_delimited_body,
+    ParsedResponseHead, RawParsedResponseHead, ResponseBodyKind, build_raw_response,
+    build_response, forward_chunked_body, forward_close_delimited_body,
 };
 use super::{
     Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-    parse_declared_content_length, send_http1_request_with_interim,
+    RawHttp1ResponseHead, parse_declared_content_length, send_http1_request_with_interim,
 };
 use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
@@ -214,7 +214,7 @@ async fn chunked_response_build_removes_conflicting_content_length() {
 }
 
 #[tokio::test]
-async fn inline_content_length_response_recycles_before_body_poll() {
+async fn inline_content_length_response_recycles_before_body_release() {
     let (stream, _peer) = tokio::io::duplex(64);
     let recycled = Arc::new(AtomicUsize::new(0));
     let recycled_capacity = Arc::new(AtomicUsize::new(0));
@@ -244,8 +244,47 @@ async fn inline_content_length_response_recycles_before_body_poll() {
     );
 
     assert_eq!(recycled.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        to_bytes(response.into_body()).await.expect("body bytes"),
+        Bytes::from_static(b"OK")
+    );
+    assert_eq!(recycled.load(Ordering::SeqCst), 1);
     assert!(recycled_capacity.load(Ordering::SeqCst) >= INITIAL_READ_BUF_SIZE);
     assert!(recycled_write_capacity.load(Ordering::SeqCst) >= 512);
+}
+
+#[tokio::test]
+async fn inline_raw_content_length_response_recycles_before_body_release() {
+    let (stream, _peer) = tokio::io::duplex(64);
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let mut prefix = BytesMut::with_capacity(INITIAL_READ_BUF_SIZE);
+    prefix.extend_from_slice(b"OK");
+    let headers = [httparse::Header {
+        name: "Content-Length",
+        value: b"2",
+    }];
+    let mut raw =
+        RawHttp1ResponseHead::from_parsed(&headers, &Method::GET, StatusCode::OK, Version::HTTP_11)
+            .expect("raw response head");
+    raw.finalize(Version::HTTP_2, "qpx");
+    let response = build_raw_response(
+        stream,
+        RawParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::OK,
+            raw: Arc::new(raw),
+        },
+        prefix,
+        BytesMut::with_capacity(512),
+        Some(Http1ConnectionRecycler::new(
+            move |_stream, _read_buf, _write_buf| {
+                recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+            },
+        )),
+    );
+
+    assert_eq!(recycled.load(Ordering::SeqCst), 1);
     assert_eq!(
         to_bytes(response.into_body()).await.expect("body bytes"),
         Bytes::from_static(b"OK")
