@@ -149,7 +149,7 @@ pub(super) struct HttpRoute {
     pub(super) name: Option<Arc<str>>,
     pub(super) target: CompiledReverseRouteTarget,
     pub(super) plan: ExecutionPlan,
-    pub(super) local_response: Option<qpx_core::config::LocalResponseConfig>,
+    pub(super) local_response: Option<crate::http::local_response::CompiledLocalResponse>,
     pub(super) headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) ipc: Option<IpcUpstream>,
     pub(super) webdav: Option<Arc<WebDavOriginService>>,

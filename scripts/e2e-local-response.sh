@@ -2,9 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 CONFIG_DIR="$ROOT_DIR/config/usecases/06-local-response"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/debug/qpxd}"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-local-response-e2e.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-local-response-e2e)"
 STATE_DIR="$TMP_DIR/state"
 LOG_DIR="$TMP_DIR/logs"
 mkdir -p "$STATE_DIR" "$LOG_DIR"

@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-config-check.XXXXXX")"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
+TMP_DIR="$(make_temp_dir qpx-config-check)"
 RUSTLS_TARGET_DIR="${QPX_CONFIG_CHECK_TARGET_DIR:-$ROOT_DIR/target}"
 NATIVE_TARGET_DIR="${QPX_CONFIG_CHECK_NATIVE_TARGET_DIR:-$ROOT_DIR/target/config-check-native}"
 QPXD_BUILD_BIN="$RUSTLS_TARGET_DIR/debug/qpxd"

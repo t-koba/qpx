@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 OUT_JSON="${1:-${QPX_HTTP2_COMPARE_JSON:-$ROOT_DIR/target/perf/perf-audit-http2-compare.jsonl}}"
 LOG_ARTIFACT_DIR="${QPX_HTTP2_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/http2-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
@@ -22,7 +23,7 @@ BACKEND_H2_PORT="${QPX_HTTP2_COMPARE_BACKEND_H2_PORT:-18283}"
 QPX_PORT="${QPX_HTTP2_COMPARE_QPX_PORT:-18281}"
 NGINX_PORT="${QPX_HTTP2_COMPARE_NGINX_PORT:-18282}"
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-http2-compare.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-http2-compare)"
 LOG_DIR="$TMP_DIR/logs"
 STATE_DIR="$TMP_DIR/state"
 mkdir -p "$LOG_DIR" "$STATE_DIR" "$(dirname "$OUT_JSON")"

@@ -168,11 +168,11 @@ pub trait CacheBackend: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct CacheRequestKey {
-    pub method: String,
-    pub scheme: String,
-    pub authority: String,
-    pub path_and_query: String,
-    pub content_digest: Option<String>,
+    pub method: std::sync::Arc<str>,
+    pub scheme: std::sync::Arc<str>,
+    pub authority: std::sync::Arc<str>,
+    pub path_and_query: std::sync::Arc<str>,
+    pub content_digest: Option<std::sync::Arc<str>>,
 }
 
 #[derive(Debug)]

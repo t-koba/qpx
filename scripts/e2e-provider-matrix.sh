@@ -2,11 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/debug/qpxd}"
 KEYCLOAK_IMAGE="quay.io/keycloak/keycloak@sha256:98fab020a3a490aba0978f237e2a06cd0ea42bf149c6cf10f11c0aaf27728ff2"
 CERBOS_IMAGE="ghcr.io/cerbos/cerbos@sha256:86f768368bbab30ceddd39e0e6df3d9ff8824c5f324af255a5573f0bddaae042"
 ORIGIN_PORT="${QPX_PROVIDER_MATRIX_ORIGIN_PORT:-18090}"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-provider-e2e.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-provider-e2e)"
 PIDS=()
 CONTAINERS=()
 

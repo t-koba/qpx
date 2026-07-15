@@ -64,7 +64,7 @@ impl DirectCombinedAccessWriter {
         for _ in 0..DIRECT_ACCESS_QUEUE_CHUNKS {
             recycled_sender
                 .send(Vec::with_capacity(DIRECT_ACCESS_BUFFER_BYTES))
-                .expect("new recycled-buffer channel must accept its initial capacity");
+                .context("failed to initialize the recycled access-log buffer pool")?;
         }
         let sink_thread = std::thread::Builder::new()
             .name("qpx-access-writer".to_string())
@@ -223,10 +223,10 @@ impl Drop for DirectCombinedAccessGuard {
         {
             eprintln!("access log writer channel disconnected during shutdown");
         }
-        if let Some(thread) = self.sink_thread.take() {
-            if thread.join().is_err() {
-                eprintln!("access log writer thread panicked");
-            }
+        if let Some(thread) = self.sink_thread.take()
+            && thread.join().is_err()
+        {
+            eprintln!("access log writer thread panicked");
         }
     }
 }
@@ -469,12 +469,16 @@ fn build_log_sink(
         "daily" => rolling::daily(&dir, file_name.as_str()),
         _ => rolling::never(&dir, file_name.as_str()),
     };
-    let cleanup = (rotation != "never").then(|| RotationCleanup {
-        dir,
-        base_name: file_name,
-        rotation,
-        keep: output.rotation_count,
-    });
+    let cleanup = if rotation != "never" {
+        Some(RotationCleanup {
+            dir,
+            base_name: file_name,
+            rotation,
+            keep: output.rotation_count,
+        })
+    } else {
+        None
+    };
     if let Some(cleanup) = cleanup.as_ref() {
         cleanup_old_logs(cleanup);
     }

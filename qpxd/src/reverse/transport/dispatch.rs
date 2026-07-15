@@ -926,7 +926,7 @@ async fn reverse_continue_response_rule(
             Ok(Ok((response, headers, cache_bypass, policy_tags, mirror)))
         }
         DispatchResponsePolicyOutcome::Response(response) => Ok(Err(
-            ReverseAttemptOutcome::Response(empty_interim_response(response)),
+            ReverseAttemptOutcome::Response(Box::new(empty_interim_response(response))),
         )),
     }
 }

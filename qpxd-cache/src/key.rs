@@ -4,7 +4,20 @@ use http::header::HOST;
 use hyper::{Method, Request};
 use qpx_http::body::Body;
 use qpx_http::protocol::address::format_authority_host_port;
+use std::cell::RefCell;
 use url::Url;
+
+struct CachedRequestKey {
+    method: Method,
+    uri: http::Uri,
+    host: Option<http::HeaderValue>,
+    default_scheme: String,
+    key: Option<CacheRequestKey>,
+}
+
+thread_local! {
+    static CACHED_REQUEST_KEY: RefCell<Option<CachedRequestKey>> = const { RefCell::new(None) };
+}
 
 impl CacheRequestKey {
     pub fn for_lookup(req: &Request<Body>, default_scheme: &str) -> Result<Option<Self>> {
@@ -12,6 +25,34 @@ impl CacheRequestKey {
     }
 
     pub fn for_target(req: &Request<Body>, default_scheme: &str) -> Result<Option<Self>> {
+        let host = req.headers().get(HOST);
+        if let Some(key) = CACHED_REQUEST_KEY.with_borrow(|cached| {
+            cached
+                .as_ref()
+                .filter(|cached| {
+                    cached.method == *req.method()
+                        && cached.uri == *req.uri()
+                        && cached.host.as_ref() == host
+                        && cached.default_scheme == default_scheme
+                })
+                .map(|cached| cached.key.clone())
+        }) {
+            return Ok(key);
+        }
+        let key = Self::for_target_uncached(req, default_scheme)?;
+        CACHED_REQUEST_KEY.with_borrow_mut(|cached| {
+            *cached = Some(CachedRequestKey {
+                method: req.method().clone(),
+                uri: req.uri().clone(),
+                host: host.cloned(),
+                default_scheme: default_scheme.to_string(),
+                key: key.clone(),
+            });
+        });
+        Ok(key)
+    }
+
+    fn for_target_uncached(req: &Request<Body>, default_scheme: &str) -> Result<Option<Self>> {
         let scheme = req
             .uri()
             .scheme_str()
@@ -39,10 +80,10 @@ impl CacheRequestKey {
             .unwrap_or_else(|| "/".to_string());
 
         Ok(Some(Self {
-            method: cache_method_group(req.method()),
-            scheme,
-            authority,
-            path_and_query,
+            method: std::sync::Arc::from(cache_method_group(req.method())),
+            scheme: std::sync::Arc::from(scheme),
+            authority: std::sync::Arc::from(authority),
+            path_and_query: std::sync::Arc::from(path_and_query),
             content_digest: None,
         }))
     }
@@ -68,7 +109,7 @@ impl CacheRequestKey {
 
     pub fn with_method_group(&self, method: impl Into<String>) -> Self {
         Self {
-            method: method.into(),
+            method: std::sync::Arc::from(method.into()),
             scheme: self.scheme.clone(),
             authority: self.authority.clone(),
             path_and_query: self.path_and_query.clone(),
@@ -78,7 +119,7 @@ impl CacheRequestKey {
 
     pub fn with_content_digest(&self, digest: impl Into<String>) -> Self {
         let mut key = self.clone();
-        key.content_digest = Some(digest.into());
+        key.content_digest = Some(std::sync::Arc::from(digest.into()));
         key
     }
 }
@@ -166,5 +207,40 @@ mod tests {
         let second = key.with_content_digest("sha-256:second");
         assert_eq!(first.primary_hash(), second.primary_hash());
         assert_ne!(first.content_digest, second.content_digest);
+    }
+
+    #[test]
+    fn repeated_request_key_reuses_normalized_components_without_cross_host_aliasing() {
+        let first_request = Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .header(HOST, "Example.COM:80")
+            .body(Body::empty())
+            .unwrap();
+        let first = CacheRequestKey::for_lookup(&first_request, "http")
+            .unwrap()
+            .unwrap();
+        let second = CacheRequestKey::for_lookup(&first_request, "http")
+            .unwrap()
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first.method, &second.method));
+        assert!(std::sync::Arc::ptr_eq(&first.scheme, &second.scheme));
+        assert!(std::sync::Arc::ptr_eq(&first.authority, &second.authority));
+        assert!(std::sync::Arc::ptr_eq(
+            &first.path_and_query,
+            &second.path_and_query
+        ));
+
+        let other_host = Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .header(HOST, "other.example")
+            .body(Body::empty())
+            .unwrap();
+        let other = CacheRequestKey::for_lookup(&other_host, "http")
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.authority.as_ref(), "other.example");
+        assert_ne!(first.authority, other.authority);
     }
 }

@@ -698,9 +698,20 @@ mod tests {
 
     #[tokio::test]
     async fn file_region_is_exact_and_portable_body_consumption_disables_it() {
-        let (mut file, path) =
-            qpx_core::secure_file::create_secure_temp_file("qpx-body-region", ".body")
-                .expect("create file");
+        let path = std::env::temp_dir().join(format!(
+            "qpx-body-region-{}-{}.body",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("create file");
         file.write_all(b"prefixpayload").expect("write file");
         file.flush().expect("flush file");
         let file = Arc::new(file);

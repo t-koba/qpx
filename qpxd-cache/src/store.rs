@@ -510,8 +510,8 @@ fn content_location_matches_target(
     let Some(authority) = super::key::normalize_url_authority(&resolved) else {
         return false;
     };
-    resolved.scheme().eq_ignore_ascii_case(key.scheme.as_str())
-        && authority == key.authority
+    resolved.scheme().eq_ignore_ascii_case(key.scheme.as_ref())
+        && authority.as_str() == key.authority.as_ref()
         && resolved.path() == base.path()
         && resolved.query() == base.query()
 }

@@ -1,9 +1,9 @@
 use super::{ReverseAccessControl, ReverseAccessInput, ReverseAccessOutcome};
 use crate::http::dispatch::{
     DecisionServiceHttpAccessInput, DecisionServiceHttpAccessOutcome, DispatchAuditContext,
-    DispatchAuditInput, DispatchGuardInput, DispatchOutcome, ProxyKind, annotated_local_response,
-    apply_decision_service_http_access, build_dispatch_audit_context, evaluate_http_guard,
-    rate_limit_response_for_parts,
+    DispatchAuditInput, DispatchGuardInput, DispatchOutcome, ProxyKind,
+    annotated_compiled_local_response, apply_decision_service_http_access,
+    build_dispatch_audit_context, evaluate_http_guard, rate_limit_response_for_parts,
 };
 use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use crate::rate_limit::{RateLimitContext, TransportScope};
@@ -226,7 +226,7 @@ fn reverse_local_route_response(
         return Ok(None);
     };
     super::super::metrics::local_response(state);
-    annotated_local_response(
+    annotated_compiled_local_response(
         request_method,
         request_version,
         proxy_name,

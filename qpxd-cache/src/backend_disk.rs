@@ -111,6 +111,12 @@ struct DecodedMetadataEntry {
     value: std::sync::Arc<CachedResponseEnvelope>,
 }
 
+struct BodyStreamWriteOptions {
+    max_body_bytes: usize,
+    body_read_timeout: Duration,
+    ttl_secs: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct DiskCacheHeader {
     schema_version: u16,
@@ -592,20 +598,21 @@ impl DiskCacheBackend {
         key: &str,
         path: &Path,
         body: Body,
-        max_body_bytes: usize,
-        body_read_timeout: Duration,
-        ttl_secs: u64,
+        options: BodyStreamWriteOptions,
     ) -> Result<u64> {
         let parent = path
             .parent()
             .ok_or_else(|| anyhow!("disk cache path missing parent: {}", path.display()))?;
         ensure_private_dir(parent)?;
-        let (body, len_rx) = bounded_cache_body_stream(body, max_body_bytes, body_read_timeout);
-        let cached = CachedBody::from_body_limited(body, max_body_bytes, body_read_timeout).await?;
+        let (body, len_rx) =
+            bounded_cache_body_stream(body, options.max_body_bytes, options.body_read_timeout);
+        let cached =
+            CachedBody::from_body_limited(body, options.max_body_bytes, options.body_read_timeout)
+                .await?;
         let len = len_rx
             .await
             .map_err(|_| anyhow!("disk cache body writer closed"))??;
-        self.put_object_path(namespace, key, path, &cached, ttl_secs)
+        self.put_object_path(namespace, key, path, &cached, options.ttl_secs)
             .await?;
         Ok(len)
     }
@@ -885,9 +892,11 @@ impl CacheBackend for DiskCacheBackend {
                 key,
                 &path,
                 body,
-                max_body_bytes,
-                body_read_timeout,
-                ttl_secs,
+                BodyStreamWriteOptions {
+                    max_body_bytes,
+                    body_read_timeout,
+                    ttl_secs,
+                },
             ),
         )
         .await?

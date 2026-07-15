@@ -176,7 +176,7 @@ pub(super) async fn dispatch_reverse_ipc_route(
                 })
                 .await?
                 {
-                    ReverseAttemptOutcome::Response(response) => return Ok(response),
+                    ReverseAttemptOutcome::Response(response) => return Ok(*response),
                     ReverseAttemptOutcome::Retry(err) => {
                         last_err = Some(err);
                         continue;
@@ -334,7 +334,7 @@ async fn handle_reverse_ipc_success(
         .await?
     {
         return Ok(capture_reverse_response_outcome(
-            ReverseAttemptOutcome::Response(empty_interim_response(stale)),
+            ReverseAttemptOutcome::Response(Box::new(empty_interim_response(stale))),
             route,
             export_session,
         )
@@ -406,8 +406,8 @@ async fn handle_reverse_ipc_success(
         DispatchOutcome::Allow,
         policy_tags.as_ref(),
     );
-    Ok(ReverseAttemptOutcome::Response(empty_interim_response(
-        resp,
+    Ok(ReverseAttemptOutcome::Response(Box::new(
+        empty_interim_response(resp),
     )))
 }
 

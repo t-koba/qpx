@@ -2,9 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 QPXD_BIN="${QPXD_BIN:?QPXD_BIN is required}"
 CLIENT="${1:?client name is required}"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-h3-external.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-h3-external)"
 QPXD_PID=""
 EXPECTED="qpx-h3-external-interop"
 URL="https://localhost:18443/"

@@ -315,7 +315,7 @@ pub(super) struct ReversePostModuleInput<'a> {
 }
 
 pub(super) enum ReverseAttemptOutcome {
-    Response((InterimList, Response<Body>)),
+    Response(Box<(InterimList, Response<Body>)>),
     Retry(anyhow::Error),
     Stop(anyhow::Error),
 }

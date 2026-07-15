@@ -53,10 +53,22 @@ pub(crate) fn prepare_dispatch_cache_keys(
     if cache_policy.is_none() {
         return Ok((None, None, None));
     }
-    let cache_lookup_key = CacheRequestKey::for_lookup(req, cache_default_scheme)?;
-    let cache_target_key = CacheRequestKey::for_target(req, cache_default_scheme)?;
+    let (cache_lookup_key, cache_target_key) =
+        prepare_dispatch_cache_key_pair(req, cache_policy, cache_default_scheme)?;
     let snapshot = cache_lookup_key.as_ref().map(|_| req.headers().clone());
     Ok((snapshot, cache_lookup_key, cache_target_key))
+}
+
+pub(crate) fn prepare_dispatch_cache_key_pair(
+    req: &Request<Body>,
+    cache_policy: Option<&qpx_core::config::CachePolicyConfig>,
+    cache_default_scheme: &str,
+) -> Result<(Option<CacheRequestKey>, Option<CacheRequestKey>)> {
+    if cache_policy.is_none() {
+        return Ok((None, None));
+    }
+    let key = CacheRequestKey::for_lookup(req, cache_default_scheme)?;
+    Ok((key.clone(), key))
 }
 
 pub(crate) struct DispatchCacheWriteInput<'a> {

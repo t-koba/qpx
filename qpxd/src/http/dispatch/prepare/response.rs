@@ -100,3 +100,23 @@ pub(crate) fn annotated_local_response(
     annotate_dispatch_response(&mut response, audit, outcome, &[]);
     Ok(response)
 }
+
+pub(crate) fn annotated_compiled_local_response(
+    request_method: &Method,
+    request_version: http::Version,
+    proxy_name: &str,
+    local: &crate::http::local_response::CompiledLocalResponse,
+    headers: Option<&CompiledHeaderControl>,
+    audit: &DispatchAuditContext,
+    outcome: DispatchOutcome,
+) -> Result<Response<Body>> {
+    let mut response = crate::http::local_response::finalized_compiled_local_response(
+        request_method,
+        request_version,
+        proxy_name,
+        local,
+        headers,
+    )?;
+    annotate_dispatch_response(&mut response, audit, outcome, &[]);
+    Ok(response)
+}

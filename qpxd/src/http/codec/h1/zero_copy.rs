@@ -61,10 +61,7 @@ impl ZeroCopySocket {
                 return Err(io::Error::last_os_error());
             }
             let owned = OwnedSocketFd(fd);
-            match AsyncFd::new(owned) {
-                Ok(socket) => self.socket = Some(socket),
-                Err(err) => return Err(err),
-            }
+            self.socket = Some(AsyncFd::new(owned)?);
         }
         self.socket
             .as_ref()

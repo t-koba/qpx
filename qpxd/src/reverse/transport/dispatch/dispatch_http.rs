@@ -183,7 +183,7 @@ pub(super) async fn dispatch_reverse_http_route(
                 })
                 .await?
                 {
-                    ReverseAttemptOutcome::Response(response) => return Ok(response),
+                    ReverseAttemptOutcome::Response(response) => return Ok(*response),
                     ReverseAttemptOutcome::Retry(err) => {
                         last_err = Some(err);
                         continue;
@@ -358,7 +358,7 @@ async fn handle_reverse_http_success(
             record_reverse_upstream_status(upstream, &route.policy, resp.status(), started);
         }
         return Ok(capture_reverse_response_outcome(
-            ReverseAttemptOutcome::Response(empty_interim_response(stale)),
+            ReverseAttemptOutcome::Response(Box::new(empty_interim_response(stale))),
             route,
             export_session,
         )
@@ -433,5 +433,5 @@ async fn handle_reverse_http_success(
         DispatchOutcome::Allow,
         policy_tags.as_ref(),
     );
-    Ok(ReverseAttemptOutcome::Response((interim, resp)))
+    Ok(ReverseAttemptOutcome::Response(Box::new((interim, resp))))
 }

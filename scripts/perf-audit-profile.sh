@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 PROFILE_DIR="${QPX_PERF_PROFILE_DIR:-$ROOT_DIR/target/perf/profiles}"
 PROFILE_JSON="${QPX_PERF_PROFILE_JSON:-$ROOT_DIR/target/perf/perf-audit-profile-summary.jsonl}"
 PROFILE_EVENTS="${QPX_PERF_PROFILE_EVENTS:-$ROOT_DIR/target/perf/perf-audit-profile-events.jsonl}"
@@ -13,7 +14,7 @@ BACKEND_PORT="${QPX_PERF_PROFILE_BACKEND_PORT:-18480}"
 QPX_HTTP1_PORT="${QPX_PERF_PROFILE_HTTP1_PORT:-18481}"
 QPX_HTTP2_PORT="${QPX_PERF_PROFILE_HTTP2_PORT:-18482}"
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-perf-profile.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-perf-profile)"
 LOG_DIR="$TMP_DIR/logs"
 mkdir -p "$PROFILE_DIR" "$LOG_DIR" "$(dirname "$PROFILE_JSON")"
 : >"$PROFILE_JSON"
@@ -230,7 +231,11 @@ annotate_profile() {
     echo "callgrind output is missing instruction events: ${file}" >&2
     return 1
   fi
-  instructions="$(awk '/^summary:/ { print $2; exit }' "$file")"
+  instructions="$(awk '
+    /^summary:/ { summary = $2 }
+    /^totals:/ { totals = $2 }
+    END { printf "%.0f\n", (summary > totals ? summary : totals) }
+  ' "$file")"
   instructions="${instructions:-0}"
   if ! [[ "$instructions" =~ ^[0-9]+$ ]] || [ "$instructions" -lt "$MIN_INSTRUCTIONS" ]; then
     echo "callgrind output has too few instructions (${instructions}): ${file}" >&2
@@ -285,8 +290,14 @@ run_profile() {
     run_http1_load "$load_output"
   fi
   callgrind_control -i off "$pid" >/dev/null
+  callgrind_control -d "$pid" >/dev/null
   kill -TERM "$pid"
-  wait "$pid"
+  local exit_status=0
+  wait "$pid" || exit_status=$?
+  if [ "$exit_status" -ne 0 ] && [ "$exit_status" -ne 143 ]; then
+    echo "profiled qpxd exited with status ${exit_status}" >&2
+    return 1
+  fi
   annotate_profile "qpxd_reverse_${protocol}" "$protocol" "$output"
   printf '{"bench":"callgrind_profile_load","target":%s,"requests":%s,"concurrency":%s,"valid":true,"commit":%s}\n' \
     "$(json_escape "qpxd_reverse_${protocol}")" \
@@ -300,6 +311,7 @@ require_cmd callgrind_annotate
 require_cmd callgrind_control
 require_cmd curl
 require_cmd h2load
+require_cmd nm
 require_cmd nginx
 require_cmd openssl
 require_cmd python3
@@ -311,8 +323,18 @@ if [ "$PROFILE_CONCURRENCY" -gt "$PROFILE_REQUESTS" ]; then
   echo "QPX_PERF_PROFILE_CONCURRENCY must not exceed QPX_PERF_PROFILE_REQUESTS" >&2
   exit 1
 fi
+if [ "$QPXD_BIN" = "$ROOT_DIR/target/release/qpxd" ]; then
+  CARGO_PROFILE_RELEASE_DEBUG=1 \
+    CARGO_PROFILE_RELEASE_STRIP=none \
+    cargo build -p qpxd --release --locked --bin qpxd --features http3-backend-qpx
+fi
 if [ ! -x "$QPXD_BIN" ]; then
-  cargo build -p qpxd --release --locked --bin qpxd
+  echo "missing qpxd binary: $QPXD_BIN" >&2
+  exit 1
+fi
+if ! nm -an "$QPXD_BIN" 2>/dev/null | awk 'index($0, "qpxd") { found = 1 } END { exit(found ? 0 : 1) }'; then
+  echo "qpxd binary lacks symbols; callgrind profiling requires an unstripped binary: $QPXD_BIN" >&2
+  exit 1
 fi
 
 make_certificate

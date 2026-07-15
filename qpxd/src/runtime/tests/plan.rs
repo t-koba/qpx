@@ -171,8 +171,8 @@ fn runtime_plan_classifies_http_modules_by_phase() {
         (
             serde_yaml::from_str::<HttpModuleConfig>("type: response_compression")
                 .expect("compression module"),
-            PlanFlags::RESPONSE_MODULES,
-            PlanFlags::REQUEST_MODULES,
+            true,
+            true,
         ),
         (
             serde_yaml::from_str::<HttpModuleConfig>(
@@ -186,8 +186,8 @@ settings:
   allowed_hosts: [127.0.0.1]"#,
             )
             .expect("request subrequest module"),
-            PlanFlags::REQUEST_MODULES,
-            PlanFlags::RESPONSE_MODULES,
+            true,
+            false,
         ),
         (
             serde_yaml::from_str::<HttpModuleConfig>(
@@ -201,12 +201,12 @@ settings:
   allowed_hosts: [127.0.0.1]"#,
             )
             .expect("response subrequest module"),
-            PlanFlags::RESPONSE_MODULES,
-            PlanFlags::REQUEST_MODULES,
+            false,
+            true,
         ),
     ];
 
-    for (module, expected, unexpected) in cases {
+    for (module, has_request_modules, has_response_modules) in cases {
         let mut route = reverse_route("default");
         route.http_modules = vec![module];
         let mut config = base_config();
@@ -214,8 +214,14 @@ settings:
 
         let flags = single_reverse_route_flags(config);
 
-        assert!(flags.contains(expected));
-        assert!(!flags.contains(unexpected));
+        assert_eq!(
+            flags.contains(PlanFlags::REQUEST_MODULES),
+            has_request_modules
+        );
+        assert_eq!(
+            flags.contains(PlanFlags::RESPONSE_MODULES),
+            has_response_modules
+        );
     }
 }
 

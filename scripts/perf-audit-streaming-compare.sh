@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 OUT_JSON="${1:-${QPX_STREAMING_COMPARE_JSON:-$ROOT_DIR/target/perf/perf-audit-streaming-compare.jsonl}}"
 LOG_ARTIFACT_DIR="${QPX_STREAMING_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/streaming-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
@@ -18,7 +19,7 @@ APACHE_PORT="${QPX_STREAMING_COMPARE_APACHE_PORT:-18383}"
 LIGHTTPD_PORT="${QPX_STREAMING_COMPARE_LIGHTTPD_PORT:-18384}"
 APACHE_BIN="${QPX_STREAMING_COMPARE_APACHE_BIN:-}"
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-streaming-compare.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-streaming-compare)"
 LOG_DIR="$TMP_DIR/logs"
 STATE_DIR="$TMP_DIR/state"
 mkdir -p "$LOG_DIR" "$STATE_DIR" "$(dirname "$OUT_JSON")"

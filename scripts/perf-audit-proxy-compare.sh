@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 OUT_JSON="${1:-${QPX_PROXY_COMPARE_JSON:-$ROOT_DIR/target/perf/perf-audit-proxy-compare.jsonl}}"
 LOG_ARTIFACT_DIR="${QPX_PROXY_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/proxy-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
@@ -70,7 +71,7 @@ validate_prefixed_environment() {
 
 validate_prefixed_environment
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-proxy-compare.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-proxy-compare)"
 LOG_DIR="$TMP_DIR/logs"
 STATE_DIR="$TMP_DIR/state"
 ORIGIN_ROOT="$TMP_DIR/origin-www"

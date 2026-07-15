@@ -79,7 +79,7 @@ pub(super) async fn send_http1_response_with_interim_zero_copy<W>(
     request_keep_alive: bool,
     body_read_timeout: Duration,
     head_buf: &mut BytesMut,
-    mut zero_copy: Option<&mut ZeroCopySocket>,
+    zero_copy: Option<&mut ZeroCopySocket>,
 ) -> Result<bool>
 where
     W: AsyncWrite + Unpin,
@@ -245,9 +245,7 @@ where
         ResponseBodyKind::ContentLength(length) => {
             if let Some(region) = file_region {
                 write_all_with_timeout(writer, head).await?;
-                let socket = zero_copy
-                    .as_deref_mut()
-                    .ok_or_else(|| anyhow!("zero-copy socket is unavailable"))?;
+                let socket = zero_copy.ok_or_else(|| anyhow!("zero-copy socket is unavailable"))?;
                 timeout_after_pending(RESPONSE_WRITE_TIMEOUT, socket.send_file(&region))
                     .await
                     .map_err(|_| anyhow!("HTTP/1 zero-copy response write timed out"))??;

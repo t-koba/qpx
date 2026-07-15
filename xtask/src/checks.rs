@@ -2933,7 +2933,7 @@ fn ci_acceptance_violations(
     release: &str,
     about: &str,
     public_api: &str,
-) -> Vec<&'static str> {
+) -> Vec<String> {
     let mut violations = Vec::new();
     for required in [
         "dtolnay/rust-toolchain@1.96",
@@ -2969,8 +2969,9 @@ fn ci_acceptance_violations(
         "target/perf/runner.jsonl",
         "sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk",
         "cargo build -p qpxd --release --locked",
-        "scripts/perf-audit-proxy-compare.sh \"$QPX_PROXY_COMPARE_JSON\"",
+        "scripts/perf-audit-proxy-matrix.sh \"$QPX_PROXY_COMPARE_JSON\"",
         "target/perf/perf-audit-proxy-compare.jsonl",
+        "scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl perf/origin-cache-performance-objectives.json",
         "scripts/perf-audit-http2-compare.sh \"$QPX_HTTP2_COMPARE_JSON\"",
         "target/perf/perf-audit-http2-compare.jsonl",
         "target/perf/http2-compare-logs/**",
@@ -2988,11 +2989,12 @@ fn ci_acceptance_violations(
         "scripts/h3-interop/run.sh all",
         "target/perf/qpx-h3-interop-matrix.json",
         "target/perf/proxy-compare-logs/**",
-        "scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json",
+        "scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json perf/proxy-performance-objectives.json",
         "scripts/perf-audit-profile.sh",
         "target/perf/perf-audit-profile-summary.jsonl",
         "target/perf/perf-audit-profile-events.jsonl",
         "target/perf/profiles/**",
+        "CARGO_PROFILE_RELEASE_DEBUG: \"1\"",
         "CARGO_PROFILE_RELEASE_STRIP: \"none\"",
         "workflow_dispatch:",
         "release:",
@@ -3001,7 +3003,9 @@ fn ci_acceptance_violations(
         "\"v*\"",
     ] {
         if !ci.contains(required) {
-            violations.push("ci.yml missing required job or command");
+            violations.push(format!(
+                "ci.yml missing required job or command: {required}"
+            ));
             break;
         }
     }
@@ -3023,7 +3027,7 @@ fn ci_acceptance_violations(
         "streaming_requirement_config_validator",
     ] {
         if !security.contains(required) {
-            violations.push("security-qa.yml missing ASAN or fuzz smoke coverage");
+            violations.push("security-qa.yml missing ASAN or fuzz smoke coverage".to_string());
             break;
         }
     }
@@ -3032,7 +3036,7 @@ fn ci_acceptance_violations(
         "github/codeql-action/analyze@v4",
     ] {
         if !codeql.contains(required) {
-            violations.push("codeql.yml missing CodeQL init/analyze");
+            violations.push("codeql.yml missing CodeQL init/analyze".to_string());
             break;
         }
     }
@@ -3042,8 +3046,10 @@ fn ci_acceptance_violations(
         "cargo xtask budget",
     ] {
         if !structure.contains(required) {
-            violations
-                .push("structure.yml must run acceptance, structure, and budget gates together");
+            violations.push(
+                "structure.yml must run acceptance, structure, and budget gates together"
+                    .to_string(),
+            );
             break;
         }
     }
@@ -3066,12 +3072,13 @@ fn ci_acceptance_violations(
         "${{ env.ASSET_SHA256 }}",
     ] {
         if !release.contains(required) {
-            violations.push("release.yml missing release build, package, or publish gate");
+            violations
+                .push("release.yml missing release build, package, or publish gate".to_string());
             break;
         }
     }
     if !about.contains("\"MIT-0\"") {
-        violations.push("about.toml missing MIT-0 license allowance");
+        violations.push("about.toml missing MIT-0 license allowance".to_string());
     }
     for required in [
         "check_crate qpx-core",
@@ -3081,7 +3088,7 @@ fn ci_acceptance_violations(
         "check_crate qpx-observability",
     ] {
         if !public_api.contains(required) {
-            violations.push("public API script missing library crate snapshot check");
+            violations.push("public API script missing library crate snapshot check".to_string());
             break;
         }
     }
@@ -5284,8 +5291,9 @@ mod tests {
             target/perf/runner.jsonl
             sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk
             cargo build -p qpxd --release --locked
-            scripts/perf-audit-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
+            scripts/perf-audit-proxy-matrix.sh "$QPX_PROXY_COMPARE_JSON"
             target/perf/perf-audit-proxy-compare.jsonl
+            scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl perf/origin-cache-performance-objectives.json
             scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
             target/perf/perf-audit-http2-compare.jsonl
             target/perf/http2-compare-logs/**
@@ -5303,11 +5311,12 @@ mod tests {
             scripts/h3-interop/run.sh all
             target/perf/qpx-h3-interop-matrix.json
             target/perf/proxy-compare-logs/**
-            scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json
+            scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json perf/proxy-performance-objectives.json
             scripts/perf-audit-profile.sh
             target/perf/perf-audit-profile-summary.jsonl
             target/perf/perf-audit-profile-events.jsonl
             target/perf/profiles/**
+            CARGO_PROFILE_RELEASE_DEBUG: "1"
             CARGO_PROFILE_RELEASE_STRIP: "none"
             workflow_dispatch:
             release:
@@ -5375,7 +5384,7 @@ mod tests {
                 "check_crate qpx-core",
             ),
             [
-                "ci.yml missing required job or command",
+                "ci.yml missing required job or command: cargo check --workspace --locked",
                 "security-qa.yml missing ASAN or fuzz smoke coverage",
                 "codeql.yml missing CodeQL init/analyze",
                 "structure.yml must run acceptance, structure, and budget gates together",

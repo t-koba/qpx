@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-config-behavior.XXXXXX")"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
+TMP_DIR="$(make_temp_dir qpx-config-behavior)"
 TARGET_DIR="${QPX_CONFIG_BEHAVIOR_TARGET_DIR:-$ROOT_DIR/target}"
 QPXD_BIN_FROM_ENV="${QPXD_BIN:-}"
 QPXD_BIN="${QPXD_BIN_FROM_ENV:-$TARGET_DIR/debug/qpxd}"

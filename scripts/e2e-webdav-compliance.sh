@@ -2,10 +2,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/debug/qpxd}"
 LITMUS_BIN="${LITMUS_BIN:?LITMUS_BIN is required}"
 CALDAV_TESTER_BIN="${CALDAV_TESTER_BIN:?CALDAV_TESTER_BIN is required}"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-webdav-e2e.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-webdav-e2e)"
 QPXD_PID=""
 
 cleanup() {

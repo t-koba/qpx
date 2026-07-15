@@ -75,13 +75,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@nightly-2026-07-15
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: public-api
       - name: install cargo-public-api
-        run: cargo install cargo-public-api --locked
+        run: cargo install cargo-public-api --version 0.52.0 --locked
       - name: check public API fingerprints
         run: bash ./scripts/check-public-api.sh
 
@@ -440,6 +439,8 @@ jobs:
         continue-on-error: true
         env:
           RUSTFLAGS: "-D warnings"
+          CARGO_PROFILE_RELEASE_DEBUG: "1"
+          CARGO_PROFILE_RELEASE_STRIP: "none"
           QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-proxy-compare.jsonl
         run: |
           cargo build -p qpxd --release --locked --features http3-backend-qpx
@@ -502,7 +503,7 @@ jobs:
         id: callgrind_hot_path_profile
         continue-on-error: true
         env:
-          RUSTFLAGS: "-D warnings -C force-frame-pointers=yes"
+          RUSTFLAGS: "-D warnings"
           CARGO_PROFILE_RELEASE_DEBUG: "1"
           CARGO_PROFILE_RELEASE_STRIP: "none"
           QPX_PERF_PROFILE_JSON: ${{ github.workspace }}/target/perf/perf-audit-profile-summary.jsonl

@@ -230,41 +230,6 @@ struct HotBucketEntry {
     entry: Arc<BucketEntry>,
 }
 
-fn with_bucket<R>(
-    hot: &ArcSwapOption<HotBucketEntry>,
-    shards: &[Mutex<LimiterInner>],
-    shard_mask: usize,
-    key: LimiterKey,
-    now: Instant,
-    now_nanos: u64,
-    capacity: f64,
-    refill_per_sec: f64,
-    operation: impl FnOnce(&BucketState) -> R,
-) -> R {
-    let cached = hot.load();
-    if let Some(cached) = cached.as_ref()
-        && cached.key == key
-    {
-        cached
-            .entry
-            .last_seen_nanos
-            .store(now_nanos, Ordering::Relaxed);
-        return operation(&cached.entry.bucket);
-    }
-    drop(cached);
-
-    let shard = qpx_http::sharding::masked(&key, shard_mask);
-    let entry = shards[shard]
-        .lock()
-        .entry(key.clone(), now, now_nanos, capacity, refill_per_sec);
-    hot.store(Some(Arc::new(HotBucketEntry {
-        key,
-        entry: entry.clone(),
-    })));
-    entry.last_seen_nanos.store(now_nanos, Ordering::Relaxed);
-    operation(&entry.bucket)
-}
-
 fn nonzero_capacity(value: usize) -> NonZeroUsize {
     match NonZeroUsize::new(value.max(1)) {
         Some(capacity) => capacity,
@@ -307,6 +272,41 @@ impl RateLimiter {
         make_limiter_key(self.key_kind, ctx)
     }
 
+    fn with_bucket<R>(
+        &self,
+        key: LimiterKey,
+        now: Instant,
+        now_nanos: u64,
+        operation: impl FnOnce(&BucketState) -> R,
+    ) -> R {
+        let cached = self.hot.load();
+        if let Some(cached) = cached.as_ref()
+            && cached.key == key
+        {
+            cached
+                .entry
+                .last_seen_nanos
+                .store(now_nanos, Ordering::Relaxed);
+            return operation(&cached.entry.bucket);
+        }
+        drop(cached);
+
+        let shard = qpx_http::sharding::masked(&key, self.shard_mask);
+        let entry = self.shards[shard].lock().entry(
+            key.clone(),
+            now,
+            now_nanos,
+            self.capacity,
+            self.refill_per_sec,
+        );
+        self.hot.store(Some(Arc::new(HotBucketEntry {
+            key,
+            entry: entry.clone(),
+        })));
+        entry.last_seen_nanos.store(now_nanos, Ordering::Relaxed);
+        operation(&entry.bucket)
+    }
+
     pub(crate) fn try_acquire_with_context(
         &self,
         ctx: &RateLimitContext,
@@ -318,17 +318,9 @@ impl RateLimiter {
             .as_nanos()
             .min(u64::MAX as u128) as u64;
         let key = self.make_key(ctx);
-        with_bucket(
-            &self.hot,
-            self.shards.as_slice(),
-            self.shard_mask,
-            key,
-            now,
-            now_nanos,
-            self.capacity,
-            self.refill_per_sec,
-            |bucket| bucket.try_take(now, now_nanos, cost),
-        )
+        self.with_bucket(key, now, now_nanos, |bucket| {
+            bucket.try_take(now, now_nanos, cost)
+        })
     }
 
     pub(crate) fn reserve_delay_with_context(&self, ctx: &RateLimitContext, cost: u64) -> Duration {
@@ -338,17 +330,9 @@ impl RateLimiter {
             .as_nanos()
             .min(u64::MAX as u128) as u64;
         let key = self.make_key(ctx);
-        with_bucket(
-            &self.hot,
-            self.shards.as_slice(),
-            self.shard_mask,
-            key,
-            now,
-            now_nanos,
-            self.capacity,
-            self.refill_per_sec,
-            |bucket| bucket.reserve_delay(now, now_nanos, cost),
-        )
+        self.with_bucket(key, now, now_nanos, |bucket| {
+            bucket.reserve_delay(now, now_nanos, cost)
+        })
     }
 
     #[cfg(test)]

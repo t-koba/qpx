@@ -59,6 +59,13 @@ where
     Spawned(JoinHandle<BodyReadResult<R>>),
 }
 
+struct ServeHttp1PartsOptions<U> {
+    header_read_timeout: Duration,
+    body_channel_capacity: usize,
+    zero_copy: Option<ZeroCopySocket>,
+    reunite: U,
+}
+
 #[cfg(test)]
 pub(crate) async fn serve_http1_with_interim<I, S>(
     io: I,
@@ -94,10 +101,14 @@ where
         write_half,
         BytesMut::new(),
         service,
-        header_read_timeout,
-        body_channel_capacity,
-        None,
-        |read_half, write_half| Ok(read_half.unsplit(write_half)),
+        ServeHttp1PartsOptions {
+            header_read_timeout,
+            body_channel_capacity,
+            zero_copy: None,
+            reunite: |read_half: tokio::io::ReadHalf<I>, write_half: tokio::io::WriteHalf<I>| {
+                Ok(read_half.unsplit(write_half))
+            },
+        },
     )
     .await
 }
@@ -125,13 +136,16 @@ where
         write_half,
         read_buf,
         service,
-        header_read_timeout,
-        body_channel_capacity,
-        zero_copy,
-        |read_half, write_half| {
-            read_half
-                .reunite(write_half)
-                .map_err(|_| anyhow!("failed to reunite HTTP/1 TCP stream"))
+        ServeHttp1PartsOptions {
+            header_read_timeout,
+            body_channel_capacity,
+            zero_copy,
+            reunite: |read_half: tokio::net::tcp::OwnedReadHalf,
+                      write_half: tokio::net::tcp::OwnedWriteHalf| {
+                read_half
+                    .reunite(write_half)
+                    .map_err(|_| anyhow!("failed to reunite HTTP/1 TCP stream"))
+            },
         },
     )
     .await
@@ -142,10 +156,7 @@ async fn serve_http1_parts<R, W, S, U, I>(
     mut write_half: W,
     mut read_buf: BytesMut,
     service: S,
-    header_read_timeout: Duration,
-    body_channel_capacity: usize,
-    mut zero_copy: Option<ZeroCopySocket>,
-    reunite: U,
+    options: ServeHttp1PartsOptions<U>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -157,6 +168,12 @@ where
     U: FnOnce(R, W) -> Result<I>,
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let ServeHttp1PartsOptions {
+        header_read_timeout,
+        body_channel_capacity,
+        mut zero_copy,
+        reunite,
+    } = options;
     let mut reunite = Some(reunite);
     let mut response_head_buf = BytesMut::with_capacity(512);
 

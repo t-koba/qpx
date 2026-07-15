@@ -2,11 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 CONFIG_DIR="$ROOT_DIR/config/usecases/99-test-fixtures"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/debug/qpxd}"
 QPXF_BIN="${QPXF_BIN:-$ROOT_DIR/target/debug/qpxf}"
 IPC_CONFIG_DIR="$ROOT_DIR/config/usecases/12-ipc-gateway"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-e2e.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-e2e)"
 STATE_DIR="$TMP_DIR/state"
 LOG_DIR="$TMP_DIR/logs"
 IPC_RUNTIME_DIR="$TMP_DIR/runtime"

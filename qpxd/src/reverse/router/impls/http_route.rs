@@ -66,9 +66,14 @@ impl HttpRoute {
                 None,
                 Vec::new(),
             ),
-            ReverseRouteTargetConfig::LocalResponse { response } => {
-                (Some(*response), None, None, Vec::new())
-            }
+            ReverseRouteTargetConfig::LocalResponse { response } => (
+                Some(crate::http::local_response::CompiledLocalResponse::compile(
+                    *response,
+                )?),
+                None,
+                None,
+                Vec::new(),
+            ),
             ReverseRouteTargetConfig::Webdav { origin } => {
                 let origin = webdav_origins.get(origin.as_str()).ok_or_else(|| {
                     anyhow::anyhow!("unknown WebDAV origin during route compilation: {origin}")

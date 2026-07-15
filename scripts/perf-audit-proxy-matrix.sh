@@ -2,9 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 OUT_JSON="${1:-${QPX_PROXY_COMPARE_JSON:-$ROOT_DIR/target/perf/perf-audit-proxy-compare.jsonl}}"
 LOG_ROOT="${QPX_PROXY_MATRIX_LOG_DIR:-$ROOT_DIR/target/perf/proxy-compare-logs}"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-proxy-matrix.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-proxy-matrix)"
 CANDIDATE="${OUT_JSON}.tmp.$$"
 INVALID_JSON="${OUT_JSON}.invalid"
 

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 OUT_JSON="${QPX_ALLOCATION_PROFILE_JSON:-$ROOT_DIR/target/perf/perf-audit-allocation-profile.jsonl}"
 PROFILE_DIR="${QPX_ALLOCATION_PROFILE_DIR:-$ROOT_DIR/target/perf/allocations}"
 ALLOCATION_TARGET_DIR="${QPX_ALLOCATION_TARGET_DIR:-$ROOT_DIR/target/perf/allocation-target}"
@@ -11,7 +12,7 @@ BODY_BYTES="${QPX_ALLOCATION_PROFILE_BODY_BYTES:-1024}"
 BACKEND_PORT="${QPX_ALLOCATION_BACKEND_PORT:-18480}"
 QPX_PORT="${QPX_ALLOCATION_QPX_PORT:-18481}"
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qpx-allocation-profile.XXXXXX")"
+TMP_DIR="$(make_temp_dir qpx-allocation-profile)"
 LOG_DIR="$TMP_DIR/logs"
 STATE_DIR="$TMP_DIR/state"
 mkdir -p "$LOG_DIR" "$STATE_DIR" "$PROFILE_DIR" "$(dirname "$OUT_JSON")"
@@ -58,7 +59,7 @@ verify_qpxd_symbols() {
     echo "missing qpxd binary: $bin" >&2
     exit 1
   fi
-  if ! nm -an "$bin" 2>/dev/null | grep -q 'qpxd'; then
+  if ! nm -an "$bin" 2>/dev/null | awk 'index($0, "qpxd") { found = 1 } END { exit(found ? 0 : 1) }'; then
     echo "qpxd binary lacks symbols; allocation profiling requires an unstripped binary: $bin" >&2
     exit 1
   fi

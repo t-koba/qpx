@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use hyper::{Request, StatusCode};
 use qpx_core::config::HttpGuardProfileConfig;
 use qpx_http::body::Body;
@@ -103,25 +103,27 @@ impl CompiledHttpGuardProfile {
             .flatten();
         async move {
             if let Some(body_reader) = body_reader {
-                let profile = profile.expect("body validation profile must be present");
-                if validate_json {
-                    if let Some(reject) = validate_json_limits_reader(
+                let Some(profile) = profile else {
+                    return Err(anyhow!(
+                        "body validation profile is unavailable for an observed request body"
+                    ));
+                };
+                if validate_json
+                    && let Some(reject) = validate_json_limits_reader(
                         &body_reader,
                         content_type.flatten().as_deref(),
                         profile.clone(),
                     )
                     .await?
-                    {
-                        return Ok(Some(reject));
-                    }
+                {
+                    return Ok(Some(reject));
                 }
-                if validate_multipart {
-                    if let Some(reject) =
+                if validate_multipart
+                    && let Some(reject) =
                         validate_multipart_limits_reader(&body_reader, boundary.flatten(), profile)
                             .await?
-                    {
-                        return Ok(Some(reject));
-                    }
+                {
+                    return Ok(Some(reject));
                 }
             }
             Ok(None)

@@ -119,12 +119,12 @@ fn collect_invalidation_targets(
                 Some(query) => format!("{}?{}", url.path(), query),
                 None => url.path().to_string(),
             };
-            for method in invalidated_method_groups(request_target.method.as_str()) {
+            for method in invalidated_method_groups(request_target.method.as_ref()) {
                 out.push(CacheRequestKey {
-                    method: method.to_string(),
-                    scheme: url.scheme().to_ascii_lowercase(),
-                    authority: authority.clone(),
-                    path_and_query: path_and_query.clone(),
+                    method: std::sync::Arc::from(*method),
+                    scheme: std::sync::Arc::from(url.scheme().to_ascii_lowercase()),
+                    authority: std::sync::Arc::from(authority.as_str()),
+                    path_and_query: std::sync::Arc::from(path_and_query.as_str()),
                     content_digest: None,
                 });
             }
@@ -134,10 +134,10 @@ fn collect_invalidation_targets(
 }
 
 fn invalidation_keys_for_target(target: &CacheRequestKey) -> Vec<CacheRequestKey> {
-    invalidated_method_groups(target.method.as_str())
+    invalidated_method_groups(target.method.as_ref())
         .iter()
         .map(|method| CacheRequestKey {
-            method: (*method).to_string(),
+            method: std::sync::Arc::from(*method),
             scheme: target.scheme.clone(),
             authority: target.authority.clone(),
             path_and_query: target.path_and_query.clone(),
