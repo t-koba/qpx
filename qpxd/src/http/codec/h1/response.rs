@@ -1,3 +1,4 @@
+use super::zero_copy::ZeroCopySocket;
 use super::{RESPONSE_WRITE_TIMEOUT, has_chunked_transfer_encoding, parse_declared_content_length};
 use crate::http::codec::h1_common::serialize_headers;
 use crate::http::codec::lazy_timeout::timeout_after_pending;
@@ -47,6 +48,38 @@ pub(crate) async fn send_http1_response_with_interim<W>(
     request_keep_alive: bool,
     body_read_timeout: Duration,
     head_buf: &mut BytesMut,
+) -> Result<bool>
+where
+    W: AsyncWrite + Unpin,
+{
+    send_http1_response_with_interim_zero_copy(
+        writer,
+        request_version,
+        request_method,
+        response,
+        interim,
+        request_keep_alive,
+        body_read_timeout,
+        head_buf,
+        None,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "response relay keeps protocol state and zero-copy capability explicit"
+)]
+pub(super) async fn send_http1_response_with_interim_zero_copy<W>(
+    writer: &mut W,
+    request_version: Version,
+    request_method: &Method,
+    response: Response<Body>,
+    interim: &[InterimResponseHead],
+    request_keep_alive: bool,
+    body_read_timeout: Duration,
+    head_buf: &mut BytesMut,
+    mut zero_copy: Option<&mut ZeroCopySocket>,
 ) -> Result<bool>
 where
     W: AsyncWrite + Unpin,
@@ -125,11 +158,28 @@ where
         }
     };
 
+    let file_region = if zero_copy.is_some()
+        && let ResponseBodyKind::ContentLength(length) = body_kind
+    {
+        match body.take_file_region_without_trailers() {
+            Some(region) if region.len() == length => Some(region),
+            Some(region) => {
+                return Err(anyhow!(
+                    "zero-copy file region length {} does not match content-length {length}",
+                    region.len()
+                ));
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let mut first_chunk = None;
     let mut first_trailers = None;
     let mut first_body_error = None;
     let mut body_data_finished = false;
-    if !matches!(body_kind, ResponseBodyKind::Empty) {
+    if !matches!(body_kind, ResponseBodyKind::Empty) && file_region.is_none() {
         match poll_response_body_data_now(&mut body).await {
             Ok(Poll::Ready(chunk)) => {
                 body_data_finished = chunk.is_none();
@@ -193,6 +243,17 @@ where
     match body_kind {
         ResponseBodyKind::Empty => write_all_with_timeout(writer, head).await?,
         ResponseBodyKind::ContentLength(length) => {
+            if let Some(region) = file_region {
+                write_all_with_timeout(writer, head).await?;
+                let socket = zero_copy
+                    .as_deref_mut()
+                    .ok_or_else(|| anyhow!("zero-copy socket is unavailable"))?;
+                timeout_after_pending(RESPONSE_WRITE_TIMEOUT, socket.send_file(&region))
+                    .await
+                    .map_err(|_| anyhow!("HTTP/1 zero-copy response write timed out"))??;
+                flush_with_timeout(writer).await?;
+                return Ok(keep_alive);
+            }
             if let Some(err) = first_body_error.take() {
                 write_all_with_timeout(writer, head).await?;
                 return Err(err);

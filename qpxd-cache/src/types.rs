@@ -96,6 +96,31 @@ impl InFlightRevalidations {
 pub trait CacheBackend: Send + Sync {
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<Bytes>>;
     async fn get_many(&self, namespace: &str, keys: &[String]) -> Result<Vec<Option<Bytes>>>;
+    async fn get_decoded_variant_index(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<Arc<VariantIndex>>> {
+        let Some(raw) = self.get(namespace, key).await? else {
+            return Ok(None);
+        };
+        Ok(Some(Arc::new(serde_json::from_slice(&raw)?)))
+    }
+    async fn get_decoded_response_metadata_many(
+        &self,
+        namespace: &str,
+        keys: &[String],
+    ) -> Result<Vec<Option<Arc<CachedResponseEnvelope>>>> {
+        self.get_many(namespace, keys)
+            .await?
+            .into_iter()
+            .map(|raw| {
+                raw.map(decode_cached_response_metadata)
+                    .transpose()
+                    .map(|decoded| decoded.map(Arc::new))
+            })
+            .collect()
+    }
     async fn get_object(&self, namespace: &str, key: &str) -> Result<Option<CachedBody>> {
         Ok(self.get(namespace, key).await?.map(CachedBody::from_bytes))
     }
@@ -252,6 +277,11 @@ const CACHE_METADATA_MAGIC: &[u8] = b"QPX-CACHE-META\0\x01";
 
 pub fn cache_body_storage_key(variant_key: &str) -> String {
     format!("{variant_key}:body")
+}
+
+pub(crate) fn is_cache_body_storage_key(key: &str) -> bool {
+    key.strip_suffix(":body")
+        .is_some_and(|variant| !variant.is_empty())
 }
 
 pub fn encode_cached_response_metadata(envelope: &CachedResponseEnvelope) -> Result<Vec<u8>> {

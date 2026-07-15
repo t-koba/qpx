@@ -147,17 +147,17 @@ pub(super) async fn enforce_reverse_access_control(
     let request_limit_ctx = if route
         .plan
         .rate_limits
-        .is_empty_for_scope(TransportScope::Request)
-        && allowed.rate_limit_profile.is_none()
+        .requires_extended_context(TransportScope::Request)
+        || allowed.rate_limit_profile.is_some()
     {
-        RateLimitContext::from_source(conn.remote_addr.ip())
-    } else {
         RateLimitContext::from_identity(
             conn.remote_addr.ip(),
             identity,
             route.name.as_deref(),
             allowed.override_upstream.as_deref(),
         )
+    } else {
+        RateLimitContext::from_source(conn.remote_addr.ip())
     };
     let crate::rate_limit::RequestLimitAcquire {
         limits: mut request_limits,

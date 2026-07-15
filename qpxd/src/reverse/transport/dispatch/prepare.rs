@@ -487,6 +487,30 @@ pub(super) fn prepare_single_plain_reverse_request(
     let Some(route) = compiled.router.single_plain_http_route() else {
         return Ok(Ok(None));
     };
+    prepare_single_reverse_route_request(req, base, conn, state, compiled, route)
+}
+
+pub(super) fn prepare_single_webdav_reverse_request(
+    req: Request<Body>,
+    base: &BaseRequestFields,
+    conn: &ReverseConnInfo,
+    state: &crate::runtime::RuntimeState,
+    compiled: &crate::reverse::CompiledReverse,
+) -> Result<ReverseEarlyResult<Option<Request<Body>>>> {
+    let Some(route) = compiled.router.single_direct_webdav_route() else {
+        return Ok(Ok(None));
+    };
+    prepare_single_reverse_route_request(req, base, conn, state, compiled, route)
+}
+
+fn prepare_single_reverse_route_request(
+    req: Request<Body>,
+    base: &BaseRequestFields,
+    conn: &ReverseConnInfo,
+    state: &crate::runtime::RuntimeState,
+    compiled: &crate::reverse::CompiledReverse,
+    route: &crate::reverse::router::HttpRoute,
+) -> Result<ReverseEarlyResult<Option<Request<Body>>>> {
     if let Some(response) = reverse_security_rejection(&req, conn, state, compiled)? {
         return Ok(Err(response));
     }
@@ -533,6 +557,69 @@ pub(super) async fn prepare_reverse_request(
     let host = base.host().unwrap_or_default();
     let request_method = &base.method;
     let request_version = req.version();
+    if !state.destination_trace_enabled()
+        && state.security.identity_sources.sources.is_empty()
+        && let Some(route) = router.single_http_route()
+        && route.plan.policy_context.identity_sources.is_empty()
+        && route.response_rules.is_none()
+        && !route.requires_destination_context()
+        && !route.requires_request_size()
+        && !route.requires_request_body_observation()
+        && !route.requires_request_rpc_context()
+        && !route
+            .plan
+            .guard
+            .as_deref()
+            .is_some_and(|guard| guard.requires_request_body_buffering_from_headers(req.headers()))
+    {
+        let identity = crate::policy_context::ResolvedIdentity::default();
+        let destination = crate::destination::DestinationMetadata::default();
+        let match_context = crate::http::policy::rule_context::build_request_rule_match_context(
+            crate::http::policy::rule_context::RequestRuleContextInput {
+                base,
+                headers: req.headers(),
+                destination: &destination,
+                identity: &identity,
+                request_size: None,
+                rpc: None,
+                client_cert: conn.peer_certificate_info.as_deref(),
+                upstream_cert: None,
+            },
+        );
+        if !route.matches(&match_context) {
+            return Err(anyhow!("no route matched"));
+        }
+        let selected_policy = route.plan.policy_context.clone();
+        let max_observed_request_body_bytes =
+            state.plan.limits.body.max_observed_request_body_bytes;
+        let override_key =
+            super::destination_override_key(route.plan.destination_resolution.as_ref());
+        let req =
+            match enforce_selected_reverse_route_constraints(req, route, request_method, &state)? {
+                Ok(req) => req,
+                Err(response) => return Ok(Err(response)),
+            };
+        let mut request_destination_cache = InlineCache::new();
+        request_destination_cache.push(override_key, destination);
+        return Ok(Ok(PreparedReverseRequest {
+            req,
+            context: ReversePreparedContext { compiled, state },
+            route: ReversePreparedRoute {
+                route_idx: 0,
+                selected_policy,
+                identity,
+                sanitized_headers: None,
+                request_destination_cache,
+                max_observed_request_body_bytes,
+            },
+            observation: crate::http::pipeline::types::RequestObservation {
+                request_rpc: None,
+                response_request_observation: Default::default(),
+                request_body_observed: false,
+                request_rpc_observed: false,
+            },
+        }));
+    }
     let request_body_too_large = || {
         request_body_too_large_response(request_method, request_version, proxy_name, None)
             .map(empty_interim_response)

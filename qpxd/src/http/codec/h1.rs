@@ -20,11 +20,13 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 mod response;
+mod zero_copy;
 
 use self::response::{ConnectionHeaderMode, http1_upgrade_accepted, write_status_and_headers};
 pub(crate) use self::response::{
     send_http1_response_with_interim, send_raw_http1_response_relay_with_interim,
 };
+use self::zero_copy::ZeroCopySocket;
 const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +96,7 @@ where
         service,
         header_read_timeout,
         body_channel_capacity,
+        None,
         |read_half, write_half| Ok(read_half.unsplit(write_half)),
     )
     .await
@@ -112,6 +115,7 @@ where
         + Sync
         + 'static,
 {
+    let zero_copy = ZeroCopySocket::for_tcp(&io);
     let read_buf = prefix
         .try_into_mut()
         .unwrap_or_else(|prefix| BytesMut::from(prefix.as_ref()));
@@ -123,6 +127,7 @@ where
         service,
         header_read_timeout,
         body_channel_capacity,
+        zero_copy,
         |read_half, write_half| {
             read_half
                 .reunite(write_half)
@@ -139,6 +144,7 @@ async fn serve_http1_parts<R, W, S, U, I>(
     service: S,
     header_read_timeout: Duration,
     body_channel_capacity: usize,
+    mut zero_copy: Option<ZeroCopySocket>,
     reunite: U,
 ) -> Result<()>
 where
@@ -263,7 +269,7 @@ where
             .extensions_mut()
             .remove::<Vec<InterimResponseHead>>()
             .unwrap_or_default();
-        let keep_alive = send_http1_response_with_interim(
+        let keep_alive = response::send_http1_response_with_interim_zero_copy(
             &mut write_half,
             parsed.version,
             &parsed.method,
@@ -272,6 +278,7 @@ where
             parsed.keep_alive,
             header_read_timeout,
             &mut response_head_buf,
+            zero_copy.as_mut(),
         )
         .await?;
 

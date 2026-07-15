@@ -1,19 +1,20 @@
 use crate::rate_limit::{QuotaLimiter, RateLimitContext, RateLimiter};
+use smallvec::SmallVec;
 use std::sync::Arc;
 use tokio::time::Duration;
 
 #[derive(Clone)]
 pub struct BandwidthThrottle {
     context: RateLimitContext,
-    limiters: Arc<Vec<Arc<RateLimiter>>>,
-    quotas: Arc<Vec<Arc<QuotaLimiter>>>,
+    limiters: Arc<SmallVec<[Arc<RateLimiter>; 2]>>,
+    quotas: Arc<SmallVec<[Arc<QuotaLimiter>; 2]>>,
 }
 
 impl BandwidthThrottle {
     pub fn with_context(
         context: RateLimitContext,
-        limiters: Vec<Arc<RateLimiter>>,
-        quotas: Vec<Arc<QuotaLimiter>>,
+        limiters: SmallVec<[Arc<RateLimiter>; 2]>,
+        quotas: SmallVec<[Arc<QuotaLimiter>; 2]>,
     ) -> Option<Self> {
         if limiters.is_empty() && quotas.is_empty() {
             return None;

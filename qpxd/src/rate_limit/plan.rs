@@ -7,6 +7,7 @@ use anyhow::{Result, anyhow};
 use qpx_core::config::{
     IngressEdgeConfig, RateLimitApplyTo, RateLimitConfig, RateLimitProfileConfig,
 };
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +15,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RateLimitSet {
     apply_to: Arc<[TransportScope]>,
+    requires_extended_context: bool,
     pub(crate) requests: Option<Arc<RateLimiter>>,
     pub(crate) bytes: Option<Arc<RateLimiter>>,
     pub(crate) concurrency: Option<Arc<ConcurrencyLimiter>>,
@@ -43,16 +45,20 @@ impl CompiledRateLimitPlan {
     pub(crate) fn is_empty_for_scope(&self, scope: TransportScope) -> bool {
         self.base.is_empty_for_scope(scope) && self.selected.is_empty_for_scope(scope)
     }
+
+    pub(crate) fn requires_extended_context(&self, scope: TransportScope) -> bool {
+        self.base.requires_extended_context(scope) || self.selected.requires_extended_context(scope)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AppliedRateLimits {
-    pub(crate) request_limiters: Vec<Arc<RateLimiter>>,
-    pub(crate) byte_limiters: Vec<Arc<RateLimiter>>,
-    pub(crate) concurrency_limiters: Vec<Arc<ConcurrencyLimiter>>,
-    pub(crate) request_quota_limiters: Vec<Arc<QuotaLimiter>>,
-    pub(crate) byte_quota_limiters: Vec<Arc<QuotaLimiter>>,
-    pub(crate) session_quota_limiters: Vec<Arc<QuotaLimiter>>,
+    pub(crate) request_limiters: SmallVec<[Arc<RateLimiter>; 2]>,
+    pub(crate) byte_limiters: SmallVec<[Arc<RateLimiter>; 2]>,
+    pub(crate) concurrency_limiters: SmallVec<[Arc<ConcurrencyLimiter>; 2]>,
+    pub(crate) request_quota_limiters: SmallVec<[Arc<QuotaLimiter>; 2]>,
+    pub(crate) byte_quota_limiters: SmallVec<[Arc<QuotaLimiter>; 2]>,
+    pub(crate) session_quota_limiters: SmallVec<[Arc<QuotaLimiter>; 2]>,
 }
 
 impl AppliedRateLimits {
@@ -306,6 +312,10 @@ impl RateLimitSet {
         }
     }
 
+    fn requires_extended_context(&self, scope: TransportScope) -> bool {
+        self.applies_to(scope) && self.requires_extended_context
+    }
+
     pub(crate) fn from_config(cfg: Option<&RateLimitConfig>) -> Self {
         let Some(cfg) = cfg.filter(|c| c.enabled) else {
             return Self::default();
@@ -378,8 +388,16 @@ impl RateLimitSet {
                     None,
                 ))
             });
+        let has_limits = requests.is_some()
+            || bytes.is_some()
+            || concurrency.is_some()
+            || request_quota.is_some()
+            || byte_quota.is_some()
+            || session_quota.is_some();
         Self {
             apply_to: Arc::from(parse_transport_scopes(cfg.apply_to.as_slice())),
+            requires_extended_context: has_limits
+                && !matches!(key_kind, KeyKind::Global | KeyKind::SrcIp),
             requests,
             bytes,
             concurrency,

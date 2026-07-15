@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "metric": "multi_axis_origin_cache_dominance",
+  "defaults": {
+    "min_throughput_ratio": 1.25,
+    "min_cpu_efficiency_ratio": 1.25,
+    "max_p99_latency_ratio": 0.8,
+    "min_dominance_score": 1.25,
+    "max_qpx_sample_spread_ratio": 1.1,
+    "max_reference_sample_spread_ratio": 1.15
+  },
+  "lanes": [
+    {
+      "bench": "origin_local_http1",
+      "body_bytes": 1024,
+      "workload_profile": "local_origin_default_v1",
+      "qpx": "qpxd-local",
+      "reference": "nginx-static",
+      "qpx_role_workers": 3,
+      "reference_role_workers": 3
+    },
+    {
+      "bench": "origin_webdav_http1",
+      "body_bytes": 1024,
+      "workload_profile": "webdav_filesystem_redb_symlink_safe_v2",
+      "qpx": "qpxd-webdav",
+      "reference": "apache-webdav",
+      "qpx_role_workers": 2,
+      "qpx_blocking_workers": 16,
+      "reference_role_workers": 400
+    },
+    {
+      "bench": "origin_webdav_http1",
+      "body_bytes": 1048576,
+      "workload_profile": "webdav_filesystem_redb_symlink_safe_v2",
+      "qpx": "qpxd-webdav",
+      "reference": "apache-webdav",
+      "qpx_role_workers": 2,
+      "qpx_blocking_workers": 16,
+      "reference_role_workers": 400,
+      "min_throughput_ratio": 1.0,
+      "min_cpu_efficiency_ratio": 1.5,
+      "max_p99_latency_ratio": 1.15,
+      "min_dominance_score": 1.1
+    },
+    {
+      "bench": "proxy_cache_hit_http1",
+      "body_bytes": 1024,
+      "workload_profile": "persistent_cache_hit_v1",
+      "qpx": "qpxd-cache",
+      "reference": "nginx-cache",
+      "qpx_role_workers": 4,
+      "reference_role_workers": 4
+    },
+    {
+      "bench": "proxy_cache_hit_http1",
+      "body_bytes": 1048576,
+      "workload_profile": "persistent_cache_hit_v1",
+      "qpx": "qpxd-cache",
+      "reference": "nginx-cache",
+      "qpx_role_workers": 4,
+      "reference_role_workers": 4,
+      "min_throughput_ratio": 1.0,
+      "min_cpu_efficiency_ratio": 1.4,
+      "max_p99_latency_ratio": 1.15,
+      "min_dominance_score": 1.1
+    },
+    {
+      "bench": "feature_rich_cache_hit_http1",
+      "body_bytes": 1024,
+      "workload_profile": "feature_rich_cache_hit_v1",
+      "qpx": "qpxd-feature-rich",
+      "reference": "nginx-feature-rich",
+      "qpx_role_workers": 4,
+      "reference_role_workers": 4,
+      "min_throughput_ratio": 1.2,
+      "min_cpu_efficiency_ratio": 1.2,
+      "max_p99_latency_ratio": 0.8,
+      "min_dominance_score": 1.3
+    },
+    {
+      "bench": "feature_rich_cache_hit_http1",
+      "body_bytes": 1048576,
+      "workload_profile": "feature_rich_cache_hit_v1",
+      "qpx": "qpxd-feature-rich",
+      "reference": "nginx-feature-rich",
+      "qpx_role_workers": 4,
+      "reference_role_workers": 4,
+      "min_throughput_ratio": 1.0,
+      "min_cpu_efficiency_ratio": 1.4,
+      "max_p99_latency_ratio": 1.15,
+      "min_dominance_score": 1.1
+    }
+  ]
+}

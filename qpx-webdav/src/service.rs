@@ -7,6 +7,8 @@ use crate::{
     ResourceId, VersionRecord, WebDavStore,
 };
 use anyhow::{Result, anyhow};
+use arc_swap::ArcSwapOption;
+use bytes::Bytes;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
@@ -37,8 +39,24 @@ type Authorizer = dyn Fn(&WebDavRequestContext, &ResourceId, &Method) -> AclDeci
 const ACL_POLICY_NAMESPACE: &str = "urn:qpx:webdav:internal";
 const ACL_POLICY_NAME: &str = "acl-policy-v1";
 
+enum PreparedRequest {
+    Continue {
+        request_resource: ResourceId,
+        resolved_resource: Option<ResourceId>,
+        content_type: Option<String>,
+    },
+    Respond(StatusCode),
+}
+
+#[derive(Debug)]
+struct CachedResourcePath {
+    path: Arc<str>,
+    resource: ResourceId,
+}
+
 pub struct WebDavService<S> {
     store: Arc<S>,
+    resource_path_cache: ArcSwapOption<CachedResourcePath>,
     authorizer: Arc<Authorizer>,
     max_depth: usize,
     max_multistatus_entries: usize,
@@ -49,6 +67,7 @@ impl<S: WebDavStore> WebDavService<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store,
+            resource_path_cache: ArcSwapOption::empty(),
             authorizer: Arc::new(|_, _, _| AclDecision::Allow),
             max_depth: 32,
             max_multistatus_entries: 10_000,
@@ -87,22 +106,115 @@ impl<S: WebDavStore> WebDavService<S> {
         request: Request<Vec<u8>>,
         context: &WebDavRequestContext,
     ) -> Result<Response<Vec<u8>>> {
-        let request_resource = ResourceId::parse(request.uri().path())?;
-        let resource = self.store.resolve_binding(&request_resource)?;
-        if (self.authorizer)(context, &resource, request.method()) == AclDecision::Deny {
-            return response(StatusCode::FORBIDDEN, Vec::new());
+        let prepared = self.prepare_request(&request, context, None)?;
+        self.handle_prepared(request, context, prepared)
+    }
+
+    pub fn handle_bytes(
+        &self,
+        request: Request<Vec<u8>>,
+        context: &WebDavRequestContext,
+    ) -> Result<Response<Bytes>> {
+        let prepared = self.prepare_request(&request, context, None)?;
+        self.handle_prepared_bytes(request, context, prepared)
+    }
+
+    pub fn handle_bytes_for_resource(
+        &self,
+        request: Request<Vec<u8>>,
+        context: &WebDavRequestContext,
+        request_resource: ResourceId,
+    ) -> Result<Response<Bytes>> {
+        let prepared = self.prepare_request(&request, context, Some(request_resource))?;
+        self.handle_prepared_bytes(request, context, prepared)
+    }
+
+    pub fn resource_for_path(&self, path: &str) -> Result<ResourceId> {
+        if let Some(cached) = self.resource_path_cache.load_full()
+            && cached.path.as_ref() == path
+        {
+            return Ok(cached.resource.clone());
         }
-        if !self.acl_allows(context, &resource, request.method())? {
-            return response(StatusCode::FORBIDDEN, Vec::new());
+        let resource = ResourceId::parse(path)?;
+        self.resource_path_cache
+            .store(Some(Arc::new(CachedResourcePath {
+                path: Arc::from(path),
+                resource: resource.clone(),
+            })));
+        Ok(resource)
+    }
+
+    fn handle_prepared_bytes(
+        &self,
+        request: Request<Vec<u8>>,
+        context: &WebDavRequestContext,
+        prepared: PreparedRequest,
+    ) -> Result<Response<Bytes>> {
+        match prepared {
+            PreparedRequest::Respond(status) => response_bytes(status, Bytes::new()),
+            PreparedRequest::Continue {
+                request_resource,
+                resolved_resource,
+                content_type,
+            } if matches!(request.method().as_str(), "GET" | "HEAD") => {
+                let resource = resolved_resource.as_ref().unwrap_or(&request_resource);
+                self.get_bytes(resource, request.method() == Method::HEAD, content_type)
+            }
+            prepared => self
+                .handle_prepared(request, context, prepared)
+                .map(|response| response.map(Bytes::from)),
+        }
+    }
+
+    fn prepare_request(
+        &self,
+        request: &Request<Vec<u8>>,
+        context: &WebDavRequestContext,
+        request_resource: Option<ResourceId>,
+    ) -> Result<PreparedRequest> {
+        let request_resource = match request_resource {
+            Some(resource) => resource,
+            None => self.resource_for_path(request.uri().path())?,
+        };
+        let access = self.store.resource_access_context(&request_resource)?;
+        let resolved_resource = access.resolved_resource;
+        let resource = resolved_resource.as_ref().unwrap_or(&request_resource);
+        if (self.authorizer)(context, resource, request.method()) == AclDecision::Deny {
+            return Ok(PreparedRequest::Respond(StatusCode::FORBIDDEN));
+        }
+        if !self.acl_allows_properties(context, request.method(), &access.properties)? {
+            return Ok(PreparedRequest::Respond(StatusCode::FORBIDDEN));
         }
         if matches!(
             request.method().as_str(),
             "PUT" | "DELETE" | "PROPPATCH" | "ACL" | "MOVE"
-        ) && !self.store.versions(&resource)?.is_empty()
-            && self.store.checkout_owner(&resource)?.as_deref() != context.subject.as_deref()
+        ) && !self.store.versions(resource)?.is_empty()
+            && self.store.checkout_owner(resource)?.as_deref() != context.subject.as_deref()
         {
-            return response(StatusCode::CONFLICT, Vec::new());
+            return Ok(PreparedRequest::Respond(StatusCode::CONFLICT));
         }
+        Ok(PreparedRequest::Continue {
+            request_resource,
+            resolved_resource,
+            content_type: access.content_type,
+        })
+    }
+
+    fn handle_prepared(
+        &self,
+        request: Request<Vec<u8>>,
+        context: &WebDavRequestContext,
+        prepared: PreparedRequest,
+    ) -> Result<Response<Vec<u8>>> {
+        let (request_resource, resolved_resource) = match prepared {
+            PreparedRequest::Continue {
+                request_resource,
+                resolved_resource,
+                ..
+            } => (request_resource, resolved_resource),
+            PreparedRequest::Respond(status) => return response(status, Vec::new()),
+        };
+        let resource = resolved_resource.unwrap_or_else(|| request_resource.clone());
         match request.method().as_str() {
             "OPTIONS" => self.options(),
             "GET" => self.get(&resource, false),
@@ -149,25 +261,46 @@ impl<S: WebDavStore> WebDavService<S> {
     }
 
     fn get(&self, resource: &ResourceId, head: bool) -> Result<Response<Vec<u8>>> {
-        let Some(metadata) = self.store.metadata(resource)? else {
-            return response(StatusCode::NOT_FOUND, Vec::new());
-        };
-        if metadata.is_collection {
-            return response(StatusCode::METHOD_NOT_ALLOWED, Vec::new());
-        }
-        let body = if head {
-            Vec::new()
+        self.get_bytes(resource, head, self.store.content_type(resource)?)
+            .map(|response| response.map(|body| body.to_vec()))
+    }
+
+    fn get_bytes(
+        &self,
+        resource: &ResourceId,
+        head: bool,
+        content_type: Option<String>,
+    ) -> Result<Response<Bytes>> {
+        let loaded = if head {
+            self.store
+                .metadata(resource)?
+                .map(|metadata| -> Result<crate::ResourceRead> {
+                    let etag = http::HeaderValue::from_str(&metadata.etag)?;
+                    Ok(crate::ResourceRead {
+                        metadata: Arc::new(metadata),
+                        etag,
+                        body: Bytes::new(),
+                    })
+                })
+                .transpose()?
         } else {
-            self.store.read(resource)?
+            self.store
+                .read_with_metadata_and_content_type(resource, content_type)?
         };
+        let Some(read) = loaded else {
+            return response_bytes(StatusCode::NOT_FOUND, Bytes::new());
+        };
+        if read.metadata.is_collection {
+            return response_bytes(StatusCode::METHOD_NOT_ALLOWED, Bytes::new());
+        }
         let mut builder = Response::builder()
             .status(StatusCode::OK)
-            .header(http::header::CONTENT_LENGTH, metadata.content_length)
-            .header(http::header::ETAG, metadata.etag);
-        if let Some(content_type) = metadata.content_type {
+            .header(http::header::CONTENT_LENGTH, read.metadata.content_length)
+            .header(http::header::ETAG, read.etag);
+        if let Some(content_type) = &read.metadata.content_type {
             builder = builder.header(http::header::CONTENT_TYPE, content_type);
         }
-        builder.body(body).map_err(Into::into)
+        builder.body(read.body).map_err(Into::into)
     }
 
     fn put(
@@ -485,16 +618,14 @@ impl<S: WebDavStore> WebDavService<S> {
         }
     }
 
-    fn acl_allows(
+    fn acl_allows_properties(
         &self,
         context: &WebDavRequestContext,
-        resource: &ResourceId,
         method: &Method,
+        properties: &[DeadProperty],
     ) -> Result<bool> {
-        let policy = self
-            .store
-            .properties(resource)?
-            .into_iter()
+        let policy = properties
+            .iter()
             .find(|property| {
                 property.namespace == ACL_POLICY_NAMESPACE && property.name == ACL_POLICY_NAME
             })
@@ -595,7 +726,7 @@ impl<S: WebDavStore> WebDavService<S> {
         self.store.put_version(&VersionRecord {
             version_name: version_name.clone(),
             resource: resource.clone(),
-            body: self.store.read(resource)?,
+            body: self.store.read(resource)?.to_vec(),
             content_type: metadata.content_type,
             properties: self.store.properties(resource)?,
             created_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
@@ -1614,7 +1745,7 @@ fn parse_basic_search(body: &[u8], max_depth: usize) -> Result<BasicSearchQuery>
 }
 
 fn resource_contains(parent: &ResourceId, child: &ResourceId) -> bool {
-    parent == &ResourceId::root()
+    parent.is_root()
         || child == parent
         || child
             .as_str()
@@ -2030,6 +2161,13 @@ fn response(status: StatusCode, body: Vec<u8>) -> Result<Response<Vec<u8>>> {
         .map_err(Into::into)
 }
 
+fn response_bytes(status: StatusCode, body: Bytes) -> Result<Response<Bytes>> {
+    Response::builder()
+        .status(status)
+        .body(body)
+        .map_err(Into::into)
+}
+
 fn locked_status() -> StatusCode {
     StatusCode::from_u16(423).expect("423 is a valid HTTP status")
 }
@@ -2094,6 +2232,36 @@ mod tests {
                 .value_xml,
             "internal"
         );
+    }
+
+    #[test]
+    fn preparsed_resource_preserves_mounted_origin_semantics() {
+        let directory = tempdir().unwrap();
+        let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
+        let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let store = PersistentWebDavStore::new(data, metadata);
+        store
+            .put(
+                &ResourceId::parse("/report.txt").unwrap(),
+                b"report",
+                Some("text/plain"),
+            )
+            .unwrap();
+        let service = WebDavService::new(Arc::new(store));
+        let resource = service.resource_for_path("/report.txt").unwrap();
+        let cached = service.resource_for_path("/report.txt").unwrap();
+        assert!(resource.is_same_resource(&cached));
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/dav/report.txt")
+            .body(Vec::new())
+            .unwrap();
+        let response = service
+            .handle_bytes_for_resource(request, &WebDavRequestContext::default(), resource)
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.into_body(), Bytes::from_static(b"report"));
     }
 
     #[test]

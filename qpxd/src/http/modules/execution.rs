@@ -34,8 +34,6 @@ struct FrozenRequestSnapshot {
     method: Method,
     version: Version,
     uri: http::Uri,
-    uri_string: String,
-    host: Option<String>,
     headers: HeaderMap,
 }
 
@@ -45,13 +43,6 @@ impl FrozenRequestSnapshot {
             method: req.method().clone(),
             version: req.version(),
             uri: req.uri().clone(),
-            uri_string: req.uri().to_string(),
-            host: req.uri().host().map(str::to_string).or_else(|| {
-                req.headers()
-                    .get(HOST)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string)
-            }),
             headers: req.headers().clone(),
         }
     }
@@ -131,7 +122,12 @@ impl<'a> HttpModuleRequestView<'a> {
                     .get(HOST)
                     .and_then(|value| value.to_str().ok())
             }),
-            RequestViewInner::Frozen(request) => request.host.as_deref(),
+            RequestViewInner::Frozen(request) => request.uri.host().or_else(|| {
+                request
+                    .headers
+                    .get(HOST)
+                    .and_then(|value| value.to_str().ok())
+            }),
         }
     }
 
@@ -175,7 +171,7 @@ impl<'a> HttpModuleRequestView<'a> {
     pub fn uri_string(&self) -> Cow<'_, str> {
         match self.inner {
             RequestViewInner::Live(request) => Cow::Owned(request.uri().to_string()),
-            RequestViewInner::Frozen(request) => Cow::Borrowed(request.uri_string.as_str()),
+            RequestViewInner::Frozen(request) => Cow::Owned(request.uri.to_string()),
         }
     }
 }
@@ -245,9 +241,6 @@ impl HttpModuleContext {
 
     pub(super) fn remember_request_header(&mut self, name: HeaderName, value: HeaderValue) {
         if let Some(request) = self.session.request.as_mut() {
-            if name == HOST {
-                request.host = value.to_str().ok().map(str::to_string);
-            }
             request.headers.insert(name, value);
         }
     }
@@ -435,6 +428,9 @@ impl HttpModuleExecution {
             return Ok(RequestHeadersOutcome::Continue);
         };
         for module in chain.request_headers.iter() {
+            if !module.module.applies_to_request_headers(req) {
+                continue;
+            }
             let label = module.label();
             let outcome = module
                 .module
@@ -445,7 +441,7 @@ impl HttpModuleExecution {
                 )
                 .await
                 .with_context(|| format!("http module {label} request_headers failed"))?
-                .request_headers_result(label.as_str())?;
+                .request_headers_result(label)?;
             match outcome {
                 RequestHeadersOutcome::Continue => {}
                 RequestHeadersOutcome::Respond(response) => {
@@ -482,7 +478,7 @@ impl HttpModuleExecution {
                 )
                 .await
                 .with_context(|| format!("http module {label} cache_lookup failed"))?
-                .into_complete(label.as_str(), HttpModuleStage::CacheLookup)?;
+                .into_complete(label, HttpModuleStage::CacheLookup)?;
         }
         Ok(())
     }
@@ -502,7 +498,7 @@ impl HttpModuleExecution {
                 )
                 .await
                 .with_context(|| format!("http module {label} upstream_request failed"))?
-                .into_complete(label.as_str(), HttpModuleStage::UpstreamRequest)?;
+                .into_complete(label, HttpModuleStage::UpstreamRequest)?;
         }
         if chain.aggregate.needs_frozen_request {
             context.sync_frozen_request(req);
@@ -530,7 +526,7 @@ impl HttpModuleExecution {
                 )
                 .await
                 .with_context(|| format!("http module {label} upstream_response failed"))?
-                .upstream_response(label.as_str())?;
+                .upstream_response(label)?;
             context.set_response_status(response.status());
             context.apply_pending_response_headers(response.headers_mut());
         }
@@ -547,6 +543,12 @@ impl HttpModuleExecution {
         context.set_response_status(response.status());
         context.apply_pending_response_headers(response.headers_mut());
         for module in chain.downstream_response.iter() {
+            if !module
+                .module
+                .applies_to_downstream_response(context, &response)
+            {
+                continue;
+            }
             let label = module.label();
             response = module
                 .module
@@ -557,7 +559,7 @@ impl HttpModuleExecution {
                 )
                 .await
                 .with_context(|| format!("http module {label} downstream_response failed"))?
-                .downstream_response(label.as_str())?;
+                .downstream_response(label)?;
             context.set_response_status(response.status());
             context.apply_pending_response_headers(response.headers_mut());
         }
@@ -580,7 +582,7 @@ impl HttpModuleExecution {
                 )
                 .await
                 .with_context(|| format!("http module {label} retry failed"))?
-                .into_complete(label.as_str(), HttpModuleStage::Retry)?;
+                .into_complete(label, HttpModuleStage::Retry)?;
         }
         Ok(())
     }
@@ -595,9 +597,9 @@ impl HttpModuleExecution {
                 .module
                 .call(HttpModuleStage::Error, context, HttpModuleEvent::Error(err))
                 .await
-                .and_then(|event| event.into_complete(label.as_str(), HttpModuleStage::Error))
+                .and_then(|event| event.into_complete(label, HttpModuleStage::Error))
             {
-                warn!(error = ?err, module = label.as_str(), "http module error hook failed");
+                warn!(error = ?err, module = label, "http module error hook failed");
             }
         }
     }
@@ -626,9 +628,9 @@ impl HttpModuleExecution {
                     },
                 )
                 .await
-                .and_then(|event| event.into_complete(label.as_str(), HttpModuleStage::Log))
+                .and_then(|event| event.into_complete(label, HttpModuleStage::Log))
             {
-                warn!(error = ?err, module = label.as_str(), "http module log hook failed");
+                warn!(error = ?err, module = label, "http module log hook failed");
             }
         }
     }

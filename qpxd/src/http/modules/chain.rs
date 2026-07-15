@@ -9,17 +9,13 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub(super) struct CompiledHttpModule {
-    type_name: Arc<str>,
-    id: Option<Arc<str>>,
+    label: Arc<str>,
     pub(super) module: Arc<dyn HttpModule>,
 }
 
 impl CompiledHttpModule {
-    pub(super) fn label(&self) -> String {
-        match &self.id {
-            Some(id) => format!("{} ({id})", self.type_name),
-            None => self.type_name.to_string(),
-        }
+    pub(super) fn label(&self) -> &str {
+        self.label.as_ref()
     }
 
     fn explain(&self) -> Option<(String, Vec<String>)> {
@@ -42,12 +38,13 @@ impl CompiledHttpModule {
             detail.push(format!("response_buffer_max_bytes={max_bytes}"));
         }
         detail.extend(self.module.explain());
-        (!detail.is_empty()).then(|| (self.label(), detail))
+        (!detail.is_empty()).then(|| (self.label().to_string(), detail))
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct CompiledHttpModuleChain {
+    session_modules: Arc<[CompiledHttpModule]>,
     pub(super) request_headers: Arc<[CompiledHttpModule]>,
     pub(super) cache_lookup: Arc<[CompiledHttpModule]>,
     pub(super) upstream_request: Arc<[CompiledHttpModule]>,
@@ -63,6 +60,7 @@ impl Default for CompiledHttpModuleChain {
     fn default() -> Self {
         let empty: Arc<[CompiledHttpModule]> = Vec::<CompiledHttpModule>::new().into();
         Self {
+            session_modules: empty.clone(),
             request_headers: empty.clone(),
             cache_lookup: empty.clone(),
             upstream_request: empty.clone(),
@@ -78,14 +76,7 @@ impl Default for CompiledHttpModuleChain {
 
 impl CompiledHttpModuleChain {
     fn is_empty(&self) -> bool {
-        self.request_headers.is_empty()
-            && self.cache_lookup.is_empty()
-            && self.upstream_request.is_empty()
-            && self.upstream_response.is_empty()
-            && self.downstream_response.is_empty()
-            && self.retry.is_empty()
-            && self.error.is_empty()
-            && self.log.is_empty()
+        self.session_modules.is_empty()
     }
 
     #[cfg(test)]
@@ -163,10 +154,11 @@ impl CompiledHttpModuleChain {
         .into_iter()
         .flat_map(|modules| modules.iter())
         .filter(|module| !module.module.capabilities().body_access.streaming_safe())
-        .map(CompiledHttpModule::label)
+        .map(|module| module.label().to_string())
         .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn start(
         self: &Arc<Self>,
         runtime: &Arc<RuntimeState>,
@@ -178,10 +170,34 @@ impl CompiledHttpModuleChain {
             HttpModuleExecution::new(self.clone(), HttpModuleContext::new(runtime.clone(), init))
         }
     }
+
+    pub(crate) fn start_for_request<'a>(
+        self: &Arc<Self>,
+        runtime: &Arc<RuntimeState>,
+        request: &hyper::Request<qpx_http::body::Body>,
+        init: impl FnOnce() -> HttpModuleSessionInit<'a>,
+    ) -> HttpModuleExecution {
+        if self.is_empty()
+            || self
+                .session_modules
+                .iter()
+                .all(|module| module.module.is_inactive_for_request(request))
+        {
+            HttpModuleExecution::empty()
+        } else {
+            HttpModuleExecution::new(
+                self.clone(),
+                HttpModuleContext::new(runtime.clone(), init()),
+            )
+        }
+    }
 }
 
 fn module_labels(modules: &[CompiledHttpModule]) -> Vec<String> {
-    modules.iter().map(CompiledHttpModule::label).collect()
+    modules
+        .iter()
+        .map(|module| module.label().to_string())
+        .collect()
 }
 
 pub(crate) fn compile_http_modules(
@@ -205,21 +221,18 @@ pub(crate) fn compile_http_modules(
             .build(config)
             .with_context(|| format!("failed to build http module {}", config.r#type))?;
         let order = config.order.unwrap_or(module.order());
-        modules.push((
-            order,
-            idx,
-            CompiledHttpModule {
-                type_name: Arc::<str>::from(config.r#type.as_str()),
-                id: config.id.as_deref().map(Arc::<str>::from),
-                module,
-            },
-        ));
+        let label: Arc<str> = match config.id.as_deref() {
+            Some(id) => Arc::from(format!("{} ({id})", config.r#type)),
+            None => Arc::from(config.r#type.as_str()),
+        };
+        modules.push((order, idx, CompiledHttpModule { label, module }));
     }
     modules.sort_by_key(|(order, idx, _)| (*order, *idx));
     let modules = modules
         .into_iter()
         .map(|(_, _, module)| module)
         .collect::<Vec<_>>();
+    let session_modules: Arc<[CompiledHttpModule]> = modules.clone().into();
     let mut aggregate = HttpModuleCapabilities::default();
     let mut request_headers = Vec::new();
     let mut cache_lookup = Vec::new();
@@ -264,6 +277,7 @@ pub(crate) fn compile_http_modules(
         }
     }
     Ok(Arc::new(CompiledHttpModuleChain {
+        session_modules,
         request_headers: request_headers.into(),
         cache_lookup: cache_lookup.into(),
         upstream_request: upstream_request.into(),

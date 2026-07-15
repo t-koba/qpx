@@ -230,6 +230,30 @@ impl HttpRoute {
             && !self.plan.require_precondition
     }
 
+    pub(in crate::reverse) fn supports_direct_webdav_dispatch(&self) -> bool {
+        self.plan.flags.bits() == 0
+            && self.plan.forwarded.is_none()
+            && self
+                .plan
+                .rate_limits
+                .is_empty_for_scope(crate::rate_limit::TransportScope::Request)
+            && self.headers.is_none()
+            && self.local_response.is_none()
+            && self.ipc.is_none()
+            && self.webdav.is_some()
+            && self.response_rules.is_none()
+            && self.mirrors.is_empty()
+            && self.policy.max_upstream_concurrency.is_none()
+            && !self.requires_destination_context()
+            && !self.requires_request_size()
+            && !self.requires_request_body_observation()
+            && !self.requires_request_rpc_context()
+            && matches!(
+                self.target,
+                crate::runtime::CompiledReverseRouteTarget::Webdav { .. }
+            )
+    }
+
     pub(in crate::reverse) fn select_upstream(
         &self,
         request_seed: u64,

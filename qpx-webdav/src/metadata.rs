@@ -1,10 +1,14 @@
 use crate::{
-    BindingAlreadyExists, DeadProperty, LockRecord, ResourceId, VersionRecord, WebDavMetadataStore,
+    BindingAlreadyExists, DeadProperty, LockRecord, ResourceAccessContext, ResourceId,
+    VersionRecord, WebDavMetadataStore,
 };
 use anyhow::Result;
+use arc_swap::ArcSwap;
+use parking_lot::Mutex;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 const PROPERTIES: TableDefinition<&str, &[u8]> = TableDefinition::new("webdav_properties_v1");
@@ -17,6 +21,15 @@ const CONTENT_TYPES: TableDefinition<&str, &str> = TableDefinition::new("webdav_
 #[derive(Debug)]
 pub struct RedbMetadataStore {
     database: Database,
+    snapshot: ArcSwap<MetadataReadSnapshot>,
+    snapshot_write_lock: Mutex<()>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MetadataReadSnapshot {
+    properties: HashMap<ResourceId, Vec<DeadProperty>>,
+    content_types: HashMap<ResourceId, String>,
+    bindings: BTreeMap<ResourceId, ResourceId>,
 }
 
 impl RedbMetadataStore {
@@ -33,43 +46,104 @@ impl RedbMetadataStore {
         transaction.open_table(BINDINGS)?;
         transaction.open_table(CONTENT_TYPES)?;
         transaction.commit()?;
-        Ok(Self { database })
+        let snapshot = MetadataReadSnapshot {
+            properties: load_properties(&database)?,
+            content_types: load_content_types(&database)?,
+            bindings: load_bindings(&database)?,
+        };
+        Ok(Self {
+            database,
+            snapshot: ArcSwap::from_pointee(snapshot),
+            snapshot_write_lock: Mutex::new(()),
+        })
     }
 
     fn read_properties(&self, resource: &ResourceId) -> Result<Vec<DeadProperty>> {
-        let transaction = self.database.begin_read()?;
-        let table = transaction.open_table(PROPERTIES)?;
-        let Some(value) = table.get(resource.as_str())? else {
-            return Ok(Vec::new());
-        };
-        Ok(serde_json::from_slice(value.value())?)
+        Ok(self
+            .snapshot
+            .load()
+            .properties
+            .get(resource)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn read_bindings(&self) -> Result<BTreeMap<ResourceId, ResourceId>> {
-        let transaction = self.database.begin_read()?;
-        let table = transaction.open_table(BINDINGS)?;
-        let mut bindings = BTreeMap::new();
-        for entry in table.iter()? {
-            let (alias, target) = entry?;
-            bindings.insert(
-                ResourceId::parse(alias.value())?,
-                ResourceId::parse(target.value())?,
-            );
-        }
-        Ok(bindings)
+        Ok(self.snapshot.load().bindings.clone())
     }
+
+    fn replace_properties_snapshot(&self, resource: &ResourceId, properties: Vec<DeadProperty>) {
+        let mut snapshot = (**self.snapshot.load()).clone();
+        if properties.is_empty() {
+            snapshot.properties.remove(resource);
+        } else {
+            snapshot.properties.insert(resource.clone(), properties);
+        }
+        self.snapshot.store(Arc::new(snapshot));
+    }
+
+    fn replace_content_type_snapshot(&self, resource: &ResourceId, content_type: Option<String>) {
+        let mut snapshot = (**self.snapshot.load()).clone();
+        if let Some(content_type) = content_type {
+            snapshot
+                .content_types
+                .insert(resource.clone(), content_type);
+        } else {
+            snapshot.content_types.remove(resource);
+        }
+        self.snapshot.store(Arc::new(snapshot));
+    }
+}
+
+fn load_properties(database: &Database) -> Result<HashMap<ResourceId, Vec<DeadProperty>>> {
+    let transaction = database.begin_read()?;
+    let table = transaction.open_table(PROPERTIES)?;
+    let mut properties = HashMap::new();
+    for entry in table.iter()? {
+        let (resource, encoded) = entry?;
+        properties.insert(
+            ResourceId::parse(resource.value())?,
+            serde_json::from_slice(encoded.value())?,
+        );
+    }
+    Ok(properties)
+}
+
+fn load_content_types(database: &Database) -> Result<HashMap<ResourceId, String>> {
+    let transaction = database.begin_read()?;
+    let table = transaction.open_table(CONTENT_TYPES)?;
+    let mut content_types = HashMap::new();
+    for entry in table.iter()? {
+        let (resource, content_type) = entry?;
+        content_types.insert(
+            ResourceId::parse(resource.value())?,
+            content_type.value().to_owned(),
+        );
+    }
+    Ok(content_types)
+}
+
+fn load_bindings(database: &Database) -> Result<BTreeMap<ResourceId, ResourceId>> {
+    let transaction = database.begin_read()?;
+    let table = transaction.open_table(BINDINGS)?;
+    let mut bindings = BTreeMap::new();
+    for entry in table.iter()? {
+        let (alias, target) = entry?;
+        bindings.insert(
+            ResourceId::parse(alias.value())?,
+            ResourceId::parse(target.value())?,
+        );
+    }
+    Ok(bindings)
 }
 
 impl WebDavMetadataStore for RedbMetadataStore {
     fn content_type(&self, resource: &ResourceId) -> Result<Option<String>> {
-        let transaction = self.database.begin_read()?;
-        let table = transaction.open_table(CONTENT_TYPES)?;
-        Ok(table
-            .get(resource.as_str())?
-            .map(|value| value.value().to_owned()))
+        Ok(self.snapshot.load().content_types.get(resource).cloned())
     }
 
     fn set_content_type(&self, resource: &ResourceId, content_type: Option<&str>) -> Result<()> {
+        let _snapshot_write = self.snapshot_write_lock.lock();
         let transaction = self.database.begin_write()?;
         {
             let mut table = transaction.open_table(CONTENT_TYPES)?;
@@ -80,6 +154,7 @@ impl WebDavMetadataStore for RedbMetadataStore {
             }
         }
         transaction.commit()?;
+        self.replace_content_type_snapshot(resource, content_type.map(str::to_owned));
         Ok(())
     }
 
@@ -88,6 +163,7 @@ impl WebDavMetadataStore for RedbMetadataStore {
     }
 
     fn set_properties(&self, resource: &ResourceId, properties: &[DeadProperty]) -> Result<()> {
+        let _snapshot_write = self.snapshot_write_lock.lock();
         let mut merged = self.read_properties(resource)?;
         for property in properties {
             merged.retain(|existing| {
@@ -102,10 +178,12 @@ impl WebDavMetadataStore for RedbMetadataStore {
             table.insert(resource.as_str(), encoded.as_slice())?;
         }
         transaction.commit()?;
+        self.replace_properties_snapshot(resource, merged);
         Ok(())
     }
 
     fn remove_properties(&self, resource: &ResourceId, names: &[(String, String)]) -> Result<()> {
+        let _snapshot_write = self.snapshot_write_lock.lock();
         let mut properties = self.read_properties(resource)?;
         properties.retain(|property| {
             !names
@@ -123,6 +201,7 @@ impl WebDavMetadataStore for RedbMetadataStore {
             }
         }
         transaction.commit()?;
+        self.replace_properties_snapshot(resource, properties);
         Ok(())
     }
 
@@ -132,22 +211,24 @@ impl WebDavMetadataStore for RedbMetadataStore {
         set: &[DeadProperty],
         remove: &[(String, String)],
     ) -> Result<()> {
+        let _snapshot_write = self.snapshot_write_lock.lock();
         let transaction = self.database.begin_write()?;
+        let properties;
         {
             let mut table = transaction.open_table(PROPERTIES)?;
-            let mut properties = table
-                .get(resource.as_str())?
-                .map(|value| serde_json::from_slice::<Vec<DeadProperty>>(value.value()))
-                .transpose()?
-                .unwrap_or_default();
-            properties.retain(|property| {
-                !remove.iter().any(|(namespace, name)| {
-                    namespace == &property.namespace && name == &property.name
-                }) && !set.iter().any(|replacement| {
-                    replacement.namespace == property.namespace && replacement.name == property.name
-                })
-            });
-            properties.extend_from_slice(set);
+            properties = {
+                let mut properties = self.read_properties(resource)?;
+                properties.retain(|property| {
+                    !remove.iter().any(|(namespace, name)| {
+                        namespace == &property.namespace && name == &property.name
+                    }) && !set.iter().any(|replacement| {
+                        replacement.namespace == property.namespace
+                            && replacement.name == property.name
+                    })
+                });
+                properties.extend_from_slice(set);
+                properties
+            };
             if properties.is_empty() {
                 table.remove(resource.as_str())?;
             } else {
@@ -156,6 +237,7 @@ impl WebDavMetadataStore for RedbMetadataStore {
             }
         }
         transaction.commit()?;
+        self.replace_properties_snapshot(resource, properties);
         Ok(())
     }
 
@@ -167,8 +249,8 @@ impl WebDavMetadataStore for RedbMetadataStore {
         for entry in table.iter()? {
             let (_, value) = entry?;
             let lock: LockRecord = serde_json::from_slice(value.value())?;
-            let descendant = if lock.resource == ResourceId::root() {
-                resource != &ResourceId::root()
+            let descendant = if lock.resource.is_root() {
+                !resource.is_root()
             } else {
                 resource.as_str().starts_with(&format!(
                     "{}/",
@@ -206,6 +288,7 @@ impl WebDavMetadataStore for RedbMetadataStore {
     }
 
     fn remove_resource_metadata(&self, resource: &ResourceId) -> Result<()> {
+        let _snapshot_write = self.snapshot_write_lock.lock();
         let transaction = self.database.begin_write()?;
         {
             let mut properties = transaction.open_table(PROPERTIES)?;
@@ -226,6 +309,8 @@ impl WebDavMetadataStore for RedbMetadataStore {
             }
         }
         transaction.commit()?;
+        self.replace_properties_snapshot(resource, Vec::new());
+        self.replace_content_type_snapshot(resource, None);
         Ok(())
     }
 
@@ -237,7 +322,9 @@ impl WebDavMetadataStore for RedbMetadataStore {
     }
 
     fn move_resource_metadata(&self, source: &ResourceId, destination: &ResourceId) -> Result<()> {
+        let _snapshot_write = self.snapshot_write_lock.lock();
         let properties = self.read_properties(source)?;
+        let content_type = self.snapshot.load().content_types.get(source).cloned();
         let transaction = self.database.begin_write()?;
         {
             let mut table = transaction.open_table(PROPERTIES)?;
@@ -274,6 +361,10 @@ impl WebDavMetadataStore for RedbMetadataStore {
             }
         }
         transaction.commit()?;
+        self.replace_properties_snapshot(source, Vec::new());
+        self.replace_properties_snapshot(destination, properties);
+        self.replace_content_type_snapshot(source, None);
+        self.replace_content_type_snapshot(destination, content_type);
         Ok(())
     }
 
@@ -332,13 +423,25 @@ impl WebDavMetadataStore for RedbMetadataStore {
     }
 
     fn resolve_binding(&self, resource: &ResourceId) -> Result<ResourceId> {
-        resolve_with_bindings(resource, &self.read_bindings()?)
+        Ok(self
+            .resolve_binding_if_present(resource)?
+            .unwrap_or_else(|| resource.clone()))
+    }
+
+    fn resolve_binding_if_present(&self, resource: &ResourceId) -> Result<Option<ResourceId>> {
+        let snapshot = self.snapshot.load();
+        if snapshot.bindings.is_empty() {
+            return Ok(None);
+        }
+        let resolved = resolve_with_bindings(resource, &snapshot.bindings)?;
+        Ok((resolved != *resource).then_some(resolved))
     }
 
     fn put_binding(&self, alias: &ResourceId, target: &ResourceId, replace: bool) -> Result<()> {
-        if alias == &ResourceId::root() || alias == target {
+        if alias.is_root() || alias == target {
             anyhow::bail!("WebDAV binding would create a cycle");
         }
+        let _snapshot_write = self.snapshot_write_lock.lock();
         let mut bindings = self.read_bindings()?;
         if bindings.contains_key(alias) && !replace {
             return Err(BindingAlreadyExists.into());
@@ -351,25 +454,58 @@ impl WebDavMetadataStore for RedbMetadataStore {
             table.insert(alias.as_str(), target.as_str())?;
         }
         transaction.commit()?;
+        let mut snapshot = (**self.snapshot.load()).clone();
+        snapshot.bindings = bindings;
+        self.snapshot.store(Arc::new(snapshot));
         Ok(())
     }
 
     fn remove_binding(&self, alias: &ResourceId) -> Result<bool> {
+        let _snapshot_write = self.snapshot_write_lock.lock();
         let transaction = self.database.begin_write()?;
         let removed = {
             let mut table = transaction.open_table(BINDINGS)?;
             table.remove(alias.as_str())?.is_some()
         };
         transaction.commit()?;
+        if removed {
+            let mut snapshot = (**self.snapshot.load()).clone();
+            snapshot.bindings.remove(alias);
+            self.snapshot.store(Arc::new(snapshot));
+        }
         Ok(removed)
     }
 
     fn child_bindings(&self, collection: &ResourceId) -> Result<Vec<ResourceId>> {
-        Ok(self
-            .read_bindings()?
-            .into_keys()
+        let snapshot = self.snapshot.load();
+        Ok(snapshot
+            .bindings
+            .keys()
             .filter(|alias| alias.parent().as_ref() == Some(collection))
+            .cloned()
             .collect())
+    }
+
+    fn resource_access_context(&self, resource: &ResourceId) -> Result<ResourceAccessContext> {
+        let snapshot = self.snapshot.load();
+        let resolved_resource = if snapshot.bindings.is_empty() {
+            None
+        } else {
+            let resolved = resolve_with_bindings(resource, &snapshot.bindings)?;
+            (resolved != *resource).then_some(resolved)
+        };
+        let effective = resolved_resource.as_ref().unwrap_or(resource);
+        let properties = snapshot
+            .properties
+            .get(effective)
+            .cloned()
+            .unwrap_or_default();
+        let content_type = snapshot.content_types.get(effective).cloned();
+        Ok(ResourceAccessContext {
+            resolved_resource,
+            properties,
+            content_type,
+        })
     }
 }
 
@@ -377,6 +513,9 @@ fn resolve_with_bindings(
     resource: &ResourceId,
     bindings: &BTreeMap<ResourceId, ResourceId>,
 ) -> Result<ResourceId> {
+    if bindings.is_empty() {
+        return Ok(resource.clone());
+    }
     let mut current = resource.clone();
     let mut visited = HashSet::new();
     for _ in 0..32 {
@@ -387,9 +526,8 @@ fn resolve_with_bindings(
             .iter()
             .filter(|(alias, _)| {
                 current.as_str() == alias.as_str()
-                    || current
-                        .as_str()
-                        .starts_with(&format!("{}/", alias.as_str()))
+                    || (current.as_str().starts_with(alias.as_str())
+                        && current.as_str().as_bytes().get(alias.as_str().len()) == Some(&b'/'))
             })
             .max_by_key(|(alias, _)| alias.as_str().len());
         let Some((alias, target)) = matched else {
@@ -429,5 +567,26 @@ mod tests {
         }
         let reopened = RedbMetadataStore::open(path).unwrap();
         assert_eq!(reopened.properties(&resource).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn binding_lookup_distinguishes_unmodified_resources() {
+        let directory = tempdir().unwrap();
+        let store = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let unrelated = ResourceId::parse("/unrelated").unwrap();
+        assert_eq!(store.resolve_binding_if_present(&unrelated).unwrap(), None);
+
+        let alias = ResourceId::parse("/alias").unwrap();
+        let target = ResourceId::parse("/target").unwrap();
+        store.put_binding(&alias, &target, false).unwrap();
+        assert_eq!(store.resolve_binding_if_present(&unrelated).unwrap(), None);
+        assert_eq!(
+            store
+                .resolve_binding_if_present(&ResourceId::parse("/alias/child").unwrap())
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "/target/child"
+        );
     }
 }

@@ -66,38 +66,62 @@ impl CompiledHttpGuardProfile {
         self.profile.limits.body_bytes
     }
 
+    #[cfg(test)]
     pub(crate) fn evaluate_request_async(
         &self,
         req: &Request<Body>,
     ) -> impl std::future::Future<Output = Result<Option<HttpGuardReject>>> + Send + 'static {
         let head_reject = self.evaluate_request_head(req);
-        let profile = self.profile.clone();
-        let content_type = req
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned);
-        let boundary = multipart_boundary_from_headers(req.headers());
-        let body_reader = crate::http::body::size::observed_request_body_reader(req);
+        let body_evaluation = self.evaluate_request_body_async(req);
         async move {
             if let Some(reject) = head_reject? {
                 return Ok(Some(reject));
             }
+            body_evaluation.await
+        }
+    }
+
+    pub(crate) fn evaluate_request_body_async(
+        &self,
+        req: &Request<Body>,
+    ) -> impl std::future::Future<Output = Result<Option<HttpGuardReject>>> + Send + 'static {
+        let validate_json =
+            self.profile.json.max_depth.is_some() || self.profile.json.max_fields.is_some();
+        let validate_multipart = self.profile.multipart.max_parts.is_some()
+            || self.profile.multipart.max_name_bytes.is_some()
+            || self.profile.multipart.max_filename_bytes.is_some();
+        let profile = (validate_json || validate_multipart).then(|| self.profile.clone());
+        let content_type = validate_json.then(|| {
+            req.headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned)
+        });
+        let boundary = validate_multipart.then(|| multipart_boundary_from_headers(req.headers()));
+        let body_reader = (validate_json || validate_multipart)
+            .then(|| crate::http::body::size::observed_request_body_reader(req))
+            .flatten();
+        async move {
             if let Some(body_reader) = body_reader {
-                if let Some(reject) = validate_json_limits_reader(
-                    &body_reader,
-                    content_type.as_deref(),
-                    profile.clone(),
-                )
-                .await?
-                {
-                    return Ok(Some(reject));
+                let profile = profile.expect("body validation profile must be present");
+                if validate_json {
+                    if let Some(reject) = validate_json_limits_reader(
+                        &body_reader,
+                        content_type.flatten().as_deref(),
+                        profile.clone(),
+                    )
+                    .await?
+                    {
+                        return Ok(Some(reject));
+                    }
                 }
-                if let Some(reject) =
-                    validate_multipart_limits_reader(&body_reader, boundary.clone(), profile)
-                        .await?
-                {
-                    return Ok(Some(reject));
+                if validate_multipart {
+                    if let Some(reject) =
+                        validate_multipart_limits_reader(&body_reader, boundary.flatten(), profile)
+                            .await?
+                    {
+                        return Ok(Some(reject));
+                    }
                 }
             }
             Ok(None)
@@ -128,7 +152,10 @@ impl CompiledHttpGuardProfile {
         Ok(None)
     }
 
-    fn evaluate_request_head(&self, req: &Request<Body>) -> Result<Option<HttpGuardReject>> {
+    pub(crate) fn evaluate_request_head(
+        &self,
+        req: &Request<Body>,
+    ) -> Result<Option<HttpGuardReject>> {
         if self.profile.protocol_safety.smuggling
             && let Some(reject) = validate_smuggling(req)
         {
@@ -140,32 +167,44 @@ impl CompiledHttpGuardProfile {
             return Ok(Some(reject));
         }
 
-        let path = normalized_path(req, self.profile.normalize.path);
-        if let Some(limit) = self.profile.limits.path_bytes
-            && path.len() > limit
-        {
-            return Ok(Some(payload_too_large(
-                "request path exceeds http_guard limit",
-            )));
+        if let Some(limit) = self.profile.limits.path_bytes {
+            let path = req.uri().path();
+            let path_len = if self.profile.normalize.path && path.len() > limit {
+                normalized_path(req, true).len()
+            } else {
+                path.len()
+            };
+            if path_len > limit {
+                return Ok(Some(payload_too_large(
+                    "request path exceeds http_guard limit",
+                )));
+            }
         }
 
-        let query = normalized_query(req, self.profile.normalize.query);
-        if let Some(reject) = validate_query_limits(&query, &self.profile) {
-            return Ok(Some(reject));
+        if req.uri().query().is_some()
+            && (self.profile.limits.query_pairs.is_some()
+                || self.profile.limits.query_key_bytes.is_some()
+                || self.profile.limits.query_value_bytes.is_some())
+        {
+            let query = normalized_query(req, self.profile.normalize.query);
+            if let Some(reject) = validate_query_limits(&query, &self.profile) {
+                return Ok(Some(reject));
+            }
         }
 
         if let Some(reject) = validate_header_limits(req, &self.profile) {
             return Ok(Some(reject));
         }
 
-        let body_size = crate::http::body::size::observed_request_size(req);
-        if let Some(limit) = self.profile.limits.body_bytes
-            && let Some(size) = body_size
-            && size as usize > limit
-        {
-            return Ok(Some(payload_too_large(
-                "request body exceeds http_guard limit",
-            )));
+        if let Some(limit) = self.profile.limits.body_bytes {
+            let body_size = crate::http::body::size::observed_request_size(req);
+            if let Some(size) = body_size
+                && size as usize > limit
+            {
+                return Ok(Some(payload_too_large(
+                    "request body exceeds http_guard limit",
+                )));
+            }
         }
 
         Ok(None)
@@ -182,23 +221,32 @@ fn validate_header_limits(
         return Some(bad_request("header count exceeds http_guard limit"));
     }
     if let Some(limit) = profile.limits.header_bytes {
-        let total = req
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                let value = if profile.normalize.headers {
-                    value.to_str().unwrap_or_default().trim().len()
-                } else {
-                    value.as_bytes().len()
-                };
-                name.as_str().len() + value
-            })
-            .sum::<usize>();
-        if total > limit {
-            return Some(payload_too_large("header bytes exceed http_guard limit"));
+        let mut total = 0usize;
+        for (name, value) in req.headers() {
+            let value_len = if profile.normalize.headers {
+                trimmed_http_ows_len(value.as_bytes())
+            } else {
+                value.as_bytes().len()
+            };
+            total = total.saturating_add(name.as_str().len() + value_len);
+            if total > limit {
+                return Some(payload_too_large("header bytes exceed http_guard limit"));
+            }
         }
     }
     None
+}
+
+fn trimmed_http_ows_len(value: &[u8]) -> usize {
+    let start = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t'))
+        .map_or(start, |index| index + 1);
+    end.saturating_sub(start)
 }
 
 fn validate_query_limits(
@@ -224,19 +272,18 @@ fn validate_query_limits(
 }
 
 fn validate_smuggling(req: &Request<Body>) -> Option<HttpGuardReject> {
-    let content_lengths = req
-        .headers()
-        .get_all(http::header::CONTENT_LENGTH)
+    let content_length_headers = req.headers().get_all(http::header::CONTENT_LENGTH);
+    let has_content_length = content_length_headers.iter().next().is_some();
+    let mut content_lengths = content_length_headers
         .iter()
         .filter_map(|value| value.to_str().ok().map(str::trim))
-        .filter(|value| !value.is_empty())
-        .collect::<std::collections::HashSet<_>>();
-    if content_lengths.len() > 1 {
+        .filter(|value| !value.is_empty());
+    if let Some(first) = content_lengths.next()
+        && content_lengths.any(|candidate| candidate != first)
+    {
         return Some(bad_request("multiple conflicting Content-Length headers"));
     }
-    if req.headers().contains_key(http::header::TRANSFER_ENCODING)
-        && req.headers().contains_key(http::header::CONTENT_LENGTH)
-    {
+    if has_content_length && req.headers().contains_key(http::header::TRANSFER_ENCODING) {
         return Some(bad_request(
             "Transfer-Encoding with Content-Length is not allowed",
         ));

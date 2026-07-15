@@ -2874,7 +2874,9 @@ name = "qpx-observability"
 version = "0.4.2"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "cidr",
+ "crossbeam-channel",
  "dirs-next",
  "http",
  "libc",
@@ -2883,6 +2885,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "parking_lot",
  "qpx-core",
  "thiserror 2.0.18",
  "tokio",
@@ -2910,13 +2913,15 @@ name = "qpx-webdav"
 version = "0.4.2"
 dependencies = [
  "anyhow",
+ "arc-swap",
+ "bytes",
  "http",
+ "parking_lot",
  "percent-encoding",
  "quick-xml",
  "redb",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "uuid",
 ]
@@ -2993,6 +2998,7 @@ dependencies = [
  "serde_json_path",
  "serde_norway",
  "sha2",
+ "smallvec",
  "socket2",
  "tempfile",
  "thiserror 2.0.18",
@@ -3015,6 +3021,7 @@ name = "qpxd-cache"
 version = "0.4.2"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "base64",
  "bytes",
@@ -3022,6 +3029,7 @@ dependencies = [
  "httpdate",
  "hyper",
  "libc",
+ "lru",
  "metrics",
  "percent-encoding",
  "qpx-core",

@@ -62,6 +62,7 @@ fn apply_header_mutations(
     remove: &[http::header::HeaderName],
     regex_replace: &[CompiledRegexReplace],
 ) {
+    headers.reserve(set.len().saturating_add(add.len()));
     for (name, value) in set {
         headers.insert(name.clone(), value.clone());
     }

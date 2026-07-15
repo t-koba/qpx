@@ -11,6 +11,44 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 #[test]
+fn rate_limit_plan_requires_extended_context_only_for_extended_keys() {
+    for (key, expected) in [
+        ("global", false),
+        ("src_ip", false),
+        ("user", true),
+        ("group", true),
+        ("tenant", true),
+        ("device", true),
+        ("route", true),
+        ("upstream", true),
+    ] {
+        let config = RateLimitConfig {
+            enabled: true,
+            apply_to: vec![RateLimitApplyTo::Request],
+            key: key.to_string(),
+            requests: Some(qpx_core::config::RateLimitRequestsConfig {
+                rps: Some(10),
+                burst: Some(10),
+                quota: None,
+            }),
+            traffic: None,
+            sessions: None,
+        };
+        let plan = CompiledRateLimitPlan::from_sets(
+            RateLimitSet::from_config(Some(&config)),
+            RateLimitSet::default(),
+        );
+
+        assert_eq!(
+            plan.requires_extended_context(TransportScope::Request),
+            expected,
+            "unexpected context requirement for {key}"
+        );
+        assert!(!plan.requires_extended_context(TransportScope::Connect));
+    }
+}
+
+#[test]
 fn collect_profile_rejects_unknown_profile_name() {
     let listener = IngressEdgeConfig {
         name: "forward".to_string(),
@@ -85,7 +123,8 @@ fn reserve_bytes_enforces_quota() {
             Duration::from_secs(60),
             None,
             Some(8),
-        ))],
+        ))]
+        .into(),
         ..Default::default()
     };
     let ctx = RateLimitContext {

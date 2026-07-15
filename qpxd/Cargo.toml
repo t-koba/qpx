@@ -85,6 +85,7 @@ metrics.workspace = true
 arc-swap.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
+smallvec.workspace = true
 notify.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true

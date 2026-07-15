@@ -1,6 +1,9 @@
 use crate::ResourceId;
 use anyhow::Result;
+use bytes::Bytes;
+use http::HeaderValue;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +24,20 @@ pub struct ResourceMetadata {
     pub content_type: Option<String>,
     pub etag: String,
     pub modified_unix_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceRead {
+    pub metadata: Arc<ResourceMetadata>,
+    pub etag: HeaderValue,
+    pub body: Bytes,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResourceAccessContext {
+    pub resolved_resource: Option<ResourceId>,
+    pub properties: Vec<DeadProperty>,
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,7 +91,21 @@ impl LockRecord {
 
 pub trait WebDavDataStore: Send + Sync + 'static {
     fn metadata(&self, resource: &ResourceId) -> Result<Option<ResourceMetadata>>;
-    fn read(&self, resource: &ResourceId) -> Result<Vec<u8>>;
+    fn read(&self, resource: &ResourceId) -> Result<Bytes>;
+    fn read_with_metadata(&self, resource: &ResourceId) -> Result<Option<ResourceRead>>;
+    fn read_with_metadata_and_content_type(
+        &self,
+        resource: &ResourceId,
+        content_type: Option<String>,
+    ) -> Result<Option<ResourceRead>> {
+        let Some(mut read) = self.read_with_metadata(resource)? else {
+            return Ok(None);
+        };
+        if read.metadata.content_type != content_type {
+            Arc::make_mut(&mut read.metadata).content_type = content_type;
+        }
+        Ok(Some(read))
+    }
     fn put(&self, resource: &ResourceId, body: &[u8], content_type: Option<&str>) -> Result<bool>;
     fn create_collection(&self, resource: &ResourceId) -> Result<()>;
     fn delete(&self, resource: &ResourceId) -> Result<()>;
@@ -111,9 +142,21 @@ pub trait WebDavMetadataStore: Send + Sync + 'static {
     fn checkout_owner(&self, resource: &ResourceId) -> Result<Option<String>>;
     fn set_checkout_owner(&self, resource: &ResourceId, owner: Option<&str>) -> Result<()>;
     fn resolve_binding(&self, resource: &ResourceId) -> Result<ResourceId>;
+    fn resolve_binding_if_present(&self, resource: &ResourceId) -> Result<Option<ResourceId>>;
     fn put_binding(&self, alias: &ResourceId, target: &ResourceId, replace: bool) -> Result<()>;
     fn remove_binding(&self, alias: &ResourceId) -> Result<bool>;
     fn child_bindings(&self, collection: &ResourceId) -> Result<Vec<ResourceId>>;
+    fn resource_access_context(&self, resource: &ResourceId) -> Result<ResourceAccessContext> {
+        let resolved_resource = self.resolve_binding_if_present(resource)?;
+        let effective = resolved_resource.as_ref().unwrap_or(resource);
+        let properties = self.properties(effective)?;
+        let content_type = self.content_type(effective)?;
+        Ok(ResourceAccessContext {
+            resolved_resource,
+            properties,
+            content_type,
+        })
+    }
 }
 
 /// Combined data and metadata transaction boundary used by `WebDavService`.
@@ -150,8 +193,27 @@ impl<D: WebDavDataStore, M: WebDavMetadataStore> WebDavDataStore for PersistentW
         Ok(Some(metadata))
     }
 
-    fn read(&self, resource: &ResourceId) -> Result<Vec<u8>> {
+    fn read(&self, resource: &ResourceId) -> Result<Bytes> {
         self.data.read(resource)
+    }
+
+    fn read_with_metadata(&self, resource: &ResourceId) -> Result<Option<ResourceRead>> {
+        let content_type = self.metadata.content_type(resource)?;
+        self.read_with_metadata_and_content_type(resource, content_type)
+    }
+
+    fn read_with_metadata_and_content_type(
+        &self,
+        resource: &ResourceId,
+        content_type: Option<String>,
+    ) -> Result<Option<ResourceRead>> {
+        let Some(mut read) = self.data.read_with_metadata(resource)? else {
+            return Ok(None);
+        };
+        if read.metadata.content_type != content_type {
+            Arc::make_mut(&mut read.metadata).content_type = content_type;
+        }
+        Ok(Some(read))
     }
 
     fn put(&self, resource: &ResourceId, body: &[u8], content_type: Option<&str>) -> Result<bool> {
@@ -262,6 +324,10 @@ impl<D: Send + Sync + 'static, M: WebDavMetadataStore> WebDavMetadataStore
         self.metadata.resolve_binding(resource)
     }
 
+    fn resolve_binding_if_present(&self, resource: &ResourceId) -> Result<Option<ResourceId>> {
+        self.metadata.resolve_binding_if_present(resource)
+    }
+
     fn put_binding(&self, alias: &ResourceId, target: &ResourceId, replace: bool) -> Result<()> {
         self.metadata.put_binding(alias, target, replace)
     }
@@ -272,5 +338,9 @@ impl<D: Send + Sync + 'static, M: WebDavMetadataStore> WebDavMetadataStore
 
     fn child_bindings(&self, collection: &ResourceId) -> Result<Vec<ResourceId>> {
         self.metadata.child_bindings(collection)
+    }
+
+    fn resource_access_context(&self, resource: &ResourceId) -> Result<ResourceAccessContext> {
+        self.metadata.resource_access_context(resource)
     }
 }

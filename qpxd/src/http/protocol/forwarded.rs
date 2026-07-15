@@ -1,9 +1,11 @@
-use crate::runtime::CompiledForwardedPolicy;
+use crate::runtime::{CompiledForwardedHop, CompiledForwardedHopCache, CompiledForwardedPolicy};
 use anyhow::{Result, anyhow};
-use http::HeaderMap;
+use http::{HeaderMap, HeaderValue};
 use qpx_core::config::UntrustedForwardedChainPolicy;
 use qpx_http::forwarded::{ForwardedElement, parse_forwarded, serialize_forwarded};
+use std::fmt::Write as _;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 pub(crate) fn apply_forwarded_policy(
     headers: &mut HeaderMap,
@@ -19,7 +21,8 @@ pub(crate) fn apply_forwarded_policy(
         .trusted_peers
         .iter()
         .any(|network| network.contains(&peer_ip));
-    let mut chain = if trusted {
+    let has_forwarded_chain = headers.contains_key("forwarded");
+    let mut chain = if trusted && has_forwarded_chain {
         parse_forwarded(headers)
             .map_err(|error| anyhow!("invalid trusted Forwarded chain: {error}"))?
     } else {
@@ -30,14 +33,23 @@ pub(crate) fn apply_forwarded_policy(
         }
         Vec::new()
     };
-    headers.remove("forwarded");
-    for legacy in [
+    for name in [
+        "forwarded",
         "x-forwarded-for",
         "x-forwarded-host",
         "x-forwarded-proto",
         "x-forwarded-port",
     ] {
-        headers.remove(legacy);
+        headers.remove(name);
+    }
+
+    if chain.is_empty() {
+        headers.reserve(1);
+        headers.insert(
+            "forwarded",
+            cached_current_hop(policy, peer_ip, scheme, host)?,
+        );
+        return Ok(());
     }
 
     let mut parameters = vec![
@@ -58,6 +70,121 @@ pub(crate) fn apply_forwarded_policy(
     Ok(())
 }
 
+fn cached_current_hop(
+    policy: &CompiledForwardedPolicy,
+    peer_ip: IpAddr,
+    scheme: &str,
+    host: Option<&str>,
+) -> Result<HeaderValue> {
+    let host = host.filter(|value| !value.is_empty());
+    let current = policy.current_hops.load();
+    if let Some(entry) = current.entries.iter().find(|entry| {
+        entry.peer_ip == peer_ip && entry.scheme.as_ref() == scheme && entry.host.as_deref() == host
+    }) {
+        return Ok(entry.value.clone());
+    }
+    drop(current);
+    let value = serialize_current_hop(peer_ip, policy.by.as_ref(), scheme, host)?;
+    let entry = CompiledForwardedHop {
+        peer_ip,
+        scheme: Arc::from(scheme),
+        host: host.map(Arc::from),
+        value: value.clone(),
+    };
+    policy.current_hops.rcu(|current| {
+        let mut entries = Vec::with_capacity(32);
+        entries.push(entry.clone());
+        entries.extend(
+            current
+                .entries
+                .iter()
+                .filter(|candidate| {
+                    candidate.peer_ip != entry.peer_ip
+                        || candidate.scheme != entry.scheme
+                        || candidate.host != entry.host
+                })
+                .take(31)
+                .cloned(),
+        );
+        CompiledForwardedHopCache { entries }
+    });
+    Ok(value)
+}
+
+fn serialize_current_hop(
+    peer_ip: IpAddr,
+    by: &str,
+    scheme: &str,
+    host: Option<&str>,
+) -> Result<HeaderValue> {
+    let mut output =
+        String::with_capacity(72 + by.len() + scheme.len() + host.map(str::len).unwrap_or(0));
+    output.push_str("for=");
+    push_forwarded_node(&mut output, peer_ip);
+    output.push_str(";by=");
+    push_forwarded_value(&mut output, by);
+    output.push_str(";proto=");
+    push_forwarded_value(&mut output, scheme);
+    if let Some(host) = host.filter(|host| !host.is_empty()) {
+        output.push_str(";host=");
+        push_forwarded_value(&mut output, host);
+    }
+    HeaderValue::from_str(&output)
+        .map_err(|error| anyhow!("cannot serialize Forwarded hop: {error}"))
+}
+
+fn push_forwarded_node(output: &mut String, ip: IpAddr) {
+    match ip {
+        IpAddr::V4(ip) => {
+            let _ = write!(output, "{ip}");
+        }
+        IpAddr::V6(ip) => {
+            output.push_str("\"[");
+            let _ = write!(output, "{ip}");
+            output.push_str("]\"");
+        }
+    }
+}
+
+fn push_forwarded_value(output: &mut String, value: &str) {
+    if is_forwarded_token(value) {
+        output.push_str(value);
+        return;
+    }
+    output.push('"');
+    for character in value.chars() {
+        if character == '"' || character == '\\' {
+            output.push('\\');
+        }
+        output.push(character);
+    }
+    output.push('"');
+}
+
+fn is_forwarded_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
 fn format_forwarded_node(ip: IpAddr) -> String {
     match ip {
         IpAddr::V4(ip) => ip.to_string(),
@@ -68,13 +195,13 @@ fn format_forwarded_node(ip: IpAddr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     fn policy(mode: UntrustedForwardedChainPolicy) -> CompiledForwardedPolicy {
         CompiledForwardedPolicy {
             trusted_peers: Arc::from(["10.0.0.0/8".parse().expect("CIDR")]),
             by: Arc::from("qpx-edge"),
             untrusted_chain: mode,
+            current_hops: Arc::new(arc_swap::ArcSwap::from_pointee(Default::default())),
         }
     }
 

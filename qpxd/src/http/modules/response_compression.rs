@@ -5,7 +5,9 @@ use super::{
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, VARY};
+use http::header::{
+    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, VARY,
+};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use hyper::Response;
 use qpx_core::config::{HttpModuleConfig, ResponseCompressionModuleConfig};
@@ -45,6 +47,34 @@ struct ResponseCompressionModule {
     dictionary_hash: Option<[u8; 32]>,
 }
 
+#[derive(Clone)]
+struct CompressionRequest {
+    method: Method,
+    headers: HeaderMap,
+}
+
+impl CompressionRequest {
+    fn from_request(request: &hyper::Request<Body>) -> Option<Self> {
+        if !request.headers().contains_key(ACCEPT_ENCODING) {
+            return None;
+        }
+        let mut headers = HeaderMap::with_capacity(3);
+        for name in [
+            ACCEPT_ENCODING,
+            http::HeaderName::from_static("available-dictionary"),
+            http::HeaderName::from_static("dictionary-id"),
+        ] {
+            for value in request.headers().get_all(&name) {
+                headers.append(name.clone(), value.clone());
+            }
+        }
+        Some(Self {
+            method: request.method().clone(),
+            headers,
+        })
+    }
+}
+
 impl ResponseCompressionModule {
     fn new(config: ResponseCompressionModuleConfig) -> Result<Self> {
         let pool = Arc::new(CompressionPool::new(config.worker_count));
@@ -71,22 +101,25 @@ impl ResponseCompressionModule {
         ctx: &HttpModuleContext,
         response: Response<Body>,
     ) -> Result<Response<Body>> {
-        let (request_method, request_headers) = {
-            let request = ctx
-                .frozen_request()
-                .ok_or_else(|| anyhow!("response compression missing frozen request"))?;
-            (request.method().clone(), request.headers().clone())
+        let Some(compression_request) = ctx.extensions().get::<CompressionRequest>() else {
+            return Ok(response);
         };
-        let response = match self
-            .compress_with_dictionary(ctx, &request_method, &request_headers, response)
-            .await?
-        {
-            DictionaryCompressionOutcome::Compressed(response) => return Ok(response),
-            DictionaryCompressionOutcome::Unchanged(response) => response,
+        let response = if self.config.dictionary.is_some() {
+            let request_method = compression_request.method.clone();
+            let request_headers = compression_request.headers.clone();
+            match self
+                .compress_with_dictionary(ctx, &request_method, &request_headers, response)
+                .await?
+            {
+                DictionaryCompressionOutcome::Compressed(response) => return Ok(response),
+                DictionaryCompressionOutcome::Unchanged(response) => response,
+            }
+        } else {
+            response
         };
         let Some(encoding) = select_response_encoding_parts(
-            &request_method,
-            &request_headers,
+            &compression_request.method,
+            &compression_request.headers,
             &self.config,
             &response,
         )?
@@ -205,12 +238,28 @@ impl HttpModule for ResponseCompressionModule {
     }
 
     fn capabilities(&self) -> HttpModuleCapabilities {
-        let mut capabilities =
-            HttpModuleCapabilities::headers_only(ModuleStages::DOWNSTREAM_RESPONSE);
+        let mut stages = ModuleStages::REQUEST_HEADERS;
+        stages.insert(ModuleStages::DOWNSTREAM_RESPONSE);
+        let mut capabilities = HttpModuleCapabilities::headers_only(stages);
         capabilities.body_access = BodyAccess::Streaming;
         capabilities.mutates_response_headers = true;
-        capabilities.needs_frozen_request = true;
         capabilities
+    }
+
+    fn applies_to_request_headers(&self, request: &hyper::Request<Body>) -> bool {
+        request.headers().contains_key(ACCEPT_ENCODING)
+    }
+
+    fn is_inactive_for_request(&self, request: &hyper::Request<Body>) -> bool {
+        !request.headers().contains_key(ACCEPT_ENCODING)
+    }
+
+    fn applies_to_downstream_response(
+        &self,
+        ctx: &HttpModuleContext,
+        _response: &Response<Body>,
+    ) -> bool {
+        ctx.extensions().get::<CompressionRequest>().is_some()
     }
 
     async fn call<'a>(
@@ -219,17 +268,23 @@ impl HttpModule for ResponseCompressionModule {
         ctx: &mut HttpModuleContext,
         event: HttpModuleEvent<'a>,
     ) -> Result<HttpModuleEvent<'a>> {
-        let HttpModuleStage::DownstreamResponse = stage else {
-            return Ok(event);
-        };
-        let HttpModuleEvent::DownstreamResponse(response) = event else {
-            return Err(anyhow!(
-                "response_compression received invalid downstream_response event"
-            ));
-        };
-        Ok(HttpModuleEvent::DownstreamResponse(
-            self.compress(ctx, response).await?,
-        ))
+        match (stage, event) {
+            (HttpModuleStage::RequestHeaders, HttpModuleEvent::RequestHeaders(request)) => {
+                if let Some(request) = CompressionRequest::from_request(request) {
+                    ctx.extensions_mut().insert(request);
+                }
+                Ok(HttpModuleEvent::RequestHeadersResult(
+                    super::RequestHeadersOutcome::Continue,
+                ))
+            }
+            (
+                HttpModuleStage::DownstreamResponse,
+                HttpModuleEvent::DownstreamResponse(response),
+            ) => Ok(HttpModuleEvent::DownstreamResponse(
+                self.compress(ctx, response).await?,
+            )),
+            (_, event) => Ok(event),
+        }
     }
 }
 

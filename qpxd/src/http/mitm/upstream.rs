@@ -111,7 +111,9 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
             .insert(http::header::HOST, http::HeaderValue::from_str(&authority)?);
     }
     let module_init = mitm_module_init(proxy_name, &input.route, &input.identity);
-    let mut http_modules = selected_plan.modules.start(&state, module_init);
+    let mut http_modules = selected_plan
+        .modules
+        .start_for_request(&state, &input.req, || module_init);
     match http_modules.on_request_headers(&mut input.req).await? {
         crate::http::modules::RequestHeadersOutcome::Continue => {}
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {

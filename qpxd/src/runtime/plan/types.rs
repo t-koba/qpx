@@ -430,7 +430,7 @@ pub struct ExecutionPlan {
     pub(crate) cache: Option<qpx_core::config::CachePolicyConfig>,
     pub(crate) response_rules: Option<Arc<HttpResponseRuleEngine>>,
     pub(crate) forwarded: Option<Arc<CompiledForwardedPolicy>>,
-    pub(crate) api_metadata: Option<Arc<qpx_http::api_metadata::ApiMetadata>>,
+    pub(crate) api_metadata: Option<Arc<qpx_http::api_metadata::PreparedApiMetadata>>,
     pub(crate) hsts: Option<qpx_http::hsts::HstsPolicy>,
     pub(crate) require_precondition: bool,
     pub(crate) guard: Option<Arc<CompiledHttpGuardProfile>>,
@@ -444,6 +444,20 @@ pub(crate) struct CompiledForwardedPolicy {
     pub(crate) trusted_peers: Arc<[cidr::IpCidr]>,
     pub(crate) by: Arc<str>,
     pub(crate) untrusted_chain: qpx_core::config::UntrustedForwardedChainPolicy,
+    pub(crate) current_hops: Arc<arc_swap::ArcSwap<CompiledForwardedHopCache>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledForwardedHop {
+    pub(crate) peer_ip: std::net::IpAddr,
+    pub(crate) scheme: Arc<str>,
+    pub(crate) host: Option<Arc<str>>,
+    pub(crate) value: http::HeaderValue,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CompiledForwardedHopCache {
+    pub(crate) entries: Vec<CompiledForwardedHop>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

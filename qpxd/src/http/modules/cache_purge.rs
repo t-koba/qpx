@@ -110,6 +110,14 @@ impl HttpModule for CachePurgeModule {
         capabilities
     }
 
+    fn applies_to_request_headers(&self, request: &hyper::Request<Body>) -> bool {
+        self.matches(request.method())
+    }
+
+    fn is_inactive_for_request(&self, request: &hyper::Request<Body>) -> bool {
+        !self.matches(request.method())
+    }
+
     async fn call<'a>(
         &self,
         stage: HttpModuleStage,

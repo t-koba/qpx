@@ -62,7 +62,7 @@ use self::prepare::{
     attach_streaming_limits, buffer_reverse_guarded_request,
     enforce_selected_reverse_route_constraints, prepare_reverse_request,
     prepare_reverse_retry_dispatch, prepare_single_plain_reverse_request,
-    reverse_security_rejection,
+    prepare_single_webdav_reverse_request, reverse_security_rejection,
 };
 use self::types::*;
 
@@ -184,6 +184,50 @@ async fn execute_reverse_dispatch(
             Err(response) => return Ok(response),
         }
     }
+    if !state.destination_trace_enabled()
+        && !qpx_observability::metrics_enabled()
+        && state.security.identity_sources.sources.is_empty()
+        && base.method != http::Method::CONNECT
+        && matches!(
+            request_version,
+            http::Version::HTTP_11 | http::Version::HTTP_2
+        )
+        && !req.headers().contains_key(http::header::UPGRADE)
+        && let Some(route) = compiled.router.single_direct_webdav_route()
+    {
+        match prepare_single_webdav_reverse_request(req, &base, conn, &state, &compiled)? {
+            Ok(Some(mut req)) => {
+                let identity = crate::policy_context::ResolvedIdentity::default();
+                let service = route
+                    .webdav
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("direct WebDAV route has no service"))?
+                    .clone();
+                let request_resource =
+                    prepare_direct_webdav_resource(&mut req, route, service.as_ref())?;
+                let mut response = execute_webdav_service(
+                    req,
+                    service,
+                    &identity,
+                    route.plan.streaming.max_request_body_bytes,
+                    Some(request_resource),
+                )
+                .await?;
+                crate::http::protocol::l7::finalize_response_with_headers_in_place(
+                    &base.method,
+                    request_version,
+                    state.plan.identity.proxy_name.as_ref(),
+                    &mut response,
+                    None,
+                    false,
+                );
+                apply_reverse_route_metadata(route, conn.tls_sni.is_some(), &mut response)?;
+                return Ok(empty_interim_response(response));
+            }
+            Ok(None) => return Err(anyhow!("no route matched")),
+            Err(response) => return Ok(response),
+        }
+    }
     let prepared = match prepare_reverse_request(req, &base, conn, state, compiled).await? {
         Ok(prepared) => prepared,
         Err(response) => return Ok(response),
@@ -199,7 +243,7 @@ async fn execute_reverse_dispatch(
     let (interim, mut response) =
         execute_reverse_request(prepared, base, reverse, runtime, conn).await?;
     if let Some(metadata) = api_metadata {
-        metadata.apply(response.headers_mut())?;
+        metadata.apply(response.headers_mut());
     }
     if secure_transport && let Some(hsts) = hsts {
         response.headers_mut().insert(
@@ -210,13 +254,39 @@ async fn execute_reverse_dispatch(
     Ok((interim, response))
 }
 
+fn prepare_direct_webdav_resource(
+    req: &mut Request<Body>,
+    route: &HttpRoute,
+    service: &crate::reverse::router::WebDavOriginService,
+) -> Result<qpx_webdav::ResourceId> {
+    if let Some(rewrite) = route.path_rewrite.as_ref()
+        && rewrite.add_prefix.is_none()
+        && rewrite.regex.is_none()
+        && req.uri().query().is_none()
+        && let Some(prefix) = rewrite.strip_prefix.as_deref()
+        && let Some(rest) = req.uri().path().strip_prefix(prefix)
+    {
+        if rest.is_empty() {
+            return service.resource_for_path("/");
+        }
+        if rest.starts_with('/') {
+            return service.resource_for_path(rest);
+        }
+        return service.resource_for_path(format!("/{rest}").as_str());
+    }
+    if let Some(rewrite) = route.path_rewrite.as_ref() {
+        crate::reverse::transport::path_rewrite::apply_path_rewrite(req, rewrite);
+    }
+    service.resource_for_path(req.uri().path())
+}
+
 fn apply_reverse_route_metadata(
     route: &HttpRoute,
     secure_transport: bool,
     response: &mut Response<Body>,
 ) -> Result<()> {
     if let Some(metadata) = route.plan.api_metadata.as_deref() {
-        metadata.apply(response.headers_mut())?;
+        metadata.apply(response.headers_mut());
     }
     if secure_transport && let Some(hsts) = route.plan.hsts {
         response.headers_mut().insert(
@@ -751,6 +821,31 @@ async fn dispatch_reverse_webdav(input: ReverseWebDavDispatch<'_>) -> Result<Res
         http_modules,
         max_request_body_bytes,
     } = input;
+    let response =
+        execute_webdav_service(req, service, identity, max_request_body_bytes, None).await?;
+    let mut response = http_modules.on_upstream_response(response).await?;
+    crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        request_method,
+        request_version,
+        proxy_name,
+        &mut response,
+        route_headers,
+        false,
+    );
+    Ok(response)
+}
+
+async fn execute_webdav_service(
+    req: Request<Body>,
+    service: Arc<crate::reverse::router::WebDavOriginService>,
+    identity: &crate::policy_context::ResolvedIdentity,
+    max_request_body_bytes: usize,
+    request_resource: Option<qpx_webdav::ResourceId>,
+) -> Result<Response<Body>> {
+    let request_resource = match request_resource {
+        Some(resource) => resource,
+        None => service.resource_for_path(req.uri().path())?,
+    };
     let (parts, mut body) = req.into_parts();
     let mut collected = Vec::new();
     while let Some(chunk) = body.data().await {
@@ -776,21 +871,13 @@ async fn dispatch_reverse_webdav(input: ReverseWebDavDispatch<'_>) -> Result<Res
         entitlements: identity.entitlements.clone(),
         assurance: identity.auth_strength.clone(),
     };
-    let response = tokio::task::spawn_blocking(move || service.handle(request, &context))
-        .await
-        .map_err(|error| anyhow!("WebDAV origin task failed: {error}"))??;
+    let response = tokio::task::spawn_blocking(move || {
+        service.handle_bytes_for_resource(request, &context, request_resource)
+    })
+    .await
+    .map_err(|error| anyhow!("WebDAV worker failed: {error}"))??;
     let (parts, body) = response.into_parts();
-    let response = Response::from_parts(parts, Body::from(body));
-    let mut response = http_modules.on_upstream_response(response).await?;
-    crate::http::protocol::l7::finalize_response_with_headers_in_place(
-        request_method,
-        request_version,
-        proxy_name,
-        &mut response,
-        route_headers,
-        false,
-    );
-    Ok(response)
+    Ok(Response::from_parts(parts, Body::from(body)))
 }
 
 async fn reverse_continue_response_rule(

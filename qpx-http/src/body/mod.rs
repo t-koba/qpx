@@ -9,6 +9,7 @@ use http_body_util::channel::{Channel, SendError as ChannelSendError, Sender as 
 use http_body_util::combinators::UnsyncBoxBody;
 use std::collections::VecDeque;
 use std::fmt;
+use std::fs::File;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -60,10 +61,38 @@ impl From<ChannelSendError> for BodyError {
 #[derive(Debug)]
 pub struct Body {
     inner: BodyInner,
+    file_region: Option<FileRegion>,
     close_signal: Option<Arc<BodyCloseSignal>>,
     pending_trailers: Option<Box<HeaderMap>>,
     stream_finished: bool,
     trailers_sanitized: bool,
+}
+
+/// An immutable file extent that can be transferred directly to a compatible
+/// transport while the regular body remains available as a portable fallback.
+#[derive(Clone, Debug)]
+pub struct FileRegion {
+    file: Arc<File>,
+    offset: u64,
+    len: u64,
+}
+
+impl FileRegion {
+    pub fn file(&self) -> &File {
+        self.file.as_ref()
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 #[derive(Debug)]
@@ -90,6 +119,7 @@ impl Body {
     pub fn empty() -> Self {
         Self {
             inner: BodyInner::Empty,
+            file_region: None,
             close_signal: None,
             pending_trailers: None,
             stream_finished: true,
@@ -113,6 +143,7 @@ impl Body {
             },
             Self {
                 inner: BodyInner::Boxed(body.boxed_unsync()),
+                file_region: None,
                 close_signal: Some(close_signal),
                 pending_trailers: None,
                 stream_finished: false,
@@ -130,6 +161,7 @@ impl Body {
                 bytes: (!bytes.is_empty()).then_some(bytes),
                 trailers: trailers.map(Box::new),
             },
+            file_region: None,
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
@@ -152,6 +184,7 @@ impl Body {
                 trailers: trailers.map(Box::new),
                 remaining_len,
             },
+            file_region: None,
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
@@ -165,6 +198,7 @@ impl Body {
     {
         Self {
             inner: BodyInner::Boxed(body.boxed_unsync()),
+            file_region: None,
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
@@ -207,12 +241,43 @@ impl Body {
             | BodyInner::Chunks { .. }
             | BodyInner::Boxed(_) => None,
         }?;
+        self.file_region = None;
         self.stream_finished = true;
         Some(bytes)
     }
 
+    /// Associates a verified immutable file extent with this body. Transports
+    /// that cannot use the extent continue to consume the regular body.
+    pub fn with_file_region(mut self, file: Arc<File>, offset: u64, len: u64) -> Self {
+        self.file_region = Some(FileRegion { file, offset, len });
+        self
+    }
+
+    /// Takes a file extent only when it exactly represents a single-frame body
+    /// without trailers, consuming the fallback frame at the same time.
+    pub fn take_file_region_without_trailers(&mut self) -> Option<FileRegion> {
+        if self.close_signal.is_some() || self.pending_trailers.is_some() || self.stream_finished {
+            return None;
+        }
+        let region = self.file_region.take()?;
+        let bytes = match &mut self.inner {
+            BodyInner::Once { bytes, trailers } if trailers.is_none() => bytes,
+            BodyInner::Empty
+            | BodyInner::Once { .. }
+            | BodyInner::Chunks { .. }
+            | BodyInner::Boxed(_) => return None,
+        };
+        if bytes.as_ref().map(Bytes::len) != usize::try_from(region.len).ok() {
+            self.file_region = Some(region);
+            return None;
+        }
+        let _ = bytes.take();
+        self.stream_finished = true;
+        Some(region)
+    }
+
     pub fn limit_bytes(self, max_bytes: usize) -> Self {
-        if max_bytes == usize::MAX {
+        if max_bytes == usize::MAX || self.materialized_len_within(max_bytes) {
             return self;
         }
         let trailers_sanitized = self.trailers_sanitized;
@@ -226,7 +291,17 @@ impl Body {
         body
     }
 
+    fn materialized_len_within(&self, max_bytes: usize) -> bool {
+        match &self.inner {
+            BodyInner::Empty => true,
+            BodyInner::Once { bytes, .. } => bytes.as_ref().map_or(0, Bytes::len) <= max_bytes,
+            BodyInner::Chunks { remaining_len, .. } => *remaining_len <= max_bytes as u64,
+            BodyInner::Boxed(_) => false,
+        }
+    }
+
     pub async fn data(&mut self) -> Option<Result<Bytes, BodyError>> {
+        self.file_region = None;
         if self.pending_trailers.is_some() || self.stream_finished {
             return None;
         }
@@ -252,6 +327,7 @@ impl Body {
     }
 
     pub async fn trailers(&mut self) -> Result<Option<HeaderMap>, BodyError> {
+        self.file_region = None;
         if self.pending_trailers.is_some() {
             return Ok(self.pending_trailers.take().map(|trailers| *trailers));
         }
@@ -346,6 +422,7 @@ impl From<hyper::body::Incoming> for Body {
     fn from(value: hyper::body::Incoming) -> Self {
         Self {
             inner: BodyInner::Boxed(value.map_err(BodyError::from).boxed_unsync()),
+            file_region: None,
             close_signal: None,
             pending_trailers: None,
             stream_finished: false,
@@ -371,6 +448,7 @@ impl http_body::Body for Body {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.as_mut().get_mut();
+        this.file_region = None;
         if let Some(trailers) = this.pending_trailers.take() {
             return Poll::Ready(Some(Ok(Frame::trailers(*trailers))));
         }
@@ -586,6 +664,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::body::*;
+    use std::io::Write;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -615,6 +694,34 @@ mod tests {
 
         let (_sender, mut streamed) = Body::channel();
         assert!(streamed.take_single_frame_without_trailers().is_none());
+    }
+
+    #[tokio::test]
+    async fn file_region_is_exact_and_portable_body_consumption_disables_it() {
+        let (mut file, path) =
+            qpx_core::secure_file::create_secure_temp_file("qpx-body-region", ".body")
+                .expect("create file");
+        file.write_all(b"prefixpayload").expect("write file");
+        file.flush().expect("flush file");
+        let file = Arc::new(file);
+
+        let mut direct = Body::from(Bytes::from_static(b"payload"))
+            .with_file_region(file.clone(), 6, 7)
+            .limit_bytes(7);
+        let region = direct
+            .take_file_region_without_trailers()
+            .expect("file region");
+        assert_eq!(region.offset(), 6);
+        assert_eq!(region.len(), 7);
+        assert!(http_body::Body::is_end_stream(&direct));
+
+        let mut portable = Body::from(Bytes::from_static(b"payload")).with_file_region(file, 6, 7);
+        assert_eq!(
+            portable.data().await.expect("data").expect("payload"),
+            Bytes::from_static(b"payload")
+        );
+        assert!(portable.take_file_region_without_trailers().is_none());
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

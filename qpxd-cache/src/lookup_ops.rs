@@ -8,10 +8,10 @@ use super::freshness::{
 };
 use super::types::{
     CACHE_HEADER, CacheBackend, CacheEntryDisposition, CacheRequestKey, CachedResponseEnvelope,
-    LookupOutcome, RequestDirectives, ResponseDirectives, RevalidationState,
-    cache_body_storage_key, cache_status_header, decode_cached_response_metadata,
+    LookupOutcome, RequestDirectives, ResponseDirectives, RevalidationState, VariantIndex,
+    cache_body_storage_key, cache_status_header,
 };
-use super::util::{cache_namespace, load_variant_index, now_millis};
+use super::util::{cache_namespace, now_millis};
 use super::vary::matches_vary;
 use anyhow::Result;
 use http::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
@@ -42,18 +42,29 @@ pub async fn lookup(
     };
 
     let namespace = cache_namespace(policy, "default");
-    let variant_keys =
+    let variant_index =
         load_candidate_variant_keys(backend.as_ref(), namespace.as_str(), key, request_method)
             .await?;
-    if variant_keys.is_empty() {
+    if variant_index.variants.is_empty() {
         return Ok(miss_or_only_if_cached(&req));
+    }
+    let metadata = backend
+        .get_decoded_response_metadata_many(namespace.as_str(), &variant_index.variants)
+        .await?;
+    if metadata.len() != variant_index.variants.len() {
+        return Err(anyhow::anyhow!(
+            "cache backend returned {} metadata values for {} keys",
+            metadata.len(),
+            variant_index.variants.len()
+        ));
     }
 
     let now = now_millis();
     let mut revalidation: Option<RevalidationState> = None;
-    for (variant_key, envelope) in
-        load_variant_metadata_batch(backend.as_ref(), namespace.as_str(), &variant_keys).await?
-    {
+    for (variant_key, envelope) in variant_index.variants.iter().zip(metadata) {
+        let Some(envelope) = envelope else {
+            continue;
+        };
         if !matches_vary(request_headers, key.content_digest.as_deref(), &envelope) {
             continue;
         }
@@ -83,8 +94,8 @@ pub async fn lookup(
                 let Some(response) = load_cached_response(
                     backend.as_ref(),
                     namespace.as_str(),
-                    &variant_key,
-                    envelope,
+                    variant_key,
+                    &envelope,
                     request_method,
                     &req,
                     now,
@@ -105,7 +116,7 @@ pub async fn lookup(
                     request_method: request_method.clone(),
                     request_directives: req.clone(),
                     stale_if_error_secs: directives.stale_if_error,
-                    envelope,
+                    envelope: (*envelope).clone(),
                     revalidations: revalidations.clone(),
                 };
                 if precondition_failed(&req, &state.envelope) {
@@ -137,8 +148,8 @@ pub async fn lookup(
                 let Some(response) = load_cached_response(
                     backend.as_ref(),
                     namespace.as_str(),
-                    &variant_key,
-                    state.envelope.clone(),
+                    variant_key,
+                    &state.envelope,
                     request_method,
                     &req,
                     now,
@@ -158,10 +169,10 @@ pub async fn lookup(
                 revalidation = Some(RevalidationState {
                     backend: backend.clone(),
                     namespace: namespace.clone(),
-                    variant_key,
+                    variant_key: variant_key.clone(),
                     request_method: request_method.clone(),
                     request_directives: req.clone(),
-                    envelope,
+                    envelope: (*envelope).clone(),
                     stale_if_error_secs: directives.stale_if_error,
                     revalidations: revalidations.clone(),
                 });
@@ -204,54 +215,45 @@ async fn load_candidate_variant_keys(
     namespace: &str,
     key: &CacheRequestKey,
     request_method: &Method,
-) -> Result<Vec<String>> {
+) -> Result<Arc<VariantIndex>> {
     let primary = key.primary_hash();
-    let mut variants = load_variant_index(backend, namespace, primary.as_str()).await?;
+    let storage_key = super::vary::index_storage_key(primary.as_str());
+    let mut variants = backend
+        .get_decoded_variant_index(namespace, storage_key.as_str())
+        .await?
+        .unwrap_or_else(|| Arc::new(VariantIndex::default()));
     if variants.variants.is_empty() && *request_method == Method::HEAD {
         let get_key = key.with_method_group("GET");
         let get_primary = get_key.primary_hash();
-        let get_variants = load_variant_index(backend, namespace, get_primary.as_str()).await?;
+        let get_storage_key = super::vary::index_storage_key(get_primary.as_str());
+        let get_variants = backend
+            .get_decoded_variant_index(namespace, get_storage_key.as_str())
+            .await?
+            .unwrap_or_else(|| Arc::new(VariantIndex::default()));
         if !get_variants.variants.is_empty() {
             variants = get_variants;
         }
     }
-    Ok(variants.variants)
-}
-
-async fn load_variant_metadata_batch(
-    backend: &dyn CacheBackend,
-    namespace: &str,
-    variant_keys: &[String],
-) -> Result<Vec<(String, CachedResponseEnvelope)>> {
-    let values = backend.get_many(namespace, variant_keys).await?;
-    Ok(variant_keys
-        .iter()
-        .cloned()
-        .zip(values)
-        .filter_map(|(variant_key, raw)| {
-            let envelope = decode_cached_response_metadata(raw?).ok()?;
-            Some((variant_key, envelope))
-        })
-        .collect())
+    Ok(variants)
 }
 
 async fn load_cached_response(
     backend: &dyn CacheBackend,
     namespace: &str,
     variant_key: &str,
-    envelope: CachedResponseEnvelope,
+    envelope: &CachedResponseEnvelope,
     request_method: &Method,
     req: &RequestDirectives,
     now: u64,
 ) -> Result<Option<Response<Body>>> {
-    let range = active_range(req, &envelope);
+    let range = active_range(req, envelope);
     let stream_range = match range {
         Some(range) => {
             let Some((start, end)) = resolve_range(range, envelope.body_len) else {
                 return Ok(Some(response_from_envelope_for_request(
                     request_method,
                     req,
-                    &envelope,
+                    envelope,
                     now,
                     "HIT",
                 )?));
@@ -274,7 +276,7 @@ async fn load_cached_response(
     Ok(Some(response_from_envelope_for_request_with_body(
         request_method,
         req,
-        &envelope,
+        envelope,
         now,
         "HIT",
         body.body,
@@ -357,7 +359,7 @@ pub async fn maybe_build_stale_if_error_response(
         state.backend.as_ref(),
         state.namespace.as_str(),
         state.variant_key.as_str(),
-        state.envelope.clone(),
+        &state.envelope,
         &state.request_method,
         &state.request_directives,
         now,

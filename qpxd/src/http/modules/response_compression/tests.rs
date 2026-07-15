@@ -1,6 +1,41 @@
 use super::*;
 
 #[test]
+fn request_snapshot_is_absent_without_accept_encoding() {
+    let request = hyper::Request::builder()
+        .method(Method::GET)
+        .header(
+            "available-dictionary",
+            ":AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:",
+        )
+        .body(Body::empty())
+        .expect("request");
+    assert!(CompressionRequest::from_request(&request).is_none());
+}
+
+#[test]
+fn request_snapshot_only_copies_compression_negotiation_fields() {
+    let request = hyper::Request::builder()
+        .method(Method::POST)
+        .header(ACCEPT_ENCODING, "gzip")
+        .header("dictionary-id", "example")
+        .header("x-unrelated", "must-not-be-copied")
+        .body(Body::empty())
+        .expect("request");
+    let snapshot = CompressionRequest::from_request(&request).expect("snapshot");
+    assert_eq!(snapshot.method, Method::POST);
+    assert_eq!(
+        snapshot.headers.get(ACCEPT_ENCODING),
+        Some(&HeaderValue::from_static("gzip"))
+    );
+    assert_eq!(
+        snapshot.headers.get("dictionary-id"),
+        Some(&HeaderValue::from_static("example"))
+    );
+    assert!(!snapshot.headers.contains_key("x-unrelated"));
+}
+
+#[test]
 fn detects_event_stream_content_type_with_parameters() {
     let mut headers = HeaderMap::new();
     headers.insert(

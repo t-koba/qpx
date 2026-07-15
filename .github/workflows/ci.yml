@@ -442,8 +442,12 @@ jobs:
           RUSTFLAGS: "-D warnings"
           QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-proxy-compare.jsonl
         run: |
-          cargo build -p qpxd --release --locked
-          scripts/perf-audit-proxy-compare.sh "$QPX_PROXY_COMPARE_JSON"
+          cargo build -p qpxd --release --locked --features http3-backend-qpx
+          scripts/perf-audit-proxy-matrix.sh "$QPX_PROXY_COMPARE_JSON"
+      - name: enforce cache origin and feature-rich performance objectives
+        id: enforce_cache_origin_feature_rich_performance_objectives
+        continue-on-error: true
+        run: scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl perf/origin-cache-performance-objectives.json
       - name: external http2 comparison bench
         id: external_http2_comparison_bench
         continue-on-error: true
@@ -512,6 +516,7 @@ jobs:
           QPX_HTTP3_PROTOCOL_PERF_BENCHMARKS: ${{ steps.qpx_http3_protocol_perf_benchmarks.outcome }}
           ADVANCED_TRANSPORT_PERF_BENCHMARKS: ${{ steps.advanced_transport_perf_benchmarks.outcome }}
           EXTERNAL_PROXY_COMPARISON_BENCH: ${{ steps.external_proxy_comparison_bench.outcome }}
+          ENFORCE_CACHE_ORIGIN_FEATURE_RICH_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_cache_origin_feature_rich_performance_objectives.outcome }}
           EXTERNAL_HTTP2_COMPARISON_BENCH: ${{ steps.external_http2_comparison_bench.outcome }}
           ENFORCE_HTTP2_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_http2_performance_objectives.outcome }}
           EXTERNAL_LONG_STREAMING_COMPARISON_BENCH: ${{ steps.external_long_streaming_comparison_bench.outcome }}
@@ -537,6 +542,7 @@ jobs:
           check_step "qpx http3 protocol perf benchmarks" "$QPX_HTTP3_PROTOCOL_PERF_BENCHMARKS"
           check_step "advanced transport perf benchmarks" "$ADVANCED_TRANSPORT_PERF_BENCHMARKS"
           check_step "external proxy comparison bench" "$EXTERNAL_PROXY_COMPARISON_BENCH"
+          check_step "cache origin and feature-rich performance objectives" "$ENFORCE_CACHE_ORIGIN_FEATURE_RICH_PERFORMANCE_OBJECTIVES"
           check_step "external http2 comparison bench" "$EXTERNAL_HTTP2_COMPARISON_BENCH"
           check_step "http2 performance objectives" "$ENFORCE_HTTP2_PERFORMANCE_OBJECTIVES"
           check_step "external long streaming comparison bench" "$EXTERNAL_LONG_STREAMING_COMPARISON_BENCH"

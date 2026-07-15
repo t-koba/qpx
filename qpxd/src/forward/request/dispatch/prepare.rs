@@ -56,8 +56,7 @@ pub(super) async fn prepare_forward_dispatch(
     let websocket = is_websocket_upgrade(req.method(), req.headers())?;
     prepare_request_with_headers_in_place(&mut req, proxy_name, headers, websocket);
     ensure_forward_host_header(&mut req, host)?;
-    let mut http_modules = selected_plan.modules.start(
-        &state,
+    let mut http_modules = selected_plan.modules.start_for_request(&state, &req, || {
         crate::http::modules::HttpModuleSessionInit {
             proxy_kind: ProxyKind::Forward,
             proxy_name,
@@ -68,8 +67,8 @@ pub(super) async fn prepare_forward_dispatch(
             identity_user: identity.user.as_deref(),
             cache_policy: cache_policy.cloned(),
             cache_default_scheme: Some(req.uri().scheme_str().unwrap_or("http")),
-        },
-    );
+        }
+    });
     if let crate::http::modules::RequestHeadersOutcome::Respond(response) =
         http_modules.on_request_headers(&mut req).await?
     {

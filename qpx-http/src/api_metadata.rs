@@ -79,6 +79,14 @@ pub struct ApiMetadata {
     pub links: Vec<LinkValue>,
 }
 
+/// Pre-serialized lifecycle fields for request-independent route metadata.
+#[derive(Debug, Clone, Default)]
+pub struct PreparedApiMetadata {
+    deprecation: Option<HeaderValue>,
+    sunset: Option<HeaderValue>,
+    links: Vec<HeaderValue>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ApiMetadataError {
     #[error("API lifecycle date is outside the RFC 9651 integer range")]
@@ -98,38 +106,63 @@ pub enum ApiMetadataError {
 }
 
 impl ApiMetadata {
-    pub fn apply(&self, headers: &mut HeaderMap) -> Result<(), ApiMetadataError> {
+    pub fn prepare(&self) -> Result<PreparedApiMetadata, ApiMetadataError> {
         if let (Some(deprecation), Some(sunset)) = (self.deprecation, self.sunset)
             && sunset < deprecation
         {
             return Err(ApiMetadataError::SunsetBeforeDeprecation);
         }
-        if let Some(deprecation) = self.deprecation {
-            let seconds = unix_seconds(deprecation)?;
-            let integer = Integer::try_from(seconds).map_err(|_| ApiMetadataError::DateRange)?;
-            let value = ItemSerializer::new()
-                .bare_item(Date::from_unix_seconds(integer))
-                .finish();
-            headers.insert(
-                "deprecation",
-                HeaderValue::from_str(&value).map_err(|_| ApiMetadataError::InvalidHeaderValue)?,
-            );
-        }
-        if let Some(sunset) = self.sunset {
-            headers.insert(
-                "sunset",
+        let deprecation = self
+            .deprecation
+            .map(|deprecation| {
+                let seconds = unix_seconds(deprecation)?;
+                let integer =
+                    Integer::try_from(seconds).map_err(|_| ApiMetadataError::DateRange)?;
+                let value = ItemSerializer::new()
+                    .bare_item(Date::from_unix_seconds(integer))
+                    .finish();
+                HeaderValue::from_str(&value).map_err(|_| ApiMetadataError::InvalidHeaderValue)
+            })
+            .transpose()?;
+        let sunset = self
+            .sunset
+            .map(|sunset| {
                 HeaderValue::from_str(&httpdate::fmt_http_date(sunset))
-                    .map_err(|_| ApiMetadataError::InvalidHeaderValue)?,
-            );
-        }
-        for link in &self.links {
-            headers.append(
-                "link",
+                    .map_err(|_| ApiMetadataError::InvalidHeaderValue)
+            })
+            .transpose()?;
+        let links = self
+            .links
+            .iter()
+            .map(|link| {
                 HeaderValue::from_str(&link.serialize()?)
-                    .map_err(|_| ApiMetadataError::InvalidHeaderValue)?,
-            );
-        }
+                    .map_err(|_| ApiMetadataError::InvalidHeaderValue)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PreparedApiMetadata {
+            deprecation,
+            sunset,
+            links,
+        })
+    }
+
+    pub fn apply(&self, headers: &mut HeaderMap) -> Result<(), ApiMetadataError> {
+        self.prepare()?.apply(headers);
         Ok(())
+    }
+}
+
+impl PreparedApiMetadata {
+    pub fn apply(&self, headers: &mut HeaderMap) {
+        if let Some(value) = self.deprecation.as_ref() {
+            headers.insert("deprecation", value.clone());
+        }
+        if let Some(value) = self.sunset.as_ref() {
+            headers.insert("sunset", value.clone());
+        }
+        for value in &self.links {
+            headers.append("link", value.clone());
+        }
     }
 }
 

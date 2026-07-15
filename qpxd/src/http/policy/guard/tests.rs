@@ -1,6 +1,13 @@
 use super::*;
 
 #[test]
+fn header_normalization_trims_only_http_ows() {
+    assert_eq!(trimmed_http_ows_len(b" \tvalue\t "), 5);
+    assert_eq!(trimmed_http_ows_len(b" \t "), 0);
+    assert_eq!(trimmed_http_ows_len(b"\x80value\x80"), 7);
+}
+
+#[test]
 fn guard_detects_conflicting_content_length() {
     let profile = CompiledHttpGuardProfile {
         profile: HttpGuardProfileConfig {

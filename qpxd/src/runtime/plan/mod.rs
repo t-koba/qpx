@@ -7,9 +7,10 @@ pub(crate) use types::CompiledPlaintextCapturePlan;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(crate) use types::CompiledTlsPassthroughRoute;
 pub(crate) use types::{
-    CompiledCapturePlan, CompiledEdge, CompiledForwardedPolicy, CompiledListenerSettings,
-    CompiledReverseEdge, CompiledReverseRoute, CompiledReverseRouteTarget, CompiledTransparentEdge,
-    ExecutionPlan, PlanFlags, ResolvedStreamingLimits, RuntimePlan,
+    CompiledCapturePlan, CompiledEdge, CompiledForwardedHop, CompiledForwardedHopCache,
+    CompiledForwardedPolicy, CompiledListenerSettings, CompiledReverseEdge, CompiledReverseRoute,
+    CompiledReverseRouteTarget, CompiledTransparentEdge, ExecutionPlan, PlanFlags,
+    ResolvedStreamingLimits, RuntimePlan,
 };
 
 #[cfg(test)]

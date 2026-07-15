@@ -24,8 +24,9 @@ pub(crate) struct DispatchAuditInput<'a> {
 }
 
 pub(crate) fn build_dispatch_audit_context(input: DispatchAuditInput<'_>) -> DispatchAuditContext {
-    let observability_enabled = input.state.resources.access_log.output.enabled
-        || input.state.resources.audit_log.output.enabled
+    let observability_enabled = qpx_observability::access_log::access_log_response_context_required(
+        &input.state.resources.access_log,
+    ) || input.state.resources.audit_log.output.enabled
         || qpx_observability::otel_enabled();
     let owned = |value: Option<&str>| value.filter(|_| observability_enabled).map(str::to_owned);
     let scope_name = observability_enabled.then(|| Arc::<str>::from(input.scope_name));

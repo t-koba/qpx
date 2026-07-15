@@ -355,6 +355,22 @@ pub trait HttpModule: Send + Sync {
         Vec::new()
     }
 
+    fn applies_to_request_headers(&self, _request: &Request<Body>) -> bool {
+        true
+    }
+
+    fn is_inactive_for_request(&self, _request: &Request<Body>) -> bool {
+        false
+    }
+
+    fn applies_to_downstream_response(
+        &self,
+        _ctx: &HttpModuleContext,
+        _response: &Response<Body>,
+    ) -> bool {
+        true
+    }
+
     async fn call<'a>(
         &self,
         stage: HttpModuleStage,

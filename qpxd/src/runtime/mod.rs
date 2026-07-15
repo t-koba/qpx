@@ -30,9 +30,10 @@ pub(crate) use plan::CompiledPlaintextCapturePlan;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(crate) use plan::CompiledTlsPassthroughRoute;
 pub(crate) use plan::{
-    CompiledCapturePlan, CompiledEdge, CompiledForwardedPolicy, CompiledListenerSettings,
-    CompiledReverseEdge, CompiledReverseRoute, CompiledReverseRouteTarget, CompiledTransparentEdge,
-    ExecutionPlan, PlanFlags, ResolvedStreamingLimits,
+    CompiledCapturePlan, CompiledEdge, CompiledForwardedHop, CompiledForwardedHopCache,
+    CompiledForwardedPolicy, CompiledListenerSettings, CompiledReverseEdge, CompiledReverseRoute,
+    CompiledReverseRouteTarget, CompiledTransparentEdge, ExecutionPlan, PlanFlags,
+    ResolvedStreamingLimits,
 };
 pub(crate) use plan::{PlanCompiler, RuntimePlan};
 pub use policy_rt::PolicyRuntime;

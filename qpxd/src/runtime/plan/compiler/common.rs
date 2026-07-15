@@ -337,12 +337,13 @@ fn compile_forwarded_policy(
         trusted_peers: trusted_peers.into(),
         by: Arc::from(by),
         untrusted_chain: config.untrusted_chain,
+        current_hops: Arc::new(arc_swap::ArcSwap::from_pointee(Default::default())),
     })
 }
 
 fn compile_api_metadata(
     config: &qpx_core::config::ApiMetadataConfig,
-) -> Result<qpx_http::api_metadata::ApiMetadata> {
+) -> Result<qpx_http::api_metadata::PreparedApiMetadata> {
     let deprecation = config
         .deprecation_unix_seconds
         .map(system_time_from_unix_seconds)
@@ -369,8 +370,7 @@ fn compile_api_metadata(
         sunset,
         links,
     };
-    metadata.apply(&mut http::HeaderMap::new())?;
-    Ok(metadata)
+    Ok(metadata.prepare()?)
 }
 
 fn system_time_from_unix_seconds(seconds: i64) -> Result<std::time::SystemTime> {

@@ -7,8 +7,8 @@ use crate::runtime::Runtime;
 use http::header::{HOST, LOCATION};
 use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use qpx_core::config::{
-    AccessLogConfig, AuditLogConfig, AuthConfig, Config, IdentityConfig, MessagesConfig,
-    RuntimeConfig, SubrequestModuleConfig, SubrequestPhase, SystemLogConfig,
+    AccessLogConfig, AuditLogConfig, AuthConfig, Config, HttpModuleConfig, IdentityConfig,
+    MessagesConfig, RuntimeConfig, SubrequestModuleConfig, SubrequestPhase, SystemLogConfig,
 };
 use qpx_http::body::Body;
 use std::collections::HashMap;
@@ -115,6 +115,66 @@ async fn empty_module_chain_is_a_context_free_identity_transform() {
             .expect("body"),
         "body"
     );
+}
+
+#[test]
+fn request_inactive_modules_skip_session_allocation_without_skipping_applicable_requests() {
+    let configs: Vec<HttpModuleConfig> = serde_yaml::from_str(
+        r#"
+- type: cache_purge
+  settings:
+    methods: [PURGE]
+    require_identity: false
+- type: response_compression
+  settings:
+    content_types: [application/octet-stream]
+"#,
+    )
+    .expect("module configs");
+    let chain = compile_http_modules(&configs, &default_http_module_registry()).expect("chain");
+    let runtime = module_test_runtime();
+    let state = runtime.state();
+    let init = || HttpModuleSessionInit {
+        proxy_kind: crate::http::dispatch::ProxyKind::Reverse,
+        proxy_name: "test-proxy",
+        scope_name: "test-scope",
+        route_name: Some("test-route"),
+        remote_ip: "127.0.0.1".parse::<IpAddr>().expect("ip"),
+        sni: None,
+        identity_user: None,
+        cache_policy: None,
+        cache_default_scheme: Some("http"),
+    };
+
+    let ordinary = Request::builder()
+        .method(Method::GET)
+        .uri("http://example.com/resource")
+        .body(Body::empty())
+        .expect("ordinary request");
+    assert!(
+        !chain
+            .start_for_request(&state, &ordinary, init)
+            .has_context()
+    );
+
+    let compressed = Request::builder()
+        .method(Method::GET)
+        .uri("http://example.com/resource")
+        .header(http::header::ACCEPT_ENCODING, "gzip")
+        .body(Body::empty())
+        .expect("compression request");
+    assert!(
+        chain
+            .start_for_request(&state, &compressed, init)
+            .has_context()
+    );
+
+    let purge = Request::builder()
+        .method("PURGE")
+        .uri("http://example.com/resource")
+        .body(Body::empty())
+        .expect("purge request");
+    assert!(chain.start_for_request(&state, &purge, init).has_context());
 }
 
 #[test]

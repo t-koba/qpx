@@ -614,6 +614,8 @@ edges:
   routes:
   - match:
       path: ["/dav/**"]
+    path_rewrite:
+      strip_prefix: /dav
     target:
       type: webdav
       origin: documents
@@ -633,6 +635,7 @@ edges:
     let compiled = state.plan.reverse_edge("dav").expect("compiled route");
     let router = ReverseRouter::new_with_plan(reverse, &[], &origins, registry.as_ref(), compiled)
         .expect("WebDAV router");
+    assert!(router.single_direct_webdav_route().is_some());
     let service = router
         .route_at(0)
         .and_then(|route| route.webdav.as_ref())
@@ -649,4 +652,51 @@ edges:
             .status(),
         http::StatusCode::NO_CONTENT
     );
+}
+
+#[test]
+fn webdav_target_with_request_features_uses_full_dispatch() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let data = directory.path().join("data");
+    let metadata = directory.path().join("metadata.redb");
+    let config_path = directory.path().join("qpx.yaml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"origins:
+  webdav:
+  - name: documents
+    root: {}
+    metadata: {}
+edges:
+- kind: reverse
+  name: dav
+  listen: 127.0.0.1:19080
+  routes:
+  - match:
+      path: ["/dav/**"]
+    headers:
+      request_set:
+        X-Origin-Feature: enabled
+    target:
+      type: webdav
+      origin: documents
+"#,
+            data.display(),
+            metadata.display()
+        ),
+    )
+    .expect("write config");
+    let config = qpx_core::config::load_config(&config_path).expect("load config");
+    let reverse = config.reverse_edge_configs()[0].clone();
+    let origins = config.http.origins.webdav.clone();
+    let registry = crate::http::modules::default_http_module_registry();
+    let state =
+        crate::runtime::RuntimeState::build_with_http_module_registry(config, registry.clone())
+            .expect("runtime state");
+    let compiled = state.plan.reverse_edge("dav").expect("compiled route");
+    let router = ReverseRouter::new_with_plan(reverse, &[], &origins, registry.as_ref(), compiled)
+        .expect("WebDAV router");
+
+    assert!(router.single_direct_webdav_route().is_none());
 }

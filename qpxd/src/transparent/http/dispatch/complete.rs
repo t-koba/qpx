@@ -190,7 +190,9 @@ pub(super) async fn complete_transparent_request(
     let policy_headers = policy.headers.as_deref();
     prepare_request_with_headers_in_place(&mut req, proxy_name, policy_headers, websocket);
     let module_init = transparent_module_init(proxy_name, listener_name, remote_ip, &identity);
-    let mut http_modules = selected_plan.modules.start(&state, module_init);
+    let mut http_modules = selected_plan
+        .modules
+        .start_for_request(&state, &req, || module_init);
     match http_modules.on_request_headers(&mut req).await? {
         crate::http::modules::RequestHeadersOutcome::Continue => {}
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
