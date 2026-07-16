@@ -1,6 +1,10 @@
+#[cfg(target_os = "linux")]
+use crate::http::codec::lazy_timeout::timeout_after_pending;
 use qpx_http::body::FileRegion;
 use std::io;
 use tokio::net::TcpStream;
+#[cfg(target_os = "linux")]
+use tokio::time::Duration;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::fd::{AsRawFd, RawFd};
@@ -106,6 +110,131 @@ impl ZeroCopySocket {
 }
 
 #[cfg(target_os = "linux")]
+pub(super) async fn splice_tcp_exact(
+    source: &TcpStream,
+    destination: &TcpStream,
+    mut remaining: u64,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) -> io::Result<()> {
+    let pipe = SplicePipe::new()?;
+    while remaining > 0 {
+        let requested = usize::try_from(remaining.min(usize::MAX as u64)).unwrap_or(usize::MAX);
+        let moved = timeout_after_pending(read_timeout, async {
+            loop {
+                source.readable().await?;
+                match source.try_io(Interest::READABLE, || {
+                    splice_once(source.as_raw_fd(), pipe.write_fd, requested)
+                }) {
+                    Ok(moved) => return Ok(moved),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "splice source read timed out"))??;
+        if moved == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "splice source closed before content-length completed",
+            ));
+        }
+
+        let mut buffered = moved;
+        while buffered > 0 {
+            let written = timeout_after_pending(write_timeout, async {
+                loop {
+                    destination.writable().await?;
+                    match destination.try_io(Interest::WRITABLE, || {
+                        splice_once(pipe.read_fd, destination.as_raw_fd(), buffered)
+                    }) {
+                        Ok(written) => return Ok(written),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "splice destination write timed out",
+                )
+            })??;
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "splice destination made no progress",
+                ));
+            }
+            buffered -= written;
+        }
+        remaining -= moved as u64;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+struct SplicePipe {
+    read_fd: RawFd,
+    write_fd: RawFd,
+}
+
+#[cfg(target_os = "linux")]
+impl SplicePipe {
+    fn new() -> io::Result<Self> {
+        let mut descriptors = [-1; 2];
+        // SAFETY: descriptors points to storage for both descriptors returned by pipe2.
+        let result =
+            unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            read_fd: descriptors[0],
+            write_fd: descriptors[1],
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SplicePipe {
+    fn drop(&mut self) {
+        // SAFETY: this type exclusively owns both descriptors returned by pipe2.
+        unsafe {
+            libc::close(self.read_fd);
+            libc::close(self.write_fd);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn splice_once(source_fd: RawFd, destination_fd: RawFd, count: usize) -> io::Result<usize> {
+    loop {
+        // SAFETY: both descriptors are live, at least one descriptor is a pipe endpoint,
+        // and socket and pipe descriptors do not use file offsets.
+        let moved = unsafe {
+            libc::splice(
+                source_fd,
+                std::ptr::null_mut(),
+                destination_fd,
+                std::ptr::null_mut(),
+                count,
+                libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK,
+            )
+        };
+        if moved >= 0 {
+            return Ok(moved as usize);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn sendfile_once(
     file_fd: RawFd,
     socket_fd: RawFd,
@@ -174,6 +303,67 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn splices_exact_socket_payload_without_consuming_following_bytes() {
+        let payload = vec![b'x'; 256 * 1024];
+        let source_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind source");
+        let source_address = source_listener.local_addr().expect("source address");
+        let source_payload = payload.clone();
+        let source_task = tokio::spawn(async move {
+            let (mut source, _) = source_listener.accept().await.expect("accept source");
+            source
+                .write_all(&source_payload)
+                .await
+                .expect("write source payload");
+            source.write_all(b"NEXT").await.expect("write sentinel");
+        });
+        let mut source = TcpStream::connect(source_address)
+            .await
+            .expect("connect source");
+
+        let destination_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind destination");
+        let destination_address = destination_listener
+            .local_addr()
+            .expect("destination address");
+        let mut destination_client = TcpStream::connect(destination_address)
+            .await
+            .expect("connect destination");
+        let (destination, _) = destination_listener
+            .accept()
+            .await
+            .expect("accept destination");
+        let payload_length = payload.len();
+        let destination_task = tokio::spawn(async move {
+            let mut received = vec![0; payload_length];
+            destination_client
+                .read_exact(&mut received)
+                .await
+                .expect("read destination payload");
+            received
+        });
+
+        splice_tcp_exact(
+            &source,
+            &destination,
+            payload.len() as u64,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("splice payload");
+        assert_eq!(destination_task.await.expect("destination task"), payload);
+        let mut sentinel = [0; 4];
+        source
+            .read_exact(&mut sentinel)
+            .await
+            .expect("read sentinel");
+        assert_eq!(&sentinel, b"NEXT");
+        source_task.await.expect("source task");
+    }
 
     #[tokio::test]
     async fn sends_the_exact_file_region_over_a_real_tcp_socket() {

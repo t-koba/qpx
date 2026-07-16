@@ -2,12 +2,16 @@ use super::zero_copy::ZeroCopySocket;
 use super::{RESPONSE_WRITE_TIMEOUT, has_chunked_transfer_encoding, parse_declared_content_length};
 use crate::http::codec::h1_common::serialize_headers;
 use crate::http::codec::lazy_timeout::timeout_after_pending;
+#[cfg(not(target_os = "linux"))]
+use crate::upstream::raw_http1::READ_BUF_SIZE;
 use crate::upstream::raw_http1::{
-    InterimResponseHead, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, READ_BUF_SIZE, RawHttp1BodyFraming,
+    InterimResponseHead, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, RawHttp1BodyFraming,
     RawHttp1ResponseHead, RawHttp1ResponseRelay,
 };
 use anyhow::{Result, anyhow};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+#[cfg(not(target_os = "linux"))]
+use bytes::BufMut;
+use bytes::{Buf, Bytes, BytesMut};
 use http::{Method, Response, StatusCode, Version};
 use hyper::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderValue, TRAILER, TRANSFER_ENCODING,
@@ -17,7 +21,10 @@ use std::future::{Future, poll_fn};
 use std::io::{Error as IoError, ErrorKind, IoSlice};
 use std::sync::Arc;
 use std::task::Poll;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(not(target_os = "linux"))]
+use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::time::Duration;
 
 enum ResponseBodyKind {
@@ -293,18 +300,14 @@ where
     Ok(keep_alive)
 }
 
-pub(crate) async fn send_raw_http1_response_relay_with_interim<W, S>(
-    writer: &mut W,
+pub(crate) async fn send_raw_http1_response_relay_with_interim(
+    writer: &mut TcpStream,
     request_version: Version,
     request_method: &Method,
-    mut response: RawHttp1ResponseRelay<S>,
+    mut response: RawHttp1ResponseRelay<TcpStream>,
     request_keep_alive: bool,
     head_buf: &mut BytesMut,
-) -> Result<bool>
-where
-    W: AsyncWrite + Unpin,
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
+) -> Result<bool> {
     if request_version == Version::HTTP_11 {
         for head in &response.interim {
             if !head.status.is_informational() {
@@ -382,16 +385,12 @@ where
     Ok(keep_alive)
 }
 
-async fn relay_direct_content_length_response<W, S>(
-    writer: &mut W,
+async fn relay_direct_content_length_response(
+    writer: &mut TcpStream,
     head: &[u8],
-    response: &mut RawHttp1ResponseRelay<S>,
+    response: &mut RawHttp1ResponseRelay<TcpStream>,
     length: u64,
-) -> Result<()>
-where
-    W: AsyncWrite + Unpin,
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
+) -> Result<()> {
     let first_len = response.read_buf.len().min(length as usize);
     if first_len == 0 {
         write_all_with_timeout(writer, head).await?;
@@ -400,44 +399,61 @@ where
         response.read_buf.advance(first_len);
     }
 
-    let mut remaining = length - first_len as u64;
-    while remaining > 0 {
-        if response.read_buf.is_empty() {
-            let read_size = remaining.min(READ_BUF_SIZE as u64) as usize;
-            response.read_buf.reserve(read_size);
-            let mut limited = (&mut response.read_buf).limit(read_size);
-            let Some(stream) = response.stream.as_mut() else {
-                return Err(anyhow!("raw HTTP/1 relay stream is unavailable"));
-            };
-            let read = timeout_after_pending(
-                RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-                stream.read_buf(&mut limited),
-            )
-            .await
-            .map_err(|_| anyhow!("HTTP/1 response body read timed out"))??;
-            if read == 0 {
-                return Err(anyhow!(
-                    "response body ended before declared content-length was satisfied"
-                ));
+    let remaining = length - first_len as u64;
+    #[cfg(target_os = "linux")]
+    if remaining > 0 {
+        let stream = response
+            .stream
+            .as_ref()
+            .ok_or_else(|| anyhow!("raw HTTP/1 relay stream is unavailable"))?;
+        super::zero_copy::splice_tcp_exact(
+            stream,
+            writer,
+            remaining,
+            RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
+            RESPONSE_WRITE_TIMEOUT,
+        )
+        .await?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut remaining = remaining;
+        while remaining > 0 {
+            if response.read_buf.is_empty() {
+                let read_size = remaining.min(READ_BUF_SIZE as u64) as usize;
+                response.read_buf.reserve(read_size);
+                let mut limited = (&mut response.read_buf).limit(read_size);
+                let Some(stream) = response.stream.as_mut() else {
+                    return Err(anyhow!("raw HTTP/1 relay stream is unavailable"));
+                };
+                let read = timeout_after_pending(
+                    RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
+                    stream.read_buf(&mut limited),
+                )
+                .await
+                .map_err(|_| anyhow!("HTTP/1 response body read timed out"))??;
+                if read == 0 {
+                    return Err(anyhow!(
+                        "response body ended before declared content-length was satisfied"
+                    ));
+                }
+                drain_ready_direct_relay_bytes(response, read_size - read).await?;
             }
-            drain_ready_direct_relay_bytes(response, read_size - read).await?;
+            let take = response.read_buf.len().min(remaining as usize);
+            write_all_with_timeout(writer, &response.read_buf[..take]).await?;
+            response.read_buf.advance(take);
+            remaining -= take as u64;
         }
-        let take = response.read_buf.len().min(remaining as usize);
-        write_all_with_timeout(writer, &response.read_buf[..take]).await?;
-        response.read_buf.advance(take);
-        remaining -= take as u64;
     }
     recycle_direct_raw_upstream_if_clean(response);
     Ok(())
 }
 
-async fn drain_ready_direct_relay_bytes<S>(
-    response: &mut RawHttp1ResponseRelay<S>,
+#[cfg(not(target_os = "linux"))]
+async fn drain_ready_direct_relay_bytes(
+    response: &mut RawHttp1ResponseRelay<TcpStream>,
     mut remaining_capacity: usize,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
+) -> Result<()> {
     let Some(stream) = response.stream.as_mut() else {
         return Err(anyhow!("raw HTTP/1 relay stream is unavailable"));
     };
@@ -461,10 +477,7 @@ where
     Ok(())
 }
 
-fn recycle_direct_raw_upstream_if_clean<S>(response: &mut RawHttp1ResponseRelay<S>)
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
+fn recycle_direct_raw_upstream_if_clean(response: &mut RawHttp1ResponseRelay<TcpStream>) {
     if !response.read_buf.is_empty() || !response.raw.upstream_keep_alive() {
         return;
     }
