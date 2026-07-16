@@ -27,10 +27,17 @@ pub(in crate::reverse) struct RawHttp1RequestView<'a> {
 pub(in crate::reverse) struct PreparedRawHttp1Request {
     state: Arc<crate::runtime::RuntimeState>,
     compiled: Arc<CompiledReverse>,
-    request_head: Bytes,
-    origin: PreparedPlainHttp1Origin,
+    target: PreparedRawHttp1Target,
     method: Method,
     keep_alive: bool,
+}
+
+enum PreparedRawHttp1Target {
+    Origin {
+        request_head: Bytes,
+        origin: PreparedPlainHttp1Origin,
+    },
+    LocalResponse,
 }
 
 pub(in crate::reverse) enum PreparedRawHttp1Response {
@@ -204,10 +211,18 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
     if state.destination_trace_enabled() || !state.security.identity_sources.sources.is_empty() {
         return None;
     }
-    let route = compiled.router.single_plain_http_route()?;
-    if !route.supports_raw_http1_dispatch() {
-        return None;
-    }
+    let (route, local_response) = if let Some(route) = compiled.router.single_plain_http_route() {
+        if !route.supports_raw_http1_dispatch() {
+            return None;
+        }
+        (route, false)
+    } else {
+        let route = compiled.router.single_direct_local_response_route()?;
+        if !route.supports_raw_local_response_dispatch() {
+            return None;
+        }
+        (route, true)
+    };
 
     if request_has_body_or_expect(request.headers) || request_has_upgrade(request.headers) {
         return None;
@@ -242,25 +257,32 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
         return None;
     }
 
-    let selected_upstream = route.available_plain_http_upstream()?;
-    let (connect_authority, host_authority) =
-        selected_upstream.origin.direct_plain_http1_authorities()?;
-    let origin = prepare_plain_http1_origin(&state.pools, connect_authority, host_authority);
     let keep_alive = !has_connection_token(request.headers, b"close");
-    let request_head = serialize_upstream_request_head(
-        request.method,
-        request.target,
-        request.headers,
-        host_authority,
-        state.plan.identity.proxy_name.as_ref(),
-    )?;
+    let target = if local_response {
+        PreparedRawHttp1Target::LocalResponse
+    } else {
+        let selected_upstream = route.available_plain_http_upstream()?;
+        let (connect_authority, host_authority) =
+            selected_upstream.origin.direct_plain_http1_authorities()?;
+        let origin = prepare_plain_http1_origin(&state.pools, connect_authority, host_authority);
+        let request_head = serialize_upstream_request_head(
+            request.method,
+            request.target,
+            request.headers,
+            host_authority,
+            state.plan.identity.proxy_name.as_ref(),
+        )?;
+        PreparedRawHttp1Target::Origin {
+            request_head,
+            origin,
+        }
+    };
     Some(cache.store_prepared_request(
         request.raw_head,
         PreparedRawHttp1Request {
             state,
             compiled,
-            request_head,
-            origin,
+            target,
             method,
             keep_alive,
         },
@@ -270,6 +292,26 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
 pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     prepared: &PreparedRawHttp1Request,
 ) -> Result<PreparedRawHttp1Response> {
+    if matches!(&prepared.target, PreparedRawHttp1Target::LocalResponse) {
+        let route = prepared
+            .compiled
+            .router
+            .single_direct_local_response_route()
+            .ok_or_else(|| anyhow!("raw HTTP/1 local-response route is no longer available"))?;
+        let local = route
+            .local_response
+            .as_ref()
+            .ok_or_else(|| anyhow!("raw HTTP/1 local-response route has no response"))?;
+        let mut response = crate::http::local_response::finalized_compiled_local_response(
+            &prepared.method,
+            Version::HTTP_11,
+            prepared.state.plan.identity.proxy_name.as_ref(),
+            local,
+            None,
+        )?;
+        super::dispatch::apply_reverse_route_metadata(route, false, &mut response)?;
+        return Ok(PreparedRawHttp1Response::Generic(Vec::new(), response));
+    }
     let route = prepared
         .compiled
         .router
@@ -284,12 +326,19 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         .as_ref()
         .is_some_and(|policy| policy.latency_threshold.is_some())
         .then(tokio::time::Instant::now);
+    let PreparedRawHttp1Target::Origin {
+        request_head,
+        origin,
+    } = &prepared.target
+    else {
+        unreachable!();
+    };
     let response = timeout_after_pending(
         route.policy.timeout,
         proxy_prepared_plain_http1_head_raw_response_with_interim(
-            &prepared.origin,
+            origin,
             &prepared.method,
-            prepared.request_head.as_ref(),
+            request_head.as_ref(),
             prepared.state.plan.identity.proxy_name.as_ref(),
         ),
     )

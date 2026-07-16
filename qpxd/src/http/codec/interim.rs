@@ -2,14 +2,15 @@ use crate::http::codec::h2::{H2TransportTuning, send_h2_response_with_interim};
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::Result;
 use bytes::Bytes;
-use futures_util::stream::{FuturesUnordered, StreamExt};
 use h2::Reason;
 use http::{Request, Response};
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use std::future::poll_fn;
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
+use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
 
@@ -25,7 +26,6 @@ pub(crate) async fn serve_h2_with_interim<I, S>(
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
-        + Clone
         + Send
         + Sync
         + 'static,
@@ -44,7 +44,6 @@ pub(crate) async fn serve_h2_with_interim_and_capacity<I, S>(
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
-        + Clone
         + Send
         + Sync
         + 'static,
@@ -71,7 +70,6 @@ pub(crate) async fn serve_h2_with_interim_and_capacity_and_tuning<I, S>(
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
-        + Clone
         + Send
         + Sync
         + 'static,
@@ -82,20 +80,29 @@ where
         builder.enable_connect_protocol();
     }
     let mut conn = timeout(idle_timeout, builder.handshake(io)).await??;
-    let mut streams = FuturesUnordered::new();
+    let service = Arc::new(service);
+    let mut streams = JoinSet::<()>::new();
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     let mut connection_closed = false;
     loop {
-        tokio::select! {
-            biased;
-            completed = streams.next(), if !streams.is_empty() => {
-                debug_assert!(completed.is_some());
-                idle_timer
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + idle_timeout);
+        let reaped_stream = reap_completed_h2_streams(&mut streams);
+        if reaped_stream {
+            idle_timer
+                .as_mut()
+                .reset(tokio::time::Instant::now() + idle_timeout);
+        }
+        if connection_closed {
+            let Some(completed) = streams.join_next().await else {
+                break;
+            };
+            if let Err(err) = completed {
+                warn!(error = ?err, "HTTP/2 stream task failed");
             }
-            accepted = conn.accept(), if !connection_closed => {
+            continue;
+        }
+        tokio::select! {
+            accepted = conn.accept() => {
                 let Some(result) = accepted else {
                     connection_closed = true;
                     continue;
@@ -104,16 +111,17 @@ where
                 idle_timer
                     .as_mut()
                     .reset(tokio::time::Instant::now() + idle_timeout);
-                streams.push(serve_h2_stream(
+                streams.spawn(serve_h2_stream(
                     request,
                     respond,
-                    &service,
+                    service.clone(),
                     body_channel_capacity,
                     idle_timeout,
                 ));
             }
             () = idle_timer.as_mut() => {
-                if streams.is_empty() {
+                let reaped_stream = reap_completed_h2_streams(&mut streams);
+                if !reaped_stream && streams.is_empty() {
                     return Ok(());
                 }
                 idle_timer
@@ -121,18 +129,26 @@ where
                     .reset(tokio::time::Instant::now() + idle_timeout);
             }
         }
-        if connection_closed && streams.is_empty() {
-            break;
-        }
     }
     poll_fn(|cx| conn.poll_closed(cx)).await?;
     Ok(())
 }
 
+fn reap_completed_h2_streams(streams: &mut JoinSet<()>) -> bool {
+    let mut reaped_stream = false;
+    while let Some(completed) = streams.try_join_next() {
+        reaped_stream = true;
+        if let Err(err) = completed {
+            warn!(error = ?err, "HTTP/2 stream task failed");
+        }
+    }
+    reaped_stream
+}
+
 async fn serve_h2_stream<S>(
     request: Request<h2::RecvStream>,
     respond: h2::server::SendResponse<Bytes>,
-    service: &S,
+    service: Arc<S>,
     body_channel_capacity: usize,
     idle_timeout: Duration,
 ) where
@@ -306,6 +322,57 @@ mod tests {
         .await;
         assert!(result.is_ok(), "preface-only H2 must not stay open");
         drop(client_io);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn h2_idle_timeout_starts_after_stream_completion() {
+        let (client_io, server_io) = duplex(4096);
+        let service = handler_fn(|_req: Request<Body>| async move {
+            sleep(Duration::from_millis(70)).await;
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(200)
+                    .body(Body::empty())
+                    .expect("response"),
+            )
+        });
+        tokio::spawn(async move {
+            serve_h2_with_interim(server_io, service, false, Duration::from_millis(100))
+                .await
+                .expect("serve h2");
+        });
+
+        let (mut client, connection) = h2::client::handshake(client_io).await.expect("handshake");
+        tokio::spawn(async move {
+            connection.await.expect("client connection");
+        });
+        client = client.ready().await.expect("first ready");
+        let first = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/first")
+            .body(())
+            .expect("first request");
+        let (first_response, _) = client.send_request(first, true).expect("send first");
+        assert_eq!(
+            first_response.await.expect("first response").status(),
+            ::http::StatusCode::OK
+        );
+
+        sleep(Duration::from_millis(60)).await;
+        client = client
+            .ready()
+            .await
+            .expect("connection must remain idle after stream completion");
+        let second = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/second")
+            .body(())
+            .expect("second request");
+        let (second_response, _) = client.send_request(second, true).expect("send second");
+        assert_eq!(
+            second_response.await.expect("second response").status(),
+            ::http::StatusCode::OK
+        );
     }
 
     #[tokio::test]

@@ -98,14 +98,14 @@ pub async fn maybe_store(
 
     let storage_key = response_storage_key(request_method, response.headers(), key)
         .unwrap_or_else(|| key.clone());
-    let storage_primary = storage_key.primary_hash();
+    let storage_primary = storage_key.primary_hash_arc();
     let initial_age_secs = initial_age_secs(response.headers(), now, timing.response_delay_secs);
     let vary_values = cache_vary_values(
         request_headers,
         &vary,
         storage_key.content_digest.as_deref(),
     );
-    let variant_key = variant_storage_key(storage_primary.as_str(), &vary_values);
+    let variant_key = variant_storage_key(storage_primary.as_ref(), &vary_values);
     let namespace = cache_namespace(policy, "default");
     let ttl = object_retention_ttl_secs(freshness_lifetime_secs, &resp_directives);
     let writeback = CacheWriteback {
@@ -154,7 +154,7 @@ pub async fn maybe_store(
 struct CacheWriteback {
     backend: Arc<dyn CacheBackend>,
     namespace: String,
-    storage_primary: String,
+    storage_primary: Arc<str>,
     variant_key: String,
     status: u16,
     headers: Vec<(String, String)>,
@@ -184,7 +184,7 @@ impl CacheWriteback {
         let index_load = load_variant_index(
             self.backend.as_ref(),
             self.namespace.as_str(),
-            self.storage_primary.as_str(),
+            self.storage_primary.as_ref(),
         );
         let (body_len, mut index) = tokio::try_join!(body_put, index_load)?;
         record_cache_writeback_body_stream(body_len);
@@ -220,7 +220,7 @@ impl CacheWriteback {
         self.backend
             .put(
                 self.namespace.as_str(),
-                index_storage_key(self.storage_primary.as_str()).as_str(),
+                index_storage_key(self.storage_primary.as_ref()).as_str(),
                 &index_payload,
                 self.ttl.max(INDEX_TTL_SECS),
             )

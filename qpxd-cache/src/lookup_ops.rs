@@ -216,16 +216,16 @@ async fn load_candidate_variant_keys(
     key: &CacheRequestKey,
     request_method: &Method,
 ) -> Result<Arc<VariantIndex>> {
-    let primary = key.primary_hash();
-    let storage_key = super::vary::index_storage_key(primary.as_str());
+    let primary = key.primary_hash_arc();
+    let storage_key = super::vary::index_storage_key(primary.as_ref());
     let mut variants = backend
         .get_decoded_variant_index(namespace, storage_key.as_str())
         .await?
         .unwrap_or_else(|| Arc::new(VariantIndex::default()));
     if variants.variants.is_empty() && *request_method == Method::HEAD {
         let get_key = key.with_method_group("GET");
-        let get_primary = get_key.primary_hash();
-        let get_storage_key = super::vary::index_storage_key(get_primary.as_str());
+        let get_primary = get_key.primary_hash_arc();
+        let get_storage_key = super::vary::index_storage_key(get_primary.as_ref());
         let get_variants = backend
             .get_decoded_variant_index(namespace, get_storage_key.as_str())
             .await?

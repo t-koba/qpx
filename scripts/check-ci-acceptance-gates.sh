@@ -12,6 +12,37 @@ require() {
   fi
 }
 
+reject_step_value() {
+  local file="$1"
+  local step_name="$2"
+  local needle="$3"
+  python3 - "$file" "$step_name" "$needle" <<'PY'
+import sys
+
+path, step_name, needle = sys.argv[1:4]
+lines = open(path, "r", encoding="utf-8").readlines()
+marker = f"- name: {step_name}"
+for index, line in enumerate(lines):
+    if line.strip() != marker:
+        continue
+    indent = len(line) - len(line.lstrip())
+    end = index + 1
+    while end < len(lines):
+        candidate = lines[end]
+        candidate_indent = len(candidate) - len(candidate.lstrip())
+        if candidate_indent == indent and candidate.strip().startswith("- name:"):
+            break
+        end += 1
+    if any(needle in candidate for candidate in lines[index:end]):
+        raise SystemExit(
+            f"{path}: step {step_name!r} contains forbidden value {needle!r}"
+        )
+    break
+else:
+    raise SystemExit(f"{path}: workflow step not found: {step_name}")
+PY
+}
+
 require_json_number_at_least() {
   local file="$1"
   local path="$2"
@@ -332,7 +363,8 @@ require .github/workflows/ci.yml 'cargo test --workspace --locked -- --test-thre
 require .github/workflows/ci.yml 'cargo doc --workspace --locked --no-deps --document-private-items'
 require .github/workflows/ci.yml 'cargo llvm-cov --workspace --locked --fail-under-lines 20'
 require .github/workflows/ci.yml 'bash ./scripts/check-public-api.sh'
-require .github/workflows/ci.yml 'dtolnay/rust-toolchain@nightly-2026-07-15'
+require .github/workflows/ci.yml 'dtolnay/rust-toolchain@nightly'
+require .github/workflows/ci.yml 'toolchain: nightly-2026-07-15'
 require .github/workflows/ci.yml 'cargo install cargo-public-api --version 0.52.0 --locked'
 require .github/workflows/ci.yml 'cargo clippy --workspace --all-targets --locked -- -D warnings'
 require .github/workflows/ci.yml 'cargo clippy -p "${pkg}" --locked --all-targets --no-default-features --features "${features}" -- -D warnings'
@@ -374,6 +406,7 @@ require .github/workflows/ci.yml 'scripts/check-perf-runner.sh'
 require .github/workflows/ci.yml 'QPX_PERF_RUNNER_JSON: ${{ github.workspace }}/target/perf/runner.jsonl'
 require .github/workflows/ci.yml 'sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk'
 require .github/workflows/ci.yml 'cargo build -p qpxd --release --locked --features http3-backend-qpx'
+reject_step_value .github/workflows/ci.yml 'external proxy comparison bench' 'CARGO_PROFILE_RELEASE_'
 require .github/workflows/ci.yml 'QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-proxy-compare.jsonl'
 require .github/workflows/ci.yml 'CARGO_PROFILE_RELEASE_DEBUG: "1"'
 require .github/workflows/ci.yml 'CARGO_PROFILE_RELEASE_STRIP: "none"'
@@ -396,7 +429,7 @@ require .github/workflows/ci.yml 'scripts/h3-interop/run.sh all'
 require .github/workflows/ci.yml 'scripts/perf-audit-profile.sh'
 require .github/workflows/ci.yml 'QPX_PERF_PROFILE_JSON: ${{ github.workspace }}/target/perf/perf-audit-profile-summary.jsonl'
 require .github/workflows/ci.yml 'QPX_PERF_PROFILE_EVENTS: ${{ github.workspace }}/target/perf/perf-audit-profile-events.jsonl'
-require .github/workflows/ci.yml 'CARGO_PROFILE_RELEASE_STRIP: "none"'
+reject_step_value .github/workflows/ci.yml 'callgrind hot path profile' 'CARGO_PROFILE_RELEASE_'
 require .github/workflows/ci.yml 'id: criterion_streaming_throughput_bench'
 require .github/workflows/ci.yml 'id: h3_crate_protocol_perf_benchmarks'
 require .github/workflows/ci.yml 'id: qpx_http3_protocol_perf_benchmarks'
@@ -430,6 +463,9 @@ require scripts/perf-audit-profile.sh 'callgrind_control -i off "$pid"'
 require scripts/perf-audit-profile.sh 'callgrind output does not profile qpxd directly'
 require scripts/perf-audit-profile.sh 'callgrind output has too few instructions'
 require scripts/perf-audit-profile.sh 'callgrind_hot_path_profile'
+require scripts/perf-audit-profile.sh 'target/callgrind/qpxd'
+require scripts/perf-audit-profile.sh 'cargo build -p qpxd --profile callgrind'
+require scripts/perf-audit-profile.sh 'select_profile_dump "$output"'
 require scripts/perf-audit-proxy-compare.sh 'require_cmd nginx'
 require scripts/perf-audit-proxy-compare.sh 'APACHE_BIN="${QPX_PROXY_COMPARE_APACHE_BIN:-}"'
 require scripts/perf-audit-proxy-compare.sh 'command -v apache2'
@@ -528,6 +564,11 @@ require scripts/perf-audit-http2-compare.sh 'MAX_CONCURRENT_STREAMS_VALUES="${QP
 require scripts/perf-audit-http2-compare.sh 'BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1024 1048576}"'
 require scripts/perf-audit-http2-compare.sh 'CLIENT_THREADS="${QPX_HTTP2_COMPARE_CLIENT_THREADS:-4}"'
 require scripts/perf-audit-http2-compare.sh '-t "$CLIENT_THREADS"'
+require scripts/perf-audit-http2-compare.sh '--log-file="$latency_file"'
+require scripts/perf-audit-http2-compare.sh "-name '*.latency.tsv'"
+require scripts/perf-audit-http2-compare.sh 'nearest_rank(latencies_us, 0.99)'
+require scripts/perf-audit-http2-compare.sh 'does not match completed requests'
+require scripts/perf-audit-http2-compare.sh 'latency_summary = timing_row("request")'
 require scripts/perf-audit-http2-compare.sh 'SAMPLE_ATTEMPTS="${QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS:-3}"'
 require scripts/perf-audit-http2-compare.sh 'MIN_VALID_SAMPLES="${QPX_HTTP2_COMPARE_MIN_VALID_SAMPLES:-}"'
 require scripts/perf-audit-http2-compare.sh '"aggregation": "conservative_median_per_metric"'

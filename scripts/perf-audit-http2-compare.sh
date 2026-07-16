@@ -57,6 +57,7 @@ collect_artifacts() {
   cp "$TMP_DIR"/*.yaml "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   find "$TMP_DIR" -name '*.conf' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.h2load' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
+  find "$TMP_DIR" -name '*.latency.tsv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.sample.txt' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.valid-samples.jsonl' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
 }
@@ -295,12 +296,15 @@ NGINX
 
 parse_h2load() {
   local file="$1"
-  python3 - "$file" <<'PY'
+  local latency_file="$2"
+  python3 - "$file" "$latency_file" <<'PY'
 import json
+import math
 import re
 import sys
 
 text = open(sys.argv[1], "r", encoding="utf-8").read()
+latency_path = sys.argv[2]
 
 def number(pattern, default=None, cast=float):
     match = re.search(pattern, text)
@@ -342,27 +346,50 @@ def timing_row(label):
         flags=re.MULTILINE,
     )
 
-latency = timing_row("request")
-latency_min_ms = None
-latency_max_ms = None
-latency_p95_ms = None
-latency_p99_ms = None
+latencies_us = []
+latency_statuses = []
+with open(latency_path, "r", encoding="utf-8") as handle:
+    for line_number, line in enumerate(handle, start=1):
+        if not line.strip():
+            continue
+        columns = line.rstrip("\n").split("\t")
+        if len(columns) < 3:
+            raise SystemExit(f"invalid h2load latency row {line_number}")
+        try:
+            latency_statuses.append(int(columns[1]))
+            latencies_us.append(int(columns[2]))
+        except ValueError as error:
+            raise SystemExit(f"invalid h2load latency row {line_number}: {error}") from error
+
+if len(latencies_us) != done:
+    raise SystemExit(
+        f"h2load latency row count {len(latencies_us)} does not match completed requests {done}"
+    )
+if not latencies_us:
+    raise SystemExit("h2load latency log is empty")
+if any(status < 200 or status >= 300 for status in latency_statuses):
+    raise SystemExit("h2load latency log contains a non-2xx response")
+
+latencies_us.sort()
+
+def nearest_rank(values, quantile):
+    return values[max(0, math.ceil(len(values) * quantile) - 1)]
+
+latency_min_ms = latencies_us[0] / 1000.0
+latency_max_ms = latencies_us[-1] / 1000.0
+latency_p95_ms = nearest_rank(latencies_us, 0.95) / 1000.0
+latency_p99_ms = nearest_rank(latencies_us, 0.99) / 1000.0
 mean_ms = None
-if latency:
-    latency_min_ms = ms(latency.group(1), latency.group(2))
-    latency_max_ms = ms(latency.group(3), latency.group(4))
-    latency_p95_ms = ms(latency.group(7), latency.group(8))
-    latency_p99_ms = ms(latency.group(9), latency.group(10))
-    mean_ms = ms(latency.group(11), latency.group(12))
+latency_summary = timing_row("request")
+if latency_summary:
+    mean_ms = ms(latency_summary.group(11), latency_summary.group(12))
 else:
-    latency = re.search(
+    legacy_latency_summary = re.search(
         r"time for request:\s+([0-9.]+)([a-z]+)\s+([0-9.]+)([a-z]+)\s+([0-9.]+)([a-z]+)",
         text,
     )
-    if latency:
-        latency_min_ms = ms(latency.group(1), latency.group(2))
-        latency_max_ms = ms(latency.group(3), latency.group(4))
-        mean_ms = ms(latency.group(5), latency.group(6))
+    if legacy_latency_summary:
+        mean_ms = ms(legacy_latency_summary.group(5), legacy_latency_summary.group(6))
 first_byte = timing_row("TTFB")
 first_byte_mean_ms = None
 if first_byte:
@@ -400,7 +427,7 @@ run_one() {
   local resource_pid="$3"
   local body_bytes="$4"
   local body_kind
-  local out warmup_out cpu_before_ms cpu_after_ms cpu_ms backend_cpu_before_ms backend_cpu_after_ms
+  local out warmup_out latency_file cpu_before_ms cpu_after_ms cpu_ms backend_cpu_before_ms backend_cpu_after_ms
   local backend_cpu_ms total_cpu_ms rss_kb rss_peak_kb metrics valid commit
   local requests_per_cpu_second requests_per_total_cpu_second
   local attempt failed_sample samples_file valid_sample_count selected_sample profile_pid
@@ -427,6 +454,7 @@ run_one() {
   failed_sample=""
   while [ "$attempt" -le "$SAMPLE_ATTEMPTS" ]; do
     out="$TMP_DIR/${artifact}.attempt-${attempt}.h2load"
+    latency_file="$TMP_DIR/${artifact}.attempt-${attempt}.latency.tsv"
     profile_pid=""
     if [ "$proxy" = qpxd ] && [ "$PROFILE_QPXD_SECONDS" -gt 0 ]; then
       /usr/bin/sample "$resource_pid" "$PROFILE_QPXD_SECONDS" 1 \
@@ -440,7 +468,7 @@ run_one() {
     else
       backend_cpu_before_ms="$(process_tree_cpu_ms "$BACKEND_PID")"
     fi
-    if ! h2load -D "$DURATION_SECONDS" -c "$load_concurrency" -t "$CLIENT_THREADS" -m "$MAX_CONCURRENT_STREAMS" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1; then
+    if ! h2load -D "$DURATION_SECONDS" -c "$load_concurrency" -t "$CLIENT_THREADS" -m "$MAX_CONCURRENT_STREAMS" --log-file="$latency_file" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1; then
       echo "h2load failed for ${proxy} attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       cat "$out" >&2 || true
       failed_sample="$out"
@@ -468,7 +496,8 @@ run_one() {
     if [ -n "$profile_pid" ]; then
       wait "$profile_pid" || true
     fi
-    metrics="$(parse_h2load "$out")"
+    metrics="$(parse_h2load "$out" "$latency_file")"
+    rm -f "$latency_file"
     valid="$(python3 - "$metrics" <<'PY'
 import json
 import sys

@@ -503,6 +503,19 @@ pub(super) fn prepare_single_webdav_reverse_request(
     prepare_single_reverse_route_request(req, base, conn, state, compiled, route)
 }
 
+pub(super) fn prepare_single_local_response_reverse_request(
+    req: Request<Body>,
+    base: &BaseRequestFields,
+    conn: &ReverseConnInfo,
+    state: &crate::runtime::RuntimeState,
+    compiled: &crate::reverse::CompiledReverse,
+) -> Result<ReverseEarlyResult<Option<Request<Body>>>> {
+    let Some(route) = compiled.router.single_direct_local_response_route() else {
+        return Ok(Ok(None));
+    };
+    prepare_single_reverse_route_request(req, base, conn, state, compiled, route)
+}
+
 fn prepare_single_reverse_route_request(
     req: Request<Body>,
     base: &BaseRequestFields,

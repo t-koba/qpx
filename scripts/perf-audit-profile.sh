@@ -9,7 +9,8 @@ PROFILE_EVENTS="${QPX_PERF_PROFILE_EVENTS:-$ROOT_DIR/target/perf/perf-audit-prof
 PROFILE_REQUESTS="${QPX_PERF_PROFILE_REQUESTS:-32}"
 PROFILE_CONCURRENCY="${QPX_PERF_PROFILE_CONCURRENCY:-4}"
 MIN_INSTRUCTIONS="${QPX_PERF_PROFILE_MIN_INSTRUCTIONS:-1000000}"
-QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
+DEFAULT_QPXD_BIN="$ROOT_DIR/target/callgrind/qpxd"
+QPXD_BIN="${QPXD_BIN:-$DEFAULT_QPXD_BIN}"
 BACKEND_PORT="${QPX_PERF_PROFILE_BACKEND_PORT:-18480}"
 QPX_HTTP1_PORT="${QPX_PERF_PROFILE_HTTP1_PORT:-18481}"
 QPX_HTTP2_PORT="${QPX_PERF_PROFILE_HTTP2_PORT:-18482}"
@@ -262,6 +263,34 @@ annotate_profile() {
     "$(json_escape "$commit")" >>"$PROFILE_JSON"
 }
 
+profile_instructions() {
+  local file="$1"
+  awk '
+    /^summary:/ { if ($2 > maximum) maximum = $2 }
+    /^totals:/ { if ($2 > maximum) maximum = $2 }
+    END { printf "%.0f\n", maximum }
+  ' "$file"
+}
+
+select_profile_dump() {
+  local prefix="$1"
+  local file instructions selected="" maximum=0
+  for file in "$prefix" "$prefix".*; do
+    [ -f "$file" ] || continue
+    instructions="$(profile_instructions "$file")"
+    instructions="${instructions:-0}"
+    if [[ "$instructions" =~ ^[0-9]+$ ]] && [ "$instructions" -gt "$maximum" ]; then
+      selected="$file"
+      maximum="$instructions"
+    fi
+  done
+  if [ -z "$selected" ]; then
+    echo "callgrind did not produce a profile dump for ${prefix}" >&2
+    return 1
+  fi
+  printf '%s\n' "$selected"
+}
+
 run_profile() {
   local protocol="$1"
   local port="$2"
@@ -269,11 +298,11 @@ run_profile() {
   local output="$PROFILE_DIR/callgrind.qpxd_reverse_${protocol}.out"
   local load_output="$LOG_DIR/load-${protocol}.txt"
   local qpx_log="$LOG_DIR/qpxd-${protocol}.log"
-  local pid tls
+  local pid tls selected_output
   tls=false
   if [ "$protocol" = http2 ]; then tls=true; fi
   write_qpx_config "$protocol" "$port" "$config"
-  rm -f "$output" "${output}.annotated.txt" "${output}.annotated.txt.err"
+  rm -f "$output" "$output".*
   valgrind \
     --tool=callgrind \
     --instr-atstart=no \
@@ -298,7 +327,8 @@ run_profile() {
     echo "profiled qpxd exited with status ${exit_status}" >&2
     return 1
   fi
-  annotate_profile "qpxd_reverse_${protocol}" "$protocol" "$output"
+  selected_output="$(select_profile_dump "$output")"
+  annotate_profile "qpxd_reverse_${protocol}" "$protocol" "$selected_output"
   printf '{"bench":"callgrind_profile_load","target":%s,"requests":%s,"concurrency":%s,"valid":true,"commit":%s}\n' \
     "$(json_escape "qpxd_reverse_${protocol}")" \
     "$PROFILE_REQUESTS" \
@@ -323,10 +353,8 @@ if [ "$PROFILE_CONCURRENCY" -gt "$PROFILE_REQUESTS" ]; then
   echo "QPX_PERF_PROFILE_CONCURRENCY must not exceed QPX_PERF_PROFILE_REQUESTS" >&2
   exit 1
 fi
-if [ "$QPXD_BIN" = "$ROOT_DIR/target/release/qpxd" ]; then
-  CARGO_PROFILE_RELEASE_DEBUG=1 \
-    CARGO_PROFILE_RELEASE_STRIP=none \
-    cargo build -p qpxd --release --locked --bin qpxd --features http3-backend-qpx
+if [ "$QPXD_BIN" = "$DEFAULT_QPXD_BIN" ]; then
+  cargo build -p qpxd --profile callgrind --locked --bin qpxd --features http3-backend-qpx
 fi
 if [ ! -x "$QPXD_BIN" ]; then
   echo "missing qpxd binary: $QPXD_BIN" >&2

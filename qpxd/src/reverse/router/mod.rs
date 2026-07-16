@@ -40,6 +40,7 @@ pub(crate) struct ReverseRouter {
     http_routes: Vec<HttpRoute>,
     http_prefilter: MatchPrefilterIndex,
     has_single_plain_http_route: bool,
+    has_single_direct_local_response_route: bool,
     has_single_direct_webdav_route: bool,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_routes: Vec<TlsPassthroughRoute>,
@@ -348,6 +349,10 @@ impl ReverseRouter {
 
         let has_single_plain_http_route =
             matches!(http_routes.as_slice(), [route] if route.supports_plain_http_dispatch());
+        let has_single_direct_local_response_route = matches!(
+            http_routes.as_slice(),
+            [route] if route.supports_direct_local_response_dispatch()
+        );
         let has_single_direct_webdav_route =
             matches!(http_routes.as_slice(), [route] if route.supports_direct_webdav_dispatch());
         let (health_shutdown, _) = watch::channel(());
@@ -355,6 +360,7 @@ impl ReverseRouter {
             http_routes,
             http_prefilter,
             has_single_plain_http_route,
+            has_single_direct_local_response_route,
             has_single_direct_webdav_route,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_routes,
@@ -520,6 +526,11 @@ impl ReverseRouter {
 
     pub(super) fn single_direct_webdav_route(&self) -> Option<&HttpRoute> {
         self.has_single_direct_webdav_route
+            .then(|| &self.http_routes[0])
+    }
+
+    pub(super) fn single_direct_local_response_route(&self) -> Option<&HttpRoute> {
+        self.has_single_direct_local_response_route
             .then(|| &self.http_routes[0])
     }
 

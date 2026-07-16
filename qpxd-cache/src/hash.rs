@@ -5,6 +5,14 @@ pub fn sha256_hex(input: &[u8]) -> String {
     hex_lower(digest.as_slice())
 }
 
+pub(crate) fn sha256_hex_parts(parts: &[&[u8]]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hex_lower(hasher.finalize().as_slice())
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     const LUT: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

@@ -61,8 +61,9 @@ use self::outcome::{
 use self::prepare::{
     attach_streaming_limits, buffer_reverse_guarded_request,
     enforce_selected_reverse_route_constraints, prepare_reverse_request,
-    prepare_reverse_retry_dispatch, prepare_single_plain_reverse_request,
-    prepare_single_webdav_reverse_request, reverse_security_rejection,
+    prepare_reverse_retry_dispatch, prepare_single_local_response_reverse_request,
+    prepare_single_plain_reverse_request, prepare_single_webdav_reverse_request,
+    reverse_security_rejection,
 };
 use self::types::*;
 
@@ -193,6 +194,37 @@ async fn execute_reverse_dispatch(
             http::Version::HTTP_11 | http::Version::HTTP_2
         )
         && !req.headers().contains_key(http::header::UPGRADE)
+        && let Some(route) = compiled.router.single_direct_local_response_route()
+    {
+        match prepare_single_local_response_reverse_request(req, &base, conn, &state, &compiled)? {
+            Ok(Some(_req)) => {
+                let local = route
+                    .local_response
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("direct local-response route has no response"))?;
+                let mut response = crate::http::local_response::finalized_compiled_local_response(
+                    &base.method,
+                    request_version,
+                    state.plan.identity.proxy_name.as_ref(),
+                    local,
+                    None,
+                )?;
+                apply_reverse_route_metadata(route, conn.tls_sni.is_some(), &mut response)?;
+                return Ok(empty_interim_response(response));
+            }
+            Ok(None) => return Err(anyhow!("no route matched")),
+            Err(response) => return Ok(response),
+        }
+    }
+    if !state.destination_trace_enabled()
+        && !qpx_observability::metrics_enabled()
+        && state.security.identity_sources.sources.is_empty()
+        && base.method != http::Method::CONNECT
+        && matches!(
+            request_version,
+            http::Version::HTTP_11 | http::Version::HTTP_2
+        )
+        && !req.headers().contains_key(http::header::UPGRADE)
         && let Some(route) = compiled.router.single_direct_webdav_route()
     {
         match prepare_single_webdav_reverse_request(req, &base, conn, &state, &compiled)? {
@@ -280,7 +312,7 @@ fn prepare_direct_webdav_resource(
     service.resource_for_path(req.uri().path())
 }
 
-fn apply_reverse_route_metadata(
+pub(super) fn apply_reverse_route_metadata(
     route: &HttpRoute,
     secure_transport: bool,
     response: &mut Response<Body>,

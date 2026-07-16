@@ -20,7 +20,9 @@ use crate::http::policy::rule_context::{
     RequestRuleContextInput, build_request_rule_match_context,
 };
 use crate::http::protocol::base_fields::BaseRequestFields;
-use crate::http::protocol::common::{blocked_response as blocked, forbidden_response as forbidden};
+use crate::http::protocol::common::blocked_response as blocked;
+#[cfg(feature = "auth-basic")]
+use crate::http::protocol::common::forbidden_response as forbidden;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http::protocol::websocket::is_websocket_upgrade;
 use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};

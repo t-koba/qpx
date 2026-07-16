@@ -594,6 +594,46 @@ fn retry_budget_requires_success_to_replenish() {
 }
 
 #[test]
+fn local_response_target_enables_direct_dispatch() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let config_path = directory.path().join("qpx.yaml");
+    std::fs::write(
+        &config_path,
+        r#"edges:
+- kind: reverse
+  name: local
+  listen: 127.0.0.1:19080
+  routes:
+  - match:
+      host: [bench.local]
+      path: [/local]
+      method: [GET, HEAD]
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: text/plain
+        body: payload
+"#,
+    )
+    .expect("write config");
+    let config = qpx_core::config::load_config(&config_path).expect("load config");
+    let reverse = config.reverse_edge_configs()[0].clone();
+    let registry = crate::http::modules::default_http_module_registry();
+    let state =
+        crate::runtime::RuntimeState::build_with_http_module_registry(config, registry.clone())
+            .expect("runtime state");
+    let compiled = state.plan.reverse_edge("local").expect("compiled route");
+    let router = ReverseRouter::new_with_plan(reverse, &[], &[], registry.as_ref(), compiled)
+        .expect("local-response router");
+
+    let route = router
+        .single_direct_local_response_route()
+        .expect("direct local-response route");
+    assert!(route.supports_raw_local_response_dispatch());
+}
+
+#[test]
 fn webdav_target_embeds_real_origin_service() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let data = directory.path().join("data");

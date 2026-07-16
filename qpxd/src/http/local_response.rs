@@ -7,13 +7,13 @@ use qpx_core::config::LocalResponseConfig;
 use qpx_http::body::Body;
 
 #[derive(Debug, Clone)]
-pub(crate) struct CompiledLocalResponse {
-    config: LocalResponseConfig,
-    static_response: Option<StaticLocalResponse>,
+pub(crate) enum CompiledLocalResponse {
+    Static(StaticLocalResponse),
+    Dynamic(LocalResponseConfig),
 }
 
 #[derive(Debug, Clone)]
-struct StaticLocalResponse {
+pub(crate) struct StaticLocalResponse {
     status: StatusCode,
     headers: http::HeaderMap,
     body: Bytes,
@@ -21,34 +21,28 @@ struct StaticLocalResponse {
 
 impl CompiledLocalResponse {
     pub(crate) fn compile(config: LocalResponseConfig) -> Result<Self> {
-        let static_response = if config.rpc.is_none() {
+        if config.rpc.is_none() {
             let response = build_local_response(&config)?;
-            let (parts, mut body) = response.into_parts();
-            let body = body.take_single_frame_without_trailers().ok_or_else(|| {
-                anyhow!("static local response did not produce a single body frame")
-            })?;
-            Some(StaticLocalResponse {
+            let (parts, _) = response.into_parts();
+            return Ok(Self::Static(StaticLocalResponse {
                 status: parts.status,
                 headers: parts.headers,
-                body,
-            })
-        } else {
-            None
-        };
-        Ok(Self {
-            config,
-            static_response,
-        })
+                body: Bytes::from(config.body),
+            }));
+        }
+        Ok(Self::Dynamic(config))
     }
 
     fn build(&self) -> Result<Response<Body>> {
-        let Some(compiled) = self.static_response.as_ref() else {
-            return build_local_response(&self.config);
-        };
-        let mut response = Response::new(Body::from(compiled.body.clone()));
-        *response.status_mut() = compiled.status;
-        *response.headers_mut() = compiled.headers.clone();
-        Ok(response)
+        match self {
+            Self::Static(compiled) => {
+                let mut response = Response::new(Body::from(compiled.body.clone()));
+                *response.status_mut() = compiled.status;
+                *response.headers_mut() = compiled.headers.clone();
+                Ok(response)
+            }
+            Self::Dynamic(config) => build_local_response(config),
+        }
     }
 }
 
@@ -145,6 +139,27 @@ mod tests {
         assert_eq!(
             qpx_http::body::to_bytes(second.into_body()).await.unwrap(),
             "payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn compiled_static_response_preserves_an_empty_body() {
+        let compiled = CompiledLocalResponse::compile(LocalResponseConfig {
+            status: 204,
+            body: String::new(),
+            content_type: None,
+            headers: HashMap::new(),
+            rpc: None,
+        })
+        .expect("compile empty local response");
+
+        let response = compiled.build().expect("empty response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            qpx_http::body::to_bytes(response.into_body())
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }

@@ -421,7 +421,7 @@ impl InFlightLookups {
     /// Joins the request-collapse group for `key`: the first caller becomes the
     /// leader (and receives a guard that wakes followers on drop), others wait.
     pub fn begin(self: &Arc<Self>, key: &CacheRequestKey) -> RequestCollapseJoin {
-        let key: Arc<str> = key.primary_hash().into();
+        let key = key.primary_hash_arc();
         let shard = qpx_http::sharding::masked(key.as_ref(), self.mask);
         let mut entries = self.shards[shard].lock().unwrap_or_else(|p| p.into_inner());
         if let Some(notify) = entries.get(key.as_ref()) {

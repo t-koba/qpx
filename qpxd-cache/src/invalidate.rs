@@ -36,11 +36,11 @@ pub async fn maybe_invalidate(
     keys.extend(collect_invalidation_targets(key, response_headers));
     let mut seen = HashSet::new();
     for k in keys {
-        let primary = k.primary_hash();
+        let primary = k.primary_hash_arc();
         if !seen.insert(primary.clone()) {
             continue;
         }
-        invalidate_primary(backend.as_ref(), namespace.as_str(), primary.as_str()).await?;
+        invalidate_primary(backend.as_ref(), namespace.as_str(), primary.as_ref()).await?;
     }
     Ok(())
 }
@@ -60,7 +60,7 @@ pub async fn purge_cache_key(
     invalidate_primary(
         backend.as_ref(),
         namespace.as_str(),
-        key.primary_hash().as_str(),
+        key.primary_hash_arc().as_ref(),
     )
     .await?;
     Ok(true)
@@ -120,13 +120,12 @@ fn collect_invalidation_targets(
                 None => url.path().to_string(),
             };
             for method in invalidated_method_groups(request_target.method.as_ref()) {
-                out.push(CacheRequestKey {
-                    method: std::sync::Arc::from(*method),
-                    scheme: std::sync::Arc::from(url.scheme().to_ascii_lowercase()),
-                    authority: std::sync::Arc::from(authority.as_str()),
-                    path_and_query: std::sync::Arc::from(path_and_query.as_str()),
-                    content_digest: None,
-                });
+                out.push(CacheRequestKey::from_parts(
+                    std::sync::Arc::from(*method),
+                    std::sync::Arc::from(url.scheme().to_ascii_lowercase()),
+                    std::sync::Arc::from(authority.as_str()),
+                    std::sync::Arc::from(path_and_query.as_str()),
+                ));
             }
         }
     }
@@ -136,13 +135,7 @@ fn collect_invalidation_targets(
 fn invalidation_keys_for_target(target: &CacheRequestKey) -> Vec<CacheRequestKey> {
     invalidated_method_groups(target.method.as_ref())
         .iter()
-        .map(|method| CacheRequestKey {
-            method: std::sync::Arc::from(*method),
-            scheme: target.scheme.clone(),
-            authority: target.authority.clone(),
-            path_and_query: target.path_and_query.clone(),
-            content_digest: None,
-        })
+        .map(|method| target.with_method_group(*method))
         .collect()
 }
 

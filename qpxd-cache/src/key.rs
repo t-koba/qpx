@@ -5,6 +5,7 @@ use hyper::{Method, Request};
 use qpx_http::body::Body;
 use qpx_http::protocol::address::format_authority_host_port;
 use std::cell::RefCell;
+use std::sync::Arc;
 use url::Url;
 
 struct CachedRequestKey {
@@ -13,6 +14,7 @@ struct CachedRequestKey {
     host: Option<http::HeaderValue>,
     default_scheme: String,
     key: Option<CacheRequestKey>,
+    primary_hash: Option<Arc<str>>,
 }
 
 thread_local! {
@@ -40,6 +42,9 @@ impl CacheRequestKey {
             return Ok(key);
         }
         let key = Self::for_target_uncached(req, default_scheme)?;
+        let primary_hash = key
+            .as_ref()
+            .map(|key| Arc::from(key.compute_primary_hash()));
         CACHED_REQUEST_KEY.with_borrow_mut(|cached| {
             *cached = Some(CachedRequestKey {
                 method: req.method().clone(),
@@ -47,6 +52,7 @@ impl CacheRequestKey {
                 host: host.cloned(),
                 default_scheme: default_scheme.to_string(),
                 key: key.clone(),
+                primary_hash,
             });
         });
         Ok(key)
@@ -79,21 +85,16 @@ impl CacheRequestKey {
             .map(|pq| pq.as_str().to_string())
             .unwrap_or_else(|| "/".to_string());
 
-        Ok(Some(Self {
-            method: std::sync::Arc::from(cache_method_group(req.method())),
-            scheme: std::sync::Arc::from(scheme),
-            authority: std::sync::Arc::from(authority),
-            path_and_query: std::sync::Arc::from(path_and_query),
-            content_digest: None,
-        }))
+        Ok(Some(Self::from_parts(
+            Arc::from(cache_method_group(req.method())),
+            Arc::from(scheme),
+            Arc::from(authority),
+            Arc::from(path_and_query),
+        )))
     }
 
     pub fn primary_hash(&self) -> String {
-        let raw = format!(
-            "{}|{}|{}|{}",
-            self.method, self.scheme, self.authority, self.path_and_query
-        );
-        super::hash::sha256_hex(raw.as_bytes())
+        self.primary_hash_arc().to_string()
     }
 
     pub fn absolute_url(&self) -> Option<Url> {
@@ -109,7 +110,7 @@ impl CacheRequestKey {
 
     pub fn with_method_group(&self, method: impl Into<String>) -> Self {
         Self {
-            method: std::sync::Arc::from(method.into()),
+            method: Arc::from(method.into()),
             scheme: self.scheme.clone(),
             authority: self.authority.clone(),
             path_and_query: self.path_and_query.clone(),
@@ -121,6 +122,55 @@ impl CacheRequestKey {
         let mut key = self.clone();
         key.content_digest = Some(std::sync::Arc::from(digest.into()));
         key
+    }
+
+    pub(crate) fn from_parts(
+        method: Arc<str>,
+        scheme: Arc<str>,
+        authority: Arc<str>,
+        path_and_query: Arc<str>,
+    ) -> Self {
+        Self {
+            method,
+            scheme,
+            authority,
+            path_and_query,
+            content_digest: None,
+        }
+    }
+
+    pub(crate) fn primary_hash_arc(&self) -> Arc<str> {
+        if let Some(primary_hash) = CACHED_REQUEST_KEY.with_borrow(|cached| {
+            cached.as_ref().and_then(|cached| {
+                cached
+                    .key
+                    .as_ref()
+                    .filter(|key| self.same_primary_key(key))
+                    .and(cached.primary_hash.clone())
+            })
+        }) {
+            return primary_hash;
+        }
+        Arc::from(self.compute_primary_hash())
+    }
+
+    fn compute_primary_hash(&self) -> String {
+        super::hash::sha256_hex_parts(&[
+            self.method.as_bytes(),
+            b"|",
+            self.scheme.as_bytes(),
+            b"|",
+            self.authority.as_bytes(),
+            b"|",
+            self.path_and_query.as_bytes(),
+        ])
+    }
+
+    fn same_primary_key(&self, other: &Self) -> bool {
+        self.method == other.method
+            && self.scheme == other.scheme
+            && self.authority == other.authority
+            && self.path_and_query == other.path_and_query
     }
 }
 
@@ -229,6 +279,10 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(
             &first.path_and_query,
             &second.path_and_query
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &first.primary_hash_arc(),
+            &second.primary_hash_arc()
         ));
 
         let other_host = Request::builder()

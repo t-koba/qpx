@@ -141,5 +141,10 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+[profile.callgrind]
+inherits = "release"
+debug = 1
+strip = "none"
+
 [patch.crates-io]
 quinn-proto = { path = "vendor/quinn-proto" }
