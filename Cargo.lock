@@ -2955,7 +2955,6 @@ dependencies = [
  "crossbeam-channel",
  "dirs-next",
  "flate2",
- "futures-util",
  "globset",
  "h2",
  "h3",

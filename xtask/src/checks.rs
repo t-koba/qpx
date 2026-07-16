@@ -5384,7 +5384,7 @@ mod tests {
                 "check_crate qpx-core",
             ),
             [
-                "ci.yml missing required job or command: cargo check --workspace --locked",
+                "ci.yml missing required job or command: dtolnay/rust-toolchain@1.96",
                 "security-qa.yml missing ASAN or fuzz smoke coverage",
                 "codeql.yml missing CodeQL init/analyze",
                 "structure.yml must run acceptance, structure, and budget gates together",

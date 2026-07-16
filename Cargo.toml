@@ -71,7 +71,6 @@ parking_lot = "0.12"
 smallvec = "1"
 notify = "6"
 async-trait = "0.1"
-futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs-next = "2"
 zeroize = "1"

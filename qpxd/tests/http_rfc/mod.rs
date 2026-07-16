@@ -67,7 +67,7 @@ fn ensure_rustls_provider() {
     }
 }
 
-/// RFC 911x / related RFCs contract tests.
+/// HTTP and related RFC contract tests.
 ///
 /// Scope: provides black-box e2e/contract tests that detect regressions in
 /// qpxd's implemented RFC compliance points (see docs/http-rfc-compliance.md).

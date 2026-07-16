@@ -219,9 +219,9 @@ total-system CPU-efficiency regression, bounds mean latency to 1.05x, p99 to
 reach at least 1.25 multi-axis dominance, and the geometric score across the
 complete four-lane matrix must reach 1.5. qpx sample spread is capped at 10%;
 reference spread is recorded and capped separately so runner noise cannot
-silently excuse a qpx regression. The qpx HTTP/2 server polls active stream
-futures in the connection task, preserving concurrency without per-stream task
-creation or atomic stream bookkeeping.
+silently excuse a qpx regression. The qpx HTTP/2 server runs streams
+concurrently as `JoinSet`-tracked tasks, preserving stream-failure reporting and
+starting the connection idle deadline from the latest stream completion.
 
 To update the proxy baseline, download the latest `qpx-nightly-perf-jsonl`
 artifact from the scheduled `nightly_perf_bench` job and regenerate the baseline
