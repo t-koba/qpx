@@ -9,6 +9,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::{TcpListener, TcpStream};
 
+#[test]
+fn scheduler_buffer_budget_preserves_single_stream_throughput_and_bounds_multiplexing() {
+    assert_eq!(h2_scheduler_buffer_budget(0), 64 * 1024);
+    assert_eq!(h2_scheduler_buffer_budget(1), 64 * 1024);
+    assert_eq!(h2_scheduler_buffer_budget(2), 32 * 1024);
+    assert_eq!(h2_scheduler_buffer_budget(4), 16 * 1024);
+    assert_eq!(h2_scheduler_buffer_budget(100), 16 * 1024);
+}
+
 #[derive(Clone)]
 struct StaticInterimService;
 
@@ -60,6 +69,7 @@ async fn serve_one_h2(socket: TcpStream) -> Result<()> {
                 &request_method,
                 false,
                 H2_BODY_IDLE_TIMEOUT,
+                1,
             )
             .await
             .expect("send response");
@@ -121,6 +131,80 @@ async fn send_h2_response_with_interim_emits_early_hints() {
 }
 
 #[tokio::test]
+async fn send_h2_response_waits_for_peer_flow_control_capacity() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().expect("addr");
+    let (completed_tx, mut completed_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        let mut conn = h2::server::handshake(socket).await.expect("handshake");
+        let (request, respond) = conn
+            .accept()
+            .await
+            .expect("request")
+            .expect("valid request");
+        assert!(request.body().is_end_stream());
+        tokio::spawn(async move {
+            let response = Response::builder()
+                .status(StatusCode::OK)
+                .header(http::header::CONTENT_LENGTH, 256 * 1024)
+                .body(Body::from(Bytes::from(vec![b'x'; 256 * 1024])))
+                .expect("response");
+            send_h2_response_with_interim(
+                respond,
+                response,
+                &[],
+                &hyper::Method::GET,
+                false,
+                H2_BODY_IDLE_TIMEOUT,
+                1,
+            )
+            .await
+            .expect("send response");
+            completed_tx.send(()).expect("completion receiver");
+        });
+        poll_fn(|cx| conn.poll_closed(cx))
+            .await
+            .expect("server connection");
+    });
+
+    let socket = TcpStream::connect(addr).await.expect("connect");
+    let mut builder = h2::client::Builder::new();
+    builder.initial_window_size(1024);
+    builder.initial_connection_window_size(1024);
+    let (client, connection) = builder
+        .handshake::<_, Bytes>(socket)
+        .await
+        .expect("handshake");
+    tokio::spawn(async move {
+        connection.await.expect("client connection");
+    });
+
+    let mut client = client.ready().await.expect("ready");
+    let request = ::http::Request::builder()
+        .method("GET")
+        .uri("https://reverse_edges.test/flow-controlled")
+        .body(())
+        .expect("request");
+    let (response_future, _) = client.send_request(request, true).expect("send");
+    let response = response_future.await.expect("response");
+    assert!(
+        timeout(Duration::from_millis(50), &mut completed_rx)
+            .await
+            .is_err(),
+        "response sender completed before the peer released capacity"
+    );
+
+    let response = h2_response_to_hyper(response).expect("convert response");
+    let body = to_bytes(response.into_body()).await.expect("response body");
+    assert_eq!(body.len(), 256 * 1024);
+    timeout(Duration::from_secs(1), completed_rx)
+        .await
+        .expect("response sender completion timeout")
+        .expect("response sender completion");
+}
+
+#[tokio::test]
 async fn send_h2_response_strips_body_framing_for_no_body_status() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("addr");
@@ -144,6 +228,7 @@ async fn send_h2_response_strips_body_framing_for_no_body_status() {
                     &hyper::Method::GET,
                     false,
                     H2_BODY_IDLE_TIMEOUT,
+                    1,
                 )
                 .await
                 .expect("send response");
@@ -256,6 +341,7 @@ async fn send_h2_response_sanitizes_response_trailers() {
                     &hyper::Method::GET,
                     false,
                     H2_BODY_IDLE_TIMEOUT,
+                    1,
                 )
                 .await
                 .expect("send response");
@@ -331,6 +417,7 @@ async fn early_h2_response_drains_abandoned_request_body() {
                     &hyper::Method::POST,
                     false,
                     H2_BODY_IDLE_TIMEOUT,
+                    1,
                 )
                 .await
                 .expect("send response");
@@ -397,6 +484,7 @@ async fn send_h2_response_with_interim_rejects_content_length_mismatch() {
                     &hyper::Method::GET,
                     false,
                     H2_BODY_IDLE_TIMEOUT,
+                    1,
                 )
                 .await
                 .expect_err("mismatch should fail");
@@ -447,6 +535,7 @@ async fn send_h2_response_resets_when_response_body_limit_is_exceeded() {
                 &hyper::Method::GET,
                 false,
                 H2_BODY_IDLE_TIMEOUT,
+                1,
             )
             .await
             .expect_err("response body cap should fail the send");
@@ -513,6 +602,7 @@ async fn send_h2_response_with_interim_preserves_successful_extended_connect_bod
                     &hyper::Method::CONNECT,
                     true,
                     H2_BODY_IDLE_TIMEOUT,
+                    1,
                 )
                 .await
                 .expect("send response");

@@ -36,7 +36,8 @@ impl CompiledLocalResponse {
     fn build(&self) -> Result<Response<Body>> {
         match self {
             Self::Static(compiled) => {
-                let mut response = Response::new(Body::from(compiled.body.clone()));
+                let mut response =
+                    Response::new(Body::from(compiled.body.clone()).mark_trailers_sanitized());
                 *response.status_mut() = compiled.status;
                 *response.headers_mut() = compiled.headers.clone();
                 Ok(response)

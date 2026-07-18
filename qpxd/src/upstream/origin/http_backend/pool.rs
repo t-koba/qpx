@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::future::{Future, poll_fn};
 use std::hash::Hash;
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::task::Poll;
 use tokio::net::TcpStream;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tracing::warn;
 
 use crate::http::codec::h2::H2TransportTuning;
@@ -22,11 +22,17 @@ const DIRECT_ORIGIN_POOL_SHARDS: usize = 32;
 const DIRECT_ORIGIN_POOL_MAX_SLOTS: usize = 4096;
 const DIRECT_ORIGIN_POOL_MAX_SLOTS_PER_SHARD: usize =
     DIRECT_ORIGIN_POOL_MAX_SLOTS / DIRECT_ORIGIN_POOL_SHARDS;
-pub(super) const MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN: usize = 64;
+pub(super) const MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN: usize = 128;
+const MAX_ACTIVE_HTTP1_CONNECTIONS_PER_ORIGIN: usize = 128;
+const MAX_RETAINED_HTTP1_BUFFER_CAPACITY: usize = 64 * 1024;
+const INITIAL_HTTP1_BUFFER_CAPACITY: usize = 2 * 1024;
+const HTTP1_IDLE_POOL_SHARDS: usize = 8;
 const MAX_POOLED_H2_CONNECTIONS_PER_ORIGIN: usize = 4;
 static DIRECT_ORIGIN_POOL_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 static NEXT_DIRECT_ORIGIN_POOL_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_HTTP1_IDLE_SHARD: AtomicUsize = AtomicUsize::new(0);
 const THREAD_PLAIN_SLOT_CACHE_CAPACITY: usize = 16;
+const LOCAL_HTTP1_IDLE_PROBE_AFTER_SECONDS: u64 = 5;
 
 struct CachedPlainOriginSlot {
     pool_id: u64,
@@ -39,6 +45,8 @@ struct CachedPlainOriginSlot {
 thread_local! {
     static PLAIN_ORIGIN_SLOTS: RefCell<Vec<CachedPlainOriginSlot>> =
         const { RefCell::new(Vec::new()) };
+    static HTTP1_IDLE_SHARD: Cell<usize> =
+        Cell::new(NEXT_HTTP1_IDLE_SHARD.fetch_add(1, Ordering::Relaxed) % HTTP1_IDLE_POOL_SHARDS);
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -57,8 +65,9 @@ pub(super) struct HttpsOriginPoolKey {
 }
 
 pub(super) struct PlainHttpOriginSlot {
-    idle: Arc<Mutex<Vec<PlainHttp1OriginConnection>>>,
+    idle: Http1IdlePool<PlainHttp1OriginConnection>,
     max_http1_idle: Arc<AtomicUsize>,
+    active: Arc<Semaphore>,
 }
 
 #[derive(Hash)]
@@ -71,6 +80,27 @@ pub(super) struct PlainHttp1OriginConnection {
     pub(super) stream: TcpStream,
     pub(super) read_buf: BytesMut,
     pub(super) write_buf: BytesMut,
+    idle_epoch_second: u64,
+}
+
+impl PlainHttp1OriginConnection {
+    pub(super) fn new(stream: TcpStream, read_buf: BytesMut, write_buf: BytesMut) -> Self {
+        Self {
+            stream,
+            read_buf,
+            write_buf,
+            idle_epoch_second: crate::http::protocol::l7::cached_epoch_second(),
+        }
+    }
+
+    fn mark_idle(&mut self) {
+        self.idle_epoch_second = crate::http::protocol::l7::cached_epoch_second();
+    }
+
+    pub(super) fn requires_idle_probe(&self) -> bool {
+        crate::http::protocol::l7::cached_epoch_second().saturating_sub(self.idle_epoch_second)
+            >= LOCAL_HTTP1_IDLE_PROBE_AFTER_SECONDS
+    }
 }
 
 pub(super) struct TlsHttp1OriginConnection {
@@ -101,11 +131,92 @@ struct H2PoolState {
 }
 
 pub(super) struct HttpsOriginSlot {
-    http1_idle: Arc<Mutex<Vec<TlsHttp1OriginConnection>>>,
+    http1_idle: Http1IdlePool<TlsHttp1OriginConnection>,
     max_http1_idle: Arc<AtomicUsize>,
     h2: Mutex<H2PoolState>,
     h2_ready: Arc<Notify>,
     h2_rr: AtomicUsize,
+}
+
+struct Http1IdlePool<T> {
+    shards: Box<[Mutex<Vec<T>>]>,
+    len: AtomicUsize,
+}
+
+impl<T> Http1IdlePool<T> {
+    fn new() -> Self {
+        Self {
+            shards: (0..HTTP1_IDLE_POOL_SHARDS)
+                .map(|_| Mutex::new(Vec::new()))
+                .collect(),
+            len: AtomicUsize::new(0),
+        }
+    }
+
+    fn pop(&self) -> Option<T> {
+        let preferred = HTTP1_IDLE_SHARD.with(Cell::get);
+        if let Some(entry) = self.pop_preferred(preferred) {
+            return Some(entry);
+        }
+        for offset in 1..HTTP1_IDLE_POOL_SHARDS {
+            let shard = (preferred + offset) % HTTP1_IDLE_POOL_SHARDS;
+            if let Some(entry) = self.pop_preferred(shard) {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
+    fn pop_preferred(&self, shard: usize) -> Option<T> {
+        let entry = self.shards[shard % HTTP1_IDLE_POOL_SHARDS].lock().pop()?;
+        self.len.fetch_sub(1, Ordering::Relaxed);
+        Some(entry)
+    }
+
+    fn push(&self, entry: T, max: &AtomicUsize) {
+        let shard = HTTP1_IDLE_SHARD.with(Cell::get);
+        self.push_preferred(entry, max, shard);
+    }
+
+    fn push_preferred(&self, entry: T, max: &AtomicUsize, shard: usize) {
+        let reserved = self
+            .len
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |len| {
+                (len < max.load(Ordering::Relaxed)).then_some(len + 1)
+            });
+        let Ok(previous_len) = reserved else {
+            return;
+        };
+        if previous_len >= max.load(Ordering::Relaxed) {
+            self.len.fetch_sub(1, Ordering::Relaxed);
+            return;
+        }
+        let mut entries = self.shards[shard % HTTP1_IDLE_POOL_SHARDS].lock();
+        if self.len.load(Ordering::Relaxed) > max.load(Ordering::Relaxed) {
+            self.len.fetch_sub(1, Ordering::Relaxed);
+            return;
+        }
+        entries.push(entry);
+    }
+
+    fn trim(&self, max: usize) {
+        let mut removed = Vec::new();
+        while self.len.load(Ordering::Relaxed) > max {
+            let mut found = None;
+            for shard in self.shards.iter() {
+                if let Some(entry) = shard.lock().pop() {
+                    found = Some(entry);
+                    break;
+                }
+            }
+            let Some(entry) = found else {
+                break;
+            };
+            self.len.fetch_sub(1, Ordering::Relaxed);
+            removed.push(entry);
+        }
+        drop(removed);
+    }
 }
 
 pub(super) struct H2ConnectionReservation<'a> {
@@ -114,14 +225,12 @@ pub(super) struct H2ConnectionReservation<'a> {
 
 impl HttpsOriginSlot {
     pub(super) fn pop_http1_idle(&self) -> Option<TlsHttp1OriginConnection> {
-        self.http1_idle.lock().pop()
+        self.http1_idle.pop()
     }
 
-    pub(super) fn recycle_http1_idle(&self, entry: TlsHttp1OriginConnection) {
-        let mut idle = self.http1_idle.lock();
-        if idle.len() < self.max_http1_idle.load(Ordering::Relaxed) {
-            idle.push(entry);
-        }
+    pub(super) fn recycle_http1_idle(&self, mut entry: TlsHttp1OriginConnection) {
+        trim_recycled_http1_buffers(&mut entry.read_buf, &mut entry.write_buf);
+        self.http1_idle.push(entry, &self.max_http1_idle);
     }
 
     pub(super) fn has_h2_connections(&self) -> bool {
@@ -181,25 +290,63 @@ impl HttpsOriginSlot {
 }
 
 impl PlainHttpOriginSlot {
-    pub(super) fn pop_idle(&self) -> Option<PlainHttp1OriginConnection> {
-        self.idle.lock().pop()
+    pub(super) async fn acquire_active(&self) -> Result<OwnedSemaphorePermit> {
+        match self.active.clone().try_acquire_owned() {
+            Ok(permit) => Ok(permit),
+            Err(TryAcquireError::NoPermits) => self
+                .active
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| anyhow::anyhow!("direct origin connection limiter closed")),
+            Err(TryAcquireError::Closed) => {
+                Err(anyhow::anyhow!("direct origin connection limiter closed"))
+            }
+        }
     }
 
-    pub(super) fn recycle_idle(&self, connection: PlainHttp1OriginConnection) {
-        let mut idle = self.idle.lock();
-        if idle.len() < self.max_http1_idle.load(Ordering::Relaxed) {
-            idle.push(connection);
-        }
+    pub(super) fn pop_idle(&self) -> Option<PlainHttp1OriginConnection> {
+        self.idle.pop()
+    }
+
+    pub(super) fn pop_idle_preferred(&self, shard: usize) -> Option<PlainHttp1OriginConnection> {
+        self.idle.pop_preferred(shard)
+    }
+
+    pub(super) fn recycle_idle(&self, mut connection: PlainHttp1OriginConnection) {
+        trim_recycled_http1_buffers(&mut connection.read_buf, &mut connection.write_buf);
+        connection.mark_idle();
+        self.idle.push(connection, &self.max_http1_idle);
+    }
+
+    pub(super) fn recycle_idle_preferred(
+        &self,
+        mut connection: PlainHttp1OriginConnection,
+        shard: usize,
+    ) {
+        trim_recycled_http1_buffers(&mut connection.read_buf, &mut connection.write_buf);
+        connection.mark_idle();
+        self.idle
+            .push_preferred(connection, &self.max_http1_idle, shard);
+    }
+}
+
+pub(super) fn next_http1_idle_affinity() -> usize {
+    NEXT_HTTP1_IDLE_SHARD.fetch_add(1, Ordering::Relaxed) % HTTP1_IDLE_POOL_SHARDS
+}
+
+pub(super) fn trim_recycled_http1_buffers(read_buf: &mut BytesMut, write_buf: &mut BytesMut) {
+    if read_buf.capacity() > MAX_RETAINED_HTTP1_BUFFER_CAPACITY {
+        *read_buf = BytesMut::with_capacity(INITIAL_HTTP1_BUFFER_CAPACITY);
+    }
+    if write_buf.capacity() > MAX_RETAINED_HTTP1_BUFFER_CAPACITY {
+        *write_buf = BytesMut::with_capacity(INITIAL_HTTP1_BUFFER_CAPACITY);
     }
 }
 
 impl crate::upstream::raw_http1::Http1RecycleTarget<TcpStream> for PlainHttpOriginSlot {
     fn recycle(&self, stream: TcpStream, read_buf: BytesMut, write_buf: BytesMut) {
-        self.recycle_idle(PlainHttp1OriginConnection {
-            stream,
-            read_buf,
-            write_buf,
-        });
+        self.recycle_idle(PlainHttp1OriginConnection::new(stream, read_buf, write_buf));
     }
 }
 
@@ -271,8 +418,9 @@ impl DirectOriginPools {
 
     pub(super) fn plain_slot(&self, key: PlainHttpOriginPoolKey) -> Arc<PlainHttpOriginSlot> {
         typed_pool_slot(&self.plain, key, || PlainHttpOriginSlot {
-            idle: Arc::new(Mutex::new(Vec::new())),
+            idle: Http1IdlePool::new(),
             max_http1_idle: self.http1_max_idle_per_origin.clone(),
+            active: Arc::new(Semaphore::new(MAX_ACTIVE_HTTP1_CONNECTIONS_PER_ORIGIN)),
         })
     }
 
@@ -321,7 +469,7 @@ impl DirectOriginPools {
 
     pub(super) fn https_slot(&self, key: HttpsOriginPoolKey) -> Arc<HttpsOriginSlot> {
         typed_pool_slot(&self.https, key, || HttpsOriginSlot {
-            http1_idle: Arc::new(Mutex::new(Vec::new())),
+            http1_idle: Http1IdlePool::new(),
             max_http1_idle: self.http1_max_idle_per_origin.clone(),
             h2: Mutex::new(H2PoolState::default()),
             h2_ready: Arc::new(Notify::new()),
@@ -354,7 +502,7 @@ impl DirectOriginPools {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .values()
             {
-                slot.idle.lock().truncate(max);
+                slot.idle.trim(max);
             }
         }
         for shard in &self.https {
@@ -363,7 +511,7 @@ impl DirectOriginPools {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .values()
             {
-                slot.http1_idle.lock().truncate(max);
+                slot.http1_idle.trim(max);
             }
         }
     }

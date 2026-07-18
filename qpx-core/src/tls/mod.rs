@@ -82,7 +82,11 @@ impl From<regex::Error> for TlsError {
 /// Installs the default rustls crypto provider if one is not already present.
 pub fn init_rustls_crypto_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        match rustls::crypto::aws_lc_rs::default_provider().install_default() {
+            Ok(()) => {}
+            Err(_) if rustls::crypto::CryptoProvider::get_default().is_some() => {}
+            Err(_) => panic!("failed to install the default rustls crypto provider"),
+        }
     }
 }
 

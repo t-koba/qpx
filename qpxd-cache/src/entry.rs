@@ -253,21 +253,14 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
             "cached response",
         )?,
     };
-    let mut builder = Response::builder().status(status);
-    for (name, value) in &params.envelope.headers {
-        let Ok(header_name) = http::HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        if header_name == AGE || header_name == CONTENT_LENGTH || header_name == CONTENT_RANGE {
-            continue;
-        }
-        let Ok(header_value) = http::HeaderValue::from_str(value) else {
-            continue;
-        };
-        builder = builder.header(header_name, header_value);
-    }
-    let mut response = builder.body(params.body)?;
-    let age = current_age_secs(params.envelope, params.now_ms).to_string();
+    let mut response = Response::new(params.body);
+    *response.status_mut() = status;
+    *response.headers_mut() = params.envelope.header_map().clone();
+    response.headers_mut().remove(AGE);
+    response.headers_mut().remove(CONTENT_LENGTH);
+    response.headers_mut().remove(CONTENT_RANGE);
+    let current_age = current_age_secs(params.envelope, params.now_ms);
+    let age = current_age.to_string();
     if let Ok(age_header) = http::HeaderValue::from_str(age.as_str()) {
         response.headers_mut().insert(AGE, age_header);
     }
@@ -275,7 +268,7 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
         params
             .envelope
             .freshness_lifetime_secs
-            .saturating_sub(current_age_secs(params.envelope, params.now_ms))
+            .saturating_sub(current_age)
     });
     response
         .headers_mut()

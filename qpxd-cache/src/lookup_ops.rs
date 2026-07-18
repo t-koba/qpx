@@ -1,4 +1,4 @@
-use super::directives::{parse_request_directives, parse_response_directives};
+use super::directives::parse_request_directives;
 use super::entry::{
     not_modified_from_envelope, precondition_failed_response, resolve_range,
     response_from_envelope_for_request, response_from_envelope_for_request_with_body,
@@ -8,8 +8,8 @@ use super::freshness::{
 };
 use super::types::{
     CACHE_HEADER, CacheBackend, CacheEntryDisposition, CacheRequestKey, CachedResponseEnvelope,
-    LookupOutcome, RequestDirectives, ResponseDirectives, RevalidationState, VariantIndex,
-    cache_body_storage_key, cache_status_header,
+    LookupOutcome, RequestDirectives, RevalidationState, VariantIndex, cache_body_storage_key,
+    cache_status_header,
 };
 use super::util::{cache_namespace, now_millis};
 use super::vary::matches_vary;
@@ -107,15 +107,14 @@ pub async fn lookup(
                 return Ok(LookupOutcome::Hit(response));
             }
             CacheEntryDisposition::ServeStaleWhileRevalidate => {
-                let directives: ResponseDirectives =
-                    parse_response_directives(envelope.header_map());
+                let stale_if_error_secs = envelope.response_directives().stale_if_error;
                 let state = RevalidationState {
                     backend: backend.clone(),
                     namespace: namespace.clone(),
                     variant_key: variant_key.clone(),
                     request_method: request_method.clone(),
                     request_directives: req.clone(),
-                    stale_if_error_secs: directives.stale_if_error,
+                    stale_if_error_secs,
                     envelope: (*envelope).clone(),
                     revalidations: revalidations.clone(),
                 };
@@ -164,8 +163,7 @@ pub async fn lookup(
                 ));
             }
             CacheEntryDisposition::RequiresRevalidation => {
-                let directives: ResponseDirectives =
-                    parse_response_directives(envelope.header_map());
+                let stale_if_error_secs = envelope.response_directives().stale_if_error;
                 revalidation = Some(RevalidationState {
                     backend: backend.clone(),
                     namespace: namespace.clone(),
@@ -173,7 +171,7 @@ pub async fn lookup(
                     request_method: request_method.clone(),
                     request_directives: req.clone(),
                     envelope: (*envelope).clone(),
-                    stale_if_error_secs: directives.stale_if_error,
+                    stale_if_error_secs,
                     revalidations: revalidations.clone(),
                 });
             }
@@ -330,7 +328,7 @@ pub fn build_only_if_cached_miss_response(message: &str) -> Response<Body> {
 pub async fn maybe_build_stale_if_error_response(
     state: &RevalidationState,
 ) -> Option<Response<Body>> {
-    let directives = parse_response_directives(state.envelope.header_map());
+    let directives = state.envelope.response_directives();
     if directives.must_revalidate || directives.proxy_revalidate {
         return None;
     }
@@ -374,7 +372,7 @@ pub fn classify_for_request(
     envelope: &CachedResponseEnvelope,
     now_ms: u64,
 ) -> CacheEntryDisposition {
-    let resp = parse_response_directives(envelope.header_map());
+    let resp = envelope.response_directives();
     let age = current_age_secs(envelope, now_ms);
     let freshness = envelope.freshness_lifetime_secs;
     let fresh_by_age = age <= freshness;

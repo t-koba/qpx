@@ -1,12 +1,12 @@
-use super::transport::{ReverseConnInfo, handle_request_with_interim_ref};
+use super::transport::{ReverseConnInfo, handle_request_with_interim_and_origin_pool_ref};
 use super::{
     ReloadableReverse, record_reverse_connection_filter_block, reverse_connection_filter_match,
 };
-use crate::http::codec::h1::serve_http1_tcp_with_interim_and_capacity;
 use crate::http::codec::interim::{
     H2_PREFACE, serve_h2_with_interim_and_capacity_and_tuning, sniff_h2_preface,
 };
 use crate::tcp_bindings::filter::ConnectionFilterStage;
+use crate::upstream::origin::PreparedPlainHttp1ConnectionPool;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use anyhow::Result;
 use http::{Request, Response};
@@ -41,6 +41,17 @@ fn reverse_body_channel_capacity(reverse: &ReloadableReverse) -> usize {
 struct ReverseInterimService {
     reverse: ReloadableReverse,
     conn: ReverseConnInfo,
+    origin_pool: PreparedPlainHttp1ConnectionPool,
+}
+
+impl ReverseInterimService {
+    fn new(reverse: ReloadableReverse, conn: ReverseConnInfo) -> Self {
+        Self {
+            reverse,
+            conn,
+            origin_pool: PreparedPlainHttp1ConnectionPool::default(),
+        }
+    }
 }
 
 impl RequestHandler<Request<Body>> for ReverseInterimService {
@@ -53,9 +64,15 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
     ) -> impl Future<Output = Result<Response<Body>, Infallible>> + Send {
         let reverse = &self.reverse;
         let conn = &self.conn;
+        let origin_pool = &self.origin_pool;
         async move {
-            let (interim, mut response) =
-                handle_request_with_interim_ref(req, reverse, conn).await?;
+            let (interim, mut response) = handle_request_with_interim_and_origin_pool_ref(
+                req,
+                reverse,
+                conn,
+                Some(origin_pool),
+            )
+            .await?;
             if !interim.is_empty() {
                 response.extensions_mut().insert(interim);
             }
@@ -174,7 +191,7 @@ pub(super) async fn run_reverse_http_acceptor(
                 let body_channel_capacity = reverse_body_channel_capacity(&reverse);
                 let result = if access_log_service_required(&access_cfg) {
                     let service = AccessLogService::new(
-                        ReverseInterimService { reverse, conn },
+                        ReverseInterimService::new(reverse, conn),
                         remote_addr,
                         AccessLogContext {
                             kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
@@ -194,7 +211,7 @@ pub(super) async fn run_reverse_http_acceptor(
                 } else {
                     serve_h2_with_interim_and_capacity_and_tuning(
                         stream,
-                        ReverseInterimService { reverse, conn },
+                        ReverseInterimService::new(reverse, conn),
                         false,
                         header_read_timeout,
                         body_channel_capacity,
@@ -203,39 +220,21 @@ pub(super) async fn run_reverse_http_acceptor(
                     .await
                 };
                 if let Err(err) = result {
-                    warn!(error = ?err, "reverse HTTP/2 connection failed");
+                    if crate::http::codec::is_expected_peer_disconnect(&err) {
+                        debug!(error = ?err, "reverse HTTP/2 peer disconnected");
+                    } else {
+                        warn!(error = ?err, "reverse HTTP/2 connection failed");
+                    }
                 }
             } else {
-                let access_cfg = reverse.runtime.state().resources.access_log.clone();
-                let body_channel_capacity = reverse_body_channel_capacity(&reverse);
-                let result = if access_log_service_required(&access_cfg) {
-                    let service = AccessLogService::new(
-                        ReverseInterimService { reverse, conn },
-                        remote_addr,
-                        AccessLogContext {
-                            kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
-                            name: reverse_name,
-                        },
-                        &access_cfg,
-                    );
-                    serve_http1_tcp_with_interim_and_capacity(
-                        stream,
-                        preface,
-                        service,
-                        header_read_timeout,
-                        body_channel_capacity,
-                    )
-                    .await
-                } else {
-                    raw_http1::serve_raw_or_fallback(
-                        stream,
-                        preface,
-                        reverse,
-                        conn,
-                        header_read_timeout,
-                    )
-                    .await
-                };
+                let result = raw_http1::serve_raw_or_fallback(
+                    stream,
+                    preface,
+                    reverse,
+                    conn,
+                    header_read_timeout,
+                )
+                .await;
                 if let Err(err) = result {
                     if crate::http::codec::is_expected_peer_disconnect(&err) {
                         debug!(error = ?err, "reverse peer disconnected");

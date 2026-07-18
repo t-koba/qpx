@@ -1,4 +1,5 @@
 use bytes::{Bytes, BytesMut};
+use std::io::IoSlice;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -67,6 +68,18 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<I> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
@@ -75,6 +88,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::{TcpListener, TcpStream};
 
     #[test]
     fn leading_prefix_is_combined_with_unread_existing_prefix() {
@@ -88,5 +102,21 @@ mod tests {
 
         assert_eq!(inner, 7);
         assert_eq!(prefix, b"12cdef"[..]);
+    }
+
+    #[tokio::test]
+    async fn vectored_write_capability_is_forwarded_from_real_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let connect = TcpStream::connect(address);
+        let accept = listener.accept();
+        let (client, accepted) = tokio::join!(connect, accept);
+        let client = client.expect("connect");
+        let (_server, _) = accepted.expect("accept");
+        let expected = client.is_write_vectored();
+
+        let prefixed = PrefixedIo::new(client, Bytes::new());
+
+        assert_eq!(prefixed.is_write_vectored(), expected);
     }
 }

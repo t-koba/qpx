@@ -16,7 +16,7 @@ members = [
   "qpxf",
   "xtask"
 ]
-exclude = ["fuzz", "vendor/quinn-proto"]
+exclude = ["fuzz", "vendor/h2", "vendor/quinn-proto"]
 
 [workspace.package]
 edition = "2024"
@@ -71,12 +71,13 @@ parking_lot = "0.12"
 smallvec = "1"
 notify = "6"
 async-trait = "0.1"
+futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs-next = "2"
 zeroize = "1"
 
 # TLS
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "ring", "std", "tls12"] }
 tokio-rustls = "0.26"
 webpki-roots = "1"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
@@ -146,4 +147,5 @@ debug = 1
 strip = "none"
 
 [patch.crates-io]
+h2 = { path = "vendor/h2" }
 quinn-proto = { path = "vendor/quinn-proto" }

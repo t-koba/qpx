@@ -8,15 +8,24 @@ pub(crate) mod lazy_timeout;
 
 pub(crate) fn is_expected_peer_disconnect(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
-            matches!(
-                error.kind(),
-                std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::ConnectionReset
-            )
-        })
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(is_expected_disconnect_io)
+            || cause.downcast_ref::<::h2::Error>().is_some_and(|error| {
+                error.get_io().is_some_and(is_expected_disconnect_io)
+                    || (error.is_reset() && error.reason() == Some(::h2::Reason::CANCEL))
+                    || (error.is_go_away() && error.reason() == Some(::h2::Reason::NO_ERROR))
+            })
     })
+}
+
+fn is_expected_disconnect_io(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
 }
 
 #[cfg(test)]

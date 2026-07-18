@@ -22,7 +22,28 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
-use tracing::warn;
+use tracing::{debug, warn};
+
+fn record_reverse_tls_connection_error(
+    error: &anyhow::Error,
+    reverse_name: &str,
+    remote_addr: std::net::SocketAddr,
+) {
+    if crate::http::codec::is_expected_peer_disconnect(error) {
+        debug!(error = ?error, "reverse TLS peer disconnected");
+        return;
+    }
+    warn!(error = ?error, "reverse TLS connection failed");
+    if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
+        tracing::warn!(
+            target: "audit_log",
+            event = "tls_error",
+            reverse = %reverse_name,
+            remote = %remote_addr,
+            error = ?error,
+        );
+    }
+}
 
 async fn serve_terminated_http<I, S>(
     io: I,
@@ -159,16 +180,11 @@ pub(crate) async fn run_reverse_tls_acceptor(
             let reverse_name_for_log = reverse_name.clone();
             let ctx = ReverseTlsContext { reverse };
             if let Err(err) = handle_tls_connection(stream, remote_addr, local_port, ctx).await {
-                warn!(error = ?err, "reverse tls connection failed");
-                if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                    tracing::warn!(
-                        target: "audit_log",
-                        event = "tls_error",
-                        reverse = %reverse_name_for_log,
-                        remote = %remote_addr,
-                        error = ?err,
-                    );
-                }
+                record_reverse_tls_connection_error(
+                    &err,
+                    reverse_name_for_log.as_ref(),
+                    remote_addr,
+                );
             }
         });
     }
@@ -273,16 +289,11 @@ pub(crate) async fn run_reverse_tls_acceptor(
             let reverse_name_for_log = reverse_name.clone();
             let ctx = ReverseTlsContext { reverse };
             if let Err(err) = handle_tls_connection(stream, remote_addr, local_port, ctx).await {
-                warn!(error = ?err, "reverse tls connection failed");
-                if tracing::enabled!(target: "audit_log", tracing::Level::WARN) {
-                    tracing::warn!(
-                        target: "audit_log",
-                        event = "tls_error",
-                        reverse = %reverse_name_for_log,
-                        remote = %remote_addr,
-                        error = ?err,
-                    );
-                }
+                record_reverse_tls_connection_error(
+                    &err,
+                    reverse_name_for_log.as_ref(),
+                    remote_addr,
+                );
             }
         });
     }
@@ -415,10 +426,7 @@ async fn handle_tls_connection(
     let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), peer_certificates);
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_name = reverse.name.clone();
-    let service = ReverseInterimService {
-        reverse: reverse.clone(),
-        conn,
-    };
+    let service = ReverseInterimService::new(reverse.clone(), conn);
     let h2_limits = reverse.runtime.state().plan.limits.h2;
     let h2_tuning = crate::http::codec::h2::H2TransportTuning {
         initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
@@ -579,10 +587,7 @@ async fn handle_tls_connection(
     let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), None);
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_name = reverse.name.clone();
-    let service = ReverseInterimService {
-        reverse: reverse.clone(),
-        conn,
-    };
+    let service = ReverseInterimService::new(reverse.clone(), conn);
     let h2_limits = reverse.runtime.state().plan.limits.h2;
     let h2_tuning = crate::http::codec::h2::H2TransportTuning {
         initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,

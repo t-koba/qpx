@@ -12,6 +12,8 @@ use std::io::{Error as IoError, ErrorKind, IoSlice};
 use std::task::Poll;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+pub(crate) struct BodylessHttp1Request(Request<Body>);
+
 pub(super) async fn write_http1_request<S>(
     stream: &mut S,
     req: Request<Body>,
@@ -107,30 +109,33 @@ pub(super) async fn write_prepared_bodyless_http1_request<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    if !http_body::Body::is_end_stream(req.body())
-        || parse_declared_content_length(req.headers())?.is_some_and(|length| length != 0)
-    {
-        return write_http1_request(stream, req, head).await;
-    }
-
+    let req = match classify_bodyless_http1_request(req)? {
+        Ok(req) => req,
+        Err(req) => return write_http1_request(stream, req, head).await,
+    };
     serialize_bodyless_http1_request(req, head)?;
     stream.write_all(head).await?;
     stream.flush().await?;
     Ok(())
 }
 
-pub(crate) fn is_bodyless_http1_request(req: &Request<Body>) -> Result<bool> {
-    Ok(http_body::Body::is_end_stream(req.body())
-        && parse_declared_content_length(req.headers())?.is_none_or(|length| length == 0))
+pub(crate) fn classify_bodyless_http1_request(
+    req: Request<Body>,
+) -> Result<std::result::Result<BodylessHttp1Request, Request<Body>>> {
+    let is_bodyless = http_body::Body::is_end_stream(req.body())
+        && parse_declared_content_length(req.headers())?.is_none_or(|length| length == 0);
+    Ok(if is_bodyless {
+        Ok(BodylessHttp1Request(req))
+    } else {
+        Err(req)
+    })
 }
 
 pub(crate) fn serialize_bodyless_http1_request(
-    req: Request<Body>,
+    req: BodylessHttp1Request,
     head: &mut BytesMut,
 ) -> Result<Method> {
-    if !is_bodyless_http1_request(&req)? {
-        return Err(anyhow!("request is not immediately bodyless"));
-    }
+    let req = req.0;
     debug_assert!(!req.headers().contains_key(CONNECTION));
     debug_assert!(!req.headers().contains_key("proxy-connection"));
     debug_assert!(!req.headers().contains_key(TRANSFER_ENCODING));
@@ -351,4 +356,76 @@ fn chunk_size_header(len: usize, out: &mut [u8; 18]) -> &[u8] {
     out[digits] = b'\r';
     out[digits + 1] = b'\n';
     &out[..digits + 2]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_bodyless_http1_request, serialize_bodyless_http1_request};
+    use bytes::BytesMut;
+    use hyper::header::{CONTENT_LENGTH, HeaderValue};
+    use hyper::{Method, Request};
+    use qpx_http::body::Body;
+
+    #[test]
+    fn classifies_and_serializes_empty_request_once() {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/asset?encoding=br")
+            .header("host", "origin.test")
+            .body(Body::empty())
+            .expect("request");
+        let classified = classify_bodyless_http1_request(request)
+            .expect("content-length validation")
+            .expect("bodyless request");
+        let mut head = BytesMut::new();
+
+        let method = serialize_bodyless_http1_request(classified, &mut head)
+            .expect("serialize request head");
+
+        assert_eq!(method, Method::GET);
+        assert_eq!(
+            head.as_ref(),
+            b"GET /asset?encoding=br HTTP/1.1\r\nhost: origin.test\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn preserves_declared_body_for_streaming_writer() {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .header(CONTENT_LENGTH, "1")
+            .body(Body::empty())
+            .expect("request");
+
+        let classified =
+            classify_bodyless_http1_request(request).expect("content-length validation");
+
+        assert!(classified.is_err());
+    }
+
+    #[test]
+    fn rejects_conflicting_content_length_before_upstream_io() {
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .body(Body::empty())
+            .expect("request");
+        request
+            .headers_mut()
+            .append(CONTENT_LENGTH, HeaderValue::from_static("0"));
+        request
+            .headers_mut()
+            .append(CONTENT_LENGTH, HeaderValue::from_static("1"));
+
+        let error = match classify_bodyless_http1_request(request) {
+            Err(error) => error,
+            Ok(_) => panic!("conflicting content-length must fail"),
+        };
+
+        assert!(
+            error.to_string().contains("conflicting content-length"),
+            "{error}"
+        );
+    }
 }

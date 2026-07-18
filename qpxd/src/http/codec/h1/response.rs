@@ -2,11 +2,9 @@ use super::zero_copy::ZeroCopySocket;
 use super::{RESPONSE_WRITE_TIMEOUT, has_chunked_transfer_encoding, parse_declared_content_length};
 use crate::http::codec::h1_common::serialize_headers;
 use crate::http::codec::lazy_timeout::timeout_after_pending;
-#[cfg(not(target_os = "linux"))]
-use crate::upstream::raw_http1::READ_BUF_SIZE;
 use crate::upstream::raw_http1::{
     InterimResponseHead, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, RawHttp1BodyFraming,
-    RawHttp1ResponseHead, RawHttp1ResponseRelay,
+    RawHttp1ResponseHead, RawHttp1ResponseRelay, ReusableRawHttp1Connection,
 };
 use anyhow::{Result, anyhow};
 #[cfg(not(target_os = "linux"))]
@@ -41,6 +39,9 @@ pub(super) enum ConnectionHeaderMode {
     KeepAlive,
     Preserve,
 }
+
+#[cfg(not(target_os = "linux"))]
+const DIRECT_RELAY_READ_SIZE: usize = 512 * 1024;
 
 #[expect(
     clippy::too_many_arguments,
@@ -307,7 +308,7 @@ pub(crate) async fn send_raw_http1_response_relay_with_interim(
     mut response: RawHttp1ResponseRelay<TcpStream>,
     request_keep_alive: bool,
     head_buf: &mut BytesMut,
-) -> Result<bool> {
+) -> Result<(bool, Option<ReusableRawHttp1Connection<TcpStream>>)> {
     if request_version == Version::HTTP_11 {
         for head in &response.interim {
             if !head.status.is_informational() {
@@ -382,7 +383,8 @@ pub(crate) async fn send_raw_http1_response_relay_with_interim(
         ResponseBodyKind::Chunked | ResponseBodyKind::CloseDelimited => unreachable!(),
     }
     flush_with_timeout(writer).await?;
-    Ok(keep_alive)
+    let reusable = response.take_reusable_connection();
+    Ok((keep_alive, reusable))
 }
 
 async fn relay_direct_content_length_response(
@@ -420,7 +422,7 @@ async fn relay_direct_content_length_response(
         let mut remaining = remaining;
         while remaining > 0 {
             if response.read_buf.is_empty() {
-                let read_size = remaining.min(READ_BUF_SIZE as u64) as usize;
+                let read_size = remaining.min(DIRECT_RELAY_READ_SIZE as u64) as usize;
                 response.read_buf.reserve(read_size);
                 let mut limited = (&mut response.read_buf).limit(read_size);
                 let Some(stream) = response.stream.as_mut() else {
@@ -481,7 +483,10 @@ fn recycle_direct_raw_upstream_if_clean(response: &mut RawHttp1ResponseRelay<Tcp
     if !response.read_buf.is_empty() || !response.raw.upstream_keep_alive() {
         return;
     }
-    let (Some(stream), Some(recycler)) = (response.stream.take(), response.recycler.take()) else {
+    let Some(recycler) = response.recycler.take() else {
+        return;
+    };
+    let Some(stream) = response.stream.take() else {
         return;
     };
     recycler.recycle(

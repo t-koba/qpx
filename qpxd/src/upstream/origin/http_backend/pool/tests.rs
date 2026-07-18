@@ -4,7 +4,7 @@ use tokio::io::duplex;
 
 fn test_https_origin_slot() -> HttpsOriginSlot {
     HttpsOriginSlot {
-        http1_idle: Arc::new(Mutex::new(Vec::new())),
+        http1_idle: Http1IdlePool::new(),
         max_http1_idle: Arc::new(AtomicUsize::new(MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN)),
         h2: Mutex::new(H2PoolState::default()),
         h2_ready: Arc::new(Notify::new()),
@@ -29,6 +29,74 @@ fn clearing_plain_origin_pool_invalidates_thread_cache() {
 
     let second = pools.plain_slot_for("127.0.0.1:80", "example.test");
     assert!(!Arc::ptr_eq(&first, &second));
+}
+
+#[test]
+fn recycled_http1_buffers_discard_oversized_allocations() {
+    let mut read_buf = BytesMut::with_capacity(MAX_RETAINED_HTTP1_BUFFER_CAPACITY + 1);
+    let mut write_buf = BytesMut::with_capacity(MAX_RETAINED_HTTP1_BUFFER_CAPACITY + 1);
+
+    trim_recycled_http1_buffers(&mut read_buf, &mut write_buf);
+
+    assert_eq!(read_buf.capacity(), INITIAL_HTTP1_BUFFER_CAPACITY);
+    assert_eq!(write_buf.capacity(), INITIAL_HTTP1_BUFFER_CAPACITY);
+}
+
+#[test]
+fn sharded_http1_idle_pool_enforces_aggregate_limit() {
+    let pool = Arc::new(Http1IdlePool::new());
+    let max = Arc::new(AtomicUsize::new(32));
+    let mut workers = Vec::new();
+    for worker in 0..HTTP1_IDLE_POOL_SHARDS {
+        let pool = pool.clone();
+        let max = max.clone();
+        workers.push(std::thread::spawn(move || {
+            for item in 0..16 {
+                pool.push(worker * 16 + item, &max);
+            }
+        }));
+    }
+    for worker in workers {
+        worker.join().expect("idle pool worker");
+    }
+
+    let mut entries = Vec::new();
+    while let Some(entry) = pool.pop() {
+        entries.push(entry);
+    }
+    entries.sort_unstable();
+    entries.dedup();
+    assert_eq!(entries.len(), 32);
+    assert_eq!(pool.len.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn sharded_http1_idle_pool_trims_without_losing_count_consistency() {
+    let pool = Http1IdlePool::new();
+    let max = AtomicUsize::new(16);
+    for item in 0..16 {
+        pool.push(item, &max);
+    }
+
+    max.store(3, Ordering::Relaxed);
+    pool.trim(3);
+
+    assert_eq!(pool.len.load(Ordering::Relaxed), 3);
+    assert_eq!(std::iter::from_fn(|| pool.pop()).count(), 3);
+    assert_eq!(pool.len.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn preferred_http1_idle_shards_share_the_aggregate_limit() {
+    let pool = Http1IdlePool::new();
+    let max = AtomicUsize::new(3);
+    for item in 0..HTTP1_IDLE_POOL_SHARDS * 2 {
+        pool.push_preferred(item, &max, item);
+    }
+
+    assert_eq!(pool.len.load(Ordering::Relaxed), 3);
+    assert_eq!(std::iter::from_fn(|| pool.pop()).count(), 3);
+    assert_eq!(pool.len.load(Ordering::Relaxed), 0);
 }
 
 #[test]

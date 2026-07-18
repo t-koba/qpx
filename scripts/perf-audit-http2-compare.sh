@@ -6,10 +6,13 @@ source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 OUT_JSON="${1:-${QPX_HTTP2_COMPARE_JSON:-$ROOT_DIR/target/perf/perf-audit-http2-compare.jsonl}}"
 LOG_ARTIFACT_DIR="${QPX_HTTP2_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/http2-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
-DURATION_SECONDS="${QPX_HTTP2_COMPARE_DURATION_SECONDS:-10}"
+TARGET_DURATION_SECONDS="${QPX_HTTP2_COMPARE_TARGET_DURATION_SECONDS:-10}"
+CALIBRATION_BYTES="${QPX_HTTP2_COMPARE_CALIBRATION_BYTES:-16777216}"
+CALIBRATION_MIN_DURATION_MS="${QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS:-2000}"
 CONCURRENCY="${QPX_HTTP2_COMPARE_CONCURRENCY:-64}"
-MULTIPLEX_CONCURRENCY="${QPX_HTTP2_COMPARE_MULTIPLEX_CONCURRENCY:-8}"
+MULTIPLEX_CONCURRENCY="${QPX_HTTP2_COMPARE_MULTIPLEX_CONCURRENCY:-1}"
 CLIENT_THREADS="${QPX_HTTP2_COMPARE_CLIENT_THREADS:-4}"
+MULTIPLEX_CLIENT_THREADS="${QPX_HTTP2_COMPARE_MULTIPLEX_CLIENT_THREADS:-1}"
 MAX_CONCURRENT_STREAMS_VALUES="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES:-1 100}"
 MAX_CONCURRENT_STREAMS=""
 BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1024 1048576}"
@@ -20,8 +23,14 @@ QPXD_TLS_FORMAT="${QPX_HTTP2_COMPARE_QPXD_TLS_FORMAT:-pem}"
 TLS_HOST="${QPX_HTTP2_COMPARE_TLS_HOST:-localhost}"
 BACKEND_PORT="${QPX_HTTP2_COMPARE_BACKEND_PORT:-18280}"
 BACKEND_H2_PORT="${QPX_HTTP2_COMPARE_BACKEND_H2_PORT:-18283}"
+NGINX_BACKEND_PORT="${QPX_HTTP2_COMPARE_NGINX_BACKEND_PORT:-18284}"
 QPX_PORT="${QPX_HTTP2_COMPARE_QPX_PORT:-18281}"
 NGINX_PORT="${QPX_HTTP2_COMPARE_NGINX_PORT:-18282}"
+AVAILABLE_PROCESSORS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+if [ "$AVAILABLE_PROCESSORS" -gt 4 ]; then
+  AVAILABLE_PROCESSORS=4
+fi
+SERVER_WORKERS="${QPX_HTTP2_COMPARE_SERVER_WORKERS:-$AVAILABLE_PROCESSORS}"
 
 TMP_DIR="$(make_temp_dir qpx-http2-compare)"
 LOG_DIR="$TMP_DIR/logs"
@@ -31,7 +40,9 @@ mkdir -p "$LOG_DIR" "$STATE_DIR" "$(dirname "$OUT_JSON")"
 PIDS=()
 ARTIFACTS_COLLECTED=0
 INVALID_SAMPLES=0
-BACKEND_PID=""
+DIRECT_BACKEND_PID=""
+QPX_BACKEND_PID=""
+NGINX_BACKEND_PID=""
 QPXD_PID=""
 NGINX_PID=""
 
@@ -163,19 +174,26 @@ make_certs() {
     >>"$LOG_DIR/openssl.log" 2>&1
 }
 
-start_backend() {
-  local prefix="$TMP_DIR/backend-nginx"
-  local config="$prefix/backend-nginx.conf"
+prepare_backend_files() {
   local size
-  mkdir -p "$prefix/logs" "$prefix/www"
+  mkdir -p "$TMP_DIR/backend-www"
   for size in $BODY_SIZES; do
-    dd if=/dev/zero of="$prefix/www/bench-${size}" bs="$size" count=1 status=none
+    dd if=/dev/zero of="$TMP_DIR/backend-www/bench-${size}" bs="$size" count=1 status=none
   done
-  cp "$prefix/www/bench-$(first_body_size)" "$prefix/www/bench"
+  cp "$TMP_DIR/backend-www/bench-$(first_body_size)" "$TMP_DIR/backend-www/bench"
+}
+
+start_http_backend() {
+  local name="$1"
+  local port="$2"
+  local prefix="$TMP_DIR/${name}-backend-nginx"
+  local config="$prefix/backend-nginx.conf"
+  local pid
+  mkdir -p "$prefix/logs"
   cat >"$config" <<NGINX
 pid $prefix/backend-nginx.pid;
-error_log $prefix/logs/error.log warn;
-worker_processes 1;
+error_log $LOG_DIR/${name}-backend-error.log warn;
+worker_processes ${SERVER_WORKERS};
 events {
   worker_connections 16384;
 }
@@ -185,28 +203,56 @@ http {
   keepalive_requests 10000000;
   keepalive_timeout 65;
   server {
-    listen 127.0.0.1:${BACKEND_PORT};
+    listen 127.0.0.1:${port} backlog=8192;
     location / {
       default_type application/octet-stream;
-      root $prefix/www;
+      root $TMP_DIR/backend-www;
     }
   }
+}
+NGINX
+  nginx -p "$prefix" -c "$config" -g 'daemon off;' >"$LOG_DIR/${name}-backend.log" 2>&1 &
+  pid=$!
+  register_pid "$pid"
+  wait_http "${name}-backend" "$port" "$pid" "$LOG_DIR/${name}-backend.log"
+  case "$name" in
+    qpx) QPX_BACKEND_PID="$pid" ;;
+    nginx) NGINX_BACKEND_PID="$pid" ;;
+    *) echo "invalid HTTP backend name: ${name}" >&2; exit 1 ;;
+  esac
+}
+
+start_direct_backend() {
+  local prefix="$TMP_DIR/direct-backend-nginx"
+  local config="$prefix/backend-nginx.conf"
+  mkdir -p "$prefix/logs"
+  cat >"$config" <<NGINX
+pid $prefix/backend-nginx.pid;
+error_log $LOG_DIR/direct-backend-error.log warn;
+worker_processes ${SERVER_WORKERS};
+events {
+  worker_connections 16384;
+}
+http {
+  access_log off;
+  sendfile on;
+  keepalive_requests 10000000;
+  keepalive_timeout 65;
   server {
     listen 127.0.0.1:${BACKEND_H2_PORT} ssl http2;
     ssl_certificate $TMP_DIR/server.crt;
     ssl_certificate_key $TMP_DIR/server.key;
     location / {
       default_type application/octet-stream;
-      root $prefix/www;
+      root $TMP_DIR/backend-www;
     }
   }
 }
 NGINX
-  nginx -p "$prefix" -c "$config" -g 'daemon off;' >"$LOG_DIR/backend.log" 2>&1 &
-  BACKEND_PID=$!
-  register_pid "$BACKEND_PID"
-  wait_http "backend" "$BACKEND_PORT" "$BACKEND_PID" "$LOG_DIR/backend.log"
-  wait_https "backend-h2" "$BACKEND_H2_PORT" "$BACKEND_PID" "$LOG_DIR/backend.log"
+  nginx -p "$prefix" -c "$config" -g 'daemon off;' >"$LOG_DIR/direct-backend.log" 2>&1 &
+  DIRECT_BACKEND_PID=$!
+  register_pid "$DIRECT_BACKEND_PID"
+  wait_https "direct-backend" "$BACKEND_H2_PORT" "$DIRECT_BACKEND_PID" "$LOG_DIR/direct-backend.log"
 }
 
 start_qpxd_h2() {
@@ -226,7 +272,7 @@ telemetry:
     level: warn
     format: json
 runtime:
-  worker_threads: 1
+  worker_threads: ${SERVER_WORKERS}
   acceptor_tasks_per_listener: 1
   reuse_port: false
   upstream_proxy_max_concurrent_per_endpoint: 2048
@@ -264,8 +310,8 @@ start_nginx_h2() {
   mkdir -p "$prefix/logs"
   cat >"$config" <<NGINX
 pid $prefix/nginx.pid;
-error_log $prefix/logs/error.log warn;
-worker_processes 1;
+error_log $LOG_DIR/nginx-h2-error.log warn;
+worker_processes ${SERVER_WORKERS};
 events {
   worker_connections 16384;
 }
@@ -273,7 +319,7 @@ http {
   access_log off;
   keepalive_requests 10000000;
   upstream qpx_benchmark_backend {
-    server 127.0.0.1:${BACKEND_PORT};
+    server 127.0.0.1:${NGINX_BACKEND_PORT};
     keepalive 1024;
   }
   server {
@@ -283,6 +329,8 @@ http {
     location / {
       proxy_http_version 1.1;
       proxy_set_header Connection "";
+      proxy_buffering off;
+      proxy_request_buffering off;
       proxy_pass http://qpx_benchmark_backend;
     }
   }
@@ -324,8 +372,14 @@ def ms(value, unit):
         return value * 1000.0
     return value
 
-duration = number(r"finished in\s+([0-9.]+)s")
-requests_per_sec = number(r"finished in\s+[0-9.]+s,\s+([0-9.]+)\s+req/s")
+finished = re.search(
+    r"finished in\s+([0-9.]+)(us|ms|s),\s+([0-9.]+)\s+req/s",
+    text,
+)
+if finished is None:
+    raise SystemExit("missing h2load completion metrics")
+duration = ms(finished.group(1), finished.group(2)) / 1000.0
+requests_per_sec = float(finished.group(3))
 requests = number(r"requests:\s+([0-9]+)\s+total", cast=int)
 started = number(r"requests:\s+[0-9]+\s+total,\s+([0-9]+)\s+started", cast=int)
 done = number(r"requests:\s+[0-9]+\s+total,\s+[0-9]+\s+started,\s+([0-9]+)\s+done", cast=int)
@@ -421,21 +475,55 @@ print(json.dumps({
 PY
 }
 
+parse_h2load_calibration() {
+  local file="$1"
+  python3 - "$file" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], "r", encoding="utf-8").read()
+match = re.search(
+    r"requests:\s+([0-9]+)\s+total,\s+([0-9]+)\s+started,\s+"
+    r"([0-9]+)\s+done,\s+([0-9]+)\s+succeeded,\s+"
+    r"([0-9]+)\s+failed,\s+([0-9]+)\s+errored,\s+([0-9]+)\s+timeout",
+    text,
+)
+if match is None:
+    raise SystemExit("h2load calibration output is missing request counters")
+total, started, done, succeeded, failed, errored, timed_out = map(int, match.groups())
+if total <= 0 or done != total or succeeded != done or failed or errored or timed_out:
+    raise SystemExit("h2load calibration did not produce clean completed requests")
+finished = re.search(r"finished in\s+([0-9.]+)(us|ms|s),", text)
+if finished is None:
+    raise SystemExit("h2load calibration output is missing duration")
+duration = float(finished.group(1))
+unit = finished.group(2)
+if unit == "s":
+    duration *= 1_000_000
+elif unit == "ms":
+    duration *= 1_000
+print(done, max(1, round(duration)))
+PY
+}
+
 run_one() {
   local proxy="$1"
   local port="$2"
   local resource_pid="$3"
-  local body_bytes="$4"
+  local backend_pid="$4"
+  local body_bytes="$5"
   local body_kind
-  local out warmup_out latency_file cpu_before_ms cpu_after_ms cpu_ms backend_cpu_before_ms backend_cpu_after_ms
+  local out warmup_out calibration_out latency_file cpu_before_ms cpu_after_ms cpu_ms backend_cpu_before_ms backend_cpu_after_ms
   local backend_cpu_ms total_cpu_ms rss_kb rss_peak_kb metrics valid commit
   local requests_per_cpu_second requests_per_total_cpu_second
   local attempt failed_sample samples_file valid_sample_count selected_sample profile_pid
-  local load_concurrency
+  local load_concurrency load_client_threads calibration_request_count calibration_requests calibration_duration_us calibration_min_duration_us minimum_requests benchmark_requests
   body_kind="$(body_profile "$body_bytes")"
   load_concurrency="$CONCURRENCY"
+  load_client_threads="$CLIENT_THREADS"
   if [ "$MAX_CONCURRENT_STREAMS" -gt 1 ]; then
     load_concurrency="$MULTIPLEX_CONCURRENCY"
+    load_client_threads="$MULTIPLEX_CLIENT_THREADS"
   fi
   local warmup_clients warmup_requests
   local artifact="http2.${proxy}.${body_bytes}.m${MAX_CONCURRENT_STREAMS}.round-${CURRENT_SAMPLE_ROUND:-0}"
@@ -443,13 +531,42 @@ run_one() {
   warmup_out="$TMP_DIR/${artifact}.warmup.h2load"
   samples_file="$TMP_DIR/${artifact}.valid-samples.jsonl"
   : >"$samples_file"
-  warmup_clients=$((CLIENT_THREADS * 2))
+  warmup_clients=$((load_client_threads * 2))
   warmup_requests=$((warmup_clients * 4))
-  h2load -n "$warmup_requests" -c "$warmup_clients" -t "$CLIENT_THREADS" -m "$MAX_CONCURRENT_STREAMS" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$warmup_out" 2>&1 || {
+  h2load -n "$warmup_requests" -c "$warmup_clients" -t "$load_client_threads" -m "$MAX_CONCURRENT_STREAMS" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$warmup_out" 2>&1 || {
     echo "h2load warmup failed for ${proxy}" >&2
     cat "$warmup_out" >&2 || true
     exit 1
   }
+  minimum_requests=$((load_concurrency * MAX_CONCURRENT_STREAMS))
+  calibration_request_count=$(((CALIBRATION_BYTES + body_bytes - 1) / body_bytes))
+  if [ "$calibration_request_count" -lt "$minimum_requests" ]; then
+    calibration_request_count="$minimum_requests"
+  fi
+  calibration_out="$TMP_DIR/${artifact}.calibration.h2load"
+  h2load -n "$calibration_request_count" -c "$load_concurrency" -t "$load_client_threads" -m "$MAX_CONCURRENT_STREAMS" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$calibration_out" 2>&1 || {
+    echo "h2load calibration failed for ${proxy}" >&2
+    cat "$calibration_out" >&2 || true
+    exit 1
+  }
+  read -r calibration_requests calibration_duration_us < <(parse_h2load_calibration "$calibration_out")
+  calibration_min_duration_us=$((CALIBRATION_MIN_DURATION_MS * 1000))
+  while [ "$calibration_duration_us" -lt "$calibration_min_duration_us" ]; do
+    calibration_request_count=$(((calibration_requests * calibration_min_duration_us * 11 + calibration_duration_us * 10 - 1) / (calibration_duration_us * 10)))
+    if [ "$calibration_request_count" -lt "$minimum_requests" ]; then
+      calibration_request_count="$minimum_requests"
+    fi
+    h2load -n "$calibration_request_count" -c "$load_concurrency" -t "$load_client_threads" -m "$MAX_CONCURRENT_STREAMS" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$calibration_out" 2>&1 || {
+      echo "h2load stabilized calibration failed for ${proxy}" >&2
+      cat "$calibration_out" >&2 || true
+      exit 1
+    }
+    read -r calibration_requests calibration_duration_us < <(parse_h2load_calibration "$calibration_out")
+  done
+  benchmark_requests=$(((calibration_requests * TARGET_DURATION_SECONDS * 1000000 + calibration_duration_us - 1) / calibration_duration_us))
+  if [ "$benchmark_requests" -lt "$minimum_requests" ]; then
+    benchmark_requests="$minimum_requests"
+  fi
   attempt=1
   failed_sample=""
   while [ "$attempt" -le "$SAMPLE_ATTEMPTS" ]; do
@@ -463,12 +580,12 @@ run_one() {
       profile_pid=$!
     fi
     cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
-    if [ "$resource_pid" = "$BACKEND_PID" ]; then
+    if [ "$resource_pid" = "$backend_pid" ]; then
       backend_cpu_before_ms="$cpu_before_ms"
     else
-      backend_cpu_before_ms="$(process_tree_cpu_ms "$BACKEND_PID")"
+      backend_cpu_before_ms="$(process_tree_cpu_ms "$backend_pid")"
     fi
-    if ! h2load -D "$DURATION_SECONDS" -c "$load_concurrency" -t "$CLIENT_THREADS" -m "$MAX_CONCURRENT_STREAMS" --log-file="$latency_file" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1; then
+    if ! h2load -n "$benchmark_requests" -c "$load_concurrency" -t "$load_client_threads" -m "$MAX_CONCURRENT_STREAMS" --log-file="$latency_file" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1; then
       echo "h2load failed for ${proxy} attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       cat "$out" >&2 || true
       failed_sample="$out"
@@ -479,14 +596,14 @@ run_one() {
       continue
     fi
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
-    if [ "$resource_pid" = "$BACKEND_PID" ]; then
+    if [ "$resource_pid" = "$backend_pid" ]; then
       backend_cpu_after_ms="$cpu_after_ms"
     else
-      backend_cpu_after_ms="$(process_tree_cpu_ms "$BACKEND_PID")"
+      backend_cpu_after_ms="$(process_tree_cpu_ms "$backend_pid")"
     fi
     cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
     backend_cpu_ms="$(awk -v before="$backend_cpu_before_ms" -v after="$backend_cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
-    if [ "$resource_pid" = "$BACKEND_PID" ]; then
+    if [ "$resource_pid" = "$backend_pid" ]; then
       total_cpu_ms="$cpu_ms"
     else
       total_cpu_ms=$((cpu_ms + backend_cpu_ms))
@@ -502,7 +619,7 @@ run_one() {
 import json
 import sys
 m = json.loads(sys.argv[1])
-print("true" if m["requests"] > 0 and m["requests"] == m["complete_requests"] and m["failed_requests"] == 0 and m["non_2xx_responses"] == 0 else "false")
+print("true" if m["requests"] > 0 and m["requests"] == m["started_requests"] == m["complete_requests"] == m["succeeded_requests"] and m["failed_requests"] == 0 and m["non_2xx_responses"] == 0 else "false")
 PY
     )"
     if [ "$valid" = true ]; then
@@ -524,11 +641,25 @@ PY
 )"
       python3 - "$samples_file" "$metrics" "$cpu_ms" "$backend_cpu_ms" "$total_cpu_ms" \
         "$rss_kb" "$rss_peak_kb" "$requests_per_cpu_second" \
-        "$requests_per_total_cpu_second" <<'PY'
+        "$requests_per_total_cpu_second" "$calibration_requests" \
+        "$calibration_duration_us" "$benchmark_requests" <<'PY'
 import json
 import sys
 
-path, metrics, cpu_ms, backend_cpu_ms, total_cpu_ms, rss_kb, rss_peak_kb, rpcpu, total_rpcpu = sys.argv[1:10]
+(
+    path,
+    metrics,
+    cpu_ms,
+    backend_cpu_ms,
+    total_cpu_ms,
+    rss_kb,
+    rss_peak_kb,
+    rpcpu,
+    total_rpcpu,
+    calibration_requests,
+    calibration_duration_us,
+    benchmark_requests,
+) = sys.argv[1:13]
 record = json.loads(metrics)
 record["cpu_ms"] = int(cpu_ms)
 record["backend_cpu_ms"] = int(backend_cpu_ms)
@@ -537,6 +668,9 @@ record["rss_kb"] = int(rss_kb)
 record["rss_peak_kb"] = int(rss_peak_kb)
 record["requests_per_cpu_second"] = None if rpcpu == "null" else float(rpcpu)
 record["requests_per_total_cpu_second"] = None if total_rpcpu == "null" else float(total_rpcpu)
+record["calibration_requests"] = int(calibration_requests)
+record["calibration_duration_ms"] = int(calibration_duration_us) / 1000.0
+record["benchmark_request_count"] = int(benchmark_requests)
 with open(path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 PY
@@ -568,11 +702,11 @@ print(json.dumps(records[(len(records) - 1) // 2], sort_keys=True, separators=("
 PY
 )"
   commit="${GITHUB_SHA:-unknown}"
-  python3 - "$OUT_JSON" "$selected_sample" "$proxy" "$body_kind" "$body_bytes" "$load_concurrency" "$CLIENT_THREADS" "$MAX_CONCURRENT_STREAMS" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit" <<'PY'
+  python3 - "$OUT_JSON" "$selected_sample" "$proxy" "$body_kind" "$body_bytes" "$load_concurrency" "$load_client_threads" "$MAX_CONCURRENT_STREAMS" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$SERVER_WORKERS" "$commit" <<'PY'
 import json
 import sys
 
-out, sample, proxy, body_kind, body_bytes, concurrency, client_threads, max_streams, attempts, valid_samples, commit = sys.argv[1:12]
+out, sample, proxy, body_kind, body_bytes, concurrency, client_threads, max_streams, attempts, valid_samples, server_workers, commit = sys.argv[1:13]
 record = json.loads(sample)
 record.update({
     "bench": "proxy_compare_http2_reverse",
@@ -582,9 +716,9 @@ record.update({
     "valid_samples": int(valid_samples),
     "aggregation": "single_sample",
 })
-record.pop("started_requests", None)
 record["concurrency"] = int(concurrency)
 record["client_threads"] = int(client_threads)
+record["server_workers"] = int(server_workers)
 record["max_concurrent_streams"] = int(max_streams)
 record["body_bytes"] = int(body_bytes)
 record["valid"] = True
@@ -620,16 +754,67 @@ for concurrency_value in "$CONCURRENCY" "$MULTIPLEX_CONCURRENCY"; do
     exit 1
   fi
 done
+for duration_value in "$TARGET_DURATION_SECONDS"; do
+  case "$duration_value" in
+    ''|*[!0-9]*)
+      echo "HTTP/2 comparison duration values must be positive integers" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$duration_value" -eq 0 ]; then
+    echo "HTTP/2 comparison duration values must be positive integers" >&2
+    exit 1
+  fi
+done
+case "$SERVER_WORKERS" in
+  ''|*[!0-9]*)
+    echo "QPX_HTTP2_COMPARE_SERVER_WORKERS must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$SERVER_WORKERS" -eq 0 ]; then
+  echo "QPX_HTTP2_COMPARE_SERVER_WORKERS must be a positive integer" >&2
+  exit 1
+fi
+case "$CALIBRATION_BYTES" in
+  ''|*[!0-9]*)
+    echo "QPX_HTTP2_COMPARE_CALIBRATION_BYTES must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+case "$CALIBRATION_MIN_DURATION_MS" in
+  ''|*[!0-9]*)
+    echo "QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$CALIBRATION_MIN_DURATION_MS" -eq 0 ]; then
+  echo "QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS must be a positive integer" >&2
+  exit 1
+fi
+if [ "$CALIBRATION_BYTES" -eq 0 ]; then
+  echo "QPX_HTTP2_COMPARE_CALIBRATION_BYTES must be a positive integer" >&2
+  exit 1
+fi
 case "$CLIENT_THREADS" in
   ''|*[!0-9]*)
     echo "QPX_HTTP2_COMPARE_CLIENT_THREADS must be a positive integer" >&2
     exit 1
     ;;
 esac
-if [ "$CLIENT_THREADS" -eq 0 ] \
-  || [ "$CLIENT_THREADS" -gt "$CONCURRENCY" ] \
-  || [ "$CLIENT_THREADS" -gt "$MULTIPLEX_CONCURRENCY" ]; then
-  echo "QPX_HTTP2_COMPARE_CLIENT_THREADS must not exceed either client concurrency" >&2
+case "$MULTIPLEX_CLIENT_THREADS" in
+  ''|*[!0-9]*)
+    echo "QPX_HTTP2_COMPARE_MULTIPLEX_CLIENT_THREADS must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$CLIENT_THREADS" -eq 0 ] || [ "$CLIENT_THREADS" -gt "$CONCURRENCY" ]; then
+  echo "QPX_HTTP2_COMPARE_CLIENT_THREADS must not exceed HTTP/2 single-stream client concurrency" >&2
+  exit 1
+fi
+if [ "$MULTIPLEX_CLIENT_THREADS" -eq 0 ] \
+  || [ "$MULTIPLEX_CLIENT_THREADS" -gt "$MULTIPLEX_CONCURRENCY" ]; then
+  echo "QPX_HTTP2_COMPARE_MULTIPLEX_CLIENT_THREADS must not exceed multiplex client concurrency" >&2
   exit 1
 fi
 
@@ -693,7 +878,10 @@ fi
 
 : >"$OUT_JSON"
 make_certs
-start_backend
+prepare_backend_files
+start_http_backend qpx "$BACKEND_PORT"
+start_http_backend nginx "$NGINX_BACKEND_PORT"
+start_direct_backend
 start_qpxd_h2
 start_nginx_h2
 
@@ -710,9 +898,9 @@ run_http2_proxy_by_index() {
   local index="$1"
   local body_bytes="$2"
   case "$index" in
-    0) run_one "direct-backend" "$BACKEND_H2_PORT" "$BACKEND_PID" "$body_bytes" ;;
-    1) run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$body_bytes" ;;
-    2) run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$body_bytes" ;;
+    0) run_one "direct-backend" "$BACKEND_H2_PORT" "$DIRECT_BACKEND_PID" "$DIRECT_BACKEND_PID" "$body_bytes" ;;
+    1) run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$QPX_BACKEND_PID" "$body_bytes" ;;
+    2) run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$NGINX_BACKEND_PID" "$body_bytes" ;;
     *) echo "invalid HTTP/2 benchmark index: ${index}" >&2; exit 1 ;;
   esac
 }
@@ -741,7 +929,7 @@ done
 
 python3 - "$RAW_OUT_JSON" "$FINAL_OUT_JSON" "$REQUESTED_SAMPLE_ATTEMPTS" \
   "$REQUESTED_MIN_VALID_SAMPLES" "$BODY_SIZES" "$MAX_CONCURRENT_STREAMS_VALUES" \
-  "$DURATION_SECONDS" <<'PY'
+  "$TARGET_DURATION_SECONDS" <<'PY'
 import json
 import math
 import sys
@@ -804,8 +992,11 @@ for key in sorted(expected):
     record = dict(records[(len(records) - 1) // 2])
     for field in (
         "requests",
+        "started_requests",
         "complete_requests",
         "succeeded_requests",
+        "calibration_requests",
+        "benchmark_request_count",
         "requests_per_sec",
         "requests_per_cpu_second",
         "requests_per_total_cpu_second",
@@ -813,6 +1004,7 @@ for key in sorted(expected):
         record[field] = lower(records, field)
     for field in (
         "duration_seconds",
+        "calibration_duration_ms",
         "mean_time_per_request_ms",
         "latency_p95_ms",
         "latency_p99_ms",
@@ -834,8 +1026,11 @@ for key in sorted(expected):
         record[field] = maximum(records, field)
     for field in (
         "requests",
+        "started_requests",
         "complete_requests",
         "succeeded_requests",
+        "calibration_requests",
+        "benchmark_request_count",
         "failed_requests",
         "process_request_failures",
         "non_2xx_responses",
@@ -849,8 +1044,8 @@ for key in sorted(expected):
             record[field] = int(record[field])
     record.update({
         "aggregation": "conservative_median_per_metric",
-        "benchmark_duration_seconds": target_duration,
-        "benchmark_schema_version": 4,
+        "target_duration_seconds": target_duration,
+        "benchmark_schema_version": 5,
         "sample_attempts": attempts,
         "sampling_order": "round_robin_interleaved",
         "sample_spread": {

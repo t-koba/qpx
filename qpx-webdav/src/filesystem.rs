@@ -3,7 +3,7 @@ use anyhow::{Context, Result, anyhow};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -269,6 +269,7 @@ impl WebDavDataStore for FileSystemDataStore {
                 metadata: Arc::new(resource_metadata),
                 etag,
                 body: Bytes::new(),
+                file: None,
             }));
         }
         let snapshot = self.read_cache.load();
@@ -280,13 +281,39 @@ impl WebDavDataStore for FileSystemDataStore {
             return Ok(Some(entry.read.clone()));
         }
         drop(snapshot);
-        let body = Bytes::from(fs::read(&path)?);
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&path)?;
+        let opened_metadata = file.metadata()?;
+        if !opened_metadata.is_file()
+            || opened_metadata.len() != metadata.len()
+            || opened_metadata.modified()? != modified
+        {
+            return Err(anyhow!("WebDAV resource changed while it was opened"));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len().min(usize::MAX as u64) as usize);
+        file.read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != metadata.len() {
+            return Err(anyhow!("WebDAV resource length changed while it was read"));
+        }
+        let completed_metadata = file.metadata()?;
+        if completed_metadata.len() != metadata.len() || completed_metadata.modified()? != modified
+        {
+            return Err(anyhow!("WebDAV resource changed while it was read"));
+        }
+        let body = Bytes::from(bytes);
         let resource_metadata = Self::resource_metadata(&metadata)?.0;
         let etag = http::HeaderValue::from_str(&resource_metadata.etag)?;
         let read = ResourceRead {
             metadata: Arc::new(resource_metadata),
             etag,
             body,
+            file: Some(Arc::new(file)),
         };
         self.cache_read(resource, metadata.len(), modified, &read);
         Ok(Some(read))

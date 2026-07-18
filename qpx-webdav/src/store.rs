@@ -3,6 +3,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use http::HeaderValue;
 use serde::{Deserialize, Serialize};
+use std::fs::File;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,6 +32,14 @@ pub struct ResourceRead {
     pub metadata: Arc<ResourceMetadata>,
     pub etag: HeaderValue,
     pub body: Bytes,
+    pub file: Option<Arc<File>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceFileRegion {
+    pub file: Arc<File>,
+    pub offset: u64,
+    pub len: u64,
 }
 
 #[derive(Debug, Clone, Default)]

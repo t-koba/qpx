@@ -52,12 +52,6 @@ impl QpxRequestBodyReader<'_> {
             Self::Recv(stream) => stream.abort_message_stream(),
         }
     }
-
-    fn stop_receiving_request_body(&mut self) {
-        match self {
-            Self::Recv(stream) => stream.stop_receiving_request_body(),
-        }
-    }
 }
 
 async fn relay_qpx_request_body_observed_inner(
@@ -77,19 +71,25 @@ async fn relay_qpx_request_body_observed_inner(
         })
         .flatten();
     let mut bytes_read = 0usize;
+    let mut receiver_open = true;
     loop {
-        let chunk = tokio::select! {
-            _ = sender.closed() => {
-                req_stream.stop_receiving_request_body();
-                return Ok((bytes_read as u64, None));
+        let read = timeout_or_deadline(
+            req_stream.recv_data(),
+            options.read_timeout,
+            options.grpc_stream_deadline,
+            "qpx-h3 request body read timed out",
+            "qpx-h3 gRPC stream duration exceeded configured limit",
+        );
+        let chunk = if receiver_open {
+            tokio::select! {
+                _ = sender.closed() => {
+                    receiver_open = false;
+                    continue;
+                }
+                chunk = read => chunk,
             }
-            chunk = timeout_or_deadline(
-                req_stream.recv_data(),
-                options.read_timeout,
-                options.grpc_stream_deadline,
-                "qpx-h3 request body read timed out",
-                "qpx-h3 gRPC stream duration exceeded configured limit",
-            ) => chunk,
+        } else {
+            read.await
         };
         let chunk = match chunk {
             Ok(chunk) => chunk?,
@@ -133,9 +133,8 @@ async fn relay_qpx_request_body_observed_inner(
             return Err(anyhow!(err));
         }
         bytes_read = next;
-        if sender.send_data(chunk).await.is_err() {
-            req_stream.stop_receiving_request_body();
-            return Ok((bytes_read as u64, None));
+        if receiver_open && sender.send_data(chunk).await.is_err() {
+            receiver_open = false;
         }
     }
 
@@ -149,19 +148,15 @@ async fn relay_qpx_request_body_observed_inner(
         ));
     }
 
-    let trailers = tokio::select! {
-        _ = sender.closed() => {
-            req_stream.stop_receiving_request_body();
-            return Ok((bytes_read as u64, None));
-        }
-        trailers = timeout_or_deadline(
-            req_stream.recv_trailers(),
-            options.read_timeout,
-            options.grpc_stream_deadline,
-            "qpx-h3 request trailers read timed out",
-            "qpx-h3 gRPC stream duration exceeded configured limit",
-        ) => trailers,
-    };
+    let trailers = timeout_or_deadline(
+        req_stream.recv_trailers(),
+        options.read_timeout,
+        options.grpc_stream_deadline,
+        "qpx-h3 request trailers read timed out",
+        "qpx-h3 gRPC stream duration exceeded configured limit",
+    )
+    .await;
+    receiver_open &= !sender.is_closed();
     let trailers = match trailers {
         Ok(trailers) => trailers?,
         Err(err) => {
@@ -176,7 +171,9 @@ async fn relay_qpx_request_body_observed_inner(
             req_stream.abort_message_stream();
             return Err(anyhow!("invalid qpx-h3 request trailers: {err}"));
         }
-        let _ = sender.send_trailers(trailers).await;
+        if receiver_open {
+            let _ = sender.send_trailers(trailers).await;
+        }
     }
     let summary = if let Some(observer) = grpc_observer {
         let protocol = observer.protocol().to_string();

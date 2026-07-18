@@ -200,6 +200,7 @@ impl CacheWriteback {
             vary_headers: self.vary_headers,
             vary_values: self.vary_values,
             header_map: std::sync::OnceLock::new(),
+            response_directives: std::sync::OnceLock::new(),
         };
         let metadata = encode_cached_response_metadata(&envelope)?;
         self.backend
@@ -320,6 +321,7 @@ pub async fn revalidate_not_modified(
                 &state.envelope.vary_values,
             ),
             header_map: std::sync::OnceLock::new(),
+            response_directives: std::sync::OnceLock::new(),
         };
         return super::entry::response_from_envelope_for_request(
             request_method,
@@ -347,6 +349,7 @@ pub async fn revalidate_not_modified(
             &state.envelope.vary_values,
         ),
         header_map: std::sync::OnceLock::new(),
+        response_directives: std::sync::OnceLock::new(),
     };
 
     let ttl = object_retention_ttl_secs(updated.freshness_lifetime_secs, &directives);

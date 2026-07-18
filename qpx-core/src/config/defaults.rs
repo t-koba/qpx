@@ -311,7 +311,7 @@ pub(super) fn default_runtime_upstream_proxy_max_concurrent_per_endpoint() -> us
 }
 
 pub(super) fn default_runtime_upstream_max_idle_connections_per_origin() -> usize {
-    64
+    128
 }
 
 pub(super) fn default_runtime_h2_initial_stream_window_size_bytes() -> u32 {

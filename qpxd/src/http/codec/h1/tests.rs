@@ -400,6 +400,7 @@ async fn direct_content_length_relay_preserves_pipelined_upstream_bytes() {
                     .expect("send recycled connection");
             },
         )),
+        active_permit: None,
     };
 
     let downstream_listener = TcpListener::bind("127.0.0.1:0")
@@ -414,7 +415,7 @@ async fn direct_content_length_relay_preserves_pipelined_upstream_bytes() {
             .await
             .expect("accept downstream");
         let mut head_buf = BytesMut::new();
-        let keep_alive = send_raw_http1_response_relay_with_interim(
+        let (keep_alive, reusable) = send_raw_http1_response_relay_with_interim(
             &mut stream,
             Version::HTTP_11,
             &Method::GET,
@@ -425,6 +426,7 @@ async fn direct_content_length_relay_preserves_pipelined_upstream_bytes() {
         .await
         .expect("relay response");
         assert!(keep_alive);
+        assert!(reusable.is_none());
     });
 
     let mut downstream = TcpStream::connect(downstream_addr)

@@ -2,17 +2,18 @@ use crate::http::codec::h2::{H2TransportTuning, send_h2_response_with_interim};
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::Result;
 use bytes::Bytes;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use h2::Reason;
 use http::{Request, Response};
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use std::future::poll_fn;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::AsyncReadExt;
-use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
-use tracing::warn;
+use tokio_util::sync::ReusableBoxFuture;
+use tracing::{debug, warn};
 
 pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
@@ -80,48 +81,70 @@ where
         builder.enable_connect_protocol();
     }
     let mut conn = timeout(idle_timeout, builder.handshake(io)).await??;
-    let service = Arc::new(service);
-    let mut streams = JoinSet::<()>::new();
+    let active_streams = AtomicUsize::new(0);
+    let mut reusable_primary_stream: Option<ReusableBoxFuture<'_, ()>> = None;
+    let mut primary_stream = None;
+    let mut concurrent_streams = FuturesUnordered::new();
+    let mut accepting_streams = true;
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
-    let mut connection_closed = false;
     loop {
-        let reaped_stream = reap_completed_h2_streams(&mut streams);
-        if reaped_stream {
-            idle_timer
-                .as_mut()
-                .reset(tokio::time::Instant::now() + idle_timeout);
-        }
-        if connection_closed {
-            let Some(completed) = streams.join_next().await else {
-                break;
-            };
-            if let Err(err) = completed {
-                warn!(error = ?err, "HTTP/2 stream task failed");
-            }
-            continue;
-        }
         tokio::select! {
-            accepted = conn.accept() => {
+            biased;
+            completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
+                let () = completed;
+                reusable_primary_stream = primary_stream.take();
+                if !accepting_streams && concurrent_streams.is_empty() {
+                    break;
+                }
+                if concurrent_streams.is_empty() {
+                    idle_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_timeout);
+                }
+            }
+            Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                if primary_stream.is_none() && concurrent_streams.is_empty() {
+                    if !accepting_streams {
+                        break;
+                    }
+                    idle_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_timeout);
+                }
+            }
+            accepted = conn.accept(), if accepting_streams => {
                 let Some(result) = accepted else {
-                    connection_closed = true;
+                    accepting_streams = false;
+                    if primary_stream.is_none() && concurrent_streams.is_empty() {
+                        break;
+                    }
                     continue;
                 };
                 let (request, respond) = result?;
-                idle_timer
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + idle_timeout);
-                streams.spawn(serve_h2_stream(
+                let active_stream = ActiveH2Stream::new(&active_streams);
+                let stream = serve_h2_stream(
                     request,
                     respond,
-                    service.clone(),
+                    &service,
                     body_channel_capacity,
                     idle_timeout,
-                ));
+                    active_stream,
+                );
+                if primary_stream.is_none() && concurrent_streams.is_empty() {
+                    let reusable = if let Some(mut reusable) = reusable_primary_stream.take() {
+                        reusable.set(stream);
+                        reusable
+                    } else {
+                        ReusableBoxFuture::new(stream)
+                    };
+                    primary_stream = Some(reusable);
+                } else {
+                    concurrent_streams.push(stream);
+                }
             }
             () = idle_timer.as_mut() => {
-                let reaped_stream = reap_completed_h2_streams(&mut streams);
-                if !reaped_stream && streams.is_empty() {
+                if primary_stream.is_none() && concurrent_streams.is_empty() {
                     return Ok(());
                 }
                 idle_timer
@@ -130,27 +153,28 @@ where
             }
         }
     }
+    drop(reusable_primary_stream);
+    drop(primary_stream);
+    drop(concurrent_streams);
     poll_fn(|cx| conn.poll_closed(cx)).await?;
     Ok(())
 }
 
-fn reap_completed_h2_streams(streams: &mut JoinSet<()>) -> bool {
-    let mut reaped_stream = false;
-    while let Some(completed) = streams.try_join_next() {
-        reaped_stream = true;
-        if let Err(err) = completed {
-            warn!(error = ?err, "HTTP/2 stream task failed");
-        }
-    }
-    reaped_stream
+async fn poll_optional_h2_stream<T>(stream: &mut Option<ReusableBoxFuture<'_, T>>) -> T {
+    poll_fn(|cx| match stream.as_mut() {
+        Some(stream) => stream.poll(cx),
+        None => std::task::Poll::Pending,
+    })
+    .await
 }
 
 async fn serve_h2_stream<S>(
     request: Request<h2::RecvStream>,
-    respond: h2::server::SendResponse<Bytes>,
-    service: Arc<S>,
+    mut respond: h2::server::SendResponse<Bytes>,
+    service: &S,
     body_channel_capacity: usize,
     idle_timeout: Duration,
+    active_stream: ActiveH2Stream<'_>,
 ) where
     S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
         + Send
@@ -172,9 +196,28 @@ async fn serve_h2_stream<S>(
     let request_method = request.method().clone();
     let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
 
-    let mut response = match service.call(request).await {
-        Ok(response) => response,
-        Err(impossible) => match impossible {},
+    let service_call = service.call(request);
+    tokio::pin!(service_call);
+    let mut response = tokio::select! {
+        biased;
+        response = &mut service_call => match response {
+            Ok(response) => response,
+            Err(impossible) => match impossible {},
+        },
+        reset = poll_fn(|cx| respond.poll_reset(cx)) => {
+            match reset {
+                Ok(reason) => debug!(?reason, "HTTP/2 request cancelled before response headers"),
+                Err(err) => {
+                    let err = anyhow::Error::from(err);
+                    if crate::http::codec::is_expected_peer_disconnect(&err) {
+                        debug!(error = ?err, "HTTP/2 response reset watch closed by peer");
+                    } else {
+                        warn!(error = ?err, "HTTP/2 response reset watch failed");
+                    }
+                }
+            }
+            return;
+        }
     };
     let interim = take_interim_response_heads(&mut response);
     if let Err(err) = send_h2_response_with_interim(
@@ -184,10 +227,36 @@ async fn serve_h2_stream<S>(
         &request_method,
         allow_successful_connect_body,
         idle_timeout,
+        active_stream.count(),
     )
     .await
     {
-        warn!(error = ?err, "HTTP/2 stream failed");
+        if crate::http::codec::is_expected_peer_disconnect(&err) {
+            debug!(error = ?err, "HTTP/2 response stream closed by peer");
+        } else {
+            warn!(error = ?err, "HTTP/2 stream failed");
+        }
+    }
+}
+
+struct ActiveH2Stream<'a> {
+    active: &'a AtomicUsize,
+}
+
+impl<'a> ActiveH2Stream<'a> {
+    fn new(active: &'a AtomicUsize) -> Self {
+        active.fetch_add(1, Ordering::Relaxed);
+        Self { active }
+    }
+
+    fn count(&self) -> usize {
+        self.active.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for ActiveH2Stream<'_> {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -230,16 +299,18 @@ pub(crate) fn take_interim_response_heads(
 #[cfg(test)]
 mod tests {
     use super::{H2_PREFACE, serve_h2_with_interim};
+    use h2::Reason;
     use http::{Request, Response};
     use qpx_http::body::Body;
     use qpx_observability::handler_fn;
     use std::convert::Infallible;
+    use std::future::pending;
     use std::sync::Arc;
     use tokio::io::AsyncWriteExt;
     use tokio::io::duplex;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Notify;
-    use tokio::time::{Duration, sleep};
+    use tokio::time::{Duration, sleep, timeout};
 
     #[tokio::test(flavor = "current_thread")]
     async fn h2_server_advertises_extended_connect_when_enabled() {
@@ -437,5 +508,185 @@ mod tests {
         release_first.notify_one();
         let first_response = first_response.await.expect("first response");
         assert_eq!(first_response.status(), ::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn h2_scheduler_completes_a_multiplexed_request_batch() {
+        const REQUESTS: usize = 128;
+        let (client_io, server_io) = duplex(1024 * 1024);
+        let service = handler_fn(|_req: Request<Body>| async move {
+            Ok::<_, Infallible>(Response::new(Body::from("ok")))
+        });
+        tokio::spawn(async move {
+            serve_h2_with_interim(server_io, service, false, Duration::from_secs(5))
+                .await
+                .expect("serve h2");
+        });
+
+        let (mut client, connection) = h2::client::handshake(client_io).await.expect("handshake");
+        tokio::spawn(async move {
+            connection.await.expect("client connection");
+        });
+        let mut responses = Vec::with_capacity(REQUESTS);
+        for request_id in 0..REQUESTS {
+            client = client.ready().await.expect("client ready");
+            let request = ::http::Request::builder()
+                .method("GET")
+                .uri(format!("https://reverse_edges.test/{request_id}"))
+                .body(())
+                .expect("request");
+            let (response, _) = client.send_request(request, true).expect("send request");
+            responses.push(response);
+        }
+        for response in responses {
+            let response = timeout(Duration::from_secs(1), response)
+                .await
+                .expect("multiplexed response timed out")
+                .expect("multiplexed response");
+            assert_eq!(response.status(), ::http::StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn h2_client_reset_cancels_pending_service_work() {
+        struct DropSignal(Arc<Notify>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+
+        let (client_io, server_io) = duplex(4096);
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(Notify::new());
+        let service_started = started.clone();
+        let service_dropped = dropped.clone();
+        let service = handler_fn(move |_req: Request<Body>| {
+            let started = service_started.clone();
+            let dropped = service_dropped.clone();
+            async move {
+                let _drop_signal = DropSignal(dropped);
+                started.notify_one();
+                pending::<()>().await;
+                Ok::<_, Infallible>(Response::new(Body::empty()))
+            }
+        });
+        tokio::spawn(async move {
+            serve_h2_with_interim(server_io, service, false, Duration::from_secs(5))
+                .await
+                .expect("serve h2");
+        });
+
+        let (mut client, connection) = h2::client::handshake(client_io).await.expect("handshake");
+        tokio::spawn(async move {
+            connection.await.expect("client connection");
+        });
+        client = client.ready().await.expect("client ready");
+        let request = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/cancel")
+            .body(())
+            .expect("request");
+        let (_response, mut request_stream) =
+            client.send_request(request, true).expect("send request");
+        started.notified().await;
+        request_stream.send_reset(Reason::CANCEL);
+
+        timeout(Duration::from_secs(1), dropped.notified())
+            .await
+            .expect("service future must be cancelled after reset");
+    }
+
+    #[tokio::test]
+    async fn h2_client_reset_drops_pending_response_body() {
+        let (client_io, server_io) = duplex(4096);
+        let body_closed = Arc::new(Notify::new());
+        let service_body_closed = body_closed.clone();
+        let service = handler_fn(move |_req: Request<Body>| {
+            let body_closed = service_body_closed.clone();
+            async move {
+                let (sender, body) = Body::channel_with_capacity(1);
+                tokio::spawn(async move {
+                    sender.closed().await;
+                    body_closed.notify_one();
+                });
+                Ok::<_, Infallible>(Response::new(body))
+            }
+        });
+        tokio::spawn(async move {
+            serve_h2_with_interim(server_io, service, false, Duration::from_secs(5))
+                .await
+                .expect("serve h2");
+        });
+
+        let (mut client, connection) = h2::client::handshake(client_io).await.expect("handshake");
+        tokio::spawn(async move {
+            connection.await.expect("client connection");
+        });
+        client = client.ready().await.expect("client ready");
+        let request = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/cancel-response")
+            .body(())
+            .expect("request");
+        let (response, mut request_stream) =
+            client.send_request(request, true).expect("send request");
+        let response = response.await.expect("response headers");
+        assert_eq!(response.status(), ::http::StatusCode::OK);
+        request_stream.send_reset(Reason::CANCEL);
+
+        timeout(Duration::from_secs(1), body_closed.notified())
+            .await
+            .expect("response body must be dropped after reset");
+    }
+
+    #[tokio::test]
+    async fn h2_connection_close_cancels_pending_service_work() {
+        struct DropSignal(Arc<Notify>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+
+        let (client_io, server_io) = duplex(4096);
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(Notify::new());
+        let service_started = started.clone();
+        let service_dropped = dropped.clone();
+        let service = handler_fn(move |_req: Request<Body>| {
+            let started = service_started.clone();
+            let dropped = service_dropped.clone();
+            async move {
+                let _drop_signal = DropSignal(dropped);
+                started.notify_one();
+                pending::<()>().await;
+                Ok::<_, Infallible>(Response::new(Body::empty()))
+            }
+        });
+        tokio::spawn(async move {
+            let _ = serve_h2_with_interim(server_io, service, false, Duration::from_secs(5)).await;
+        });
+
+        let (mut client, connection) = h2::client::handshake(client_io).await.expect("handshake");
+        let connection_task = tokio::spawn(connection);
+        client = client.ready().await.expect("client ready");
+        let request = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/disconnect")
+            .body(())
+            .expect("request");
+        let (response, request_stream) = client.send_request(request, true).expect("send request");
+        started.notified().await;
+        drop(response);
+        drop(request_stream);
+        drop(client);
+        connection_task.abort();
+
+        timeout(Duration::from_secs(1), dropped.notified())
+            .await
+            .expect("service future must be cancelled after connection close");
     }
 }

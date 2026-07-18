@@ -475,3 +475,62 @@ fn validate_rejects_connect_absolute_form() {
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidConnectTarget);
 }
+
+#[test]
+fn common_h2_retrieval_predicate_accepts_only_the_prevalidated_shape() {
+    let request = http::Request::builder()
+        .version(Version::HTTP_2)
+        .method(Method::GET)
+        .uri("https://example.com/resource?q=1")
+        .header("accept", "application/octet-stream")
+        .body(())
+        .expect("request");
+
+    assert!(is_intrinsically_valid_common_h2_request(&request));
+    validate_incoming_request(&request).expect("common shape must pass full validation");
+}
+
+#[test]
+fn common_h2_retrieval_predicate_defers_validation_sensitive_fields() {
+    for (name, value) in [
+        ("content-length", "0"),
+        ("expect", "100-continue"),
+        ("host", "example.com"),
+        ("te", "trailers"),
+    ] {
+        let request = http::Request::builder()
+            .version(Version::HTTP_2)
+            .method(Method::GET)
+            .uri("https://example.com/resource")
+            .header(name, value)
+            .body(())
+            .expect("request");
+        assert!(!is_intrinsically_valid_common_h2_request(&request));
+    }
+}
+
+#[test]
+fn common_h2_retrieval_predicate_rejects_other_protocol_shapes() {
+    for request in [
+        http::Request::builder()
+            .version(Version::HTTP_11)
+            .method(Method::GET)
+            .uri("https://example.com/resource")
+            .body(())
+            .expect("HTTP/1 request"),
+        http::Request::builder()
+            .version(Version::HTTP_2)
+            .method(Method::POST)
+            .uri("https://example.com/resource")
+            .body(())
+            .expect("POST request"),
+        http::Request::builder()
+            .version(Version::HTTP_2)
+            .method(Method::GET)
+            .uri("/resource")
+            .body(())
+            .expect("origin-form request"),
+    ] {
+        assert!(!is_intrinsically_valid_common_h2_request(&request));
+    }
+}

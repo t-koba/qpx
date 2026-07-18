@@ -10,6 +10,7 @@ use http_body::Frame;
 use hyper::header::{CONTENT_LENGTH, COOKIE};
 use hyper::{Request, Response};
 use qpx_http::body::{Body, BodyError};
+use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,6 +25,9 @@ const H2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
 const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
 const H2_MAX_SEND_BUFFER_SIZE: usize = 1024 * 1024;
 const H2_MAX_CONCURRENT_STREAMS: u32 = 256;
+const H2_DIRECT_SEND_BODY_MAX_BYTES: u64 = 16 * 1024;
+const H2_INITIAL_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_FRAME_SIZE as usize;
+const H2_MIN_SCHEDULER_BUFFER_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy)]
 pub(crate) struct H2TransportTuning {
@@ -73,23 +77,16 @@ pub(crate) fn h2_request_to_hyper_with_capacity(
     req: Http1Request<RecvStream>,
     body_channel_capacity: usize,
 ) -> Result<Request<Body>> {
-    let (parts, body) = req.into_parts();
-    let method = parts.method;
-    let uri = parts.uri;
-    let headers = h1_headers_into_http(parts.headers)?;
+    let (mut parts, body) = req.into_parts();
+    parts.headers = h1_headers_into_http(parts.headers)?;
     // The h2 transport already enforces RFC 9113 content-length reconciliation
     // while decoding DATA / END_STREAM on the inbound stream. We still parse the
     // header locally to reject conflicting field-values before handing the
     // request to Hyper, but body-length mismatches surface via the body stream.
-    let _declared_length = parse_declared_content_length(&headers)?;
+    let _declared_length = parse_declared_content_length(&parts.headers)?;
     let body = body_from_h2_stream(body, body_channel_capacity);
-    let mut out = Request::builder().method(method).uri(uri).body(body)?;
-    *out.headers_mut() = headers;
-    *out.version_mut() = http::Version::HTTP_2;
-    if let Some(protocol) = parts.extensions.get::<h2::ext::Protocol>().cloned() {
-        out.extensions_mut().insert(protocol);
-    }
-    Ok(out)
+    parts.version = http::Version::HTTP_2;
+    Ok(Request::from_parts(parts, body))
 }
 
 pub(crate) async fn send_h2_response_with_interim(
@@ -99,6 +96,7 @@ pub(crate) async fn send_h2_response_with_interim(
     request_method: &http::Method,
     allow_successful_connect_body: bool,
     body_read_timeout: Duration,
+    active_streams: usize,
 ) -> Result<()> {
     for head in interim {
         let status = qpx_http::protocol::semantics::validate_http_status_class(
@@ -116,7 +114,8 @@ pub(crate) async fn send_h2_response_with_interim(
         }
         let mut headers = head.headers.clone();
         qpx_http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
-        let mut informational = Http1Response::builder().status(status).body(())?;
+        let mut informational = Http1Response::new(());
+        *informational.status_mut() = status;
         *informational.headers_mut() = http_headers_to_h1(&headers)?;
         respond.send_informational(informational)?;
     }
@@ -150,7 +149,12 @@ pub(crate) async fn send_h2_response_with_interim(
     } else {
         parse_declared_content_length(&headers)?
     };
-    let mut head = Http1Response::builder().status(status).body(())?;
+    let flow_control_body =
+        declared_length.is_none_or(|length| length > H2_DIRECT_SEND_BODY_MAX_BYTES);
+    let body_read_timeout_enforced = body.read_timeout_is_enforced();
+    let mut scheduler_buffer_budget = h2_scheduler_buffer_budget(active_streams);
+    let mut head = Http1Response::new(());
+    *head.status_mut() = status;
     *head.headers_mut() = http_headers_into_h1(headers);
 
     let body_ends_immediately = http_body::Body::is_end_stream(&body);
@@ -159,7 +163,22 @@ pub(crate) async fn send_h2_response_with_interim(
     let single_frame = (!no_body)
         .then(|| body.take_single_frame_without_trailers())
         .flatten();
-    let mut send_stream = respond.send_response(head, end_stream_on_headers)?;
+    let mut send_stream = match respond.send_response(head, end_stream_on_headers) {
+        Ok(stream) => stream,
+        Err(error) => {
+            return match poll_send_response_reset_now(&mut respond).await {
+                Some(Ok(reason)) => {
+                    debug!(
+                        ?reason,
+                        "HTTP/2 request cancelled before response headers were sent"
+                    );
+                    Ok(())
+                }
+                Some(Err(reset_error)) => Err(reset_error.into()),
+                None => Err(error.into()),
+            };
+        }
+    };
 
     if end_stream_on_headers {
         return Ok(());
@@ -180,14 +199,35 @@ pub(crate) async fn send_h2_response_with_interim(
                 ))
             };
         }
-        send_stream.send_data(chunk, true)?;
+        if !send_h2_data(
+            &mut send_stream,
+            chunk,
+            true,
+            flow_control_body,
+            &mut scheduler_buffer_budget,
+        )
+        .await?
+        {
+            return Ok(());
+        }
         return Ok(());
     }
 
     let mut sent_len = 0u64;
     let mut final_chunk = None;
-    while let Some(chunk) = match read_h2_response_body_chunk(&mut body, body_read_timeout).await {
-        Ok(chunk) => chunk,
+    while let Some(chunk) = match read_h2_response_body_chunk(
+        &mut body,
+        &mut send_stream,
+        body_read_timeout,
+        body_read_timeout_enforced,
+    )
+    .await
+    {
+        Ok(H2BodyRead::Value(chunk)) => chunk,
+        Ok(H2BodyRead::PeerReset(reason)) => {
+            debug!(?reason, "HTTP/2 response body cancelled by peer");
+            return Ok(());
+        }
         Err(err) => {
             send_stream.send_reset(Reason::CANCEL);
             return Err(err);
@@ -210,20 +250,39 @@ pub(crate) async fn send_h2_response_with_interim(
                 final_chunk = Some(chunk);
                 break;
             }
-            send_stream.send_data(chunk, false)?;
+            if !send_h2_data(
+                &mut send_stream,
+                chunk,
+                false,
+                flow_control_body,
+                &mut scheduler_buffer_budget,
+            )
+            .await?
+            {
+                return Ok(());
+            }
         }
     }
 
     if final_chunk.is_some() {
-        while let Some(chunk) =
-            match read_h2_response_body_chunk(&mut body, body_read_timeout).await {
-                Ok(chunk) => chunk,
-                Err(err) => {
-                    send_stream.send_reset(Reason::CANCEL);
-                    return Err(err);
-                }
-            }
+        while let Some(chunk) = match read_h2_response_body_chunk(
+            &mut body,
+            &mut send_stream,
+            body_read_timeout,
+            body_read_timeout_enforced,
+        )
+        .await
         {
+            Ok(H2BodyRead::Value(chunk)) => chunk,
+            Ok(H2BodyRead::PeerReset(reason)) => {
+                debug!(?reason, "HTTP/2 response body cancelled by peer");
+                return Ok(());
+            }
+            Err(err) => {
+                send_stream.send_reset(Reason::CANCEL);
+                return Err(err);
+            }
+        } {
             let chunk = chunk?;
             if !chunk.is_empty() {
                 send_stream.send_reset(Reason::PROTOCOL_ERROR);
@@ -234,8 +293,19 @@ pub(crate) async fn send_h2_response_with_interim(
         }
     }
 
-    let trailers = match read_h2_response_trailers(&mut body, body_read_timeout).await {
-        Ok(trailers) => trailers,
+    let trailers = match read_h2_response_trailers(
+        &mut body,
+        &mut send_stream,
+        body_read_timeout,
+        body_read_timeout_enforced,
+    )
+    .await
+    {
+        Ok(H2BodyRead::Value(trailers)) => trailers,
+        Ok(H2BodyRead::PeerReset(reason)) => {
+            debug!(?reason, "HTTP/2 response trailers cancelled by peer");
+            return Ok(());
+        }
         Err(err) => {
             send_stream.send_reset(Reason::CANCEL);
             return Err(err);
@@ -255,37 +325,198 @@ pub(crate) async fn send_h2_response_with_interim(
             warn!(removed, "dropping forbidden HTTP/2 response trailers");
         }
         if trailers.is_empty() {
-            send_stream.send_data(final_chunk.unwrap_or_default(), true)?;
-        } else {
-            if let Some(chunk) = final_chunk {
-                send_stream.send_data(chunk, false)?;
+            if !send_h2_data(
+                &mut send_stream,
+                final_chunk.unwrap_or_default(),
+                true,
+                flow_control_body,
+                &mut scheduler_buffer_budget,
+            )
+            .await?
+            {
+                return Ok(());
             }
-            send_stream.send_trailers(http_headers_into_h1(trailers))?;
+        } else {
+            if let Some(chunk) = final_chunk
+                && !send_h2_data(
+                    &mut send_stream,
+                    chunk,
+                    false,
+                    flow_control_body,
+                    &mut scheduler_buffer_budget,
+                )
+                .await?
+            {
+                return Ok(());
+            }
+            let result = send_stream.send_trailers(http_headers_into_h1(trailers));
+            if !handle_h2_send_result(&mut send_stream, result).await? {
+                return Ok(());
+            }
         }
     } else {
-        send_stream.send_data(final_chunk.unwrap_or_default(), true)?;
+        if !send_h2_data(
+            &mut send_stream,
+            final_chunk.unwrap_or_default(),
+            true,
+            flow_control_body,
+            &mut scheduler_buffer_budget,
+        )
+        .await?
+        {
+            return Ok(());
+        }
     }
 
     Ok(())
 }
 
+fn h2_scheduler_buffer_budget(active_streams: usize) -> usize {
+    (H2_INITIAL_SCHEDULER_BUFFER_BYTES / active_streams.max(1)).max(H2_MIN_SCHEDULER_BUFFER_BYTES)
+}
+
+async fn send_h2_data(
+    send_stream: &mut h2::SendStream<Bytes>,
+    mut data: Bytes,
+    end_stream: bool,
+    flow_control: bool,
+    scheduler_buffer_budget: &mut usize,
+) -> Result<bool> {
+    if data.is_empty() || !flow_control {
+        let result = send_stream.send_data(data, end_stream);
+        return handle_h2_send_result(send_stream, result).await;
+    }
+    if *scheduler_buffer_budget > 0 {
+        let buffered = data.split_to(data.len().min(*scheduler_buffer_budget));
+        *scheduler_buffer_budget -= buffered.len();
+        let final_chunk = end_stream && data.is_empty();
+        let result = send_stream.send_data(buffered, final_chunk);
+        if !handle_h2_send_result(send_stream, result).await? {
+            return Ok(false);
+        }
+        if !final_chunk {
+            tokio::task::yield_now().await;
+        }
+    }
+    while !data.is_empty() {
+        send_stream.reserve_capacity(data.len());
+        let capacity = if send_stream.capacity() > 0 {
+            send_stream.capacity()
+        } else {
+            poll_fn(|cx| send_stream.poll_capacity(cx))
+                .await
+                .ok_or_else(|| anyhow!("HTTP/2 response stream closed while awaiting capacity"))??
+        };
+        if capacity == 0 {
+            continue;
+        }
+        let chunk = data.split_to(capacity.min(data.len()));
+        let final_chunk = end_stream && data.is_empty();
+        let result = send_stream.send_data(chunk, final_chunk);
+        if !handle_h2_send_result(send_stream, result).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn handle_h2_send_result(
+    send_stream: &mut h2::SendStream<Bytes>,
+    result: std::result::Result<(), h2::Error>,
+) -> Result<bool> {
+    let Err(error) = result else {
+        return Ok(true);
+    };
+    match poll_send_stream_reset_now(send_stream).await {
+        Some(Ok(reason)) => {
+            debug!(?reason, "HTTP/2 response stream cancelled by peer");
+            Ok(false)
+        }
+        Some(Err(reset_error)) => Err(reset_error.into()),
+        None => Err(error.into()),
+    }
+}
+
+async fn poll_send_response_reset_now(
+    respond: &mut SendResponse<Bytes>,
+) -> Option<std::result::Result<Reason, h2::Error>> {
+    poll_fn(|cx| {
+        Poll::Ready(match respond.poll_reset(cx) {
+            Poll::Ready(reset) => Some(reset),
+            Poll::Pending => None,
+        })
+    })
+    .await
+}
+
+async fn poll_send_stream_reset_now(
+    send_stream: &mut h2::SendStream<Bytes>,
+) -> Option<std::result::Result<Reason, h2::Error>> {
+    poll_fn(|cx| {
+        Poll::Ready(match send_stream.poll_reset(cx) {
+            Poll::Ready(reset) => Some(reset),
+            Poll::Pending => None,
+        })
+    })
+    .await
+}
+
 async fn read_h2_response_body_chunk(
     body: &mut Body,
+    send_stream: &mut h2::SendStream<Bytes>,
     body_read_timeout: Duration,
-) -> Result<Option<Result<Bytes, qpx_http::body::BodyError>>> {
-    timeout_after_pending(body_read_timeout, body.data())
-        .await
-        .map_err(|_| anyhow!("HTTP/2 response body read timed out"))
+    body_read_timeout_enforced: bool,
+) -> Result<H2BodyRead<Option<Result<Bytes, qpx_http::body::BodyError>>>> {
+    let read = async {
+        if body_read_timeout_enforced {
+            Ok(body.data().await)
+        } else {
+            timeout_after_pending(body_read_timeout, body.data())
+                .await
+                .map_err(|_| anyhow!("HTTP/2 response body read timed out"))
+        }
+    };
+    tokio::pin!(read);
+    tokio::select! {
+        biased;
+        value = &mut read => value.map(H2BodyRead::Value),
+        reset = poll_fn(|cx| send_stream.poll_reset(cx)) => match reset {
+            Ok(reason) => Ok(H2BodyRead::PeerReset(reason)),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 async fn read_h2_response_trailers(
     body: &mut Body,
+    send_stream: &mut h2::SendStream<Bytes>,
     body_read_timeout: Duration,
-) -> Result<Option<http::HeaderMap>> {
-    timeout_after_pending(body_read_timeout, body.trailers())
-        .await
-        .map_err(|_| anyhow!("HTTP/2 response trailer read timed out"))?
-        .map_err(Into::into)
+    body_read_timeout_enforced: bool,
+) -> Result<H2BodyRead<Option<http::HeaderMap>>> {
+    let read = async {
+        if body_read_timeout_enforced {
+            body.trailers().await.map_err(Into::into)
+        } else {
+            timeout_after_pending(body_read_timeout, body.trailers())
+                .await
+                .map_err(|_| anyhow!("HTTP/2 response trailer read timed out"))?
+                .map_err(Into::into)
+        }
+    };
+    tokio::pin!(read);
+    tokio::select! {
+        biased;
+        value = &mut read => value.map(H2BodyRead::Value),
+        reset = poll_fn(|cx| send_stream.poll_reset(cx)) => match reset {
+            Ok(reason) => Ok(H2BodyRead::PeerReset(reason)),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+enum H2BodyRead<T> {
+    Value(T),
+    PeerReset(Reason),
 }
 
 pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
@@ -376,30 +607,27 @@ pub(crate) fn h2_response_body_with_inflight(
 pub(crate) fn h2_response_to_hyper(
     response: ::http::Response<RecvStream>,
 ) -> Result<Response<Body>> {
-    let (parts, body) = response.into_parts();
-    let status =
+    let (mut parts, body) = response.into_parts();
+    parts.status =
         qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/2 response")?;
-    let mut out = Response::builder()
-        .status(status)
-        .body(h2_response_body(body))?;
-    *out.headers_mut() = h1_headers_into_http(parts.headers)?;
-    *out.version_mut() = http::Version::HTTP_2;
-    Ok(out)
+    parts.headers = h1_headers_into_http(parts.headers)?;
+    parts.version = http::Version::HTTP_2;
+    Ok(Response::from_parts(parts, h2_response_body(body)))
 }
 
 pub(crate) fn h2_response_to_hyper_with_inflight(
     response: ::http::Response<RecvStream>,
     inflight: Option<Arc<AtomicUsize>>,
 ) -> Result<Response<Body>> {
-    let (parts, body) = response.into_parts();
-    let status =
+    let (mut parts, body) = response.into_parts();
+    parts.status =
         qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/2 response")?;
-    let mut out = Response::builder()
-        .status(status)
-        .body(h2_response_body_with_inflight(body, inflight))?;
-    *out.headers_mut() = h1_headers_into_http(parts.headers)?;
-    *out.version_mut() = http::Version::HTTP_2;
-    Ok(out)
+    parts.headers = h1_headers_into_http(parts.headers)?;
+    parts.version = http::Version::HTTP_2;
+    Ok(Response::from_parts(
+        parts,
+        h2_response_body_with_inflight(body, inflight),
+    ))
 }
 
 fn body_from_h2_stream(body: RecvStream, _body_channel_capacity: usize) -> Body {

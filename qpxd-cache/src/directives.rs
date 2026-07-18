@@ -11,6 +11,21 @@ const QPX_CACHE_CONTROL: HeaderName = HeaderName::from_static("qpx-cache-control
 const CDN_CACHE_CONTROL: HeaderName = HeaderName::from_static("cdn-cache-control");
 
 pub fn parse_request_directives(headers: &http::HeaderMap) -> RequestDirectives {
+    if !headers.keys().any(|name| {
+        matches!(
+            name.as_str(),
+            "cache-control"
+                | "pragma"
+                | "range"
+                | "if-range"
+                | "if-match"
+                | "if-none-match"
+                | "if-modified-since"
+                | "if-unmodified-since"
+        )
+    }) {
+        return RequestDirectives::default();
+    }
     let range = parse_single_range_header(headers);
     let if_range = parse_if_range_header(headers);
     let mut directives = RequestDirectives {

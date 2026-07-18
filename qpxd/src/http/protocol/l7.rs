@@ -130,12 +130,7 @@ fn ensure_date_header(headers: &mut http::HeaderMap) {
 }
 
 pub(crate) fn cached_date_header_value() -> http::HeaderValue {
-    let cached_epoch_second = CACHED_DATE_EPOCH_SECOND.load(Ordering::Relaxed);
-    let epoch_second = if cached_epoch_second == 0 {
-        current_epoch_second()
-    } else {
-        cached_epoch_second
-    };
+    let epoch_second = cached_epoch_second();
     CACHED_DATE_HEADER.with_borrow_mut(|cached| {
         if let Some((cached_second, value)) = cached.as_ref()
             && *cached_second == epoch_second
@@ -154,6 +149,15 @@ pub(crate) fn cached_date_header_value() -> http::HeaderValue {
         *cached = Some((epoch_second, value.clone()));
         value
     })
+}
+
+pub(crate) fn cached_epoch_second() -> u64 {
+    let cached = CACHED_DATE_EPOCH_SECOND.load(Ordering::Relaxed);
+    if cached == 0 {
+        current_epoch_second()
+    } else {
+        cached
+    }
 }
 
 pub(crate) fn start_cached_date_updater() {
@@ -273,11 +277,28 @@ pub(crate) fn prepare_request_with_headers_in_place(
     header_control: Option<&CompiledHeaderControl>,
     preserve_upgrade: bool,
 ) {
+    prepare_request_headers_in_place(request, proxy_name, header_control, preserve_upgrade, true);
+}
+
+pub(crate) fn prepare_request_for_fixed_authority_in_place(
+    request: &mut Request<Body>,
+    proxy_name: &str,
+) {
+    prepare_request_headers_in_place(request, proxy_name, None, false, false);
+}
+
+fn prepare_request_headers_in_place(
+    request: &mut Request<Body>,
+    proxy_name: &str,
+    header_control: Option<&CompiledHeaderControl>,
+    preserve_upgrade: bool,
+    sync_target_authority: bool,
+) {
     let request_version = request.version();
     let validate_trailers = request_version == http::Version::HTTP_2
         || request.headers().contains_key(http::header::TRAILER);
     apply_request_headers(request.headers_mut(), header_control);
-    if request.uri().authority().is_some() {
+    if sync_target_authority && request.uri().authority().is_some() {
         let request_uri = request.uri().clone();
         sync_host_header_from_absolute_target(request.headers_mut(), &request_uri);
     }

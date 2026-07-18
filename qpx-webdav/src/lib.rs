@@ -15,6 +15,6 @@ pub use resource::ResourceId;
 pub use service::{AclDecision, WebDavRequestContext, WebDavService};
 pub use store::{
     BindingAlreadyExists, DeadProperty, LockDepth, LockRecord, LockScope, PersistentWebDavStore,
-    ResourceAccessContext, ResourceMetadata, ResourceRead, VersionRecord, WebDavDataStore,
-    WebDavMetadataStore, WebDavStore,
+    ResourceAccessContext, ResourceFileRegion, ResourceMetadata, ResourceRead, VersionRecord,
+    WebDavDataStore, WebDavMetadataStore, WebDavStore,
 };

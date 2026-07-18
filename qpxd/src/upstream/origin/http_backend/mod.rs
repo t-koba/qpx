@@ -1,6 +1,7 @@
 use anyhow::Result;
 use hyper::header::{HOST, HeaderValue};
 use hyper::{Request, Response};
+use parking_lot::Mutex;
 use qpx_http::body::Body;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -8,13 +9,14 @@ use tokio::net::TcpStream;
 #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 use tracing::warn;
 
-use crate::http::protocol::l7::prepare_request_with_headers_in_place;
+use crate::http::protocol::l7::prepare_request_for_fixed_authority_in_place;
 use crate::upstream::raw_http1::{
-    Http1ConnectionRecycler, Http1ResponseWithInterim, RawHttp1ResponseRelay,
-    UpstreamConnectionClosed, idle_connection_closed_or_dirty, is_bodyless_http1_request,
-    send_http1_request_with_interim_reusable,
+    BodylessHttp1Request, Http1ConnectionRecycler, Http1ResponseWithInterim,
+    RawHttp1ResponseContext, RawHttp1ResponseRelay, ReusableRawHttp1Connection,
+    UpstreamConnectionClosed, classify_bodyless_http1_request, idle_connection_closed_or_dirty,
+    retain_active_permit, send_http1_request_with_interim_reusable,
     send_http1_request_with_interim_reusable_raw_response,
-    send_prepared_http1_head_with_interim_reusable_raw_response,
+    send_prepared_http1_head_with_interim_reusable_raw_response_under_external_deadline,
     send_serialized_http1_head_with_interim_reusable_raw_response,
     serialize_bodyless_http1_request,
 };
@@ -33,10 +35,134 @@ mod shared;
 
 const MAX_CACHED_ORIGIN_AUTHORITIES: usize = 32;
 
+#[derive(Clone, Default)]
+pub(crate) struct PreparedPlainHttp1ConnectionPool {
+    target: Arc<Mutex<Option<Arc<PreparedPlainHttp1ConnectionPoolTarget>>>>,
+}
+
+struct PreparedPlainHttp1ConnectionPoolTarget {
+    slot: Arc<pool::PlainHttpOriginSlot>,
+    idle_affinity: usize,
+}
+
+impl PreparedPlainHttp1ConnectionPool {
+    fn target_for(
+        &self,
+        slot: &Arc<pool::PlainHttpOriginSlot>,
+    ) -> Arc<PreparedPlainHttp1ConnectionPoolTarget> {
+        let mut target = self.target.lock();
+        if let Some(current) = target.as_ref()
+            && Arc::ptr_eq(&current.slot, slot)
+        {
+            return Arc::clone(current);
+        }
+        let next = Arc::new(PreparedPlainHttp1ConnectionPoolTarget {
+            slot: Arc::clone(slot),
+            idle_affinity: pool::next_http1_idle_affinity(),
+        });
+        *target = Some(Arc::clone(&next));
+        next
+    }
+}
+
+impl PreparedPlainHttp1ConnectionPoolTarget {
+    fn pop_idle(&self) -> Option<pool::PlainHttp1OriginConnection> {
+        self.slot.pop_idle_preferred(self.idle_affinity)
+    }
+}
+
+impl crate::upstream::raw_http1::Http1RecycleTarget<TcpStream>
+    for PreparedPlainHttp1ConnectionPoolTarget
+{
+    fn recycle(&self, stream: TcpStream, read_buf: bytes::BytesMut, write_buf: bytes::BytesMut) {
+        self.slot.recycle_idle_preferred(
+            pool::PlainHttp1OriginConnection::new(stream, read_buf, write_buf),
+            self.idle_affinity,
+        );
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct PreparedPlainHttp1Origin {
     slot: Arc<pool::PlainHttpOriginSlot>,
     connect_authority: Arc<str>,
+}
+
+#[derive(Default)]
+pub(crate) struct PreparedPlainHttp1Session {
+    target: Option<PreparedPlainHttp1SessionTarget>,
+}
+
+struct PreparedPlainHttp1SessionTarget {
+    slot: Arc<pool::PlainHttpOriginSlot>,
+    connection: Option<pool::PlainHttp1OriginConnection>,
+    _active_permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl PreparedPlainHttp1Session {
+    async fn prepare_for(&mut self, origin: &PreparedPlainHttp1Origin) -> Result<()> {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|target| Arc::ptr_eq(&target.slot, &origin.slot))
+        {
+            return Ok(());
+        }
+        // Never await a new origin permit while retaining a permit for the old
+        // origin. Concurrent route changes must not create cross-origin lock order.
+        self.target = None;
+        let active_permit = origin.slot.acquire_active().await?;
+        self.target = Some(PreparedPlainHttp1SessionTarget {
+            slot: Arc::clone(&origin.slot),
+            connection: None,
+            _active_permit: active_permit,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn release(&mut self) {
+        self.target = None;
+    }
+
+    fn take_connection(&mut self) -> Option<pool::PlainHttp1OriginConnection> {
+        self.target.as_mut()?.connection.take()
+    }
+
+    pub(crate) fn recycle_connection(&mut self, connection: ReusableRawHttp1Connection<TcpStream>) {
+        let Some(target) = self.target.as_mut() else {
+            return;
+        };
+        debug_assert!(target.connection.is_none());
+        let ReusableRawHttp1Connection {
+            stream,
+            read_buf,
+            write_buf,
+        } = connection;
+        target.connection = Some(pool::PlainHttp1OriginConnection::new(
+            stream, read_buf, write_buf,
+        ));
+    }
+
+    pub(crate) fn recycle_response_globally(
+        &self,
+        response: &mut RawHttp1ResponseRelay<TcpStream>,
+    ) {
+        let Some(target) = self.target.as_ref() else {
+            return;
+        };
+        debug_assert!(response.recycler.is_none());
+        response.recycler = Some(Http1ConnectionRecycler::from_target(Arc::clone(
+            &target.slot,
+        )));
+    }
+}
+
+impl Drop for PreparedPlainHttp1SessionTarget {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            self.slot.recycle_idle(connection);
+        }
+    }
 }
 
 struct CachedOriginAuthority {
@@ -144,11 +270,11 @@ async fn open_plain_http_origin_stream(
 ) -> Result<pool::PlainHttp1OriginConnection> {
     let stream = TcpStream::connect(connect_authority).await?;
     let _ = stream.set_nodelay(true);
-    Ok(pool::PlainHttp1OriginConnection {
+    Ok(pool::PlainHttp1OriginConnection::new(
         stream,
-        read_buf: bytes::BytesMut::new(),
-        write_buf: bytes::BytesMut::new(),
-    })
+        bytes::BytesMut::new(),
+        bytes::BytesMut::new(),
+    ))
 }
 
 async fn proxy_plain_http(
@@ -179,6 +305,7 @@ pub(crate) async fn proxy_direct_plain_http1_with_interim(
     let slot = pools
         .direct_origin
         .plain_slot_for(connect_authority, host_authority);
+    let active_permit = slot.acquire_active().await?;
     crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
     crate::upstream::http1::ensure_host_header(&mut req, host_authority)?;
     *req.version_mut() = http::Version::HTTP_11;
@@ -186,14 +313,16 @@ pub(crate) async fn proxy_direct_plain_http1_with_interim(
         Some(connection) => connection,
         None => open_plain_http_origin_stream(connect_authority).await?,
     };
-    send_http1_request_with_interim_reusable(
+    let mut response = send_http1_request_with_interim_reusable(
         connection.stream,
         connection.read_buf,
         connection.write_buf,
         req,
         Http1ConnectionRecycler::from_target(slot),
     )
-    .await
+    .await?;
+    retain_active_permit(response.response.body_mut(), Some(active_permit));
+    Ok(response)
 }
 
 pub(crate) async fn proxy_direct_plain_http1_raw_response_with_interim(
@@ -203,6 +332,48 @@ pub(crate) async fn proxy_direct_plain_http1_raw_response_with_interim(
     host_authority: &str,
     request_version: http::Version,
     proxy_name: &str,
+) -> Result<Http1ResponseWithInterim> {
+    proxy_direct_plain_http1_raw_response_with_interim_inner(
+        pools,
+        req,
+        connect_authority,
+        host_authority,
+        request_version,
+        proxy_name,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn proxy_direct_plain_http1_raw_response_with_interim_on_connection(
+    pools: &crate::pool::PoolRegistry,
+    req: Request<Body>,
+    connect_authority: &str,
+    host_authority: &str,
+    request_version: http::Version,
+    proxy_name: &str,
+    connection_pool: &PreparedPlainHttp1ConnectionPool,
+) -> Result<Http1ResponseWithInterim> {
+    proxy_direct_plain_http1_raw_response_with_interim_inner(
+        pools,
+        req,
+        connect_authority,
+        host_authority,
+        request_version,
+        proxy_name,
+        Some(connection_pool),
+    )
+    .await
+}
+
+async fn proxy_direct_plain_http1_raw_response_with_interim_inner(
+    pools: &crate::pool::PoolRegistry,
+    mut req: Request<Body>,
+    connect_authority: &str,
+    host_authority: &str,
+    request_version: http::Version,
+    proxy_name: &str,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionPool>,
 ) -> Result<Http1ResponseWithInterim> {
     let slot = pools
         .direct_origin
@@ -215,23 +386,28 @@ pub(crate) async fn proxy_direct_plain_http1_raw_response_with_interim(
             .and_then(|value| value.to_str().ok()),
         Some(host_authority)
     );
-    if matches!(*req.method(), http::Method::GET | http::Method::HEAD)
-        && is_bodyless_http1_request(&req)?
-    {
-        return proxy_bodyless_plain_http1_raw_response_with_interim(
-            slot,
-            req,
-            connect_authority,
-            request_version,
-            proxy_name,
-        )
-        .await;
+    if matches!(*req.method(), http::Method::GET | http::Method::HEAD) {
+        req = match classify_bodyless_http1_request(req)? {
+            Ok(req) => {
+                return proxy_bodyless_plain_http1_raw_response_with_interim(
+                    slot,
+                    req,
+                    connect_authority,
+                    request_version,
+                    proxy_name,
+                    connection_pool,
+                )
+                .await;
+            }
+            Err(req) => req,
+        };
     }
+    let active_permit = slot.acquire_active().await?;
     let connection = match take_reusable_plain_http_stream(&slot).await {
         Some(connection) => connection,
         None => open_plain_http_origin_stream(connect_authority).await?,
     };
-    send_http1_request_with_interim_reusable_raw_response(
+    let mut response = send_http1_request_with_interim_reusable_raw_response(
         connection.stream,
         connection.read_buf,
         connection.write_buf,
@@ -240,23 +416,47 @@ pub(crate) async fn proxy_direct_plain_http1_raw_response_with_interim(
         proxy_name,
         Http1ConnectionRecycler::from_target(slot),
     )
-    .await
+    .await?;
+    retain_active_permit(response.response.body_mut(), Some(active_permit));
+    Ok(response)
 }
 
 async fn proxy_bodyless_plain_http1_raw_response_with_interim(
     slot: Arc<pool::PlainHttpOriginSlot>,
-    req: Request<Body>,
+    req: BodylessHttp1Request,
     connect_authority: &str,
     request_version: http::Version,
     proxy_name: &str,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionPool>,
 ) -> Result<Http1ResponseWithInterim> {
-    let (mut connection, reused) = match slot.pop_idle() {
+    let active_permit = slot.acquire_active().await?;
+    let local_target = connection_pool.map(|pool| pool.target_for(&slot));
+    let pooled = loop {
+        let pooled = match local_target.as_ref() {
+            Some(target) => target.pop_idle(),
+            None => slot.pop_idle(),
+        };
+        let Some(mut connection) = pooled else {
+            break None;
+        };
+        if connection.requires_idle_probe()
+            && idle_connection_closed_or_dirty(&mut connection.stream).await
+        {
+            continue;
+        }
+        break Some(connection);
+    };
+    let (mut connection, reused) = match pooled {
         Some(connection) => (connection, true),
         None => (
             open_plain_http_origin_stream(connect_authority).await?,
             false,
         ),
     };
+    let recycler = local_target
+        .as_ref()
+        .map(|target| Http1ConnectionRecycler::from_target(Arc::clone(target)))
+        .unwrap_or_else(|| Http1ConnectionRecycler::from_target(Arc::clone(&slot)));
     let request_method = serialize_bodyless_http1_request(req, &mut connection.write_buf)?;
     let response = send_serialized_http1_head_with_interim_reusable_raw_response(
         connection.stream,
@@ -265,10 +465,10 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
         &request_method,
         request_version,
         proxy_name,
-        Http1ConnectionRecycler::from_target(slot.clone()),
+        recycler.clone(),
     )
     .await;
-    let relay = match response {
+    let mut relay = match response {
         Ok(relay) => relay,
         Err(first_error) => {
             let (first_error, request_head) = first_error.into_parts();
@@ -284,12 +484,13 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
                 &request_method,
                 request_version,
                 proxy_name,
-                Http1ConnectionRecycler::from_target(slot),
+                recycler,
             )
             .await
             .map_err(|error| error.into_parts().0)?
         }
     };
+    relay.active_permit = Some(active_permit);
     if request_version == http::Version::HTTP_2 {
         relay.into_materialized_http_response()
     } else {
@@ -299,43 +500,46 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
 
 pub(crate) async fn proxy_prepared_plain_http1_head_raw_response_with_interim(
     origin: &PreparedPlainHttp1Origin,
+    session: &mut PreparedPlainHttp1Session,
     request_method: &http::Method,
     request_head: &[u8],
+    request_version: http::Version,
     proxy_name: &str,
 ) -> Result<RawHttp1ResponseRelay<TcpStream>> {
-    let (connection, reused) = match origin.slot.pop_idle() {
+    session.prepare_for(origin).await?;
+    let (connection, reused) = match session.take_connection().or_else(|| origin.slot.pop_idle()) {
         Some(connection) => (connection, true),
         None => (
             open_plain_http_origin_stream(origin.connect_authority.as_ref()).await?,
             false,
         ),
     };
-    let response = send_prepared_http1_head_with_interim_reusable_raw_response(
-        connection.stream,
-        connection.read_buf,
-        connection.write_buf,
-        request_method,
-        request_head,
-        proxy_name,
-        Http1ConnectionRecycler::from_target(origin.slot.clone()),
-    )
-    .await;
-    let Err(first_error) = response else {
-        return response;
+    let response =
+        send_prepared_http1_head_with_interim_reusable_raw_response_under_external_deadline(
+            connection.stream,
+            connection.read_buf,
+            connection.write_buf,
+            request_head,
+            RawHttp1ResponseContext::new(request_method, request_version, proxy_name),
+            None,
+        )
+        .await;
+    let first_error = match response {
+        Ok(relay) => return Ok(relay),
+        Err(error) => error,
     };
     if !reused || !is_transport_error(&first_error) {
         return Err(first_error);
     }
 
     let connection = open_plain_http_origin_stream(origin.connect_authority.as_ref()).await?;
-    send_prepared_http1_head_with_interim_reusable_raw_response(
+    send_prepared_http1_head_with_interim_reusable_raw_response_under_external_deadline(
         connection.stream,
         connection.read_buf,
         connection.write_buf,
-        request_method,
         request_head,
-        proxy_name,
-        Http1ConnectionRecycler::from_target(origin.slot.clone()),
+        RawHttp1ResponseContext::new(request_method, request_version, proxy_name),
+        None,
     )
     .await
 }
@@ -465,7 +669,7 @@ pub(crate) fn prepare_proxy_http1_request(
     host_authority: &str,
     proxy_name: &str,
 ) -> Result<Request<Body>> {
-    prepare_request_with_headers_in_place(&mut req, proxy_name, None, false);
+    prepare_request_for_fixed_authority_in_place(&mut req, proxy_name);
     *req.version_mut() = http::Version::HTTP_11;
     crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
     req.headers_mut()

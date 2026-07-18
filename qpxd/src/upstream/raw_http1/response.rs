@@ -488,6 +488,7 @@ where
             recycler.filter(|_| response_body_allows_reuse(kind) && upstream_reusable),
         )),
     }
+    .mark_read_timeout_enforced()
     .mark_trailers_sanitized();
     let mut response = Response::new(body);
     *response.status_mut() = head.status;
@@ -506,7 +507,15 @@ pub(super) fn build_raw_response<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    build_raw_response_inner(stream, head, prefix, write_buf, recycler, None)
+    build_raw_response_inner(
+        stream,
+        head,
+        prefix,
+        write_buf,
+        recycler,
+        None,
+        super::MAX_EMITTED_BODY_FRAME_SIZE,
+    )
 }
 
 pub(super) fn build_materialized_raw_response<S>(
@@ -515,6 +524,7 @@ pub(super) fn build_materialized_raw_response<S>(
     prefix: BytesMut,
     write_buf: BytesMut,
     recycler: Option<Http1ConnectionRecycler<S>>,
+    max_body_frame_size: usize,
 ) -> Result<Response<Body>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -527,6 +537,7 @@ where
         write_buf,
         recycler,
         Some(headers),
+        max_body_frame_size,
     ))
 }
 
@@ -537,6 +548,7 @@ fn build_raw_response_inner<S>(
     write_buf: BytesMut,
     recycler: Option<Http1ConnectionRecycler<S>>,
     materialized_headers: Option<HeaderMap>,
+    max_body_frame_size: usize,
 ) -> Response<Body>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -563,14 +575,16 @@ where
             }
             Body::from(bytes)
         }
-        kind => Body::wrap(super::body::Http1ResponseBody::new(
+        kind => Body::wrap(super::body::Http1ResponseBody::new_with_max_frame_size(
             stream,
             prefix,
             kind,
             write_buf,
             recycler.filter(|_| response_body_allows_reuse(kind) && upstream_reusable),
+            max_body_frame_size,
         )),
     }
+    .mark_read_timeout_enforced()
     .mark_trailers_sanitized();
     let mut response = Response::new(body);
     *response.status_mut() = head.status;

@@ -20,9 +20,15 @@ pub(crate) fn cache_status_header(
     state: &'static str,
     ttl: Option<u64>,
 ) -> Result<http::HeaderValue> {
+    const SFV_MAX_INTEGER: u64 = 999_999_999_999_999;
     let value = match state {
         "HIT" => match ttl {
-            Some(ttl) => format!("qpx; hit; ttl={ttl}"),
+            Some(ttl) if ttl <= SFV_MAX_INTEGER => format!("qpx; hit; ttl={ttl}"),
+            Some(ttl) => {
+                return Err(anyhow!(
+                    "Cache-Status ttl {ttl} exceeds the RFC 9651 integer range"
+                ));
+            }
             None => "qpx; hit".to_string(),
         },
         "MISS" => "qpx; fwd=miss".to_string(),
@@ -30,11 +36,10 @@ pub(crate) fn cache_status_header(
         "REVALIDATED" => "qpx; fwd=stale; fwd-status=304".to_string(),
         _ => return Err(anyhow!("unsupported internal cache status: {state}")),
     };
-    // Validate every emitted value with the shared RFC 9651 parser. This also
-    // prevents future state additions from introducing an invalid field value.
-    qpx_http::structured_fields::parse_list(value.as_bytes())
-        .map_err(|err| anyhow!("invalid generated Cache-Status field: {err}"))?;
-    http::HeaderValue::from_str(value.as_str())
+    // Every shape is constructed from fixed RFC 9651 tokens plus a decimal u64.
+    // Conformance tests validate the complete shape set; reparsing it for every
+    // cache hit adds no runtime safety and materially penalizes the hot path.
+    http::HeaderValue::from_maybe_shared(value)
         .map_err(|err| anyhow!("invalid generated Cache-Status header value: {err}"))
 }
 
@@ -238,6 +243,9 @@ pub struct CachedResponseEnvelope {
     /// `CachedResponseEnvelope` small (it is embedded by value in several enums).
     /// Access via [`CachedResponseEnvelope::header_map`] / [`CachedResponseEnvelope::header_str`].
     pub header_map: OnceLock<Box<http::HeaderMap>>,
+    /// Parsed response cache directives derived from `header_map`. They are immutable
+    /// for the lifetime of an envelope, so repeated hot-cache lookups reuse one parse.
+    pub response_directives: OnceLock<ResponseDirectives>,
 }
 
 impl CachedResponseEnvelope {
@@ -251,6 +259,11 @@ impl CachedResponseEnvelope {
     /// First case-insensitive value for `name` from the hydrated headers.
     pub fn header_str(&self, name: &http::HeaderName) -> Option<&str> {
         self.header_map().get(name).and_then(|v| v.to_str().ok())
+    }
+
+    pub fn response_directives(&self) -> &ResponseDirectives {
+        self.response_directives
+            .get_or_init(|| super::directives::parse_response_directives(self.header_map()))
     }
 }
 
@@ -326,6 +339,7 @@ pub fn decode_cached_response_metadata(raw: Bytes) -> Result<CachedResponseEnvel
         vary_headers: metadata.vary_headers,
         vary_values: metadata.vary_values,
         header_map: OnceLock::new(),
+        response_directives: OnceLock::new(),
     })
 }
 
@@ -485,4 +499,26 @@ impl Drop for RequestCollapseGuard {
 pub enum VarySpec {
     Any,
     Fields(Vec<String>),
+}
+
+#[cfg(test)]
+mod cache_status_tests {
+    use super::cache_status_header;
+
+    #[test]
+    fn generated_cache_status_shapes_are_rfc_9651_lists() {
+        for (state, ttl) in [
+            ("HIT", None),
+            ("HIT", Some(0)),
+            ("HIT", Some(999_999_999_999_999)),
+            ("MISS", None),
+            ("BYPASS", None),
+            ("REVALIDATED", None),
+        ] {
+            let value = cache_status_header(state, ttl).expect("build Cache-Status");
+            qpx_http::structured_fields::parse_list(value.as_bytes())
+                .expect("parse generated Cache-Status");
+        }
+        assert!(cache_status_header("HIT", Some(u64::MAX)).is_err());
+    }
 }

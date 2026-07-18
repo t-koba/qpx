@@ -5,15 +5,22 @@ use crate::http::codec::h1::{
 };
 use crate::http::codec::h1_common::MAX_HEADER_BYTES;
 use crate::http::codec::lazy_timeout::timeout_after_pending;
+use crate::http::dispatcher::InterimList;
 use crate::reverse::ReloadableReverse;
 use crate::reverse::transport::{
     PreparedRawHttp1Response, RawHttp1ConnectionCache, RawHttp1RequestView, ReverseConnInfo,
     dispatch_prepared_raw_http1_request, prepare_raw_http1_request,
 };
+use crate::upstream::origin::PreparedPlainHttp1Session;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Response, StatusCode};
 use qpx_http::body::Body;
+use qpx_observability::RequestHandler;
+use qpx_observability::access_log::{
+    AccessLogContext, AccessLogService, access_log_service_required,
+};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
@@ -43,9 +50,25 @@ pub(super) async fn serve_raw_or_fallback(
         .unwrap_or_else(|prefix| BytesMut::from(prefix.as_ref()));
     let mut response_head = BytesMut::with_capacity(512);
     let mut request_cache = RawHttp1ConnectionCache::default();
+    let mut origin_session = PreparedPlainHttp1Session::default();
+    let access_cfg = reverse.runtime.state().resources.access_log.clone();
+    let access_service = access_log_service_required(&access_cfg).then(|| {
+        AccessLogService::new(
+            ReverseInterimService::new(reverse.clone(), conn.clone()),
+            conn.remote_addr,
+            AccessLogContext {
+                kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
+                name: Arc::clone(&reverse.name),
+            },
+            &access_cfg,
+        )
+    });
 
     loop {
         if read_buf.is_empty() {
+            // Preserve connection affinity across already pipelined requests, but do not
+            // pin an upstream connection or active permit while the downstream is idle.
+            origin_session.release();
             let read = timeout_after_pending(header_read_timeout, stream.read_buf(&mut read_buf))
                 .await
                 .map_err(|_| anyhow!("HTTP/1 request header read timed out"))??;
@@ -59,7 +82,25 @@ pub(super) async fn serve_raw_or_fallback(
                 read_buf.advance(consumed);
                 let request_method = request.method();
                 let request_keep_alive = request.keep_alive();
-                let response = match dispatch_prepared_raw_http1_request(request.as_ref()).await {
+                let dispatched = if let (Some(service), Some(generic)) =
+                    (access_service.as_ref(), request.generic_request())
+                {
+                    let mut response = service.call(generic).await.expect("infallible handler");
+                    let interim = response
+                        .extensions_mut()
+                        .remove::<InterimList>()
+                        .unwrap_or_default();
+                    Ok(PreparedRawHttp1Response::Generic(interim, response))
+                } else {
+                    dispatch_prepared_raw_http1_request(
+                        request.as_ref(),
+                        &reverse,
+                        &conn,
+                        &mut origin_session,
+                    )
+                    .await
+                };
+                let response = match dispatched {
                     Ok(response) => response,
                     Err(error) => {
                         warn!(error = ?error, "reverse handling failed");
@@ -79,7 +120,7 @@ pub(super) async fn serve_raw_or_fallback(
                 };
                 let keep_alive = match response {
                     PreparedRawHttp1Response::Direct(response) => {
-                        send_raw_http1_response_relay_with_interim(
+                        let (keep_alive, reusable) = send_raw_http1_response_relay_with_interim(
                             &mut stream,
                             http::Version::HTTP_11,
                             request_method,
@@ -87,7 +128,11 @@ pub(super) async fn serve_raw_or_fallback(
                             request_keep_alive,
                             &mut response_head,
                         )
-                        .await?
+                        .await?;
+                        if let Some(reusable) = reusable {
+                            origin_session.recycle_connection(reusable);
+                        }
+                        keep_alive
                     }
                     PreparedRawHttp1Response::Generic(interim, response) => {
                         send_http1_response_with_interim(
@@ -119,14 +164,25 @@ pub(super) async fn serve_raw_or_fallback(
             }
             FastParse::Partial | FastParse::Fallback => {
                 let body_channel_capacity = reverse_body_channel_capacity(&reverse);
-                return serve_http1_tcp_with_interim_and_capacity(
-                    stream,
-                    read_buf.freeze(),
-                    ReverseInterimService { reverse, conn },
-                    header_read_timeout,
-                    body_channel_capacity,
-                )
-                .await;
+                return if let Some(service) = access_service {
+                    serve_http1_tcp_with_interim_and_capacity(
+                        stream,
+                        read_buf.freeze(),
+                        service,
+                        header_read_timeout,
+                        body_channel_capacity,
+                    )
+                    .await
+                } else {
+                    serve_http1_tcp_with_interim_and_capacity(
+                        stream,
+                        read_buf.freeze(),
+                        ReverseInterimService::new(reverse, conn),
+                        header_read_timeout,
+                        body_channel_capacity,
+                    )
+                    .await
+                };
             }
         }
     }

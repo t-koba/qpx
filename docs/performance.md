@@ -209,10 +209,15 @@ The TLS HTTP/2 comparison uses h2load against the direct static HTTP/2 backend,
 qpx, and nginx. It covers both one stream per connection and 100 multiplexed
 streams for the short and 1 MiB lanes. Every implementation is interleaved
 across rounds and uses the same conservative per-metric aggregation as the
-HTTP/1 comparison. The benchmark records proxy CPU and backend CPU separately,
-then compares qpx and nginx by requests per total-system CPU second. The direct
-backend is a workload and saturation reference; its request rate is not treated
-as a proxy ceiling because its TLS/H2 topology differs from the two proxy lanes.
+HTTP/1 comparison. Each round performs an immediately preceding calibration of
+at least two seconds, converts that measured rate to a fixed request count, and
+records the calibration duration, calibration requests, and resulting benchmark
+request count. This keeps request accounting exact while preventing a short
+calibration interval from amplifying runner noise. The benchmark records proxy
+CPU and backend CPU separately, then compares qpx and nginx by requests per
+total-system CPU second. The direct backend is a workload and saturation
+reference; its request rate is not treated as a proxy ceiling because its
+TLS/H2 topology differs from the two proxy lanes.
 `scripts/check-http2-performance.sh` requires no per-lane throughput or
 total-system CPU-efficiency regression, bounds mean latency to 1.05x, p99 to
 1.1x, and maximum latency to the external leader on every lane. Every lane must
@@ -220,8 +225,24 @@ reach at least 1.25 multi-axis dominance, and the geometric score across the
 complete four-lane matrix must reach 1.5. qpx sample spread is capped at 10%;
 reference spread is recorded and capped separately so runner noise cannot
 silently excuse a qpx regression. The qpx HTTP/2 server runs streams
-concurrently as `JoinSet`-tracked tasks, preserving stream-failure reporting and
-starting the connection idle deadline from the latest stream completion.
+concurrently in the owning connection task. The single active stream reuses its
+boxed future allocation; a second stream promotes both streams into the
+connection-local concurrent scheduler. The scheduler drains ready completions
+between accepts, and divides its initial response buffer budget across active
+streams so multiplexed responses cannot collectively overrun the connection
+flow-control window. Stream errors remain visible and the connection idle
+deadline starts from the latest stream completion. Peer resets are observed
+while service execution and response-body production are pending, so cancelled
+work releases its upstream resources promptly. Expected peer cancellation is
+recorded at debug level; protocol, framing, and local implementation errors
+remain warnings or request failures.
+
+The HTTP/2 Callgrind lane establishes warm connections while instrumentation is
+disabled, records those warm-up requests separately, and enables instruction
+counting only for the fixed measured request batch. This prevents TLS key
+exchange and connection setup from dominating what is reported as an HTTP/2
+request-path profile. The measured batch still uses the production TLS and
+HTTP/2 implementation; only the location of the profiling window changes.
 
 To update the proxy baseline, download the latest `qpx-nightly-perf-jsonl`
 artifact from the scheduled `nightly_perf_bench` job and regenerate the baseline

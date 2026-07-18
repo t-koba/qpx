@@ -58,14 +58,40 @@ impl From<ChannelSendError> for BodyError {
     }
 }
 
-#[derive(Debug)]
 pub struct Body {
     inner: BodyInner,
     file_region: Option<FileRegion>,
     close_signal: Option<Arc<BodyCloseSignal>>,
+    retained_resource: Option<RetainedResource>,
     pending_trailers: Option<Box<HeaderMap>>,
     stream_finished: bool,
     trailers_sanitized: bool,
+    read_timeout_enforced: bool,
+}
+
+enum RetainedResource {
+    Opaque {
+        _resource: Box<dyn Send>,
+    },
+    Semaphore {
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    },
+}
+
+impl fmt::Debug for Body {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Body")
+            .field("inner", &self.inner)
+            .field("file_region", &self.file_region)
+            .field("close_signal", &self.close_signal)
+            .field("retained_resource", &self.retained_resource.is_some())
+            .field("pending_trailers", &self.pending_trailers)
+            .field("stream_finished", &self.stream_finished)
+            .field("trailers_sanitized", &self.trailers_sanitized)
+            .field("read_timeout_enforced", &self.read_timeout_enforced)
+            .finish()
+    }
 }
 
 /// An immutable file extent that can be transferred directly to a compatible
@@ -121,9 +147,11 @@ impl Body {
             inner: BodyInner::Empty,
             file_region: None,
             close_signal: None,
+            retained_resource: None,
             pending_trailers: None,
             stream_finished: true,
             trailers_sanitized: false,
+            read_timeout_enforced: false,
         }
     }
 
@@ -145,9 +173,11 @@ impl Body {
                 inner: BodyInner::Boxed(body.boxed_unsync()),
                 file_region: None,
                 close_signal: Some(close_signal),
+                retained_resource: None,
                 pending_trailers: None,
                 stream_finished: false,
                 trailers_sanitized: false,
+                read_timeout_enforced: false,
             },
         )
     }
@@ -163,9 +193,11 @@ impl Body {
             },
             file_region: None,
             close_signal: None,
+            retained_resource: None,
             pending_trailers: None,
             stream_finished: false,
             trailers_sanitized: false,
+            read_timeout_enforced: false,
         }
     }
 
@@ -186,9 +218,11 @@ impl Body {
             },
             file_region: None,
             close_signal: None,
+            retained_resource: None,
             pending_trailers: None,
             stream_finished: false,
             trailers_sanitized: false,
+            read_timeout_enforced: false,
         }
     }
 
@@ -200,9 +234,11 @@ impl Body {
             inner: BodyInner::Boxed(body.boxed_unsync()),
             file_region: None,
             close_signal: None,
+            retained_resource: None,
             pending_trailers: None,
             stream_finished: false,
             trailers_sanitized: false,
+            read_timeout_enforced: false,
         }
     }
 
@@ -215,6 +251,39 @@ impl Body {
     /// Returns whether trailer sanitization is guaranteed by the body producer.
     pub fn trailers_are_sanitized(&self) -> bool {
         self.trailers_sanitized
+    }
+
+    /// Marks that the body producer enforces its own idle read timeout.
+    pub fn mark_read_timeout_enforced(mut self) -> Self {
+        self.read_timeout_enforced = true;
+        self
+    }
+
+    /// Returns whether the body producer enforces its own idle read timeout.
+    pub fn read_timeout_is_enforced(&self) -> bool {
+        self.read_timeout_enforced
+    }
+
+    /// Retains a transport resource until this body is dropped.
+    pub fn retain_resource<T>(&mut self, resource: T)
+    where
+        T: Send + 'static,
+    {
+        debug_assert!(self.retained_resource.is_none());
+        self.retained_resource = Some(RetainedResource::Opaque {
+            _resource: Box::new(resource),
+        });
+    }
+
+    /// Retains a semaphore permit without allocating an opaque resource box.
+    pub fn retain_semaphore_permit(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
+        debug_assert!(self.retained_resource.is_none());
+        self.retained_resource = Some(RetainedResource::Semaphore { _permit: permit });
+    }
+
+    /// Returns whether this body is fully materialized instead of streamed.
+    pub fn is_materialized(&self) -> bool {
+        !matches!(self.inner, BodyInner::Boxed(_))
     }
 
     /// Takes an in-memory body represented by exactly one data frame and no trailers.
@@ -424,9 +493,11 @@ impl From<hyper::body::Incoming> for Body {
             inner: BodyInner::Boxed(value.map_err(BodyError::from).boxed_unsync()),
             file_region: None,
             close_signal: None,
+            retained_resource: None,
             pending_trailers: None,
             stream_finished: false,
             trailers_sanitized: false,
+            read_timeout_enforced: false,
         }
     }
 }
@@ -670,6 +741,32 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::time::{Duration, timeout};
+
+    struct DropMarker(Arc<AtomicUsize>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn retained_resource_lives_until_streaming_body_is_dropped() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (_sender, mut body) = Body::channel_with_capacity(1);
+        body.retain_resource(DropMarker(dropped.clone()));
+
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        drop(body);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn read_timeout_enforcement_marker_is_explicit() {
+        let body = Body::from("body");
+        assert!(!body.read_timeout_is_enforced());
+        assert!(body.mark_read_timeout_enforced().read_timeout_is_enforced());
+    }
 
     #[test]
     fn byte_limit_preserves_trailer_sanitization_guarantee() {

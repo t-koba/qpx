@@ -209,6 +209,41 @@ pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), Reques
     validate_incoming_request_with_metadata(req).map(|_| ())
 }
 
+/// Returns true when an ordinary HTTP/2 retrieval request is valid without
+/// parsing any field values or rebuilding its already parsed URI authority.
+///
+/// This is deliberately a sufficient, not exhaustive, predicate. Requests
+/// outside this narrow shape must use [`validate_incoming_request_with_metadata`].
+#[inline]
+pub fn is_intrinsically_valid_common_h2_request<B>(req: &http::Request<B>) -> bool {
+    if req.version() != Version::HTTP_2 || !matches!(*req.method(), Method::GET | Method::HEAD) {
+        return false;
+    }
+    if req.headers().keys().any(|name| {
+        matches!(
+            name.as_str(),
+            "host"
+                | "content-length"
+                | "transfer-encoding"
+                | "expect"
+                | "connection"
+                | "proxy-connection"
+                | "keep-alive"
+                | "upgrade"
+                | "te"
+        )
+    }) {
+        return false;
+    }
+    let Some(authority) = req.uri().authority() else {
+        return false;
+    };
+    req.uri().scheme().is_some()
+        && !authority.host().is_empty()
+        && !authority.as_str().contains('@')
+        && req.uri().path().starts_with('/')
+}
+
 pub fn validate_incoming_request_with_metadata<B>(
     req: &http::Request<B>,
 ) -> Result<ValidatedIncomingRequest, RequestValidationError> {

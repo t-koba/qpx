@@ -139,6 +139,46 @@ async fn proxy_plain_http_reuses_direct_origin_connection() -> Result<()> {
 }
 
 #[tokio::test]
+async fn connection_local_pool_keeps_reusable_origins_isolated() -> Result<()> {
+    let (origin, accepts) = spawn_counting_http1_origin("http").await?;
+    let pools = crate::pool::PoolRegistry::new();
+    let default_port = origin.default_port_hint();
+    let connect_authority = origin.connect_authority_ref(default_port)?;
+    let host_authority = origin.host_header_authority_ref(default_port)?;
+    let first_connection = PreparedPlainHttp1ConnectionPool::default();
+    let second_connection = PreparedPlainHttp1ConnectionPool::default();
+
+    for (connection, path) in [
+        (&first_connection, "/first"),
+        (&second_connection, "/second"),
+        (&first_connection, "/third"),
+    ] {
+        let request = prepare_proxy_http1_request(
+            Request::builder()
+                .method(http::Method::GET)
+                .uri(path)
+                .body(Body::empty())?,
+            host_authority.as_ref(),
+            "qpx-test",
+        )?;
+        let response = proxy_direct_plain_http1_raw_response_with_interim_on_connection(
+            &pools,
+            request,
+            connect_authority.as_ref(),
+            host_authority.as_ref(),
+            http::Version::HTTP_2,
+            "qpx-test",
+            connection,
+        )
+        .await?;
+        assert_eq!(to_bytes(response.response.into_body()).await?, "OK");
+    }
+
+    assert_eq!(accepts.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()> {
     let (origin, accepts, closes, closed) = spawn_closing_keepalive_http1_origin().await?;
     let pools = crate::pool::PoolRegistry::new();

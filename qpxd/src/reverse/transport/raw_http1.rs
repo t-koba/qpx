@@ -5,13 +5,13 @@ use super::{InterimList, ReverseConnInfo};
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::reverse::{CompiledReverse, ReloadableReverse};
 use crate::upstream::origin::{
-    PreparedPlainHttp1Origin, prepare_plain_http1_origin,
+    PreparedPlainHttp1Origin, PreparedPlainHttp1Session, prepare_plain_http1_origin,
     proxy_prepared_plain_http1_head_raw_response_with_interim,
 };
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use http::uri::{Authority, Uri};
-use http::{Method, Response, Version};
+use http::{HeaderMap, Method, Request, Response, Version};
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -38,6 +38,10 @@ enum PreparedRawHttp1Target {
         origin: PreparedPlainHttp1Origin,
     },
     LocalResponse,
+    Generic {
+        uri: Uri,
+        headers: HeaderMap,
+    },
 }
 
 pub(in crate::reverse) enum PreparedRawHttp1Response {
@@ -52,6 +56,18 @@ impl PreparedRawHttp1Request {
 
     pub(in crate::reverse) fn keep_alive(&self) -> bool {
         self.keep_alive
+    }
+
+    pub(in crate::reverse) fn generic_request(&self) -> Option<Request<Body>> {
+        let PreparedRawHttp1Target::Generic { uri, headers } = &self.target else {
+            return None;
+        };
+        let mut request = Request::new(Body::empty());
+        *request.method_mut() = self.method.clone();
+        *request.uri_mut() = uri.clone();
+        *request.version_mut() = Version::HTTP_11;
+        *request.headers_mut() = headers.clone();
+        Some(request)
     }
 }
 
@@ -211,19 +227,6 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
     if state.destination_trace_enabled() || !state.security.identity_sources.sources.is_empty() {
         return None;
     }
-    let (route, local_response) = if let Some(route) = compiled.router.single_plain_http_route() {
-        if !route.supports_raw_http1_dispatch() {
-            return None;
-        }
-        (route, false)
-    } else {
-        let route = compiled.router.single_direct_local_response_route()?;
-        if !route.supports_raw_local_response_dispatch() {
-            return None;
-        }
-        (route, true)
-    };
-
     if request_has_body_or_expect(request.headers) || request_has_upgrade(request.headers) {
         return None;
     }
@@ -234,11 +237,11 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
     } else {
         Method::HEAD
     };
-    let route_matches = {
+    let route_match_context = {
         let target = cache.target.as_ref()?;
         let authority = cache.authority.as_ref()?;
         let (path, query) = target.path_and_query();
-        let match_context = RuleMatchContext {
+        RuleMatchContext {
             src_ip: Some(conn.remote_addr.ip()),
             dst_port: Some(conn.dst_port),
             host: Some(authority.normalized_host.as_str()),
@@ -250,17 +253,17 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
             http_version: Some("HTTP/1.1"),
             client_cert_present: Some(false),
             ..Default::default()
-        };
-        route.matches(&match_context)
+        }
     };
-    if !route_matches {
-        return None;
-    }
 
     let keep_alive = !has_connection_token(request.headers, b"close");
-    let target = if local_response {
-        PreparedRawHttp1Target::LocalResponse
-    } else {
+    let direct_dispatch_allowed =
+        !qpx_observability::access_log::access_log_service_required(&state.resources.access_log);
+    let target = if let Some(route) = direct_dispatch_allowed
+        .then(|| compiled.router.single_plain_http_route())
+        .flatten()
+        .filter(|route| route.supports_raw_http1_dispatch() && route.matches(&route_match_context))
+    {
         let selected_upstream = route.available_plain_http_upstream()?;
         let (connect_authority, host_authority) =
             selected_upstream.origin.direct_plain_http1_authorities()?;
@@ -276,6 +279,19 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
             request_head,
             origin,
         }
+    } else if direct_dispatch_allowed
+        && compiled
+            .router
+            .single_direct_local_response_route()
+            .is_some_and(|route| {
+                route.supports_raw_local_response_dispatch() && route.matches(&route_match_context)
+            })
+    {
+        PreparedRawHttp1Target::LocalResponse
+    } else {
+        let uri = request.target.parse::<Uri>().ok()?;
+        let headers = crate::http::codec::h1_common::parse_header_map(request.headers).ok()?;
+        PreparedRawHttp1Target::Generic { uri, headers }
     };
     Some(cache.store_prepared_request(
         request.raw_head,
@@ -291,8 +307,18 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
 
 pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     prepared: &PreparedRawHttp1Request,
+    reverse: &ReloadableReverse,
+    conn: &ReverseConnInfo,
+    session: &mut PreparedPlainHttp1Session,
 ) -> Result<PreparedRawHttp1Response> {
+    if let Some(request) = prepared.generic_request() {
+        session.release();
+        let (interim, response) =
+            super::handle_request_with_interim_ref(request, reverse, conn).await?;
+        return Ok(PreparedRawHttp1Response::Generic(interim, response));
+    }
     if matches!(&prepared.target, PreparedRawHttp1Target::LocalResponse) {
+        session.release();
         let route = prepared
             .compiled
             .router
@@ -337,8 +363,10 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         route.policy.timeout,
         proxy_prepared_plain_http1_head_raw_response_with_interim(
             origin,
+            session,
             &prepared.method,
             request_head.as_ref(),
+            Version::HTTP_11,
             prepared.state.plan.identity.proxy_name.as_ref(),
         ),
     )
@@ -362,6 +390,7 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         );
         return Ok(PreparedRawHttp1Response::Direct(proxied));
     }
+    session.recycle_response_globally(&mut proxied);
     let proxied = proxied.into_http_response()?;
     let mut response = proxied.response;
     crate::http::capture::stream::limit_response_body_for_plan_in_place(&mut response, &route.plan);

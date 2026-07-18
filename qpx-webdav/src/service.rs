@@ -280,6 +280,7 @@ impl<S: WebDavStore> WebDavService<S> {
                         metadata: Arc::new(metadata),
                         etag,
                         body: Bytes::new(),
+                        file: None,
                     })
                 })
                 .transpose()?
@@ -300,7 +301,16 @@ impl<S: WebDavStore> WebDavService<S> {
         if let Some(content_type) = &read.metadata.content_type {
             builder = builder.header(http::header::CONTENT_TYPE, content_type);
         }
-        builder.body(read.body).map_err(Into::into)
+        let file_region = read.file.map(|file| crate::ResourceFileRegion {
+            file,
+            offset: 0,
+            len: read.metadata.content_length,
+        });
+        let mut response = builder.body(read.body)?;
+        if !head && let Some(file_region) = file_region {
+            response.extensions_mut().insert(file_region);
+        }
+        Ok(response)
     }
 
     fn put(

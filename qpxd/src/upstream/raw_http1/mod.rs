@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::task::Poll;
 use tokio::io::ReadBuf;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::sync::OwnedSemaphorePermit;
 
 mod body;
 mod io;
@@ -20,12 +21,15 @@ mod response;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use request::{is_bodyless_http1_request, serialize_bodyless_http1_request};
+pub(crate) use request::{
+    BodylessHttp1Request, classify_bodyless_http1_request, serialize_bodyless_http1_request,
+};
 
 const MAX_HEADER_BYTES: usize = 128 * 1024;
 const INITIAL_READ_BUF_SIZE: usize = 2 * 1024;
 pub(crate) const READ_BUF_SIZE: usize = 512 * 1024;
 const MAX_EMITTED_BODY_FRAME_SIZE: usize = READ_BUF_SIZE;
+const H2_RELAY_BODY_FRAME_SIZE: usize = 1024 * 1024;
 const MAX_CHUNKED_BODY_BYTES: u64 = 1024 * 1024 * 1024;
 pub(crate) const RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT: tokio::time::Duration =
     tokio::time::Duration::from_secs(30);
@@ -65,6 +69,44 @@ pub(crate) struct RawHttp1ResponseRelay<S> {
     pub(crate) read_buf: BytesMut,
     pub(crate) write_buf: BytesMut,
     pub(crate) recycler: Option<Http1ConnectionRecycler<S>>,
+    pub(crate) active_permit: Option<OwnedSemaphorePermit>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RawHttp1ResponseContext<'a> {
+    request_method: &'a http::Method,
+    request_version: http::Version,
+    proxy_name: &'a str,
+}
+
+impl<'a> RawHttp1ResponseContext<'a> {
+    pub(crate) fn new(
+        request_method: &'a http::Method,
+        request_version: http::Version,
+        proxy_name: &'a str,
+    ) -> Self {
+        Self {
+            request_method,
+            request_version,
+            proxy_name,
+        }
+    }
+}
+
+pub(crate) struct ReusableRawHttp1Connection<S> {
+    pub(crate) stream: S,
+    pub(crate) read_buf: BytesMut,
+    pub(crate) write_buf: BytesMut,
+}
+
+pub(crate) fn retain_active_permit(body: &mut Body, permit: Option<OwnedSemaphorePermit>) {
+    let Some(permit) = permit else {
+        return;
+    };
+    if body.is_materialized() {
+        return;
+    }
+    body.retain_semaphore_permit(permit);
 }
 
 pub(crate) struct SerializedHttp1HeadSendError {
@@ -84,6 +126,17 @@ where
 {
     pub(crate) fn status(&self) -> StatusCode {
         self.status
+    }
+
+    pub(crate) fn take_reusable_connection(&mut self) -> Option<ReusableRawHttp1Connection<S>> {
+        if !self.read_buf.is_empty() || !self.raw.upstream_keep_alive() {
+            return None;
+        }
+        Some(ReusableRawHttp1Connection {
+            stream: self.stream.take()?,
+            read_buf: std::mem::take(&mut self.read_buf),
+            write_buf: std::mem::take(&mut self.write_buf),
+        })
     }
 
     pub(crate) fn supports_direct_relay(&self, max_response_body_bytes: usize) -> bool {
@@ -114,9 +167,10 @@ where
             read_buf,
             write_buf,
             recycler,
+            active_permit,
         } = self;
         let stream = stream.ok_or_else(|| anyhow!("raw HTTP/1 relay stream is unavailable"))?;
-        let response = response::build_raw_response(
+        let mut response = response::build_raw_response(
             stream,
             response::RawParsedResponseHead {
                 version,
@@ -127,6 +181,7 @@ where
             write_buf,
             recycler,
         );
+        retain_active_permit(response.body_mut(), active_permit);
         Ok(Http1ResponseWithInterim {
             interim,
             response,
@@ -145,9 +200,10 @@ where
             read_buf,
             write_buf,
             recycler,
+            active_permit,
         } = self;
         let stream = stream.ok_or_else(|| anyhow!("raw HTTP/1 relay stream is unavailable"))?;
-        let response = response::build_materialized_raw_response(
+        let mut response = response::build_materialized_raw_response(
             stream,
             response::RawParsedResponseHead {
                 version,
@@ -157,7 +213,9 @@ where
             read_buf,
             write_buf,
             recycler,
+            H2_RELAY_BODY_FRAME_SIZE,
         )?;
+        retain_active_permit(response.body_mut(), active_permit);
         Ok(Http1ResponseWithInterim {
             interim,
             response,
@@ -180,9 +238,16 @@ where
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct Http1ConnectionRecycler<S> {
     target: Arc<dyn Http1RecycleTarget<S>>,
+}
+
+impl<S> Clone for Http1ConnectionRecycler<S> {
+    fn clone(&self) -> Self {
+        Self {
+            target: Arc::clone(&self.target),
+        }
+    }
 }
 
 impl<S> Http1ConnectionRecycler<S> {
@@ -277,26 +342,29 @@ where
     .await
 }
 
-pub(crate) async fn send_prepared_http1_head_with_interim_reusable_raw_response<S>(
+pub(crate) async fn send_prepared_http1_head_with_interim_reusable_raw_response_under_external_deadline<
+    S,
+>(
     mut stream: S,
     read_buf: BytesMut,
     write_buf: BytesMut,
-    request_method: &http::Method,
     request_head: &[u8],
-    proxy_name: &str,
-    recycler: Http1ConnectionRecycler<S>,
+    response_context: RawHttp1ResponseContext<'_>,
+    recycler: Option<Http1ConnectionRecycler<S>>,
 ) -> Result<RawHttp1ResponseRelay<S>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     stream.write_all(request_head).await?;
+    // The reverse raw path wraps the full upstream exchange in the route deadline.
+    // A second timer for the same response-head wait only adds per-request work.
     let (interim, final_head, buffered_body) =
-        response::read_finalized_raw_response_head_with_interim(
+        response::read_finalized_raw_response_head_with_interim_under_external_deadline(
             &mut stream,
             read_buf,
-            request_method,
-            http::Version::HTTP_11,
-            proxy_name,
+            response_context.request_method,
+            response_context.request_version,
+            response_context.proxy_name,
         )
         .await?;
     Ok(RawHttp1ResponseRelay {
@@ -307,7 +375,8 @@ where
         stream: Some(stream),
         read_buf: buffered_body,
         write_buf,
-        recycler: Some(recycler),
+        recycler,
+        active_permit: None,
     })
 }
 
@@ -355,6 +424,7 @@ where
         read_buf: buffered_body,
         write_buf,
         recycler: Some(recycler),
+        active_permit: None,
     })
 }
 

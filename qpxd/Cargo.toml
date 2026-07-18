@@ -24,6 +24,7 @@ default = [
 # system allocator explicitly without changing the production default.
 mimalloc-allocator = ["dep:mimalloc"]
 system-allocator = []
+h2-wire-tracing = ["h2/wire-tracing"]
 
 tls-rustls = [
   "dep:rustls",
@@ -88,6 +89,7 @@ parking_lot.workspace = true
 smallvec.workspace = true
 notify.workspace = true
 async-trait.workspace = true
+futures-util.workspace = true
 dirs-next.workspace = true
 zeroize.workspace = true
 mimalloc = { workspace = true, optional = true }

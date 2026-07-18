@@ -13,8 +13,9 @@ use crate::reverse::ReloadableReverse;
 use crate::reverse::router::HttpRoute;
 use crate::runtime::Runtime;
 use crate::upstream::origin::{
-    OriginEndpoint, prepare_proxy_http1_request,
-    proxy_direct_plain_http1_raw_response_with_interim, proxy_http,
+    OriginEndpoint, PreparedPlainHttp1ConnectionPool, prepare_proxy_http1_request,
+    proxy_direct_plain_http1_raw_response_with_interim,
+    proxy_direct_plain_http1_raw_response_with_interim_on_connection, proxy_http,
     proxy_http_with_interim_timeout,
 };
 use anyhow::{Result, anyhow};
@@ -95,6 +96,7 @@ pub(super) async fn try_dispatch_unconditional_plain_reverse_request(
     reverse: &ReloadableReverse,
     conn: &ReverseConnInfo,
     state: &Arc<crate::runtime::RuntimeState>,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionPool>,
 ) -> Result<std::result::Result<(InterimList, Response<Body>), Request<Body>>> {
     let request_version = req.version();
     if state.destination_trace_enabled()
@@ -128,16 +130,18 @@ pub(super) async fn try_dispatch_unconditional_plain_reverse_request(
         Ok(req) => req,
         Err(response) => return Ok(Ok(response)),
     };
-    dispatch_plain_reverse_http(
+    let (interim, mut response) = dispatch_plain_reverse_http(
         req,
         state,
         route,
         &request_method,
         request_version,
         state.plan.identity.proxy_name.as_ref(),
+        connection_pool,
     )
-    .await
-    .map(Ok)
+    .await?;
+    apply_reverse_route_metadata(route, conn.tls_sni.is_some(), &mut response)?;
+    Ok(Ok((interim, response)))
 }
 
 async fn execute_reverse_dispatch(
@@ -174,6 +178,7 @@ async fn execute_reverse_dispatch(
                     &base.method,
                     request_version,
                     state.plan.identity.proxy_name.as_ref(),
+                    None,
                 )
                 .await?;
                 apply_reverse_route_metadata(route, secure_transport, &mut response)?;
@@ -381,6 +386,7 @@ async fn execute_reverse_request(
             request_method,
             request_version,
             proxy_name,
+            None,
         )
         .await;
     }
@@ -557,6 +563,7 @@ async fn dispatch_plain_reverse_http(
     request_method: &http::Method,
     request_version: http::Version,
     proxy_name: &str,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionPool>,
 ) -> Result<(InterimList, Response<Body>)> {
     let selected_upstream = route
         .available_plain_http_upstream()
@@ -572,17 +579,30 @@ async fn dispatch_plain_reverse_http(
         .as_ref()
         .is_some_and(|policy| policy.latency_threshold.is_some())
         .then(tokio::time::Instant::now);
-    let response = timeout_after_pending(
-        route.policy.timeout,
-        proxy_direct_plain_http1_raw_response_with_interim(
-            &state.pools,
-            req,
-            connect_authority,
-            host_authority,
-            request_version,
-            proxy_name,
-        ),
-    )
+    let response = timeout_after_pending(route.policy.timeout, async {
+        if let Some(connection_pool) = connection_pool {
+            proxy_direct_plain_http1_raw_response_with_interim_on_connection(
+                &state.pools,
+                req,
+                connect_authority,
+                host_authority,
+                request_version,
+                proxy_name,
+                connection_pool,
+            )
+            .await
+        } else {
+            proxy_direct_plain_http1_raw_response_with_interim(
+                &state.pools,
+                req,
+                connect_authority,
+                host_authority,
+                request_version,
+                proxy_name,
+            )
+            .await
+        }
+    })
     .await;
     let (interim, response, response_finalized) = match response {
         Ok(Ok(response)) => (
@@ -908,8 +928,19 @@ async fn execute_webdav_service(
     })
     .await
     .map_err(|error| anyhow!("WebDAV worker failed: {error}"))??;
-    let (parts, body) = response.into_parts();
-    Ok(Response::from_parts(parts, Body::from(body)))
+    let (mut parts, body) = response.into_parts();
+    let file_region = parts.extensions.remove::<qpx_webdav::ResourceFileRegion>();
+    let body_len = body.len() as u64;
+    let mut body = Body::from(body).mark_trailers_sanitized();
+    if let Some(region) = file_region.filter(|region| region.len >= 64 * 1024) {
+        if region.len != body_len {
+            return Err(anyhow!(
+                "WebDAV file region length does not match the response body"
+            ));
+        }
+        body = body.with_file_region(region.file, region.offset, region.len);
+    }
+    Ok(Response::from_parts(parts, body))
 }
 
 async fn reverse_continue_response_rule(

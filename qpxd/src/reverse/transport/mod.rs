@@ -6,6 +6,7 @@ use crate::http::protocol::preflight::{
     ConnectPolicy, PreflightOptions, PreflightOutcome, preflight_validate,
 };
 use crate::runtime::Runtime;
+use crate::upstream::origin::PreparedPlainHttp1ConnectionPool;
 use anyhow::Result;
 use hyper::{Request, Response, StatusCode};
 use qpx_core::tls::UpstreamCertificateInfo;
@@ -110,11 +111,22 @@ pub(super) async fn handle_request_with_interim_ref(
     reverse: &super::ReloadableReverse,
     conn: &ReverseConnInfo,
 ) -> Result<(InterimList, Response<Body>), Infallible> {
+    handle_request_with_interim_and_origin_pool_ref(req, reverse, conn, None).await
+}
+
+pub(super) async fn handle_request_with_interim_and_origin_pool_ref(
+    req: Request<Body>,
+    reverse: &super::ReloadableReverse,
+    conn: &ReverseConnInfo,
+    origin_pool: Option<&PreparedPlainHttp1ConnectionPool>,
+) -> Result<(InterimList, Response<Body>), Infallible> {
     let runtime = &reverse.runtime;
     let state = runtime.state();
     let request_method = req.method().clone();
     let request_version = req.version();
-    match handle_request_inner(req, reverse, runtime, conn, state).await {
+    match handle_request_inner_with_origin_pool(req, reverse, runtime, conn, state, origin_pool)
+        .await
+    {
         Ok(response) => Ok(response),
         Err(err) => {
             warn!(error = ?err, "reverse handling failed");
@@ -132,14 +144,31 @@ pub(super) async fn handle_request_with_interim_ref(
     }
 }
 
-pub(crate) async fn handle_request_inner(
+async fn handle_request_inner_with_origin_pool(
     mut req: Request<Body>,
     reverse: &super::ReloadableReverse,
     runtime: &Runtime,
     conn: &ReverseConnInfo,
     state: Arc<crate::runtime::RuntimeState>,
+    origin_pool: Option<&PreparedPlainHttp1ConnectionPool>,
 ) -> Result<(InterimList, Response<Body>)> {
     let proxy_name = state.plan.identity.proxy_name.as_ref();
+    let common_h2_request =
+        qpx_http::protocol::semantics::is_intrinsically_valid_common_h2_request(&req);
+    if common_h2_request {
+        req = match try_dispatch_unconditional_plain_reverse_request(
+            req,
+            reverse,
+            conn,
+            &state,
+            origin_pool,
+        )
+        .await?
+        {
+            Ok(response) => return Ok(response),
+            Err(req) => req,
+        };
+    }
     let validated_request = match preflight_validate(
         &mut req,
         proxy_name,
@@ -155,11 +184,20 @@ pub(crate) async fn handle_request_inner(
         PreflightOutcome::Continue(validated) => validated,
         PreflightOutcome::Reject(response) => return Ok(empty_interim_response(*response)),
     };
-    let req =
-        match try_dispatch_unconditional_plain_reverse_request(req, reverse, conn, &state).await? {
+    if !common_h2_request {
+        req = match try_dispatch_unconditional_plain_reverse_request(
+            req,
+            reverse,
+            conn,
+            &state,
+            origin_pool,
+        )
+        .await?
+        {
             Ok(response) => return Ok(response),
             Err(req) => req,
         };
+    }
     let base = extract_base_request_fields(
         &req,
         BaseRequestContext {

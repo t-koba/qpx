@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+while IFS= read -r script; do
+  bash -n "$script"
+done < <(find scripts -type f -name '*.sh' -print)
+
 require() {
   local file="$1"
   local needle="$2"
@@ -559,11 +563,9 @@ require_json_number_at_least perf/origin-cache-performance-objectives.json defau
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_cpu_efficiency_ratio 1.25
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_dominance_score 1.25
 require_json_number_at_most perf/origin-cache-performance-objectives.json defaults.max_p99_latency_ratio 0.8
-require scripts/perf-audit-http2-compare.sh 'h2load -D "$DURATION_SECONDS"'
 require scripts/perf-audit-http2-compare.sh 'MAX_CONCURRENT_STREAMS_VALUES="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES:-1 100}"'
 require scripts/perf-audit-http2-compare.sh 'BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1024 1048576}"'
 require scripts/perf-audit-http2-compare.sh 'CLIENT_THREADS="${QPX_HTTP2_COMPARE_CLIENT_THREADS:-4}"'
-require scripts/perf-audit-http2-compare.sh '-t "$CLIENT_THREADS"'
 require scripts/perf-audit-http2-compare.sh '--log-file="$latency_file"'
 require scripts/perf-audit-http2-compare.sh "-name '*.latency.tsv'"
 require scripts/perf-audit-http2-compare.sh 'nearest_rank(latencies_us, 0.99)'
@@ -587,13 +589,15 @@ require scripts/perf-audit-http2-compare.sh '"nginx"'
 require scripts/perf-audit-http2-compare.sh 'requests_per_cpu_second'
 require scripts/perf-audit-http2-compare.sh 'requests_per_total_cpu_second'
 require scripts/perf-audit-http2-compare.sh 'backend_cpu_ms'
-require scripts/perf-audit-http2-compare.sh '"benchmark_schema_version": 4'
+require scripts/perf-audit-http2-compare.sh '"benchmark_schema_version": 5'
 require scripts/perf-audit-http2-compare.sh 'rss_peak_kb'
 require scripts/perf-audit-http2-compare.sh 'latency_max_ms'
 require scripts/perf-audit-http2-compare.sh 'first_byte_mean_ms'
 require scripts/perf-audit-http2-compare.sh 'source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"'
 require scripts/check-http2-performance.sh 'multi_axis_total_system_http2_dominance'
 require scripts/check-http2-performance.sh 'client_threads'
+require scripts/check-http2-performance.sh 'started_requests'
+require scripts/check-http2-performance.sh 'server_workers'
 require scripts/check-http2-performance.sh 'min_lane_throughput_ratio'
 require scripts/check-http2-performance.sh 'min_lane_total_cpu_efficiency_ratio'
 require scripts/check-http2-performance.sh 'max_lane_p99_latency_ratio'

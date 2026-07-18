@@ -31,6 +31,7 @@ const DISK_CACHE_HOT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const DISK_CACHE_HOT_MAX_OBJECT_BYTES: u64 = 2 * 1024 * 1024;
 const DISK_CACHE_RECENT_ENTRIES: usize = 32;
 const DISK_CACHE_DECODED_SLOTS: usize = 256;
+const DISK_CACHE_ZERO_COPY_MIN_BYTES: u64 = 64 * 1024;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -932,8 +933,10 @@ fn hot_body_stream(
         None => value,
     };
     let len = value.len() as u64;
-    let mut body = Body::from(value);
-    if let Some(file) = file {
+    let mut body = Body::from(value).mark_trailers_sanitized();
+    if len >= DISK_CACHE_ZERO_COPY_MIN_BYTES
+        && let Some(file) = file
+    {
         body = body.with_file_region(file, body_offset.saturating_add(range_start), len);
     }
     Some(CachedBodyStream::from_body_for_backend(len, body))
@@ -1301,6 +1304,7 @@ mod tests {
             vary_headers: Vec::new(),
             vary_values: Vec::new(),
             header_map: Default::default(),
+            response_directives: Default::default(),
         };
         backend
             .put(
@@ -1348,6 +1352,7 @@ mod tests {
             .expect("get stream")
             .expect("hot stream")
             .body;
+        assert!(stream.take_file_region_without_trailers().is_none());
         let mut received = Vec::new();
         while let Some(chunk) = stream.data().await {
             received.extend_from_slice(&chunk.expect("chunk"));
@@ -1361,14 +1366,14 @@ mod tests {
         let dir = temp_dir("canonical-body-region");
         let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
         let key = super::super::types::cache_body_storage_key("ordinary-route-variant");
-        let body = CachedBody::from_bytes(Bytes::from_static(b"content"));
+        let body = CachedBody::from_bytes(Bytes::from(vec![b'x'; 64 * 1024]));
         backend
             .put_object("ordinary-namespace", &key, &body, 60)
             .await
             .expect("put object");
 
         let mut stream = backend
-            .get_object_stream("ordinary-namespace", &key, 7, None)
+            .get_object_stream("ordinary-namespace", &key, 64 * 1024, None)
             .await
             .expect("get stream")
             .expect("cached stream");
@@ -1376,7 +1381,7 @@ mod tests {
             .body
             .take_file_region_without_trailers()
             .expect("canonical cache body file region");
-        assert_eq!(region.len(), 7);
+        assert_eq!(region.len(), 64 * 1024);
         assert!(region.offset() > 0);
         let _ = fs::remove_dir_all(dir);
     }

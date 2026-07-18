@@ -126,22 +126,29 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"{owner} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"{owner} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version", owner) != 4:
+        if nonnegative_int(record, "benchmark_schema_version", owner) != 5:
             fail(f"{owner} uses an unsupported benchmark schema")
         concurrency = nonnegative_int(record, "concurrency", owner)
         client_threads = nonnegative_int(record, "client_threads", owner)
-        if concurrency == 0 or client_threads == 0 or client_threads > concurrency:
+        server_workers = nonnegative_int(record, "server_workers", owner)
+        if concurrency == 0 or client_threads == 0 or server_workers == 0 or client_threads > concurrency:
             fail(f"{owner} has an invalid client saturation configuration")
         requests = nonnegative_int(record, "requests", owner)
+        started = nonnegative_int(record, "started_requests", owner)
         complete = nonnegative_int(record, "complete_requests", owner)
         succeeded = nonnegative_int(record, "succeeded_requests", owner)
-        if requests == 0 or requests != complete or requests != succeeded:
+        if requests == 0 or requests != started or requests != complete or requests != succeeded:
             fail(f"{owner} did not complete every request")
         if nonnegative_int(record, "failed_requests", owner) != 0:
             fail(f"{owner} contains failed requests")
         if nonnegative_int(record, "non_2xx_responses", owner) != 0:
             fail(f"{owner} contains non-2xx responses")
+        if nonnegative_int(record, "calibration_requests", owner) == 0:
+            fail(f"{owner} has an empty calibration workload")
+        if nonnegative_int(record, "benchmark_request_count", owner) != requests:
+            fail(f"{owner} benchmark request count does not match completed requests")
         for field in (
+            "calibration_duration_ms",
             "requests_per_sec",
             "requests_per_cpu_second",
             "requests_per_total_cpu_second",
@@ -187,9 +194,10 @@ for body_bytes, max_streams in sorted(required_lanes):
     qpx = records[(body_bytes, max_streams, "qpxd")]
     nginx = records[(body_bytes, max_streams, "nginx")]
     for field in (
-        "benchmark_duration_seconds",
+        "target_duration_seconds",
         "concurrency",
         "client_threads",
+        "server_workers",
         "max_concurrent_streams",
         "sample_attempts",
         "sampling_order",

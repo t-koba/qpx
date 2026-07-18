@@ -1324,8 +1324,6 @@ dependencies = [
 [[package]]
 name = "h2"
 version = "0.4.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f44da3a8150a6703ed5d34e164b875fd14c2cdab9af1252a9a1020bde2bdc54"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1334,6 +1332,7 @@ dependencies = [
  "futures-sink",
  "http",
  "indexmap",
+ "parking_lot",
  "slab",
  "tokio",
  "tokio-util",
@@ -2916,6 +2915,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "http",
+ "libc",
  "parking_lot",
  "percent-encoding",
  "quick-xml",
@@ -2955,6 +2955,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs-next",
  "flate2",
+ "futures-util",
  "globset",
  "h2",
  "h3",

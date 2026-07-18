@@ -2,10 +2,9 @@ use super::response::ResponseBodyKind;
 use super::{
     Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, MAX_CHUNKED_BODY_BYTES,
     MAX_EMITTED_BODY_FRAME_SIZE, MAX_HEADER_BYTES, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-    READ_BUF_SIZE,
 };
 use crate::http::codec::h1_common::{find_crlf, parse_header_map};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http_body::Frame;
 use qpx_http::body::BodyError;
 use std::pin::Pin;
@@ -38,6 +37,7 @@ pub(super) struct Http1ResponseBody<S> {
     write_buf: BytesMut,
     state: BodyState,
     recycler: Option<Http1ConnectionRecycler<S>>,
+    max_frame_size: usize,
     read_timeout: Duration,
     read_timer: Option<Pin<Box<Sleep>>>,
     read_timer_armed: bool,
@@ -50,6 +50,24 @@ impl<S> Http1ResponseBody<S> {
         kind: ResponseBodyKind,
         write_buf: BytesMut,
         recycler: Option<Http1ConnectionRecycler<S>>,
+    ) -> Self {
+        Self::new_with_max_frame_size(
+            stream,
+            prefix,
+            kind,
+            write_buf,
+            recycler,
+            MAX_EMITTED_BODY_FRAME_SIZE,
+        )
+    }
+
+    pub(super) fn new_with_max_frame_size(
+        stream: S,
+        prefix: BytesMut,
+        kind: ResponseBodyKind,
+        write_buf: BytesMut,
+        recycler: Option<Http1ConnectionRecycler<S>>,
+        max_frame_size: usize,
     ) -> Self {
         let state = match kind {
             ResponseBodyKind::Empty => BodyState::Done,
@@ -66,6 +84,7 @@ impl<S> Http1ResponseBody<S> {
             write_buf,
             state,
             recycler,
+            max_frame_size: max_frame_size.max(1),
             read_timeout: RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
             read_timer: None,
             read_timer_armed: false,
@@ -140,7 +159,7 @@ where
                             .buf
                             .len()
                             .min(*remaining as usize)
-                            .min(MAX_EMITTED_BODY_FRAME_SIZE);
+                            .min(this.max_frame_size);
                         *remaining -= take as u64;
                         return Poll::Ready(Some(Ok(Frame::data(
                             this.buf.split_to(take).freeze(),
@@ -148,7 +167,7 @@ where
                     }
                     // Bounded read-ahead keeps unexpected bytes from entering the reusable pool.
                     let read_size = (*remaining)
-                        .clamp(INITIAL_READ_BUF_SIZE as u64, READ_BUF_SIZE as u64)
+                        .clamp(INITIAL_READ_BUF_SIZE as u64, this.max_frame_size as u64)
                         as usize;
                     match poll_read_with_timeout(this, cx, read_size) {
                         Poll::Ready(Ok(0)) => {
@@ -169,12 +188,12 @@ where
                 }
                 BodyState::CloseDelimited => {
                     if !this.buf.is_empty() {
-                        let take = this.buf.len().min(MAX_EMITTED_BODY_FRAME_SIZE);
+                        let take = this.buf.len().min(this.max_frame_size);
                         return Poll::Ready(Some(Ok(Frame::data(
                             this.buf.split_to(take).freeze(),
                         ))));
                     }
-                    match poll_read_with_timeout(this, cx, READ_BUF_SIZE) {
+                    match poll_read_with_timeout(this, cx, this.max_frame_size) {
                         Poll::Ready(Ok(0)) => {
                             this.state = BodyState::Done;
                             this.discard();
@@ -247,17 +266,13 @@ where
                             continue;
                         }
                         if !this.buf.is_empty() {
-                            let take = this
-                                .buf
-                                .len()
-                                .min(*remaining)
-                                .min(MAX_EMITTED_BODY_FRAME_SIZE);
+                            let take = this.buf.len().min(*remaining).min(this.max_frame_size);
                             *remaining -= take;
                             return Poll::Ready(Some(Ok(Frame::data(
                                 this.buf.split_to(take).freeze(),
                             ))));
                         }
-                        let read_size = (*remaining).min(READ_BUF_SIZE);
+                        let read_size = (*remaining).min(this.max_frame_size);
                         match poll_read_with_timeout(this, cx, read_size) {
                             Poll::Ready(Ok(0)) => {
                                 this.state = BodyState::Done;
@@ -404,10 +419,12 @@ where
     let Some(stream) = body.stream.as_mut() else {
         return Poll::Ready(Ok(0));
     };
-    if body.buf.capacity() == body.buf.len() {
-        body.buf.reserve(read_size.max(1));
+    let read_size = read_size.max(1);
+    if body.buf.capacity().saturating_sub(body.buf.len()) < read_size {
+        body.buf.reserve(read_size);
     }
-    match tokio_util::io::poll_read_buf(Pin::new(stream), cx, &mut body.buf) {
+    let mut limited = (&mut body.buf).limit(read_size);
+    match tokio_util::io::poll_read_buf(Pin::new(stream), cx, &mut limited) {
         Poll::Ready(Ok(n)) => {
             body.read_timer_armed = false;
             Poll::Ready(Ok(n))
@@ -503,6 +520,39 @@ mod tests {
                 .into_data()
                 .expect("data frame");
             assert_eq!(frame.len(), expected);
+        }
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn transport_frame_limit_caps_each_upstream_read() {
+        const FRAME_LIMIT: usize = 4096;
+        let body_bytes = FRAME_LIMIT * 3;
+        let (mut upstream, proxy) = tokio::io::duplex(body_bytes * 2);
+        upstream
+            .write_all(&vec![b'x'; body_bytes])
+            .await
+            .expect("write body");
+        let mut prefix = BytesMut::with_capacity(body_bytes * 2);
+        prefix.clear();
+        let mut body = Http1ResponseBody::new_with_max_frame_size(
+            proxy,
+            prefix,
+            ResponseBodyKind::ContentLength(body_bytes as u64),
+            BytesMut::new(),
+            None,
+            FRAME_LIMIT,
+        );
+
+        for _ in 0..3 {
+            let frame = body
+                .frame()
+                .await
+                .expect("body frame")
+                .expect("valid body frame")
+                .into_data()
+                .expect("data frame");
+            assert_eq!(frame.len(), FRAME_LIMIT);
         }
         assert!(body.frame().await.is_none());
     }

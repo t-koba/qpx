@@ -26,6 +26,14 @@ fn build_reloadable_reverse_with_filter(
     upstream_addr: SocketAddr,
     connection_filter: Vec<RuleConfig>,
 ) -> ReloadableReverse {
+    build_reloadable_reverse_with_options(upstream_addr, connection_filter, false)
+}
+
+fn build_reloadable_reverse_with_options(
+    upstream_addr: SocketAddr,
+    connection_filter: Vec<RuleConfig>,
+    access_log_enabled: bool,
+) -> ReloadableReverse {
     let reverse_cfg = ReverseEdgeConfig {
         name: "test".to_string(),
         listen: "127.0.0.1:0".to_string(),
@@ -80,6 +88,9 @@ fn build_reloadable_reverse_with_filter(
         discovery: None,
         resilience: None,
     };
+    let mut access_log = AccessLogConfig::default();
+    access_log.output.enabled = access_log_enabled;
+    access_log.output.format = "combined".to_string();
     let config = Config {
         state_dir: None,
         identity: IdentityConfig::default(),
@@ -87,7 +98,7 @@ fn build_reloadable_reverse_with_filter(
         runtime: RuntimeConfig::default(),
         telemetry: qpx_core::config::TelemetryConfig {
             system_log: SystemLogConfig::default(),
-            access_log: AccessLogConfig::default(),
+            access_log,
             audit_log: AuditLogConfig::default(),
             metrics: None,
             otel: None,
@@ -258,13 +269,10 @@ async fn reverse_h2_service_emits_early_hints() {
     let addr = listener.local_addr().expect("reverse addr");
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let service = AccessLogService::new(
-        ReverseInterimService {
+        ReverseInterimService::new(
             reverse,
-            conn: ReverseConnInfo::plain(
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
-                80,
-            ),
-        },
+            ReverseConnInfo::plain(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345), 80),
+        ),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         AccessLogContext {
             kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
@@ -391,6 +399,176 @@ async fn reverse_h1_listener_emits_early_hints() {
 
     acceptor.abort();
     let _ = acceptor.await;
+}
+
+async fn assert_reverse_h1_reuses_validated_requests(access_log_enabled: bool) {
+    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let upstream_addr = upstream_listener.local_addr().expect("upstream addr");
+    tokio::spawn(async move {
+        let (mut stream, _) = upstream_listener.accept().await.expect("accept upstream");
+        for _ in 0..2 {
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut byte).await.expect("read request");
+                assert!(
+                    read > 0,
+                    "upstream request ended after {:?}",
+                    String::from_utf8_lossy(&request)
+                );
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(b"GET /asset HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .await
+                .expect("write response");
+        }
+    });
+
+    let reverse =
+        build_reloadable_reverse_with_options(upstream_addr, Vec::new(), access_log_enabled);
+    let reverse_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind reverse");
+    let reverse_addr = reverse_listener.local_addr().expect("reverse addr");
+    let acceptor = tokio::spawn(async move {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        run_reverse_http_acceptor(reverse_listener, None, reverse, shutdown_rx)
+            .await
+            .expect("acceptor");
+    });
+
+    let mut client = TcpStream::connect(reverse_addr)
+        .await
+        .expect("connect reverse");
+    client
+        .write_all(
+            b"GET /asset HTTP/1.1\r\nHost: reverse.test\r\n\r\nGET /asset HTTP/1.1\r\nHost: reverse.test\r\n\r\n",
+        )
+        .await
+        .expect("write requests");
+    let mut raw = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while raw
+        .windows(b"\r\n\r\nOK".len())
+        .filter(|window| *window == b"\r\n\r\nOK")
+        .count()
+        < 2
+    {
+        let read = tokio::time::timeout(Duration::from_secs(2), client.read(&mut chunk))
+            .await
+            .expect("response timeout")
+            .expect("read responses");
+        assert!(read > 0, "reverse connection closed before both responses");
+        raw.extend_from_slice(&chunk[..read]);
+    }
+    assert_eq!(
+        raw.windows(b"HTTP/1.1 200".len())
+            .filter(|window| *window == b"HTTP/1.1 200")
+            .count(),
+        2
+    );
+    assert_eq!(
+        raw.windows(b"\r\n\r\nOK".len())
+            .filter(|window| *window == b"\r\n\r\nOK")
+            .count(),
+        2
+    );
+
+    acceptor.abort();
+    let _ = acceptor.await;
+}
+
+#[tokio::test]
+async fn reverse_h1_direct_session_reuses_upstream_connection() {
+    assert_reverse_h1_reuses_validated_requests(false).await;
+}
+
+#[tokio::test]
+async fn reverse_h1_direct_session_retries_closed_upstream_connection() {
+    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let upstream_addr = upstream_listener.local_addr().expect("upstream addr");
+    let upstream = tokio::spawn(async move {
+        let mut completed = 0;
+        while completed < 2 {
+            let (mut stream, _) = upstream_listener.accept().await.expect("accept upstream");
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut byte).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.push(byte[0]);
+            }
+            if !request.ends_with(b"\r\n\r\n") {
+                continue;
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .await
+                .expect("write response");
+            stream.shutdown().await.expect("shutdown upstream");
+            completed += 1;
+        }
+    });
+
+    let reverse = build_reloadable_reverse(upstream_addr);
+    let reverse_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind reverse");
+    let reverse_addr = reverse_listener.local_addr().expect("reverse addr");
+    let acceptor = tokio::spawn(async move {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        run_reverse_http_acceptor(reverse_listener, None, reverse, shutdown_rx)
+            .await
+            .expect("acceptor");
+    });
+
+    let mut client = TcpStream::connect(reverse_addr)
+        .await
+        .expect("connect reverse");
+    client
+        .write_all(
+            b"GET /one HTTP/1.1\r\nHost: reverse.test\r\n\r\nGET /two HTTP/1.1\r\nHost: reverse.test\r\n\r\n",
+        )
+        .await
+        .expect("write requests");
+    let mut raw = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while raw
+        .windows(b"\r\n\r\nOK".len())
+        .filter(|window| *window == b"\r\n\r\nOK")
+        .count()
+        < 2
+    {
+        let read = tokio::time::timeout(Duration::from_secs(2), client.read(&mut chunk))
+            .await
+            .expect("response timeout")
+            .expect("read responses");
+        assert!(read > 0, "reverse connection closed before both responses");
+        raw.extend_from_slice(&chunk[..read]);
+    }
+    assert_eq!(
+        raw.windows(b"HTTP/1.1 200".len())
+            .filter(|window| *window == b"HTTP/1.1 200")
+            .count(),
+        2
+    );
+
+    upstream.await.expect("upstream task");
+    acceptor.abort();
+    let _ = acceptor.await;
+}
+
+#[tokio::test]
+async fn reverse_h1_reuses_validated_requests_with_access_logging_enabled() {
+    assert_reverse_h1_reuses_validated_requests(true).await;
 }
 
 #[tokio::test]
