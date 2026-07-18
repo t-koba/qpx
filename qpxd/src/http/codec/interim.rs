@@ -10,12 +10,14 @@ use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use std::future::poll_fn;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
 use tokio::io::AsyncReadExt;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::ReusableBoxFuture;
 use tracing::{debug, warn};
 
 pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+const H2_ACCEPT_BACKLOG: usize = 64;
 
 #[cfg(test)]
 pub(crate) async fn serve_h2_with_interim<I, S>(
@@ -89,31 +91,30 @@ where
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     loop {
+        let accept_backlog_available = concurrent_streams.len() < H2_ACCEPT_BACKLOG;
+        if accepting_streams && !accept_backlog_available {
+            let progress = poll_fn(|cx| {
+                Poll::Ready(match conn.poll_closed(cx) {
+                    Poll::Ready(result) => Some(result),
+                    Poll::Pending => None,
+                })
+            })
+            .await;
+            if let Some(result) = progress {
+                match result {
+                    Ok(()) => {
+                        accepting_streams = false;
+                        if primary_stream.is_none() && concurrent_streams.is_empty() {
+                            break;
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         tokio::select! {
             biased;
-            completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
-                let () = completed;
-                reusable_primary_stream = primary_stream.take();
-                if !accepting_streams && concurrent_streams.is_empty() {
-                    break;
-                }
-                if concurrent_streams.is_empty() {
-                    idle_timer
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + idle_timeout);
-                }
-            }
-            Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
-                if primary_stream.is_none() && concurrent_streams.is_empty() {
-                    if !accepting_streams {
-                        break;
-                    }
-                    idle_timer
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + idle_timeout);
-                }
-            }
-            accepted = conn.accept(), if accepting_streams => {
+            accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
                 let Some(result) = accepted else {
                     accepting_streams = false;
                     if primary_stream.is_none() && concurrent_streams.is_empty() {
@@ -141,6 +142,28 @@ where
                     primary_stream = Some(reusable);
                 } else {
                     concurrent_streams.push(stream);
+                }
+            }
+            Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                if primary_stream.is_none() && concurrent_streams.is_empty() {
+                    if !accepting_streams {
+                        break;
+                    }
+                    idle_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_timeout);
+                }
+            }
+            completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
+                let () = completed;
+                reusable_primary_stream = primary_stream.take();
+                if !accepting_streams && concurrent_streams.is_empty() {
+                    break;
+                }
+                if concurrent_streams.is_empty() {
+                    idle_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_timeout);
                 }
             }
             () = idle_timer.as_mut() => {

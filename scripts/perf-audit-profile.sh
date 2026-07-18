@@ -9,8 +9,6 @@ PROFILE_EVENTS="${QPX_PERF_PROFILE_EVENTS:-$ROOT_DIR/target/perf/perf-audit-prof
 PROFILE_REQUESTS="${QPX_PERF_PROFILE_REQUESTS:-32}"
 PROFILE_CONCURRENCY="${QPX_PERF_PROFILE_CONCURRENCY:-4}"
 MIN_INSTRUCTIONS="${QPX_PERF_PROFILE_MIN_INSTRUCTIONS:-1000000}"
-HTTP2_WARMUP_GAP_MS="${QPX_PERF_PROFILE_HTTP2_WARMUP_GAP_MS:-15000}"
-HTTP2_INSTRUMENTATION_LEAD_MS=2000
 DEFAULT_QPXD_BIN="$ROOT_DIR/target/callgrind/qpxd"
 QPXD_BIN="${QPXD_BIN:-$DEFAULT_QPXD_BIN}"
 BACKEND_PORT="${QPX_PERF_PROFILE_BACKEND_PORT:-18480}"
@@ -25,15 +23,9 @@ mkdir -p "$PROFILE_DIR" "$LOG_DIR" "$(dirname "$PROFILE_JSON")"
 
 PIDS=()
 BACKEND_PID=""
-BACKEND_ACCESS_LOG=""
-HTTP2_CLIENT_PID=""
 
 cleanup() {
   local pid
-  if [ -n "$HTTP2_CLIENT_PID" ] && kill -0 "$HTTP2_CLIENT_PID" >/dev/null 2>&1; then
-    kill "$HTTP2_CLIENT_PID" >/dev/null 2>&1 || true
-    wait "$HTTP2_CLIENT_PID" >/dev/null 2>&1 || true
-  fi
   for pid in "${PIDS[@]:-}"; do
     if kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" >/dev/null 2>&1 || true
@@ -68,14 +60,6 @@ json_escape() {
   python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"
 }
 
-monotonic_ms() {
-  python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'
-}
-
-sleep_ms() {
-  python3 -c 'import sys, time; time.sleep(int(sys.argv[1]) / 1000)' "$1"
-}
-
 make_certificate() {
   openssl req \
     -x509 \
@@ -94,8 +78,8 @@ start_backend() {
   local prefix="$TMP_DIR/backend"
   local config="$prefix/nginx.conf"
   mkdir -p "$prefix/logs" "$prefix/www"
-  BACKEND_ACCESS_LOG="$prefix/logs/access.log"
-  : >"$BACKEND_ACCESS_LOG"
+  local backend_access_log="$prefix/logs/access.log"
+  : >"$backend_access_log"
   dd if=/dev/zero of="$prefix/www/bench" bs=1024 count=1 status=none
   cat >"$config" <<NGINX
 pid $prefix/nginx.pid;
@@ -103,7 +87,7 @@ error_log $prefix/logs/error.log warn;
 worker_processes 1;
 events { worker_connections 4096; }
 http {
-  access_log $BACKEND_ACCESS_LOG combined;
+  access_log $backend_access_log combined;
   sendfile on;
   keepalive_requests 10000000;
   keepalive_timeout 65;
@@ -216,81 +200,35 @@ PY
 run_http2_profile_load() {
   local output="$1"
   local qpx_pid="$2"
-  local timing_script="$TMP_DIR/http2-profile-timing.tsv"
-  local requests_per_client=$((PROFILE_REQUESTS / PROFILE_CONCURRENCY))
-  local expected_requests=$((PROFILE_REQUESTS + PROFILE_CONCURRENCY))
-  local access_lines_before access_lines expected_warmup_lines client_pid elapsed_ms index
-  local arm_at_ms started_at_ms client_status
-  : >"$timing_script"
-  printf '0\thttps://localhost:%s/bench\n' "$QPX_HTTP2_PORT" >>"$timing_script"
-  index=0
-  while [ "$index" -lt "$requests_per_client" ]; do
-    printf '%s\thttps://localhost:%s/bench\n' \
-      "$HTTP2_WARMUP_GAP_MS" "$QPX_HTTP2_PORT" >>"$timing_script"
-    index=$((index + 1))
-  done
-  access_lines_before="$(wc -l <"$BACKEND_ACCESS_LOG")"
-  expected_warmup_lines=$((access_lines_before + PROFILE_CONCURRENCY))
-  started_at_ms="$(monotonic_ms)"
-  h2load -c "$PROFILE_CONCURRENCY" -m "$PROFILE_CONCURRENCY" \
-    --timing-script-file="$timing_script" \
-    --base-uri="https://localhost:${QPX_HTTP2_PORT}" \
+  local warmup_output="$LOG_DIR/http2-profile-warmup.txt"
+  local client_status=0
+
+  # Warm up the TLS, HTTP/2, HPACK and origin connection state in a completed
+  # request before enabling callgrind. Timing-script based warmup was racy:
+  # h2load may complete the timed requests before nginx flushes its access log,
+  # leaving the profiler with an empty or partial measurement window.
+  if ! h2load -n "$PROFILE_CONCURRENCY" -c "$PROFILE_CONCURRENCY" \
+    -m "$PROFILE_CONCURRENCY" \
     --connect-to "127.0.0.1:${QPX_HTTP2_PORT}" \
-    >"$output" 2>&1 &
-  client_pid=$!
-  HTTP2_CLIENT_PID="$client_pid"
-  while true; do
-    access_lines="$(wc -l <"$BACKEND_ACCESS_LOG")"
-    if [ "$access_lines" -ge "$expected_warmup_lines" ]; then
-      break
-    fi
-    if ! kill -0 "$client_pid" >/dev/null 2>&1; then
-      wait "$client_pid" || true
-      HTTP2_CLIENT_PID=""
-      cat "$output" >&2
-      echo "HTTP/2 profile client exited before warmup completed" >&2
-      return 1
-    fi
-    sleep 0.1
-  done
-  elapsed_ms=$(( $(monotonic_ms) - started_at_ms ))
-  arm_at_ms=$((HTTP2_WARMUP_GAP_MS - HTTP2_INSTRUMENTATION_LEAD_MS))
-  if [ "$elapsed_ms" -ge "$arm_at_ms" ]; then
-    kill "$client_pid" >/dev/null 2>&1 || true
-    wait "$client_pid" >/dev/null 2>&1 || true
-    HTTP2_CLIENT_PID=""
-    echo "HTTP/2 warmup exceeded the instrumentation window" >&2
+    "https://localhost:${QPX_HTTP2_PORT}/bench" >"$warmup_output" 2>&1; then
+    cat "$warmup_output" >&2
+    echo "HTTP/2 profile warmup failed" >&2
     return 1
   fi
-  sleep_ms $((arm_at_ms - elapsed_ms))
-  access_lines="$(wc -l <"$BACKEND_ACCESS_LOG")"
-  if [ "$access_lines" -ne "$expected_warmup_lines" ]; then
-    kill "$client_pid" >/dev/null 2>&1 || true
-    wait "$client_pid" >/dev/null 2>&1 || true
-    HTTP2_CLIENT_PID=""
-    echo "HTTP/2 measured requests started before instrumentation" >&2
-    return 1
-  fi
+
   callgrind_control -i on "$qpx_pid" >/dev/null
-  elapsed_ms=$(( $(monotonic_ms) - started_at_ms ))
-  if [ "$elapsed_ms" -ge "$HTTP2_WARMUP_GAP_MS" ]; then
-    kill "$client_pid" >/dev/null 2>&1 || true
-    wait "$client_pid" >/dev/null 2>&1 || true
-    HTTP2_CLIENT_PID=""
-    callgrind_control -i off "$qpx_pid" >/dev/null || true
-    echo "HTTP/2 instrumentation did not arm before measured requests" >&2
-    return 1
-  fi
-  client_status=0
-  wait "$client_pid" || client_status=$?
-  HTTP2_CLIENT_PID=""
-  callgrind_control -i off "$qpx_pid" >/dev/null
+  h2load -n "$PROFILE_REQUESTS" -c "$PROFILE_CONCURRENCY" \
+    -m "$PROFILE_CONCURRENCY" \
+    --connect-to "127.0.0.1:${QPX_HTTP2_PORT}" \
+    "https://localhost:${QPX_HTTP2_PORT}/bench" \
+    >"$output" 2>&1 || client_status=$?
+  callgrind_control -i off "$qpx_pid" >/dev/null || true
   if [ "$client_status" -ne 0 ]; then
     cat "$output" >&2
-    echo "HTTP/2 profile client failed with status ${client_status}" >&2
+    echo "HTTP/2 profile load failed with status ${client_status}" >&2
     return 1
   fi
-  python3 - "$output" "$expected_requests" <<'PY'
+  python3 - "$output" "$PROFILE_REQUESTS" <<'PY'
 import re
 import sys
 
@@ -306,7 +244,7 @@ if row is None:
 values = [int(value) for value in row.groups()]
 total, started, done, succeeded, failed, errored, timed_out = values
 if (total, started, done, succeeded) != (expected, expected, expected, expected):
-    raise SystemExit("HTTP/2 profile load did not complete warmup and measured requests")
+    raise SystemExit("HTTP/2 profile load did not complete the measured requests")
 if failed != 0 or errored != 0 or timed_out != 0:
     raise SystemExit("HTTP/2 profile load reported failures")
 PY
@@ -442,11 +380,6 @@ require_cmd valgrind
 positive_integer QPX_PERF_PROFILE_REQUESTS "$PROFILE_REQUESTS"
 positive_integer QPX_PERF_PROFILE_CONCURRENCY "$PROFILE_CONCURRENCY"
 positive_integer QPX_PERF_PROFILE_MIN_INSTRUCTIONS "$MIN_INSTRUCTIONS"
-positive_integer QPX_PERF_PROFILE_HTTP2_WARMUP_GAP_MS "$HTTP2_WARMUP_GAP_MS"
-if [ "$HTTP2_WARMUP_GAP_MS" -le "$HTTP2_INSTRUMENTATION_LEAD_MS" ]; then
-  echo "QPX_PERF_PROFILE_HTTP2_WARMUP_GAP_MS must exceed ${HTTP2_INSTRUMENTATION_LEAD_MS}" >&2
-  exit 1
-fi
 if [ "$PROFILE_CONCURRENCY" -gt "$PROFILE_REQUESTS" ]; then
   echo "QPX_PERF_PROFILE_CONCURRENCY must not exceed QPX_PERF_PROFILE_REQUESTS" >&2
   exit 1

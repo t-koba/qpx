@@ -29,9 +29,15 @@ const DISK_CACHE_FILE_EXT: &str = "qpxc";
 const DISK_CACHE_CHUNK_BYTES: usize = 64 * 1024;
 const DISK_CACHE_HOT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const DISK_CACHE_HOT_MAX_OBJECT_BYTES: u64 = 2 * 1024 * 1024;
-const DISK_CACHE_RECENT_ENTRIES: usize = 32;
+// Keep the lock-free read index wider than the number of hot metadata/body
+// objects commonly touched by one worker. A narrow table makes the metadata
+// and body keys for unrelated cache entries collide frequently, forcing every
+// hit through the LRU mutex that the read path is designed to avoid.
+const DISK_CACHE_RECENT_ENTRIES: usize = 256;
 const DISK_CACHE_DECODED_SLOTS: usize = 256;
 const DISK_CACHE_ZERO_COPY_MIN_BYTES: u64 = 64 * 1024;
+const HOT_SLOT_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const HOT_SLOT_PRIME: u64 = 0x100000001b3;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -95,7 +101,7 @@ struct RecentHotCacheEntry {
 
 #[derive(Clone, Default)]
 struct RecentHotCache {
-    entries: Vec<RecentHotCacheEntry>,
+    entries: Vec<Option<RecentHotCacheEntry>>,
 }
 
 struct DecodedVariantIndexEntry {
@@ -271,11 +277,13 @@ impl DiskCacheBackend {
     async fn hot_get(&self, namespace: &str, key: &str) -> HotCacheLookup {
         let now = now_ms();
         let recent = self.hot_recent.load();
-        if let Some(entry) = recent
-            .entries
-            .iter()
-            .find(|entry| entry.namespace.as_ref() == namespace && entry.key.as_ref() == key)
-        {
+        let slot = hot_slot(namespace, key);
+        if let Some(entry) = recent.entries.get(slot).and_then(Option::as_ref) {
+            if entry.namespace.as_ref() != namespace || entry.key.as_ref() != key {
+                drop(recent);
+                let path = self.path_for(namespace, key);
+                return self.hot_get_from_lru(namespace, key, path, now).await;
+            }
             if entry.expires_at_ms > now {
                 return HotCacheLookup::Hit {
                     value: entry.value.clone(),
@@ -290,6 +298,16 @@ impl DiskCacheBackend {
         }
         drop(recent);
         let path = self.path_for(namespace, key);
+        self.hot_get_from_lru(namespace, key, path, now).await
+    }
+
+    async fn hot_get_from_lru(
+        &self,
+        namespace: &str,
+        key: &str,
+        path: PathBuf,
+        now: u64,
+    ) -> HotCacheLookup {
         let mut state = self.state.lock().await;
         let expired = state
             .hot_entries
@@ -452,19 +470,18 @@ impl DiskCacheBackend {
 
     fn hot_recent_upsert(&self, entry: RecentHotCacheEntry, removed: &[PathBuf]) {
         self.hot_recent.rcu(|current| {
-            let mut entries = Vec::with_capacity(DISK_CACHE_RECENT_ENTRIES);
-            entries.push(entry.clone());
-            entries.extend(
-                current
-                    .entries
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.path != entry.path
-                            && !removed.iter().any(|path| path == &candidate.path)
-                    })
-                    .take(DISK_CACHE_RECENT_ENTRIES.saturating_sub(1))
-                    .cloned(),
-            );
+            let mut entries = current.entries.clone();
+            entries.resize_with(DISK_CACHE_RECENT_ENTRIES, || None);
+            for candidate in &mut entries {
+                if candidate.as_ref().is_some_and(|candidate| {
+                    candidate.path == entry.path
+                        || removed.iter().any(|path| path == &candidate.path)
+                }) {
+                    *candidate = None;
+                }
+            }
+            let slot = hot_slot(entry.namespace.as_ref(), entry.key.as_ref());
+            entries[slot] = Some(entry.clone());
             RecentHotCache { entries }
         });
     }
@@ -475,6 +492,7 @@ impl DiskCacheBackend {
             .load()
             .entries
             .iter()
+            .flatten()
             .any(|entry| entry.path == path)
         {
             return;
@@ -483,8 +501,12 @@ impl DiskCacheBackend {
             entries: current
                 .entries
                 .iter()
-                .filter(|entry| entry.path != path)
-                .cloned()
+                .map(|entry| {
+                    entry
+                        .as_ref()
+                        .filter(|candidate| candidate.path != path)
+                        .cloned()
+                })
                 .collect(),
         });
     }
@@ -940,6 +962,21 @@ fn hot_body_stream(
         body = body.with_file_region(file, body_offset.saturating_add(range_start), len);
     }
     Some(CachedBodyStream::from_body_for_backend(len, body))
+}
+
+fn hot_slot(namespace: &str, key: &str) -> usize {
+    let mut hash = HOT_SLOT_OFFSET_BASIS;
+    for byte in namespace
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(0))
+        .chain(key.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(HOT_SLOT_PRIME);
+    }
+    (hash as usize) % DISK_CACHE_RECENT_ENTRIES
 }
 
 fn open_zero_copy_source(key: &str, path: &Path) -> Option<std::sync::Arc<File>> {

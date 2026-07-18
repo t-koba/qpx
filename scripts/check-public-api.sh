@@ -47,11 +47,11 @@ check_crate() {
 
 case "$(uname -s)" in
   Darwin)
-    qpx_core_api_hash=a69b3fe4a142efb0af694b004c7326cc2ba7fc1fb8f3834938afdee149a02903
+    qpx_core_api_hash=d6d3412e7c07e276b300ec5efc65b294b2d3ba9dea1178638a2c357abe794101
     qpx_h3_api_hash=400fc73c391d6a5963c922c2053bb7c18776d9ab5997762b7e2cac3a3b2376cb
     ;;
   *)
-    qpx_core_api_hash=3063c24969a6a4a68918f79d6f7a1541613b542be152e910b1ee08b644e2af2c
+    qpx_core_api_hash=4a2ae77412aa933b76a6e35b8ecc8a6d48a91d3f4101d7041d450977e1bcce38
     qpx_h3_api_hash=cd9fcefc7ac1cb75406ab51a30de364be14e9ea72b243b850f43f03e649a211a
     ;;
 esac

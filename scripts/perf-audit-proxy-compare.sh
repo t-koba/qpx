@@ -472,7 +472,7 @@ telemetry:
 runtime:
   worker_threads: ${LOCAL_ORIGIN_WORKERS}
   acceptor_tasks_per_listener: ${LOCAL_ORIGIN_WORKERS}
-  reuse_port: false
+  reuse_port: true
 edges:
   - kind: reverse
     name: qpxd-origin
@@ -522,7 +522,7 @@ runtime:
   worker_threads: ${WEBDAV_WORKERS}
   max_blocking_threads: ${WEBDAV_BLOCKING_THREADS}
   acceptor_tasks_per_listener: ${WEBDAV_WORKERS}
-  reuse_port: false
+  reuse_port: true
 edges:
   - kind: reverse
     name: qpxd-webdav
@@ -658,7 +658,7 @@ caches:
 runtime:
   worker_threads: ${workers}
   acceptor_tasks_per_listener: ${workers}
-  reuse_port: false
+  reuse_port: true
   upstream_proxy_max_concurrent_per_endpoint: 512
 edges:
   - kind: reverse

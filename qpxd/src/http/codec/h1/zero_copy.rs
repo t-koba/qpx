@@ -122,12 +122,13 @@ pub(super) async fn splice_tcp_exact(
         let requested = usize::try_from(remaining.min(usize::MAX as u64)).unwrap_or(usize::MAX);
         let moved = timeout_after_pending(read_timeout, async {
             loop {
-                source.readable().await?;
                 match source.try_io(Interest::READABLE, || {
                     splice_once(source.as_raw_fd(), pipe.write_fd, requested)
                 }) {
                     Ok(moved) => return Ok(moved),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        source.readable().await?;
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -145,12 +146,13 @@ pub(super) async fn splice_tcp_exact(
         while buffered > 0 {
             let written = timeout_after_pending(write_timeout, async {
                 loop {
-                    destination.writable().await?;
                     match destination.try_io(Interest::WRITABLE, || {
                         splice_once(pipe.read_fd, destination.as_raw_fd(), buffered)
                     }) {
                         Ok(written) => return Ok(written),
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            destination.writable().await?;
+                        }
                         Err(error) => return Err(error),
                     }
                 }

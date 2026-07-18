@@ -183,7 +183,7 @@ impl Prioritize {
             stream.requested_send_capacity =
                 cmp::min(stream.buffered_send_data, WindowSize::MAX as usize) as WindowSize;
 
-            // `try_assign_capacity` will queue the stream to `pending_capacity` if the capcaity
+            // `try_assign_capacity` will queue the stream to `pending_capacity` if the capacity
             // cannot be assigned at the time it is called.
             self.try_assign_capacity(stream);
         }

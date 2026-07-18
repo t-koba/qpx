@@ -505,11 +505,11 @@ impl Recv {
     /// Set the "target" connection window size.
     ///
     /// By default, all new connections start with 64kb of window size. As
-    /// streams used and release capacity, we will send WINDOW_UPDATEs for the
+    /// streams used and release capacity, we will send window update frames for the
     /// connection to bring it back up to the initial "target".
     ///
     /// Setting a target means that we will try to tell the peer about
-    /// WINDOW_UPDATEs so the peer knows it has about `target` window to use
+    /// window update frames so the peer knows it has about `target` window to use
     /// for the whole connection.
     ///
     /// The `task` is an optional parked task for the `Connection` that might
@@ -868,7 +868,7 @@ impl Recv {
         stream: &mut Stream,
         counts: &mut Counts,
     ) -> Result<(), Error> {
-        // Reseting a stream that the user hasn't accepted is possible,
+        // Resetting a stream that the user hasn't accepted is possible,
         // but should be done with care. These streams will continue
         // to take up memory in the accept queue, but will no longer be
         // counted as "concurrent" streams.

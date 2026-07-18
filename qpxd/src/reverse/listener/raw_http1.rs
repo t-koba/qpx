@@ -66,8 +66,8 @@ pub(super) async fn serve_raw_or_fallback(
 
     loop {
         if read_buf.is_empty() {
-            // Preserve connection affinity across already pipelined requests, but do not
-            // pin an upstream connection or active permit while the downstream is idle.
+            // Preserve one validated upstream connection across pipelined requests while
+            // releasing the active-origin permit during downstream idle time.
             origin_session.release();
             let read = timeout_after_pending(header_read_timeout, stream.read_buf(&mut read_buf))
                 .await

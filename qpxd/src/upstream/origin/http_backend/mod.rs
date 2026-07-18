@@ -1,7 +1,7 @@
 use anyhow::Result;
+use arc_swap::ArcSwapOption;
 use hyper::header::{HOST, HeaderValue};
 use hyper::{Request, Response};
-use parking_lot::Mutex;
 use qpx_http::body::Body;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ const MAX_CACHED_ORIGIN_AUTHORITIES: usize = 32;
 
 #[derive(Clone, Default)]
 pub(crate) struct PreparedPlainHttp1ConnectionAffinity {
-    target: Arc<Mutex<Option<Arc<PreparedPlainHttp1ConnectionAffinityTarget>>>>,
+    target: Arc<ArcSwapOption<PreparedPlainHttp1ConnectionAffinityTarget>>,
 }
 
 struct PreparedPlainHttp1ConnectionAffinityTarget {
@@ -50,8 +50,8 @@ impl PreparedPlainHttp1ConnectionAffinity {
         &self,
         slot: &Arc<pool::PlainHttpOriginSlot>,
     ) -> Arc<PreparedPlainHttp1ConnectionAffinityTarget> {
-        let mut target = self.target.lock();
-        if let Some(current) = target.as_ref()
+        let current = self.target.load();
+        if let Some(current) = current.as_ref()
             && Arc::ptr_eq(&current.slot, slot)
         {
             return Arc::clone(current);
@@ -60,7 +60,7 @@ impl PreparedPlainHttp1ConnectionAffinity {
             slot: Arc::clone(slot),
             idle_affinity: pool::next_http1_idle_affinity(),
         });
-        *target = Some(Arc::clone(&next));
+        self.target.store(Some(Arc::clone(&next)));
         next
     }
 }
@@ -96,16 +96,19 @@ pub(crate) struct PreparedPlainHttp1Session {
 struct PreparedPlainHttp1SessionTarget {
     slot: Arc<pool::PlainHttpOriginSlot>,
     connection: Option<pool::PlainHttp1OriginConnection>,
-    _active_permit: tokio::sync::OwnedSemaphorePermit,
+    active_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl PreparedPlainHttp1Session {
     async fn prepare_for(&mut self, origin: &PreparedPlainHttp1Origin) -> Result<()> {
-        if self
+        if let Some(target) = self
             .target
-            .as_ref()
-            .is_some_and(|target| Arc::ptr_eq(&target.slot, &origin.slot))
+            .as_mut()
+            .filter(|target| Arc::ptr_eq(&target.slot, &origin.slot))
         {
+            if target.active_permit.is_none() {
+                target.active_permit = Some(origin.slot.acquire_active().await?);
+            }
             return Ok(());
         }
         // Never await a new origin permit while retaining a permit for the old
@@ -115,13 +118,15 @@ impl PreparedPlainHttp1Session {
         self.target = Some(PreparedPlainHttp1SessionTarget {
             slot: Arc::clone(&origin.slot),
             connection: None,
-            _active_permit: active_permit,
+            active_permit: Some(active_permit),
         });
         Ok(())
     }
 
     pub(crate) fn release(&mut self) {
-        self.target = None;
+        if let Some(target) = self.target.as_mut() {
+            target.active_permit.take();
+        }
     }
 
     fn take_connection(&mut self) -> Option<pool::PlainHttp1OriginConnection> {

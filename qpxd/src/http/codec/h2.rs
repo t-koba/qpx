@@ -151,8 +151,11 @@ pub(crate) async fn send_h2_response_with_interim(
     };
     let flow_control_body =
         declared_length.is_none_or(|length| length > H2_DIRECT_SEND_BODY_MAX_BYTES);
-    let body_read_timeout_enforced = body.read_timeout_is_enforced();
-    let mut scheduler_buffer_budget = h2_scheduler_buffer_budget(active_streams);
+    let mut scheduler_buffer_budget = if flow_control_body {
+        h2_scheduler_buffer_budget(active_streams)
+    } else {
+        0
+    };
     let mut head = Http1Response::new(());
     *head.status_mut() = status;
     *head.headers_mut() = http_headers_into_h1(headers);
@@ -213,6 +216,7 @@ pub(crate) async fn send_h2_response_with_interim(
         return Ok(());
     }
 
+    let body_read_timeout_enforced = body.read_timeout_is_enforced();
     let mut sent_len = 0u64;
     let mut final_chunk = None;
     while let Some(chunk) = match read_h2_response_body_chunk(
@@ -384,7 +388,10 @@ async fn send_h2_data(
 ) -> Result<bool> {
     if data.is_empty() || !flow_control {
         let result = send_stream.send_data(data, end_stream);
-        return handle_h2_send_result(send_stream, result).await;
+        if let Err(error) = result {
+            return handle_h2_send_result(send_stream, Err(error)).await;
+        }
+        return Ok(true);
     }
     if *scheduler_buffer_budget > 0 {
         let buffered = data.split_to(data.len().min(*scheduler_buffer_budget));
@@ -467,14 +474,13 @@ async fn read_h2_response_body_chunk(
     body_read_timeout: Duration,
     body_read_timeout_enforced: bool,
 ) -> Result<H2BodyRead<Option<Result<Bytes, qpx_http::body::BodyError>>>> {
+    if body_read_timeout_enforced {
+        return Ok(H2BodyRead::Value(body.data().await));
+    }
     let read = async {
-        if body_read_timeout_enforced {
-            Ok(body.data().await)
-        } else {
-            timeout_after_pending(body_read_timeout, body.data())
-                .await
-                .map_err(|_| anyhow!("HTTP/2 response body read timed out"))
-        }
+        timeout_after_pending(body_read_timeout, body.data())
+            .await
+            .map_err(|_| anyhow!("HTTP/2 response body read timed out"))
     };
     tokio::pin!(read);
     tokio::select! {
@@ -493,15 +499,18 @@ async fn read_h2_response_trailers(
     body_read_timeout: Duration,
     body_read_timeout_enforced: bool,
 ) -> Result<H2BodyRead<Option<http::HeaderMap>>> {
+    if body_read_timeout_enforced {
+        return body
+            .trailers()
+            .await
+            .map(H2BodyRead::Value)
+            .map_err(Into::into);
+    }
     let read = async {
-        if body_read_timeout_enforced {
-            body.trailers().await.map_err(Into::into)
-        } else {
-            timeout_after_pending(body_read_timeout, body.trailers())
-                .await
-                .map_err(|_| anyhow!("HTTP/2 response trailer read timed out"))?
-                .map_err(Into::into)
-        }
+        timeout_after_pending(body_read_timeout, body.trailers())
+            .await
+            .map_err(|_| anyhow!("HTTP/2 response trailer read timed out"))?
+            .map_err(Into::into)
     };
     tokio::pin!(read);
     tokio::select! {

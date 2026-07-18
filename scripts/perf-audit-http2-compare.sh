@@ -273,8 +273,11 @@ telemetry:
     format: json
 runtime:
   worker_threads: ${SERVER_WORKERS}
-  acceptor_tasks_per_listener: 1
-  reuse_port: false
+  # Keep the listener fan-out aligned with the worker pool. A single acceptor
+  # serializes the 64 independent HTTP/2 connections before the worker pool
+  # can process them, which measures the accept loop rather than the proxy.
+  acceptor_tasks_per_listener: ${SERVER_WORKERS}
+  reuse_port: true
   upstream_proxy_max_concurrent_per_endpoint: 2048
   upstream_max_idle_connections_per_origin: 1024
 edges:
