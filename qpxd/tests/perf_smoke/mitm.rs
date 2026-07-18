@@ -13,7 +13,7 @@ async fn forward_mitm_perf_smoke() -> Result<()> {
         return Ok(());
     }
 
-    qpx_core::tls::init_rustls_crypto_provider();
+    qpx_core::tls::init_rustls_crypto_provider().expect("crypto provider");
     let dir = temp_dir("qpxd-forward-mitm-perf")?;
     let state_dir = dir.join("state");
     fs::create_dir_all(&state_dir)?;

@@ -1,12 +1,11 @@
 use super::router::ReverseRouter;
 use crate::http::dispatcher::InterimList;
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
-use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http::protocol::preflight::{
     ConnectPolicy, PreflightOptions, PreflightOutcome, preflight_validate,
 };
 use crate::runtime::Runtime;
-use crate::upstream::origin::PreparedPlainHttp1ConnectionPool;
+use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use anyhow::Result;
 use hyper::{Request, Response, StatusCode};
 use qpx_core::tls::UpstreamCertificateInfo;
@@ -118,7 +117,7 @@ pub(super) async fn handle_request_with_interim_and_origin_pool_ref(
     req: Request<Body>,
     reverse: &super::ReloadableReverse,
     conn: &ReverseConnInfo,
-    origin_pool: Option<&PreparedPlainHttp1ConnectionPool>,
+    origin_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<(InterimList, Response<Body>), Infallible> {
     let runtime = &reverse.runtime;
     let state = runtime.state();
@@ -131,15 +130,14 @@ pub(super) async fn handle_request_with_interim_and_origin_pool_ref(
         Err(err) => {
             warn!(error = ?err, "reverse handling failed");
             let state = runtime.state();
-            let mut response = Response::new(Body::from(state.messages.reverse_error.clone()));
-            *response.status_mut() = StatusCode::BAD_GATEWAY;
-            Ok(empty_interim_response(finalize_response_for_request(
-                &request_method,
-                request_version,
-                state.plan.identity.proxy_name.as_ref(),
-                response,
-                false,
-            )))
+            Ok(empty_interim_response(
+                response_rules::reverse_gateway_error_response(
+                    &request_method,
+                    request_version,
+                    state.plan.identity.proxy_name.as_ref(),
+                    state.messages.reverse_error.as_str(),
+                ),
+            ))
         }
     }
 }
@@ -150,7 +148,7 @@ async fn handle_request_inner_with_origin_pool(
     runtime: &Runtime,
     conn: &ReverseConnInfo,
     state: Arc<crate::runtime::RuntimeState>,
-    origin_pool: Option<&PreparedPlainHttp1ConnectionPool>,
+    origin_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<(InterimList, Response<Body>)> {
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let common_h2_request =

@@ -65,7 +65,7 @@ pub(super) struct HttpsOriginPoolKey {
 }
 
 pub(super) struct PlainHttpOriginSlot {
-    idle: Http1IdlePool<PlainHttp1OriginConnection>,
+    idle: Http1IdleShards<PlainHttp1OriginConnection>,
     max_http1_idle: Arc<AtomicUsize>,
     active: Arc<Semaphore>,
 }
@@ -131,19 +131,19 @@ struct H2PoolState {
 }
 
 pub(super) struct HttpsOriginSlot {
-    http1_idle: Http1IdlePool<TlsHttp1OriginConnection>,
+    http1_idle: Http1IdleShards<TlsHttp1OriginConnection>,
     max_http1_idle: Arc<AtomicUsize>,
     h2: Mutex<H2PoolState>,
     h2_ready: Arc<Notify>,
     h2_rr: AtomicUsize,
 }
 
-struct Http1IdlePool<T> {
+struct Http1IdleShards<T> {
     shards: Box<[Mutex<Vec<T>>]>,
     len: AtomicUsize,
 }
 
-impl<T> Http1IdlePool<T> {
+impl<T> Http1IdleShards<T> {
     fn new() -> Self {
         Self {
             shards: (0..HTTP1_IDLE_POOL_SHARDS)
@@ -418,7 +418,7 @@ impl DirectOriginPools {
 
     pub(super) fn plain_slot(&self, key: PlainHttpOriginPoolKey) -> Arc<PlainHttpOriginSlot> {
         typed_pool_slot(&self.plain, key, || PlainHttpOriginSlot {
-            idle: Http1IdlePool::new(),
+            idle: Http1IdleShards::new(),
             max_http1_idle: self.http1_max_idle_per_origin.clone(),
             active: Arc::new(Semaphore::new(MAX_ACTIVE_HTTP1_CONNECTIONS_PER_ORIGIN)),
         })
@@ -469,7 +469,7 @@ impl DirectOriginPools {
 
     pub(super) fn https_slot(&self, key: HttpsOriginPoolKey) -> Arc<HttpsOriginSlot> {
         typed_pool_slot(&self.https, key, || HttpsOriginSlot {
-            http1_idle: Http1IdlePool::new(),
+            http1_idle: Http1IdleShards::new(),
             max_http1_idle: self.http1_max_idle_per_origin.clone(),
             h2: Mutex::new(H2PoolState::default()),
             h2_ready: Arc::new(Notify::new()),

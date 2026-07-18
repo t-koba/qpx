@@ -20,7 +20,7 @@ pub(crate) use dns::resolve_upstream_socket_addr;
 #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 pub(crate) use http_backend::H3OriginPool;
 pub(crate) use http_backend::{
-    DirectOriginPools, PreparedPlainHttp1ConnectionPool, PreparedPlainHttp1Origin,
+    DirectOriginPools, PreparedPlainHttp1ConnectionAffinity, PreparedPlainHttp1Origin,
     PreparedPlainHttp1Session, prepare_plain_http1_origin, prepare_proxy_http1_request,
     proxy_direct_plain_http1_raw_response_with_interim,
     proxy_direct_plain_http1_raw_response_with_interim_on_connection,

@@ -85,7 +85,10 @@ pub(super) async fn serve_raw_or_fallback(
                 let dispatched = if let (Some(service), Some(generic)) =
                     (access_service.as_ref(), request.generic_request())
                 {
-                    let mut response = service.call(generic).await.expect("infallible handler");
+                    let mut response = match service.call(generic).await {
+                        Ok(response) => response,
+                        Err(error) => match error {},
+                    };
                     let interim = response
                         .extensions_mut()
                         .remove::<InterimList>()

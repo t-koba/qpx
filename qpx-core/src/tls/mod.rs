@@ -80,14 +80,19 @@ impl From<regex::Error> for TlsError {
 
 #[cfg(feature = "tls-rustls")]
 /// Installs the default rustls crypto provider if one is not already present.
-pub fn init_rustls_crypto_provider() {
+pub fn init_rustls_crypto_provider() -> TlsResult<()> {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         match rustls::crypto::aws_lc_rs::default_provider().install_default() {
             Ok(()) => {}
             Err(_) if rustls::crypto::CryptoProvider::get_default().is_some() => {}
-            Err(_) => panic!("failed to install the default rustls crypto provider"),
+            Err(_) => {
+                return Err(TlsError::Backend(anyhow::anyhow!(
+                    "failed to install the default rustls crypto provider"
+                )));
+            }
         }
     }
+    Ok(())
 }
 
 // --- Unavailable implementation when tls-rustls is not enabled ---
@@ -158,7 +163,9 @@ pub fn write_ca_files(state_dir: &Path) -> TlsResult<(PathBuf, PathBuf)> {
 
 #[cfg(not(feature = "tls-rustls"))]
 /// No-op crypto-provider initializer in builds without rustls support.
-pub fn init_rustls_crypto_provider() {}
+pub fn init_rustls_crypto_provider() -> TlsResult<()> {
+    Ok(())
+}
 
 #[cfg(not(feature = "tls-rustls"))]
 impl CaStore {

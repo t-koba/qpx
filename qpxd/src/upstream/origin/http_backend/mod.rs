@@ -36,27 +36,27 @@ mod shared;
 const MAX_CACHED_ORIGIN_AUTHORITIES: usize = 32;
 
 #[derive(Clone, Default)]
-pub(crate) struct PreparedPlainHttp1ConnectionPool {
-    target: Arc<Mutex<Option<Arc<PreparedPlainHttp1ConnectionPoolTarget>>>>,
+pub(crate) struct PreparedPlainHttp1ConnectionAffinity {
+    target: Arc<Mutex<Option<Arc<PreparedPlainHttp1ConnectionAffinityTarget>>>>,
 }
 
-struct PreparedPlainHttp1ConnectionPoolTarget {
+struct PreparedPlainHttp1ConnectionAffinityTarget {
     slot: Arc<pool::PlainHttpOriginSlot>,
     idle_affinity: usize,
 }
 
-impl PreparedPlainHttp1ConnectionPool {
+impl PreparedPlainHttp1ConnectionAffinity {
     fn target_for(
         &self,
         slot: &Arc<pool::PlainHttpOriginSlot>,
-    ) -> Arc<PreparedPlainHttp1ConnectionPoolTarget> {
+    ) -> Arc<PreparedPlainHttp1ConnectionAffinityTarget> {
         let mut target = self.target.lock();
         if let Some(current) = target.as_ref()
             && Arc::ptr_eq(&current.slot, slot)
         {
             return Arc::clone(current);
         }
-        let next = Arc::new(PreparedPlainHttp1ConnectionPoolTarget {
+        let next = Arc::new(PreparedPlainHttp1ConnectionAffinityTarget {
             slot: Arc::clone(slot),
             idle_affinity: pool::next_http1_idle_affinity(),
         });
@@ -65,14 +65,14 @@ impl PreparedPlainHttp1ConnectionPool {
     }
 }
 
-impl PreparedPlainHttp1ConnectionPoolTarget {
+impl PreparedPlainHttp1ConnectionAffinityTarget {
     fn pop_idle(&self) -> Option<pool::PlainHttp1OriginConnection> {
         self.slot.pop_idle_preferred(self.idle_affinity)
     }
 }
 
 impl crate::upstream::raw_http1::Http1RecycleTarget<TcpStream>
-    for PreparedPlainHttp1ConnectionPoolTarget
+    for PreparedPlainHttp1ConnectionAffinityTarget
 {
     fn recycle(&self, stream: TcpStream, read_buf: bytes::BytesMut, write_buf: bytes::BytesMut) {
         self.slot.recycle_idle_preferred(
@@ -352,7 +352,7 @@ pub(crate) async fn proxy_direct_plain_http1_raw_response_with_interim_on_connec
     host_authority: &str,
     request_version: http::Version,
     proxy_name: &str,
-    connection_pool: &PreparedPlainHttp1ConnectionPool,
+    connection_pool: &PreparedPlainHttp1ConnectionAffinity,
 ) -> Result<Http1ResponseWithInterim> {
     proxy_direct_plain_http1_raw_response_with_interim_inner(
         pools,
@@ -373,7 +373,7 @@ async fn proxy_direct_plain_http1_raw_response_with_interim_inner(
     host_authority: &str,
     request_version: http::Version,
     proxy_name: &str,
-    connection_pool: Option<&PreparedPlainHttp1ConnectionPool>,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<Http1ResponseWithInterim> {
     let slot = pools
         .direct_origin
@@ -427,7 +427,7 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
     connect_authority: &str,
     request_version: http::Version,
     proxy_name: &str,
-    connection_pool: Option<&PreparedPlainHttp1ConnectionPool>,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<Http1ResponseWithInterim> {
     let active_permit = slot.acquire_active().await?;
     let local_target = connection_pool.map(|pool| pool.target_for(&slot));

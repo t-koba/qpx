@@ -35,7 +35,7 @@ struct NoTlsAcceptor;
 type TlsAcceptor = NoTlsAcceptor;
 
 pub async fn run() -> Result<()> {
-    qpx_core::tls::init_rustls_crypto_provider();
+    qpx_core::tls::init_rustls_crypto_provider()?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

@@ -67,7 +67,7 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    qpx_core::tls::init_rustls_crypto_provider();
+    qpx_core::tls::init_rustls_crypto_provider()?;
     let cli = Cli::parse();
 
     let tls_args = TlsClientArgs {

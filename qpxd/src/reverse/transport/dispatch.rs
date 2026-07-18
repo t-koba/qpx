@@ -13,7 +13,7 @@ use crate::reverse::ReloadableReverse;
 use crate::reverse::router::HttpRoute;
 use crate::runtime::Runtime;
 use crate::upstream::origin::{
-    OriginEndpoint, PreparedPlainHttp1ConnectionPool, prepare_proxy_http1_request,
+    OriginEndpoint, PreparedPlainHttp1ConnectionAffinity, prepare_proxy_http1_request,
     proxy_direct_plain_http1_raw_response_with_interim,
     proxy_direct_plain_http1_raw_response_with_interim_on_connection, proxy_http,
     proxy_http_with_interim_timeout,
@@ -96,7 +96,7 @@ pub(super) async fn try_dispatch_unconditional_plain_reverse_request(
     reverse: &ReloadableReverse,
     conn: &ReverseConnInfo,
     state: &Arc<crate::runtime::RuntimeState>,
-    connection_pool: Option<&PreparedPlainHttp1ConnectionPool>,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<std::result::Result<(InterimList, Response<Body>), Request<Body>>> {
     let request_version = req.version();
     if state.destination_trace_enabled()
@@ -563,7 +563,7 @@ async fn dispatch_plain_reverse_http(
     request_method: &http::Method,
     request_version: http::Version,
     proxy_name: &str,
-    connection_pool: Option<&PreparedPlainHttp1ConnectionPool>,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<(InterimList, Response<Body>)> {
     let selected_upstream = route
         .available_plain_http_upstream()

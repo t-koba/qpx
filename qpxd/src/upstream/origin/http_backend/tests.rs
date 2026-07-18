@@ -145,8 +145,8 @@ async fn connection_local_pool_keeps_reusable_origins_isolated() -> Result<()> {
     let default_port = origin.default_port_hint();
     let connect_authority = origin.connect_authority_ref(default_port)?;
     let host_authority = origin.host_header_authority_ref(default_port)?;
-    let first_connection = PreparedPlainHttp1ConnectionPool::default();
-    let second_connection = PreparedPlainHttp1ConnectionPool::default();
+    let first_connection = PreparedPlainHttp1ConnectionAffinity::default();
+    let second_connection = PreparedPlainHttp1ConnectionAffinity::default();
 
     for (connection, path) in [
         (&first_connection, "/first"),
@@ -299,7 +299,7 @@ async fn tls_trust_for_localhost(
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 
-    init_rustls_crypto_provider();
+    init_rustls_crypto_provider().expect("crypto provider");
     let certified =
         generate_simple_self_signed(vec!["localhost".to_string()]).expect("self-signed cert");
     let cert_der = certified.cert.der().clone();

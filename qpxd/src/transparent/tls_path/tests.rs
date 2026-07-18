@@ -8,7 +8,7 @@ use qpx_core::config::{
 
 fn tls_runtime(rules: Vec<RuleConfig>) -> Runtime {
     #[cfg(feature = "tls-rustls")]
-    qpx_core::tls::init_rustls_crypto_provider();
+    qpx_core::tls::init_rustls_crypto_provider().expect("crypto provider");
 
     Runtime::new(Config {
         state_dir: None,

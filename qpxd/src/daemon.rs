@@ -31,7 +31,7 @@ impl Daemon {
     }
 
     pub fn run_cli(&self) -> Result<()> {
-        qpx_core::tls::init_rustls_crypto_provider();
+        qpx_core::tls::init_rustls_crypto_provider()?;
         let cli = Cli::parse();
         match cli.command {
             Command::Run { config } => self.run_with_runtime(config),

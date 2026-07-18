@@ -4,7 +4,7 @@ use tokio::io::duplex;
 
 fn test_https_origin_slot() -> HttpsOriginSlot {
     HttpsOriginSlot {
-        http1_idle: Http1IdlePool::new(),
+        http1_idle: Http1IdleShards::new(),
         max_http1_idle: Arc::new(AtomicUsize::new(MAX_POOLED_HTTP1_CONNECTIONS_PER_ORIGIN)),
         h2: Mutex::new(H2PoolState::default()),
         h2_ready: Arc::new(Notify::new()),
@@ -44,7 +44,7 @@ fn recycled_http1_buffers_discard_oversized_allocations() {
 
 #[test]
 fn sharded_http1_idle_pool_enforces_aggregate_limit() {
-    let pool = Arc::new(Http1IdlePool::new());
+    let pool = Arc::new(Http1IdleShards::new());
     let max = Arc::new(AtomicUsize::new(32));
     let mut workers = Vec::new();
     for worker in 0..HTTP1_IDLE_POOL_SHARDS {
@@ -72,7 +72,7 @@ fn sharded_http1_idle_pool_enforces_aggregate_limit() {
 
 #[test]
 fn sharded_http1_idle_pool_trims_without_losing_count_consistency() {
-    let pool = Http1IdlePool::new();
+    let pool = Http1IdleShards::new();
     let max = AtomicUsize::new(16);
     for item in 0..16 {
         pool.push(item, &max);
@@ -88,7 +88,7 @@ fn sharded_http1_idle_pool_trims_without_losing_count_consistency() {
 
 #[test]
 fn preferred_http1_idle_shards_share_the_aggregate_limit() {
-    let pool = Http1IdlePool::new();
+    let pool = Http1IdleShards::new();
     let max = AtomicUsize::new(3);
     for item in 0..HTTP1_IDLE_POOL_SHARDS * 2 {
         pool.push_preferred(item, &max, item);

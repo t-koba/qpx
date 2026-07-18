@@ -6,7 +6,7 @@ use crate::http::codec::interim::{
     H2_PREFACE, serve_h2_with_interim_and_capacity_and_tuning, sniff_h2_preface,
 };
 use crate::tcp_bindings::filter::ConnectionFilterStage;
-use crate::upstream::origin::PreparedPlainHttp1ConnectionPool;
+use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use anyhow::Result;
 use http::{Request, Response};
@@ -41,7 +41,7 @@ fn reverse_body_channel_capacity(reverse: &ReloadableReverse) -> usize {
 struct ReverseInterimService {
     reverse: ReloadableReverse,
     conn: ReverseConnInfo,
-    origin_pool: PreparedPlainHttp1ConnectionPool,
+    origin_pool: PreparedPlainHttp1ConnectionAffinity,
 }
 
 impl ReverseInterimService {
@@ -49,7 +49,7 @@ impl ReverseInterimService {
         Self {
             reverse,
             conn,
-            origin_pool: PreparedPlainHttp1ConnectionPool::default(),
+            origin_pool: PreparedPlainHttp1ConnectionAffinity::default(),
         }
     }
 }
