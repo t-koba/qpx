@@ -19,8 +19,10 @@ use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use qpx_observability::access_log::{
     AccessLogContext, AccessLogService, access_log_service_required,
+    direct_combined_access_log_enabled,
 };
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
@@ -52,9 +54,11 @@ pub(super) async fn serve_raw_or_fallback(
     let mut request_cache = RawHttp1ConnectionCache::default();
     let mut origin_session = PreparedPlainHttp1Session::default();
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
+    let reverse_service = ReverseInterimService::new(reverse.clone(), conn.clone());
+    let direct_combined_access = direct_combined_access_log_enabled(&access_cfg);
     let access_service = access_log_service_required(&access_cfg).then(|| {
         AccessLogService::new(
-            ReverseInterimService::new(reverse.clone(), conn.clone()),
+            reverse_service.clone(),
             conn.remote_addr,
             AccessLogContext {
                 kind: crate::http::dispatch::ProxyKind::Reverse.as_str(),
@@ -82,13 +86,42 @@ pub(super) async fn serve_raw_or_fallback(
                 read_buf.advance(consumed);
                 let request_method = request.method();
                 let request_keep_alive = request.keep_alive();
-                let dispatched = if let (Some(service), Some(generic)) =
-                    (access_service.as_ref(), request.generic_request())
-                {
-                    let mut response = match service.call(generic).await {
-                        Ok(response) => response,
-                        Err(error) => match error {},
+                let direct_log_started = request.raw_access_log_request().map(|_| Instant::now());
+                let dispatched = if let Some(generic) = request.generic_request() {
+                    let direct_generic_started = direct_combined_access.then(Instant::now);
+                    let direct_generic_log =
+                        direct_combined_access.then(|| direct_combined_log_request(&generic));
+                    let mut response = if let Some(service) = access_service.as_ref()
+                        && !direct_combined_access
+                    {
+                        match service.call(generic).await {
+                            Ok(response) => response,
+                            Err(error) => match error {},
+                        }
+                    } else {
+                        match reverse_service.call(generic).await {
+                            Ok(response) => response,
+                            Err(error) => match error {},
+                        }
                     };
+                    if let (Some(service), Some(log_request), Some(started)) = (
+                        access_service.as_ref(),
+                        direct_generic_log.as_ref(),
+                        direct_generic_started,
+                    ) {
+                        let bytes_out = response
+                            .headers()
+                            .get(http::header::CONTENT_LENGTH)
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .unwrap_or(0);
+                        service.record_direct_combined_status(
+                            log_request,
+                            response.status(),
+                            bytes_out,
+                            started,
+                        );
+                    }
                     let interim = response
                         .extensions_mut()
                         .remove::<InterimList>()
@@ -121,6 +154,30 @@ pub(super) async fn serve_raw_or_fallback(
                         PreparedRawHttp1Response::Generic(Vec::new(), response)
                     }
                 };
+                if let (Some(service), Some(log_request), Some(started)) = (
+                    access_service.as_ref(),
+                    request.raw_access_log_request(),
+                    direct_log_started,
+                ) {
+                    let (status, bytes_out) = match &response {
+                        PreparedRawHttp1Response::Direct(response) => {
+                            (response.status(), response.content_length().unwrap_or(0))
+                        }
+                        PreparedRawHttp1Response::InMemory { status, body, .. } => {
+                            (*status, body.len() as u64)
+                        }
+                        PreparedRawHttp1Response::Generic(_, response) => (
+                            response.status(),
+                            response
+                                .headers()
+                                .get(http::header::CONTENT_LENGTH)
+                                .and_then(|value| value.to_str().ok())
+                                .and_then(|value| value.parse::<u64>().ok())
+                                .unwrap_or(0),
+                        ),
+                    };
+                    service.record_direct_combined_status(log_request, status, bytes_out, started);
+                }
                 let keep_alive = match response {
                     PreparedRawHttp1Response::Direct(response) => {
                         let (keep_alive, reusable) = send_raw_http1_response_relay_with_interim(
@@ -205,6 +262,21 @@ pub(super) async fn serve_raw_or_fallback(
             }
         }
     }
+}
+
+fn direct_combined_log_request(request: &http::Request<Body>) -> http::Request<()> {
+    let mut log_request = http::Request::new(());
+    *log_request.method_mut() = request.method().clone();
+    *log_request.uri_mut() = request.uri().clone();
+    *log_request.version_mut() = request.version();
+    for name in [http::header::REFERER, http::header::USER_AGENT] {
+        for value in request.headers().get_all(&name) {
+            log_request
+                .headers_mut()
+                .append(name.clone(), value.clone());
+        }
+    }
+    log_request
 }
 
 fn try_prepare_request(

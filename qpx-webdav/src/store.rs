@@ -115,6 +115,16 @@ pub trait WebDavDataStore: Send + Sync + 'static {
         }
         Ok(Some(read))
     }
+    /// Reads metadata and returns an open file region when the caller can use zero-copy output.
+    /// Implementations that cannot safely expose a file region must retain the materialized
+    /// body, which keeps non-HTTP/1.1 and encrypted transports fully portable.
+    fn read_with_metadata_and_content_type_file_backed(
+        &self,
+        resource: &ResourceId,
+        content_type: Option<String>,
+    ) -> Result<Option<ResourceRead>> {
+        self.read_with_metadata_and_content_type(resource, content_type)
+    }
     fn put(&self, resource: &ResourceId, body: &[u8], content_type: Option<&str>) -> Result<bool>;
     fn create_collection(&self, resource: &ResourceId) -> Result<()>;
     fn delete(&self, resource: &ResourceId) -> Result<()>;

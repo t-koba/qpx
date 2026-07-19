@@ -1,6 +1,6 @@
 use crate::handler::RequestHandler;
 use arc_swap::ArcSwapOption;
-use http::{Request, Response};
+use http::{Request, Response, StatusCode};
 use qpx_core::config::AccessLogConfig;
 use qpx_core::redaction::redact_uri_query_keys;
 use std::borrow::Cow;
@@ -24,6 +24,16 @@ pub fn access_log_service_required(config: &AccessLogConfig) -> bool {
 /// processing cost without changing its output.
 pub fn access_log_response_context_required(config: &AccessLogConfig) -> bool {
     config.output.enabled && !config.output.format.eq_ignore_ascii_case("combined")
+}
+
+/// Returns whether the raw HTTP/1.1 path may emit the configured combined log directly.
+///
+/// The direct writer is deliberately limited to the combined format. Structured logs and
+/// tracing require the full request/response wrapper because they carry extensions and spans.
+pub fn direct_combined_access_log_enabled(config: &AccessLogConfig) -> bool {
+    config.output.enabled
+        && config.output.format.eq_ignore_ascii_case("combined")
+        && crate::logging::direct_combined_access_log_enabled()
 }
 
 /// Static access-log identity for a listener or proxy surface.
@@ -462,9 +472,9 @@ fn append_utc_second(output: &mut String, seconds: i64) {
     );
 }
 
-fn emit_direct_combined_access_log<B>(
+fn emit_direct_combined_access_log(
     snapshot: &CombinedRequestTemplate,
-    response: &Response<B>,
+    status: StatusCode,
     elapsed: std::time::Duration,
     completed: Instant,
     bytes_out: u64,
@@ -473,7 +483,7 @@ fn emit_direct_combined_access_log<B>(
         line.extend_from_slice(&snapshot.remote_prefix);
         append_utc_timestamp(line, completed);
         line.extend_from_slice(&snapshot.request_suffix);
-        append_u64(line, response.status().as_u16() as u64);
+        append_u64(line, status.as_u16() as u64);
         line.push(b' ');
         append_u64(line, bytes_out);
         line.extend_from_slice(&snapshot.metadata_suffix);
@@ -515,7 +525,7 @@ where
                         .unwrap_or(0);
                     let _ = emit_direct_combined_access_log(
                         &snapshot,
-                        response,
+                        response.status(),
                         completed.saturating_duration_since(start),
                         completed,
                         bytes_out,
@@ -876,6 +886,40 @@ where
             direct_combined,
         }
     }
+}
+
+impl<S> AccessLogService<S> {
+    /// Emits a combined access record for a response produced outside the request wrapper.
+    ///
+    /// Raw HTTP/1.1 origin responses intentionally bypass the generic dispatch stack. This
+    /// method preserves the exact combined-log format and exclusion/redaction rules without
+    /// constructing a second response body or tracing span.
+    pub fn record_direct_combined_status(
+        &self,
+        request: &Request<()>,
+        status: StatusCode,
+        bytes_out: u64,
+        started: Instant,
+    ) {
+        if !direct_combined_access_log_enabled_from_service(self)
+            || self.is_excluded(request.uri().path())
+        {
+            return;
+        }
+        let completed = Instant::now();
+        let snapshot = self.combined_request_template(request);
+        let _ = emit_direct_combined_access_log(
+            &snapshot,
+            status,
+            completed.saturating_duration_since(started),
+            completed,
+            bytes_out,
+        );
+    }
+}
+
+fn direct_combined_access_log_enabled_from_service<S>(service: &AccessLogService<S>) -> bool {
+    service.enabled && service.combined && crate::logging::direct_combined_access_log_enabled()
 }
 
 #[cfg(test)]

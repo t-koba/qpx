@@ -128,6 +128,14 @@ where
         self.status
     }
 
+    pub(crate) fn content_length(&self) -> Option<u64> {
+        match self.raw.framing() {
+            RawHttp1BodyFraming::Empty => Some(0),
+            RawHttp1BodyFraming::ContentLength(length) => Some(length),
+            RawHttp1BodyFraming::Chunked | RawHttp1BodyFraming::CloseDelimited => None,
+        }
+    }
+
     pub(crate) fn take_reusable_connection(&mut self) -> Option<ReusableRawHttp1Connection<S>> {
         if !self.read_buf.is_empty() || !self.raw.upstream_keep_alive() {
             return None;

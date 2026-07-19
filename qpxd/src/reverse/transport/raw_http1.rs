@@ -28,6 +28,7 @@ pub(in crate::reverse) struct PreparedRawHttp1Request {
     state: Arc<crate::runtime::RuntimeState>,
     compiled: Arc<CompiledReverse>,
     target: PreparedRawHttp1Target,
+    raw_access_log_request: Option<Request<()>>,
     method: Method,
     keep_alive: bool,
 }
@@ -73,6 +74,13 @@ impl PreparedRawHttp1Request {
         *request.version_mut() = Version::HTTP_11;
         *request.headers_mut() = headers.clone();
         Some(request)
+    }
+
+    pub(in crate::reverse) fn raw_access_log_request(&self) -> Option<&Request<()>> {
+        if matches!(&self.target, PreparedRawHttp1Target::Generic { .. }) {
+            return None;
+        }
+        self.raw_access_log_request.as_ref()
     }
 }
 
@@ -262,8 +270,25 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
     };
 
     let keep_alive = !has_connection_token(request.headers, b"close");
+    let direct_combined_access_log =
+        qpx_observability::access_log::direct_combined_access_log_enabled(
+            &state.resources.access_log,
+        );
     let direct_dispatch_allowed =
-        !qpx_observability::access_log::access_log_service_required(&state.resources.access_log);
+        !qpx_observability::access_log::access_log_service_required(&state.resources.access_log)
+            || direct_combined_access_log;
+    let raw_access_log_request = if direct_combined_access_log {
+        let uri = request.target.parse::<Uri>().ok()?;
+        let headers = crate::http::codec::h1_common::parse_header_map(request.headers).ok()?;
+        let mut request = Request::new(());
+        *request.method_mut() = method.clone();
+        *request.uri_mut() = uri;
+        *request.version_mut() = Version::HTTP_11;
+        *request.headers_mut() = headers;
+        Some(request)
+    } else {
+        None
+    };
     let target = if let Some(route) = direct_dispatch_allowed
         .then(|| compiled.router.single_plain_http_route())
         .flatten()
@@ -304,6 +329,7 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
             state,
             compiled,
             target,
+            raw_access_log_request,
             method,
             keep_alive,
         },

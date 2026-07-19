@@ -116,7 +116,7 @@ impl<S: WebDavStore> WebDavService<S> {
         context: &WebDavRequestContext,
     ) -> Result<Response<Bytes>> {
         let prepared = self.prepare_request(&request, context, None)?;
-        self.handle_prepared_bytes(request, context, prepared)
+        self.handle_prepared_bytes(request, context, prepared, false)
     }
 
     pub fn handle_bytes_for_resource(
@@ -126,7 +126,17 @@ impl<S: WebDavStore> WebDavService<S> {
         request_resource: ResourceId,
     ) -> Result<Response<Bytes>> {
         let prepared = self.prepare_request(&request, context, Some(request_resource))?;
-        self.handle_prepared_bytes(request, context, prepared)
+        self.handle_prepared_bytes(request, context, prepared, false)
+    }
+
+    pub fn handle_bytes_for_resource_file_backed(
+        &self,
+        request: Request<Vec<u8>>,
+        context: &WebDavRequestContext,
+        request_resource: ResourceId,
+    ) -> Result<Response<Bytes>> {
+        let prepared = self.prepare_request(&request, context, Some(request_resource))?;
+        self.handle_prepared_bytes(request, context, prepared, true)
     }
 
     pub fn resource_for_path(&self, path: &str) -> Result<ResourceId> {
@@ -149,6 +159,7 @@ impl<S: WebDavStore> WebDavService<S> {
         request: Request<Vec<u8>>,
         context: &WebDavRequestContext,
         prepared: PreparedRequest,
+        file_backed: bool,
     ) -> Result<Response<Bytes>> {
         match prepared {
             PreparedRequest::Respond(status) => response_bytes(status, Bytes::new()),
@@ -158,7 +169,12 @@ impl<S: WebDavStore> WebDavService<S> {
                 content_type,
             } if matches!(request.method().as_str(), "GET" | "HEAD") => {
                 let resource = resolved_resource.as_ref().unwrap_or(&request_resource);
-                self.get_bytes(resource, request.method() == Method::HEAD, content_type)
+                self.get_bytes(
+                    resource,
+                    request.method() == Method::HEAD,
+                    content_type,
+                    file_backed,
+                )
             }
             prepared => self
                 .handle_prepared(request, context, prepared)
@@ -261,7 +277,7 @@ impl<S: WebDavStore> WebDavService<S> {
     }
 
     fn get(&self, resource: &ResourceId, head: bool) -> Result<Response<Vec<u8>>> {
-        self.get_bytes(resource, head, self.store.content_type(resource)?)
+        self.get_bytes(resource, head, self.store.content_type(resource)?, false)
             .map(|response| response.map(|body| body.to_vec()))
     }
 
@@ -270,6 +286,7 @@ impl<S: WebDavStore> WebDavService<S> {
         resource: &ResourceId,
         head: bool,
         content_type: Option<String>,
+        file_backed: bool,
     ) -> Result<Response<Bytes>> {
         let loaded = if head {
             self.store
@@ -285,8 +302,13 @@ impl<S: WebDavStore> WebDavService<S> {
                 })
                 .transpose()?
         } else {
-            self.store
-                .read_with_metadata_and_content_type(resource, content_type)?
+            if file_backed {
+                self.store
+                    .read_with_metadata_and_content_type_file_backed(resource, content_type)?
+            } else {
+                self.store
+                    .read_with_metadata_and_content_type(resource, content_type)?
+            }
         };
         let Some(read) = loaded else {
             return response_bytes(StatusCode::NOT_FOUND, Bytes::new());

@@ -247,6 +247,7 @@ async fn execute_reverse_dispatch(
                     service,
                     &identity,
                     route.plan.streaming.max_request_body_bytes,
+                    request_version == http::Version::HTTP_11 && !conn.tls_terminated,
                     Some(request_resource),
                 )
                 .await?;
@@ -695,6 +696,7 @@ async fn complete_reverse_after_modules(
             route_headers: route_headers.as_deref(),
             http_modules: &mut http_modules,
             max_request_body_bytes: route.plan.streaming.max_request_body_bytes,
+            allow_file_backed: request_version == http::Version::HTTP_11 && !conn.tls_terminated,
         })
         .await?;
         return Ok(empty_interim_response(response));
@@ -859,6 +861,7 @@ struct ReverseWebDavDispatch<'a> {
     route_headers: Option<&'a qpx_core::rules::CompiledHeaderControl>,
     http_modules: &'a mut crate::http::modules::HttpModuleExecution,
     max_request_body_bytes: usize,
+    allow_file_backed: bool,
 }
 
 async fn dispatch_reverse_webdav(input: ReverseWebDavDispatch<'_>) -> Result<Response<Body>> {
@@ -872,9 +875,17 @@ async fn dispatch_reverse_webdav(input: ReverseWebDavDispatch<'_>) -> Result<Res
         route_headers,
         http_modules,
         max_request_body_bytes,
+        allow_file_backed,
     } = input;
-    let response =
-        execute_webdav_service(req, service, identity, max_request_body_bytes, None).await?;
+    let response = execute_webdav_service(
+        req,
+        service,
+        identity,
+        max_request_body_bytes,
+        allow_file_backed,
+        None,
+    )
+    .await?;
     let mut response = http_modules.on_upstream_response(response).await?;
     crate::http::protocol::l7::finalize_response_with_headers_in_place(
         request_method,
@@ -892,6 +903,7 @@ async fn execute_webdav_service(
     service: Arc<crate::reverse::router::WebDavOriginService>,
     identity: &crate::policy_context::ResolvedIdentity,
     max_request_body_bytes: usize,
+    allow_file_backed: bool,
     request_resource: Option<qpx_webdav::ResourceId>,
 ) -> Result<Response<Body>> {
     let request_resource = match request_resource {
@@ -924,7 +936,11 @@ async fn execute_webdav_service(
         assurance: identity.auth_strength.clone(),
     };
     let response = tokio::task::spawn_blocking(move || {
-        service.handle_bytes_for_resource(request, &context, request_resource)
+        if allow_file_backed {
+            service.handle_bytes_for_resource_file_backed(request, &context, request_resource)
+        } else {
+            service.handle_bytes_for_resource(request, &context, request_resource)
+        }
     })
     .await
     .map_err(|error| anyhow!("WebDAV worker failed: {error}"))??;
@@ -933,7 +949,7 @@ async fn execute_webdav_service(
     let body_len = body.len() as u64;
     let mut body = Body::from(body).mark_trailers_sanitized();
     if let Some(region) = file_region.filter(|region| region.len >= 64 * 1024) {
-        if region.len != body_len {
+        if body_len != 0 && region.len != body_len {
             return Err(anyhow!(
                 "WebDAV file region length does not match the response body"
             ));

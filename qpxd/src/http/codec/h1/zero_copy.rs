@@ -202,7 +202,7 @@ impl SplicePipe {
             libc::fcntl(
                 descriptors[0],
                 libc::F_SETPIPE_SZ,
-                256_i32.saturating_mul(1024),
+                1024_i32.saturating_mul(1024),
             )
         };
         if resize < 0 {

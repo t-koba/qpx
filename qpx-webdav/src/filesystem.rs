@@ -178,6 +178,73 @@ impl FileSystemDataStore {
         });
     }
 
+    fn read_file_backed_with_metadata(
+        &self,
+        resource: &ResourceId,
+    ) -> Result<Option<ResourceRead>> {
+        let (path, metadata) = match self.resolve_existing(resource) {
+            Ok(resolved) => resolved,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if !metadata.is_file() {
+            let resource_metadata = Self::resource_metadata(&metadata)?.0;
+            let etag = http::HeaderValue::from_str(&resource_metadata.etag)?;
+            return Ok(Some(ResourceRead {
+                metadata: Arc::new(resource_metadata),
+                etag,
+                body: Bytes::new(),
+                file: None,
+            }));
+        }
+        let modified = metadata.modified()?;
+        if let Some(entry) = self.read_cache.load().entries.iter().find(|entry| {
+            entry.resource.is_same_resource(resource)
+                && entry.content_length == metadata.len()
+                && entry.modified == modified
+                && entry.read.body.is_empty()
+                && entry.read.file.is_some()
+        }) {
+            return Ok(Some(entry.read.clone()));
+        }
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(&path)?;
+        let opened_metadata = file.metadata()?;
+        if !opened_metadata.is_file()
+            || opened_metadata.len() != metadata.len()
+            || opened_metadata.modified()? != modified
+        {
+            return Err(anyhow!("WebDAV resource changed while it was opened"));
+        }
+        let completed_metadata = file.metadata()?;
+        if completed_metadata.len() != metadata.len() || completed_metadata.modified()? != modified
+        {
+            return Err(anyhow!("WebDAV resource changed while it was opened"));
+        }
+        let resource_metadata = Self::resource_metadata(&metadata)?.0;
+        let etag = http::HeaderValue::from_str(&resource_metadata.etag)?;
+        let read = ResourceRead {
+            metadata: Arc::new(resource_metadata),
+            etag,
+            body: Bytes::new(),
+            file: Some(Arc::new(file)),
+        };
+        self.cache_read(resource, metadata.len(), modified, &read);
+        Ok(Some(read))
+    }
+
     fn require_parent(&self, resource: &ResourceId) -> Result<PathBuf> {
         let parent = resource
             .parent()
@@ -277,6 +344,7 @@ impl WebDavDataStore for FileSystemDataStore {
             entry.resource.is_same_resource(resource)
                 && entry.content_length == metadata.len()
                 && entry.modified == modified
+                && entry.read.body.len() as u64 == metadata.len()
         }) {
             return Ok(Some(entry.read.clone()));
         }
@@ -316,6 +384,20 @@ impl WebDavDataStore for FileSystemDataStore {
             file: Some(Arc::new(file)),
         };
         self.cache_read(resource, metadata.len(), modified, &read);
+        Ok(Some(read))
+    }
+
+    fn read_with_metadata_and_content_type_file_backed(
+        &self,
+        resource: &ResourceId,
+        content_type: Option<String>,
+    ) -> Result<Option<ResourceRead>> {
+        let Some(mut read) = self.read_file_backed_with_metadata(resource)? else {
+            return Ok(None);
+        };
+        if read.metadata.content_type != content_type {
+            Arc::make_mut(&mut read.metadata).content_type = content_type;
+        }
         Ok(Some(read))
     }
 
@@ -439,6 +521,22 @@ mod tests {
         assert_eq!(store.read(&file).unwrap(), b"first".as_slice());
         assert!(!store.put(&file, b"second", Some("text/plain")).unwrap());
         assert_eq!(store.read(&file).unwrap(), b"second".as_slice());
+    }
+
+    #[test]
+    fn file_backed_reads_preserve_materialized_read_api() {
+        let directory = tempdir().unwrap();
+        let store = FileSystemDataStore::open(directory.path()).unwrap();
+        let file = ResourceId::parse("/asset.bin").unwrap();
+        assert!(store.put(&file, b"payload", None).unwrap());
+
+        let backed = store
+            .read_with_metadata_and_content_type_file_backed(&file, None)
+            .unwrap()
+            .expect("file-backed resource");
+        assert!(backed.body.is_empty());
+        assert!(backed.file.is_some());
+        assert_eq!(store.read(&file).unwrap(), b"payload".as_slice());
     }
 
     #[cfg(unix)]

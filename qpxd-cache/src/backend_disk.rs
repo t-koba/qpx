@@ -276,29 +276,30 @@ impl DiskCacheBackend {
 
     async fn hot_get(&self, namespace: &str, key: &str) -> HotCacheLookup {
         let now = now_ms();
-        let recent = self.hot_recent.load();
-        let slot = hot_slot(namespace, key);
-        if let Some(entry) = recent.entries.get(slot).and_then(Option::as_ref) {
-            if entry.namespace.as_ref() != namespace || entry.key.as_ref() != key {
-                drop(recent);
-                let path = self.path_for(namespace, key);
-                return self.hot_get_from_lru(namespace, key, path, now).await;
+        if let Some(result) = self.hot_recent_lookup(namespace, key, now) {
+            if let HotCacheLookup::Miss(path) = &result {
+                self.hot_remove(path).await;
             }
-            if entry.expires_at_ms > now {
-                return HotCacheLookup::Hit {
-                    value: entry.value.clone(),
-                    body_offset: entry.body_offset,
-                    file: entry.file.clone(),
-                };
-            }
-            let path = entry.path.clone();
-            drop(recent);
-            self.hot_remove(&path).await;
-            return HotCacheLookup::Miss(path);
+            return result;
         }
-        drop(recent);
         let path = self.path_for(namespace, key);
         self.hot_get_from_lru(namespace, key, path, now).await
+    }
+
+    fn hot_recent_lookup(&self, namespace: &str, key: &str, now: u64) -> Option<HotCacheLookup> {
+        let recent = self.hot_recent.load();
+        let entry = recent.entries.get(hot_slot(namespace, key))?.as_ref()?;
+        if entry.namespace.as_ref() != namespace || entry.key.as_ref() != key {
+            return None;
+        }
+        if entry.expires_at_ms <= now {
+            return Some(HotCacheLookup::Miss(entry.path.clone()));
+        }
+        Some(HotCacheLookup::Hit {
+            value: entry.value.clone(),
+            body_offset: entry.body_offset,
+            file: entry.file.clone(),
+        })
     }
 
     async fn hot_get_from_lru(
@@ -732,9 +733,25 @@ impl CacheBackend for DiskCacheBackend {
     }
 
     async fn get_many(&self, namespace: &str, keys: &[String]) -> Result<Vec<Option<Bytes>>> {
-        let mut out = Vec::with_capacity(keys.len());
-        for key in keys {
-            out.push(self.get(namespace, key).await?);
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_background_sweep();
+        let now = now_ms();
+        let mut out = vec![None; keys.len()];
+        let mut misses = Vec::new();
+        for (index, key) in keys.iter().enumerate() {
+            match self.hot_recent_lookup(namespace, key, now) {
+                Some(HotCacheLookup::Hit { value, .. }) => out[index] = Some(value),
+                Some(HotCacheLookup::Miss(path)) => {
+                    self.hot_remove(&path).await;
+                    misses.push((index, key));
+                }
+                None => misses.push((index, key)),
+            }
+        }
+        for (index, key) in misses {
+            out[index] = self.get(namespace, key).await?;
         }
         Ok(out)
     }

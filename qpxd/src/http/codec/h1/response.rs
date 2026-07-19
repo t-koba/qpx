@@ -7,7 +7,6 @@ use crate::upstream::raw_http1::{
     RawHttp1ResponseHead, RawHttp1ResponseRelay, ReusableRawHttp1Connection,
 };
 use anyhow::{Result, anyhow};
-#[cfg(not(target_os = "linux"))]
 use bytes::BufMut;
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Method, Response, StatusCode, Version};
@@ -19,7 +18,6 @@ use std::future::{Future, poll_fn};
 use std::io::{Error as IoError, ErrorKind, IoSlice};
 use std::sync::Arc;
 use std::task::Poll;
-#[cfg(not(target_os = "linux"))]
 use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -475,52 +473,93 @@ async fn relay_direct_content_length_response(
     }
 
     let remaining = length - first_len as u64;
-    #[cfg(target_os = "linux")]
     if remaining > 0 {
-        let stream = response
-            .stream
-            .as_ref()
-            .ok_or_else(|| anyhow!("raw HTTP/1 relay stream is unavailable"))?;
-        super::zero_copy::splice_tcp_exact(
-            stream,
-            writer,
-            remaining,
-            RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-            RESPONSE_WRITE_TIMEOUT,
-        )
-        .await?;
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let mut remaining = remaining;
-        while remaining > 0 {
-            if response.read_buf.is_empty() {
-                let read_size = remaining.min(DIRECT_RELAY_READ_SIZE as u64) as usize;
-                response.read_buf.reserve(read_size);
-                let mut limited = (&mut response.read_buf).limit(read_size);
-                let Some(stream) = response.stream.as_mut() else {
-                    return Err(anyhow!("raw HTTP/1 relay stream is unavailable"));
-                };
-                let read = timeout_after_pending(
-                    RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-                    stream.read_buf(&mut limited),
-                )
-                .await
-                .map_err(|_| anyhow!("HTTP/1 response body read timed out"))??;
-                if read == 0 {
-                    return Err(anyhow!(
-                        "response body ended before declared content-length was satisfied"
-                    ));
+        #[cfg(target_os = "linux")]
+        if remaining <= DIRECT_RELAY_SPLICE_THRESHOLD {
+            relay_small_direct_content_length_response(writer, response, remaining).await?;
+        } else {
+            let stream = response
+                .stream
+                .as_ref()
+                .ok_or_else(|| anyhow!("raw HTTP/1 relay stream is unavailable"))?;
+            super::zero_copy::splice_tcp_exact(
+                stream,
+                writer,
+                remaining,
+                RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
+                RESPONSE_WRITE_TIMEOUT,
+            )
+            .await?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mut remaining = remaining;
+            while remaining > 0 {
+                if response.read_buf.is_empty() {
+                    let read_size = remaining.min(DIRECT_RELAY_READ_SIZE as u64) as usize;
+                    response.read_buf.reserve(read_size);
+                    let mut limited = (&mut response.read_buf).limit(read_size);
+                    let Some(stream) = response.stream.as_mut() else {
+                        return Err(anyhow!("raw HTTP/1 relay stream is unavailable"));
+                    };
+                    let read = timeout_after_pending(
+                        RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
+                        stream.read_buf(&mut limited),
+                    )
+                    .await
+                    .map_err(|_| anyhow!("HTTP/1 response body read timed out"))??;
+                    if read == 0 {
+                        return Err(anyhow!(
+                            "response body ended before declared content-length was satisfied"
+                        ));
+                    }
+                    drain_ready_direct_relay_bytes(response, read_size - read).await?;
                 }
-                drain_ready_direct_relay_bytes(response, read_size - read).await?;
+                let take = response.read_buf.len().min(remaining as usize);
+                write_all_with_timeout(writer, &response.read_buf[..take]).await?;
+                response.read_buf.advance(take);
+                remaining -= take as u64;
             }
-            let take = response.read_buf.len().min(remaining as usize);
-            write_all_with_timeout(writer, &response.read_buf[..take]).await?;
-            response.read_buf.advance(take);
-            remaining -= take as u64;
         }
     }
     recycle_direct_raw_upstream_if_clean(response);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+const DIRECT_RELAY_SPLICE_THRESHOLD: u64 = 64 * 1024;
+
+#[cfg(target_os = "linux")]
+async fn relay_small_direct_content_length_response(
+    writer: &mut TcpStream,
+    response: &mut RawHttp1ResponseRelay<TcpStream>,
+    mut remaining: u64,
+) -> Result<()> {
+    while remaining > 0 {
+        if response.read_buf.is_empty() {
+            let read_size = remaining.min(64 * 1024) as usize;
+            response.read_buf.reserve(read_size);
+            let mut limited = (&mut response.read_buf).limit(read_size);
+            let Some(stream) = response.stream.as_mut() else {
+                return Err(anyhow!("raw HTTP/1 relay stream is unavailable"));
+            };
+            let read = timeout_after_pending(
+                RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
+                stream.read_buf(&mut limited),
+            )
+            .await
+            .map_err(|_| anyhow!("HTTP/1 response body read timed out"))??;
+            if read == 0 {
+                return Err(anyhow!(
+                    "response body ended before declared content-length was satisfied"
+                ));
+            }
+        }
+        let take = response.read_buf.len().min(remaining as usize);
+        write_all_with_timeout(writer, &response.read_buf[..take]).await?;
+        response.read_buf.advance(take);
+        remaining -= take as u64;
+    }
     Ok(())
 }
 
