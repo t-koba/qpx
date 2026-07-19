@@ -197,6 +197,7 @@ impl SplicePipe {
         // source-read / destination-write wakeup at the kernel's small default pipe capacity.
         // The requested size is an optimization only; kernels may reject it for an ordinary
         // unprivileged process, while unrelated errors still indicate a broken pipe setup.
+        // SAFETY: descriptors[0] is the open read endpoint returned by pipe2 above.
         let resize = unsafe {
             libc::fcntl(
                 descriptors[0],
@@ -209,6 +210,7 @@ impl SplicePipe {
             let optional_resize_rejection = matches!(error.raw_os_error(), Some(code)
                 if code == libc::EPERM || code == libc::EINVAL || code == libc::ENOMEM);
             if !optional_resize_rejection {
+                // SAFETY: both descriptors were returned by pipe2 above and remain owned here.
                 unsafe {
                     libc::close(descriptors[0]);
                     libc::close(descriptors[1]);
