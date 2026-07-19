@@ -2247,7 +2247,7 @@ mod tests {
                 ResourceId::parse("/docs/report.txt").unwrap(),
             )
             .unwrap();
-        assert!(file_backed_response.body().is_empty());
+        assert_eq!(file_backed_response.body(), &Bytes::from_static(b"report"));
         assert!(
             file_backed_response
                 .extensions()

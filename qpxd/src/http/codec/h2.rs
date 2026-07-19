@@ -26,7 +26,12 @@ const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
 const H2_MAX_SEND_BUFFER_SIZE: usize = 1024 * 1024;
 pub(crate) const H2_MAX_CONCURRENT_STREAMS: usize = 256;
 const H2_DIRECT_SEND_BODY_MAX_BYTES: u64 = 16 * 1024;
+// A small active-stream set benefits from a larger first write, while a busy
+// connection must yield after a frame-sized slice so one large response cannot
+// monopolize the h2 connection. h2's flow-control scheduler remains the final
+// arbiter after this initial slice.
 const H2_INITIAL_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_FRAME_SIZE as usize;
+const H2_LOW_CONTENTION_STREAMS: usize = 4;
 const H2_MIN_SCHEDULER_BUFFER_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy)]
@@ -376,6 +381,9 @@ pub(crate) async fn send_h2_response_with_interim(
 }
 
 fn h2_scheduler_buffer_budget(active_streams: usize) -> usize {
+    if active_streams <= H2_LOW_CONTENTION_STREAMS {
+        return H2_MAX_SEND_BUFFER_SIZE;
+    }
     (H2_INITIAL_SCHEDULER_BUFFER_BYTES / active_streams.max(1)).max(H2_MIN_SCHEDULER_BUFFER_BYTES)
 }
 

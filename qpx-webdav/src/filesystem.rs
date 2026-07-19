@@ -208,7 +208,7 @@ impl FileSystemDataStore {
             entry.resource.is_same_resource(resource)
                 && entry.content_length == metadata.len()
                 && entry.modified == modified
-                && entry.read.body.is_empty()
+                && entry.read.body.len() as u64 == metadata.len()
                 && entry.read.file.is_some()
         }) {
             return Ok(Some(entry.read.clone()));
@@ -220,13 +220,22 @@ impl FileSystemDataStore {
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NOFOLLOW);
         }
-        let file = options.open(&path)?;
+        let mut file = options.open(&path)?;
         let opened_metadata = file.metadata()?;
         if !opened_metadata.is_file()
             || opened_metadata.len() != metadata.len()
             || opened_metadata.modified()? != modified
         {
             return Err(anyhow!("WebDAV resource changed while it was opened"));
+        }
+        let mut body = Bytes::new();
+        if metadata.len() <= READ_CACHE_MAX_OBJECT_BYTES as u64 {
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            file.read_to_end(&mut bytes)?;
+            if bytes.len() as u64 != metadata.len() {
+                return Err(anyhow!("WebDAV resource length changed while it was read"));
+            }
+            body = Bytes::from(bytes);
         }
         let completed_metadata = file.metadata()?;
         if completed_metadata.len() != metadata.len() || completed_metadata.modified()? != modified
@@ -238,7 +247,7 @@ impl FileSystemDataStore {
         let read = ResourceRead {
             metadata: Arc::new(resource_metadata),
             etag,
-            body: Bytes::new(),
+            body,
             file: Some(Arc::new(file)),
         };
         self.cache_read(resource, metadata.len(), modified, &read);
@@ -534,7 +543,7 @@ mod tests {
             .read_with_metadata_and_content_type_file_backed(&file, None)
             .unwrap()
             .expect("file-backed resource");
-        assert!(backed.body.is_empty());
+        assert_eq!(backed.body, Bytes::from_static(b"payload"));
         assert!(backed.file.is_some());
         assert_eq!(store.read(&file).unwrap(), b"payload".as_slice());
     }

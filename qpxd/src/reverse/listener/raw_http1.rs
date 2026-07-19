@@ -210,18 +210,35 @@ pub(super) async fn serve_raw_or_fallback(
                         )
                         .await?
                     }
-                    PreparedRawHttp1Response::Generic(interim, response) => {
-                        send_http1_response_with_interim_tcp(
-                            &mut stream,
-                            http::Version::HTTP_11,
-                            request_method,
-                            response,
-                            &interim,
-                            request_keep_alive,
-                            header_read_timeout,
-                            &mut response_head,
-                        )
-                        .await?
+                    PreparedRawHttp1Response::Generic(interim, mut response) => {
+                        if interim.is_empty()
+                            && let Some(body) =
+                                response.body_mut().take_single_frame_without_trailers()
+                        {
+                            let (parts, _) = response.into_parts();
+                            send_static_http1_response(
+                                &mut stream,
+                                request_method,
+                                parts.status,
+                                parts.headers,
+                                body,
+                                request_keep_alive,
+                                &mut response_head,
+                            )
+                            .await?
+                        } else {
+                            send_http1_response_with_interim_tcp(
+                                &mut stream,
+                                http::Version::HTTP_11,
+                                request_method,
+                                response,
+                                &interim,
+                                request_keep_alive,
+                                header_read_timeout,
+                                &mut response_head,
+                            )
+                            .await?
+                        }
                     }
                 };
                 if !keep_alive {
