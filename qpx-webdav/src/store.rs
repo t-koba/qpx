@@ -115,6 +115,7 @@ pub trait WebDavDataStore: Send + Sync + 'static {
         }
         Ok(Some(read))
     }
+
     /// Reads metadata and returns an open file region when the caller can use zero-copy output.
     /// Implementations that cannot safely expose a file region must retain the materialized
     /// body, which keeps non-HTTP/1.1 and encrypted transports fully portable.
@@ -227,6 +228,23 @@ impl<D: WebDavDataStore, M: WebDavMetadataStore> WebDavDataStore for PersistentW
         content_type: Option<String>,
     ) -> Result<Option<ResourceRead>> {
         let Some(mut read) = self.data.read_with_metadata(resource)? else {
+            return Ok(None);
+        };
+        if read.metadata.content_type != content_type {
+            Arc::make_mut(&mut read.metadata).content_type = content_type;
+        }
+        Ok(Some(read))
+    }
+
+    fn read_with_metadata_and_content_type_file_backed(
+        &self,
+        resource: &ResourceId,
+        content_type: Option<String>,
+    ) -> Result<Option<ResourceRead>> {
+        let Some(mut read) = self
+            .data
+            .read_with_metadata_and_content_type_file_backed(resource, content_type.clone())?
+        else {
             return Ok(None);
         };
         if read.metadata.content_type != content_type {

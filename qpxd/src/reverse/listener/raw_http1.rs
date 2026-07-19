@@ -1,6 +1,6 @@
 use super::{ReverseInterimService, reverse_body_channel_capacity};
 use crate::http::codec::h1::{
-    send_http1_response_with_interim, send_raw_http1_response_relay_with_interim,
+    send_http1_response_with_interim_tcp, send_raw_http1_response_relay_with_interim,
     send_static_http1_response, serve_http1_tcp_with_interim_and_capacity,
 };
 use crate::http::codec::h1_common::MAX_HEADER_BYTES;
@@ -211,7 +211,7 @@ pub(super) async fn serve_raw_or_fallback(
                         .await?
                     }
                     PreparedRawHttp1Response::Generic(interim, response) => {
-                        send_http1_response_with_interim(
+                        send_http1_response_with_interim_tcp(
                             &mut stream,
                             http::Version::HTTP_11,
                             request_method,

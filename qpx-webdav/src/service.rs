@@ -2235,6 +2235,26 @@ mod tests {
             .unwrap();
         assert_eq!(service.handle(put, &context).unwrap().status(), 201);
 
+        let file_backed_get = Request::builder()
+            .method("GET")
+            .uri("/docs/report.txt")
+            .body(Vec::new())
+            .unwrap();
+        let file_backed_response = service
+            .handle_bytes_for_resource_file_backed(
+                file_backed_get,
+                &context,
+                ResourceId::parse("/docs/report.txt").unwrap(),
+            )
+            .unwrap();
+        assert!(file_backed_response.body().is_empty());
+        assert!(
+            file_backed_response
+                .extensions()
+                .get::<crate::ResourceFileRegion>()
+                .is_some()
+        );
+
         let propfind = Request::builder()
             .method("PROPFIND")
             .uri("/docs")

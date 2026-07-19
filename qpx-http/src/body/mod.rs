@@ -101,6 +101,7 @@ pub struct FileRegion {
     file: Arc<File>,
     offset: u64,
     len: u64,
+    portable_fallback: bool,
 }
 
 impl FileRegion {
@@ -323,7 +324,33 @@ impl Body {
     /// Associates a verified immutable file extent with this body. Transports
     /// that cannot use the extent continue to consume the regular body.
     pub fn with_file_region(mut self, file: Arc<File>, offset: u64, len: u64) -> Self {
-        self.file_region = Some(FileRegion { file, offset, len });
+        self.file_region = Some(FileRegion {
+            file,
+            offset,
+            len,
+            portable_fallback: true,
+        });
+        self
+    }
+
+    /// Associates a file extent with a body that is intentionally consumed only by
+    /// a compatible zero-copy transport. The caller must route this body exclusively
+    /// to a transport that takes the region before polling regular body frames.
+    pub fn with_file_region_for_zero_copy(
+        mut self,
+        file: Arc<File>,
+        offset: u64,
+        len: u64,
+    ) -> Self {
+        self.file_region = Some(FileRegion {
+            file,
+            offset,
+            len,
+            portable_fallback: false,
+        });
+        if matches!(self.inner, BodyInner::Empty) {
+            self.stream_finished = false;
+        }
         self
     }
 
@@ -336,6 +363,10 @@ impl Body {
         let region = self.file_region.take()?;
         let bytes = match &mut self.inner {
             BodyInner::Once { bytes, trailers } if trailers.is_none() => bytes,
+            BodyInner::Empty if !region.portable_fallback => {
+                self.stream_finished = true;
+                return Some(region);
+            }
             BodyInner::Empty
             | BodyInner::Once { .. }
             | BodyInner::Chunks { .. }
@@ -835,6 +866,20 @@ mod tests {
         );
         assert!(portable.take_file_region_without_trailers().is_none());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn zero_copy_only_file_region_can_replace_an_empty_fallback() {
+        let file = Arc::new(
+            std::fs::File::open(std::env::current_exe().expect("current executable"))
+                .expect("open executable"),
+        );
+        let mut body = Body::empty().with_file_region_for_zero_copy(file, 0, 1);
+        let region = body
+            .take_file_region_without_trailers()
+            .expect("zero-copy file region");
+        assert_eq!(region.len(), 1);
+        assert!(http_body::Body::is_end_stream(&body));
     }
 
     #[tokio::test]

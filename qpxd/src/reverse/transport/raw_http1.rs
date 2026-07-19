@@ -205,7 +205,7 @@ impl RawHttp1ConnectionCache {
         &mut self,
         downstream_head: &[u8],
         prepared: PreparedRawHttp1Request,
-    ) -> &PreparedRawHttp1Request {
+    ) -> Option<&PreparedRawHttp1Request> {
         let prepared = Box::new(prepared);
         self.serialized = Some(CachedSerializedRequest {
             downstream_head: downstream_head.into(),
@@ -213,9 +213,7 @@ impl RawHttp1ConnectionCache {
         });
         self.serialized
             .as_ref()
-            .expect("prepared request cache was initialized")
-            .prepared
-            .as_ref()
+            .map(|serialized| serialized.prepared.as_ref())
     }
 }
 
@@ -335,7 +333,7 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
         let headers = crate::http::codec::h1_common::parse_header_map(request.headers).ok()?;
         PreparedRawHttp1Target::Generic { uri, headers }
     };
-    Some(cache.store_prepared_request(
+    cache.store_prepared_request(
         request.raw_head,
         PreparedRawHttp1Request {
             state,
@@ -345,7 +343,7 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
             method,
             keep_alive,
         },
-    ))
+    )
 }
 
 pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(

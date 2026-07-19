@@ -948,15 +948,67 @@ async fn execute_webdav_service(
     let file_region = parts.extensions.remove::<qpx_webdav::ResourceFileRegion>();
     let body_len = body.len() as u64;
     let mut body = Body::from(body).mark_trailers_sanitized();
-    if let Some(region) = file_region.filter(|region| region.len >= 64 * 1024) {
+    if let Some(region) = file_region {
         if body_len != 0 && region.len != body_len {
             return Err(anyhow!(
                 "WebDAV file region length does not match the response body"
             ));
         }
-        body = body.with_file_region(region.file, region.offset, region.len);
+        if region.len >= 64 * 1024 && cfg!(any(target_os = "linux", target_os = "macos")) {
+            body = body.with_file_region_for_zero_copy(region.file, region.offset, region.len);
+        } else {
+            let bytes = materialize_webdav_file_region(&region.file, region.offset, region.len)?;
+            body = Body::from(bytes).mark_trailers_sanitized();
+        }
     }
     Ok(Response::from_parts(parts, body))
+}
+
+fn materialize_webdav_file_region(
+    file: &std::fs::File,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>> {
+    let length = usize::try_from(length)
+        .map_err(|_| anyhow!("WebDAV file region is too large to materialize"))?;
+    let mut bytes = vec![0; length];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        #[cfg(unix)]
+        let read = std::os::unix::fs::FileExt::read_at(
+            file,
+            &mut bytes[filled..],
+            offset
+                .checked_add(filled as u64)
+                .ok_or_else(|| anyhow!("WebDAV file region offset overflow"))?,
+        )?;
+        #[cfg(windows)]
+        let read = std::os::windows::fs::FileExt::seek_read(
+            file,
+            &mut bytes[filled..],
+            offset
+                .checked_add(filled as u64)
+                .ok_or_else(|| anyhow!("WebDAV file region offset overflow"))?,
+        )?;
+        #[cfg(not(any(unix, windows)))]
+        let read = {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = file.try_clone()?;
+            file.seek(SeekFrom::Start(
+                offset
+                    .checked_add(filled as u64)
+                    .ok_or_else(|| anyhow!("WebDAV file region offset overflow"))?,
+            ))?;
+            file.read(&mut bytes[filled..])?
+        };
+        if read == 0 {
+            return Err(anyhow!(
+                "WebDAV file region ended before its declared length"
+            ));
+        }
+        filled += read;
+    }
+    Ok(bytes)
 }
 
 async fn reverse_continue_response_rule(

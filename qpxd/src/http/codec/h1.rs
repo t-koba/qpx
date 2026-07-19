@@ -30,6 +30,37 @@ pub(crate) use self::response::{
 use self::zero_copy::ZeroCopySocket;
 const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Sends a response on a plain TCP HTTP/1.1 connection, retaining the file-region
+/// fast path used by origin responses while preserving the normal framing contract.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the TCP wrapper preserves the established HTTP/1.1 response contract"
+)]
+pub(crate) async fn send_http1_response_with_interim_tcp(
+    writer: &mut TcpStream,
+    request_version: Version,
+    request_method: &Method,
+    response: Response<Body>,
+    interim: &[InterimResponseHead],
+    request_keep_alive: bool,
+    body_read_timeout: Duration,
+    head_buf: &mut BytesMut,
+) -> Result<bool> {
+    let mut zero_copy = ZeroCopySocket::for_tcp(writer);
+    response::send_http1_response_with_interim_zero_copy(
+        writer,
+        request_version,
+        request_method,
+        response,
+        interim,
+        request_keep_alive,
+        body_read_timeout,
+        head_buf,
+        zero_copy.as_mut(),
+    )
+    .await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestBodyKind {
     Empty,
