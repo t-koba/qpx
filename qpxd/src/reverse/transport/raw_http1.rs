@@ -37,6 +37,7 @@ enum PreparedRawHttp1Target {
     Origin {
         request_head: Bytes,
         origin: PreparedPlainHttp1Origin,
+        endpoint: Arc<crate::reverse::health::UpstreamEndpoint>,
     },
     LocalResponse,
     Generic {
@@ -104,47 +105,49 @@ struct CachedOriginTarget {
 
 struct CachedSerializedRequest {
     downstream_head: Box<[u8]>,
-    prepared: Arc<PreparedRawHttp1Request>,
+    prepared: Box<PreparedRawHttp1Request>,
 }
 
 impl RawHttp1ConnectionCache {
-    pub(in crate::reverse) fn prepare_cached_prefix(
+    pub(in crate::reverse) fn cached_prefix_len(
         &self,
         reverse: &ReloadableReverse,
         bytes: &[u8],
-    ) -> Option<(usize, Arc<PreparedRawHttp1Request>)> {
+    ) -> Option<usize> {
         let cached = self.serialized.as_ref()?;
         let consumed = cached.downstream_head.len();
         if bytes.len() < consumed || &bytes[..consumed] != cached.downstream_head.as_ref() {
             return None;
         }
-        self.prepared_request(reverse, cached.downstream_head.as_ref())
-            .map(|request| (consumed, request))
+        self.has_current_prepared(reverse, cached.downstream_head.as_ref())
+            .then_some(consumed)
     }
 
-    fn prepared_request(
-        &self,
-        reverse: &ReloadableReverse,
-        downstream_head: &[u8],
-    ) -> Option<Arc<PreparedRawHttp1Request>> {
+    fn has_current_prepared(&self, reverse: &ReloadableReverse, downstream_head: &[u8]) -> bool {
+        let Some(cached) = self.serialized.as_ref() else {
+            return false;
+        };
         if qpx_observability::metrics_enabled() || qpx_observability::request_spans_enabled() {
-            return None;
+            return false;
         }
-        let cached = self.serialized.as_ref()?;
-        if cached.downstream_head.as_ref() != downstream_head
-            || !reverse.runtime.is_current_state(&cached.prepared.state)
-            || cached.prepared.state.destination_trace_enabled()
-            || !cached
+        cached.downstream_head.as_ref() == downstream_head
+            && reverse.runtime.is_current_state(&cached.prepared.state)
+            && !cached.prepared.state.destination_trace_enabled()
+            && cached
                 .prepared
                 .state
                 .security
                 .identity_sources
                 .sources
                 .is_empty()
-        {
-            return None;
-        }
-        Some(cached.prepared.clone())
+    }
+
+    /// Return the cached request after the caller has validated its state.
+    pub(in crate::reverse) fn prepared_request_ref_unchecked(
+        &self,
+    ) -> Option<&PreparedRawHttp1Request> {
+        let cached = self.serialized.as_ref()?;
+        Some(cached.prepared.as_ref())
     }
 
     fn routing_snapshot(
@@ -202,13 +205,17 @@ impl RawHttp1ConnectionCache {
         &mut self,
         downstream_head: &[u8],
         prepared: PreparedRawHttp1Request,
-    ) -> Arc<PreparedRawHttp1Request> {
-        let prepared = Arc::new(prepared);
+    ) -> &PreparedRawHttp1Request {
+        let prepared = Box::new(prepared);
         self.serialized = Some(CachedSerializedRequest {
             downstream_head: downstream_head.into(),
-            prepared: prepared.clone(),
+            prepared,
         });
-        prepared
+        self.serialized
+            .as_ref()
+            .expect("prepared request cache was initialized")
+            .prepared
+            .as_ref()
     }
 }
 
@@ -221,19 +228,20 @@ impl CachedOriginTarget {
     }
 }
 
-pub(in crate::reverse) fn prepare_raw_http1_request(
+pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
     reverse: &ReloadableReverse,
     conn: &ReverseConnInfo,
     request: RawHttp1RequestView<'_>,
-    cache: &mut RawHttp1ConnectionCache,
-) -> Option<Arc<PreparedRawHttp1Request>> {
+    cache: &'a mut RawHttp1ConnectionCache,
+) -> Option<&'a PreparedRawHttp1Request> {
     if request.version != 1 || !matches!(request.method, "GET" | "HEAD") {
         return None;
     }
     if qpx_observability::metrics_enabled() || qpx_observability::request_spans_enabled() {
         return None;
     }
-    if let Some(prepared) = cache.prepared_request(reverse, request.raw_head) {
+    if cache.has_current_prepared(reverse, request.raw_head) {
+        let prepared = cache.prepared_request_ref_unchecked()?;
         return Some(prepared);
     }
     let (state, compiled) = cache.routing_snapshot(reverse)?;
@@ -294,7 +302,10 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
         .flatten()
         .filter(|route| route.supports_raw_http1_dispatch() && route.matches(&route_match_context))
     {
-        let selected_upstream = route.available_plain_http_upstream()?;
+        let selected_upstream = route.single_plain_http_upstream_arc()?;
+        if selected_upstream.has_time_dependent_admission_state() {
+            return None;
+        }
         let (connect_authority, host_authority) =
             selected_upstream.origin.direct_plain_http1_authorities()?;
         let origin = prepare_plain_http1_origin(&state.pools, connect_authority, host_authority);
@@ -308,6 +319,7 @@ pub(in crate::reverse) fn prepare_raw_http1_request(
         PreparedRawHttp1Target::Origin {
             request_head,
             origin,
+            endpoint: selected_upstream,
         }
     } else if direct_dispatch_allowed
         && compiled
@@ -391,22 +403,25 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         .router
         .single_plain_http_route()
         .ok_or_else(|| anyhow!("raw HTTP/1 route is no longer available"))?;
-    let selected_upstream = route
-        .available_plain_http_upstream()
-        .ok_or_else(|| anyhow!("raw HTTP/1 route requires one static upstream"))?;
+    let PreparedRawHttp1Target::Origin {
+        request_head,
+        origin,
+        endpoint: selected_upstream,
+    } = &prepared.target
+    else {
+        unreachable!();
+    };
+    if selected_upstream.has_time_dependent_admission_state() {
+        return Err(anyhow!(
+            "raw HTTP/1 route upstream is not currently available"
+        ));
+    }
     let started = route
         .policy
         .passive_health
         .as_ref()
         .is_some_and(|policy| policy.latency_threshold.is_some())
         .then(tokio::time::Instant::now);
-    let PreparedRawHttp1Target::Origin {
-        request_head,
-        origin,
-    } = &prepared.target
-    else {
-        unreachable!();
-    };
     let response = timeout_after_pending(
         route.policy.timeout,
         proxy_prepared_plain_http1_head_raw_response_with_interim(

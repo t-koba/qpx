@@ -31,10 +31,10 @@ use tracing::warn;
 const COMMON_HTTP1_REQUEST_HEADERS: usize = 32;
 const MAX_HTTP1_REQUEST_HEADERS: usize = 128;
 
-enum FastParse {
+enum FastParse<'a> {
     Prepared {
         consumed: usize,
-        request: std::sync::Arc<crate::reverse::transport::PreparedRawHttp1Request>,
+        request: &'a crate::reverse::transport::PreparedRawHttp1Request,
     },
     Partial,
     Fallback,
@@ -129,7 +129,7 @@ pub(super) async fn serve_raw_or_fallback(
                     Ok(PreparedRawHttp1Response::Generic(interim, response))
                 } else {
                     dispatch_prepared_raw_http1_request(
-                        request.as_ref(),
+                        request,
                         &reverse,
                         &conn,
                         &mut origin_session,
@@ -279,13 +279,16 @@ fn direct_combined_log_request(request: &http::Request<Body>) -> http::Request<(
     log_request
 }
 
-fn try_prepare_request(
+fn try_prepare_request<'a>(
     bytes: &[u8],
     reverse: &ReloadableReverse,
     conn: &ReverseConnInfo,
-    cache: &mut RawHttp1ConnectionCache,
-) -> FastParse {
-    if let Some((consumed, request)) = cache.prepare_cached_prefix(reverse, bytes) {
+    cache: &'a mut RawHttp1ConnectionCache,
+) -> FastParse<'a> {
+    if let Some(consumed) = cache.cached_prefix_len(reverse, bytes) {
+        let Some(request) = cache.prepared_request_ref_unchecked() else {
+            return FastParse::Fallback;
+        };
         return FastParse::Prepared { consumed, request };
     }
     let mut common_headers =
@@ -320,14 +323,14 @@ fn try_prepare_request(
     }
 }
 
-fn prepare_complete_request(
+fn prepare_complete_request<'a>(
     parsed: &httparse::Request<'_, '_>,
     consumed: usize,
     bytes: &[u8],
     reverse: &ReloadableReverse,
     conn: &ReverseConnInfo,
-    cache: &mut RawHttp1ConnectionCache,
-) -> FastParse {
+    cache: &'a mut RawHttp1ConnectionCache,
+) -> FastParse<'a> {
     let (Some(method), Some(target), Some(version)) = (parsed.method, parsed.path, parsed.version)
     else {
         return FastParse::Fallback;

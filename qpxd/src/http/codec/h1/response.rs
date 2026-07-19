@@ -453,7 +453,9 @@ pub(crate) async fn send_raw_http1_response_relay_with_interim(
         }
         ResponseBodyKind::Chunked | ResponseBodyKind::CloseDelimited => unreachable!(),
     }
-    flush_with_timeout(writer).await?;
+    // TcpStream has no user-space write buffer, so a flush cannot make bytes
+    // more visible on the wire. Avoid an extra poll in the direct relay hot
+    // path; write_all above already completed the kernel write operation.
     let reusable = response.take_reusable_connection();
     Ok((keep_alive, reusable))
 }

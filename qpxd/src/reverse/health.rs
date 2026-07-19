@@ -1,6 +1,6 @@
 use qpx_core::config::{EndpointLifecycleConfig, HealthCheckConfig, HttpHealthCheckConfig};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use tokio::time::Duration;
 
 use crate::upstream::origin::OriginEndpoint;
@@ -176,6 +176,7 @@ pub(super) struct UpstreamEndpoint {
     recovery_start_ms: AtomicU64,
     warmup_until_ms: AtomicU64,
     drain_deadline_ms: AtomicU64,
+    admission_state_active: AtomicBool,
 }
 
 impl UpstreamEndpoint {
@@ -202,6 +203,7 @@ impl UpstreamEndpoint {
             recovery_start_ms: AtomicU64::new(0),
             warmup_until_ms: AtomicU64::new(0),
             drain_deadline_ms: AtomicU64::new(0),
+            admission_state_active: AtomicBool::new(false),
         }
     }
 
@@ -215,10 +217,15 @@ impl UpstreamEndpoint {
     }
 
     pub(super) fn has_time_dependent_admission_state(&self) -> bool {
-        self.unhealthy_until_ms.load(Ordering::Relaxed) != 0
+        self.admission_state_active.load(Ordering::Acquire)
+    }
+
+    fn refresh_admission_state(&self) {
+        let active = self.unhealthy_until_ms.load(Ordering::Relaxed) != 0
             || self.recovery_start_ms.load(Ordering::Relaxed) != 0
             || self.warmup_until_ms.load(Ordering::Relaxed) != 0
-            || self.drain_deadline_ms.load(Ordering::Relaxed) != 0
+            || self.drain_deadline_ms.load(Ordering::Relaxed) != 0;
+        self.admission_state_active.store(active, Ordering::Release);
     }
 
     pub(super) fn mark_success(&self, lifecycle: &EndpointLifecycleRuntime) {
@@ -329,6 +336,7 @@ impl UpstreamEndpoint {
         let scaled_ms = (duration.as_millis() as u64).saturating_mul(1u64 << shift);
         let until = now_millis().saturating_add(scaled_ms);
         self.unhealthy_until_ms.fetch_max(until, Ordering::Relaxed);
+        self.admission_state_active.store(true, Ordering::Release);
         self.reset_adaptive_stats();
         super::metrics::upstream_ejection(reason.as_label());
     }
@@ -347,6 +355,7 @@ impl UpstreamEndpoint {
         };
         self.recovery_start_ms
             .store(recovery_start, Ordering::Relaxed);
+        self.refresh_admission_state();
     }
 
     pub(super) fn mark_draining(&self, lifecycle: &EndpointLifecycleRuntime) -> bool {
@@ -355,6 +364,7 @@ impl UpstreamEndpoint {
         };
         let until = now_millis().saturating_add(timeout.as_millis() as u64);
         self.drain_deadline_ms.fetch_max(until, Ordering::Relaxed);
+        self.admission_state_active.store(true, Ordering::Release);
         true
     }
 

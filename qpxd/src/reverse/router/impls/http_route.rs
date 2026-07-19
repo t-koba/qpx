@@ -194,6 +194,19 @@ impl HttpRoute {
             .map(|_| endpoint.as_ref())
     }
 
+    pub(in crate::reverse) fn single_plain_http_upstream_arc(
+        &self,
+    ) -> Option<Arc<UpstreamEndpoint>> {
+        let [backend] = self.backends.as_slice() else {
+            return None;
+        };
+        let endpoint = backend.upstreams.single_static_endpoint()?;
+        endpoint
+            .origin
+            .direct_plain_http1_authorities()
+            .map(|_| Arc::clone(endpoint))
+    }
+
     pub(in crate::reverse) fn available_plain_http_upstream(&self) -> Option<&UpstreamEndpoint> {
         let endpoint = self.single_plain_http_upstream()?;
         (!endpoint.has_time_dependent_admission_state()).then_some(endpoint)
