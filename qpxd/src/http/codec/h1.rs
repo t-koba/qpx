@@ -25,6 +25,7 @@ mod zero_copy;
 use self::response::{ConnectionHeaderMode, http1_upgrade_accepted, write_status_and_headers};
 pub(crate) use self::response::{
     send_http1_response_with_interim, send_raw_http1_response_relay_with_interim,
+    send_static_http1_response,
 };
 use self::zero_copy::ZeroCopySocket;
 const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);

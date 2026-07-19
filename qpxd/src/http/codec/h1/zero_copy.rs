@@ -193,6 +193,29 @@ impl SplicePipe {
         if result != 0 {
             return Err(io::Error::last_os_error());
         }
+        // A larger pipe lets splice coalesce adjacent upstream writes instead of forcing a
+        // source-read / destination-write wakeup at the kernel's small default pipe capacity.
+        // The requested size is an optimization only; kernels may reject it for an ordinary
+        // unprivileged process, while unrelated errors still indicate a broken pipe setup.
+        let resize = unsafe {
+            libc::fcntl(
+                descriptors[0],
+                libc::F_SETPIPE_SZ,
+                256_i32.saturating_mul(1024),
+            )
+        };
+        if resize < 0 {
+            let error = io::Error::last_os_error();
+            let optional_resize_rejection = matches!(error.raw_os_error(), Some(code)
+                if code == libc::EPERM || code == libc::EINVAL || code == libc::ENOMEM);
+            if !optional_resize_rejection {
+                unsafe {
+                    libc::close(descriptors[0]);
+                    libc::close(descriptors[1]);
+                }
+                return Err(error);
+            }
+        }
         Ok(Self {
             read_fd: descriptors[0],
             write_fd: descriptors[1],

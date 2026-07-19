@@ -1,7 +1,7 @@
 use super::{ReverseInterimService, reverse_body_channel_capacity};
 use crate::http::codec::h1::{
     send_http1_response_with_interim, send_raw_http1_response_relay_with_interim,
-    serve_http1_tcp_with_interim_and_capacity,
+    send_static_http1_response, serve_http1_tcp_with_interim_and_capacity,
 };
 use crate::http::codec::h1_common::MAX_HEADER_BYTES;
 use crate::http::codec::lazy_timeout::timeout_after_pending;
@@ -136,6 +136,22 @@ pub(super) async fn serve_raw_or_fallback(
                             origin_session.recycle_connection(reusable);
                         }
                         keep_alive
+                    }
+                    PreparedRawHttp1Response::InMemory {
+                        status,
+                        headers,
+                        body,
+                    } => {
+                        send_static_http1_response(
+                            &mut stream,
+                            request_method,
+                            status,
+                            headers,
+                            body,
+                            request_keep_alive,
+                            &mut response_head,
+                        )
+                        .await?
                     }
                     PreparedRawHttp1Response::Generic(interim, response) => {
                         send_http1_response_with_interim(

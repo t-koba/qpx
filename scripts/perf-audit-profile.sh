@@ -8,6 +8,9 @@ PROFILE_JSON="${QPX_PERF_PROFILE_JSON:-$ROOT_DIR/target/perf/perf-audit-profile-
 PROFILE_EVENTS="${QPX_PERF_PROFILE_EVENTS:-$ROOT_DIR/target/perf/perf-audit-profile-events.jsonl}"
 PROFILE_REQUESTS="${QPX_PERF_PROFILE_REQUESTS:-32}"
 PROFILE_CONCURRENCY="${QPX_PERF_PROFILE_CONCURRENCY:-4}"
+PROFILE_HTTP2_WARMUP_TIME="${QPX_PERF_PROFILE_HTTP2_WARMUP_TIME:-1s}"
+PROFILE_HTTP2_DURATION="${QPX_PERF_PROFILE_HTTP2_DURATION:-1s}"
+PROFILE_HTTP2_WARMUP_DELAY_SECONDS="${QPX_PERF_PROFILE_HTTP2_WARMUP_DELAY_SECONDS:-1.1}"
 MIN_INSTRUCTIONS="${QPX_PERF_PROFILE_MIN_INSTRUCTIONS:-1000000}"
 DEFAULT_QPXD_BIN="$ROOT_DIR/target/callgrind/qpxd"
 QPXD_BIN="${QPXD_BIN:-$DEFAULT_QPXD_BIN}"
@@ -23,6 +26,7 @@ mkdir -p "$PROFILE_DIR" "$LOG_DIR" "$(dirname "$PROFILE_JSON")"
 
 PIDS=()
 BACKEND_PID=""
+HTTP2_PROFILE_COMPLETED_REQUESTS=0
 
 cleanup() {
   local pid
@@ -200,40 +204,34 @@ PY
 run_http2_profile_load() {
   local output="$1"
   local qpx_pid="$2"
-  local warmup_output="$LOG_DIR/http2-profile-warmup.txt"
+  local client_pid
   local client_status=0
 
-  # Warm up the TLS, HTTP/2, HPACK and origin connection state in a completed
-  # request before enabling callgrind. Timing-script based warmup was racy:
-  # h2load may complete the timed requests before nginx flushes its access log,
-  # leaving the profiler with an empty or partial measurement window.
-  if ! h2load -n "$PROFILE_CONCURRENCY" -c "$PROFILE_CONCURRENCY" \
-    -m "$PROFILE_CONCURRENCY" \
-    --connect-to "127.0.0.1:${QPX_HTTP2_PORT}" \
-    "https://localhost:${QPX_HTTP2_PORT}/bench" >"$warmup_output" 2>&1; then
-    cat "$warmup_output" >&2
-    echo "HTTP/2 profile warmup failed" >&2
-    return 1
-  fi
-
-  callgrind_control -i on "$qpx_pid" >/dev/null
-  h2load -n "$PROFILE_REQUESTS" -c "$PROFILE_CONCURRENCY" \
+  # Keep one h2load process alive across TLS/HTTP/2 warm-up and measurement.
+  # Starting a second process after warm-up redoes the TLS handshake and makes
+  # callgrind report handshake crypto instead of the HTTP/2 request path.
+  h2load -D "$PROFILE_HTTP2_DURATION" \
+    --warm-up-time "$PROFILE_HTTP2_WARMUP_TIME" \
+    -c "$PROFILE_CONCURRENCY" \
     -m "$PROFILE_CONCURRENCY" \
     --connect-to "127.0.0.1:${QPX_HTTP2_PORT}" \
     "https://localhost:${QPX_HTTP2_PORT}/bench" \
-    >"$output" 2>&1 || client_status=$?
+    >"$output" 2>&1 &
+  client_pid=$!
+  sleep "$PROFILE_HTTP2_WARMUP_DELAY_SECONDS"
+  callgrind_control -i on "$qpx_pid" >/dev/null
+  wait "$client_pid" || client_status=$?
   callgrind_control -i off "$qpx_pid" >/dev/null || true
   if [ "$client_status" -ne 0 ]; then
     cat "$output" >&2
     echo "HTTP/2 profile load failed with status ${client_status}" >&2
     return 1
   fi
-  python3 - "$output" "$PROFILE_REQUESTS" <<'PY'
+  HTTP2_PROFILE_COMPLETED_REQUESTS="$(python3 - "$output" <<'PY'
 import re
 import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
-expected = int(sys.argv[2])
 row = re.search(
     r"requests:\s+([0-9]+) total,\s+([0-9]+) started,\s+([0-9]+) done,\s+"
     r"([0-9]+) succeeded,\s+([0-9]+) failed,\s+([0-9]+) errored,\s+([0-9]+) timeout",
@@ -243,11 +241,13 @@ if row is None:
     raise SystemExit("h2load output is missing request counters")
 values = [int(value) for value in row.groups()]
 total, started, done, succeeded, failed, errored, timed_out = values
-if (total, started, done, succeeded) != (expected, expected, expected, expected):
-    raise SystemExit("HTTP/2 profile load did not complete the measured requests")
+if total == 0 or started == 0 or done == 0 or succeeded == 0:
+    raise SystemExit("HTTP/2 profile load did not complete any measured requests")
 if failed != 0 or errored != 0 or timed_out != 0:
     raise SystemExit("HTTP/2 profile load reported failures")
+print(succeeded)
 PY
+)"
 }
 
 annotate_profile() {
@@ -326,9 +326,10 @@ run_profile() {
   local output="$PROFILE_DIR/callgrind.qpxd_reverse_${protocol}.out"
   local load_output="$LOG_DIR/load-${protocol}.txt"
   local qpx_log="$LOG_DIR/qpxd-${protocol}.log"
-  local pid tls selected_output warmup_requests
+  local pid tls selected_output warmup_requests measured_requests
   tls=false
   warmup_requests=0
+  measured_requests="$PROFILE_REQUESTS"
   if [ "$protocol" = http2 ]; then tls=true; fi
   write_qpx_config "$protocol" "$port" "$config"
   rm -f "$output" "$output".*
@@ -342,8 +343,11 @@ run_profile() {
   PIDS+=("$pid")
   wait_http "qpxd-${protocol}" "$port" "$pid" "$qpx_log" "$tls"
   if [ "$protocol" = http2 ]; then
+    # h2load timing mode does not expose warm-up counters; this records the
+    # number of connections that were primed before callgrind was enabled.
     warmup_requests="$PROFILE_CONCURRENCY"
     run_http2_profile_load "$load_output" "$pid"
+    measured_requests="$HTTP2_PROFILE_COMPLETED_REQUESTS"
   else
     callgrind_control -i on "$pid" >/dev/null
     run_http1_load "$load_output"
@@ -361,7 +365,7 @@ run_profile() {
   annotate_profile "qpxd_reverse_${protocol}" "$protocol" "$selected_output"
   printf '{"bench":"callgrind_profile_load","target":%s,"requests":%s,"warmup_requests":%s,"concurrency":%s,"valid":true,"commit":%s}\n' \
     "$(json_escape "qpxd_reverse_${protocol}")" \
-    "$PROFILE_REQUESTS" \
+    "$measured_requests" \
     "$warmup_requests" \
     "$PROFILE_CONCURRENCY" \
     "$(json_escape "${GITHUB_SHA:-unknown}")" >>"$PROFILE_EVENTS"

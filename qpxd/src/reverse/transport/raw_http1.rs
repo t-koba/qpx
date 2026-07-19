@@ -11,7 +11,7 @@ use crate::upstream::origin::{
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use http::uri::{Authority, Uri};
-use http::{HeaderMap, Method, Request, Response, Version};
+use http::{HeaderMap, Method, Request, Response, StatusCode, Version};
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -46,6 +46,11 @@ enum PreparedRawHttp1Target {
 
 pub(in crate::reverse) enum PreparedRawHttp1Response {
     Direct(crate::upstream::raw_http1::RawHttp1ResponseRelay<tokio::net::TcpStream>),
+    InMemory {
+        status: StatusCode,
+        headers: HeaderMap,
+        body: Bytes,
+    },
     Generic(InterimList, Response<Body>),
 }
 
@@ -315,6 +320,15 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         session.release();
         let (interim, response) =
             super::handle_request_with_interim_ref(request, reverse, conn).await?;
+        let mut response = response;
+        if let Some(body) = take_in_memory_body(&interim, &mut response) {
+            let (parts, _) = response.into_parts();
+            return Ok(PreparedRawHttp1Response::InMemory {
+                status: parts.status,
+                headers: parts.headers,
+                body,
+            });
+        }
         return Ok(PreparedRawHttp1Response::Generic(interim, response));
     }
     if matches!(&prepared.target, PreparedRawHttp1Target::LocalResponse) {
@@ -336,6 +350,14 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
             None,
         )?;
         super::dispatch::apply_reverse_route_metadata(route, false, &mut response)?;
+        if let Some(body) = take_in_memory_body(&[], &mut response) {
+            let (parts, _) = response.into_parts();
+            return Ok(PreparedRawHttp1Response::InMemory {
+                status: parts.status,
+                headers: parts.headers,
+                body,
+            });
+        }
         return Ok(PreparedRawHttp1Response::Generic(Vec::new(), response));
     }
     let route = prepared
@@ -402,7 +424,28 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         None,
         false,
     );
+    if let Some(body) = take_in_memory_body(&proxied.interim, &mut response) {
+        let (parts, _) = response.into_parts();
+        return Ok(PreparedRawHttp1Response::InMemory {
+            status: parts.status,
+            headers: parts.headers,
+            body,
+        });
+    }
     Ok(PreparedRawHttp1Response::Generic(proxied.interim, response))
+}
+
+fn take_in_memory_body(
+    interim: &[crate::upstream::raw_http1::InterimResponseHead],
+    response: &mut Response<Body>,
+) -> Option<Bytes> {
+    if !interim.is_empty() {
+        return None;
+    }
+    if response.body().has_file_region() {
+        return None;
+    }
+    response.body_mut().take_single_frame_without_trailers()
 }
 
 fn serialize_upstream_request_head(
@@ -605,5 +648,13 @@ mod tests {
             },
         ];
         assert!(cache.update_authority(&headers).is_none());
+    }
+
+    #[test]
+    fn in_memory_response_fast_path_takes_only_a_trailerless_frame() {
+        let mut response = Response::new(Body::from(Bytes::from_static(b"body")));
+        let body = take_in_memory_body(&[], &mut response).expect("single body frame");
+        assert_eq!(body, Bytes::from_static(b"body"));
+        assert!(take_in_memory_body(&[], &mut response).is_none());
     }
 }

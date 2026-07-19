@@ -24,7 +24,7 @@ const H2_INITIAL_STREAM_WINDOW_SIZE: u32 = 1024 * 1024;
 const H2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
 const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
 const H2_MAX_SEND_BUFFER_SIZE: usize = 1024 * 1024;
-const H2_MAX_CONCURRENT_STREAMS: u32 = 256;
+pub(crate) const H2_MAX_CONCURRENT_STREAMS: usize = 256;
 const H2_DIRECT_SEND_BODY_MAX_BYTES: u64 = 16 * 1024;
 const H2_INITIAL_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_FRAME_SIZE as usize;
 const H2_MIN_SCHEDULER_BUFFER_BYTES: usize = 16 * 1024;
@@ -65,7 +65,7 @@ pub(crate) fn tune_h2_server_builder_with(
     builder.initial_connection_window_size(tuning.initial_connection_window_size);
     builder.max_frame_size(H2_MAX_FRAME_SIZE);
     builder.max_send_buffer_size(H2_MAX_SEND_BUFFER_SIZE);
-    builder.max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS);
+    builder.max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS as u32);
 }
 
 #[cfg(test)]

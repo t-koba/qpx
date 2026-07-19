@@ -74,6 +74,79 @@ where
     .await
 }
 
+/// Send a finalized in-memory response without constructing a body polling state machine.
+/// This path retains the general HTTP/1 framing rules for replayable responses.
+pub(crate) async fn send_static_http1_response(
+    writer: &mut TcpStream,
+    request_method: &Method,
+    response_status: StatusCode,
+    mut headers: HeaderMap,
+    body: Bytes,
+    request_keep_alive: bool,
+    head_buf: &mut BytesMut,
+) -> Result<bool> {
+    let status_has_no_body = response_status.is_informational()
+        || response_status == StatusCode::NO_CONTENT
+        || response_status == StatusCode::RESET_CONTENT
+        || response_status == StatusCode::NOT_MODIFIED
+        || (request_method == Method::CONNECT && response_status.is_success());
+    let no_body = request_method == Method::HEAD || status_has_no_body;
+    let body_len = body.len() as u64;
+    let declared_length = parse_declared_content_length(&headers)?;
+    if status_has_no_body {
+        if request_method != Method::HEAD {
+            headers.remove(CONTENT_LENGTH);
+        }
+        headers.remove(TRANSFER_ENCODING);
+        headers.remove(TRAILER);
+    } else {
+        if let Some(declared_length) = declared_length
+            && declared_length != body_len
+        {
+            return Err(anyhow!(
+                "static response body length {} does not match declared content-length {}",
+                body_len,
+                declared_length
+            ));
+        }
+        if declared_length.is_none() {
+            headers.insert(
+                CONTENT_LENGTH,
+                HeaderValue::from_str(&body_len.to_string())
+                    .map_err(|error| anyhow!("invalid static response content length: {error}"))?,
+            );
+        }
+        headers.remove(TRANSFER_ENCODING);
+        headers.remove(TRAILER);
+    }
+    let keep_alive = request_keep_alive
+        && request_method != Method::CONNECT
+        && !response_status.is_informational()
+        && response_status != StatusCode::SWITCHING_PROTOCOLS;
+    let connection_mode = determine_connection_header_mode(
+        Version::HTTP_11,
+        request_method,
+        response_status,
+        &headers,
+        keep_alive,
+    );
+    serialize_status_and_headers(
+        head_buf,
+        Version::HTTP_11,
+        response_status,
+        &headers,
+        connection_mode,
+    );
+    let body = if no_body { Bytes::new() } else { body };
+    if body.is_empty() {
+        write_all_with_timeout(writer, head_buf).await?;
+    } else {
+        write_vectored_all_with_timeout(writer, &[head_buf, &body]).await?;
+    }
+    flush_with_timeout(writer).await?;
+    Ok(keep_alive)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "response relay keeps protocol state and zero-copy capability explicit"

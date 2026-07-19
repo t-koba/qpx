@@ -286,6 +286,11 @@ impl Body {
         !matches!(self.inner, BodyInner::Boxed(_))
     }
 
+    /// Returns whether the body has a verified file extent reserved for zero-copy transport.
+    pub fn has_file_region(&self) -> bool {
+        self.file_region.is_some()
+    }
+
     /// Takes an in-memory body represented by exactly one data frame and no trailers.
     ///
     /// Callers can use this to preserve a single-frame transport fast path without

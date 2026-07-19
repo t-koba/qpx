@@ -67,7 +67,9 @@ impl CachedBody {
 
     pub(crate) fn to_body(&self) -> Body {
         match self {
-            Self::Memory(bytes) => Body::from(bytes.clone()),
+            // Cache envelopes do not persist trailers, so memory bodies are safe to
+            // replay without wrapping them in a trailer-sanitizing stream.
+            Self::Memory(bytes) => Body::from(bytes.clone()).mark_trailers_sanitized(),
             Self::File(file) => file.body(None, None),
         }
     }
@@ -77,7 +79,7 @@ impl CachedBody {
             Self::Memory(bytes) => {
                 let start = start as usize;
                 let end = end_inclusive as usize;
-                Body::from(bytes.slice(start..end + 1))
+                Body::from(bytes.slice(start..end + 1)).mark_trailers_sanitized()
             }
             Self::File(file) => file.body(Some((start, end_inclusive)), None),
         }

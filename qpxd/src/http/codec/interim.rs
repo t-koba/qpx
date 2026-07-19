@@ -1,4 +1,6 @@
-use crate::http::codec::h2::{H2TransportTuning, send_h2_response_with_interim};
+use crate::http::codec::h2::{
+    H2_MAX_CONCURRENT_STREAMS, H2TransportTuning, send_h2_response_with_interim,
+};
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::Result;
 use bytes::Bytes;
@@ -17,7 +19,9 @@ use tokio_util::sync::ReusableBoxFuture;
 use tracing::{debug, warn};
 
 pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-const H2_ACCEPT_BACKLOG: usize = 64;
+// Keep request admission aligned with the protocol stream limit. This remains bounded while
+// avoiding an artificial half-capacity bottleneck for a single connection's stream fan-out.
+const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
 
 #[cfg(test)]
 pub(crate) async fn serve_h2_with_interim<I, S>(
