@@ -210,6 +210,7 @@ fn decode_cached_response_metadata_rejects_non_http_status_class() {
         vary_values: Vec::new(),
         header_map: Default::default(),
         response_directives: Default::default(),
+        response_header_values: Default::default(),
     };
     let encoded = encode_cached_response_metadata(&envelope).expect("encode");
     let err = decode_cached_response_metadata(Bytes::from(encoded))
@@ -234,6 +235,7 @@ fn vary_matching_works() {
         vary_values: vec![("accept-language".to_string(), "ja".to_string())],
         header_map: Default::default(),
         response_directives: Default::default(),
+        response_header_values: Default::default(),
     };
     assert!(matches_vary(&req_headers, None, &envelope));
 }

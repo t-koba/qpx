@@ -11,9 +11,12 @@ use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use std::future::poll_fn;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use tokio::io::AsyncReadExt;
+use tokio::sync::{Notify, mpsc};
+use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::ReusableBoxFuture;
 use tracing::{debug, warn};
@@ -22,6 +25,12 @@ pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 // Keep request admission aligned with the protocol stream limit. This remains bounded while
 // avoiding an artificial half-capacity bottleneck for a single connection's stream fan-out.
 const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
+// The connection task owns protocol I/O and the reusable primary-stream future;
+// a small fixed executor set provides bounded parallelism without allocating a
+// Tokio task for every request.
+const H2_STREAM_EXECUTOR_WORKERS: usize = 3;
+const H2_STREAM_EXECUTOR_QUEUE_CAPACITY: usize =
+    H2_ACCEPT_BACKLOG.div_ceil(H2_STREAM_EXECUTOR_WORKERS);
 
 #[cfg(test)]
 pub(crate) async fn serve_h2_with_interim<I, S>(
@@ -87,56 +96,73 @@ where
         builder.enable_connect_protocol();
     }
     let mut conn = timeout(idle_timeout, builder.handshake(io)).await??;
-    let active_streams = AtomicUsize::new(0);
+    let service = Arc::new(service);
+    let stream_activity = Arc::new(H2StreamActivity::default());
     let mut reusable_primary_stream: Option<ReusableBoxFuture<'_, ()>> = None;
     let mut primary_stream = None;
-    let mut concurrent_streams = FuturesUnordered::new();
+    let mut stream_executor = None;
     let mut accepting_streams = true;
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     loop {
-        let accept_backlog_available = concurrent_streams.len() < H2_ACCEPT_BACKLOG;
+        if !accepting_streams && stream_activity.count() == 0 {
+            break;
+        }
+        let accept_backlog_available = stream_activity.count() < H2_ACCEPT_BACKLOG;
         if accepting_streams && !accept_backlog_available {
-            let progress = poll_fn(|cx| {
-                Poll::Ready(match conn.poll_closed(cx) {
-                    Poll::Ready(result) => Some(result),
-                    Poll::Pending => None,
-                })
-            })
-            .await;
-            if let Some(result) = progress {
-                match result {
-                    Ok(()) => {
-                        accepting_streams = false;
-                        if primary_stream.is_none() && concurrent_streams.is_empty() {
-                            break;
+            tokio::select! {
+                progress = poll_fn(|cx| {
+                    Poll::Ready(match conn.poll_closed(cx) {
+                        Poll::Ready(result) => Some(result),
+                        Poll::Pending => None,
+                    })
+                }) => {
+                    if let Some(result) = progress {
+                        match result {
+                            Ok(()) => accepting_streams = false,
+                            Err(error) => return Err(error.into()),
                         }
                     }
-                    Err(error) => return Err(error.into()),
                 }
+                () = stream_activity.completed.notified() => {}
+            }
+            if !accepting_streams && stream_activity.count() == 0 {
+                break;
             }
         }
         tokio::select! {
             biased;
+            completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
+                let () = completed;
+                reusable_primary_stream = primary_stream.take();
+                if !accepting_streams && stream_activity.count() == 0 {
+                    break;
+                }
+                if stream_activity.count() == 0 {
+                    idle_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_timeout);
+                }
+            }
             accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
                 let Some(result) = accepted else {
                     accepting_streams = false;
-                    if primary_stream.is_none() && concurrent_streams.is_empty() {
+                    if stream_activity.count() == 0 {
                         break;
                     }
                     continue;
                 };
                 let (request, respond) = result?;
-                let active_stream = ActiveH2Stream::new(&active_streams);
-                let stream = serve_h2_stream(
-                    request,
-                    respond,
-                    &service,
-                    body_channel_capacity,
-                    idle_timeout,
-                    active_stream,
-                );
-                if primary_stream.is_none() && concurrent_streams.is_empty() {
+                if primary_stream.is_none() {
+                    let active_stream = BorrowedH2StreamActivity::new(stream_activity.as_ref());
+                    let stream = serve_h2_stream(
+                        request,
+                        respond,
+                        service.as_ref(),
+                        body_channel_capacity,
+                        idle_timeout,
+                        active_stream,
+                    );
                     let reusable = if let Some(mut reusable) = reusable_primary_stream.take() {
                         reusable.set(stream);
                         reusable
@@ -145,33 +171,32 @@ where
                     };
                     primary_stream = Some(reusable);
                 } else {
-                    concurrent_streams.push(stream);
+                    let executor = stream_executor.get_or_insert_with(|| {
+                        H2StreamExecutor::new(
+                            Arc::clone(&service),
+                            body_channel_capacity,
+                            idle_timeout,
+                        )
+                    });
+                    executor.dispatch(H2StreamWork {
+                        request,
+                        respond,
+                        active_stream: OwnedH2StreamActivity::new(Arc::clone(&stream_activity)),
+                    })?;
                 }
             }
-            Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
-                if primary_stream.is_none() && concurrent_streams.is_empty() {
-                    if !accepting_streams {
-                        break;
-                    }
-                    idle_timer
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + idle_timeout);
-                }
-            }
-            completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
-                let () = completed;
-                reusable_primary_stream = primary_stream.take();
-                if !accepting_streams && concurrent_streams.is_empty() {
+            () = stream_activity.completed.notified() => {
+                if !accepting_streams && stream_activity.count() == 0 {
                     break;
                 }
-                if concurrent_streams.is_empty() {
+                if stream_activity.count() == 0 {
                     idle_timer
                         .as_mut()
                         .reset(tokio::time::Instant::now() + idle_timeout);
                 }
             }
             () = idle_timer.as_mut() => {
-                if primary_stream.is_none() && concurrent_streams.is_empty() {
+                if stream_activity.count() == 0 {
                     return Ok(());
                 }
                 idle_timer
@@ -182,7 +207,9 @@ where
     }
     drop(reusable_primary_stream);
     drop(primary_stream);
-    drop(concurrent_streams);
+    if let Some(executor) = stream_executor {
+        executor.finish().await?;
+    }
     poll_fn(|cx| conn.poll_closed(cx)).await?;
     Ok(())
 }
@@ -195,18 +222,19 @@ async fn poll_optional_h2_stream<T>(stream: &mut Option<ReusableBoxFuture<'_, T>
     .await
 }
 
-async fn serve_h2_stream<S>(
+async fn serve_h2_stream<S, A>(
     request: Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<Bytes>,
     service: &S,
     body_channel_capacity: usize,
     idle_timeout: Duration,
-    active_stream: ActiveH2Stream<'_>,
+    active_stream: A,
 ) where
     S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
         + Send
         + Sync
         + 'static,
+    A: H2StreamActivityGuard,
 {
     let request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
         request,
@@ -223,8 +251,10 @@ async fn serve_h2_stream<S>(
     let request_method = request.method().clone();
     let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
 
-    let service_call = service.call(request);
-    tokio::pin!(service_call);
+    // The provider-neutral request pipeline has a deliberately rich async state
+    // machine. Keep it behind one stable pointer so multiplexed H2 scheduling
+    // does not copy tens of kilobytes of future state for every admitted stream.
+    let mut service_call = Box::pin(service.call(request));
     let mut response = tokio::select! {
         biased;
         response = &mut service_call => match response {
@@ -266,24 +296,175 @@ async fn serve_h2_stream<S>(
     }
 }
 
-struct ActiveH2Stream<'a> {
-    active: &'a AtomicUsize,
+#[derive(Default)]
+struct H2StreamActivity {
+    active: AtomicUsize,
+    completed: Notify,
 }
 
-impl<'a> ActiveH2Stream<'a> {
-    fn new(active: &'a AtomicUsize) -> Self {
-        active.fetch_add(1, Ordering::Relaxed);
-        Self { active }
-    }
-
+impl H2StreamActivity {
     fn count(&self) -> usize {
         self.active.load(Ordering::Relaxed)
     }
+
+    fn start(&self) {
+        self.active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn finish_primary(&self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn finish_worker(&self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+        self.completed.notify_one();
+    }
 }
 
-impl Drop for ActiveH2Stream<'_> {
+trait H2StreamActivityGuard {
+    fn count(&self) -> usize;
+}
+
+struct BorrowedH2StreamActivity<'a> {
+    activity: &'a H2StreamActivity,
+}
+
+impl<'a> BorrowedH2StreamActivity<'a> {
+    fn new(activity: &'a H2StreamActivity) -> Self {
+        activity.start();
+        Self { activity }
+    }
+}
+
+impl H2StreamActivityGuard for BorrowedH2StreamActivity<'_> {
+    fn count(&self) -> usize {
+        self.activity.count()
+    }
+}
+
+impl Drop for BorrowedH2StreamActivity<'_> {
     fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::Relaxed);
+        self.activity.finish_primary();
+    }
+}
+
+struct OwnedH2StreamActivity {
+    activity: Arc<H2StreamActivity>,
+}
+
+impl OwnedH2StreamActivity {
+    fn new(activity: Arc<H2StreamActivity>) -> Self {
+        activity.start();
+        Self { activity }
+    }
+}
+
+impl H2StreamActivityGuard for OwnedH2StreamActivity {
+    fn count(&self) -> usize {
+        self.activity.count()
+    }
+}
+
+impl Drop for OwnedH2StreamActivity {
+    fn drop(&mut self) {
+        self.activity.finish_worker();
+    }
+}
+
+struct H2StreamWork {
+    request: Request<h2::RecvStream>,
+    respond: h2::server::SendResponse<Bytes>,
+    active_stream: OwnedH2StreamActivity,
+}
+
+struct H2StreamExecutor {
+    senders: Box<[mpsc::Sender<H2StreamWork>]>,
+    workers: JoinSet<()>,
+    next_worker: usize,
+}
+
+impl H2StreamExecutor {
+    fn new<S>(service: Arc<S>, body_channel_capacity: usize, idle_timeout: Duration) -> Self
+    where
+        S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let mut senders = Vec::with_capacity(H2_STREAM_EXECUTOR_WORKERS);
+        let mut workers = JoinSet::new();
+        for _ in 0..H2_STREAM_EXECUTOR_WORKERS {
+            let (sender, receiver) = mpsc::channel(H2_STREAM_EXECUTOR_QUEUE_CAPACITY);
+            senders.push(sender);
+            workers.spawn(run_h2_stream_worker(
+                receiver,
+                Arc::clone(&service),
+                body_channel_capacity,
+                idle_timeout,
+            ));
+        }
+        Self {
+            senders: senders.into_boxed_slice(),
+            workers,
+            next_worker: 0,
+        }
+    }
+
+    fn dispatch(&mut self, work: H2StreamWork) -> Result<()> {
+        let worker = self.next_worker;
+        self.next_worker = (self.next_worker + 1) % self.senders.len();
+        self.senders[worker]
+            .try_send(work)
+            .map_err(|error| anyhow::anyhow!("HTTP/2 stream executor rejected work: {error}"))
+    }
+
+    async fn finish(mut self) -> Result<()> {
+        drop(self.senders);
+        while let Some(completed) = self.workers.join_next().await {
+            completed?;
+        }
+        Ok(())
+    }
+}
+
+async fn run_h2_stream_worker<S>(
+    mut receiver: mpsc::Receiver<H2StreamWork>,
+    service: Arc<S>,
+    body_channel_capacity: usize,
+    idle_timeout: Duration,
+) where
+    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Send
+        + Sync
+        + 'static,
+{
+    let mut streams = FuturesUnordered::new();
+    let mut accepting = true;
+    loop {
+        tokio::select! {
+            work = receiver.recv(), if accepting => {
+                let Some(work) = work else {
+                    accepting = false;
+                    if streams.is_empty() {
+                        break;
+                    }
+                    continue;
+                };
+                streams.push(serve_h2_stream(
+                    work.request,
+                    work.respond,
+                    service.as_ref(),
+                    body_channel_capacity,
+                    idle_timeout,
+                    work.active_stream,
+                ));
+            }
+            Some(()) = streams.next(), if !streams.is_empty() => {
+                if !accepting && streams.is_empty() {
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -469,6 +650,98 @@ mod tests {
         let (second_response, _) = client.send_request(second, true).expect("send second");
         assert_eq!(
             second_response.await.expect("second response").status(),
+            ::http::StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn h2_idle_timeout_resets_when_a_worker_stream_finishes_last() {
+        let (client_io, server_io) = duplex(4096);
+        let primary_started = Arc::new(Notify::new());
+        let worker_started = Arc::new(Notify::new());
+        let release_primary = Arc::new(Notify::new());
+        let release_worker = Arc::new(Notify::new());
+        let service = handler_fn({
+            let primary_started = Arc::clone(&primary_started);
+            let worker_started = Arc::clone(&worker_started);
+            let release_primary = Arc::clone(&release_primary);
+            let release_worker = Arc::clone(&release_worker);
+            move |req: Request<Body>| {
+                let primary_started = Arc::clone(&primary_started);
+                let worker_started = Arc::clone(&worker_started);
+                let release_primary = Arc::clone(&release_primary);
+                let release_worker = Arc::clone(&release_worker);
+                async move {
+                    match req.uri().path() {
+                        "/primary" => {
+                            primary_started.notify_one();
+                            release_primary.notified().await;
+                        }
+                        "/worker" => {
+                            worker_started.notify_one();
+                            release_worker.notified().await;
+                        }
+                        _ => {}
+                    }
+                    Ok::<_, Infallible>(Response::new(Body::empty()))
+                }
+            }
+        });
+        tokio::spawn(async move {
+            serve_h2_with_interim(server_io, service, false, Duration::from_millis(500))
+                .await
+                .expect("serve h2");
+        });
+
+        let (mut client, connection) = h2::client::handshake(client_io).await.expect("handshake");
+        tokio::spawn(async move {
+            connection.await.expect("client connection");
+        });
+        client = client.ready().await.expect("primary ready");
+        let primary = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/primary")
+            .body(())
+            .expect("primary request");
+        let (primary_response, _) = client.send_request(primary, true).expect("send primary");
+        primary_started.notified().await;
+
+        client = client.ready().await.expect("worker ready");
+        let worker = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/worker")
+            .body(())
+            .expect("worker request");
+        let (worker_response, _) = client.send_request(worker, true).expect("send worker");
+        worker_started.notified().await;
+
+        release_primary.notify_one();
+        assert_eq!(
+            primary_response.await.expect("primary response").status(),
+            ::http::StatusCode::OK
+        );
+        sleep(Duration::from_millis(350)).await;
+        release_worker.notify_one();
+        assert_eq!(
+            worker_response.await.expect("worker response").status(),
+            ::http::StatusCode::OK
+        );
+
+        sleep(Duration::from_millis(250)).await;
+        client = client
+            .ready()
+            .await
+            .expect("connection must remain idle after worker completion");
+        let final_request = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/final")
+            .body(())
+            .expect("final request");
+        let (final_response, _) = client
+            .send_request(final_request, true)
+            .expect("send final request");
+        assert_eq!(
+            final_response.await.expect("final response").status(),
             ::http::StatusCode::OK
         );
     }

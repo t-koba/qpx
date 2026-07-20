@@ -116,6 +116,118 @@ fn collect_profile_rejects_unknown_profile_name() {
 }
 
 #[test]
+fn absent_decision_profile_does_not_consume_route_limit_twice() {
+    let config = RateLimitConfig {
+        enabled: true,
+        apply_to: vec![RateLimitApplyTo::Request],
+        key: "global".to_string(),
+        requests: Some(qpx_core::config::RateLimitRequestsConfig {
+            rps: Some(1),
+            burst: Some(1),
+            quota: None,
+        }),
+        traffic: None,
+        sessions: None,
+    };
+    let plan = CompiledRateLimitPlan::from_sets(
+        RateLimitSet::from_config(Some(&config)),
+        RateLimitSet::default(),
+    );
+    let rate_limiters = RateLimiters::default();
+    let ctx = RateLimitContext::default();
+    let RequestLimitAcquire {
+        mut limits,
+        retry_after,
+    } = rate_limiters
+        .collect_checked_plan_request(&plan, None, TransportScope::Request, &ctx, 1)
+        .expect("collect route rate limit");
+
+    assert_eq!(retry_after, None);
+    assert_eq!(
+        limits
+            .merge_profile_and_check(&rate_limiters, None, TransportScope::Request, &ctx, 1,)
+            .expect("merge absent decision profile"),
+        None
+    );
+    assert!(
+        rate_limiters
+            .collect_checked_plan_request(&plan, None, TransportScope::Request, &ctx, 1)
+            .expect("collect second route request")
+            .retry_after
+            .is_some(),
+        "the next request must observe exactly one consumed token"
+    );
+}
+
+#[test]
+fn initial_profile_check_also_enforces_route_limit() {
+    let route_config = RateLimitConfig {
+        enabled: true,
+        apply_to: vec![RateLimitApplyTo::Request],
+        key: "global".to_string(),
+        requests: Some(qpx_core::config::RateLimitRequestsConfig {
+            rps: Some(1),
+            burst: Some(1),
+            quota: None,
+        }),
+        traffic: None,
+        sessions: None,
+    };
+    let profile = RateLimitProfileConfig {
+        name: "external".to_string(),
+        limit: RateLimitConfig {
+            enabled: true,
+            apply_to: vec![RateLimitApplyTo::Request],
+            key: "global".to_string(),
+            requests: Some(qpx_core::config::RateLimitRequestsConfig {
+                rps: Some(1_000_000_000),
+                burst: Some(1_000_000_000),
+                quota: None,
+            }),
+            traffic: None,
+            sessions: None,
+        },
+    };
+    let plan = CompiledRateLimitPlan::from_sets(
+        RateLimitSet::from_config(Some(&route_config)),
+        RateLimitSet::default(),
+    );
+    let rate_limiters = RateLimiters::from_config(
+        std::iter::empty::<&IngressEdgeConfig>(),
+        std::slice::from_ref(&profile),
+    );
+    let ctx = RateLimitContext::default();
+
+    assert_eq!(
+        rate_limiters
+            .collect_checked_plan_request(
+                &plan,
+                Some("external"),
+                TransportScope::Request,
+                &ctx,
+                1,
+            )
+            .expect("collect first request")
+            .retry_after,
+        None
+    );
+    assert!(
+        rate_limiters
+            .collect_checked_plan_request(
+                &plan,
+                Some("external"),
+                TransportScope::Request,
+                &ctx,
+                1,
+            )
+            .expect("collect second request")
+            .retry_after
+            .is_some(),
+        "the route limit must remain authoritative when a profile is present"
+    );
+}
+
+#[test]
 fn reserve_bytes_enforces_quota() {
     let limits = AppliedRateLimits {
         byte_quota_limiters: vec![Arc::new(QuotaLimiter::new(

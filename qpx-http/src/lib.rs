@@ -13,6 +13,7 @@ pub mod content_disposition;
 pub mod cookie_policy;
 pub mod digest_fields;
 pub mod forwarded;
+pub mod header_pool;
 pub mod hsts;
 pub mod prefer;
 pub mod problem;

@@ -1,36 +1,9 @@
-use http::HeaderMap;
-use std::cell::RefCell;
-
-const MAX_RETAINED_MAPS_PER_THREAD: usize = 64;
-const MAX_RETAINED_HEADER_CAPACITY: usize = 256;
-
-thread_local! {
-    static HTTP1_HEADER_MAPS: RefCell<Vec<HeaderMap>> = const { RefCell::new(Vec::new()) };
-}
-
-pub(crate) fn take(minimum_capacity: usize) -> HeaderMap {
-    HTTP1_HEADER_MAPS.with_borrow_mut(|maps| {
-        let mut map = maps.pop().unwrap_or_default();
-        map.reserve(minimum_capacity.saturating_sub(map.capacity()));
-        map
-    })
-}
-
-pub(crate) fn recycle(mut map: HeaderMap) {
-    if map.capacity() > MAX_RETAINED_HEADER_CAPACITY {
-        return;
-    }
-    map.clear();
-    HTTP1_HEADER_MAPS.with_borrow_mut(|maps| {
-        if maps.len() < MAX_RETAINED_MAPS_PER_THREAD {
-            maps.push(map);
-        }
-    });
-}
+pub(crate) use qpx_http::header_pool::{recycle, take};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::HeaderMap;
     use http::HeaderValue;
 
     #[test]
@@ -47,7 +20,7 @@ mod tests {
 
     #[test]
     fn oversized_map_is_not_retained() {
-        let map = HeaderMap::with_capacity(MAX_RETAINED_HEADER_CAPACITY + 1);
+        let map = HeaderMap::with_capacity(257);
         let oversized_capacity = map.capacity();
         recycle(map);
 

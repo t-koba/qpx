@@ -19,6 +19,7 @@ fn stale_can_be_served_with_max_stale() {
         vary_values: Vec::new(),
         header_map: Default::default(),
         response_directives: Default::default(),
+        response_header_values: Default::default(),
     };
     let disposition = classify_for_request(&req, &envelope, 40_000);
     assert!(matches!(disposition, CacheEntryDisposition::ServeStale));
@@ -46,6 +47,7 @@ fn immutable_fresh_response_ignores_request_no_cache() {
         vary_values: Vec::new(),
         header_map: Default::default(),
         response_directives: Default::default(),
+        response_header_values: Default::default(),
     };
 
     let disposition = classify_for_request(&req, &envelope, 30_000);
@@ -71,6 +73,7 @@ fn stale_while_revalidate_allows_serving_stale_without_max_stale() {
         vary_values: Vec::new(),
         header_map: Default::default(),
         response_directives: Default::default(),
+        response_header_values: Default::default(),
     };
     let disposition = classify_for_request(&req, &envelope, 40_000);
     assert!(matches!(
@@ -98,6 +101,7 @@ fn must_revalidate_blocks_stale_while_revalidate() {
         vary_values: Vec::new(),
         header_map: Default::default(),
         response_directives: Default::default(),
+        response_header_values: Default::default(),
     };
     let disposition = classify_for_request(&req, &envelope, 40_000);
     assert!(matches!(
@@ -128,6 +132,7 @@ fn only_if_cached_swr_does_not_trigger_background_revalidation() {
         vary_values: Vec::new(),
         header_map: Default::default(),
         response_directives: Default::default(),
+        response_header_values: Default::default(),
     };
     let disposition = classify_for_request(&req, &envelope, 40_000);
     assert!(matches!(disposition, CacheEntryDisposition::ServeStale));
@@ -166,6 +171,7 @@ async fn stale_if_error_fallback_omits_obsolete_warning_headers() {
             vary_values: Vec::new(),
             header_map: Default::default(),
             response_directives: Default::default(),
+            response_header_values: Default::default(),
         },
         revalidations: test_revalidations(),
     };
@@ -201,6 +207,7 @@ async fn must_revalidate_blocks_stale_if_error_fallback() {
             vary_values: Vec::new(),
             header_map: Default::default(),
             response_directives: Default::default(),
+            response_header_values: Default::default(),
         },
         revalidations: test_revalidations(),
     };

@@ -393,6 +393,11 @@ http {
   keepalive_timeout 65;
   server {
     listen 127.0.0.1:${BACKEND_PORT};
+    location = /__qpx_perf_route_evidence {
+      default_type text/plain;
+      add_header X-Qpx-Perf-Upstream-Via "\$http_via" always;
+      return 200 "qpx backend route evidence\n";
+    }
     location / {
       default_type application/octet-stream;
       root $ORIGIN_ROOT;
@@ -1039,6 +1044,25 @@ expect_status_ok() {
   return 1
 }
 
+expect_qpx_backend_route_evidence() {
+  local headers="$TMP_DIR/qpxd.backend-route-headers"
+  local path="/__qpx_perf_route_evidence"
+  local tries=0
+  while [ "$tries" -lt 40 ]; do
+    if curl -fsS --max-time 5 -H "Host: ${HOST_HEADER}" -D "$headers" -o /dev/null \
+      "http://127.0.0.1:${QPX_PORT}${path}" &&
+      grep -Eiq '^x-qpx-perf-upstream-via:[[:space:]]*1\.1[[:space:]]+qpx([[:space:]]|$)' "$headers"; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  echo "qpxd reverse benchmark did not produce backend route evidence" >&2
+  cat "$headers" >&2 || true
+  dump_benchmark_logs
+  return 1
+}
+
 expect_status_rejected() {
   local proxy="$1"
   local port="$2"
@@ -1496,7 +1520,10 @@ if [ -z "$SCALE_WORKERS" ]; then
   SCALE_WORKERS="$(default_scale_workers)"
 fi
 start_backend
-if proxy_selected qpxd; then start_qpxd; fi
+if proxy_selected qpxd; then
+  start_qpxd
+  expect_qpx_backend_route_evidence
+fi
 if proxy_selected nginx; then start_nginx; fi
 if proxy_selected apache || proxy_selected apache-webdav; then start_apache; fi
 if proxy_selected lighttpd; then start_lighttpd; fi

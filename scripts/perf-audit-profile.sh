@@ -184,20 +184,73 @@ wait_http() {
 
 run_http1_load() {
   local output="$1"
-  ab -n "$PROFILE_REQUESTS" -c "$PROFILE_CONCURRENCY" -k \
-    "http://127.0.0.1:${QPX_HTTP1_PORT}/bench" >"$output" 2>&1
-  python3 - "$output" "$PROFILE_REQUESTS" <<'PY'
-import re
+  python3 - "$QPX_HTTP1_PORT" "$PROFILE_REQUESTS" "$PROFILE_CONCURRENCY" \
+    >"$output" 2>&1 <<'PY'
+import concurrent.futures
+import socket
 import sys
+import threading
 
-text = open(sys.argv[1], encoding="utf-8").read()
-expected = int(sys.argv[2])
-complete = re.search(r"Complete requests:\s+([0-9]+)", text)
-failed = re.search(r"Failed requests:\s+([0-9]+)", text)
-if complete is None or failed is None:
-    raise SystemExit("ab output is missing request counters")
-if int(complete.group(1)) != expected or int(failed.group(1)) != 0:
-    raise SystemExit("HTTP/1 profile load did not complete successfully")
+port = int(sys.argv[1])
+requests = int(sys.argv[2])
+concurrency = int(sys.argv[3])
+start = threading.Barrier(concurrency)
+wire_request = (
+    b"GET /bench HTTP/1.1\r\n"
+    b"Host: 127.0.0.1\r\n"
+    b"Connection: keep-alive\r\n"
+    b"\r\n"
+)
+
+def read_response(sock, buffered):
+    while b"\r\n\r\n" not in buffered:
+        chunk = sock.recv(65536)
+        if not chunk:
+            raise RuntimeError("HTTP/1 profile connection closed before response headers")
+        buffered.extend(chunk)
+    head, remainder = buffered.split(b"\r\n\r\n", 1)
+    lines = head.split(b"\r\n")
+    if lines[0] != b"HTTP/1.1 200 OK":
+        raise RuntimeError(f"unexpected HTTP/1 profile status: {lines[0]!r}")
+    headers = {}
+    for line in lines[1:]:
+        name, separator, value = line.partition(b":")
+        if not separator:
+            raise RuntimeError(f"malformed HTTP/1 profile header: {line!r}")
+        headers[name.strip().lower()] = value.strip()
+    if b"content-length" not in headers:
+        raise RuntimeError("HTTP/1 profile response lacks Content-Length")
+    content_length = int(headers[b"content-length"])
+    buffered = bytearray(remainder)
+    while len(buffered) < content_length:
+        chunk = sock.recv(65536)
+        if not chunk:
+            raise RuntimeError("HTTP/1 profile connection closed before response body")
+        buffered.extend(chunk)
+    if content_length != 1024:
+        raise RuntimeError(f"unexpected HTTP/1 profile body length: {content_length}")
+    return bytearray(buffered[content_length:])
+
+def run_connection(worker):
+    requests_for_connection = requests // concurrency
+    if worker < requests % concurrency:
+        requests_for_connection += 1
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.settimeout(10)
+        buffered = bytearray()
+        start.wait(timeout=10)
+        for _ in range(requests_for_connection):
+            sock.sendall(wire_request)
+            buffered = read_response(sock, buffered)
+    return requests_for_connection
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+    complete = sum(executor.map(run_connection, range(concurrency)))
+if complete != requests:
+    raise SystemExit(
+        f"HTTP/1 profile load completed {complete}/{requests} requests"
+    )
+print(f"complete_requests={complete}")
 PY
 }
 
@@ -371,7 +424,6 @@ run_profile() {
     "$(json_escape "${GITHUB_SHA:-unknown}")" >>"$PROFILE_EVENTS"
 }
 
-require_cmd ab
 require_cmd callgrind_annotate
 require_cmd callgrind_control
 require_cmd curl

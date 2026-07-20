@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use bytes::Bytes;
 use hyper::{Method, Response, StatusCode};
@@ -246,6 +247,18 @@ pub struct CachedResponseEnvelope {
     /// Parsed response cache directives derived from `header_map`. They are immutable
     /// for the lifetime of an envelope, so repeated hot-cache lookups reuse one parse.
     pub response_directives: OnceLock<ResponseDirectives>,
+    /// Last rendered age-dependent response fields. Cache age advances in whole
+    /// seconds, so all hits within the same second can share immutable values.
+    pub(crate) response_header_values: OnceLock<Arc<ArcSwapOption<CachedResponseHeaderValues>>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CachedResponseHeaderValues {
+    cache_state: &'static str,
+    current_age: u64,
+    ttl: Option<u64>,
+    pub(crate) age: http::HeaderValue,
+    pub(crate) cache_status: http::HeaderValue,
 }
 
 impl CachedResponseEnvelope {
@@ -264,6 +277,37 @@ impl CachedResponseEnvelope {
     pub fn response_directives(&self) -> &ResponseDirectives {
         self.response_directives
             .get_or_init(|| super::directives::parse_response_directives(self.header_map()))
+    }
+
+    pub(crate) fn response_header_values(
+        &self,
+        cache_state: &'static str,
+        current_age: u64,
+        ttl: Option<u64>,
+    ) -> Result<(http::HeaderValue, http::HeaderValue)> {
+        let cache = self
+            .response_header_values
+            .get_or_init(|| Arc::new(ArcSwapOption::empty()));
+        let cached = cache.load();
+        if let Some(values) = cached.as_ref()
+            && values.cache_state == cache_state
+            && values.current_age == current_age
+            && values.ttl == ttl
+        {
+            return Ok((values.age.clone(), values.cache_status.clone()));
+        }
+        drop(cached);
+        let values = Arc::new(CachedResponseHeaderValues {
+            cache_state,
+            current_age,
+            ttl,
+            age: http::HeaderValue::from_maybe_shared(current_age.to_string())
+                .map_err(|error| anyhow!("invalid generated Age header value: {error}"))?,
+            cache_status: cache_status_header(cache_state, ttl)?,
+        });
+        let rendered = (values.age.clone(), values.cache_status.clone());
+        cache.store(Some(Arc::clone(&values)));
+        Ok(rendered)
     }
 }
 
@@ -340,6 +384,7 @@ pub fn decode_cached_response_metadata(raw: Bytes) -> Result<CachedResponseEnvel
         vary_values: metadata.vary_values,
         header_map: OnceLock::new(),
         response_directives: OnceLock::new(),
+        response_header_values: OnceLock::new(),
     })
 }
 
@@ -503,7 +548,8 @@ pub enum VarySpec {
 
 #[cfg(test)]
 mod cache_status_tests {
-    use super::cache_status_header;
+    use super::{CachedBody, CachedResponseEnvelope, cache_status_header};
+    use std::sync::{Arc, OnceLock};
 
     #[test]
     fn generated_cache_status_shapes_are_rfc_9651_lists() {
@@ -520,5 +566,52 @@ mod cache_status_tests {
                 .expect("parse generated Cache-Status");
         }
         assert!(cache_status_header("HIT", Some(u64::MAX)).is_err());
+    }
+
+    #[test]
+    fn age_dependent_response_fields_are_shared_only_for_an_exact_value_set() {
+        let envelope = CachedResponseEnvelope {
+            status: 200,
+            headers: Vec::new(),
+            body: CachedBody::default(),
+            body_len: 0,
+            stored_at_ms: 0,
+            initial_age_secs: 0,
+            response_delay_secs: 0,
+            freshness_lifetime_secs: 60,
+            vary_headers: Vec::new(),
+            vary_values: Vec::new(),
+            header_map: OnceLock::new(),
+            response_directives: OnceLock::new(),
+            response_header_values: OnceLock::new(),
+        };
+
+        let first = envelope
+            .response_header_values("HIT", 7, Some(53))
+            .expect("first response fields");
+        let first_cached = envelope
+            .response_header_values
+            .get()
+            .expect("initialized response field cache")
+            .load_full()
+            .expect("first cached response fields");
+        let repeated = envelope
+            .response_header_values("HIT", 7, Some(53))
+            .expect("repeated response fields");
+        let repeated_cached = envelope
+            .response_header_values
+            .get()
+            .expect("initialized response field cache")
+            .load_full()
+            .expect("repeated cached response fields");
+        let advanced = envelope
+            .response_header_values("HIT", 8, Some(52))
+            .expect("advanced response fields");
+
+        assert!(Arc::ptr_eq(&first_cached, &repeated_cached));
+        assert_eq!(first, repeated);
+        assert_ne!(first, advanced);
+        assert_eq!(advanced.0, "8");
+        assert_eq!(advanced.1, "qpx; hit; ttl=52");
     }
 }

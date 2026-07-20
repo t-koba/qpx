@@ -4,7 +4,7 @@ use crate::http::codec::h1::{
     send_static_http1_response, serve_http1_tcp_with_interim_and_capacity,
 };
 use crate::http::codec::h1_common::MAX_HEADER_BYTES;
-use crate::http::codec::lazy_timeout::timeout_after_pending;
+use crate::http::codec::lazy_timeout::{timeout_after_pending, timeout_after_pending_with};
 use crate::http::dispatcher::InterimList;
 use crate::reverse::ReloadableReverse;
 use crate::reverse::transport::{
@@ -70,12 +70,17 @@ pub(super) async fn serve_raw_or_fallback(
 
     loop {
         if read_buf.is_empty() {
-            // Preserve one validated upstream connection across pipelined requests while
-            // releasing the active-origin permit during downstream idle time.
-            origin_session.release();
-            let read = timeout_after_pending(header_read_timeout, stream.read_buf(&mut read_buf))
-                .await
-                .map_err(|_| anyhow!("HTTP/1 request header read timed out"))??;
+            // Preserve both the validated upstream connection and its active permit when
+            // the next keep-alive request is already queued. Release only before actually
+            // waiting on an idle downstream connection so admission capacity is never held
+            // by an inactive client.
+            let read = timeout_after_pending_with(
+                header_read_timeout,
+                stream.read_buf(&mut read_buf),
+                || origin_session.release(),
+            )
+            .await
+            .map_err(|_| anyhow!("HTTP/1 request header read timed out"))??;
             if read == 0 {
                 return Ok(());
             }

@@ -79,6 +79,7 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
             vary_values: vec![("accept-language".to_string(), lang.to_string())],
             header_map: Default::default(),
             response_directives: Default::default(),
+            response_header_values: Default::default(),
         };
         backend
             .put(

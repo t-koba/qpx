@@ -357,7 +357,6 @@ where
                 timeout_after_pending(RESPONSE_WRITE_TIMEOUT, socket.send_file(&region))
                     .await
                     .map_err(|_| anyhow!("HTTP/1 zero-copy response write timed out"))??;
-                flush_with_timeout(writer).await?;
                 return Ok(keep_alive);
             }
             if let Some(err) = first_body_error.take() {

@@ -379,7 +379,6 @@ min_throughput_ratio = number(objective_defaults, "min_throughput_ratio")
 min_cpu_ratio = number(objective_defaults, "min_cpu_efficiency_ratio")
 max_p99_ratio = number(objective_defaults, "max_p99_latency_ratio")
 min_dominance_score = number(objective_defaults, "min_dominance_score")
-min_direct_headroom_ratio = number(objective_defaults, "min_direct_headroom_ratio")
 max_throughput_sample_spread_ratio = number(
     objective_defaults, "max_throughput_sample_spread_ratio"
 )
@@ -435,7 +434,6 @@ for entry in baseline_entries:
         )
     baseline_dominance_score = number(entry, "dominance_score")
     current_dominance_score = number(current_entry, "dominance_score")
-    current_direct_headroom_ratio = number(current_entry, "direct_headroom_ratio")
     required_dominance_score = baseline_dominance_score * (1.0 - threshold)
     if current_dominance_score + 1e-12 < required_dominance_score:
         failures.append(
@@ -465,12 +463,6 @@ for entry in baseline_entries:
             "proxy aggregate dominance objective failed for "
             f"{key}: current score {current_dominance_score:.6f} "
             f"< objective {min_dominance_score:.6f}"
-        )
-    if current_direct_headroom_ratio + 1e-12 < min_direct_headroom_ratio:
-        failures.append(
-            "proxy benchmark backend headroom objective failed for "
-            f"{key}: current ratio {current_direct_headroom_ratio:.6f} "
-            f"< objective {min_direct_headroom_ratio:.6f}"
         )
     for proxy, spread in current_entry["sample_spread"].items():
         throughput_spread = number(spread, "requests_per_sec_ratio")

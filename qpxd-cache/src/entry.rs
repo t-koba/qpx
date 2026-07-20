@@ -255,24 +255,23 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
     };
     let mut response = Response::new(params.body);
     *response.status_mut() = status;
-    *response.headers_mut() = params.envelope.header_map().clone();
+    *response.headers_mut() = qpx_http::header_pool::clone_map(params.envelope.header_map());
     response.headers_mut().remove(AGE);
     response.headers_mut().remove(CONTENT_LENGTH);
     response.headers_mut().remove(CONTENT_RANGE);
     let current_age = current_age_secs(params.envelope, params.now_ms);
-    let age = current_age.to_string();
-    if let Ok(age_header) = http::HeaderValue::from_str(age.as_str()) {
-        response.headers_mut().insert(AGE, age_header);
-    }
     let ttl = (params.cache_state == "HIT").then(|| {
         params
             .envelope
             .freshness_lifetime_secs
             .saturating_sub(current_age)
     });
-    response
-        .headers_mut()
-        .insert(CACHE_HEADER, cache_status_header(params.cache_state, ttl)?);
+    let (age, cache_status) =
+        params
+            .envelope
+            .response_header_values(params.cache_state, current_age, ttl)?;
+    response.headers_mut().insert(AGE, age);
+    response.headers_mut().insert(CACHE_HEADER, cache_status);
     let content_length = params.content_length_override.unwrap_or(params.body_len);
     if let Ok(length) = http::HeaderValue::from_str(content_length.to_string().as_str()) {
         response.headers_mut().insert(CONTENT_LENGTH, length);

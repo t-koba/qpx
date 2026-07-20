@@ -1359,6 +1359,7 @@ mod tests {
             vary_values: Vec::new(),
             header_map: Default::default(),
             response_directives: Default::default(),
+            response_header_values: Default::default(),
         };
         backend
             .put(

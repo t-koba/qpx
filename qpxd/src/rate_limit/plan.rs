@@ -156,7 +156,13 @@ impl RateLimiters {
         cost: u64,
     ) -> Result<RequestLimitAcquire> {
         let mut limits = plan.collect(scope);
-        let retry_after = limits.merge_profile_and_check(self, profile, scope, ctx, cost)?;
+        let plan_retry_after = limits.try_acquire_request(ctx, cost);
+        let profile_retry_after =
+            limits.merge_profile_and_check(self, profile, scope, ctx, cost)?;
+        let retry_after = match (plan_retry_after, profile_retry_after) {
+            (Some(plan), Some(profile)) => Some(plan.max(profile)),
+            (plan, profile) => plan.or(profile),
+        };
         Ok(RequestLimitAcquire {
             limits,
             retry_after,
@@ -283,7 +289,7 @@ impl AppliedRateLimits {
             self.extend_from(&profile_limits);
             Ok(retry_after)
         } else {
-            Ok(self.try_acquire_request(ctx, cost))
+            Ok(None)
         }
     }
 }

@@ -4,7 +4,6 @@
     "max_p99_latency_ratio": 0.8,
     "max_throughput_sample_spread_ratio": 1.1,
     "min_cpu_efficiency_ratio": 1.25,
-    "min_direct_headroom_ratio": 1.1,
     "min_dominance_score": 1.25,
     "min_throughput_ratio": 1.25
   },

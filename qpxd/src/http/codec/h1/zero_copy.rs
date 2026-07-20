@@ -13,6 +13,11 @@ use tokio::io::Interest;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use tokio::io::unix::AsyncFd;
 
+// Bound uninterrupted kernel-assisted transfers so a ready socket cannot
+// monopolize a runtime worker while other connections are runnable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const ZERO_COPY_SCHEDULING_QUANTUM: u64 = 256 * 1024;
+
 pub(super) struct ZeroCopySocket {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     source_fd: RawFd,
@@ -81,8 +86,9 @@ impl ZeroCopySocket {
                 .checked_add(region.len())
                 .ok_or_else(|| io::Error::other("file region overflow"))?;
             let socket = self.socket()?;
+            let mut bytes_since_yield = 0_u64;
             while offset < end {
-                let remaining = end - offset;
+                let remaining = (end - offset).min(ZERO_COPY_SCHEDULING_QUANTUM);
                 let written = socket
                     .async_io(Interest::WRITABLE, |_| {
                         sendfile_once(file_fd, socket.get_ref().as_raw_fd(), offset, remaining)
@@ -95,6 +101,11 @@ impl ZeroCopySocket {
                     ));
                 }
                 offset = offset.saturating_add(written as u64);
+                bytes_since_yield = bytes_since_yield.saturating_add(written as u64);
+                if offset < end && bytes_since_yield >= ZERO_COPY_SCHEDULING_QUANTUM {
+                    bytes_since_yield = 0;
+                    tokio::task::yield_now().await;
+                }
             }
             Ok(())
         }
@@ -118,8 +129,10 @@ pub(super) async fn splice_tcp_exact(
     write_timeout: Duration,
 ) -> io::Result<()> {
     let pipe = SplicePipe::new()?;
+    let mut bytes_since_yield = 0_u64;
     while remaining > 0 {
-        let requested = usize::try_from(remaining.min(usize::MAX as u64)).unwrap_or(usize::MAX);
+        let requested = usize::try_from(remaining.min(ZERO_COPY_SCHEDULING_QUANTUM))
+            .unwrap_or(ZERO_COPY_SCHEDULING_QUANTUM as usize);
         let moved = timeout_after_pending(read_timeout, async {
             loop {
                 match source.try_io(Interest::READABLE, || {
@@ -183,6 +196,11 @@ pub(super) async fn splice_tcp_exact(
             buffered -= written;
         }
         remaining -= moved as u64;
+        bytes_since_yield = bytes_since_yield.saturating_add(moved as u64);
+        if remaining > 0 && bytes_since_yield >= ZERO_COPY_SCHEDULING_QUANTUM {
+            bytes_since_yield = 0;
+            tokio::task::yield_now().await;
+        }
     }
     Ok(())
 }
@@ -254,8 +272,6 @@ fn splice_once(
     more: bool,
 ) -> io::Result<usize> {
     loop {
-        // SAFETY: both descriptors are live, at least one descriptor is a pipe endpoint,
-        // and socket and pipe descriptors do not use file offsets.
         let mut flags = libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK;
         if more {
             // Tell the kernel that this relay has more bytes behind the current
@@ -263,6 +279,8 @@ fn splice_once(
             // unnecessary packet push between adjacent upstream writes.
             flags |= libc::SPLICE_F_MORE;
         }
+        // SAFETY: both descriptors are live, at least one descriptor is a pipe endpoint,
+        // and socket and pipe descriptors do not use file offsets.
         let moved = unsafe {
             libc::splice(
                 source_fd,
