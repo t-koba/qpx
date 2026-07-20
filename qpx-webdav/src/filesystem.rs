@@ -11,7 +11,10 @@ use uuid::Uuid;
 
 const READ_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const READ_CACHE_MAX_ENTRIES: usize = 64;
-const READ_CACHE_MAX_OBJECT_BYTES: usize = 2 * 1024 * 1024;
+// Keep replayable bodies in memory only while they fit the cache body's
+// in-memory tier. Larger resources use their verified file region directly so
+// a zero-copy response does not first pay for a redundant materialization.
+const READ_CACHE_MAX_OBJECT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 struct ReadCacheEntry {
@@ -150,7 +153,7 @@ impl FileSystemDataStore {
         modified: SystemTime,
         read: &ResourceRead,
     ) {
-        if read.body.len() > READ_CACHE_MAX_OBJECT_BYTES {
+        if read.body.is_empty() || read.body.len() > READ_CACHE_MAX_OBJECT_BYTES {
             return;
         }
         let new_entry = ReadCacheEntry {
@@ -546,6 +549,23 @@ mod tests {
         assert_eq!(backed.body, Bytes::from_static(b"payload"));
         assert!(backed.file.is_some());
         assert_eq!(store.read(&file).unwrap(), b"payload".as_slice());
+    }
+
+    #[test]
+    fn large_file_backed_reads_retain_zero_copy_region_without_materializing_body() {
+        let directory = tempdir().unwrap();
+        let store = FileSystemDataStore::open(directory.path()).unwrap();
+        let file = ResourceId::parse("/large.bin").unwrap();
+        let content = vec![b'x'; READ_CACHE_MAX_OBJECT_BYTES + 1];
+        assert!(store.put(&file, &content, None).unwrap());
+
+        let backed = store
+            .read_with_metadata_and_content_type_file_backed(&file, None)
+            .unwrap()
+            .expect("file-backed resource");
+        assert!(backed.body.is_empty());
+        assert_eq!(backed.metadata.content_length, content.len() as u64);
+        assert!(backed.file.is_some());
     }
 
     #[cfg(unix)]

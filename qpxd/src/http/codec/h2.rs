@@ -26,12 +26,7 @@ const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
 const H2_MAX_SEND_BUFFER_SIZE: usize = 1024 * 1024;
 pub(crate) const H2_MAX_CONCURRENT_STREAMS: usize = 256;
 const H2_DIRECT_SEND_BODY_MAX_BYTES: u64 = 16 * 1024;
-// A small active-stream set benefits from a larger first write, while a busy
-// connection must yield after a frame-sized slice so one large response cannot
-// monopolize the h2 connection. h2's flow-control scheduler remains the final
-// arbiter after this initial slice.
 const H2_INITIAL_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_FRAME_SIZE as usize;
-const H2_LOW_CONTENTION_STREAMS: usize = 4;
 const H2_MIN_SCHEDULER_BUFFER_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy)]
@@ -161,6 +156,12 @@ pub(crate) async fn send_h2_response_with_interim(
     } else {
         0
     };
+    // A single active stream does not need an executor hand-off after its
+    // initial frame. Keep the frame-sized budget so peer flow-control remains
+    // authoritative, but let that stream consume available capacity without
+    // an avoidable scheduling gap. Multiplexed connections still yield after
+    // the initial slice to preserve fairness between response streams.
+    let yield_after_initial = active_streams > 1;
     let mut head = Http1Response::new(());
     *head.status_mut() = status;
     *head.headers_mut() = http_headers_into_h1(headers);
@@ -213,6 +214,7 @@ pub(crate) async fn send_h2_response_with_interim(
             true,
             flow_control_body,
             &mut scheduler_buffer_budget,
+            yield_after_initial,
         )
         .await?
         {
@@ -265,6 +267,7 @@ pub(crate) async fn send_h2_response_with_interim(
                 false,
                 flow_control_body,
                 &mut scheduler_buffer_budget,
+                yield_after_initial,
             )
             .await?
             {
@@ -340,6 +343,7 @@ pub(crate) async fn send_h2_response_with_interim(
                 true,
                 flow_control_body,
                 &mut scheduler_buffer_budget,
+                yield_after_initial,
             )
             .await?
             {
@@ -353,6 +357,7 @@ pub(crate) async fn send_h2_response_with_interim(
                     false,
                     flow_control_body,
                     &mut scheduler_buffer_budget,
+                    yield_after_initial,
                 )
                 .await?
             {
@@ -370,6 +375,7 @@ pub(crate) async fn send_h2_response_with_interim(
             true,
             flow_control_body,
             &mut scheduler_buffer_budget,
+            yield_after_initial,
         )
         .await?
         {
@@ -381,9 +387,6 @@ pub(crate) async fn send_h2_response_with_interim(
 }
 
 fn h2_scheduler_buffer_budget(active_streams: usize) -> usize {
-    if active_streams <= H2_LOW_CONTENTION_STREAMS {
-        return H2_MAX_SEND_BUFFER_SIZE;
-    }
     (H2_INITIAL_SCHEDULER_BUFFER_BYTES / active_streams.max(1)).max(H2_MIN_SCHEDULER_BUFFER_BYTES)
 }
 
@@ -393,6 +396,7 @@ async fn send_h2_data(
     end_stream: bool,
     flow_control: bool,
     scheduler_buffer_budget: &mut usize,
+    yield_after_initial: bool,
 ) -> Result<bool> {
     if data.is_empty() || !flow_control {
         let result = send_stream.send_data(data, end_stream);
@@ -409,7 +413,7 @@ async fn send_h2_data(
         if !handle_h2_send_result(send_stream, result).await? {
             return Ok(false);
         }
-        if !final_chunk {
+        if !final_chunk && yield_after_initial {
             tokio::task::yield_now().await;
         }
     }

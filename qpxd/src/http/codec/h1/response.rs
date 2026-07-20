@@ -141,7 +141,9 @@ pub(crate) async fn send_static_http1_response(
     } else {
         write_vectored_all_with_timeout(writer, &[head_buf, &body]).await?;
     }
-    flush_with_timeout(writer).await?;
+    // TcpStream has no user-space write buffer. write_all above already pushed
+    // the bytes to the kernel, so an extra flush poll only adds work to the
+    // high-rate static response path.
     Ok(keep_alive)
 }
 
@@ -254,6 +256,18 @@ where
         None
     };
 
+    // A materialized response with one trailer-free frame can be written as a
+    // single vectored operation. This keeps the normal framing validation but
+    // avoids a body poll and a second write-loop for the common cache/origin
+    // response path. Streamed and trailer-bearing bodies continue through the
+    // general state machine below.
+    let single_frame =
+        if file_region.is_none() && matches!(body_kind, ResponseBodyKind::ContentLength(_)) {
+            body.take_single_frame_without_trailers()
+        } else {
+            None
+        };
+
     let mut first_chunk = None;
     let mut first_trailers = None;
     let mut first_body_error = None;
@@ -318,6 +332,21 @@ where
     }
     crate::http::codec::header_pool::recycle(headers);
     let head = head_buf.as_ref();
+
+    if let (ResponseBodyKind::ContentLength(length), Some(chunk)) = (&body_kind, single_frame) {
+        if chunk.len() as u64 != *length {
+            return Err(anyhow!(
+                "response body length {} does not match declared content-length {length}",
+                chunk.len()
+            ));
+        }
+        if chunk.is_empty() {
+            write_all_with_timeout(writer, head).await?;
+        } else {
+            write_vectored_all_with_timeout(writer, &[head, &chunk]).await?;
+        }
+        return Ok(keep_alive);
+    }
 
     match body_kind {
         ResponseBodyKind::Empty => write_all_with_timeout(writer, head).await?,

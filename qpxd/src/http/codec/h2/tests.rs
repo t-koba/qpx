@@ -11,10 +11,10 @@ use tokio::net::{TcpListener, TcpStream};
 
 #[test]
 fn scheduler_buffer_budget_preserves_single_stream_throughput_and_bounds_multiplexing() {
-    assert_eq!(h2_scheduler_buffer_budget(0), 1024 * 1024);
-    assert_eq!(h2_scheduler_buffer_budget(1), 1024 * 1024);
-    assert_eq!(h2_scheduler_buffer_budget(4), 1024 * 1024);
-    assert_eq!(h2_scheduler_buffer_budget(5), 16 * 1024);
+    assert_eq!(h2_scheduler_buffer_budget(0), 64 * 1024);
+    assert_eq!(h2_scheduler_buffer_budget(1), 64 * 1024);
+    assert_eq!(h2_scheduler_buffer_budget(2), 32 * 1024);
+    assert_eq!(h2_scheduler_buffer_budget(4), 16 * 1024);
     assert_eq!(h2_scheduler_buffer_budget(100), 16 * 1024);
 }
 
