@@ -42,14 +42,44 @@ pub async fn lookup(
     };
 
     let namespace = cache_namespace(policy, "default");
+    if can_use_hot_response_candidate(request_method, &req) {
+        let primary = key.primary_hash_arc();
+        let storage_key = super::vary::index_storage_key(primary.as_ref());
+        if let Some(candidate) = backend
+            .get_response_candidate(namespace, storage_key.as_str())
+            .await?
+            && matches_vary(
+                request_headers,
+                key.content_digest.as_deref(),
+                candidate.envelope.as_ref(),
+            )
+        {
+            let now = now_millis();
+            if matches!(
+                classify_for_request(&req, candidate.envelope.as_ref(), now),
+                CacheEntryDisposition::ServeFresh | CacheEntryDisposition::ServeStale
+            ) {
+                return Ok(LookupOutcome::Hit(
+                    response_from_envelope_for_request_with_body(
+                        request_method,
+                        &req,
+                        candidate.envelope.as_ref(),
+                        now,
+                        "HIT",
+                        candidate.body.body,
+                        candidate.body.len,
+                    )?,
+                ));
+            }
+        }
+    }
     let variant_index =
-        load_candidate_variant_keys(backend.as_ref(), namespace.as_str(), key, request_method)
-            .await?;
+        load_candidate_variant_keys(backend.as_ref(), namespace, key, request_method).await?;
     if variant_index.variants.is_empty() {
         return Ok(miss_or_only_if_cached(&req));
     }
     let metadata = backend
-        .get_decoded_response_metadata_many(namespace.as_str(), &variant_index.variants)
+        .get_decoded_response_metadata_many(namespace, &variant_index.variants)
         .await?;
     if metadata.len() != variant_index.variants.len() {
         return Err(anyhow::anyhow!(
@@ -93,7 +123,7 @@ pub async fn lookup(
                 }
                 let Some(response) = load_cached_response(
                     backend.as_ref(),
-                    namespace.as_str(),
+                    namespace,
                     variant_key,
                     &envelope,
                     request_method,
@@ -110,7 +140,7 @@ pub async fn lookup(
                 let stale_if_error_secs = envelope.response_directives().stale_if_error;
                 let state = RevalidationState {
                     backend: backend.clone(),
-                    namespace: namespace.clone(),
+                    namespace: namespace.to_string(),
                     variant_key: variant_key.clone(),
                     request_method: request_method.clone(),
                     request_directives: req.clone(),
@@ -146,7 +176,7 @@ pub async fn lookup(
                 }
                 let Some(response) = load_cached_response(
                     backend.as_ref(),
-                    namespace.as_str(),
+                    namespace,
                     variant_key,
                     &state.envelope,
                     request_method,
@@ -166,7 +196,7 @@ pub async fn lookup(
                 let stale_if_error_secs = envelope.response_directives().stale_if_error;
                 revalidation = Some(RevalidationState {
                     backend: backend.clone(),
-                    namespace: namespace.clone(),
+                    namespace: namespace.to_string(),
                     variant_key: variant_key.clone(),
                     request_method: request_method.clone(),
                     request_directives: req.clone(),
@@ -185,6 +215,17 @@ pub async fn lookup(
         return Ok(LookupOutcome::Revalidate(state));
     }
     Ok(LookupOutcome::Miss)
+}
+
+fn can_use_hot_response_candidate(request_method: &Method, req: &RequestDirectives) -> bool {
+    *request_method == Method::GET
+        && !req.has_conditional
+        && req.if_match.is_empty()
+        && req.if_none_match.is_empty()
+        && req.if_modified_since.is_none()
+        && req.if_unmodified_since.is_none()
+        && req.if_range.is_none()
+        && req.range.is_none()
 }
 
 fn lookup_precheck(request_method: &Method, req: &RequestDirectives) -> Option<LookupOutcome> {

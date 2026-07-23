@@ -10,13 +10,12 @@ use http::{Request, Response};
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use tokio::io::AsyncReadExt;
-use tokio::sync::{Notify, mpsc};
-use tokio::task::JoinSet;
+use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::ReusableBoxFuture;
 use tracing::{debug, warn};
@@ -25,13 +24,6 @@ pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 // Keep request admission aligned with the protocol stream limit. This remains bounded while
 // avoiding an artificial half-capacity bottleneck for a single connection's stream fan-out.
 const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
-// The connection task owns protocol I/O and the reusable primary-stream future;
-// a small fixed executor set provides bounded parallelism without allocating a
-// Tokio task for every request.
-const H2_STREAM_EXECUTOR_WORKERS: usize = 3;
-const H2_STREAM_EXECUTOR_QUEUE_CAPACITY: usize =
-    H2_ACCEPT_BACKLOG.div_ceil(H2_STREAM_EXECUTOR_WORKERS);
-
 #[cfg(test)]
 pub(crate) async fn serve_h2_with_interim<I, S>(
     io: I,
@@ -98,9 +90,11 @@ where
     let mut conn = timeout(idle_timeout, builder.handshake(io)).await??;
     let service = Arc::new(service);
     let stream_activity = Arc::new(H2StreamActivity::default());
-    let mut reusable_primary_stream: Option<ReusableBoxFuture<'_, ()>> = None;
+    let mut reusable_primary_stream = None;
+    let mut reusable_primary_service_call = None;
     let mut primary_stream = None;
-    let mut stream_executor = None;
+    let mut concurrent_streams = FuturesUnordered::new();
+    let mut reusable_concurrent_service_calls = Vec::new();
     let mut accepting_streams = true;
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
@@ -133,8 +127,21 @@ where
         tokio::select! {
             biased;
             completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
-                let () = completed;
+                reusable_primary_service_call = completed;
                 reusable_primary_stream = primary_stream.take();
+                if !accepting_streams && stream_activity.count() == 0 {
+                    break;
+                }
+                if stream_activity.count() == 0 {
+                    idle_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_timeout);
+                }
+            }
+            completed = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                if let Some(Some(service_call)) = completed {
+                    reusable_concurrent_service_calls.push(service_call);
+                }
                 if !accepting_streams && stream_activity.count() == 0 {
                     break;
                 }
@@ -154,14 +161,16 @@ where
                 };
                 let (request, respond) = result?;
                 if primary_stream.is_none() {
-                    let active_stream = BorrowedH2StreamActivity::new(stream_activity.as_ref());
-                    let stream = serve_h2_stream(
-                        request,
-                        respond,
-                        service.as_ref(),
+                    let stream = serve_h2_stream_owned(
+                        H2StreamWork {
+                            request,
+                            respond,
+                            active_stream: OwnedH2StreamActivity::new(Arc::clone(&stream_activity)),
+                        },
+                        Arc::clone(&service),
                         body_channel_capacity,
                         idle_timeout,
-                        active_stream,
+                        reusable_primary_service_call.take(),
                     );
                     let reusable = if let Some(mut reusable) = reusable_primary_stream.take() {
                         reusable.set(stream);
@@ -171,18 +180,17 @@ where
                     };
                     primary_stream = Some(reusable);
                 } else {
-                    let executor = stream_executor.get_or_insert_with(|| {
-                        H2StreamExecutor::new(
-                            Arc::clone(&service),
-                            body_channel_capacity,
-                            idle_timeout,
-                        )
-                    });
-                    executor.dispatch(H2StreamWork {
-                        request,
-                        respond,
-                        active_stream: OwnedH2StreamActivity::new(Arc::clone(&stream_activity)),
-                    })?;
+                    concurrent_streams.push(serve_h2_stream_owned(
+                        H2StreamWork {
+                            request,
+                            respond,
+                            active_stream: OwnedH2StreamActivity::new(Arc::clone(&stream_activity)),
+                        },
+                        Arc::clone(&service),
+                        body_channel_capacity,
+                        idle_timeout,
+                        reusable_concurrent_service_calls.pop(),
+                    ));
                 }
             }
             () = stream_activity.completed.notified() => {
@@ -206,10 +214,10 @@ where
         }
     }
     drop(reusable_primary_stream);
+    drop(reusable_primary_service_call);
     drop(primary_stream);
-    if let Some(executor) = stream_executor {
-        executor.finish().await?;
-    }
+    drop(concurrent_streams);
+    drop(reusable_concurrent_service_calls);
     poll_fn(|cx| conn.poll_closed(cx)).await?;
     Ok(())
 }
@@ -222,42 +230,20 @@ async fn poll_optional_h2_stream<T>(stream: &mut Option<ReusableBoxFuture<'_, T>
     .await
 }
 
-async fn serve_h2_stream<S, A>(
-    request: Request<h2::RecvStream>,
+async fn complete_h2_stream<F, A>(
+    service_call: &mut F,
     mut respond: h2::server::SendResponse<Bytes>,
-    service: &S,
-    body_channel_capacity: usize,
+    request_method: http::Method,
+    allow_successful_connect_body: bool,
     idle_timeout: Duration,
     active_stream: A,
 ) where
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
-        + Send
-        + Sync
-        + 'static,
+    F: Future<Output = Result<Response<Body>, Infallible>> + Unpin,
     A: H2StreamActivityGuard,
 {
-    let request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
-        request,
-        body_channel_capacity,
-    ) {
-        Ok(request) => request,
-        Err(err) => {
-            warn!(error = ?err, "invalid HTTP/2 request");
-            let mut respond = respond;
-            respond.send_reset(Reason::PROTOCOL_ERROR);
-            return;
-        }
-    };
-    let request_method = request.method().clone();
-    let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
-
-    // The provider-neutral request pipeline has a deliberately rich async state
-    // machine. Keep it behind one stable pointer so multiplexed H2 scheduling
-    // does not copy tens of kilobytes of future state for every admitted stream.
-    let mut service_call = Box::pin(service.call(request));
     let mut response = tokio::select! {
         biased;
-        response = &mut service_call => match response {
+        response = service_call => match response {
             Ok(response) => response,
             Err(impossible) => match impossible {},
         },
@@ -296,6 +282,75 @@ async fn serve_h2_stream<S, A>(
     }
 }
 
+async fn call_owned_h2_service<S>(
+    service: Arc<S>,
+    request: Request<Body>,
+) -> Result<Response<Body>, Infallible>
+where
+    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Send
+        + Sync
+        + 'static,
+{
+    service.call(request).await
+}
+
+async fn serve_h2_stream_owned<S>(
+    work: H2StreamWork,
+    service: Arc<S>,
+    body_channel_capacity: usize,
+    idle_timeout: Duration,
+    reusable_service_call: Option<ReusableBoxFuture<'static, Result<Response<Body>, Infallible>>>,
+) -> Option<ReusableBoxFuture<'static, Result<Response<Body>, Infallible>>>
+where
+    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Send
+        + Sync
+        + 'static,
+{
+    let H2StreamWork {
+        request,
+        mut respond,
+        active_stream,
+    } = work;
+    let mut request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
+        request,
+        body_channel_capacity,
+    ) {
+        Ok(request) => request,
+        Err(err) => {
+            warn!(error = ?err, "invalid HTTP/2 request");
+            respond.send_reset(Reason::PROTOCOL_ERROR);
+            return reusable_service_call;
+        }
+    };
+    request
+        .extensions_mut()
+        .insert(crate::http::codec::h2::H2DownstreamLoad::new(
+            active_stream.count(),
+        ));
+    let request_method = request.method().clone();
+    let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
+    let service_call = call_owned_h2_service(service, request);
+    let mut reusable_service_call = match reusable_service_call {
+        Some(mut reusable) => {
+            reusable.set(service_call);
+            reusable
+        }
+        None => ReusableBoxFuture::new(service_call),
+    };
+    complete_h2_stream(
+        &mut reusable_service_call,
+        respond,
+        request_method,
+        allow_successful_connect_body,
+        idle_timeout,
+        active_stream,
+    )
+    .await;
+    Some(reusable_service_call)
+}
+
 #[derive(Default)]
 struct H2StreamActivity {
     active: AtomicUsize,
@@ -311,11 +366,7 @@ impl H2StreamActivity {
         self.active.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn finish_primary(&self) {
-        self.active.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    fn finish_worker(&self) {
+    fn finish_owned(&self) {
         self.active.fetch_sub(1, Ordering::Relaxed);
         self.completed.notify_one();
     }
@@ -323,29 +374,6 @@ impl H2StreamActivity {
 
 trait H2StreamActivityGuard {
     fn count(&self) -> usize;
-}
-
-struct BorrowedH2StreamActivity<'a> {
-    activity: &'a H2StreamActivity,
-}
-
-impl<'a> BorrowedH2StreamActivity<'a> {
-    fn new(activity: &'a H2StreamActivity) -> Self {
-        activity.start();
-        Self { activity }
-    }
-}
-
-impl H2StreamActivityGuard for BorrowedH2StreamActivity<'_> {
-    fn count(&self) -> usize {
-        self.activity.count()
-    }
-}
-
-impl Drop for BorrowedH2StreamActivity<'_> {
-    fn drop(&mut self) {
-        self.activity.finish_primary();
-    }
 }
 
 struct OwnedH2StreamActivity {
@@ -367,7 +395,7 @@ impl H2StreamActivityGuard for OwnedH2StreamActivity {
 
 impl Drop for OwnedH2StreamActivity {
     fn drop(&mut self) {
-        self.activity.finish_worker();
+        self.activity.finish_owned();
     }
 }
 
@@ -375,97 +403,6 @@ struct H2StreamWork {
     request: Request<h2::RecvStream>,
     respond: h2::server::SendResponse<Bytes>,
     active_stream: OwnedH2StreamActivity,
-}
-
-struct H2StreamExecutor {
-    senders: Box<[mpsc::Sender<H2StreamWork>]>,
-    workers: JoinSet<()>,
-    next_worker: usize,
-}
-
-impl H2StreamExecutor {
-    fn new<S>(service: Arc<S>, body_channel_capacity: usize, idle_timeout: Duration) -> Self
-    where
-        S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
-            + Send
-            + Sync
-            + 'static,
-    {
-        let mut senders = Vec::with_capacity(H2_STREAM_EXECUTOR_WORKERS);
-        let mut workers = JoinSet::new();
-        for _ in 0..H2_STREAM_EXECUTOR_WORKERS {
-            let (sender, receiver) = mpsc::channel(H2_STREAM_EXECUTOR_QUEUE_CAPACITY);
-            senders.push(sender);
-            workers.spawn(run_h2_stream_worker(
-                receiver,
-                Arc::clone(&service),
-                body_channel_capacity,
-                idle_timeout,
-            ));
-        }
-        Self {
-            senders: senders.into_boxed_slice(),
-            workers,
-            next_worker: 0,
-        }
-    }
-
-    fn dispatch(&mut self, work: H2StreamWork) -> Result<()> {
-        let worker = self.next_worker;
-        self.next_worker = (self.next_worker + 1) % self.senders.len();
-        self.senders[worker]
-            .try_send(work)
-            .map_err(|error| anyhow::anyhow!("HTTP/2 stream executor rejected work: {error}"))
-    }
-
-    async fn finish(mut self) -> Result<()> {
-        drop(self.senders);
-        while let Some(completed) = self.workers.join_next().await {
-            completed?;
-        }
-        Ok(())
-    }
-}
-
-async fn run_h2_stream_worker<S>(
-    mut receiver: mpsc::Receiver<H2StreamWork>,
-    service: Arc<S>,
-    body_channel_capacity: usize,
-    idle_timeout: Duration,
-) where
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
-        + Send
-        + Sync
-        + 'static,
-{
-    let mut streams = FuturesUnordered::new();
-    let mut accepting = true;
-    loop {
-        tokio::select! {
-            work = receiver.recv(), if accepting => {
-                let Some(work) = work else {
-                    accepting = false;
-                    if streams.is_empty() {
-                        break;
-                    }
-                    continue;
-                };
-                streams.push(serve_h2_stream(
-                    work.request,
-                    work.respond,
-                    service.as_ref(),
-                    body_channel_capacity,
-                    idle_timeout,
-                    work.active_stream,
-                ));
-            }
-            Some(()) = streams.next(), if !streams.is_empty() => {
-                if !accepting && streams.is_empty() {
-                    break;
-                }
-            }
-        }
-    }
 }
 
 pub(crate) async fn sniff_h2_preface<S>(stream: &mut S, timeout_dur: Duration) -> Result<Bytes>

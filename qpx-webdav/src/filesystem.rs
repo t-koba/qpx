@@ -21,7 +21,34 @@ struct ReadCacheEntry {
     resource: ResourceId,
     content_length: u64,
     modified: SystemTime,
+    file_identity: Option<FileIdentity>,
     read: ResourceRead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(unix)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(not(unix))]
+struct FileIdentity;
+
+#[cfg(unix)]
+fn file_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    Some(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn file_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
+    None
 }
 
 #[derive(Debug, Clone, Default)]
@@ -149,17 +176,24 @@ impl FileSystemDataStore {
     fn cache_read(
         &self,
         resource: &ResourceId,
-        content_length: u64,
+        metadata: &fs::Metadata,
         modified: SystemTime,
         read: &ResourceRead,
     ) {
-        if read.body.is_empty() || read.body.len() > READ_CACHE_MAX_OBJECT_BYTES {
+        let file_identity = file_identity(metadata);
+        let complete_body = read.body.len() as u64 == metadata.len();
+        let reusable_file_region =
+            read.body.is_empty() && read.file.is_some() && file_identity.is_some();
+        if (!complete_body && !reusable_file_region)
+            || read.body.len() > READ_CACHE_MAX_OBJECT_BYTES
+        {
             return;
         }
         let new_entry = ReadCacheEntry {
             resource: resource.clone(),
-            content_length,
+            content_length: metadata.len(),
             modified,
+            file_identity,
             read: read.clone(),
         };
         self.read_cache.rcu(|current| {
@@ -207,12 +241,16 @@ impl FileSystemDataStore {
             }));
         }
         let modified = metadata.modified()?;
+        let current_file_identity = file_identity(&metadata);
         if let Some(entry) = self.read_cache.load().entries.iter().find(|entry| {
             entry.resource.is_same_resource(resource)
                 && entry.content_length == metadata.len()
                 && entry.modified == modified
-                && entry.read.body.len() as u64 == metadata.len()
-                && entry.read.file.is_some()
+                && (entry.read.body.len() as u64 == metadata.len()
+                    || (entry.read.body.is_empty()
+                        && entry.read.file.is_some()
+                        && entry.file_identity.is_some()
+                        && entry.file_identity == current_file_identity))
         }) {
             return Ok(Some(entry.read.clone()));
         }
@@ -253,7 +291,7 @@ impl FileSystemDataStore {
             body,
             file: Some(Arc::new(file)),
         };
-        self.cache_read(resource, metadata.len(), modified, &read);
+        self.cache_read(resource, &metadata, modified, &read);
         Ok(Some(read))
     }
 
@@ -395,7 +433,7 @@ impl WebDavDataStore for FileSystemDataStore {
             body,
             file: Some(Arc::new(file)),
         };
-        self.cache_read(resource, metadata.len(), modified, &read);
+        self.cache_read(resource, &metadata, modified, &read);
         Ok(Some(read))
     }
 
@@ -565,7 +603,25 @@ mod tests {
             .expect("file-backed resource");
         assert!(backed.body.is_empty());
         assert_eq!(backed.metadata.content_length, content.len() as u64);
-        assert!(backed.file.is_some());
+        let first_file = backed.file.expect("open file region");
+
+        let cached = store
+            .read_with_metadata_and_content_type_file_backed(&file, None)
+            .unwrap()
+            .expect("cached file-backed resource");
+        let cached_file = cached.file.expect("cached open file region");
+        #[cfg(unix)]
+        assert!(Arc::ptr_eq(&first_file, &cached_file));
+        #[cfg(not(unix))]
+        drop(cached_file);
+
+        assert!(!store.put(&file, &content, None).unwrap());
+        let replaced = store
+            .read_with_metadata_and_content_type_file_backed(&file, None)
+            .unwrap()
+            .expect("replaced file-backed resource");
+        let replaced_file = replaced.file.expect("replaced open file region");
+        assert!(!Arc::ptr_eq(&first_file, &replaced_file));
     }
 
     #[cfg(unix)]

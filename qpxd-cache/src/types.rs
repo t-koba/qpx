@@ -127,6 +127,16 @@ pub trait CacheBackend: Send + Sync {
             })
             .collect()
     }
+    /// Returns a compound single-variant response when the backend can do so
+    /// without making the normal index, metadata, and body reads separately.
+    async fn get_response_candidate(
+        &self,
+        _namespace: &str,
+        _index_key: &str,
+    ) -> Result<Option<CachedResponseCandidate>> {
+        Ok(None)
+    }
+
     async fn get_object(&self, namespace: &str, key: &str) -> Result<Option<CachedBody>> {
         Ok(self.get(namespace, key).await?.map(CachedBody::from_bytes))
     }
@@ -170,6 +180,18 @@ pub trait CacheBackend: Send + Sync {
         ))
     }
     async fn delete(&self, namespace: &str, key: &str) -> Result<()>;
+}
+
+pub struct CachedResponseCandidate {
+    pub(crate) envelope: Arc<CachedResponseEnvelope>,
+    pub(crate) body: CachedBodyStream,
+}
+
+impl CachedResponseCandidate {
+    /// Creates a response candidate from already validated metadata and body.
+    pub fn new(envelope: Arc<CachedResponseEnvelope>, body: CachedBodyStream) -> Self {
+        Self { envelope, body }
+    }
 }
 
 #[derive(Debug, Clone)]

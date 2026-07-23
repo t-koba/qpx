@@ -120,6 +120,12 @@ impl FileRegion {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// Returns whether regular body frames remain available when a transport
+    /// cannot consume this file extent directly.
+    pub fn has_portable_fallback(&self) -> bool {
+        self.portable_fallback
+    }
 }
 
 #[derive(Debug)]
@@ -857,6 +863,7 @@ mod tests {
             .expect("file region");
         assert_eq!(region.offset(), 6);
         assert_eq!(region.len(), 7);
+        assert!(region.has_portable_fallback());
         assert!(http_body::Body::is_end_stream(&direct));
 
         let mut portable = Body::from(Bytes::from_static(b"payload")).with_file_region(file, 6, 7);
@@ -879,6 +886,7 @@ mod tests {
             .take_file_region_without_trailers()
             .expect("zero-copy file region");
         assert_eq!(region.len(), 1);
+        assert!(!region.has_portable_fallback());
         assert!(http_body::Body::is_end_stream(&body));
     }
 

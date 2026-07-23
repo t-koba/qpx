@@ -227,9 +227,43 @@ pub(crate) async fn proxy_http_with_interim_timeout(
     trust: Option<&CompiledUpstreamTlsTrust>,
     timeout_dur: std::time::Duration,
 ) -> Result<Http1ResponseWithInterim> {
+    proxy_http_with_interim_timeout_inner(pools, req, origin, proxy_name, trust, timeout_dur, None)
+        .await
+}
+
+pub(crate) async fn proxy_http_with_interim_timeout_on_connection(
+    pools: &crate::pool::PoolRegistry,
+    req: Request<Body>,
+    origin: &OriginEndpoint,
+    proxy_name: &str,
+    trust: Option<&CompiledUpstreamTlsTrust>,
+    timeout_dur: std::time::Duration,
+    connection_pool: &PreparedPlainHttp1ConnectionAffinity,
+) -> Result<Http1ResponseWithInterim> {
+    proxy_http_with_interim_timeout_inner(
+        pools,
+        req,
+        origin,
+        proxy_name,
+        trust,
+        timeout_dur,
+        Some(connection_pool),
+    )
+    .await
+}
+
+async fn proxy_http_with_interim_timeout_inner(
+    pools: &crate::pool::PoolRegistry,
+    req: Request<Body>,
+    origin: &OriginEndpoint,
+    proxy_name: &str,
+    trust: Option<&CompiledUpstreamTlsTrust>,
+    timeout_dur: std::time::Duration,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
+) -> Result<Http1ResponseWithInterim> {
     match origin_scheme(origin)? {
         OriginScheme::Http | OriginScheme::Ws => {
-            proxy_plain_http(pools, req, origin, proxy_name).await
+            proxy_plain_http(pools, req, origin, proxy_name, connection_pool).await
         }
         OriginScheme::Https | OriginScheme::Wss => {
             proxy_https_with_options(pools, req, origin, proxy_name, trust, true, timeout_dur).await
@@ -287,25 +321,38 @@ async fn proxy_plain_http(
     req: Request<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<Http1ResponseWithInterim> {
     let default_port = origin.default_port_hint();
     let connect_authority = origin.connect_authority_ref(default_port)?;
     let host_authority = origin.host_header_authority_ref(default_port)?;
     let req = prepare_proxy_http1_request(req, host_authority.as_ref(), proxy_name)?;
-    proxy_direct_plain_http1_with_interim(
+    proxy_direct_plain_http1_with_interim_inner(
         pools,
         req,
         connect_authority.as_ref(),
         host_authority.as_ref(),
+        connection_pool,
     )
     .await
 }
 
 pub(crate) async fn proxy_direct_plain_http1_with_interim(
     pools: &crate::pool::PoolRegistry,
+    req: Request<Body>,
+    connect_authority: &str,
+    host_authority: &str,
+) -> Result<Http1ResponseWithInterim> {
+    proxy_direct_plain_http1_with_interim_inner(pools, req, connect_authority, host_authority, None)
+        .await
+}
+
+async fn proxy_direct_plain_http1_with_interim_inner(
+    pools: &crate::pool::PoolRegistry,
     mut req: Request<Body>,
     connect_authority: &str,
     host_authority: &str,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<Http1ResponseWithInterim> {
     let slot = pools
         .direct_origin
@@ -314,16 +361,24 @@ pub(crate) async fn proxy_direct_plain_http1_with_interim(
     crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
     crate::upstream::http1::ensure_host_header(&mut req, host_authority)?;
     *req.version_mut() = http::Version::HTTP_11;
-    let connection = match take_reusable_plain_http_stream(&slot).await {
+    let local_target = connection_pool.map(|pool| pool.target_for(&slot));
+    let pooled = match local_target.as_ref() {
+        Some(target) => take_reusable_plain_http_stream_from_target(target).await,
+        None => take_reusable_plain_http_stream(&slot).await,
+    };
+    let connection = match pooled {
         Some(connection) => connection,
         None => open_plain_http_origin_stream(connect_authority).await?,
     };
+    let recycler = local_target
+        .map(Http1ConnectionRecycler::from_target)
+        .unwrap_or_else(|| Http1ConnectionRecycler::from_target(slot));
     let mut response = send_http1_request_with_interim_reusable(
         connection.stream,
         connection.read_buf,
         connection.write_buf,
         req,
-        Http1ConnectionRecycler::from_target(slot),
+        recycler,
     )
     .await?;
     retain_active_permit(response.response.body_mut(), Some(active_permit));
@@ -392,6 +447,12 @@ async fn proxy_direct_plain_http1_raw_response_with_interim_inner(
         Some(host_authority)
     );
     if matches!(*req.method(), http::Method::GET | http::Method::HEAD) {
+        let h2_response_frame_size = req
+            .extensions()
+            .get::<crate::http::codec::h2::H2DownstreamLoad>()
+            .copied()
+            .map(crate::http::codec::h2::H2DownstreamLoad::upstream_response_frame_size)
+            .unwrap_or(1024 * 1024);
         req = match classify_bodyless_http1_request(req)? {
             Ok(req) => {
                 return proxy_bodyless_plain_http1_raw_response_with_interim(
@@ -401,6 +462,7 @@ async fn proxy_direct_plain_http1_raw_response_with_interim_inner(
                     request_version,
                     proxy_name,
                     connection_pool,
+                    h2_response_frame_size,
                 )
                 .await;
             }
@@ -433,6 +495,7 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
     request_version: http::Version,
     proxy_name: &str,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
+    h2_response_frame_size: usize,
 ) -> Result<Http1ResponseWithInterim> {
     let active_permit = slot.acquire_active().await?;
     let local_target = connection_pool.map(|pool| pool.target_for(&slot));
@@ -497,7 +560,7 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
     };
     relay.active_permit = Some(active_permit);
     if request_version == http::Version::HTTP_2 {
-        relay.into_materialized_http_response()
+        relay.into_materialized_http_response(h2_response_frame_size)
     } else {
         relay.into_http_response()
     }
@@ -574,6 +637,18 @@ async fn take_reusable_plain_http_stream(
 ) -> Option<pool::PlainHttp1OriginConnection> {
     loop {
         let mut connection = slot.pop_idle()?;
+        if idle_connection_closed_or_dirty(&mut connection.stream).await {
+            continue;
+        }
+        return Some(connection);
+    }
+}
+
+async fn take_reusable_plain_http_stream_from_target(
+    target: &Arc<PreparedPlainHttp1ConnectionAffinityTarget>,
+) -> Option<pool::PlainHttp1OriginConnection> {
+    loop {
+        let mut connection = target.pop_idle()?;
         if idle_connection_closed_or_dirty(&mut connection.stream).await {
             continue;
         }

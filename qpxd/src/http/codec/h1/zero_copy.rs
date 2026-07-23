@@ -2,6 +2,8 @@
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use qpx_http::body::FileRegion;
 use std::io;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::TcpStream;
 #[cfg(target_os = "linux")]
 use tokio::time::Duration;
@@ -13,10 +15,50 @@ use tokio::io::Interest;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use tokio::io::unix::AsyncFd;
 
-// Bound uninterrupted kernel-assisted transfers so a ready socket cannot
-// monopolize a runtime worker while other connections are runnable.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const ZERO_COPY_SCHEDULING_QUANTUM: u64 = 256 * 1024;
+const LOW_CONTENTION_ZERO_COPY_QUANTUM: u64 = 8 * 1024 * 1024;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BALANCED_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const HIGH_CONTENTION_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+static ACTIVE_ZERO_COPY_TRANSFERS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct ZeroCopyTransferGuard;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ZeroCopyTransferGuard {
+    fn begin() -> Self {
+        ACTIVE_ZERO_COPY_TRANSFERS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for ZeroCopyTransferGuard {
+    fn drop(&mut self) {
+        ACTIVE_ZERO_COPY_TRANSFERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn zero_copy_scheduling_quantum(zero_copy_only: bool) -> u64 {
+    zero_copy_scheduling_quantum_for(
+        ACTIVE_ZERO_COPY_TRANSFERS.load(Ordering::Acquire),
+        zero_copy_only,
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn zero_copy_scheduling_quantum_for(active_transfers: usize, zero_copy_only: bool) -> u64 {
+    match active_transfers {
+        0..=8 => LOW_CONTENTION_ZERO_COPY_QUANTUM,
+        9..=31 => BALANCED_ZERO_COPY_QUANTUM,
+        _ if zero_copy_only => HIGH_CONTENTION_ZERO_COPY_QUANTUM,
+        _ => BALANCED_ZERO_COPY_QUANTUM,
+    }
+}
 
 pub(super) struct ZeroCopySocket {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -80,15 +122,18 @@ impl ZeroCopySocket {
     pub(super) async fn send_file(&mut self, region: &FileRegion) -> io::Result<()> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
+            let _transfer = ZeroCopyTransferGuard::begin();
             let file_fd = region.file().as_raw_fd();
             let mut offset = region.offset();
             let end = offset
                 .checked_add(region.len())
                 .ok_or_else(|| io::Error::other("file region overflow"))?;
             let socket = self.socket()?;
+            let zero_copy_only = !region.has_portable_fallback();
             let mut bytes_since_yield = 0_u64;
             while offset < end {
-                let remaining = (end - offset).min(ZERO_COPY_SCHEDULING_QUANTUM);
+                let scheduling_quantum = zero_copy_scheduling_quantum(zero_copy_only);
+                let remaining = (end - offset).min(scheduling_quantum);
                 let written = socket
                     .async_io(Interest::WRITABLE, |_| {
                         sendfile_once(file_fd, socket.get_ref().as_raw_fd(), offset, remaining)
@@ -102,7 +147,7 @@ impl ZeroCopySocket {
                 }
                 offset = offset.saturating_add(written as u64);
                 bytes_since_yield = bytes_since_yield.saturating_add(written as u64);
-                if offset < end && bytes_since_yield >= ZERO_COPY_SCHEDULING_QUANTUM {
+                if offset < end && bytes_since_yield >= scheduling_quantum {
                     bytes_since_yield = 0;
                     tokio::task::yield_now().await;
                 }
@@ -128,11 +173,13 @@ pub(super) async fn splice_tcp_exact(
     read_timeout: Duration,
     write_timeout: Duration,
 ) -> io::Result<()> {
+    let _transfer = ZeroCopyTransferGuard::begin();
     let pipe = SplicePipe::new()?;
     let mut bytes_since_yield = 0_u64;
     while remaining > 0 {
-        let requested = usize::try_from(remaining.min(ZERO_COPY_SCHEDULING_QUANTUM))
-            .unwrap_or(ZERO_COPY_SCHEDULING_QUANTUM as usize);
+        let scheduling_quantum = zero_copy_scheduling_quantum(false);
+        let requested = usize::try_from(remaining.min(scheduling_quantum))
+            .unwrap_or(scheduling_quantum as usize);
         let moved = timeout_after_pending(read_timeout, async {
             loop {
                 match source.try_io(Interest::READABLE, || {
@@ -197,7 +244,7 @@ pub(super) async fn splice_tcp_exact(
         }
         remaining -= moved as u64;
         bytes_since_yield = bytes_since_yield.saturating_add(moved as u64);
-        if remaining > 0 && bytes_since_yield >= ZERO_COPY_SCHEDULING_QUANTUM {
+        if remaining > 0 && bytes_since_yield >= scheduling_quantum {
             bytes_since_yield = 0;
             tokio::task::yield_now().await;
         }
@@ -370,6 +417,26 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn scheduling_quantum_adapts_to_active_transfer_pressure() {
+        assert_eq!(
+            zero_copy_scheduling_quantum_for(1, false),
+            LOW_CONTENTION_ZERO_COPY_QUANTUM
+        );
+        assert_eq!(
+            zero_copy_scheduling_quantum_for(9, false),
+            BALANCED_ZERO_COPY_QUANTUM
+        );
+        assert_eq!(
+            zero_copy_scheduling_quantum_for(32, true),
+            HIGH_CONTENTION_ZERO_COPY_QUANTUM
+        );
+        assert_eq!(
+            zero_copy_scheduling_quantum_for(32, false),
+            BALANCED_ZERO_COPY_QUANTUM
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]

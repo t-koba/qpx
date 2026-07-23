@@ -211,7 +211,7 @@ async fn handle_request_inner_with_origin_pool(
             ..Default::default()
         },
     );
-    dispatch_reverse_request(req, base, reverse, runtime, conn, state).await
+    dispatch_reverse_request(req, base, reverse, runtime, conn, state, origin_pool).await
 }
 
 #[cfg(test)]

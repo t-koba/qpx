@@ -15,12 +15,12 @@ async fn purge_cache_key_removes_variant_objects_and_index() {
         variants: vec![variant.clone()],
     };
     backend
-        .put(namespace.as_str(), variant.as_str(), b"cached", 30)
+        .put(namespace, variant.as_str(), b"cached", 30)
         .await
         .expect("put variant");
     backend
         .put(
-            namespace.as_str(),
+            namespace,
             cache_body_storage_key(variant.as_str()).as_str(),
             b"cached body",
             30,
@@ -29,7 +29,7 @@ async fn purge_cache_key_removes_variant_objects_and_index() {
         .expect("put variant body");
     backend
         .put(
-            namespace.as_str(),
+            namespace,
             index_storage_key(primary.as_str()).as_str(),
             serde_json::to_vec(&index)
                 .expect("serialize index")
@@ -48,27 +48,21 @@ async fn purge_cache_key_removes_variant_objects_and_index() {
     assert!(purged);
     assert!(
         backend
-            .get(namespace.as_str(), variant.as_str())
+            .get(namespace, variant.as_str())
             .await
             .expect("get variant")
             .is_none()
     );
     assert!(
         backend
-            .get(
-                namespace.as_str(),
-                cache_body_storage_key(variant.as_str()).as_str(),
-            )
+            .get(namespace, cache_body_storage_key(variant.as_str()).as_str(),)
             .await
             .expect("get variant body")
             .is_none()
     );
     assert!(
         backend
-            .get(
-                namespace.as_str(),
-                index_storage_key(primary.as_str()).as_str(),
-            )
+            .get(namespace, index_storage_key(primary.as_str()).as_str(),)
             .await
             .expect("get index")
             .is_none()

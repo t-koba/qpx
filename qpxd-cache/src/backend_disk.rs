@@ -1,6 +1,7 @@
 use super::types::{
-    CacheBackend, CachedBody, CachedBodyStream, CachedResponseEnvelope, VariantIndex,
-    bounded_cache_body_stream, decode_cached_response_metadata, is_cache_body_storage_key,
+    CacheBackend, CachedBody, CachedBodyStream, CachedResponseCandidate, CachedResponseEnvelope,
+    VariantIndex, bounded_cache_body_stream, cache_body_storage_key,
+    decode_cached_response_metadata, is_cache_body_storage_key,
 };
 use anyhow::{Context, Result, anyhow};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -51,6 +52,7 @@ pub struct DiskCacheBackend {
     hot_recent: std::sync::Arc<ArcSwap<RecentHotCache>>,
     decoded_variants: std::sync::Arc<Vec<ArcSwapOption<DecodedVariantIndexEntry>>>,
     decoded_metadata: std::sync::Arc<Vec<ArcSwapOption<DecodedMetadataEntry>>>,
+    hot_responses: std::sync::Arc<Vec<ArcSwapOption<HotResponseEntry>>>,
     background_sweep_started: std::sync::Arc<AtomicBool>,
     state: std::sync::Arc<Mutex<DiskCacheState>>,
 }
@@ -116,6 +118,17 @@ struct DecodedMetadataEntry {
     key: std::sync::Arc<str>,
     raw: Bytes,
     value: std::sync::Arc<CachedResponseEnvelope>,
+}
+
+struct HotResponseEntry {
+    namespace: std::sync::Arc<str>,
+    index_key: std::sync::Arc<str>,
+    envelope: std::sync::Arc<CachedResponseEnvelope>,
+    body: Bytes,
+    body_offset: u64,
+    file: Option<std::sync::Arc<File>>,
+    expires_at_ms: u64,
+    sources: [RecentHotCacheEntry; 3],
 }
 
 struct BodyStreamWriteOptions {
@@ -186,6 +199,7 @@ impl DiskCacheBackend {
             hot_recent: std::sync::Arc::new(ArcSwap::from_pointee(RecentHotCache::default())),
             decoded_variants: std::sync::Arc::new(decoded_slots()),
             decoded_metadata: std::sync::Arc::new(decoded_slots()),
+            hot_responses: std::sync::Arc::new(decoded_slots()),
             background_sweep_started: std::sync::Arc::new(AtomicBool::new(false)),
             state: std::sync::Arc::new(Mutex::new(DiskCacheState::default())),
         };
@@ -470,6 +484,9 @@ impl DiskCacheBackend {
     }
 
     fn hot_recent_upsert(&self, entry: RecentHotCacheEntry, removed: &[PathBuf]) {
+        self.invalidate_hot_responses_for_paths(
+            std::iter::once(entry.path.as_path()).chain(removed.iter().map(PathBuf::as_path)),
+        );
         self.hot_recent.rcu(|current| {
             let mut entries = current.entries.clone();
             entries.resize_with(DISK_CACHE_RECENT_ENTRIES, || None);
@@ -488,6 +505,7 @@ impl DiskCacheBackend {
     }
 
     fn hot_recent_remove(&self, path: &Path) {
+        self.invalidate_hot_responses_for_paths(std::iter::once(path));
         if !self
             .hot_recent
             .load()
@@ -510,6 +528,25 @@ impl DiskCacheBackend {
                 })
                 .collect(),
         });
+    }
+
+    fn invalidate_hot_responses_for_paths<'a>(&self, paths: impl Iterator<Item = &'a Path>) {
+        let paths = paths.collect::<Vec<_>>();
+        if paths.is_empty() {
+            return;
+        }
+        for slot in self.hot_responses.iter() {
+            let entry = slot.load();
+            if entry.as_ref().is_some_and(|entry| {
+                entry
+                    .sources
+                    .iter()
+                    .any(|source| paths.contains(&source.path.as_path()))
+            }) {
+                drop(entry);
+                slot.store(None);
+            }
+        }
     }
 
     async fn remember_write(
@@ -782,6 +819,72 @@ impl CacheBackend for DiskCacheBackend {
             .collect()
     }
 
+    async fn get_response_candidate(
+        &self,
+        namespace: &str,
+        index_key: &str,
+    ) -> Result<Option<CachedResponseCandidate>> {
+        let slot_index = hot_slot(namespace, index_key);
+        let now = now_ms();
+        let slot = &self.hot_responses[slot_index];
+        if let Some(entry) = slot.load_full()
+            && entry.namespace.as_ref() == namespace
+            && entry.index_key.as_ref() == index_key
+        {
+            let recent = self.hot_recent.load();
+            if entry.expires_at_ms > now
+                && hot_response_sources_are_current(&recent, &entry.sources, now)
+            {
+                return Ok(hot_response_candidate(entry.as_ref()));
+            }
+            slot.store(None);
+        }
+
+        let recent = self.hot_recent.load();
+        let Some(index_entry) = recent_hot_entry(&recent, namespace, index_key, now) else {
+            return Ok(None);
+        };
+        let variant_index =
+            self.decode_variant_index(namespace, index_key, index_entry.value.clone())?;
+        let [variant_key] = variant_index.variants.as_slice() else {
+            return Ok(None);
+        };
+        let Some(metadata_entry) = recent_hot_entry(&recent, namespace, variant_key, now) else {
+            return Ok(None);
+        };
+        let envelope =
+            self.decode_response_metadata(namespace, variant_key, metadata_entry.value.clone())?;
+        let body_key = cache_body_storage_key(variant_key);
+        let Some(body_entry) = recent_hot_entry(&recent, namespace, body_key.as_str(), now) else {
+            return Ok(None);
+        };
+        if body_entry.value.len() as u64 != envelope.body_len {
+            return Ok(None);
+        }
+        let entry = std::sync::Arc::new(HotResponseEntry {
+            namespace: std::sync::Arc::from(namespace),
+            index_key: std::sync::Arc::from(index_key),
+            envelope,
+            body: body_entry.value.clone(),
+            body_offset: body_entry.body_offset,
+            file: body_entry.file.clone(),
+            expires_at_ms: index_entry
+                .expires_at_ms
+                .min(metadata_entry.expires_at_ms)
+                .min(body_entry.expires_at_ms),
+            sources: [
+                index_entry.clone(),
+                metadata_entry.clone(),
+                body_entry.clone(),
+            ],
+        });
+        let candidate = hot_response_candidate(entry.as_ref());
+        if candidate.is_some() {
+            slot.store(Some(entry));
+        }
+        Ok(candidate)
+    }
+
     async fn get_object(&self, namespace: &str, key: &str) -> Result<Option<CachedBody>> {
         Ok(self.get(namespace, key).await?.map(CachedBody::from_bytes))
     }
@@ -979,6 +1082,47 @@ fn hot_body_stream(
         body = body.with_file_region(file, body_offset.saturating_add(range_start), len);
     }
     Some(CachedBodyStream::from_body_for_backend(len, body))
+}
+
+fn recent_hot_entry<'a>(
+    recent: &'a RecentHotCache,
+    namespace: &str,
+    key: &str,
+    now: u64,
+) -> Option<&'a RecentHotCacheEntry> {
+    let entry = recent.entries.get(hot_slot(namespace, key))?.as_ref()?;
+    (entry.namespace.as_ref() == namespace
+        && entry.key.as_ref() == key
+        && entry.expires_at_ms > now)
+        .then_some(entry)
+}
+
+fn hot_response_candidate(entry: &HotResponseEntry) -> Option<CachedResponseCandidate> {
+    let body = hot_body_stream(
+        entry.body.clone(),
+        entry.envelope.body_len,
+        None,
+        entry.file.clone(),
+        entry.body_offset,
+    )?;
+    Some(CachedResponseCandidate::new(entry.envelope.clone(), body))
+}
+
+fn hot_response_sources_are_current(
+    recent: &RecentHotCache,
+    sources: &[RecentHotCacheEntry; 3],
+    now: u64,
+) -> bool {
+    sources.iter().all(|source| {
+        recent_hot_entry(recent, source.namespace.as_ref(), source.key.as_ref(), now).is_some_and(
+            |current| {
+                current.path == source.path
+                    && current.body_offset == source.body_offset
+                    && current.expires_at_ms == source.expires_at_ms
+                    && same_bytes_allocation(&current.value, &source.value)
+            },
+        )
+    })
 }
 
 fn hot_slot(namespace: &str, key: &str) -> usize {
@@ -1387,6 +1531,122 @@ mod tests {
             .flatten()
             .expect("repeated metadata");
         assert!(std::sync::Arc::ptr_eq(&first, &repeated));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_backend_hot_response_candidate_is_coherent_across_replacement_and_delete() {
+        let dir = temp_dir("hot-response-candidate");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let variant_key = "obj:primary:variant";
+        let body_key = cache_body_storage_key(variant_key);
+        let mut envelope = CachedResponseEnvelope {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            body: CachedBody::default(),
+            body_len: 7,
+            stored_at_ms: 1,
+            initial_age_secs: 0,
+            response_delay_secs: 0,
+            freshness_lifetime_secs: 60,
+            vary_headers: Vec::new(),
+            vary_values: Vec::new(),
+            header_map: Default::default(),
+            response_directives: Default::default(),
+            response_header_values: Default::default(),
+        };
+        backend
+            .put_object(
+                "ns",
+                body_key.as_str(),
+                &CachedBody::from_bytes(Bytes::from_static(b"payload")),
+                60,
+            )
+            .await
+            .expect("put body");
+        backend
+            .put(
+                "ns",
+                variant_key,
+                &super::super::types::encode_cached_response_metadata(&envelope)
+                    .expect("encode metadata"),
+                60,
+            )
+            .await
+            .expect("put metadata");
+        backend
+            .put(
+                "ns",
+                "index",
+                &serde_json::to_vec(&VariantIndex {
+                    variants: vec![variant_key.to_string()],
+                })
+                .expect("encode index"),
+                60,
+            )
+            .await
+            .expect("put index");
+
+        let mut first = backend
+            .get_response_candidate("ns", "index")
+            .await
+            .expect("get candidate")
+            .expect("candidate");
+        assert_eq!(first.envelope.status, 200);
+        assert_eq!(
+            first.body.body.data().await.expect("body").expect("bytes"),
+            Bytes::from_static(b"payload")
+        );
+
+        envelope.status = 201;
+        let updated_metadata = Bytes::from(
+            super::super::types::encode_cached_response_metadata(&envelope)
+                .expect("encode concurrently replaced metadata"),
+        );
+        let mut updated_recent = (**backend.hot_recent.load()).clone();
+        updated_recent.entries[hot_slot("ns", variant_key)]
+            .as_mut()
+            .expect("hot metadata")
+            .value = updated_metadata;
+        backend
+            .hot_recent
+            .store(std::sync::Arc::new(updated_recent));
+        let raced_replacement = backend
+            .get_response_candidate("ns", "index")
+            .await
+            .expect("get concurrently replaced candidate")
+            .expect("concurrently replaced candidate");
+        assert_eq!(raced_replacement.envelope.status, 201);
+
+        envelope.status = 202;
+        backend
+            .put(
+                "ns",
+                variant_key,
+                &super::super::types::encode_cached_response_metadata(&envelope)
+                    .expect("encode replacement metadata"),
+                60,
+            )
+            .await
+            .expect("replace metadata");
+        let replaced = backend
+            .get_response_candidate("ns", "index")
+            .await
+            .expect("get replaced candidate")
+            .expect("replaced candidate");
+        assert_eq!(replaced.envelope.status, 202);
+
+        backend
+            .delete("ns", body_key.as_str())
+            .await
+            .expect("delete body");
+        assert!(
+            backend
+                .get_response_candidate("ns", "index")
+                .await
+                .expect("get deleted candidate")
+                .is_none()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

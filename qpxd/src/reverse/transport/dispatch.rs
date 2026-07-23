@@ -16,7 +16,7 @@ use crate::upstream::origin::{
     OriginEndpoint, PreparedPlainHttp1ConnectionAffinity, prepare_proxy_http1_request,
     proxy_direct_plain_http1_raw_response_with_interim,
     proxy_direct_plain_http1_raw_response_with_interim_on_connection, proxy_http,
-    proxy_http_with_interim_timeout,
+    proxy_http_with_interim_timeout, proxy_http_with_interim_timeout_on_connection,
 };
 use anyhow::{Result, anyhow};
 use hyper::{Request, Response};
@@ -75,6 +75,7 @@ pub(super) async fn dispatch_reverse_request(
     runtime: &Runtime,
     conn: &ReverseConnInfo,
     state: Arc<crate::runtime::RuntimeState>,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<(InterimList, Response<Body>)> {
     use tracing::Instrument as _;
     if qpx_observability::request_spans_enabled() {
@@ -84,11 +85,11 @@ pub(super) async fn dispatch_reverse_request(
             host = %base.host().unwrap_or(""),
             method = %base.method,
         );
-        return execute_reverse_dispatch(req, base, reverse, runtime, conn, state)
+        return execute_reverse_dispatch(req, base, reverse, runtime, conn, state, connection_pool)
             .instrument(span)
             .await;
     }
-    execute_reverse_dispatch(req, base, reverse, runtime, conn, state).await
+    execute_reverse_dispatch(req, base, reverse, runtime, conn, state, connection_pool).await
 }
 
 pub(super) async fn try_dispatch_unconditional_plain_reverse_request(
@@ -151,6 +152,7 @@ async fn execute_reverse_dispatch(
     runtime: &Runtime,
     conn: &ReverseConnInfo,
     state: Arc<crate::runtime::RuntimeState>,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<(InterimList, Response<Body>)> {
     let (state, compiled) = reverse.compiled_snapshot(state).await;
     let request_version = req.version();
@@ -178,7 +180,7 @@ async fn execute_reverse_dispatch(
                     &base.method,
                     request_version,
                     state.plan.identity.proxy_name.as_ref(),
-                    None,
+                    connection_pool,
                 )
                 .await?;
                 apply_reverse_route_metadata(route, secure_transport, &mut response)?;
@@ -279,7 +281,7 @@ async fn execute_reverse_dispatch(
     let hsts = route.and_then(|route| route.plan.hsts);
     let secure_transport = conn.tls_sni.is_some();
     let (interim, mut response) =
-        execute_reverse_request(prepared, base, reverse, runtime, conn).await?;
+        execute_reverse_request(prepared, base, reverse, runtime, conn, connection_pool).await?;
     if let Some(metadata) = api_metadata {
         metadata.apply(response.headers_mut());
     }
@@ -341,6 +343,7 @@ async fn execute_reverse_request(
     reverse: &ReloadableReverse,
     runtime: &Runtime,
     conn: &ReverseConnInfo,
+    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<(InterimList, Response<Body>)> {
     let PreparedReverseRequest {
         mut req,
@@ -387,7 +390,7 @@ async fn execute_reverse_request(
             request_method,
             request_version,
             proxy_name,
-            None,
+            connection_pool,
         )
         .await;
     }
@@ -552,6 +555,7 @@ async fn execute_reverse_request(
         request_limits: &mut request_limits,
         request_limit_ctx: &request_limit_ctx,
         audit_ctx: &audit_ctx,
+        connection_pool,
     })
     .await?;
     Ok(attach_streaming_limits(result, streaming, request_version))
@@ -682,6 +686,7 @@ async fn complete_reverse_after_modules(
         request_limits,
         request_limit_ctx,
         audit_ctx,
+        connection_pool,
     } = input;
     if override_upstream.is_none()
         && let Some(webdav) = route.webdav.as_ref()
@@ -847,6 +852,7 @@ async fn complete_reverse_after_modules(
         request_limits,
         request_limit_ctx,
         audit_ctx,
+        connection_pool,
     })
     .await
 }
@@ -1087,6 +1093,11 @@ async fn build_reverse_attempt_request(
     Err(anyhow!("reverse retry template missing or incomplete"))
 }
 
+struct ReverseHttpAttemptTransport<'a> {
+    timeout: Duration,
+    connection_pool: Option<&'a PreparedPlainHttp1ConnectionAffinity>,
+}
+
 async fn proxy_reverse_http_attempt(
     pools: &crate::pool::PoolRegistry,
     req_for_upstream: Request<Body>,
@@ -1094,7 +1105,7 @@ async fn proxy_reverse_http_attempt(
     request_version: http::Version,
     proxy_name: &str,
     route: &HttpRoute,
-    route_timeout: Duration,
+    transport: ReverseHttpAttemptTransport<'_>,
 ) -> std::result::Result<
     Result<(
         InterimList,
@@ -1103,7 +1114,7 @@ async fn proxy_reverse_http_attempt(
     )>,
     tokio::time::error::Elapsed,
 > {
-    timeout(route_timeout, async {
+    timeout(transport.timeout, async {
         if upstream_origin.upstream.starts_with("ipc://")
             || upstream_origin.upstream.starts_with("ipc+unix://")
         {
@@ -1122,15 +1133,31 @@ async fn proxy_reverse_http_attempt(
                 | http::Version::HTTP_2
                 | http::Version::HTTP_3
         ) {
-            let proxied = proxy_http_with_interim_timeout(
-                pools,
-                req_for_upstream,
-                upstream_origin,
-                proxy_name,
-                route.upstream_trust.as_deref(),
-                route_timeout,
-            )
-            .await?;
+            let proxied = match transport.connection_pool {
+                Some(connection_pool) => {
+                    proxy_http_with_interim_timeout_on_connection(
+                        pools,
+                        req_for_upstream,
+                        upstream_origin,
+                        proxy_name,
+                        route.upstream_trust.as_deref(),
+                        transport.timeout,
+                        connection_pool,
+                    )
+                    .await?
+                }
+                None => {
+                    proxy_http_with_interim_timeout(
+                        pools,
+                        req_for_upstream,
+                        upstream_origin,
+                        proxy_name,
+                        route.upstream_trust.as_deref(),
+                        transport.timeout,
+                    )
+                    .await?
+                }
+            };
             return Ok((proxied.interim, proxied.response, proxied.upstream_cert));
         }
         Ok((

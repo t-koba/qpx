@@ -39,6 +39,30 @@ pub fn pick_free_tcp_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
+#[allow(
+    dead_code,
+    reason = "shared integration support is compiled into tests that do not start HTTP/3"
+)]
+fn pick_free_tcp_udp_port() -> Result<u16> {
+    for _ in 0..PORT_PICK_ATTEMPTS {
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).context("pick free tcp/udp port")?;
+        let port = listener.local_addr()?.port();
+        let udp = match std::net::UdpSocket::bind(("127.0.0.1", port)) {
+            Ok(udp) => udp,
+            Err(error) if is_retryable_bind_error_text(&error.to_string()) => continue,
+            Err(error) => return Err(error).context("reserve matching udp port"),
+        };
+        drop(udp);
+        drop(listener);
+        return Ok(port);
+    }
+    Err(anyhow!(
+        "failed to reserve a matching tcp/udp port after {} attempts",
+        PORT_PICK_ATTEMPTS
+    ))
+}
+
 pub fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Result<QpxdHandle> {
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_qpxd"));
     let log = fs::File::create(&log_path).context("create qpxd log")?;
@@ -61,9 +85,25 @@ pub fn spawn_qpxd_on_random_port(
     log_path: PathBuf,
     make_config: impl Fn(u16) -> String,
 ) -> Result<(u16, QpxdHandle)> {
+    spawn_qpxd_on_random_port_with(
+        config_path,
+        log_path,
+        make_config,
+        pick_free_tcp_port,
+        "port",
+    )
+}
+
+fn spawn_qpxd_on_random_port_with(
+    config_path: &Path,
+    log_path: PathBuf,
+    make_config: impl Fn(u16) -> String,
+    pick_port: impl Fn() -> Result<u16>,
+    failure_label: &str,
+) -> Result<(u16, QpxdHandle)> {
     let mut last_err: Option<anyhow::Error> = None;
     for _ in 0..PORT_PICK_ATTEMPTS {
-        let port = pick_free_tcp_port()?;
+        let port = pick_port()?;
         fs::write(config_path, make_config(port)).context("write qpxd config")?;
         match spawn_qpxd(config_path, port, log_path.clone()) {
             Ok(handle) => return Ok((port, handle)),
@@ -83,10 +123,29 @@ pub fn spawn_qpxd_on_random_port(
     }
     Err(last_err.unwrap_or_else(|| {
         anyhow!(
-            "failed to start qpxd after {} port attempts",
-            PORT_PICK_ATTEMPTS
+            "failed to start qpxd after {} {} attempts",
+            PORT_PICK_ATTEMPTS,
+            failure_label,
         )
     }))
+}
+
+#[allow(
+    dead_code,
+    reason = "shared integration support is compiled into tests that do not start HTTP/3"
+)]
+pub fn spawn_qpxd_on_random_tcp_udp_port(
+    config_path: &Path,
+    log_path: PathBuf,
+    make_config: impl Fn(u16) -> String,
+) -> Result<(u16, QpxdHandle)> {
+    spawn_qpxd_on_random_port_with(
+        config_path,
+        log_path,
+        make_config,
+        pick_free_tcp_udp_port,
+        "tcp/udp port",
+    )
 }
 
 fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<()> {

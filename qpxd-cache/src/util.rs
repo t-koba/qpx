@@ -93,12 +93,11 @@ pub async fn load_variant_index(
     Ok(parsed)
 }
 
-pub fn cache_namespace(policy: &CachePolicyConfig, fallback: &str) -> String {
+pub fn cache_namespace<'a>(policy: &'a CachePolicyConfig, fallback: &'a str) -> &'a str {
     policy
         .namespace
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or(fallback)
-        .to_string()
 }

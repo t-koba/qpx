@@ -62,6 +62,7 @@ pub(super) async fn dispatch_reverse_http_route(
         request_limits,
         request_limit_ctx,
         audit_ctx,
+        connection_pool,
     } = input;
     let mut last_err = None;
     for attempt_idx in 0..attempts {
@@ -138,7 +139,10 @@ pub(super) async fn dispatch_reverse_http_route(
             request_version,
             proxy_name,
             route,
-            route_timeout,
+            super::ReverseHttpAttemptTransport {
+                timeout: route_timeout,
+                connection_pool,
+            },
         )
         .await;
         if let Some(upstream) = selected_upstream.as_ref() {

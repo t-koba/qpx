@@ -40,7 +40,7 @@ pub async fn maybe_invalidate(
         if !seen.insert(primary.clone()) {
             continue;
         }
-        invalidate_primary(backend.as_ref(), namespace.as_str(), primary.as_ref()).await?;
+        invalidate_primary(backend.as_ref(), namespace, primary.as_ref()).await?;
     }
     Ok(())
 }
@@ -57,12 +57,7 @@ pub async fn purge_cache_key(
         return Ok(false);
     };
     let namespace = cache_namespace(policy, "default");
-    invalidate_primary(
-        backend.as_ref(),
-        namespace.as_str(),
-        key.primary_hash_arc().as_ref(),
-    )
-    .await?;
+    invalidate_primary(backend.as_ref(), namespace, key.primary_hash_arc().as_ref()).await?;
     Ok(true)
 }
 

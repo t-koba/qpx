@@ -49,7 +49,7 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
     };
     backend
         .put(
-            namespace.as_str(),
+            namespace,
             index_storage_key(primary.as_str()).as_str(),
             serde_json::to_vec(&index).expect("index").as_slice(),
             60,
@@ -83,7 +83,7 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
         };
         backend
             .put(
-                namespace.as_str(),
+                namespace,
                 variant,
                 encode_cached_response_metadata(&envelope)
                     .expect("metadata")
@@ -94,7 +94,7 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
             .expect("put metadata");
         backend
             .put(
-                namespace.as_str(),
+                namespace,
                 cache_body_storage_key(variant).as_str(),
                 body,
                 60,
@@ -125,17 +125,17 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
     assert_eq!(body.as_ref(), b"japanese");
 
     let gets = backend.get_log();
-    assert!(gets.contains(&MockBackend::key(namespace.as_str(), en_variant.as_str())));
-    assert!(gets.contains(&MockBackend::key(namespace.as_str(), ja_variant.as_str())));
+    assert!(gets.contains(&MockBackend::key(namespace, en_variant.as_str())));
+    assert!(gets.contains(&MockBackend::key(namespace, ja_variant.as_str())));
     assert!(
         !gets.contains(&MockBackend::key(
-            namespace.as_str(),
+            namespace,
             cache_body_storage_key(en_variant.as_str()).as_str(),
         )),
         "non-matching variant body must not be fetched: {gets:?}"
     );
     assert!(gets.contains(&MockBackend::key(
-        namespace.as_str(),
+        namespace,
         cache_body_storage_key(ja_variant.as_str()).as_str(),
     )));
 }

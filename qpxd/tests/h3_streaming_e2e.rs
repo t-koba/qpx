@@ -18,7 +18,7 @@ mod streaming_backend;
 mod yaml_support;
 
 use cert_support::write_self_signed_cert;
-use common::{QpxdHandle, pick_free_tcp_port, spawn_qpxd, temp_dir};
+use common::{QpxdHandle, spawn_qpxd_on_random_tcp_udp_port, temp_dir};
 use h3_client_support::{build_h3_test_client_config, build_quinn_client_endpoint};
 use yaml_support::yaml_quote_path;
 
@@ -330,9 +330,7 @@ async fn spawn_reverse_h3_proxy(
     fs::create_dir_all(&state_dir).context("create state dir")?;
     let (cert_path, key_path) = write_self_signed_cert(&dir, H3_HOST)?;
     let cfg = dir.join("qpxd.yaml");
-    let port = pick_free_tcp_port()?;
-    fs::write(
-        &cfg,
+    let (port, handle) = spawn_qpxd_on_random_tcp_udp_port(&cfg, dir.join("qpxd.log"), |port| {
         format!(
             r#"upstreams:
 - name: streaming
@@ -366,10 +364,8 @@ edges:
             state_dir = yaml_quote_path(&state_dir),
             cert_path = yaml_quote_path(&cert_path),
             key_path = yaml_quote_path(&key_path),
-        ),
-    )
-    .context("write qpxd config")?;
-    let handle = spawn_qpxd(&cfg, port, dir.join("qpxd.log"))?;
+        )
+    })?;
     Ok((
         H3StreamingProxy {
             _handle: handle,

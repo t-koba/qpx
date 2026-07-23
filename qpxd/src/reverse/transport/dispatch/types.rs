@@ -249,6 +249,8 @@ pub(super) struct ReverseHttpDispatchInput<'a> {
     pub(super) request_limits: &'a mut crate::rate_limit::AppliedRateLimits,
     pub(super) request_limit_ctx: &'a RateLimitContext,
     pub(super) audit_ctx: &'a DispatchAuditContext,
+    pub(super) connection_pool:
+        Option<&'a crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity>,
 }
 
 pub(super) struct ReverseIpcDispatchInput<'a> {
@@ -312,6 +314,8 @@ pub(super) struct ReversePostModuleInput<'a> {
     pub(super) request_limits: &'a mut crate::rate_limit::AppliedRateLimits,
     pub(super) request_limit_ctx: &'a RateLimitContext,
     pub(super) audit_ctx: &'a DispatchAuditContext,
+    pub(super) connection_pool:
+        Option<&'a crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity>,
 }
 
 pub(super) enum ReverseAttemptOutcome {

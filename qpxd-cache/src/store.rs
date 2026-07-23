@@ -110,7 +110,7 @@ pub async fn maybe_store(
     let ttl = object_retention_ttl_secs(freshness_lifetime_secs, &resp_directives);
     let writeback = CacheWriteback {
         backend: backend.clone(),
-        namespace,
+        namespace: namespace.to_string(),
         storage_primary,
         variant_key,
         status: response.status().as_u16(),
