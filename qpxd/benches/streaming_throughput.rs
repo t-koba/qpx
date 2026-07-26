@@ -91,7 +91,25 @@ fn bench_sse_event_observer_overhead(c: &mut Criterion) {
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 fn feed_grpc_frame_observer(payload: &[u8], iterations: usize) -> anyhow::Result<usize> {
-    qpxd::bench_support::feed_grpc_frame_observer(payload, iterations)
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/grpc"),
+    );
+    let mut observed = 0usize;
+    for _ in 0..iterations {
+        let Some(mut observer) = qpxd::module_api::RpcStreamObserver::from_headers(
+            &headers,
+            None,
+            Some(16 * 1024 * 1024),
+            None,
+        ) else {
+            continue;
+        };
+        observer.feed(payload)?;
+        observed = observed.saturating_add(observer.finish()?.message_count);
+    }
+    Ok(observed)
 }
 
 #[cfg(not(any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
@@ -101,7 +119,13 @@ fn feed_grpc_frame_observer(_payload: &[u8], _iterations: usize) -> anyhow::Resu
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 fn feed_sse_event_observer(payload: &[u8], iterations: usize) -> u64 {
-    qpxd::bench_support::feed_sse_event_observer(payload, iterations)
+    let mut events = 0u64;
+    for _ in 0..iterations {
+        let mut observer = qpxd::module_api::SseEventObserver::new();
+        observer.feed(payload);
+        events = events.saturating_add(observer.summary().event_count);
+    }
+    events
 }
 
 #[cfg(not(any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]

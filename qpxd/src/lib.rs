@@ -63,50 +63,150 @@ pub mod module_api {
         HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome, RetryEvent,
     };
     pub use qpx_http::body::{Body, BodyError, Sender};
+
+    /// Incremental observer for an RPC response stream selected from its HTTP fields.
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    pub struct RpcStreamObserver {
+        inner: crate::http::rpc::streaming::StreamingRpcObserver,
+    }
+
+    /// Final counts and trailers extracted from an RPC response stream.
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    pub struct RpcStreamSummary {
+        pub message_count: usize,
+        pub message_bytes: u64,
+        pub trailers: Option<http::HeaderMap>,
+    }
+
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    impl RpcStreamObserver {
+        /// Selects the gRPC, gRPC-Web, or Connect observer for the response.
+        pub fn from_headers(
+            headers: &http::HeaderMap,
+            fallback_protocol: Option<&str>,
+            max_message_bytes: Option<u64>,
+            max_trailer_bytes: Option<u64>,
+        ) -> Option<Self> {
+            crate::http::rpc::streaming::streaming_rpc_observer(
+                headers,
+                fallback_protocol,
+                max_message_bytes,
+                max_trailer_bytes,
+            )
+            .map(|inner| Self { inner })
+        }
+
+        /// Returns the selected RPC protocol name.
+        pub fn protocol(&self) -> &str {
+            self.inner.protocol()
+        }
+
+        /// Feeds the next response-body chunk into the observer.
+        pub fn feed(&mut self, chunk: &[u8]) -> anyhow::Result<()> {
+            self.inner.feed(chunk).map_err(anyhow::Error::from)
+        }
+
+        /// Finishes the stream and returns its validated summary.
+        pub fn finish(self) -> anyhow::Result<RpcStreamSummary> {
+            let summary = self.inner.finish().map_err(anyhow::Error::from)?;
+            let (message_count, message_bytes, trailers) = summary.into_parts();
+            Ok(RpcStreamSummary {
+                message_count,
+                message_bytes,
+                trailers,
+            })
+        }
+    }
+
+    /// Incremental observer for Server-Sent Event streams.
+    pub struct SseEventObserver {
+        inner: crate::http::protocol::sse::SseEventObserver,
+    }
+
+    /// Current counts and last event ID extracted from an SSE stream.
+    pub struct SseStreamSummary {
+        pub event_count: u64,
+        pub byte_count: u64,
+        pub last_event_id: Option<String>,
+    }
+
+    impl Default for SseEventObserver {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl SseEventObserver {
+        /// Creates an observer with the canonical SSE streaming limits.
+        pub fn new() -> Self {
+            Self {
+                inner: crate::http::protocol::sse::SseEventObserver::new(),
+            }
+        }
+
+        /// Feeds a response-body chunk and returns the number of completed events.
+        pub fn feed(&mut self, chunk: &[u8]) -> u64 {
+            self.inner.feed(chunk).events
+        }
+
+        /// Returns the current stream summary without consuming the observer.
+        pub fn summary(&self) -> SseStreamSummary {
+            let summary = self.inner.summary();
+            SseStreamSummary {
+                event_count: summary.event_count,
+                byte_count: summary.byte_count,
+                last_event_id: summary.last_event_id,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::SseEventObserver;
+
+        #[test]
+        fn public_sse_observer_reports_completed_events() {
+            let payload = b"id: 7\ndata: hello\n\n";
+            let mut observer = SseEventObserver::new();
+
+            assert_eq!(observer.feed(payload), 1);
+            let summary = observer.summary();
+            assert_eq!(summary.event_count, 1);
+            assert_eq!(summary.byte_count, payload.len() as u64);
+            assert_eq!(summary.last_event_id.as_deref(), Some("7"));
+        }
+
+        #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+        #[test]
+        fn public_rpc_observer_validates_and_summarizes_grpc_frames() {
+            let mut headers = http::HeaderMap::new();
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/grpc"),
+            );
+            let mut observer = super::RpcStreamObserver::from_headers(
+                &headers,
+                None,
+                Some(16 * 1024 * 1024),
+                None,
+            )
+            .expect("gRPC observer");
+
+            assert_eq!(observer.protocol(), "grpc");
+            observer
+                .feed(&[0, 0, 0, 0, 3, b'a', b'b', b'c'])
+                .expect("valid gRPC frame");
+            let summary = observer.finish().expect("gRPC summary");
+            assert_eq!(summary.message_count, 1);
+            assert_eq!(summary.message_bytes, 3);
+            assert!(summary.trailers.is_none());
+        }
+    }
 }
 
 pub use daemon::{Daemon, DaemonBuilder};
 pub use qpx_core::config::{Config, HttpModuleConfig};
 pub use runtime::{Runtime, RuntimeState};
-
-#[doc(hidden)]
-#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-pub mod bench_support {
-    use anyhow::Result;
-    use http::HeaderMap;
-
-    pub fn feed_grpc_frame_observer(payload: &[u8], iterations: usize) -> Result<usize> {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/grpc"),
-        );
-        let mut observed = 0usize;
-        for _ in 0..iterations {
-            let Some(mut observer) = crate::http::rpc::streaming_rpc_observer(
-                &headers,
-                None,
-                Some(16 * 1024 * 1024),
-                None,
-            ) else {
-                continue;
-            };
-            observer.feed(payload)?;
-            observed = observed.saturating_add(observer.finish()?.message_count());
-        }
-        Ok(observed)
-    }
-
-    pub fn feed_sse_event_observer(payload: &[u8], iterations: usize) -> u64 {
-        let mut events = 0u64;
-        for _ in 0..iterations {
-            let mut observer = crate::http::protocol::sse::SseEventObserver::new();
-            observer.feed(payload);
-            events = events.saturating_add(observer.summary().event_count);
-        }
-        events
-    }
-}
 
 #[doc(hidden)]
 pub mod fuzz_support {

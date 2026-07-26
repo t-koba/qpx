@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 pub const CACHE_HEADER: &str = "cache-status";
 pub const INDEX_TTL_SECS: u64 = 24 * 60 * 60;
@@ -16,6 +16,34 @@ pub const MAX_CACHE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_VARIANTS_PER_PRIMARY: usize = 256;
 const BACKGROUND_REVALIDATIONS_SHARDS: usize = 64;
 const REQUEST_COLLAPSE_SHARDS: usize = 64;
+const CACHE_WRITEBACK_CONCURRENCY: usize = 16;
+
+/// Bounds cache writeback work so slow durable backends cannot exhaust runtime
+/// tasks, memory, or file descriptors while origin responses keep flowing.
+pub struct CacheWritebackAdmission {
+    permits: Arc<Semaphore>,
+}
+
+impl CacheWritebackAdmission {
+    /// Creates the per-runtime writeback admission controller.
+    pub fn with_default_capacity() -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(CACHE_WRITEBACK_CONCURRENCY)),
+        }
+    }
+
+    pub(crate) fn try_acquire(&self) -> Option<CacheWritebackPermit> {
+        self.permits
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(|permit| CacheWritebackPermit { _permit: permit })
+    }
+}
+
+pub(crate) struct CacheWritebackPermit {
+    _permit: OwnedSemaphorePermit,
+}
 
 pub(crate) fn cache_status_header(
     state: &'static str,
@@ -570,7 +598,10 @@ pub enum VarySpec {
 
 #[cfg(test)]
 mod cache_status_tests {
-    use super::{CachedBody, CachedResponseEnvelope, cache_status_header};
+    use super::{
+        CACHE_WRITEBACK_CONCURRENCY, CacheWritebackAdmission, CachedBody, CachedResponseEnvelope,
+        cache_status_header,
+    };
     use std::sync::{Arc, OnceLock};
 
     #[test]
@@ -588,6 +619,18 @@ mod cache_status_tests {
                 .expect("parse generated Cache-Status");
         }
         assert!(cache_status_header("HIT", Some(u64::MAX)).is_err());
+    }
+
+    #[test]
+    fn cache_writeback_admission_is_bounded_and_recovers_capacity() {
+        let admission = CacheWritebackAdmission::with_default_capacity();
+        let mut permits = (0..CACHE_WRITEBACK_CONCURRENCY)
+            .map(|_| admission.try_acquire().expect("writeback permit"))
+            .collect::<Vec<_>>();
+
+        assert!(admission.try_acquire().is_none());
+        permits.pop();
+        assert!(admission.try_acquire().is_some());
     }
 
     #[test]

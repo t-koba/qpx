@@ -1,11 +1,19 @@
 use crate::runtime::{CompiledForwardedHop, CompiledForwardedHopCache, CompiledForwardedPolicy};
 use anyhow::{Result, anyhow};
-use http::{HeaderMap, HeaderValue};
+use http::{HeaderMap, HeaderValue, header::HeaderName};
 use qpx_core::config::UntrustedForwardedChainPolicy;
-use qpx_http::forwarded::{ForwardedElement, parse_forwarded, serialize_forwarded};
+use qpx_http::forwarded::{FORWARDED, ForwardedElement, parse_forwarded, serialize_forwarded};
 use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::sync::Arc;
+
+static FORWARDED_CHAIN_HEADERS: [HeaderName; 5] = [
+    HeaderName::from_static("forwarded"),
+    HeaderName::from_static("x-forwarded-for"),
+    HeaderName::from_static("x-forwarded-host"),
+    HeaderName::from_static("x-forwarded-proto"),
+    HeaderName::from_static("x-forwarded-port"),
+];
 
 pub(crate) fn apply_forwarded_policy(
     headers: &mut HeaderMap,
@@ -21,32 +29,26 @@ pub(crate) fn apply_forwarded_policy(
         .trusted_peers
         .iter()
         .any(|network| network.contains(&peer_ip));
-    let has_forwarded_chain = headers.contains_key("forwarded");
+    let has_forwarded_chain = headers.contains_key(&FORWARDED);
     let mut chain = if trusted && has_forwarded_chain {
         parse_forwarded(headers)
             .map_err(|error| anyhow!("invalid trusted Forwarded chain: {error}"))?
     } else {
-        if headers.contains_key("forwarded")
+        if headers.contains_key(&FORWARDED)
             && policy.untrusted_chain == UntrustedForwardedChainPolicy::Reject
         {
             return Err(anyhow!("untrusted peer supplied a Forwarded chain"));
         }
         Vec::new()
     };
-    for name in [
-        "forwarded",
-        "x-forwarded-for",
-        "x-forwarded-host",
-        "x-forwarded-proto",
-        "x-forwarded-port",
-    ] {
+    for name in &FORWARDED_CHAIN_HEADERS {
         headers.remove(name);
     }
 
     if chain.is_empty() {
         headers.reserve(1);
         headers.insert(
-            "forwarded",
+            FORWARDED.clone(),
             cached_current_hop(policy, peer_ip, scheme, host)?,
         );
         return Ok(());
@@ -66,7 +68,7 @@ pub(crate) fn apply_forwarded_policy(
     );
     let value = serialize_forwarded(&chain)
         .map_err(|error| anyhow!("cannot serialize Forwarded chain: {error}"))?;
-    headers.insert("forwarded", value);
+    headers.insert(FORWARDED.clone(), value);
     Ok(())
 }
 

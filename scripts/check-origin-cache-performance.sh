@@ -57,6 +57,22 @@ def number(container, field, context):
     return value
 
 
+def nonnegative_number(container, field, context):
+    try:
+        value = float(container[field])
+    except (KeyError, TypeError, ValueError):
+        fail(f"{context} is missing non-negative numeric {field}")
+    if not math.isfinite(value) or value < 0:
+        fail(f"{context} has invalid {field}: {value}")
+    return value
+
+
+def lower_is_better_ratio(current, reference):
+    if reference == 0:
+        return 1.0 if current == 0 else sys.float_info.max
+    return current / reference
+
+
 def nonnegative_integer(container, field, context):
     try:
         value = int(container[field])
@@ -70,7 +86,7 @@ def nonnegative_integer(container, field, context):
 def require_record(record, context):
     if record.get("valid") is not True:
         fail(f"{context} is marked invalid")
-    if record.get("benchmark_schema_version") != 2:
+    if record.get("benchmark_schema_version") != 3:
         fail(f"{context} uses unsupported benchmark schema")
     if record.get("aggregation") != "conservative_median_per_metric":
         fail(f"{context} uses unsupported aggregation")
@@ -83,6 +99,12 @@ def require_record(record, context):
         fail(f"{context} has unsupported execution model: {execution_model}")
     if nonnegative_integer(record, "role_workers", context) == 0:
         fail(f"{context} has no role workers")
+    if record.get("kernel_resource_metrics") is not True:
+        fail(f"{context} is missing Linux kernel resource metrics")
+    if context.startswith("proxy_cache_miss_http1/") and record.get("cache_writeback_verified") is not True:
+        fail(f"{context} did not verify durable cache writeback")
+    if nonnegative_integer(record, "fd_peak", context) == 0:
+        fail(f"{context} has no peak FD measurement")
     attempts = nonnegative_integer(record, "sample_attempts", context)
     valid_samples = nonnegative_integer(record, "valid_samples", context)
     if attempts == 0 or valid_samples < attempts // 2 + 1 or valid_samples > attempts:
@@ -97,6 +119,7 @@ def require_record(record, context):
         "timeout_errors",
         "non_2xx_responses",
         "bad_length_responses",
+        "cache_result_errors",
     ):
         if nonnegative_integer(record, field, context) != 0:
             fail(f"{context} has non-zero {field}")
@@ -223,6 +246,18 @@ for lane in lanes:
     p99_ratio = number(qpx, "latency_p99_ms", qpx_context) / number(
         reference, "latency_p99_ms", reference_context
     )
+    rss_peak_ratio = number(qpx, "rss_peak_kb", qpx_context) / number(
+        reference, "rss_peak_kb", reference_context
+    )
+    fd_peak_ratio = number(qpx, "fd_peak", qpx_context) / number(
+        reference, "fd_peak", reference_context
+    )
+    scheduler_queue_delay_ratio = lower_is_better_ratio(
+        nonnegative_number(qpx, "scheduler_queue_delay_us_per_request", qpx_context),
+        nonnegative_number(
+            reference, "scheduler_queue_delay_us_per_request", reference_context
+        ),
+    )
     dominance = (throughput_ratio * cpu_ratio / p99_ratio) ** (1.0 / 3.0)
 
     def objective(name):
@@ -234,6 +269,9 @@ for lane in lanes:
             "min_cpu_efficiency_ratio": 1.4,
             "max_p99_latency_ratio": 1.15,
             "min_dominance_score": 1.1,
+            "max_rss_peak_ratio": 1.0,
+            "max_fd_peak_ratio": 1.0,
+            "max_scheduler_queue_delay_ratio": 1.0,
         }
         if bench == "origin_webdav_http1":
             policy_floor.update(
@@ -245,6 +283,9 @@ for lane in lanes:
             "min_cpu_efficiency_ratio": 1.2,
             "max_p99_latency_ratio": 0.8,
             "min_dominance_score": 1.3,
+            "max_rss_peak_ratio": 1.0,
+            "max_fd_peak_ratio": 1.0,
+            "max_scheduler_queue_delay_ratio": 1.0,
         }
     else:
         policy_floor = {
@@ -252,12 +293,22 @@ for lane in lanes:
             "min_cpu_efficiency_ratio": 1.25,
             "max_p99_latency_ratio": 0.8,
             "min_dominance_score": 1.25,
+            "max_rss_peak_ratio": 1.0,
+            "max_fd_peak_ratio": 1.0,
+            "max_scheduler_queue_delay_ratio": 1.0,
         }
     for name in ("min_throughput_ratio", "min_cpu_efficiency_ratio", "min_dominance_score"):
         if objective(name) < policy_floor[name]:
             fail(f"objective {bench}/{body_bytes} weakens {name}")
     if objective("max_p99_latency_ratio") > policy_floor["max_p99_latency_ratio"]:
         fail(f"objective {bench}/{body_bytes} weakens max_p99_latency_ratio")
+    for name in (
+        "max_rss_peak_ratio",
+        "max_fd_peak_ratio",
+        "max_scheduler_queue_delay_ratio",
+    ):
+        if objective(name) > policy_floor[name]:
+            fail(f"objective {bench}/{body_bytes} weakens {name}")
 
     failures = []
     if throughput_ratio < objective("min_throughput_ratio"):
@@ -268,6 +319,12 @@ for lane in lanes:
         failures.append(f"p99 ratio {p99_ratio:.3f}")
     if dominance < objective("min_dominance_score"):
         failures.append(f"dominance score {dominance:.3f}")
+    if rss_peak_ratio > objective("max_rss_peak_ratio"):
+        failures.append(f"RSS peak ratio {rss_peak_ratio:.3f}")
+    if fd_peak_ratio > objective("max_fd_peak_ratio"):
+        failures.append(f"FD peak ratio {fd_peak_ratio:.3f}")
+    if scheduler_queue_delay_ratio > objective("max_scheduler_queue_delay_ratio"):
+        failures.append(f"scheduler queue-delay ratio {scheduler_queue_delay_ratio:.3f}")
     qpx_spread = qpx["sample_spread"]
     reference_spread = reference["sample_spread"]
     for field in ("requests_per_sec_ratio", "requests_per_cpu_second_ratio"):
@@ -290,6 +347,9 @@ for lane in lanes:
         "cpu_efficiency_ratio": round(cpu_ratio, 6),
         "p99_latency_ratio": round(p99_ratio, 6),
         "dominance_score": round(dominance, 6),
+        "rss_peak_ratio": round(rss_peak_ratio, 6),
+        "fd_peak_ratio": round(fd_peak_ratio, 6),
+        "scheduler_queue_delay_ratio": round(scheduler_queue_delay_ratio, 6),
     }
     print(json.dumps(result, sort_keys=True))
     results.append((bench, body_bytes, failures))

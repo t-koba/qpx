@@ -123,6 +123,7 @@ async fn maybe_store_does_not_block_downstream_on_idle_cacheable_body() {
         .body(body)
         .expect("response");
     let backends = backend_map();
+    let writeback_admission = test_writeback_admission();
 
     let stored = tokio::time::timeout(
         Duration::from_millis(25),
@@ -132,12 +133,15 @@ async fn maybe_store_does_not_block_downstream_on_idle_cacheable_body() {
             &key,
             &policy(),
             response,
-            CacheStoreTiming {
-                response_delay_secs: 0,
-                body_read_timeout: Duration::from_millis(10),
-                request_collapse_guard: None,
+            CacheStoreContext {
+                timing: CacheStoreTiming {
+                    response_delay_secs: 0,
+                    body_read_timeout: Duration::from_millis(10),
+                    request_collapse_guard: None,
+                },
+                writeback_admission: &writeback_admission,
+                backends: &backends,
             },
-            &backends,
         ),
     )
     .await

@@ -1,8 +1,10 @@
 //! RFC 7239 `Forwarded` field codec.
 
-use http::{HeaderMap, HeaderValue};
+use http::{HeaderMap, HeaderValue, header::HeaderName};
 use std::collections::HashSet;
 use thiserror::Error;
+
+pub static FORWARDED: HeaderName = HeaderName::from_static("forwarded");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardedElement {
@@ -50,7 +52,7 @@ pub enum ForwardedError {
 
 pub fn parse_forwarded(headers: &HeaderMap) -> Result<Vec<ForwardedElement>, ForwardedError> {
     let mut elements = Vec::new();
-    for value in headers.get_all("forwarded") {
+    for value in headers.get_all(&FORWARDED) {
         let value = value.to_str().map_err(|_| ForwardedError::NonAscii)?;
         for raw_element in split_quoted(value, b',')? {
             let raw_element = raw_element.trim();

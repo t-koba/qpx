@@ -35,6 +35,22 @@ def positive_number(record, field, owner="record"):
     return value
 
 
+def nonnegative_number(record, field, owner="record"):
+    try:
+        value = float(record[field])
+    except (KeyError, TypeError, ValueError):
+        fail(f"{owner} is missing numeric {field}")
+    if not math.isfinite(value) or value < 0:
+        fail(f"{owner} field {field} must be a non-negative finite number")
+    return value
+
+
+def lower_is_better_ratio(current, reference):
+    if reference == 0:
+        return 1.0 if current == 0 else sys.float_info.max
+    return current / reference
+
+
 def nonnegative_int(record, field, owner="record"):
     try:
         value = int(record[field])
@@ -83,6 +99,9 @@ limit_fields = (
     "max_qpx_cpu_sample_spread_ratio",
     "max_reference_throughput_sample_spread_ratio",
     "max_reference_cpu_sample_spread_ratio",
+    "max_lane_total_rss_peak_ratio",
+    "max_lane_total_fd_peak_ratio",
+    "max_lane_scheduler_queue_delay_ratio",
 )
 for field in limit_fields:
     positive_number(limits, field, "HTTP/2 objectives")
@@ -126,8 +145,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"{owner} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"{owner} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version", owner) != 5:
+        if nonnegative_int(record, "benchmark_schema_version", owner) != 6:
             fail(f"{owner} uses an unsupported benchmark schema")
+        if record.get("kernel_resource_metrics") is not True:
+            fail(f"{owner} is missing Linux kernel resource metrics")
         concurrency = nonnegative_int(record, "concurrency", owner)
         client_threads = nonnegative_int(record, "client_threads", owner)
         server_workers = nonnegative_int(record, "server_workers", owner)
@@ -158,6 +179,8 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             "cpu_ms",
             "backend_cpu_ms",
             "total_cpu_ms",
+            "total_rss_peak_kb",
+            "total_fd_peak",
         ):
             positive_number(record, field, owner)
         if positive_number(record, "total_cpu_ms", owner) < positive_number(record, "cpu_ms", owner):
@@ -222,6 +245,16 @@ for body_bytes, max_streams in sorted(required_lanes):
     maximum_ratio = positive_number(qpx, "latency_max_ms") / positive_number(
         nginx, "latency_max_ms"
     )
+    total_rss_peak_ratio = positive_number(qpx, "total_rss_peak_kb") / positive_number(
+        nginx, "total_rss_peak_kb"
+    )
+    total_fd_peak_ratio = positive_number(qpx, "total_fd_peak") / positive_number(
+        nginx, "total_fd_peak"
+    )
+    scheduler_queue_delay_ratio = lower_is_better_ratio(
+        nonnegative_number(qpx, "scheduler_queue_delay_us_per_request"),
+        nonnegative_number(nginx, "scheduler_queue_delay_us_per_request"),
+    )
     lane_score = (
         throughput_ratio
         * total_cpu_ratio
@@ -238,6 +271,9 @@ for body_bytes, max_streams in sorted(required_lanes):
         ("p99 latency ratio", p99_ratio, "max_lane_p99_latency_ratio", "max"),
         ("maximum latency ratio", maximum_ratio, "max_lane_latency_ratio", "max"),
         ("lane dominance score", lane_score, "min_lane_dominance_score", "min"),
+        ("total RSS peak ratio", total_rss_peak_ratio, "max_lane_total_rss_peak_ratio", "max"),
+        ("total FD peak ratio", total_fd_peak_ratio, "max_lane_total_fd_peak_ratio", "max"),
+        ("scheduler queue-delay ratio", scheduler_queue_delay_ratio, "max_lane_scheduler_queue_delay_ratio", "max"),
     )
     for label, current, field, direction in checks:
         objective = positive_number(limits, field, "HTTP/2 objectives")
@@ -288,6 +324,8 @@ for body_bytes, max_streams in sorted(required_lanes):
         f"HTTP/2 {body_bytes} bytes m={max_streams}: throughput={throughput_ratio:.3f}, "
         f"total-CPU={total_cpu_ratio:.3f}, mean={mean_ratio:.3f}, "
         f"p99={p99_ratio:.3f}, max={maximum_ratio:.3f}, dominance={lane_score:.3f}"
+        f", RSS={total_rss_peak_ratio:.3f}, FD={total_fd_peak_ratio:.3f}, "
+        f"queue={scheduler_queue_delay_ratio:.3f}"
     )
 
 aggregate_score = math.prod(lane_scores) ** (1.0 / len(lane_scores))

@@ -79,6 +79,10 @@ impl FramedBodySummary {
     pub(crate) fn trailers(&self) -> Option<&HeaderMap> {
         self.trailers.as_ref()
     }
+
+    pub(crate) fn into_parts(self) -> (usize, u64, Option<HeaderMap>) {
+        (self.message_count, self.message_bytes, self.trailers)
+    }
 }
 
 #[derive(Debug)]

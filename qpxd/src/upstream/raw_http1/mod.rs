@@ -29,6 +29,7 @@ const MAX_HEADER_BYTES: usize = 128 * 1024;
 const INITIAL_READ_BUF_SIZE: usize = 2 * 1024;
 pub(crate) const READ_BUF_SIZE: usize = 512 * 1024;
 const MAX_EMITTED_BODY_FRAME_SIZE: usize = READ_BUF_SIZE;
+const H2_RELAY_BODY_FRAME_SIZE: usize = 1024 * 1024;
 const MAX_CHUNKED_BODY_BYTES: u64 = 1024 * 1024 * 1024;
 pub(crate) const RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT: tokio::time::Duration =
     tokio::time::Duration::from_secs(30);
@@ -197,10 +198,7 @@ where
         })
     }
 
-    pub(crate) fn into_materialized_http_response(
-        self,
-        max_body_frame_size: usize,
-    ) -> Result<Http1ResponseWithInterim> {
+    pub(crate) fn into_materialized_http_response(self) -> Result<Http1ResponseWithInterim> {
         let Self {
             interim,
             version,
@@ -223,7 +221,7 @@ where
             read_buf,
             write_buf,
             recycler,
-            max_body_frame_size,
+            H2_RELAY_BODY_FRAME_SIZE,
         )?;
         retain_active_permit(response.body_mut(), active_permit);
         Ok(Http1ResponseWithInterim {

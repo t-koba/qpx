@@ -205,6 +205,7 @@ Body buffering observability emits:
 - `qpx_body_spool_cleanup_errors_total{direction,reason,error}`
 - `qpx_body_mirror_drops_total{mirror,reason}`
 - `qpx_cache_writeback_body_bytes_total`
+- `qpx_cache_writeback_admission_rejections_total`
 
 The `reason` label matches the `qpxd explain` cost vocabulary, for example
 `rpc.body`, `request.size_exact_unknown`, `response.size_exact_unknown`,
@@ -214,6 +215,10 @@ Cache writeback uses a lossy mirror so downstream response streaming is not
 blocked by a slow cache backend. Dropped writeback mirror chunks increment
 `qpx_body_mirror_drops_total{mirror="cache_writeback",...}` so hit-rate loss
 under load is visible without putting cache completeness back on the hot path.
+Each runtime also bounds concurrent writebacks. A cacheable miss that arrives
+while every durable writeback slot is occupied remains a correct forwarded
+miss and increments `qpx_cache_writeback_admission_rejections_total`; admitted
+writes retain the backend's durability and atomic-commit guarantees.
 Reverse streaming mirrors use the same primary-protecting drop behavior and
 report `qpx_body_mirror_drops_total{mirror="reverse_streaming_mirror",...}`.
 Built-in HTTP and Redis cache backends stream the mirrored body directly from

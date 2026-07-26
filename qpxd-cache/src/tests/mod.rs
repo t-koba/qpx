@@ -266,14 +266,18 @@ async fn store_and_drain(
     timing: CacheStoreTiming,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
 ) -> Result<Response<Body>> {
+    let writeback_admission = test_writeback_admission();
     let response = super::maybe_store(
         request_method,
         request_headers,
         key,
         policy,
         response,
-        timing,
-        backends,
+        CacheStoreContext {
+            timing,
+            writeback_admission: &writeback_admission,
+            backends,
+        },
     )
     .await?;
     let (parts, body) = response.into_parts();
@@ -292,6 +296,10 @@ fn test_revalidations() -> Arc<crate::InFlightRevalidations> {
 /// Fresh per-test request-collapse registry (formerly a process-global).
 fn test_request_collapse() -> Arc<crate::InFlightLookups> {
     Arc::new(crate::InFlightLookups::with_default_shards())
+}
+
+fn test_writeback_admission() -> crate::CacheWritebackAdmission {
+    crate::CacheWritebackAdmission::with_default_capacity()
 }
 
 mod backend_tests;

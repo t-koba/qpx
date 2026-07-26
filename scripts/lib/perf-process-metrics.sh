@@ -126,3 +126,61 @@ process_tree_status_kb() {
   done
   echo "$total"
 }
+
+process_tree_fd_count() {
+  local root="$1"
+  local fd pid total
+  if [ -z "$root" ] || [ ! -d /proc ]; then
+    echo 0
+    return
+  fi
+  total=0
+  for pid in $(process_tree_pids "$root"); do
+    if [ ! -d "/proc/${pid}/fd" ]; then
+      continue
+    fi
+    for fd in "/proc/${pid}/fd"/*; do
+      if [ -e "$fd" ]; then
+        total=$((total + 1))
+      fi
+    done
+  done
+  echo "$total"
+}
+
+process_tree_scheduler_run_delay_ns() {
+  local root="$1"
+  local pid schedstat task total value
+  if [ -z "$root" ] || [ ! -d /proc ]; then
+    echo 0
+    return
+  fi
+  total=0
+  for pid in $(process_tree_pids "$root"); do
+    for task in "/proc/${pid}/task"/*; do
+      schedstat="${task}/schedstat"
+      if [ ! -r "$schedstat" ]; then
+        continue
+      fi
+      value="$(awk '{ print $2 }' "$schedstat")"
+      total=$((total + value))
+    done
+  done
+  echo "$total"
+}
+
+monitor_process_tree_fd_peak() {
+  local root="$1"
+  local output="$2"
+  local current peak
+  peak=0
+  printf '0\n' >"$output"
+  while kill -0 "$root" >/dev/null 2>&1; do
+    current="$(process_tree_fd_count "$root")"
+    if [ "$current" -gt "$peak" ]; then
+      peak="$current"
+      printf '%s\n' "$peak" >"$output"
+    fi
+    sleep 0.05
+  done
+}

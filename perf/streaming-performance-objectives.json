@@ -8,6 +8,9 @@
     "max_first_byte_ratio": 1.1,
     "max_gap_ratio": 1.0,
     "max_p99_gap_ratio": 1.0,
+    "max_scheduler_queue_delay_ratio": 1.0,
+    "max_total_fd_peak_ratio": 1.0,
+    "max_total_rss_peak_ratio": 1.0,
     "min_dominance_score": 1.25,
     "min_direct_efficiency_ratio": 0.8,
     "min_throughput_ratio": 1.5,
@@ -24,6 +27,9 @@
     "max_first_byte_ratio": 2.0,
     "max_gap_ratio": 1.5,
     "max_p99_gap_ratio": 1.15,
+    "max_scheduler_queue_delay_ratio": 1.0,
+    "max_total_fd_peak_ratio": 1.0,
+    "max_total_rss_peak_ratio": 1.0,
     "max_total_time_ratio": 1.02
   }
 }

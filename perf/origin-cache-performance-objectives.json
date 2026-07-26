@@ -6,6 +6,9 @@
     "min_cpu_efficiency_ratio": 1.25,
     "max_p99_latency_ratio": 0.8,
     "min_dominance_score": 1.25,
+    "max_rss_peak_ratio": 1.0,
+    "max_fd_peak_ratio": 1.0,
+    "max_scheduler_queue_delay_ratio": 1.0,
     "max_qpx_sample_spread_ratio": 1.1,
     "max_reference_sample_spread_ratio": 1.15
   },
@@ -64,6 +67,15 @@
       "min_cpu_efficiency_ratio": 1.4,
       "max_p99_latency_ratio": 1.15,
       "min_dominance_score": 1.1
+    },
+    {
+      "bench": "proxy_cache_miss_http1",
+      "body_bytes": 1024,
+      "workload_profile": "persistent_cache_unique_miss_v1",
+      "qpx": "qpxd-cache",
+      "reference": "nginx-cache",
+      "qpx_role_workers": 4,
+      "reference_role_workers": 4
     },
     {
       "bench": "feature_rich_cache_hit_http1",

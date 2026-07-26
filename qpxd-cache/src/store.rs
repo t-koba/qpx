@@ -3,10 +3,10 @@ use super::entry::{header_map_from_vec, merge_headers_after_304, primary_from_va
 use super::freshness::{freshness_lifetime_secs, initial_age_secs};
 use super::invalidate::invalidate_primary;
 use super::types::{
-    CACHE_HEADER, CacheBackend, CacheRequestKey, CachedBody, CachedResponseEnvelope,
-    INDEX_TTL_SECS, MAX_CACHE_OBJECT_BYTES, RequestCollapseGuard, ResponseDirectives,
-    RevalidationState, VarySpec, cache_body_storage_key, cache_status_header,
-    encode_cached_response_metadata,
+    CACHE_HEADER, CacheBackend, CacheRequestKey, CacheWritebackAdmission, CacheWritebackPermit,
+    CachedBody, CachedResponseEnvelope, INDEX_TTL_SECS, MAX_CACHE_OBJECT_BYTES,
+    RequestCollapseGuard, ResponseDirectives, RevalidationState, VarySpec, cache_body_storage_key,
+    cache_status_header, encode_cached_response_metadata,
 };
 use super::util::{
     cache_namespace, load_variant_index, now_millis, sanitize_cached_headers_for_storage,
@@ -33,14 +33,19 @@ pub struct CacheStoreTiming {
     pub request_collapse_guard: Option<RequestCollapseGuard>,
 }
 
+pub struct CacheStoreContext<'a> {
+    pub timing: CacheStoreTiming,
+    pub writeback_admission: &'a CacheWritebackAdmission,
+    pub backends: &'a HashMap<String, Arc<dyn CacheBackend>>,
+}
+
 pub async fn maybe_store(
     request_method: &Method,
     request_headers: &http::HeaderMap,
     key: &CacheRequestKey,
     policy: &CachePolicyConfig,
     mut response: Response<Body>,
-    timing: CacheStoreTiming,
-    backends: &HashMap<String, Arc<dyn CacheBackend>>,
+    context: CacheStoreContext<'_>,
 ) -> Result<Response<Body>> {
     if !policy.enabled {
         return Ok(response);
@@ -54,7 +59,7 @@ pub async fn maybe_store(
         return Ok(response);
     }
 
-    let Some(backend) = backends.get(policy.backend.as_str()) else {
+    let Some(backend) = context.backends.get(policy.backend.as_str()) else {
         return Ok(response);
     };
 
@@ -96,10 +101,19 @@ pub async fn maybe_store(
         return Ok(response);
     };
 
+    let Some(writeback_permit) = context.writeback_admission.try_acquire() else {
+        super::metrics::writeback_admission_rejected();
+        response
+            .headers_mut()
+            .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
+        return Ok(response);
+    };
+
     let storage_key = response_storage_key(request_method, response.headers(), key)
         .unwrap_or_else(|| key.clone());
     let storage_primary = storage_key.primary_hash_arc();
-    let initial_age_secs = initial_age_secs(response.headers(), now, timing.response_delay_secs);
+    let initial_age_secs =
+        initial_age_secs(response.headers(), now, context.timing.response_delay_secs);
     let vary_values = cache_vary_values(
         request_headers,
         &vary,
@@ -117,14 +131,15 @@ pub async fn maybe_store(
         headers: sanitize_cached_headers_for_storage(response.headers(), &resp_directives),
         stored_at_ms: now,
         initial_age_secs,
-        response_delay_secs: timing.response_delay_secs,
+        response_delay_secs: context.timing.response_delay_secs,
         freshness_lifetime_secs,
         vary_headers: vary,
         vary_values,
         ttl,
         max_cacheable_body_bytes,
-        body_read_timeout: timing.body_read_timeout,
-        _request_collapse_guard: timing.request_collapse_guard,
+        body_read_timeout: context.timing.body_read_timeout,
+        _request_collapse_guard: context.timing.request_collapse_guard,
+        _writeback_permit: writeback_permit,
     };
 
     let (parts, body) = response.into_parts();
@@ -168,6 +183,7 @@ struct CacheWriteback {
     max_cacheable_body_bytes: usize,
     body_read_timeout: Duration,
     _request_collapse_guard: Option<RequestCollapseGuard>,
+    _writeback_permit: CacheWritebackPermit,
 }
 
 impl CacheWriteback {

@@ -6,9 +6,9 @@ use hyper::{Method, Request, Response, StatusCode};
 use qpx_core::config::{CacheBackendConfig, CachePolicyConfig};
 use qpx_http::body::Body;
 use qpxd_cache::{
-    CacheBackend, CacheRequestKey, CacheStoreTiming, CachedBody, CachedBodyStream,
-    InFlightRevalidations, LookupOutcome, attach_revalidation_headers, build_backends, lookup,
-    maybe_store,
+    CacheBackend, CacheRequestKey, CacheStoreContext, CacheStoreTiming, CacheWritebackAdmission,
+    CachedBody, CachedBodyStream, InFlightRevalidations, LookupOutcome,
+    attach_revalidation_headers, build_backends, lookup, maybe_store,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -247,18 +247,22 @@ async fn store_and_drain(
     policy: &CachePolicyConfig,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
 ) -> Result<()> {
+    let writeback_admission = CacheWritebackAdmission::with_default_capacity();
     let mut stored = maybe_store(
         req.method(),
         req.headers(),
         key,
         policy,
         response,
-        CacheStoreTiming {
-            response_delay_secs: 0,
-            body_read_timeout: Duration::from_secs(1),
-            request_collapse_guard: None,
+        CacheStoreContext {
+            timing: CacheStoreTiming {
+                response_delay_secs: 0,
+                body_read_timeout: Duration::from_secs(1),
+                request_collapse_guard: None,
+            },
+            writeback_admission: &writeback_admission,
+            backends,
         },
-        backends,
     )
     .await?;
     let _ = collect_body(stored.body_mut()).await?;

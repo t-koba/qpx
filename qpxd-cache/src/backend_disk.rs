@@ -151,6 +151,12 @@ struct DiskCacheRead {
     total_len: u64,
 }
 
+struct DiskCacheWrite {
+    body_offset: u64,
+    expires_at_ms: u64,
+    total_len: u64,
+}
+
 enum HotCacheLookup {
     Hit {
         value: Bytes,
@@ -620,34 +626,22 @@ impl DiskCacheBackend {
         value: &[u8],
         ttl_secs: u64,
     ) -> Result<()> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| anyhow!("disk cache path missing parent: {}", path.display()))?;
-        ensure_private_dir(parent)?;
-        let expires_at_ms = now_ms().saturating_add(ttl_secs.saturating_mul(1000));
-        let header = DiskCacheHeader {
-            schema_version: DISK_CACHE_SCHEMA_VERSION,
-            expires_at_ms,
-            body_len: value.len() as u64,
-        };
-        let tmp_path = temp_path(parent);
-        let mut file = create_secure_new_file(&tmp_path)?;
-        let body_offset = write_header(&mut file, &header)?;
-        file.write_all(value)?;
-        file.sync_all()?;
-        let total_len = file.metadata()?.len();
-        drop(file);
-        fs::rename(&tmp_path, path)
-            .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;
-        self.remember_write(path.to_path_buf(), total_len, expires_at_ms)
+        let write_path = path.to_path_buf();
+        let value = Bytes::copy_from_slice(value);
+        let (write, value) = tokio::task::spawn_blocking(move || {
+            write_cached_bytes_sync(write_path.as_path(), value, ttl_secs)
+        })
+        .await
+        .context("disk cache writer task failed")??;
+        self.remember_write(path.to_path_buf(), write.total_len, write.expires_at_ms)
             .await?;
         self.hot_insert(
             namespace,
             key,
             path.to_path_buf(),
-            Bytes::copy_from_slice(value),
-            expires_at_ms,
-            body_offset,
+            value,
+            write.expires_at_ms,
+            write.body_offset,
         )
         .await;
         Ok(())
@@ -686,6 +680,28 @@ impl DiskCacheBackend {
         body: &CachedBody,
         ttl_secs: u64,
     ) -> Result<()> {
+        if let CachedBody::Memory(value) = body {
+            let write_path = path.to_path_buf();
+            let value = value.clone();
+            let (write, value) = tokio::task::spawn_blocking(move || {
+                write_cached_bytes_sync(write_path.as_path(), value, ttl_secs)
+            })
+            .await
+            .context("disk cache body writer task failed")??;
+            self.remember_write(path.to_path_buf(), write.total_len, write.expires_at_ms)
+                .await?;
+            self.hot_insert(
+                namespace,
+                key,
+                path.to_path_buf(),
+                value,
+                write.expires_at_ms,
+                write.body_offset,
+            )
+            .await;
+            return Ok(());
+        }
+
         let mut source = body.to_body();
         let parent = path
             .parent()
@@ -699,7 +715,7 @@ impl DiskCacheBackend {
         };
         let tmp_path = temp_path(parent);
         let mut file = TokioFile::from_std(create_secure_new_file(&tmp_path)?);
-        let body_offset = write_header_async(&mut file, &header).await?;
+        write_header_async(&mut file, &header).await?;
         while let Some(chunk) = source.data().await {
             file.write_all(chunk?.as_ref()).await?;
         }
@@ -710,19 +726,7 @@ impl DiskCacheBackend {
             .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;
         self.remember_write(path.to_path_buf(), total_len, expires_at_ms)
             .await?;
-        if let CachedBody::Memory(value) = body {
-            self.hot_insert(
-                namespace,
-                key,
-                path.to_path_buf(),
-                value.clone(),
-                expires_at_ms,
-                body_offset,
-            )
-            .await;
-        } else {
-            self.hot_remove(path).await;
-        }
+        self.hot_remove(path).await;
         Ok(())
     }
 
@@ -1258,6 +1262,43 @@ fn write_header(file: &mut File, header: &DiskCacheHeader) -> Result<u64> {
     file.write_all(&(raw.len() as u32).to_be_bytes())?;
     file.write_all(&raw)?;
     Ok(DISK_CACHE_MAGIC.len() as u64 + 4 + raw.len() as u64)
+}
+
+fn write_cached_bytes_sync(
+    path: &Path,
+    value: Bytes,
+    ttl_secs: u64,
+) -> Result<(DiskCacheWrite, Bytes)> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("disk cache path missing parent: {}", path.display()))?;
+    ensure_private_dir(parent)?;
+    let expires_at_ms = now_ms().saturating_add(ttl_secs.saturating_mul(1000));
+    let header = DiskCacheHeader {
+        schema_version: DISK_CACHE_SCHEMA_VERSION,
+        expires_at_ms,
+        body_len: value.len() as u64,
+    };
+    let tmp_path = temp_path(parent);
+    let result = (|| {
+        let mut file = create_secure_new_file(&tmp_path)?;
+        let body_offset = write_header(&mut file, &header)?;
+        file.write_all(value.as_ref())?;
+        file.sync_all()?;
+        let total_len = file.metadata()?.len();
+        drop(file);
+        fs::rename(&tmp_path, path)
+            .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;
+        Ok(DiskCacheWrite {
+            body_offset,
+            expires_at_ms,
+            total_len,
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result.map(|write| (write, value))
 }
 
 async fn write_header_async(file: &mut TokioFile, header: &DiskCacheHeader) -> Result<u64> {

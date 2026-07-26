@@ -39,6 +39,7 @@ pub struct CacheWritebackContext<'a> {
     pub revalidation_state: Option<RevalidationState>,
     pub request_collapse_guard: Option<cache::RequestCollapseGuard>,
     pub body_read_timeout: Duration,
+    pub writeback_admission: &'a cache::CacheWritebackAdmission,
     pub backends: &'a HashMap<String, Arc<dyn CacheBackend>>,
 }
 
@@ -175,6 +176,7 @@ pub(crate) async fn process_upstream_response_for_cache(
         revalidation_state,
         mut request_collapse_guard,
         body_read_timeout,
+        writeback_admission,
         backends,
     } = ctx;
     if let Some(policy) = cache_policy {
@@ -214,12 +216,15 @@ pub(crate) async fn process_upstream_response_for_cache(
             key,
             policy,
             response,
-            cache::CacheStoreTiming {
-                response_delay_secs,
-                body_read_timeout,
-                request_collapse_guard: request_collapse_guard.take(),
+            cache::CacheStoreContext {
+                timing: cache::CacheStoreTiming {
+                    response_delay_secs,
+                    body_read_timeout,
+                    request_collapse_guard: request_collapse_guard.take(),
+                },
+                writeback_admission,
+                backends,
             },
-            backends,
         )
         .await?;
     }

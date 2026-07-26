@@ -168,6 +168,7 @@ fn maybe_spawn_forward_background_revalidation(
                         .upstream_http_timeout_ms
                         .max(1),
                 ),
+                writeback_admission: &runtime_state.cache.writeback_admission,
                 backends,
             },
         )

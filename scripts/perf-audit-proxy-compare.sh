@@ -1157,6 +1157,8 @@ run_one() {
   local request_host="$6"
   local body_bytes="$7"
   local resource_pid="$8"
+  local expected_cache_header="${9:-}"
+  local expected_cache_result="${10:-}"
   local probe_path="/bench-${body_bytes}"
   if [ "$mode" != "forward" ]; then
     probe_path="$request_target"
@@ -1176,14 +1178,19 @@ run_one() {
   local lua="$TMP_DIR/${artifact_name}.lua"
   local status_before status_after
   local cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb
-  local attempt failed_sample samples_file valid_sample_count median_index selected_sample profile_pid
+  local fd_peak fd_peak_file fd_peak_monitor_pid kernel_resource_metrics
+  local scheduler_before_ns scheduler_after_ns scheduler_run_delay_ns scheduler_queue_delay_us_per_request
+  local attempt failed_sample samples_file valid_sample_count median_index selected_sample profile_pid wrk_succeeded
   body_kind="$(body_profile "$body_bytes")"
 
   cat >"$lua" <<LUA
 local expected = ${body_bytes}
 local threads = {}
+local next_thread_index = 0
 
 setup = function(thread)
+  thread:set("thread_index", next_thread_index)
+  next_thread_index = next_thread_index + 1
   table.insert(threads, thread)
 end
 
@@ -1191,10 +1198,18 @@ init = function(args)
   responses = 0
   non_200 = 0
   bad_length = 0
+  cache_result_errors = 0
+  request_sequence = 0
+  request_namespace = (args and args[1]) or "default"
 end
 
 request = function()
-  return wrk.format("GET", "${request_target}", { ["Host"] = "${request_host}" })
+  local target = "${request_target}"
+  if "${expected_cache_result}" ~= "" then
+    request_sequence = request_sequence + 1
+    target = target .. "?qpx_cache_miss=" .. request_namespace .. "-" .. tostring(thread_index) .. "-" .. tostring(request_sequence)
+  end
+  return wrk.format("GET", target, { ["Host"] = "${request_host}" })
 end
 
 response = function(status, headers, body)
@@ -1205,6 +1220,18 @@ response = function(status, headers, body)
   if body == nil or string.len(body) ~= expected then
     bad_length = bad_length + 1
   end
+  if "${expected_cache_result}" ~= "" then
+    local matched = false
+    for name, value in pairs(headers) do
+      if string.lower(name) == "${expected_cache_header}" and string.find(string.lower(value), "${expected_cache_result}", 1, true) then
+        matched = true
+        break
+      end
+    end
+    if not matched then
+      cache_result_errors = cache_result_errors + 1
+    end
+  end
 end
 
 done = function(summary, latency, requests)
@@ -1212,15 +1239,18 @@ done = function(summary, latency, requests)
   local total_responses = 0
   local total_non_200 = 0
   local total_bad_length = 0
+  local total_cache_result_errors = 0
   for _, thread in ipairs(threads) do
     total_responses = total_responses + tonumber(thread:get("responses") or 0)
     total_non_200 = total_non_200 + tonumber(thread:get("non_200") or 0)
     total_bad_length = total_bad_length + tonumber(thread:get("bad_length") or 0)
+    total_cache_result_errors = total_cache_result_errors + tonumber(thread:get("cache_result_errors") or 0)
   end
   io.write(string.format("qpx_complete_requests %d\n", total_responses))
   io.write(string.format("qpx_summary_requests %d\n", summary.requests))
   io.write(string.format("qpx_non_2xx_responses %d\n", total_non_200))
   io.write(string.format("qpx_bad_length_responses %d\n", total_bad_length))
+  io.write(string.format("qpx_cache_result_errors %d\n", total_cache_result_errors))
   io.write(string.format("qpx_requests_per_sec %.6f\n", summary.requests / seconds))
   io.write(string.format("qpx_transfer_kbytes_per_sec %.6f\n", summary.bytes / 1024 / seconds))
   io.write(string.format("qpx_latency_p50_ms %.6f\n", latency:percentile(50) / 1000))
@@ -1244,7 +1274,8 @@ LUA
       return 0
     fi
   fi
-  if ! wrk -t"$THREADS" -c16 -d2s --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$warmup_out" 2>&1; then
+  local warmup_namespace="warmup-${artifact_name}"
+  if ! wrk -t"$THREADS" -c16 -d2s --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "$warmup_namespace" >"$warmup_out" 2>&1; then
     echo "wrk warmup failed for ${proxy}" >&2
     cat "$warmup_out" >&2 || true
     record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "200" "200" "warmup_failed"
@@ -1256,7 +1287,7 @@ LUA
   else
     status_before="$(safe_probe_status "$port" "$probe_path")"
   fi
-  local complete summary_requests failed fatal_errors non_2xx bad_length write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
+  local complete summary_requests failed fatal_errors non_2xx bad_length cache_result_errors cache_writeback_verified write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
   local latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms requests_per_cpu_second
   samples_file="$TMP_DIR/${artifact_name}.valid-samples.tsv"
   : >"$samples_file"
@@ -1271,8 +1302,33 @@ LUA
         >"$LOG_DIR/${artifact_name}.attempt-${attempt}.sample.log" 2>&1 &
       profile_pid=$!
     fi
+    kernel_resource_metrics=false
+    fd_peak=0
+    fd_peak_file="$TMP_DIR/${artifact_name}.attempt-${attempt}.fd-peak"
+    fd_peak_monitor_pid=""
+    scheduler_before_ns=0
+    if [ -d /proc ]; then
+      kernel_resource_metrics=true
+      monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" &
+      fd_peak_monitor_pid=$!
+      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+    fi
     cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
-    if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" >"$out" 2>&1; then
+    wrk_succeeded=true
+    if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "sample-${artifact_name}-${attempt}" >"$out" 2>&1; then
+      wrk_succeeded=false
+    fi
+    if [ -n "$fd_peak_monitor_pid" ]; then
+      kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
+      wait "$fd_peak_monitor_pid" 2>/dev/null || true
+      fd_peak="$(cat "$fd_peak_file" 2>/dev/null || echo 0)"
+    fi
+    scheduler_after_ns="$scheduler_before_ns"
+    if [ "$kernel_resource_metrics" = true ]; then
+      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+    fi
+    scheduler_run_delay_ns="$(awk -v before="$scheduler_before_ns" -v after="$scheduler_after_ns" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    if [ "$wrk_succeeded" != true ]; then
       echo "wrk failed for ${proxy} attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       cat "$out" >&2 || true
       failed_sample="$out"
@@ -1303,6 +1359,7 @@ LUA
     summary_requests="$(extract_metric_or_zero "$out" "qpx_summary_requests")"
     non_2xx="$(extract_metric_or_zero "$out" "qpx_non_2xx_responses")"
     bad_length="$(extract_metric_or_zero "$out" "qpx_bad_length_responses")"
+    cache_result_errors="$(extract_metric_or_zero "$out" "qpx_cache_result_errors")"
     rps="$(extract_metric "$out" "qpx_requests_per_sec")"
     transfer_kbps="$(extract_metric "$out" "qpx_transfer_kbytes_per_sec")"
     latency_p50_ms="$(extract_metric "$out" "qpx_latency_p50_ms")"
@@ -1340,16 +1397,26 @@ LUA
       continue
     fi
     requests_per_cpu_second="$(awk -v requests="$summary_requests" -v cpu_ms="$cpu_ms" 'BEGIN { if (cpu_ms > 0) printf "%.6f", requests / (cpu_ms / 1000); else printf "null" }')"
-    valid="$([ "$complete" -gt 0 ] && [ "$summary_requests" = "$complete" ] && [ "$fatal_errors" = 0 ] && read_error_rate_allowed "$read_errors" "$complete" && [ "$non_2xx" = 0 ] && [ "$bad_length" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
+    scheduler_queue_delay_us_per_request="$(awk -v delay_ns="$scheduler_run_delay_ns" -v requests="$summary_requests" 'BEGIN { if (requests > 0) printf "%.6f", delay_ns / requests / 1000; else printf "null" }')"
+    valid="$([ "$complete" -gt 0 ] && [ "$summary_requests" = "$complete" ] && [ "$fatal_errors" = 0 ] && read_error_rate_allowed "$read_errors" "$complete" && [ "$non_2xx" = 0 ] && [ "$bad_length" = 0 ] && [ "$cache_result_errors" = 0 ] && [ "$status_before" = 200 ] && [ "$status_after" = 200 ] && echo true || echo false)"
+    cache_writeback_verified=false
+    if [ "$valid" = true ] && [ -n "$expected_cache_result" ]; then
+      expect_cache_hit \
+        "$proxy" \
+        "$port" \
+        "^${expected_cache_header}:.*hit" \
+        "${request_target}?qpx_cache_writeback_verify=${artifact_name}-${attempt}"
+      cache_writeback_verified=true
+    fi
     if [ "$valid" = true ]; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$rps" "$complete" "$summary_requests" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$non_2xx" "$bad_length" "$mean_ms" "$transfer_kbps" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$cpu_ms" "$rss_kb" "$rss_peak_kb" "$requests_per_cpu_second" "$status_before" "$status_after" >>"$samples_file"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$rps" "$complete" "$summary_requests" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$mean_ms" "$transfer_kbps" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$cpu_ms" "$rss_kb" "$rss_peak_kb" "$requests_per_cpu_second" "$fd_peak" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$status_before" "$status_after" >>"$samples_file"
       attempt=$((attempt + 1))
       continue
     fi
     failed_sample="$out"
     echo "${proxy} produced an invalid benchmark sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
-    echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} connect_errors=${connect_errors} read_errors=${read_errors} write_errors=${write_errors} timeout_errors=${timeout_errors} max_read_error_rate_ppm=${MAX_READ_ERROR_RATE_PPM} non_2xx=${non_2xx} bad_length=${bad_length} status_before=${status_before} status_after=${status_after}" >&2
+    echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} connect_errors=${connect_errors} read_errors=${read_errors} write_errors=${write_errors} timeout_errors=${timeout_errors} max_read_error_rate_ppm=${MAX_READ_ERROR_RATE_PPM} non_2xx=${non_2xx} bad_length=${bad_length} cache_result_errors=${cache_result_errors} status_before=${status_before} status_after=${status_after}" >&2
     cat "$out" >&2 || true
     attempt=$((attempt + 1))
   done
@@ -1373,11 +1440,11 @@ LUA
     record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "${status_before:-200}" "${status_after:-200}" "sample_aggregation_failed"
     return 0
   fi
-  IFS=$'\t' read -r rps complete summary_requests failed connect_errors read_errors write_errors timeout_errors non_2xx bad_length mean_ms transfer_kbps latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms cpu_ms rss_kb rss_peak_kb requests_per_cpu_second status_before status_after <<<"$selected_sample"
+  IFS=$'\t' read -r rps complete summary_requests failed connect_errors read_errors write_errors timeout_errors non_2xx bad_length cache_result_errors cache_writeback_verified mean_ms transfer_kbps latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms cpu_ms rss_kb rss_peak_kb requests_per_cpu_second fd_peak scheduler_run_delay_ns scheduler_queue_delay_us_per_request kernel_resource_metrics status_before status_after <<<"$selected_sample"
   commit="${GITHUB_SHA:-unknown}"
   valid=true
-  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_peak_kb":%s,"requests_per_cpu_second":%s,"valid":%s,"commit":"%s"}\n' \
-    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_peak_kb")" "$requests_per_cpu_second" "$valid" "$commit" >>"$OUT_JSON"
+  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"cache_result_errors":%s,"cache_writeback_verified":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_peak_kb":%s,"requests_per_cpu_second":%s,"fd_peak":%s,"scheduler_run_delay_ns":%s,"scheduler_queue_delay_us_per_request":%s,"kernel_resource_metrics":%s,"valid":%s,"commit":"%s"}\n' \
+    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_peak_kb")" "$requests_per_cpu_second" "$fd_peak" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$valid" "$commit" >>"$OUT_JSON"
 }
 
 require_cmd curl
@@ -1664,6 +1731,22 @@ for body_bytes in $BODY_SIZES; do
   done
 done
 
+if proxy_selected qpxd-cache || proxy_selected nginx-cache; then
+  body_bytes=1024
+  round=1
+  while [ "$round" -le "$REQUESTED_SAMPLE_ATTEMPTS" ]; do
+    CURRENT_SAMPLE_ROUND="$round"
+    if [ $((round % 2)) -eq 1 ]; then
+      run_one "proxy_cache_miss_http1" "qpxd-cache" "$QPX_CACHE_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$QPX_CACHE_PID" "cache-status" "miss"
+      run_one "proxy_cache_miss_http1" "nginx-cache" "$NGINX_CACHE_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$NGINX_CACHE_PID" "x-cache-status" "miss"
+    else
+      run_one "proxy_cache_miss_http1" "nginx-cache" "$NGINX_CACHE_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$NGINX_CACHE_PID" "x-cache-status" "miss"
+      run_one "proxy_cache_miss_http1" "qpxd-cache" "$QPX_CACHE_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$QPX_CACHE_PID" "cache-status" "miss"
+    fi
+    round=$((round + 1))
+  done
+fi
+
 if proxy_selected qpxd-cache; then
   expect_cache_hit "qpxd-cache" "$QPX_CACHE_PORT" '^cache-status:.*hit' "/bench-$(first_body_size)"
 fi
@@ -1751,12 +1834,12 @@ jq -cs \
         | .valid_samples = ($valid | length)
         | .sampling_order = "round_robin_interleaved"
         | .sample_spread_basis = "tightest_valid_majority"
-        | .benchmark_schema_version = 2
+        | .benchmark_schema_version = 3
         | .backend_workers = $backend_workers
         | .role_workers = (if .proxy == "qpxd-webdav" then $webdav_workers elif (.proxy == "apache" or .proxy == "apache-webdav") then $apache_request_workers elif (.proxy | endswith("feature-rich")) then $feature_rich_workers elif (.proxy == "qpxd-cache" or .proxy == "nginx-cache") then $cache_workers elif .proxy == "qpxd-local" then $local_origin_workers elif (.proxy == "direct-backend" or .proxy == "nginx-static") then $backend_workers elif (.proxy | startswith("qpxd-workers-")) then (.proxy | ltrimstr("qpxd-workers-") | tonumber) else 1 end)
         | .blocking_workers = (if .proxy == "qpxd-webdav" then $webdav_blocking_threads else null end)
         | .execution_model = (if (.proxy == "apache" or .proxy == "apache-webdav") then "thread-per-request" else "async-io" end)
-        | .workload_profile = (if .bench == "origin_local_http1" then "local_origin_default_v1" elif .bench == "origin_webdav_http1" then "webdav_filesystem_redb_symlink_safe_v2" elif .bench == "proxy_cache_hit_http1" then "persistent_cache_hit_v1" elif .bench == "feature_rich_cache_hit_http1" then "feature_rich_cache_hit_v1" else "minimal_proxy_v1" end)
+        | .workload_profile = (if .bench == "origin_local_http1" then "local_origin_default_v1" elif .bench == "origin_webdav_http1" then "webdav_filesystem_redb_symlink_safe_v2" elif .bench == "proxy_cache_hit_http1" then "persistent_cache_hit_v1" elif .bench == "proxy_cache_miss_http1" then "persistent_cache_unique_miss_v1" elif .bench == "feature_rich_cache_hit_http1" then "feature_rich_cache_hit_v1" else "minimal_proxy_v1" end)
         | .health_check_interval_ms = $health_check_interval_ms
         | .logical_cpus = $logical_cpus
         | .requests = ([$valid[].requests] | lower_median)
@@ -1768,6 +1851,8 @@ jq -cs \
         | .failed_requests = (.connect_errors + .read_errors + .write_errors + .timeout_errors)
         | .non_2xx_responses = ([$valid[].non_2xx_responses] | maximum)
         | .bad_length_responses = ([$valid[].bad_length_responses] | maximum)
+        | .cache_result_errors = ([$valid[].cache_result_errors] | maximum)
+        | .cache_writeback_verified = ([$valid[].cache_writeback_verified] | all)
         | .requests_per_sec = ([$valid[].requests_per_sec] | lower_median)
         | .mean_time_per_request_ms = ([$valid[].mean_time_per_request_ms] | upper_median)
         | .latency_p50_ms = ([$valid[].latency_p50_ms] | upper_median)
@@ -1779,6 +1864,10 @@ jq -cs \
         | .cpu_ms = ([$valid[].cpu_ms] | upper_median)
         | .rss_kb = ([$valid[].rss_kb] | maximum)
         | .rss_peak_kb = ([$valid[].rss_peak_kb] | maximum)
+        | .fd_peak = ([$valid[].fd_peak] | maximum)
+        | .scheduler_run_delay_ns = ([$valid[].scheduler_run_delay_ns] | maximum)
+        | .scheduler_queue_delay_us_per_request = ([$valid[].scheduler_queue_delay_us_per_request] | maximum)
+        | .kernel_resource_metrics = ([$valid[].kernel_resource_metrics] | all)
         | .requests_per_cpu_second = ([$valid[].requests_per_cpu_second] | lower_median)
         | .sample_spread = {
             requests_per_sec_ratio: ([$valid[].requests_per_sec] | majority_spread_ratio),
@@ -1792,12 +1881,12 @@ jq -cs \
         | .valid_samples = ($valid | length)
         | .sampling_order = "round_robin_interleaved"
         | .sample_spread_basis = "tightest_valid_majority"
-        | .benchmark_schema_version = 2
+        | .benchmark_schema_version = 3
         | .backend_workers = $backend_workers
         | .role_workers = (if .proxy == "qpxd-webdav" then $webdav_workers elif (.proxy == "apache" or .proxy == "apache-webdav") then $apache_request_workers elif (.proxy | endswith("feature-rich")) then $feature_rich_workers elif (.proxy == "qpxd-cache" or .proxy == "nginx-cache") then $cache_workers elif .proxy == "qpxd-local" then $local_origin_workers elif (.proxy == "direct-backend" or .proxy == "nginx-static") then $backend_workers elif (.proxy | startswith("qpxd-workers-")) then (.proxy | ltrimstr("qpxd-workers-") | tonumber) else 1 end)
         | .blocking_workers = (if .proxy == "qpxd-webdav" then $webdav_blocking_threads else null end)
         | .execution_model = (if (.proxy == "apache" or .proxy == "apache-webdav") then "thread-per-request" else "async-io" end)
-        | .workload_profile = (if .bench == "origin_local_http1" then "local_origin_default_v1" elif .bench == "origin_webdav_http1" then "webdav_filesystem_redb_symlink_safe_v2" elif .bench == "proxy_cache_hit_http1" then "persistent_cache_hit_v1" elif .bench == "feature_rich_cache_hit_http1" then "feature_rich_cache_hit_v1" else "minimal_proxy_v1" end)
+        | .workload_profile = (if .bench == "origin_local_http1" then "local_origin_default_v1" elif .bench == "origin_webdav_http1" then "webdav_filesystem_redb_symlink_safe_v2" elif .bench == "proxy_cache_hit_http1" then "persistent_cache_hit_v1" elif .bench == "proxy_cache_miss_http1" then "persistent_cache_unique_miss_v1" elif .bench == "feature_rich_cache_hit_http1" then "feature_rich_cache_hit_v1" else "minimal_proxy_v1" end)
         | .health_check_interval_ms = $health_check_interval_ms
         | .logical_cpus = $logical_cpus
         | .valid = false

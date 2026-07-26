@@ -292,6 +292,47 @@ async fn content_length_response_does_not_repoll_completed_body() {
     assert!(raw.ends_with(b"\r\n\r\ncomplete"));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn static_response_recycles_header_storage() {
+    let mut retained = Vec::new();
+    for _ in 0..64 {
+        retained.push(qpx_http::header_pool::take(1));
+    }
+    let mut headers = HeaderMap::with_capacity(31);
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("2"));
+    let expected_capacity = headers.capacity();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("listener address");
+    let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+    let mut client = client.expect("connect");
+    let (mut server, _) = accepted.expect("accept");
+    let mut head_buf = BytesMut::new();
+    let keep_alive = send_static_http1_response(
+        &mut server,
+        &Method::GET,
+        StatusCode::OK,
+        headers,
+        Bytes::from_static(b"OK"),
+        true,
+        &mut head_buf,
+    )
+    .await
+    .expect("send static response");
+    assert!(keep_alive);
+
+    let recycled = qpx_http::header_pool::take(1);
+    assert!(recycled.capacity() >= expected_capacity);
+    qpx_http::header_pool::recycle(recycled);
+    for map in retained {
+        qpx_http::header_pool::recycle(map);
+    }
+
+    let mut raw = vec![0; head_buf.len() + 2];
+    client.read_exact(&mut raw).await.expect("read response");
+    assert!(raw.ends_with(b"OK"));
+}
+
 #[tokio::test]
 async fn finalized_raw_response_head_uses_direct_http1_serialization() {
     let (mut client, server) = tokio::io::duplex(4096);

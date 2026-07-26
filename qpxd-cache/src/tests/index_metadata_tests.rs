@@ -112,18 +112,22 @@ async fn request_collapse_guard_waits_for_cache_writeback() {
         .body(body)
         .expect("response");
     let backends = backend_map();
+    let writeback_admission = test_writeback_admission();
     let stored = super::maybe_store(
         req.method(),
         req.headers(),
         &key,
         &policy(),
         response,
-        CacheStoreTiming {
-            response_delay_secs: 0,
-            body_read_timeout: Duration::from_secs(1),
-            request_collapse_guard: Some(leader),
+        CacheStoreContext {
+            timing: CacheStoreTiming {
+                response_delay_secs: 0,
+                body_read_timeout: Duration::from_secs(1),
+                request_collapse_guard: Some(leader),
+            },
+            writeback_admission: &writeback_admission,
+            backends: &backends,
         },
-        &backends,
     )
     .await
     .expect("store response");

@@ -17,10 +17,10 @@ use tokio::io::unix::AsyncFd;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const LOW_CONTENTION_ZERO_COPY_QUANTUM: u64 = 8 * 1024 * 1024;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 const BALANCED_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const HIGH_CONTENTION_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
+const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ACTIVE_ZERO_COPY_TRANSFERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -43,20 +43,31 @@ impl Drop for ZeroCopyTransferGuard {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn zero_copy_scheduling_quantum(zero_copy_only: bool) -> u64 {
+fn zero_copy_scheduling_quantum(transfer_kind: ZeroCopyTransferKind) -> u64 {
     zero_copy_scheduling_quantum_for(
         ACTIVE_ZERO_COPY_TRANSFERS.load(Ordering::Acquire),
-        zero_copy_only,
+        transfer_kind,
     )
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn zero_copy_scheduling_quantum_for(active_transfers: usize, zero_copy_only: bool) -> u64 {
-    match active_transfers {
-        0..=8 => LOW_CONTENTION_ZERO_COPY_QUANTUM,
-        9..=31 => BALANCED_ZERO_COPY_QUANTUM,
-        _ if zero_copy_only => HIGH_CONTENTION_ZERO_COPY_QUANTUM,
-        _ => BALANCED_ZERO_COPY_QUANTUM,
+#[derive(Clone, Copy)]
+enum ZeroCopyTransferKind {
+    File,
+    #[cfg(target_os = "linux")]
+    Socket,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn zero_copy_scheduling_quantum_for(
+    active_transfers: usize,
+    transfer_kind: ZeroCopyTransferKind,
+) -> u64 {
+    match (transfer_kind, active_transfers) {
+        #[cfg(target_os = "linux")]
+        (ZeroCopyTransferKind::Socket, _) => BALANCED_ZERO_COPY_QUANTUM,
+        (ZeroCopyTransferKind::File, 0..=8) => LOW_CONTENTION_ZERO_COPY_QUANTUM,
+        (ZeroCopyTransferKind::File, _) => CONTENDED_FILE_ZERO_COPY_QUANTUM,
     }
 }
 
@@ -129,10 +140,9 @@ impl ZeroCopySocket {
                 .checked_add(region.len())
                 .ok_or_else(|| io::Error::other("file region overflow"))?;
             let socket = self.socket()?;
-            let zero_copy_only = !region.has_portable_fallback();
             let mut bytes_since_yield = 0_u64;
             while offset < end {
-                let scheduling_quantum = zero_copy_scheduling_quantum(zero_copy_only);
+                let scheduling_quantum = zero_copy_scheduling_quantum(ZeroCopyTransferKind::File);
                 let remaining = (end - offset).min(scheduling_quantum);
                 let written = socket
                     .async_io(Interest::WRITABLE, |_| {
@@ -177,7 +187,7 @@ pub(super) async fn splice_tcp_exact(
     let pipe = SplicePipe::new()?;
     let mut bytes_since_yield = 0_u64;
     while remaining > 0 {
-        let scheduling_quantum = zero_copy_scheduling_quantum(false);
+        let scheduling_quantum = zero_copy_scheduling_quantum(ZeroCopyTransferKind::Socket);
         let requested = usize::try_from(remaining.min(scheduling_quantum))
             .unwrap_or(scheduling_quantum as usize);
         let moved = timeout_after_pending(read_timeout, async {
@@ -420,20 +430,27 @@ mod tests {
 
     #[test]
     fn scheduling_quantum_adapts_to_active_transfer_pressure() {
+        #[cfg(target_os = "linux")]
         assert_eq!(
-            zero_copy_scheduling_quantum_for(1, false),
-            LOW_CONTENTION_ZERO_COPY_QUANTUM
+            zero_copy_scheduling_quantum_for(1, ZeroCopyTransferKind::Socket),
+            BALANCED_ZERO_COPY_QUANTUM
         );
+        #[cfg(target_os = "linux")]
         assert_eq!(
-            zero_copy_scheduling_quantum_for(9, false),
+            zero_copy_scheduling_quantum_for(9, ZeroCopyTransferKind::Socket),
             BALANCED_ZERO_COPY_QUANTUM
         );
         assert_eq!(
-            zero_copy_scheduling_quantum_for(32, true),
-            HIGH_CONTENTION_ZERO_COPY_QUANTUM
+            zero_copy_scheduling_quantum_for(1, ZeroCopyTransferKind::File),
+            LOW_CONTENTION_ZERO_COPY_QUANTUM
         );
         assert_eq!(
-            zero_copy_scheduling_quantum_for(32, false),
+            zero_copy_scheduling_quantum_for(32, ZeroCopyTransferKind::File),
+            CONTENDED_FILE_ZERO_COPY_QUANTUM
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            zero_copy_scheduling_quantum_for(32, ZeroCopyTransferKind::Socket),
             BALANCED_ZERO_COPY_QUANTUM
         );
     }

@@ -187,6 +187,7 @@ pub(crate) async fn write_dispatch_cache_result(
                         .upstream_http_timeout_ms
                         .max(1),
                 ),
+                writeback_admission: &input.state.cache.writeback_admission,
                 backends: &input.state.cache.backends,
             },
         )

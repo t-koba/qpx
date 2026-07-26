@@ -418,6 +418,7 @@ fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidat
                         .upstream_http_timeout_ms
                         .max(1),
                 ),
+                writeback_admission: &runtime_state.cache.writeback_admission,
                 backends: &runtime_state.cache.backends,
             },
         )

@@ -110,6 +110,22 @@ def number(record, field):
     return value
 
 
+def nonnegative_number(record, field):
+    try:
+        value = float(record[field])
+    except (KeyError, TypeError, ValueError):
+        fail(f"record for proxy {record.get('proxy', '<missing>')} is missing numeric {field}")
+    if not math.isfinite(value) or value < 0:
+        fail(f"{field} must be a non-negative finite number")
+    return value
+
+
+def lower_is_better_ratio(current, reference):
+    if reference == 0:
+        return 1.0 if current == 0 else sys.float_info.max
+    return current / reference
+
+
 def nonnegative_int(record, field):
     try:
         value = int(record[field])
@@ -153,11 +169,14 @@ def require_valid_sample(record):
         fail(f"proxy comparison record for {proxy} uses an unsupported aggregation")
     if record.get("sampling_order") != "round_robin_interleaved":
         fail(f"proxy comparison record for {proxy} uses an unsupported sampling order")
-    if positive_int(record, "benchmark_schema_version") != 2:
+    if positive_int(record, "benchmark_schema_version") != 3:
         fail(f"proxy comparison record for {proxy} uses an unsupported benchmark schema")
     positive_int(record, "backend_workers")
     positive_int(record, "health_check_interval_ms")
     positive_int(record, "logical_cpus")
+    if record.get("kernel_resource_metrics") is not True:
+        fail(f"proxy comparison record for {proxy} is missing Linux kernel resource metrics")
+    positive_int(record, "fd_peak")
     if nonnegative_int(record, "complete_requests") != nonnegative_int(record, "requests"):
         fail(f"proxy comparison record for {proxy} did not complete all requests")
     connect_errors = nonnegative_int(record, "connect_errors")
@@ -179,6 +198,8 @@ def require_valid_sample(record):
         fail(f"proxy comparison record for {proxy} has non-2xx responses")
     if nonnegative_int(record, "bad_length_responses") != 0:
         fail(f"proxy comparison record for {proxy} has bad response lengths")
+    if nonnegative_int(record, "cache_result_errors") != 0:
+        fail(f"proxy comparison record for {proxy} has cache-result validation errors")
     if str(record.get("status_before")) != "200" or str(record.get("status_after")) != "200":
         fail(f"proxy comparison record for {proxy} failed status probes")
     throughput_spread = nested_number(record, "sample_spread", "requests_per_sec_ratio")
@@ -280,6 +301,31 @@ def collect_ratios(records, target_keys=None):
         }
         external_best_p99_ms = min(external_latency_p99_ms.values())
         p99_latency_ratio = qpxd_p99_ms / external_best_p99_ms
+        qpxd_rss_peak_kb = number(proxies["qpxd"], "rss_peak_kb")
+        external_rss_peak_kb = {
+            proxy: number(proxies[proxy], "rss_peak_kb") for proxy in EXTERNAL_PROXIES
+        }
+        external_best_rss_peak_kb = min(external_rss_peak_kb.values())
+        rss_peak_ratio = qpxd_rss_peak_kb / external_best_rss_peak_kb
+        qpxd_fd_peak = number(proxies["qpxd"], "fd_peak")
+        external_fd_peak = {
+            proxy: number(proxies[proxy], "fd_peak") for proxy in EXTERNAL_PROXIES
+        }
+        external_best_fd_peak = min(external_fd_peak.values())
+        fd_peak_ratio = qpxd_fd_peak / external_best_fd_peak
+        qpxd_scheduler_queue_delay = nonnegative_number(
+            proxies["qpxd"], "scheduler_queue_delay_us_per_request"
+        )
+        external_scheduler_queue_delay = {
+            proxy: nonnegative_number(proxies[proxy], "scheduler_queue_delay_us_per_request")
+            for proxy in EXTERNAL_PROXIES
+        }
+        external_best_scheduler_queue_delay = min(
+            external_scheduler_queue_delay.values()
+        )
+        scheduler_queue_delay_ratio = lower_is_better_ratio(
+            qpxd_scheduler_queue_delay, external_best_scheduler_queue_delay
+        )
         dominance_score = (
             throughput_ratio * cpu_efficiency_ratio / p99_latency_ratio
         ) ** (1.0 / 3.0)
@@ -296,6 +342,9 @@ def collect_ratios(records, target_keys=None):
             "cpu_efficiency_ratio": round(cpu_efficiency_ratio, 6),
             "p99_latency_ratio": round(p99_latency_ratio, 6),
             "dominance_score": round(dominance_score, 6),
+            "rss_peak_ratio": round(rss_peak_ratio, 6),
+            "fd_peak_ratio": round(fd_peak_ratio, 6),
+            "scheduler_queue_delay_ratio": round(scheduler_queue_delay_ratio, 6),
             "qpxd_requests_per_sec": qpxd_rps,
             "qpxd_requests_per_cpu_second": qpxd_cpu_efficiency,
             "qpxd_latency_p99_ms": qpxd_p99_ms,
@@ -305,6 +354,9 @@ def collect_ratios(records, target_keys=None):
             "external_proxy_requests_per_sec": external_requests_per_sec,
             "external_proxy_requests_per_cpu_second": external_cpu_efficiency,
             "external_proxy_latency_p99_ms": external_latency_p99_ms,
+            "external_proxy_rss_peak_kb": external_rss_peak_kb,
+            "external_proxy_fd_peak": external_fd_peak,
+            "external_proxy_scheduler_queue_delay_us_per_request": external_scheduler_queue_delay,
             "direct_backend_requests_per_sec": direct_backend_rps,
             "direct_efficiency_ratio": round(qpxd_rps / direct_backend_rps, 6),
             "direct_headroom_ratio": round(direct_headroom_ratio, 6),
@@ -385,6 +437,11 @@ max_throughput_sample_spread_ratio = number(
 max_cpu_sample_spread_ratio = number(
     objective_defaults, "max_cpu_sample_spread_ratio"
 )
+max_rss_peak_ratio = number(objective_defaults, "max_rss_peak_ratio")
+max_fd_peak_ratio = number(objective_defaults, "max_fd_peak_ratio")
+max_scheduler_queue_delay_ratio = number(
+    objective_defaults, "max_scheduler_queue_delay_ratio"
+)
 
 threshold = parse_threshold(THRESHOLD_ARG, float(baseline.get("degradation_threshold", DEFAULT_THRESHOLD)))
 baseline_entries = baseline.get("baselines", [])
@@ -463,6 +520,29 @@ for entry in baseline_entries:
             "proxy aggregate dominance objective failed for "
             f"{key}: current score {current_dominance_score:.6f} "
             f"< objective {min_dominance_score:.6f}"
+        )
+    current_rss_peak_ratio = number(current_entry, "rss_peak_ratio")
+    if current_rss_peak_ratio > max_rss_peak_ratio + 1e-12:
+        failures.append(
+            "proxy RSS peak dominance objective failed for "
+            f"{key}: current ratio {current_rss_peak_ratio:.6f} "
+            f"> objective {max_rss_peak_ratio:.6f}"
+        )
+    current_fd_peak_ratio = number(current_entry, "fd_peak_ratio")
+    if current_fd_peak_ratio > max_fd_peak_ratio + 1e-12:
+        failures.append(
+            "proxy FD peak dominance objective failed for "
+            f"{key}: current ratio {current_fd_peak_ratio:.6f} "
+            f"> objective {max_fd_peak_ratio:.6f}"
+        )
+    current_scheduler_queue_delay_ratio = number(
+        current_entry, "scheduler_queue_delay_ratio"
+    )
+    if current_scheduler_queue_delay_ratio > max_scheduler_queue_delay_ratio + 1e-12:
+        failures.append(
+            "proxy scheduler queue-delay dominance objective failed for "
+            f"{key}: current ratio {current_scheduler_queue_delay_ratio:.6f} "
+            f"> objective {max_scheduler_queue_delay_ratio:.6f}"
         )
     for proxy, spread in current_entry["sample_spread"].items():
         throughput_spread = number(spread, "requests_per_sec_ratio")

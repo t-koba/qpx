@@ -64,6 +64,8 @@ if ! jq -e -s '
       ["qpxd-webdav", "apache-webdav"])
     + matrix("proxy_cache_hit_http1"; [1024, 1048576];
       ["qpxd-cache", "nginx-cache"])
+    + matrix("proxy_cache_miss_http1"; [1024];
+      ["qpxd-cache", "nginx-cache"])
     + matrix("feature_rich_cache_hit_http1"; [1024, 1048576];
       ["qpxd-feature-rich", "nginx-feature-rich"])
     | sort) as $expected
@@ -79,7 +81,9 @@ if ! jq -e -s '
       and (.failed_requests == .read_errors)
       and (.read_errors * 1000000 <= .complete_requests * .max_read_error_rate_ppm)
       and .non_2xx_responses == 0
-      and .bad_length_responses == 0)
+      and .bad_length_responses == 0
+      and .cache_result_errors == 0
+      and (if .bench == "proxy_cache_miss_http1" then .cache_writeback_verified == true else true end))
 ' "$CANDIDATE" >/dev/null; then
   echo "isolated proxy performance matrix is incomplete or invalid" >&2
   jq -r '[.bench, .body_bytes, .proxy, .valid] | @tsv' "$CANDIDATE" >&2 || true

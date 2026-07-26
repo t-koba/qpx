@@ -528,6 +528,12 @@ require scripts/perf-audit-proxy-compare.sh '"thread-per-request" else "async-io
 require scripts/perf-audit-proxy-compare.sh '.blocking_workers = (if .proxy == "qpxd-webdav" then $webdav_blocking_threads else null end)'
 require scripts/perf-audit-proxy-compare.sh 'source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"'
 require scripts/perf-audit-proxy-compare.sh 'rss_peak_kb'
+require scripts/perf-audit-proxy-compare.sh 'proxy_cache_miss_http1'
+require scripts/perf-audit-proxy-compare.sh 'cache_result_errors'
+require scripts/perf-audit-proxy-compare.sh 'cache_writeback_verified'
+require scripts/perf-audit-proxy-compare.sh 'scheduler_queue_delay_us_per_request'
+require scripts/perf-audit-proxy-compare.sh 'kernel_resource_metrics'
+require scripts/perf-audit-proxy-matrix.sh 'matrix("proxy_cache_miss_http1"; [1024]'
 require scripts/perf-audit-proxy-compare.sh 'dump_benchmark_logs'
 require scripts/perf-audit-proxy-compare.sh 'proxy-compare-logs'
 require scripts/perf-audit-proxy-compare.sh 'copy_bounded_log_artifact'
@@ -551,6 +557,9 @@ require_json_number_at_least perf/proxy-performance-objectives.json defaults.min
 require_json_number_at_least perf/proxy-performance-objectives.json defaults.min_cpu_efficiency_ratio 1.25
 require_json_number_at_least perf/proxy-performance-objectives.json defaults.min_dominance_score 1.25
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_p99_latency_ratio 0.8
+require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_rss_peak_ratio 1.0
+require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_fd_peak_ratio 1.0
+require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_scheduler_queue_delay_ratio 1.0
 require scripts/check-origin-cache-performance.sh 'multi_axis_origin_cache_dominance'
 require scripts/check-origin-cache-performance.sh 'round_robin_interleaved'
 require scripts/check-origin-cache-performance.sh 'does not use majority spread'
@@ -563,6 +572,10 @@ require_json_number_at_least perf/origin-cache-performance-objectives.json defau
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_cpu_efficiency_ratio 1.25
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_dominance_score 1.25
 require_json_number_at_most perf/origin-cache-performance-objectives.json defaults.max_p99_latency_ratio 0.8
+require perf/origin-cache-performance-objectives.json '"bench": "proxy_cache_miss_http1"'
+require_json_number_at_most perf/origin-cache-performance-objectives.json defaults.max_rss_peak_ratio 1.0
+require_json_number_at_most perf/origin-cache-performance-objectives.json defaults.max_fd_peak_ratio 1.0
+require_json_number_at_most perf/origin-cache-performance-objectives.json defaults.max_scheduler_queue_delay_ratio 1.0
 require scripts/perf-audit-http2-compare.sh 'MAX_CONCURRENT_STREAMS_VALUES="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES:-1 100}"'
 require scripts/perf-audit-http2-compare.sh 'BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1024 1048576}"'
 require scripts/perf-audit-http2-compare.sh 'CLIENT_THREADS="${QPX_HTTP2_COMPARE_CLIENT_THREADS:-4}"'
@@ -589,8 +602,11 @@ require scripts/perf-audit-http2-compare.sh '"nginx"'
 require scripts/perf-audit-http2-compare.sh 'requests_per_cpu_second'
 require scripts/perf-audit-http2-compare.sh 'requests_per_total_cpu_second'
 require scripts/perf-audit-http2-compare.sh 'backend_cpu_ms'
-require scripts/perf-audit-http2-compare.sh '"benchmark_schema_version": 5'
+require scripts/perf-audit-http2-compare.sh '"benchmark_schema_version": 6'
 require scripts/perf-audit-http2-compare.sh 'rss_peak_kb'
+require scripts/perf-audit-http2-compare.sh 'total_rss_peak_kb'
+require scripts/perf-audit-http2-compare.sh 'total_fd_peak'
+require scripts/perf-audit-http2-compare.sh 'scheduler_queue_delay_us_per_request'
 require scripts/perf-audit-http2-compare.sh 'latency_max_ms'
 require scripts/perf-audit-http2-compare.sh 'first_byte_mean_ms'
 require scripts/perf-audit-http2-compare.sh 'source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"'
@@ -604,6 +620,9 @@ require scripts/check-http2-performance.sh 'max_lane_p99_latency_ratio'
 require scripts/check-http2-performance.sh 'min_aggregate_dominance_score'
 require_json_number_at_least perf/http2-performance-objectives.json defaults.min_lane_dominance_score 1.25
 require_json_number_at_least perf/http2-performance-objectives.json defaults.min_aggregate_dominance_score 1.5
+require_json_number_at_most perf/http2-performance-objectives.json defaults.max_lane_total_rss_peak_ratio 1.0
+require_json_number_at_most perf/http2-performance-objectives.json defaults.max_lane_total_fd_peak_ratio 1.0
+require_json_number_at_most perf/http2-performance-objectives.json defaults.max_lane_scheduler_queue_delay_ratio 1.0
 require scripts/perf-audit-streaming-compare.sh '"proxy_compare_http1_streaming_reverse"'
 require scripts/perf-audit-streaming-compare.sh 'STREAM_BYTES="${QPX_STREAMING_COMPARE_BYTES:-104857600}"'
 require scripts/perf-audit-streaming-compare.sh 'FAST_TRANSFERS="${QPX_STREAMING_COMPARE_FAST_TRANSFERS:-8}"'
@@ -619,12 +638,18 @@ require scripts/perf-audit-streaming-compare.sh 'read_mode'
 require scripts/perf-audit-streaming-compare.sh 'requests_per_cpu_second'
 require scripts/perf-audit-streaming-compare.sh 'requests_per_total_cpu_second'
 require scripts/perf-audit-streaming-compare.sh 'backend_cpu_ms'
-require scripts/perf-audit-streaming-compare.sh '"benchmark_schema_version": 3'
+require scripts/perf-audit-streaming-compare.sh '"benchmark_schema_version": 4'
 require scripts/perf-audit-streaming-compare.sh 'gap_observation_bytes'
+require scripts/perf-audit-streaming-compare.sh 'total_rss_peak_kb'
+require scripts/perf-audit-streaming-compare.sh 'total_fd_peak'
+require scripts/perf-audit-streaming-compare.sh 'scheduler_queue_delay_us_per_transfer'
 require scripts/perf-audit-streaming-compare.sh 'source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"'
 require scripts/lib/perf-process-metrics.sh 'process_tree_cpu_ms()'
 require scripts/lib/perf-process-metrics.sh 'process_cpu_ms_portable()'
 require scripts/lib/perf-process-metrics.sh 'ps -o time='
+require scripts/lib/perf-process-metrics.sh 'process_tree_fd_count()'
+require scripts/lib/perf-process-metrics.sh 'process_tree_scheduler_run_delay_ns()'
+require scripts/lib/perf-process-metrics.sh 'monitor_process_tree_fd_peak()'
 require scripts/check-streaming-performance.sh 'multi_axis_total_system_streaming_dominance'
 require scripts/check-streaming-performance.sh 'min_throughput_ratio'
 require scripts/check-streaming-performance.sh 'min_total_cpu_efficiency_ratio'
@@ -633,6 +658,9 @@ require scripts/check-streaming-performance.sh 'max_total_time_ratio'
 require scripts/check-streaming-performance.sh 'competitive_frontier_total_ratio'
 require_json_number_at_least perf/streaming-performance-objectives.json fast.min_throughput_ratio 1.5
 require_json_number_at_least perf/streaming-performance-objectives.json fast.min_dominance_score 1.25
+require_json_number_at_most perf/streaming-performance-objectives.json fast.max_total_rss_peak_ratio 1.0
+require_json_number_at_most perf/streaming-performance-objectives.json fast.max_total_fd_peak_ratio 1.0
+require_json_number_at_most perf/streaming-performance-objectives.json fast.max_scheduler_queue_delay_ratio 1.0
 require scripts/perf-audit-allocation-profile.sh '"qpxd_allocation_profile_http1_reverse"'
 require scripts/perf-audit-allocation-profile.sh '--tool=dhat'
 require scripts/perf-audit-allocation-profile.sh 'while [ "$tries" -lt 600 ]'
@@ -660,8 +688,8 @@ require qpxd/tests/advanced_transport_perf.rs 'live_qpxd_pids'
 require qpxd/tests/advanced_transport_perf.rs 'RUSAGE_SELF'
 require scripts/check-perf-runner.sh '"perf_runner_capacity"'
 require scripts/check-perf-runner.sh 'MIN_CORES="${QPX_PERF_MIN_CORES:-4}"'
-require scripts/check-perf-runner.sh 'MIN_MEM_MB="${QPX_PERF_MIN_MEM_MB:-16384}"'
-require scripts/check-perf-runner.sh 'REQUIRE_CAPACITY="${QPX_PERF_REQUIRE_CAPACITY:-0}"'
+require scripts/check-perf-runner.sh 'MIN_MEM_MB="${QPX_PERF_MIN_MEM_MB:-15360}"'
+require scripts/check-perf-runner.sh 'REQUIRE_CAPACITY="${QPX_PERF_REQUIRE_CAPACITY:-1}"'
 require scripts/compare-proxy-baseline.sh 'multi_axis_proxy_dominance'
 require scripts/compare-proxy-baseline.sh 'external_best_rps = max'
 require scripts/compare-proxy-baseline.sh 'external_best_p99_ms = min'

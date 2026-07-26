@@ -377,7 +377,9 @@ run_one() {
   local read_mode="$4"
   local delay_ms="0"
   local cpu_before_ms cpu_after_ms cpu_ms backend_cpu_before_ms backend_cpu_after_ms
-  local backend_cpu_ms total_cpu_ms rss_kb rss_peak_kb metrics commit
+  local backend_cpu_ms total_cpu_ms rss_kb rss_peak_kb backend_rss_peak_kb total_rss_peak_kb metrics commit
+  local fd_peak backend_fd_peak total_fd_peak fd_peak_file backend_fd_peak_file fd_peak_monitor_pid backend_fd_peak_monitor_pid
+  local scheduler_before_ns scheduler_after_ns backend_scheduler_before_ns backend_scheduler_after_ns total_scheduler_run_delay_ns scheduler_queue_delay_us_per_transfer kernel_resource_metrics
   local requests_per_cpu_second requests_per_total_cpu_second
   local attempt valid samples_file valid_sample_count selected_sample
   if [ "$read_mode" = "slow" ]; then
@@ -389,6 +391,26 @@ run_one() {
   attempt=1
   valid=false
   while [ "$attempt" -le "$SAMPLE_ATTEMPTS" ]; do
+    kernel_resource_metrics=false
+    fd_peak=0
+    backend_fd_peak=0
+    fd_peak_monitor_pid=""
+    backend_fd_peak_monitor_pid=""
+    scheduler_before_ns=0
+    backend_scheduler_before_ns=0
+    if [ -d /proc ]; then
+      kernel_resource_metrics=true
+      fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.fd-peak"
+      monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" &
+      fd_peak_monitor_pid=$!
+      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      if [ "$resource_pid" != "$BACKEND_PID" ]; then
+        backend_fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-fd-peak"
+        monitor_process_tree_fd_peak "$BACKEND_PID" "$backend_fd_peak_file" &
+        backend_fd_peak_monitor_pid=$!
+        backend_scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$BACKEND_PID")"
+      fi
+    fi
     cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
     if [ "$resource_pid" = "$BACKEND_PID" ]; then
       backend_cpu_before_ms="$cpu_before_ms"
@@ -396,9 +418,27 @@ run_one() {
       backend_cpu_before_ms="$(process_tree_cpu_ms "$BACKEND_PID")"
     fi
     if ! metrics="$(run_client "$proxy" "$port" "$read_mode" "$delay_ms")"; then
+      if [ -n "$fd_peak_monitor_pid" ]; then
+        kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
+        wait "$fd_peak_monitor_pid" 2>/dev/null || true
+      fi
+      if [ -n "$backend_fd_peak_monitor_pid" ]; then
+        kill "$backend_fd_peak_monitor_pid" >/dev/null 2>&1 || true
+        wait "$backend_fd_peak_monitor_pid" 2>/dev/null || true
+      fi
       echo "${proxy} streaming client failed on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       attempt=$((attempt + 1))
       continue
+    fi
+    if [ -n "$fd_peak_monitor_pid" ]; then
+      kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
+      wait "$fd_peak_monitor_pid" 2>/dev/null || true
+      fd_peak="$(cat "$fd_peak_file" 2>/dev/null || echo 0)"
+    fi
+    if [ -n "$backend_fd_peak_monitor_pid" ]; then
+      kill "$backend_fd_peak_monitor_pid" >/dev/null 2>&1 || true
+      wait "$backend_fd_peak_monitor_pid" 2>/dev/null || true
+      backend_fd_peak="$(cat "$backend_fd_peak_file" 2>/dev/null || echo 0)"
     fi
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
     if [ "$resource_pid" = "$BACKEND_PID" ]; then
@@ -415,6 +455,25 @@ run_one() {
     fi
     rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
     rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
+    backend_rss_peak_kb="$rss_peak_kb"
+    scheduler_after_ns="$scheduler_before_ns"
+    backend_scheduler_after_ns="$backend_scheduler_before_ns"
+    if [ "$resource_pid" != "$BACKEND_PID" ]; then
+      backend_rss_peak_kb="$(process_tree_status_kb "$BACKEND_PID" "VmHWM")"
+    fi
+    if [ "$kernel_resource_metrics" = true ]; then
+      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      if [ "$resource_pid" != "$BACKEND_PID" ]; then
+        backend_scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$BACKEND_PID")"
+      fi
+    fi
+    total_rss_peak_kb=$((rss_peak_kb + backend_rss_peak_kb))
+    total_fd_peak=$((fd_peak + backend_fd_peak))
+    if [ "$resource_pid" = "$BACKEND_PID" ]; then
+      total_rss_peak_kb="$rss_peak_kb"
+      total_fd_peak="$fd_peak"
+    fi
+    total_scheduler_run_delay_ns="$(awk -v resource_before="$scheduler_before_ns" -v resource_after="$scheduler_after_ns" -v backend_before="$backend_scheduler_before_ns" -v backend_after="$backend_scheduler_after_ns" 'BEGIN { delta = (resource_after - resource_before) + (backend_after - backend_before); if (delta < 0) delta = 0; printf "%.0f", delta }')"
     valid="$(python3 - "$metrics" <<'PY'
 import json
 import sys
@@ -440,19 +499,37 @@ cpu_ms = float(sys.argv[2])
 print("null" if cpu_ms <= 0 else f"{metrics['transfers'] * 1000.0 / cpu_ms:.6f}")
 PY
 )"
+      scheduler_queue_delay_us_per_transfer="$(python3 - "$metrics" "$total_scheduler_run_delay_ns" <<'PY'
+import json
+import sys
+metrics = json.loads(sys.argv[1])
+delay_ns = float(sys.argv[2])
+print(f"{delay_ns / metrics['transfers'] / 1000.0:.6f}")
+PY
+)"
       python3 - "$samples_file" "$metrics" "$cpu_ms" "$backend_cpu_ms" "$total_cpu_ms" \
-        "$rss_kb" "$rss_peak_kb" "$requests_per_cpu_second" \
+        "$rss_kb" "$rss_peak_kb" "$backend_rss_peak_kb" "$total_rss_peak_kb" \
+        "$fd_peak" "$backend_fd_peak" "$total_fd_peak" "$total_scheduler_run_delay_ns" \
+        "$scheduler_queue_delay_us_per_transfer" "$kernel_resource_metrics" "$requests_per_cpu_second" \
         "$requests_per_total_cpu_second" <<'PY'
 import json
 import sys
 
-path, metrics, cpu_ms, backend_cpu_ms, total_cpu_ms, rss_kb, rss_peak_kb, rpcpu, total_rpcpu = sys.argv[1:10]
+path, metrics, cpu_ms, backend_cpu_ms, total_cpu_ms, rss_kb, rss_peak_kb, backend_rss_peak_kb, total_rss_peak_kb, fd_peak, backend_fd_peak, total_fd_peak, total_scheduler_run_delay_ns, scheduler_queue_delay_us_per_transfer, kernel_resource_metrics, rpcpu, total_rpcpu = sys.argv[1:18]
 record = json.loads(metrics)
 record["cpu_ms"] = int(cpu_ms)
 record["backend_cpu_ms"] = int(backend_cpu_ms)
 record["total_cpu_ms"] = int(total_cpu_ms)
 record["rss_kb"] = int(rss_kb)
 record["rss_peak_kb"] = int(rss_peak_kb)
+record["backend_rss_peak_kb"] = int(backend_rss_peak_kb)
+record["total_rss_peak_kb"] = int(total_rss_peak_kb)
+record["fd_peak"] = int(fd_peak)
+record["backend_fd_peak"] = int(backend_fd_peak)
+record["total_fd_peak"] = int(total_fd_peak)
+record["total_scheduler_run_delay_ns"] = int(total_scheduler_run_delay_ns)
+record["scheduler_queue_delay_us_per_transfer"] = float(scheduler_queue_delay_us_per_transfer)
+record["kernel_resource_metrics"] = kernel_resource_metrics == "true"
 record["requests_per_cpu_second"] = None if rpcpu == "null" else float(rpcpu)
 record["requests_per_total_cpu_second"] = None if total_rpcpu == "null" else float(total_rpcpu)
 with open(path, "a", encoding="utf-8") as handle:
@@ -675,8 +752,21 @@ for key in sorted(expected):
     record["requests_per_total_cpu_second"] = lower(
         records, "requests_per_total_cpu_second"
     )
-    for field in ("rss_kb", "rss_peak_kb"):
+    for field in (
+        "rss_kb",
+        "rss_peak_kb",
+        "backend_rss_peak_kb",
+        "total_rss_peak_kb",
+        "fd_peak",
+        "backend_fd_peak",
+        "total_fd_peak",
+        "total_scheduler_run_delay_ns",
+        "scheduler_queue_delay_us_per_transfer",
+    ):
         record[field] = maximum(records, field)
+    record["kernel_resource_metrics"] = all(
+        item.get("kernel_resource_metrics") is True for item in records
+    )
     for field in (
         "bytes",
         "transfers",
@@ -689,12 +779,18 @@ for key in sorted(expected):
         "total_cpu_ms",
         "rss_kb",
         "rss_peak_kb",
+        "backend_rss_peak_kb",
+        "total_rss_peak_kb",
+        "fd_peak",
+        "backend_fd_peak",
+        "total_fd_peak",
+        "total_scheduler_run_delay_ns",
     ):
         if record.get(field) is not None:
             record[field] = int(record[field])
     record.update({
         "aggregation": "conservative_median_per_metric",
-        "benchmark_schema_version": 3,
+        "benchmark_schema_version": 4,
         "sample_attempts": attempts,
         "sampling_order": "round_robin_interleaved",
         "sample_spread": {

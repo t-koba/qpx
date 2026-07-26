@@ -34,6 +34,22 @@ def positive_number(record, field):
     return value
 
 
+def nonnegative_number(record, field):
+    try:
+        value = float(record[field])
+    except (KeyError, TypeError, ValueError):
+        fail(f"record for {record.get('proxy', '<missing>')} is missing numeric {field}")
+    if not math.isfinite(value) or value < 0:
+        fail(f"{field} must be a non-negative finite number")
+    return value
+
+
+def lower_is_better_ratio(current, reference):
+    if reference == 0:
+        return 1.0 if current == 0 else sys.float_info.max
+    return current / reference
+
+
 def nonnegative_int(record, field):
     try:
         value = int(record[field])
@@ -101,8 +117,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"streaming performance record for {key} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"streaming performance record for {key} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version") != 3:
+        if nonnegative_int(record, "benchmark_schema_version") != 4:
             fail(f"streaming performance record for {key} uses an unsupported benchmark schema")
+        if record.get("kernel_resource_metrics") is not True:
+            fail(f"streaming performance record for {key} is missing Linux kernel resource metrics")
         stream_bytes = nonnegative_int(record, "stream_bytes")
         chunk_bytes = nonnegative_int(record, "chunk_bytes")
         transfers = nonnegative_int(record, "transfers")
@@ -133,6 +151,8 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             "cpu_ms",
             "backend_cpu_ms",
             "total_cpu_ms",
+            "total_rss_peak_kb",
+            "total_fd_peak",
         ):
             positive_number(record, field)
         if positive_number(record, "total_cpu_ms") < positive_number(record, "cpu_ms"):
@@ -180,6 +200,16 @@ total_cpu_efficiency_ratio = qpx_cpu_efficiency / leader_cpu_efficiency
 first_byte_ratio = positive_number(qpx_fast, "first_byte_ms") / positive_number(leader, "first_byte_ms")
 p99_gap_ratio = positive_number(qpx_fast, "p99_chunk_gap_ms") / positive_number(leader, "p99_chunk_gap_ms")
 max_gap_ratio = positive_number(qpx_fast, "max_chunk_gap_ms") / positive_number(leader, "max_chunk_gap_ms")
+total_rss_peak_ratio = positive_number(qpx_fast, "total_rss_peak_kb") / positive_number(
+    leader, "total_rss_peak_kb"
+)
+total_fd_peak_ratio = positive_number(qpx_fast, "total_fd_peak") / positive_number(
+    leader, "total_fd_peak"
+)
+scheduler_queue_delay_ratio = lower_is_better_ratio(
+    nonnegative_number(qpx_fast, "scheduler_queue_delay_us_per_transfer"),
+    nonnegative_number(leader, "scheduler_queue_delay_us_per_transfer"),
+)
 dominance_score = (
     throughput_ratio * total_cpu_efficiency_ratio / first_byte_ratio / p99_gap_ratio
 ) ** 0.25
@@ -193,6 +223,9 @@ fast_checks = (
     ("p99 gap ratio", p99_gap_ratio, ratio_limit(fast_objectives, "max_p99_gap_ratio"), "max"),
     ("maximum gap ratio", max_gap_ratio, ratio_limit(fast_objectives, "max_gap_ratio"), "max"),
     ("dominance score", dominance_score, ratio_limit(fast_objectives, "min_dominance_score"), "min"),
+    ("total RSS peak ratio", total_rss_peak_ratio, ratio_limit(fast_objectives, "max_total_rss_peak_ratio"), "max"),
+    ("total FD peak ratio", total_fd_peak_ratio, ratio_limit(fast_objectives, "max_total_fd_peak_ratio"), "max"),
+    ("scheduler queue-delay ratio", scheduler_queue_delay_ratio, ratio_limit(fast_objectives, "max_scheduler_queue_delay_ratio"), "max"),
 )
 
 failures = []
@@ -238,6 +271,12 @@ slow_ratios = {
     "max_first_byte_ratio": positive_number(qpx_slow, "first_byte_ms") / positive_number(direct_slow, "first_byte_ms"),
     "max_p99_gap_ratio": positive_number(qpx_slow, "p99_chunk_gap_ms") / positive_number(direct_slow, "p99_chunk_gap_ms"),
     "max_gap_ratio": positive_number(qpx_slow, "max_chunk_gap_ms") / positive_number(direct_slow, "max_chunk_gap_ms"),
+    "max_total_rss_peak_ratio": positive_number(qpx_slow, "total_rss_peak_kb") / positive_number(direct_slow, "total_rss_peak_kb"),
+    "max_total_fd_peak_ratio": positive_number(qpx_slow, "total_fd_peak") / positive_number(direct_slow, "total_fd_peak"),
+    "max_scheduler_queue_delay_ratio": lower_is_better_ratio(
+        nonnegative_number(qpx_slow, "scheduler_queue_delay_us_per_transfer"),
+        nonnegative_number(direct_slow, "scheduler_queue_delay_us_per_transfer"),
+    ),
 }
 slow_objectives = objectives.get("slow", {})
 for field, current in slow_ratios.items():
@@ -251,6 +290,8 @@ print(
     f"direct-efficiency={direct_efficiency_ratio:.3f}, total-CPU={total_cpu_efficiency_ratio:.3f}, "
     f"first-byte={first_byte_ratio:.3f}, p99-gap={p99_gap_ratio:.3f}, "
     f"max-gap={max_gap_ratio:.3f}, dominance={dominance_score:.3f}"
+    f", RSS={total_rss_peak_ratio:.3f}, FD={total_fd_peak_ratio:.3f}, "
+    f"queue={scheduler_queue_delay_ratio:.3f}"
 )
 print(
     "streaming backpressure: "

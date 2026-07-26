@@ -8,6 +8,7 @@ use super::RuntimeResources;
 #[derive(Clone)]
 pub struct CacheRuntime {
     pub backends: HashMap<String, Arc<dyn CacheBackend>>,
+    pub(crate) writeback_admission: Arc<qpxd_cache::CacheWritebackAdmission>,
     /// Per-runtime request-collapse registry (replaces the former process-global).
     pub(crate) request_collapse: Arc<qpxd_cache::InFlightLookups>,
     /// Per-runtime background-revalidation dedupe registry.
@@ -22,6 +23,9 @@ impl CacheRuntime {
         )?;
         Ok(Self {
             backends,
+            writeback_admission: Arc::new(
+                qpxd_cache::CacheWritebackAdmission::with_default_capacity(),
+            ),
             request_collapse: Arc::new(qpxd_cache::InFlightLookups::with_default_shards()),
             background_revalidations: Arc::new(
                 qpxd_cache::InFlightRevalidations::with_default_shards(),
