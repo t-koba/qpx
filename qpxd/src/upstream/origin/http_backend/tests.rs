@@ -175,6 +175,16 @@ async fn connection_local_pool_keeps_reusable_origins_isolated() -> Result<()> {
     }
 
     assert_eq!(accepts.load(Ordering::SeqCst), 2);
+    let slot = first_connection
+        .target
+        .load_full()
+        .expect("first connection pool target")
+        .slot
+        .clone();
+    assert_eq!(slot.idle_connection_count(), 2);
+    drop(first_connection);
+    drop(second_connection);
+    assert_eq!(slot.idle_connection_count(), 0);
     Ok(())
 }
 

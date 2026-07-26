@@ -100,6 +100,36 @@ fn preferred_http1_idle_shards_share_the_aggregate_limit() {
 }
 
 #[test]
+fn preferred_http1_idle_pop_falls_back_to_other_shards() {
+    let pool = Http1IdleShards::new();
+    let max = AtomicUsize::new(2);
+    pool.push_preferred(11, &max, 1);
+    pool.push_preferred(22, &max, 2);
+
+    assert_eq!(pool.pop_preferred_with_fallback(2), Some(22));
+    assert_eq!(pool.pop_preferred_with_fallback(2), Some(11));
+    assert_eq!(pool.len.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn matching_http1_idle_pop_and_remove_preserve_ownership() {
+    let pool = Http1IdleShards::new();
+    let max = AtomicUsize::new(3);
+    pool.push_preferred((1_u64, 11), &max, 1);
+    pool.push_preferred((9_u64, 99), &max, 9);
+    pool.push_preferred((0_u64, 22), &max, 2);
+
+    assert_eq!(
+        pool.pop_matching(1, |(owner, _)| *owner == 1),
+        Some((1, 11))
+    );
+    pool.remove_matching(|(owner, _)| *owner == 9);
+    assert_eq!(pool.len.load(Ordering::Relaxed), 1);
+    assert_eq!(pool.pop(), Some((0, 22)));
+    assert_eq!(pool.len.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn https_origin_pool_key_uses_stable_trust_policy_key() {
     let trust_a =
         CompiledUpstreamTlsTrust::from_config(Some(&qpx_core::config::UpstreamTlsTrustConfig {

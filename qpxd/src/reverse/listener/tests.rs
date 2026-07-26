@@ -406,25 +406,38 @@ async fn assert_reverse_h1_reuses_validated_requests(access_log_enabled: bool) {
         .await
         .expect("bind upstream");
     let upstream_addr = upstream_listener.local_addr().expect("upstream addr");
-    tokio::spawn(async move {
-        let (mut stream, _) = upstream_listener.accept().await.expect("accept upstream");
-        for _ in 0..2 {
-            let mut request = Vec::new();
-            let mut byte = [0_u8; 1];
-            while !request.ends_with(b"\r\n\r\n") {
-                let read = stream.read(&mut byte).await.expect("read request");
+    let upstream = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = upstream_listener.accept().await.expect("accept upstream");
+            let mut completed = 0;
+            while completed < 2 {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let read = stream.read(&mut byte).await.expect("read request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                }
+                if request.is_empty() && completed == 0 {
+                    break;
+                }
                 assert!(
-                    read > 0,
+                    request.ends_with(b"\r\n\r\n"),
                     "upstream request ended after {:?}",
                     String::from_utf8_lossy(&request)
                 );
-                request.push(byte[0]);
+                assert!(request.starts_with(b"GET /asset HTTP/1.1\r\n"));
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                    .await
+                    .expect("write response");
+                completed += 1;
             }
-            assert!(request.starts_with(b"GET /asset HTTP/1.1\r\n"));
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
-                .await
-                .expect("write response");
+            if completed == 2 {
+                return;
+            }
         }
     });
 
@@ -478,6 +491,7 @@ async fn assert_reverse_h1_reuses_validated_requests(access_log_enabled: bool) {
         2
     );
 
+    upstream.await.expect("upstream task");
     acceptor.abort();
     let _ = acceptor.await;
 }

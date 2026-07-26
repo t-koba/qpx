@@ -172,10 +172,12 @@ process_tree_scheduler_run_delay_ns() {
 monitor_process_tree_fd_peak() {
   local root="$1"
   local output="$2"
-  local current peak
+  local current peak stopping
   peak=0
+  stopping=0
+  trap 'stopping=1' TERM INT
   printf '0\n' >"$output"
-  while kill -0 "$root" >/dev/null 2>&1; do
+  while [ "$stopping" -eq 0 ] && kill -0 "$root" >/dev/null 2>&1; do
     current="$(process_tree_fd_count "$root")"
     if [ "$current" -gt "$peak" ]; then
       peak="$current"
@@ -183,4 +185,5 @@ monitor_process_tree_fd_peak() {
     fi
     sleep 0.05
   done
+  trap - TERM INT
 }

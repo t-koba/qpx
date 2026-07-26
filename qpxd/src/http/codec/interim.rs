@@ -117,6 +117,28 @@ where
         }
         tokio::select! {
             biased;
+            Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                if primary_stream.is_none() && concurrent_streams.is_empty() {
+                    if !accepting_streams {
+                        break;
+                    }
+                    idle_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_timeout);
+                }
+            }
+            completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
+                let () = completed;
+                reusable_primary_stream = primary_stream.take();
+                if !accepting_streams && concurrent_streams.is_empty() {
+                    break;
+                }
+                if concurrent_streams.is_empty() {
+                    idle_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_timeout);
+                }
+            }
             accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
                 let Some(result) = accepted else {
                     accepting_streams = false;
@@ -144,29 +166,7 @@ where
                     };
                     primary_stream = Some(reusable);
                 } else {
-                    concurrent_streams.push(stream);
-                }
-            }
-            Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
-                if primary_stream.is_none() && concurrent_streams.is_empty() {
-                    if !accepting_streams {
-                        break;
-                    }
-                    idle_timer
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + idle_timeout);
-                }
-            }
-            completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
-                let () = completed;
-                reusable_primary_stream = primary_stream.take();
-                if !accepting_streams && concurrent_streams.is_empty() {
-                    break;
-                }
-                if concurrent_streams.is_empty() {
-                    idle_timer
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + idle_timeout);
+                    concurrent_streams.push(Box::pin(stream));
                 }
             }
             () = idle_timer.as_mut() => {
@@ -207,7 +207,7 @@ async fn serve_h2_stream<S>(
         + Sync
         + 'static,
 {
-    let request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
+    let mut request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
         request,
         body_channel_capacity,
     ) {
@@ -218,11 +218,15 @@ async fn serve_h2_stream<S>(
             return;
         }
     };
+    request
+        .extensions_mut()
+        .insert(crate::http::codec::h2::H2DownstreamLoad::new(
+            active_stream.count(),
+        ));
     let request_method = request.method().clone();
     let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
 
-    let service_call = service.call(request);
-    tokio::pin!(service_call);
+    let mut service_call = Box::pin(service.call(request));
     let mut response = tokio::select! {
         biased;
         response = &mut service_call => match response {

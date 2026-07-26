@@ -1342,27 +1342,37 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
-        if current.exists() {
-            let meta = fs::symlink_metadata(&current)?;
-            if meta.file_type().is_symlink() {
-                return Err(anyhow!(
-                    "refusing symlinked disk cache path component {}",
-                    current.display()
-                ));
+        match fs::create_dir(&current) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&current, fs::Permissions::from_mode(0o700))?;
+                }
             }
-            if !meta.is_dir() {
-                return Err(anyhow!(
-                    "disk cache path component is not a directory: {}",
-                    current.display()
-                ));
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let meta = fs::symlink_metadata(&current)?;
+                if meta.file_type().is_symlink() {
+                    return Err(anyhow!(
+                        "refusing symlinked disk cache path component {}",
+                        current.display()
+                    ));
+                }
+                if !meta.is_dir() {
+                    return Err(anyhow!(
+                        "disk cache path component is not a directory: {}",
+                        current.display()
+                    ));
+                }
             }
-            continue;
-        }
-        fs::create_dir(&current)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&current, fs::Permissions::from_mode(0o700))?;
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to create disk cache directory {}",
+                        current.display()
+                    )
+                });
+            }
         }
     }
     Ok(())
@@ -1384,6 +1394,7 @@ fn reject_symlink(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1414,6 +1425,32 @@ mod tests {
             max_object_bytes: 1024 * 1024,
             auth_header_env: None,
         }
+    }
+
+    #[test]
+    fn private_directory_creation_is_concurrent_safe() {
+        const WORKERS: usize = 16;
+        let root = temp_dir("concurrent-directory");
+        let target = root.join("objects").join("ab").join("cd");
+        let barrier = Arc::new(Barrier::new(WORKERS));
+        let mut workers = Vec::with_capacity(WORKERS);
+        for _ in 0..WORKERS {
+            let barrier = Arc::clone(&barrier);
+            let target = target.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                ensure_private_dir(&target)
+            }));
+        }
+
+        for worker in workers {
+            worker
+                .join()
+                .expect("directory creation worker")
+                .expect("create private directory");
+        }
+        assert!(target.is_dir());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

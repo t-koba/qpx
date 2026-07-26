@@ -42,7 +42,7 @@ pub(crate) struct PreparedPlainHttp1ConnectionAffinity {
 
 struct PreparedPlainHttp1ConnectionAffinityTarget {
     slot: Arc<pool::PlainHttpOriginSlot>,
-    idle_affinity: usize,
+    idle_affinity: u64,
 }
 
 impl PreparedPlainHttp1ConnectionAffinity {
@@ -67,7 +67,13 @@ impl PreparedPlainHttp1ConnectionAffinity {
 
 impl PreparedPlainHttp1ConnectionAffinityTarget {
     fn pop_idle(&self) -> Option<pool::PlainHttp1OriginConnection> {
-        self.slot.pop_idle_preferred(self.idle_affinity)
+        self.slot.pop_idle_affinity(self.idle_affinity)
+    }
+}
+
+impl Drop for PreparedPlainHttp1ConnectionAffinityTarget {
+    fn drop(&mut self) {
+        self.slot.remove_idle_affinity(self.idle_affinity);
     }
 }
 
@@ -447,6 +453,12 @@ async fn proxy_direct_plain_http1_raw_response_with_interim_inner(
         Some(host_authority)
     );
     if matches!(*req.method(), http::Method::GET | http::Method::HEAD) {
+        let h2_response_frame_size = req
+            .extensions()
+            .get::<crate::http::codec::h2::H2DownstreamLoad>()
+            .copied()
+            .map(crate::http::codec::h2::H2DownstreamLoad::upstream_response_frame_size)
+            .unwrap_or(1024 * 1024);
         req = match classify_bodyless_http1_request(req)? {
             Ok(req) => {
                 return proxy_bodyless_plain_http1_raw_response_with_interim(
@@ -456,6 +468,7 @@ async fn proxy_direct_plain_http1_raw_response_with_interim_inner(
                     request_version,
                     proxy_name,
                     connection_pool,
+                    h2_response_frame_size,
                 )
                 .await;
             }
@@ -488,6 +501,7 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
     request_version: http::Version,
     proxy_name: &str,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
+    h2_response_frame_size: usize,
 ) -> Result<Http1ResponseWithInterim> {
     let active_permit = slot.acquire_active().await?;
     let local_target = connection_pool.map(|pool| pool.target_for(&slot));
@@ -552,7 +566,7 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
     };
     relay.active_permit = Some(active_permit);
     if request_version == http::Version::HTTP_2 {
-        relay.into_materialized_http_response()
+        relay.into_materialized_http_response(h2_response_frame_size)
     } else {
         relay.into_http_response()
     }

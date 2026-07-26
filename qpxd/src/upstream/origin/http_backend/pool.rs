@@ -30,6 +30,7 @@ const HTTP1_IDLE_POOL_SHARDS: usize = 8;
 const MAX_POOLED_H2_CONNECTIONS_PER_ORIGIN: usize = 4;
 static DIRECT_ORIGIN_POOL_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 static NEXT_DIRECT_ORIGIN_POOL_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_HTTP1_IDLE_AFFINITY: AtomicU64 = AtomicU64::new(1);
 static NEXT_HTTP1_IDLE_SHARD: AtomicUsize = AtomicUsize::new(0);
 const THREAD_PLAIN_SLOT_CACHE_CAPACITY: usize = 16;
 const LOCAL_HTTP1_IDLE_PROBE_AFTER_SECONDS: u64 = 5;
@@ -81,6 +82,7 @@ pub(super) struct PlainHttp1OriginConnection {
     pub(super) read_buf: BytesMut,
     pub(super) write_buf: BytesMut,
     idle_epoch_second: u64,
+    idle_affinity: Option<u64>,
 }
 
 impl PlainHttp1OriginConnection {
@@ -90,6 +92,7 @@ impl PlainHttp1OriginConnection {
             read_buf,
             write_buf,
             idle_epoch_second: crate::http::protocol::l7::cached_epoch_second(),
+            idle_affinity: None,
         }
     }
 
@@ -155,6 +158,10 @@ impl<T> Http1IdleShards<T> {
 
     fn pop(&self) -> Option<T> {
         let preferred = HTTP1_IDLE_SHARD.with(Cell::get);
+        self.pop_preferred_with_fallback(preferred)
+    }
+
+    fn pop_preferred_with_fallback(&self, preferred: usize) -> Option<T> {
         if let Some(entry) = self.pop_preferred(preferred) {
             return Some(entry);
         }
@@ -171,6 +178,43 @@ impl<T> Http1IdleShards<T> {
         let entry = self.shards[shard % HTTP1_IDLE_POOL_SHARDS].lock().pop()?;
         self.len.fetch_sub(1, Ordering::Relaxed);
         Some(entry)
+    }
+
+    fn pop_matching<F>(&self, preferred: usize, mut predicate: F) -> Option<T>
+    where
+        F: FnMut(&T) -> bool,
+    {
+        for offset in 0..HTTP1_IDLE_POOL_SHARDS {
+            let shard = (preferred + offset) % HTTP1_IDLE_POOL_SHARDS;
+            let mut entries = self.shards[shard].lock();
+            let Some(index) = entries.iter().rposition(&mut predicate) else {
+                continue;
+            };
+            let entry = entries.swap_remove(index);
+            self.len.fetch_sub(1, Ordering::Relaxed);
+            return Some(entry);
+        }
+        None
+    }
+
+    fn remove_matching<F>(&self, mut predicate: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let mut removed = Vec::new();
+        for shard in self.shards.iter() {
+            let mut entries = shard.lock();
+            let mut index = 0;
+            while index < entries.len() {
+                if predicate(&entries[index]) {
+                    removed.push(entries.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        self.len.fetch_sub(removed.len(), Ordering::Relaxed);
+        drop(removed);
     }
 
     fn push(&self, entry: T, max: &AtomicUsize) {
@@ -306,33 +350,49 @@ impl PlainHttpOriginSlot {
     }
 
     pub(super) fn pop_idle(&self) -> Option<PlainHttp1OriginConnection> {
-        self.idle.pop()
+        let preferred = HTTP1_IDLE_SHARD.with(Cell::get);
+        self.idle
+            .pop_matching(preferred, |connection| connection.idle_affinity.is_none())
     }
 
-    pub(super) fn pop_idle_preferred(&self, shard: usize) -> Option<PlainHttp1OriginConnection> {
-        self.idle.pop_preferred(shard)
+    pub(super) fn pop_idle_affinity(&self, affinity: u64) -> Option<PlainHttp1OriginConnection> {
+        self.idle.pop_matching(affinity as usize, |connection| {
+            connection.idle_affinity == Some(affinity)
+        })
+    }
+
+    pub(super) fn remove_idle_affinity(&self, affinity: u64) {
+        self.idle
+            .remove_matching(|connection| connection.idle_affinity == Some(affinity));
+    }
+
+    #[cfg(test)]
+    pub(super) fn idle_connection_count(&self) -> usize {
+        self.idle.len.load(Ordering::Relaxed)
     }
 
     pub(super) fn recycle_idle(&self, mut connection: PlainHttp1OriginConnection) {
         trim_recycled_http1_buffers(&mut connection.read_buf, &mut connection.write_buf);
         connection.mark_idle();
+        connection.idle_affinity = None;
         self.idle.push(connection, &self.max_http1_idle);
     }
 
     pub(super) fn recycle_idle_preferred(
         &self,
         mut connection: PlainHttp1OriginConnection,
-        shard: usize,
+        affinity: u64,
     ) {
         trim_recycled_http1_buffers(&mut connection.read_buf, &mut connection.write_buf);
         connection.mark_idle();
+        connection.idle_affinity = Some(affinity);
         self.idle
-            .push_preferred(connection, &self.max_http1_idle, shard);
+            .push_preferred(connection, &self.max_http1_idle, affinity as usize);
     }
 }
 
-pub(super) fn next_http1_idle_affinity() -> usize {
-    NEXT_HTTP1_IDLE_SHARD.fetch_add(1, Ordering::Relaxed) % HTTP1_IDLE_POOL_SHARDS
+pub(super) fn next_http1_idle_affinity() -> u64 {
+    NEXT_HTTP1_IDLE_AFFINITY.fetch_add(1, Ordering::Relaxed)
 }
 
 pub(super) fn trim_recycled_http1_buffers(read_buf: &mut BytesMut, write_buf: &mut BytesMut) {

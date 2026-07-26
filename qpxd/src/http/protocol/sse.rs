@@ -1,8 +1,11 @@
+#[cfg(feature = "http3")]
 use http::HeaderMap;
 use qpx_core::config::SseStreamingPolicy;
 
+#[cfg(feature = "http3")]
 #[path = "sse/metrics.rs"]
 mod metrics;
+#[cfg(feature = "http3")]
 pub(crate) use metrics::{
     SseActiveGuard, SseMetricHandles, emit_slow_upstream_body, emit_sse_reconnect,
 };
@@ -113,6 +116,7 @@ impl SseEventObserver {
     }
 }
 
+#[cfg(feature = "http3")]
 pub(crate) fn is_sse_reconnect(headers: &HeaderMap) -> bool {
     headers.contains_key("last-event-id")
 }

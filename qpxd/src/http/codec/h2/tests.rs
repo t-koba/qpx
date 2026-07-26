@@ -18,6 +18,34 @@ fn scheduler_buffer_budget_preserves_single_stream_throughput_and_bounds_multipl
     assert_eq!(h2_scheduler_buffer_budget(100), 16 * 1024);
 }
 
+#[test]
+fn upstream_read_ahead_shrinks_with_downstream_multiplexing() {
+    assert_eq!(
+        H2DownstreamLoad::new(1).upstream_response_frame_size(),
+        1024 * 1024
+    );
+    assert_eq!(
+        H2DownstreamLoad::new(8).upstream_response_frame_size(),
+        1024 * 1024
+    );
+    assert_eq!(
+        H2DownstreamLoad::new(9).upstream_response_frame_size(),
+        256 * 1024
+    );
+    assert_eq!(
+        H2DownstreamLoad::new(31).upstream_response_frame_size(),
+        256 * 1024
+    );
+    assert_eq!(
+        H2DownstreamLoad::new(32).upstream_response_frame_size(),
+        64 * 1024
+    );
+    assert_eq!(
+        H2DownstreamLoad::new(100).upstream_response_frame_size(),
+        64 * 1024
+    );
+}
+
 #[derive(Clone)]
 struct StaticInterimService;
 
