@@ -758,6 +758,9 @@ record["benchmark_request_count"] = int(benchmark_requests)
 with open(path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 PY
+      if [ "${STOP_AFTER_FIRST_VALID_SAMPLE:-false}" = true ]; then
+        break
+      fi
       attempt=$((attempt + 1))
       continue
     fi
@@ -974,8 +977,9 @@ RAW_OUT_JSON="$TMP_DIR/interleaved-raw.jsonl"
 REQUESTED_SAMPLE_ATTEMPTS="$SAMPLE_ATTEMPTS"
 REQUESTED_MIN_VALID_SAMPLES="$MIN_VALID_SAMPLES"
 OUT_JSON="$RAW_OUT_JSON"
-SAMPLE_ATTEMPTS=1
+SAMPLE_ATTEMPTS=3
 MIN_VALID_SAMPLES=1
+STOP_AFTER_FIRST_VALID_SAMPLE=true
 : >"$OUT_JSON"
 
 run_http2_proxy_by_index() {

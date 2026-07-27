@@ -22,10 +22,7 @@ pub async fn spawn_slow_chunked_backend(
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
-            let Ok(read) = stream.read(&mut [0u8; 1024]).await else {
-                continue;
-            };
-            if read == 0 {
+            if read_request_head(&mut stream).await.is_err() {
                 continue;
             }
             if serve_slow_chunked_response(
@@ -96,6 +93,29 @@ async fn serve_slow_chunked_response(
     stream.shutdown().await
 }
 
+async fn read_request_head(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+    const MAX_REQUEST_HEAD_BYTES: usize = 64 * 1024;
+    let mut request = Vec::with_capacity(1024);
+    while request.len() < MAX_REQUEST_HEAD_BYTES {
+        let mut chunk = [0_u8; 1024];
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "request closed before the header terminator",
+            ));
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(());
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "request header exceeded the test server limit",
+    ))
+}
+
 pub async fn spawn_infinite_stream_backend(
     chunk: Bytes,
     interval: Duration,
@@ -109,10 +129,7 @@ pub async fn spawn_infinite_stream_backend(
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
-            let Ok(read) = stream.read(&mut [0u8; 1024]).await else {
-                continue;
-            };
-            if read == 0 {
+            if read_request_head(&mut stream).await.is_err() {
                 continue;
             }
             if stream
@@ -151,10 +168,7 @@ pub async fn spawn_abort_after_partial_backend(
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
-            let Ok(read) = stream.read(&mut [0u8; 1024]).await else {
-                continue;
-            };
-            if read == 0 {
+            if read_request_head(&mut stream).await.is_err() {
                 continue;
             }
             let mut head = format!("{response_line}\r\n");

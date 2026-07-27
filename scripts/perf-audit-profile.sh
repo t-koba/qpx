@@ -187,25 +187,83 @@ wait_http() {
 
 run_http1_load() {
   local output="$1"
-  if ! ab -n "$PROFILE_REQUESTS" -c "$PROFILE_CONCURRENCY" -k \
-    "http://127.0.0.1:${QPX_HTTP1_PORT}/bench" >"$output" 2>&1; then
+  local port="$2"
+  if ! python3 - "$port" "$PROFILE_REQUESTS" "$PROFILE_CONCURRENCY" >"$output" 2>&1 <<'PY'
+import concurrent.futures
+import socket
+import sys
+
+port = int(sys.argv[1])
+requests = int(sys.argv[2])
+concurrency = int(sys.argv[3])
+
+
+def read_response(stream, buffered):
+    while b"\r\n\r\n" not in buffered:
+        chunk = stream.recv(64 * 1024)
+        if not chunk:
+            raise RuntimeError("connection closed while reading response head")
+        buffered += chunk
+    raw_head, buffered = buffered.split(b"\r\n\r\n", 1)
+    lines = raw_head.split(b"\r\n")
+    if lines[0] != b"HTTP/1.1 200 OK":
+        raise RuntimeError(f"unexpected response status: {lines[0]!r}")
+    headers = {}
+    for line in lines[1:]:
+        name, separator, value = line.partition(b":")
+        if not separator:
+            raise RuntimeError(f"malformed response header: {line!r}")
+        headers.setdefault(name.strip().lower(), []).append(value.strip().lower())
+    if headers.get(b"connection") == [b"close"]:
+        raise RuntimeError("profile response disabled HTTP/1.1 connection reuse")
+    lengths = headers.get(b"content-length", [])
+    if lengths != [b"1024"]:
+        raise RuntimeError(f"unexpected content-length: {lengths!r}")
+    while len(buffered) < 1024:
+        chunk = stream.recv(64 * 1024)
+        if not chunk:
+            raise RuntimeError("connection closed while reading response body")
+        buffered += chunk
+    body, buffered = buffered[:1024], buffered[1024:]
+    if body != bytes(1024):
+        raise RuntimeError("profile response body does not match the origin payload")
+    return buffered
+
+
+def run_connection(connection_index):
+    assigned = requests // concurrency
+    if connection_index < requests % concurrency:
+        assigned += 1
+    request = (
+        f"GET /bench HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n"
+    ).encode("ascii")
+    completed = 0
+    buffered = b""
+    with socket.create_connection(("127.0.0.1", port), timeout=30) as stream:
+        stream.settimeout(30)
+        for _ in range(assigned):
+            stream.sendall(request)
+            buffered = read_response(stream, buffered)
+            completed += 1
+    return completed
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+    completed = sum(executor.map(run_connection, range(concurrency)))
+if completed != requests:
+    raise SystemExit(f"completed {completed}/{requests} HTTP/1.1 requests")
+print(f"HTTP/1.1 requests: {completed}")
+print(f"Persistent connections: {concurrency}")
+print(f"Reused requests: {completed - concurrency}")
+PY
+  then
     cat "$output" >&2
     echo "HTTP/1 profile load failed" >&2
     return 1
   fi
-  python3 - "$output" "$PROFILE_REQUESTS" <<'PY'
-import re
-import sys
-
-text = open(sys.argv[1], encoding="utf-8").read()
-expected = int(sys.argv[2])
-complete = re.search(r"Complete requests:\s+([0-9]+)", text)
-failed = re.search(r"Failed requests:\s+([0-9]+)", text)
-if complete is None or failed is None:
-    raise SystemExit("ab output is missing request counters")
-if int(complete.group(1)) != expected or int(failed.group(1)) != 0:
-    raise SystemExit("HTTP/1 profile load did not complete successfully")
-PY
 }
 
 run_http2_profile_load() {
@@ -357,7 +415,7 @@ run_profile() {
     measured_requests="$HTTP2_PROFILE_COMPLETED_REQUESTS"
   else
     callgrind_control -i on "$pid" >/dev/null
-    run_http1_load "$load_output"
+    run_http1_load "$load_output" "$port"
     callgrind_control -i off "$pid" >/dev/null
   fi
   callgrind_control -d "$pid" >/dev/null
@@ -370,15 +428,15 @@ run_profile() {
   fi
   selected_output="$(select_profile_dump "$output")"
   annotate_profile "qpxd_reverse_${protocol}" "$protocol" "$selected_output"
-  printf '{"bench":"callgrind_profile_load","target":%s,"requests":%s,"warmup_requests":%s,"concurrency":%s,"valid":true,"commit":%s}\n' \
+  printf '{"bench":"callgrind_profile_load","target":%s,"requests":%s,"warmup_requests":%s,"concurrency":%s,"http1_connection_reuse":%s,"valid":true,"commit":%s}\n' \
     "$(json_escape "qpxd_reverse_${protocol}")" \
     "$measured_requests" \
     "$warmup_requests" \
     "$PROFILE_CONCURRENCY" \
+    "$([ "$protocol" = http1 ] && echo true || echo false)" \
     "$(json_escape "${GITHUB_SHA:-unknown}")" >>"$PROFILE_EVENTS"
 }
 
-require_cmd ab
 require_cmd callgrind_annotate
 require_cmd callgrind_control
 require_cmd curl

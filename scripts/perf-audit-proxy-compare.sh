@@ -804,7 +804,7 @@ events {
 http {
   ${rich_http}
   ${access_log}
-  proxy_cache_path $prefix/cache levels=1:2 keys_zone=${name}_cache:32m max_size=1g inactive=10m use_temp_path=off;
+  proxy_cache_path $prefix/cache levels=1:2 keys_zone=${name}_cache:128m max_size=1g inactive=10m use_temp_path=off;
   upstream ${name}_backend {
     server 127.0.0.1:${BACKEND_PORT};
     keepalive 256;
@@ -1411,6 +1411,9 @@ LUA
     if [ "$valid" = true ]; then
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$rps" "$complete" "$summary_requests" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$mean_ms" "$transfer_kbps" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$cpu_ms" "$rss_kb" "$rss_peak_kb" "$requests_per_cpu_second" "$fd_peak" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$status_before" "$status_after" >>"$samples_file"
+      if [ "${STOP_AFTER_FIRST_VALID_SAMPLE:-false}" = true ]; then
+        break
+      fi
       attempt=$((attempt + 1))
       continue
     fi
@@ -1640,8 +1643,9 @@ RAW_OUT_JSON="$TMP_DIR/interleaved-raw.jsonl"
 REQUESTED_SAMPLE_ATTEMPTS="$SAMPLE_ATTEMPTS"
 REQUESTED_MIN_VALID_SAMPLES="$MIN_VALID_SAMPLES"
 OUT_JSON="$RAW_OUT_JSON"
-SAMPLE_ATTEMPTS=1
+SAMPLE_ATTEMPTS=3
 MIN_VALID_SAMPLES=1
+STOP_AFTER_FIRST_VALID_SAMPLE=true
 : >"$OUT_JSON"
 
 run_reverse_proxy_by_index() {

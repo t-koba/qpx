@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::File as TokioFile;
@@ -30,17 +30,24 @@ const DISK_CACHE_FILE_EXT: &str = "qpxc";
 const DISK_CACHE_CHUNK_BYTES: usize = 64 * 1024;
 const DISK_CACHE_HOT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const DISK_CACHE_HOT_MAX_OBJECT_BYTES: u64 = 2 * 1024 * 1024;
+const DISK_CACHE_HOT_MAX_ENTRIES: usize = 8 * 1024;
 // Keep the lock-free read index wider than the number of hot metadata/body
 // objects commonly touched by one worker. A narrow table makes the metadata
 // and body keys for unrelated cache entries collide frequently, forcing every
 // hit through the LRU mutex that the read path is designed to avoid.
 const DISK_CACHE_RECENT_ENTRIES: usize = 256;
+const DISK_CACHE_RECENT_SHARDS: usize = 16;
+const DISK_CACHE_RECENT_ENTRIES_PER_SHARD: usize =
+    DISK_CACHE_RECENT_ENTRIES / DISK_CACHE_RECENT_SHARDS;
 const DISK_CACHE_DECODED_SLOTS: usize = 256;
 const DISK_CACHE_ZERO_COPY_MIN_BYTES: u64 = 64 * 1024;
 const HOT_SLOT_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const HOT_SLOT_PRIME: u64 = 0x100000001b3;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct DiskCacheFileId([u8; 32]);
 
 #[derive(Clone)]
 pub struct DiskCacheBackend {
@@ -60,7 +67,7 @@ pub struct DiskCacheBackend {
 struct DiskCacheState {
     indexed: bool,
     total_bytes: u64,
-    entries: HashMap<PathBuf, DiskCacheIndexEntry>,
+    entries: HashMap<DiskCacheFileId, DiskCacheIndexEntry>,
     hot_bytes: u64,
     hot_entries: LruCache<PathBuf, HotCacheEntry>,
 }
@@ -101,9 +108,28 @@ struct RecentHotCacheEntry {
     file: Option<std::sync::Arc<File>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct RecentHotCache {
+    shards: Vec<std::sync::Arc<RecentHotCacheShard>>,
+}
+
+#[derive(Clone)]
+struct RecentHotCacheShard {
     entries: Vec<Option<RecentHotCacheEntry>>,
+}
+
+impl Default for RecentHotCache {
+    fn default() -> Self {
+        Self {
+            shards: (0..DISK_CACHE_RECENT_SHARDS)
+                .map(|_| {
+                    std::sync::Arc::new(RecentHotCacheShard {
+                        entries: vec![None; DISK_CACHE_RECENT_ENTRIES_PER_SHARD],
+                    })
+                })
+                .collect(),
+        }
+    }
 }
 
 struct DecodedVariantIndexEntry {
@@ -234,7 +260,11 @@ impl DiskCacheBackend {
     }
 
     fn path_for(&self, namespace: &str, key: &str) -> PathBuf {
-        let digest = cache_hash(namespace, key);
+        self.path_for_id(cache_file_id(namespace, key))
+    }
+
+    fn path_for_id(&self, id: DiskCacheFileId) -> PathBuf {
+        let digest = cache_file_id_hex(id);
         self.root
             .join(&digest[0..2])
             .join(&digest[2..4])
@@ -249,6 +279,10 @@ impl DiskCacheBackend {
         let mut entries = HashMap::new();
         let mut total_bytes = 0u64;
         for path in collect_cache_files(&self.root)? {
+            let Some(id) = cache_file_id_from_path(&self.root, &path) else {
+                let _ = fs::remove_file(&path);
+                continue;
+            };
             match read_disk_cache_header_sync(&path) {
                 Ok(read) => {
                     if read.header.expires_at_ms <= now_ms() {
@@ -258,7 +292,7 @@ impl DiskCacheBackend {
                     let touched_at_ms = file_touched_at_ms(&path).unwrap_or(0);
                     total_bytes = total_bytes.saturating_add(read.total_len);
                     entries.insert(
-                        path,
+                        id,
                         DiskCacheIndexEntry {
                             total_len: read.total_len,
                             expires_at_ms: read.header.expires_at_ms,
@@ -288,7 +322,9 @@ impl DiskCacheBackend {
             return Ok(None);
         }
         let mut state = self.state.lock().await;
-        if let Some(entry) = state.entries.get_mut(&path) {
+        if let Some(id) = cache_file_id_from_path(&self.root, &path)
+            && let Some(entry) = state.entries.get_mut(&id)
+        {
             entry.touched_at_ms = now_ms();
         }
         Ok(Some(read))
@@ -308,7 +344,7 @@ impl DiskCacheBackend {
 
     fn hot_recent_lookup(&self, namespace: &str, key: &str, now: u64) -> Option<HotCacheLookup> {
         let recent = self.hot_recent.load();
-        let entry = recent.entries.get(hot_slot(namespace, key))?.as_ref()?;
+        let entry = recent_hot_entry_at(&recent, hot_slot(namespace, key))?;
         if entry.namespace.as_ref() != namespace || entry.key.as_ref() != key {
             return None;
         }
@@ -346,7 +382,7 @@ impl DiskCacheBackend {
             .map(|entry| (entry.value.clone(), entry.expires_at_ms, entry.body_offset));
         drop(state);
         if let Some((value, expires_at_ms, body_offset)) = value {
-            let file = open_zero_copy_source(key, &path);
+            let file = open_zero_copy_source(key, &path, value.len() as u64);
             self.hot_recent_upsert(
                 RecentHotCacheEntry {
                     namespace: std::sync::Arc::from(namespace),
@@ -441,7 +477,7 @@ impl DiskCacheBackend {
             value: value.clone(),
             expires_at_ms,
             body_offset,
-            file: open_zero_copy_source(key, &path),
+            file: open_zero_copy_source(key, &path, value_len),
         };
         let mut state = self.state.lock().await;
         if let Some(previous) = state.hot_entries.pop(&path) {
@@ -457,7 +493,9 @@ impl DiskCacheBackend {
             },
         );
         let mut evicted_paths = Vec::new();
-        while state.hot_bytes > self.hot_max_bytes {
+        while state.hot_bytes > self.hot_max_bytes
+            || state.hot_entries.len() > DISK_CACHE_HOT_MAX_ENTRIES
+        {
             let Some((evicted_path, evicted)) = state.hot_entries.pop_lru() else {
                 state.hot_bytes = 0;
                 break;
@@ -484,75 +522,51 @@ impl DiskCacheBackend {
         if let Some(entry) = state.hot_entries.pop(path) {
             state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
         }
-        if let Some(entry) = state.entries.remove(path) {
+        if let Some(id) = cache_file_id_from_path(&self.root, path)
+            && let Some(entry) = state.entries.remove(&id)
+        {
             state.total_bytes = state.total_bytes.saturating_sub(entry.total_len);
         }
     }
 
     fn hot_recent_upsert(&self, entry: RecentHotCacheEntry, removed: &[PathBuf]) {
-        self.invalidate_hot_responses_for_paths(
-            std::iter::once(entry.path.as_path()).chain(removed.iter().map(PathBuf::as_path)),
-        );
         self.hot_recent.rcu(|current| {
-            let mut entries = current.entries.clone();
-            entries.resize_with(DISK_CACHE_RECENT_ENTRIES, || None);
-            for candidate in &mut entries {
-                if candidate.as_ref().is_some_and(|candidate| {
-                    candidate.path == entry.path
-                        || removed.iter().any(|path| path == &candidate.path)
-                }) {
-                    *candidate = None;
+            let mut shards = current.shards.clone();
+            if !removed.is_empty() {
+                for slot in 0..DISK_CACHE_RECENT_ENTRIES {
+                    if recent_hot_entry_at(current, slot)
+                        .is_some_and(|candidate| removed.iter().any(|path| path == &candidate.path))
+                    {
+                        *recent_hot_entry_mut(&mut shards, slot) = None;
+                    }
                 }
             }
             let slot = hot_slot(entry.namespace.as_ref(), entry.key.as_ref());
-            entries[slot] = Some(entry.clone());
-            RecentHotCache { entries }
+            *recent_hot_entry_mut(&mut shards, slot) = Some(entry.clone());
+            RecentHotCache { shards }
         });
     }
 
     fn hot_recent_remove(&self, path: &Path) {
-        self.invalidate_hot_responses_for_paths(std::iter::once(path));
         if !self
             .hot_recent
             .load()
-            .entries
+            .shards
             .iter()
-            .flatten()
+            .flat_map(|shard| shard.entries.iter().flatten())
             .any(|entry| entry.path == path)
         {
             return;
         }
-        self.hot_recent.rcu(|current| RecentHotCache {
-            entries: current
-                .entries
-                .iter()
-                .map(|entry| {
-                    entry
-                        .as_ref()
-                        .filter(|candidate| candidate.path != path)
-                        .cloned()
-                })
-                .collect(),
-        });
-    }
-
-    fn invalidate_hot_responses_for_paths<'a>(&self, paths: impl Iterator<Item = &'a Path>) {
-        let paths = paths.collect::<Vec<_>>();
-        if paths.is_empty() {
-            return;
-        }
-        for slot in self.hot_responses.iter() {
-            let entry = slot.load();
-            if entry.as_ref().is_some_and(|entry| {
-                entry
-                    .sources
-                    .iter()
-                    .any(|source| paths.contains(&source.path.as_path()))
-            }) {
-                drop(entry);
-                slot.store(None);
+        self.hot_recent.rcu(|current| {
+            let mut shards = current.shards.clone();
+            for slot in 0..DISK_CACHE_RECENT_ENTRIES {
+                if recent_hot_entry_at(current, slot).is_some_and(|entry| entry.path == path) {
+                    *recent_hot_entry_mut(&mut shards, slot) = None;
+                }
             }
-        }
+            RecentHotCache { shards }
+        });
     }
 
     async fn remember_write(
@@ -562,10 +576,12 @@ impl DiskCacheBackend {
         expires_at_ms: u64,
     ) -> Result<()> {
         self.ensure_indexed().await?;
+        let id = cache_file_id_from_path(&self.root, &path)
+            .ok_or_else(|| anyhow!("invalid disk cache object path: {}", path.display()))?;
         {
             let mut state = self.state.lock().await;
             if let Some(old) = state.entries.insert(
-                path,
+                id,
                 DiskCacheIndexEntry {
                     total_len,
                     expires_at_ms,
@@ -590,10 +606,11 @@ impl DiskCacheBackend {
                 .entries
                 .iter()
                 .filter(|(_, entry)| entry.expires_at_ms <= now)
-                .map(|(path, _)| path.clone())
+                .map(|(id, _)| *id)
                 .collect::<Vec<_>>()
         };
-        for path in expired {
+        for id in expired {
+            let path = self.path_for_id(id);
             self.delete_path(&path).await;
         }
     }
@@ -609,11 +626,12 @@ impl DiskCacheBackend {
                     .entries
                     .iter()
                     .min_by_key(|(_, entry)| entry.touched_at_ms)
-                    .map(|(path, _)| path.clone())
+                    .map(|(id, _)| *id)
             };
-            let Some(path) = victim else {
+            let Some(id) = victim else {
                 return Ok(());
             };
+            let path = self.path_for_id(id);
             self.delete_path(&path).await;
         }
     }
@@ -948,7 +966,7 @@ impl CacheBackend for DiskCacheBackend {
                 value,
                 expected_len,
                 range,
-                open_zero_copy_source(key, &read.path),
+                open_zero_copy_source(key, &read.path, read.header.body_len),
                 read.body_offset,
             ));
         }
@@ -1094,11 +1112,29 @@ fn recent_hot_entry<'a>(
     key: &str,
     now: u64,
 ) -> Option<&'a RecentHotCacheEntry> {
-    let entry = recent.entries.get(hot_slot(namespace, key))?.as_ref()?;
+    let entry = recent_hot_entry_at(recent, hot_slot(namespace, key))?;
     (entry.namespace.as_ref() == namespace
         && entry.key.as_ref() == key
         && entry.expires_at_ms > now)
         .then_some(entry)
+}
+
+fn recent_hot_entry_at(recent: &RecentHotCache, slot: usize) -> Option<&RecentHotCacheEntry> {
+    let shard = recent
+        .shards
+        .get(slot / DISK_CACHE_RECENT_ENTRIES_PER_SHARD)?;
+    shard
+        .entries
+        .get(slot % DISK_CACHE_RECENT_ENTRIES_PER_SHARD)?
+        .as_ref()
+}
+
+fn recent_hot_entry_mut(
+    shards: &mut [std::sync::Arc<RecentHotCacheShard>],
+    slot: usize,
+) -> &mut Option<RecentHotCacheEntry> {
+    let shard = std::sync::Arc::make_mut(&mut shards[slot / DISK_CACHE_RECENT_ENTRIES_PER_SHARD]);
+    &mut shard.entries[slot % DISK_CACHE_RECENT_ENTRIES_PER_SHARD]
 }
 
 fn hot_response_candidate(entry: &HotResponseEntry) -> Option<CachedResponseCandidate> {
@@ -1144,8 +1180,8 @@ fn hot_slot(namespace: &str, key: &str) -> usize {
     (hash as usize) % DISK_CACHE_RECENT_ENTRIES
 }
 
-fn open_zero_copy_source(key: &str, path: &Path) -> Option<std::sync::Arc<File>> {
-    if !is_cache_body_storage_key(key) {
+fn open_zero_copy_source(key: &str, path: &Path, body_len: u64) -> Option<std::sync::Arc<File>> {
+    if !is_cache_body_storage_key(key) || body_len < DISK_CACHE_ZERO_COPY_MIN_BYTES {
         return None;
     }
     let mut options = OpenOptions::new();
@@ -1168,18 +1204,53 @@ fn open_zero_copy_source(key: &str, path: &Path) -> Option<std::sync::Arc<File>>
     }
 }
 
-fn cache_hash(namespace: &str, key: &str) -> String {
+fn cache_file_id(namespace: &str, key: &str) -> DiskCacheFileId {
     let mut hasher = Sha256::new();
     hasher.update(namespace.as_bytes());
     hasher.update([0]);
     hasher.update(key.as_bytes());
     let digest = hasher.finalize();
+    DiskCacheFileId(digest.into())
+}
+
+fn cache_file_id_hex(id: DiskCacheFileId) -> String {
     let mut out = String::with_capacity(64);
-    for byte in digest {
+    for byte in id.0 {
         use std::fmt::Write as _;
         let _ = write!(&mut out, "{byte:02x}");
     }
     out
+}
+
+fn cache_file_id_from_path(root: &Path, path: &Path) -> Option<DiskCacheFileId> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some(DISK_CACHE_FILE_EXT) {
+        return None;
+    }
+    let encoded = path.file_stem()?.to_str()?;
+    if encoded.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+        digest[index] = decode_hex_nibble(pair[0])?
+            .checked_mul(16)?
+            .checked_add(decode_hex_nibble(pair[1])?)?;
+    }
+    let id = DiskCacheFileId(digest);
+    let expected = cache_file_id_hex(id);
+    let expected_path = root
+        .join(&expected[0..2])
+        .join(&expected[2..4])
+        .join(format!("{expected}.{DISK_CACHE_FILE_EXT}"));
+    (expected_path == path).then_some(id)
+}
+
+fn decode_hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
 }
 
 fn now_ms() -> u64 {
@@ -1339,9 +1410,21 @@ fn create_secure_new_file(path: &Path) -> Result<File> {
 }
 
 fn ensure_private_dir(path: &Path) -> Result<()> {
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(anyhow!(
+            "disk cache path must not contain parent traversal: {}",
+            path.display()
+        ));
+    }
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
         match fs::create_dir(&current) {
             Ok(()) => {
                 #[cfg(unix)]
@@ -1450,6 +1533,26 @@ mod tests {
                 .expect("create private directory");
         }
         assert!(target.is_dir());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_directory_creation_accepts_an_absolute_path_anchor() {
+        let root = temp_dir("absolute-path-anchor");
+        let target = root.join("objects");
+        ensure_private_dir(&target).expect("create directory below absolute path anchor");
+        assert!(target.is_dir());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_directory_creation_rejects_parent_traversal_before_mutation() {
+        let root = temp_dir("parent-traversal");
+        let child = root.join("untrusted");
+        let target = child.join("..").join("objects");
+        let error = ensure_private_dir(&target).expect_err("reject parent traversal");
+        assert!(error.to_string().contains("parent traversal"));
+        assert!(!child.exists());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1682,7 +1785,7 @@ mod tests {
                 .expect("encode concurrently replaced metadata"),
         );
         let mut updated_recent = (**backend.hot_recent.load()).clone();
-        updated_recent.entries[hot_slot("ns", variant_key)]
+        recent_hot_entry_mut(&mut updated_recent.shards, hot_slot("ns", variant_key))
             .as_mut()
             .expect("hot metadata")
             .value = updated_metadata;
@@ -1755,6 +1858,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonical_small_bodies_do_not_retain_zero_copy_files() {
+        let dir = temp_dir("canonical-small-body");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let key = super::super::types::cache_body_storage_key("small-variant");
+        let body = CachedBody::from_bytes(Bytes::from(vec![b'x'; 1024]));
+        backend
+            .put_object("ns", &key, &body, 60)
+            .await
+            .expect("put object");
+
+        let recent = backend.hot_recent.load();
+        let entry = recent_hot_entry(&recent, "ns", &key, now_ms()).expect("recent body");
+        assert!(entry.file.is_none());
+        drop(recent);
+
+        let mut stream = backend
+            .get_object_stream("ns", &key, 1024, None)
+            .await
+            .expect("get stream")
+            .expect("cached stream");
+        assert!(stream.body.take_file_region_without_trailers().is_none());
+        assert_eq!(
+            stream.body.data().await.expect("body").expect("bytes"),
+            Bytes::from(vec![b'x'; 1024])
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn canonical_body_keys_receive_file_regions_independent_of_route_names() {
         let dir = temp_dir("canonical-body-region");
         let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
@@ -1776,6 +1908,23 @@ mod tests {
             .expect("canonical cache body file region");
         assert_eq!(region.len(), 64 * 1024);
         assert!(region.offset() > 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disk_cache_file_ids_round_trip_only_canonical_paths() {
+        let dir = temp_dir("file-id-round-trip");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let id = cache_file_id("ordinary-namespace", "ordinary-key");
+        let path = backend.path_for_id(id);
+        assert_eq!(cache_file_id_from_path(&dir, &path), Some(id));
+
+        let encoded = cache_file_id_hex(id);
+        let misplaced = dir
+            .join("ff")
+            .join(&encoded[2..4])
+            .join(format!("{encoded}.{DISK_CACHE_FILE_EXT}"));
+        assert_eq!(cache_file_id_from_path(&dir, &misplaced), None);
         let _ = fs::remove_dir_all(dir);
     }
 
