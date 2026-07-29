@@ -1,37 +1,87 @@
-use std::future::{Future, poll_fn};
-use std::task::Poll;
-use tokio::time::{Duration, error::Elapsed, timeout};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::time::{Duration, Sleep, sleep};
 
-pub(crate) async fn timeout_after_pending<F>(
+#[derive(Debug)]
+pub(crate) struct TimeoutElapsed;
+
+struct TimeoutAfterPending<F, P> {
+    future: F,
+    duration: Duration,
+    timer: Option<Sleep>,
+    on_pending: Option<P>,
+    completed: bool,
+}
+
+pub(crate) fn timeout_after_pending<F>(
     duration: Duration,
     future: F,
-) -> Result<F::Output, Elapsed>
+) -> impl Future<Output = Result<F::Output, TimeoutElapsed>>
 where
     F: Future,
 {
-    timeout_after_pending_with(duration, future, || {}).await
+    timeout_after_pending_with(duration, future, || {})
 }
 
-pub(crate) async fn timeout_after_pending_with<F, P>(
+pub(crate) fn timeout_after_pending_with<F, P>(
     duration: Duration,
     future: F,
     on_pending: P,
-) -> Result<F::Output, Elapsed>
+) -> impl Future<Output = Result<F::Output, TimeoutElapsed>>
 where
     F: Future,
     P: FnOnce(),
 {
-    tokio::pin!(future);
-    let ready = poll_fn(|cx| match future.as_mut().poll(cx) {
-        Poll::Ready(output) => Poll::Ready(Some(output)),
-        Poll::Pending => Poll::Ready(None),
-    })
-    .await;
-    match ready {
-        Some(output) => Ok(output),
-        None => {
+    TimeoutAfterPending {
+        future,
+        duration,
+        timer: None,
+        on_pending: Some(on_pending),
+        completed: false,
+    }
+}
+
+impl<F, P> Future for TimeoutAfterPending<F, P>
+where
+    F: Future,
+    P: FnOnce(),
+{
+    type Output = Result<F::Output, TimeoutElapsed>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: `future` is never moved after the wrapper is pinned. The other
+        // fields are not structurally pinned and may be updated independently.
+        let this = unsafe { self.get_unchecked_mut() };
+        assert!(!this.completed, "timeout future polled after completion");
+        // SAFETY: the wrapper owns `future` and never moves it while pinned.
+        let future = unsafe { Pin::new_unchecked(&mut this.future) };
+        if let Poll::Ready(output) = future.poll(cx) {
+            this.completed = true;
+            return Poll::Ready(Ok(output));
+        }
+
+        if this.timer.is_none() {
+            let on_pending = this
+                .on_pending
+                .take()
+                .expect("pending hook must be available before the timer starts");
             on_pending();
-            timeout(duration, future).await
+            // Inserting the timer into an empty slot does not move a previously
+            // pinned value. Once initialized, this field is never replaced.
+            this.timer = Some(sleep(this.duration));
+        }
+        let timer = this
+            .timer
+            .as_mut()
+            .expect("timeout timer must be initialized");
+        // SAFETY: the timer is initialized only after the wrapper is pinned and
+        // remains in the same field until the wrapper is dropped.
+        if unsafe { Pin::new_unchecked(timer) }.poll(cx).is_ready() {
+            this.completed = true;
+            Poll::Ready(Err(TimeoutElapsed))
+        } else {
+            Poll::Pending
         }
     }
 }

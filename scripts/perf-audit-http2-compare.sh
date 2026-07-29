@@ -671,7 +671,14 @@ run_one() {
     if [ -n "$profile_pid" ]; then
       wait "$profile_pid" || true
     fi
-    metrics="$(parse_h2load "$out" "$latency_file")"
+    if ! metrics="$(parse_h2load "$out" "$latency_file")"; then
+      rm -f "$latency_file"
+      failed_sample="$out"
+      echo "${proxy} produced unparseable HTTP/2 metrics on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
+      cat "$out" >&2 || true
+      attempt=$((attempt + 1))
+      continue
+    fi
     rm -f "$latency_file"
     valid="$(python3 - "$metrics" <<'PY'
 import json
