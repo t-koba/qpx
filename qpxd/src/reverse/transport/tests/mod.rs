@@ -32,6 +32,50 @@ use std::sync::Arc as StdArc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+#[tokio::test]
+async fn materialized_webdav_file_region_keeps_verified_snapshot() {
+    use std::io::Write as _;
+
+    let mut file = tempfile::tempfile().expect("temporary WebDAV file");
+    file.write_all(b"changed!").expect("write WebDAV file");
+    let region = qpx_webdav::ResourceFileRegion {
+        file: StdArc::new(file),
+        offset: 0,
+        len: 8,
+    };
+    let body = super::dispatch::apply_webdav_file_region(
+        Body::from("snapshot").mark_trailers_sanitized(),
+        8,
+        region,
+    )
+    .expect("apply WebDAV file region");
+
+    assert!(!body.has_file_region());
+    assert_eq!(to_bytes(body).await.expect("WebDAV body"), "snapshot");
+}
+
+#[tokio::test]
+async fn empty_webdav_file_region_materializes_portable_body() {
+    use std::io::Write as _;
+
+    let mut file = tempfile::tempfile().expect("temporary WebDAV file");
+    file.write_all(b"payload").expect("write WebDAV file");
+    let region = qpx_webdav::ResourceFileRegion {
+        file: StdArc::new(file),
+        offset: 0,
+        len: 7,
+    };
+    let body = super::dispatch::apply_webdav_file_region(
+        Body::empty().mark_trailers_sanitized(),
+        0,
+        region,
+    )
+    .expect("apply WebDAV file region");
+
+    assert!(!body.has_file_region());
+    assert_eq!(to_bytes(body).await.expect("WebDAV body"), "payload");
+}
+
 fn test_decision_service_config(name: &str, endpoint: String) -> DecisionServiceConfig {
     DecisionServiceConfig {
         name: name.to_string(),

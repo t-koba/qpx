@@ -453,12 +453,11 @@ async fn proxy_direct_plain_http1_raw_response_with_interim_inner(
         Some(host_authority)
     );
     if matches!(*req.method(), http::Method::GET | http::Method::HEAD) {
-        let h2_response_frame_size = req
-            .extensions()
-            .get::<crate::http::codec::h2::H2DownstreamLoad>()
-            .copied()
-            .map(crate::http::codec::h2::H2DownstreamLoad::upstream_response_frame_size)
-            .unwrap_or(1024 * 1024);
+        let h2_response_frame_size = if request_version == http::Version::HTTP_2 {
+            crate::http::codec::h2::H2_UPSTREAM_RESPONSE_FRAME_SIZE
+        } else {
+            1024 * 1024
+        };
         req = match classify_bodyless_http1_request(req)? {
             Ok(req) => {
                 return proxy_bodyless_plain_http1_raw_response_with_interim(

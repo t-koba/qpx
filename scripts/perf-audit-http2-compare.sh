@@ -674,7 +674,7 @@ run_one() {
     if ! metrics="$(parse_h2load "$out" "$latency_file")"; then
       rm -f "$latency_file"
       failed_sample="$out"
-      echo "${proxy} produced unparseable HTTP/2 metrics on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
+      echo "${proxy} produced unparsable HTTP/2 metrics on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       cat "$out" >&2 || true
       attempt=$((attempt + 1))
       continue

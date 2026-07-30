@@ -15,12 +15,12 @@ use tokio::io::Interest;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use tokio::io::unix::AsyncFd;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 const LOW_CONTENTION_ZERO_COPY_QUANTUM: u64 = 8 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const BALANCED_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
+const FILE_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ACTIVE_ZERO_COPY_TRANSFERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -68,8 +68,7 @@ fn zero_copy_scheduling_quantum_for(
         (ZeroCopyTransferKind::Socket, 0..=8) => LOW_CONTENTION_ZERO_COPY_QUANTUM,
         #[cfg(target_os = "linux")]
         (ZeroCopyTransferKind::Socket, _) => BALANCED_ZERO_COPY_QUANTUM,
-        (ZeroCopyTransferKind::File, 0..=8) => LOW_CONTENTION_ZERO_COPY_QUANTUM,
-        (ZeroCopyTransferKind::File, _) => CONTENDED_FILE_ZERO_COPY_QUANTUM,
+        (ZeroCopyTransferKind::File, _) => FILE_ZERO_COPY_QUANTUM,
     }
 }
 
@@ -195,12 +194,7 @@ pub(super) async fn splice_tcp_exact(
         let moved = timeout_after_pending(read_timeout, async {
             loop {
                 match source.try_io(Interest::READABLE, || {
-                    splice_once(
-                        source.as_raw_fd(),
-                        pipe.write_fd,
-                        requested,
-                        remaining > requested as u64,
-                    )
+                    splice_once(source.as_raw_fd(), pipe.write_fd, requested)
                 }) {
                     Ok(moved) => return Ok(moved),
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -224,12 +218,7 @@ pub(super) async fn splice_tcp_exact(
             let written = timeout_after_pending(write_timeout, async {
                 loop {
                     match destination.try_io(Interest::WRITABLE, || {
-                        splice_once(
-                            pipe.read_fd,
-                            destination.as_raw_fd(),
-                            buffered,
-                            remaining > moved as u64,
-                        )
+                        splice_once(pipe.read_fd, destination.as_raw_fd(), buffered)
                     }) {
                         Ok(written) => return Ok(written),
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -324,20 +313,11 @@ impl Drop for SplicePipe {
 }
 
 #[cfg(target_os = "linux")]
-fn splice_once(
-    source_fd: RawFd,
-    destination_fd: RawFd,
-    count: usize,
-    more: bool,
-) -> io::Result<usize> {
+fn splice_once(source_fd: RawFd, destination_fd: RawFd, count: usize) -> io::Result<usize> {
     loop {
-        let mut flags = libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK;
-        if more {
-            // Tell the kernel that this relay has more bytes behind the current
-            // splice. This preserves the zero-copy path while avoiding an
-            // unnecessary packet push between adjacent upstream writes.
-            flags |= libc::SPLICE_F_MORE;
-        }
+        // Flush each pipe batch to a socket. SPLICE_F_MORE can retain the last
+        // partial packet until Linux's flush timer when the upstream pauses.
+        let flags = libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK;
         // SAFETY: both descriptors are live, at least one descriptor is a pipe endpoint,
         // and socket and pipe descriptors do not use file offsets.
         let moved = unsafe {
@@ -444,11 +424,11 @@ mod tests {
         );
         assert_eq!(
             zero_copy_scheduling_quantum_for(1, ZeroCopyTransferKind::File),
-            LOW_CONTENTION_ZERO_COPY_QUANTUM
+            FILE_ZERO_COPY_QUANTUM
         );
         assert_eq!(
             zero_copy_scheduling_quantum_for(32, ZeroCopyTransferKind::File),
-            CONTENDED_FILE_ZERO_COPY_QUANTUM
+            FILE_ZERO_COPY_QUANTUM
         );
         #[cfg(target_os = "linux")]
         assert_eq!(

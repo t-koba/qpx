@@ -953,21 +953,32 @@ async fn execute_webdav_service(
     let (mut parts, body) = response.into_parts();
     let file_region = parts.extensions.remove::<qpx_webdav::ResourceFileRegion>();
     let body_len = body.len() as u64;
-    let mut body = Body::from(body).mark_trailers_sanitized();
+    let body = Body::from(body).mark_trailers_sanitized();
     if let Some(region) = file_region {
-        if body_len != 0 && region.len != body_len {
-            return Err(anyhow!(
-                "WebDAV file region length does not match the response body"
-            ));
-        }
-        if region.len >= 64 * 1024 && cfg!(any(target_os = "linux", target_os = "macos")) {
-            body = body.with_file_region_for_zero_copy(region.file, region.offset, region.len);
-        } else {
-            let bytes = materialize_webdav_file_region(&region.file, region.offset, region.len)?;
-            body = Body::from(bytes).mark_trailers_sanitized();
-        }
+        let body = apply_webdav_file_region(body, body_len, region)?;
+        return Ok(Response::from_parts(parts, body));
     }
     Ok(Response::from_parts(parts, body))
+}
+
+pub(super) fn apply_webdav_file_region(
+    body: Body,
+    body_len: u64,
+    region: qpx_webdav::ResourceFileRegion,
+) -> Result<Body> {
+    if body_len != 0 && region.len != body_len {
+        return Err(anyhow!(
+            "WebDAV file region length does not match the response body"
+        ));
+    }
+    if region.len >= 64 * 1024 && cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Ok(body.with_file_region_for_zero_copy(region.file, region.offset, region.len));
+    }
+    if body_len != 0 || region.len == 0 {
+        return Ok(body);
+    }
+    let bytes = materialize_webdav_file_region(&region.file, region.offset, region.len)?;
+    Ok(Body::from(bytes).mark_trailers_sanitized())
 }
 
 fn materialize_webdav_file_region(

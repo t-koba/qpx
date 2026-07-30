@@ -23,30 +23,12 @@ const H2_ABANDONED_REQUEST_DRAIN_LIMIT: usize = 1024 * 1024;
 const H2_INITIAL_STREAM_WINDOW_SIZE: u32 = 1024 * 1024;
 const H2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
 const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
-const H2_MAX_SEND_BUFFER_SIZE: usize = 1024 * 1024;
+const H2_MAX_SEND_BUFFER_SIZE: usize = H2_MAX_FRAME_SIZE as usize;
+pub(crate) const H2_UPSTREAM_RESPONSE_FRAME_SIZE: usize = 2 * H2_MAX_FRAME_SIZE as usize;
 pub(crate) const H2_MAX_CONCURRENT_STREAMS: usize = 256;
 const H2_DIRECT_SEND_BODY_MAX_BYTES: u64 = 16 * 1024;
 const H2_INITIAL_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_FRAME_SIZE as usize;
 const H2_MIN_SCHEDULER_BUFFER_BYTES: usize = 16 * 1024;
-
-#[derive(Clone, Copy)]
-pub(crate) struct H2DownstreamLoad {
-    active_streams: usize,
-}
-
-impl H2DownstreamLoad {
-    pub(crate) fn new(active_streams: usize) -> Self {
-        Self { active_streams }
-    }
-
-    pub(crate) fn upstream_response_frame_size(self) -> usize {
-        match self.active_streams {
-            0..=8 => 1024 * 1024,
-            9..=31 => 256 * 1024,
-            _ => H2_MAX_FRAME_SIZE as usize,
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 pub(crate) struct H2TransportTuning {

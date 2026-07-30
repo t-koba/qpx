@@ -207,7 +207,7 @@ async fn serve_h2_stream<S>(
         + Sync
         + 'static,
 {
-    let mut request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
+    let request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
         request,
         body_channel_capacity,
     ) {
@@ -218,11 +218,6 @@ async fn serve_h2_stream<S>(
             return;
         }
     };
-    request
-        .extensions_mut()
-        .insert(crate::http::codec::h2::H2DownstreamLoad::new(
-            active_stream.count(),
-        ));
     let request_method = request.method().clone();
     let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
 

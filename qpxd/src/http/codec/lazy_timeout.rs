@@ -10,7 +10,7 @@ struct TimeoutAfterPending<F, P> {
     future: F,
     duration: Duration,
     timer: Option<Sleep>,
-    on_pending: Option<P>,
+    on_pending: P,
     completed: bool,
 }
 
@@ -31,13 +31,13 @@ pub(crate) fn timeout_after_pending_with<F, P>(
 ) -> impl Future<Output = Result<F::Output, TimeoutElapsed>>
 where
     F: Future,
-    P: FnOnce(),
+    P: FnMut(),
 {
     TimeoutAfterPending {
         future,
         duration,
         timer: None,
-        on_pending: Some(on_pending),
+        on_pending,
         completed: false,
     }
 }
@@ -45,7 +45,7 @@ where
 impl<F, P> Future for TimeoutAfterPending<F, P>
 where
     F: Future,
-    P: FnOnce(),
+    P: FnMut(),
 {
     type Output = Result<F::Output, TimeoutElapsed>;
 
@@ -61,20 +61,15 @@ where
             return Poll::Ready(Ok(output));
         }
 
-        if this.timer.is_none() {
-            let on_pending = this
-                .on_pending
-                .take()
-                .expect("pending hook must be available before the timer starts");
-            on_pending();
-            // Inserting the timer into an empty slot does not move a previously
-            // pinned value. Once initialized, this field is never replaced.
-            this.timer = Some(sleep(this.duration));
-        }
-        let timer = this
-            .timer
-            .as_mut()
-            .expect("timeout timer must be initialized");
+        let timer = match this.timer.as_mut() {
+            Some(timer) => timer,
+            None => {
+                (this.on_pending)();
+                // Inserting the timer into an empty slot does not move a previously
+                // pinned value. Once initialized, this field is never replaced.
+                this.timer.insert(sleep(this.duration))
+            }
+        };
         // SAFETY: the timer is initialized only after the wrapper is pinned and
         // remains in the same field until the wrapper is dropped.
         if unsafe { Pin::new_unchecked(timer) }.poll(cx).is_ready() {
