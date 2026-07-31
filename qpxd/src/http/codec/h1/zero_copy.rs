@@ -20,7 +20,7 @@ const LOW_CONTENTION_ZERO_COPY_QUANTUM: u64 = 8 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const BALANCED_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
+const FILE_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ACTIVE_ZERO_COPY_TRANSFERS: AtomicUsize = AtomicUsize::new(0);
 
