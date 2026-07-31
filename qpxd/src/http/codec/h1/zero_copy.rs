@@ -18,9 +18,9 @@ use tokio::io::unix::AsyncFd;
 #[cfg(target_os = "linux")]
 const LOW_CONTENTION_ZERO_COPY_QUANTUM: u64 = 8 * 1024 * 1024;
 #[cfg(target_os = "linux")]
-const BALANCED_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
+const BALANCED_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const FILE_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
+const FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ACTIVE_ZERO_COPY_TRANSFERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -198,6 +198,11 @@ pub(super) async fn splice_tcp_exact(
                 }) {
                     Ok(moved) => return Ok(moved),
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if bytes_since_yield > 0 {
+                            // Re-applying TCP_NODELAY explicitly pushes any partial splice
+                            // batch before an upstream pause can leave it to the TCP flush timer.
+                            destination.set_nodelay(true)?;
+                        }
                         source.readable().await?;
                     }
                     Err(error) => return Err(error),

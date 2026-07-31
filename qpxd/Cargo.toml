@@ -10,7 +10,6 @@ workspace = true
 
 [features]
 default = [
-  "mimalloc-allocator",
   "tls-rustls",
   "http3-backend-h3",
   "mitm",
@@ -19,9 +18,9 @@ default = [
   "auth-ldap",
 ]
 
-# Production builds use mimalloc to reduce allocator contention and tail
-# latency. Profiling tools that interpose libc allocation can select the
-# system allocator explicitly without changing the production default.
+# The system allocator is the production default. Workloads that prove they
+# benefit from mimalloc can select it explicitly, while profiling tools can
+# force the system allocator when all features are enabled.
 mimalloc-allocator = ["dep:mimalloc"]
 system-allocator = []
 h2-wire-tracing = ["h2/wire-tracing"]

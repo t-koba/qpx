@@ -19,9 +19,9 @@ fn scheduler_buffer_budget_preserves_single_stream_throughput_and_bounds_multipl
 }
 
 #[test]
-fn upstream_read_ahead_is_bounded_to_two_transport_frames() {
-    assert_eq!(H2_UPSTREAM_RESPONSE_FRAME_SIZE, 128 * 1024);
-    assert_eq!(H2_MAX_SEND_BUFFER_SIZE, H2_UPSTREAM_RESPONSE_FRAME_SIZE / 2);
+fn upstream_read_ahead_matches_the_transport_send_frame() {
+    assert_eq!(H2_UPSTREAM_RESPONSE_FRAME_SIZE, 64 * 1024);
+    assert_eq!(H2_MAX_SEND_BUFFER_SIZE, H2_UPSTREAM_RESPONSE_FRAME_SIZE);
 }
 
 #[derive(Clone)]
