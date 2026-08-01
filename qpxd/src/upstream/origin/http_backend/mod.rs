@@ -453,12 +453,10 @@ async fn proxy_direct_plain_http1_raw_response_with_interim_inner(
         Some(host_authority)
     );
     if matches!(*req.method(), http::Method::GET | http::Method::HEAD) {
-        let h2_downstream_load = if request_version == http::Version::HTTP_2 {
-            req.extensions()
-                .get::<crate::http::codec::h2::H2DownstreamLoad>()
-                .cloned()
+        let h2_response_frame_size = if request_version == http::Version::HTTP_2 {
+            crate::http::codec::h2::h2_upstream_response_frame_size()
         } else {
-            None
+            1024 * 1024
         };
         req = match classify_bodyless_http1_request(req)? {
             Ok(req) => {
@@ -469,7 +467,7 @@ async fn proxy_direct_plain_http1_raw_response_with_interim_inner(
                     request_version,
                     proxy_name,
                     connection_pool,
-                    h2_downstream_load,
+                    h2_response_frame_size,
                 )
                 .await;
             }
@@ -502,7 +500,7 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
     request_version: http::Version,
     proxy_name: &str,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
-    h2_downstream_load: Option<crate::http::codec::h2::H2DownstreamLoad>,
+    h2_response_frame_size: usize,
 ) -> Result<Http1ResponseWithInterim> {
     let active_permit = slot.acquire_active().await?;
     let local_target = connection_pool.map(|pool| pool.target_for(&slot));
@@ -567,9 +565,6 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
     };
     relay.active_permit = Some(active_permit);
     if request_version == http::Version::HTTP_2 {
-        let h2_response_frame_size = h2_downstream_load
-            .map(crate::http::codec::h2::H2DownstreamLoad::upstream_response_frame_size)
-            .unwrap_or(16 * 1024);
         relay.into_materialized_http_response(h2_response_frame_size)
     } else {
         relay.into_http_response()

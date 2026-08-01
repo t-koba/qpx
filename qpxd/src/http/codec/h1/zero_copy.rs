@@ -65,7 +65,7 @@ fn zero_copy_scheduling_quantum_for(
 ) -> u64 {
     match (transfer_kind, active_transfers) {
         #[cfg(target_os = "linux")]
-        (ZeroCopyTransferKind::Socket, 0..=8) => LOW_CONTENTION_ZERO_COPY_QUANTUM,
+        (ZeroCopyTransferKind::Socket, 0..=1) => LOW_CONTENTION_ZERO_COPY_QUANTUM,
         #[cfg(target_os = "linux")]
         (ZeroCopyTransferKind::Socket, _) => BALANCED_ZERO_COPY_QUANTUM,
         (ZeroCopyTransferKind::File, _) => FILE_ZERO_COPY_QUANTUM,
@@ -430,7 +430,7 @@ mod tests {
         );
         #[cfg(target_os = "linux")]
         assert_eq!(
-            zero_copy_scheduling_quantum_for(9, ZeroCopyTransferKind::Socket),
+            zero_copy_scheduling_quantum_for(2, ZeroCopyTransferKind::Socket),
             BALANCED_ZERO_COPY_QUANTUM
         );
         assert_eq!(

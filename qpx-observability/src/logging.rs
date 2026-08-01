@@ -22,7 +22,7 @@ const DIRECT_ACCESS_BUFFER_BYTES: usize = 64 * 1024;
 const DIRECT_ACCESS_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const DIRECT_ACCESS_BUFFER_SHARDS: usize = 16;
 const DIRECT_ACCESS_QUEUE_CHUNKS: usize = 256;
-const DIRECT_ACCESS_RECYCLED_CHUNKS: usize = DIRECT_ACCESS_BUFFER_SHARDS;
+const DIRECT_ACCESS_RECYCLE_CAPACITY: usize = DIRECT_ACCESS_BUFFER_SHARDS;
 const DIRECT_ACCESS_BUSY_WRITES_PER_INTERVAL: usize = 4096;
 const DIRECT_ACCESS_THREAD_STACK_BYTES: usize = 256 * 1024;
 static NEXT_DIRECT_ACCESS_SHARD: AtomicUsize = AtomicUsize::new(0);
@@ -62,19 +62,15 @@ impl DirectCombinedAccessWriter {
         W: Write + Send + 'static,
     {
         let (sender, receiver) = crossbeam_channel::bounded(DIRECT_ACCESS_QUEUE_CHUNKS);
-        let (recycled_sender, recycled) = crossbeam_channel::bounded(DIRECT_ACCESS_RECYCLED_CHUNKS);
-        for _ in 0..DIRECT_ACCESS_RECYCLED_CHUNKS {
-            recycled_sender
-                .send(Vec::with_capacity(DIRECT_ACCESS_BUFFER_BYTES))
-                .context("failed to initialize the recycled access-log buffer pool")?;
-        }
+        let (recycled_sender, recycled) =
+            crossbeam_channel::bounded(DIRECT_ACCESS_RECYCLE_CAPACITY);
         let writer = Arc::new(Self {
             sender,
             recycled,
             states: (0..DIRECT_ACCESS_BUFFER_SHARDS)
                 .map(|_| {
                     CachePaddedDirectAccessBuffer(Mutex::new(DirectCombinedAccessBuffer {
-                        bytes: Vec::with_capacity(DIRECT_ACCESS_BUFFER_BYTES),
+                        bytes: Vec::new(),
                         writes: 0,
                     }))
                 })
@@ -551,8 +547,7 @@ fn cleanup_old_logs(cleanup: &RotationCleanup) {
 #[cfg(test)]
 mod tests {
     use super::{
-        DIRECT_ACCESS_FLUSH_INTERVAL, DIRECT_ACCESS_RECYCLED_CHUNKS, DirectCombinedAccessWriter,
-        request_spans_are_consumed,
+        DIRECT_ACCESS_FLUSH_INTERVAL, DirectCombinedAccessWriter, request_spans_are_consumed,
     };
     use std::io::Write as _;
     use std::sync::{Arc, Mutex};
@@ -610,7 +605,13 @@ mod tests {
         let output = Arc::new(Mutex::new(Vec::new()));
         let (writer, guard) =
             DirectCombinedAccessWriter::new(SharedSink(output.clone())).expect("writer");
-        assert_eq!(writer.recycled.len(), DIRECT_ACCESS_RECYCLED_CHUNKS);
+        assert!(writer.recycled.is_empty());
+        assert!(
+            writer
+                .states
+                .iter()
+                .all(|state| state.0.lock().bytes.capacity() == 0)
+        );
         writer.write(|bytes| bytes.extend_from_slice(b"first\n"));
         writer.write(|bytes| bytes.write_all(b"second\n").expect("buffer write"));
         drop(guard);

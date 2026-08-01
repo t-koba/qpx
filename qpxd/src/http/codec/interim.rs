@@ -151,12 +151,12 @@ where
                 let (request, respond) = result?;
                 let active_stream = ActiveH2Stream::new(&active_streams);
                 let stream = serve_h2_stream(
-                        request,
-                        respond,
-                        &service,
-                        body_channel_capacity,
-                        idle_timeout,
-                        active_stream,
+                    request,
+                    respond,
+                    &service,
+                    body_channel_capacity,
+                    idle_timeout,
+                    active_stream,
                 );
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
                     let reusable = if let Some(mut reusable) = reusable_primary_stream.take() {
@@ -208,7 +208,7 @@ async fn serve_h2_stream<S>(
         + Sync
         + 'static,
 {
-    let mut request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
+    let request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
         request,
         body_channel_capacity,
     ) {
@@ -219,9 +219,6 @@ async fn serve_h2_stream<S>(
             return;
         }
     };
-    request
-        .extensions_mut()
-        .insert(active_stream.downstream_load());
     let request_method = request.method().clone();
     let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
 
@@ -269,6 +266,7 @@ async fn serve_h2_stream<S>(
 
 struct ActiveH2Stream {
     active: Arc<AtomicUsize>,
+    _global: crate::http::codec::h2::GlobalActiveH2Stream,
 }
 
 impl ActiveH2Stream {
@@ -276,15 +274,12 @@ impl ActiveH2Stream {
         active.fetch_add(1, Ordering::Relaxed);
         Self {
             active: active.clone(),
+            _global: crate::http::codec::h2::GlobalActiveH2Stream::begin(),
         }
     }
 
     fn count(&self) -> usize {
         self.active.load(Ordering::Relaxed)
-    }
-
-    fn downstream_load(&self) -> crate::http::codec::h2::H2DownstreamLoad {
-        crate::http::codec::h2::H2DownstreamLoad::new(self.active.clone())
     }
 }
 
