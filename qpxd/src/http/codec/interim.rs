@@ -11,6 +11,7 @@ use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use std::future::poll_fn;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use tokio::io::AsyncReadExt;
@@ -86,7 +87,7 @@ where
         builder.enable_connect_protocol();
     }
     let mut conn = timeout(idle_timeout, builder.handshake(io)).await??;
-    let active_streams = AtomicUsize::new(0);
+    let active_streams = Arc::new(AtomicUsize::new(0));
     let mut reusable_primary_stream: Option<ReusableBoxFuture<'_, ()>> = None;
     let mut primary_stream = None;
     let mut concurrent_streams = FuturesUnordered::new();
@@ -200,14 +201,14 @@ async fn serve_h2_stream<S>(
     service: &S,
     body_channel_capacity: usize,
     idle_timeout: Duration,
-    active_stream: ActiveH2Stream<'_>,
+    active_stream: ActiveH2Stream,
 ) where
     S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
         + Send
         + Sync
         + 'static,
 {
-    let request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
+    let mut request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
         request,
         body_channel_capacity,
     ) {
@@ -218,6 +219,9 @@ async fn serve_h2_stream<S>(
             return;
         }
     };
+    request
+        .extensions_mut()
+        .insert(active_stream.downstream_load());
     let request_method = request.method().clone();
     let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
 
@@ -263,22 +267,28 @@ async fn serve_h2_stream<S>(
     }
 }
 
-struct ActiveH2Stream<'a> {
-    active: &'a AtomicUsize,
+struct ActiveH2Stream {
+    active: Arc<AtomicUsize>,
 }
 
-impl<'a> ActiveH2Stream<'a> {
-    fn new(active: &'a AtomicUsize) -> Self {
+impl ActiveH2Stream {
+    fn new(active: &Arc<AtomicUsize>) -> Self {
         active.fetch_add(1, Ordering::Relaxed);
-        Self { active }
+        Self {
+            active: active.clone(),
+        }
     }
 
     fn count(&self) -> usize {
         self.active.load(Ordering::Relaxed)
     }
+
+    fn downstream_load(&self) -> crate::http::codec::h2::H2DownstreamLoad {
+        crate::http::codec::h2::H2DownstreamLoad::new(self.active.clone())
+    }
 }
 
-impl Drop for ActiveH2Stream<'_> {
+impl Drop for ActiveH2Stream {
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::Relaxed);
     }

@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError};
 use parking_lot::Mutex;
 use qpx_core::config::{
     AccessLogConfig, AuditLogConfig, LogOutputConfig, OtelConfig, SystemLogConfig,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::time::Duration;
 use tracing_subscriber::EnvFilter;
@@ -24,6 +24,7 @@ const DIRECT_ACCESS_BUFFER_SHARDS: usize = 16;
 const DIRECT_ACCESS_QUEUE_CHUNKS: usize = 256;
 const DIRECT_ACCESS_RECYCLED_CHUNKS: usize = DIRECT_ACCESS_BUFFER_SHARDS;
 const DIRECT_ACCESS_BUSY_WRITES_PER_INTERVAL: usize = 4096;
+const DIRECT_ACCESS_THREAD_STACK_BYTES: usize = 256 * 1024;
 static NEXT_DIRECT_ACCESS_SHARD: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
@@ -67,28 +68,6 @@ impl DirectCombinedAccessWriter {
                 .send(Vec::with_capacity(DIRECT_ACCESS_BUFFER_BYTES))
                 .context("failed to initialize the recycled access-log buffer pool")?;
         }
-        let sink_thread = std::thread::Builder::new()
-            .name("qpx-access-writer".to_string())
-            .spawn(move || {
-                while let Ok(message) = receiver.recv() {
-                    match message {
-                        DirectAccessMessage::Data(mut bytes) => {
-                            if let Err(error) = sink.write_all(&bytes) {
-                                eprintln!("access log writer failed: {error}");
-                            }
-                            bytes.clear();
-                            let _ = recycled_sender.try_send(bytes);
-                        }
-                        DirectAccessMessage::Shutdown => {
-                            if let Err(error) = sink.flush() {
-                                eprintln!("access log flush failed: {error}");
-                            }
-                            break;
-                        }
-                    }
-                }
-            })
-            .context("failed to start direct access-log writer thread")?;
         let writer = Arc::new(Self {
             sender,
             recycled,
@@ -102,7 +81,41 @@ impl DirectCombinedAccessWriter {
                 .collect(),
             dropped_chunks: AtomicUsize::new(0),
         });
-        let guard = DirectCombinedAccessGuard::new(writer.clone(), sink_thread)?;
+        let thread_writer = writer.clone();
+        let sink_thread = std::thread::Builder::new()
+            .name("qpx-access-writer".to_string())
+            .stack_size(DIRECT_ACCESS_THREAD_STACK_BYTES)
+            .spawn(move || {
+                let mut previous_writes = [0; DIRECT_ACCESS_BUFFER_SHARDS];
+                let mut next_flush = std::time::Instant::now() + DIRECT_ACCESS_FLUSH_INTERVAL;
+                loop {
+                    let wait = next_flush.saturating_duration_since(std::time::Instant::now());
+                    match receiver.recv_timeout(wait) {
+                        Ok(DirectAccessMessage::Data(mut bytes)) => {
+                            if let Err(error) = sink.write_all(&bytes) {
+                                eprintln!("access log writer failed: {error}");
+                            }
+                            bytes.clear();
+                            let _ = recycled_sender.try_send(bytes);
+                        }
+                        Ok(DirectAccessMessage::Shutdown) => {
+                            if let Err(error) = sink.flush() {
+                                eprintln!("access log flush failed: {error}");
+                            }
+                            break;
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                    let now = std::time::Instant::now();
+                    if now >= next_flush {
+                        thread_writer.try_flush(&mut previous_writes);
+                        next_flush = now + DIRECT_ACCESS_FLUSH_INTERVAL;
+                    }
+                }
+            })
+            .context("failed to start direct access-log writer thread")?;
+        let guard = DirectCombinedAccessGuard::new(writer.clone(), sink_thread);
         Ok((writer, guard))
     }
 
@@ -172,8 +185,6 @@ impl DirectCombinedAccessWriter {
 #[derive(Debug)]
 struct DirectCombinedAccessGuard {
     writer: Arc<DirectCombinedAccessWriter>,
-    stop: Arc<AtomicBool>,
-    flush_thread: Option<std::thread::JoinHandle<()>>,
     sink_thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -181,40 +192,16 @@ impl DirectCombinedAccessGuard {
     fn new(
         writer: Arc<DirectCombinedAccessWriter>,
         sink_thread: std::thread::JoinHandle<()>,
-    ) -> Result<Self> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_writer = writer.clone();
-        let thread_stop = stop.clone();
-        let flush_thread = std::thread::Builder::new()
-            .name("qpx-access-flush".to_string())
-            .spawn(move || {
-                let mut previous_writes = [0; DIRECT_ACCESS_BUFFER_SHARDS];
-                while !thread_stop.load(Ordering::Acquire) {
-                    std::thread::park_timeout(DIRECT_ACCESS_FLUSH_INTERVAL);
-                    if !thread_stop.load(Ordering::Acquire) {
-                        thread_writer.try_flush(&mut previous_writes);
-                    }
-                }
-            })
-            .context("failed to start direct access-log flush thread")?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             writer,
-            stop,
-            flush_thread: Some(flush_thread),
             sink_thread: Some(sink_thread),
-        })
+        }
     }
 }
 
 impl Drop for DirectCombinedAccessGuard {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.flush_thread.take() {
-            thread.thread().unpark();
-            if thread.join().is_err() {
-                eprintln!("access log flush thread panicked");
-            }
-        }
         self.writer.flush();
         if self
             .writer
@@ -564,7 +551,8 @@ fn cleanup_old_logs(cleanup: &RotationCleanup) {
 #[cfg(test)]
 mod tests {
     use super::{
-        DIRECT_ACCESS_RECYCLED_CHUNKS, DirectCombinedAccessWriter, request_spans_are_consumed,
+        DIRECT_ACCESS_FLUSH_INTERVAL, DIRECT_ACCESS_RECYCLED_CHUNKS, DirectCombinedAccessWriter,
+        request_spans_are_consumed,
     };
     use std::io::Write as _;
     use std::sync::{Arc, Mutex};
@@ -629,5 +617,27 @@ mod tests {
 
         let output = output.lock().expect("shared sink lock");
         assert_eq!(output.as_slice(), b"first\nsecond\n");
+    }
+
+    #[test]
+    fn direct_access_writer_flushes_partial_buffers_on_interval() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (writer, guard) =
+            DirectCombinedAccessWriter::new(SharedSink(output.clone())).expect("writer");
+        writer.write(|bytes| bytes.extend_from_slice(b"periodic\n"));
+
+        let deadline = std::time::Instant::now() + DIRECT_ACCESS_FLUSH_INTERVAL * 4;
+        loop {
+            if output.lock().expect("shared sink lock").as_slice() == b"periodic\n" {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "partial access-log buffer was not flushed on schedule"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        drop(guard);
     }
 }

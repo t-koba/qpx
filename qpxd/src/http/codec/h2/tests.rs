@@ -19,9 +19,15 @@ fn scheduler_buffer_budget_preserves_single_stream_throughput_and_bounds_multipl
 }
 
 #[test]
-fn upstream_read_ahead_matches_the_transport_send_buffer() {
-    assert_eq!(H2_UPSTREAM_RESPONSE_FRAME_SIZE, 16 * 1024);
-    assert_eq!(H2_MAX_SEND_BUFFER_SIZE, H2_UPSTREAM_RESPONSE_FRAME_SIZE);
+fn upstream_read_ahead_tracks_downstream_multiplexing() {
+    let active_streams = Arc::new(AtomicUsize::new(1));
+    let load = H2DownstreamLoad::new(active_streams.clone());
+    assert_eq!(load.clone().upstream_response_frame_size(), 1024 * 1024);
+    active_streams.store(2, Ordering::Relaxed);
+    assert_eq!(load.clone().upstream_response_frame_size(), 16 * 1024);
+    active_streams.store(100, Ordering::Relaxed);
+    assert_eq!(load.upstream_response_frame_size(), 16 * 1024);
+    assert_eq!(H2_MAX_SEND_BUFFER_SIZE, 16 * 1024);
 }
 
 #[derive(Clone)]

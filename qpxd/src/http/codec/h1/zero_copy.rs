@@ -187,6 +187,7 @@ pub(super) async fn splice_tcp_exact(
     let _transfer = ZeroCopyTransferGuard::begin();
     let pipe = SplicePipe::new()?;
     let mut bytes_since_yield = 0_u64;
+    let mut waited_for_io = false;
     while remaining > 0 {
         let scheduling_quantum = zero_copy_scheduling_quantum(ZeroCopyTransferKind::Socket);
         let requested = usize::try_from(remaining.min(scheduling_quantum))
@@ -203,6 +204,7 @@ pub(super) async fn splice_tcp_exact(
                             // batch before an upstream pause can leave it to the TCP flush timer.
                             destination.set_nodelay(true)?;
                         }
+                        waited_for_io = true;
                         source.readable().await?;
                     }
                     Err(error) => return Err(error),
@@ -227,6 +229,7 @@ pub(super) async fn splice_tcp_exact(
                     }) {
                         Ok(written) => return Ok(written),
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            waited_for_io = true;
                             destination.writable().await?;
                         }
                         Err(error) => return Err(error),
@@ -252,7 +255,10 @@ pub(super) async fn splice_tcp_exact(
         bytes_since_yield = bytes_since_yield.saturating_add(moved as u64);
         if remaining > 0 && bytes_since_yield >= scheduling_quantum {
             bytes_since_yield = 0;
-            tokio::task::yield_now().await;
+            if !waited_for_io {
+                tokio::task::yield_now().await;
+            }
+            waited_for_io = false;
         }
     }
     Ok(())
