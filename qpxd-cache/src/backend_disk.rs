@@ -99,6 +99,7 @@ struct HotCacheEntry {
 
 #[derive(Clone)]
 struct RecentHotCacheEntry {
+    identity: std::sync::Arc<()>,
     namespace: std::sync::Arc<str>,
     key: std::sync::Arc<str>,
     path: PathBuf,
@@ -386,6 +387,7 @@ impl DiskCacheBackend {
             let file = open_zero_copy_source(key, &path, value.len() as u64);
             self.hot_recent_upsert(
                 RecentHotCacheEntry {
+                    identity: std::sync::Arc::new(()),
                     namespace: std::sync::Arc::from(namespace),
                     key: std::sync::Arc::from(key),
                     path,
@@ -472,6 +474,7 @@ impl DiskCacheBackend {
             return;
         }
         let recent = RecentHotCacheEntry {
+            identity: std::sync::Arc::new(()),
             namespace: std::sync::Arc::from(namespace),
             key: std::sync::Arc::from(key),
             path: path.clone(),
@@ -1174,13 +1177,8 @@ fn hot_response_sources_are_current(
         .zip(sources)
         .all(|(slot, source)| {
             recent_hot_entry_at(recent, slot).is_some_and(|current| {
-                current.namespace.as_ref() == source.namespace.as_ref()
-                    && current.key.as_ref() == source.key.as_ref()
-                    && current.expires_at_ms > now
-                    && current.path == source.path
-                    && current.body_offset == source.body_offset
-                    && current.expires_at_ms == source.expires_at_ms
-                    && same_bytes_allocation(&current.value, &source.value)
+                current.expires_at_ms > now
+                    && std::sync::Arc::ptr_eq(&current.identity, &source.identity)
             })
         })
 }
@@ -1805,10 +1803,12 @@ mod tests {
                 .expect("encode concurrently replaced metadata"),
         );
         let mut updated_recent = (**backend.hot_recent.load()).clone();
-        recent_hot_entry_mut(&mut updated_recent.shards, hot_slot("ns", variant_key))
-            .as_mut()
-            .expect("hot metadata")
-            .value = updated_metadata;
+        let updated_entry =
+            recent_hot_entry_mut(&mut updated_recent.shards, hot_slot("ns", variant_key))
+                .as_mut()
+                .expect("hot metadata");
+        updated_entry.identity = std::sync::Arc::new(());
+        updated_entry.value = updated_metadata;
         backend
             .hot_recent
             .store(std::sync::Arc::new(updated_recent));

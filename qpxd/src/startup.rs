@@ -6,7 +6,22 @@ use qpx_core::config::{Config as ProxyConfig, load_configs, load_configs_with_so
 use qpx_observability::init_logging;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 use tracing::{info, warn};
+
+fn build_runtime(worker_threads: usize, max_blocking_threads: usize) -> Result<Runtime> {
+    let mut builder = if worker_threads == 1 {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.worker_threads(worker_threads);
+        builder
+    };
+    builder
+        .max_blocking_threads(max_blocking_threads)
+        .enable_all();
+    Ok(builder.build()?)
+}
 
 pub(crate) fn run_with_runtime(
     config_paths: Vec<PathBuf>,
@@ -16,13 +31,7 @@ pub(crate) fn run_with_runtime(
     let worker_threads = crate::tcp_bindings::net::worker_threads(&config.runtime);
     let max_blocking_threads = crate::tcp_bindings::net::max_blocking_threads(&config.runtime);
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder
-        .worker_threads(worker_threads)
-        .max_blocking_threads(max_blocking_threads)
-        .enable_all();
-
-    let runtime = builder.build()?;
+    let runtime = build_runtime(worker_threads, max_blocking_threads)?;
     runtime.block_on(run(config_paths, config, http_module_registry))
 }
 
@@ -34,13 +43,7 @@ pub(crate) fn check_with_runtime(
     let worker_threads = crate::tcp_bindings::net::worker_threads(&config.runtime);
     let max_blocking_threads = crate::tcp_bindings::net::max_blocking_threads(&config.runtime);
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder
-        .worker_threads(worker_threads)
-        .max_blocking_threads(max_blocking_threads)
-        .enable_all();
-
-    let runtime = builder.build()?;
+    let runtime = build_runtime(worker_threads, max_blocking_threads)?;
     runtime.block_on(async move {
         let state = crate::runtime::RuntimeState::build_with_http_module_registry(
             config,
@@ -543,4 +546,30 @@ pub(crate) fn refresh_watches(
 
     *watched = next;
     Ok(())
+}
+
+#[cfg(test)]
+mod runtime_builder_tests {
+    use super::*;
+    use tokio::runtime::RuntimeFlavor;
+
+    #[test]
+    fn single_worker_uses_current_thread_scheduler() {
+        let runtime = build_runtime(1, 4).expect("build single-worker runtime");
+
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            RuntimeFlavor::CurrentThread
+        );
+    }
+
+    #[test]
+    fn multiple_workers_use_multi_thread_scheduler() {
+        let runtime = build_runtime(2, 4).expect("build multi-worker runtime");
+
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            RuntimeFlavor::MultiThread
+        );
+    }
 }

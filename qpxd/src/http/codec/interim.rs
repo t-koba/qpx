@@ -116,9 +116,10 @@ where
                 }
             }
         }
-        // Fair branch selection prevents a continuously ready completion queue from
-        // starving admission of new streams on a multiplexed connection.
+        // Reap completed streams before admitting more work. This keeps ready
+        // completions from retaining service futures and their response buffers.
         tokio::select! {
+            biased;
             Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
                     if !accepting_streams {
