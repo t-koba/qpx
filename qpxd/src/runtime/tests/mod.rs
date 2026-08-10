@@ -159,6 +159,26 @@ fn single_reverse_route_plan(config: Config) -> ExecutionPlan {
     }
 }
 
+#[test]
+fn combined_access_log_does_not_enable_destination_traces() {
+    let mut config = base_config();
+    config.telemetry.access_log.output.enabled = true;
+    config.telemetry.access_log.output.format = "combined".to_string();
+    let runtime = Runtime::new(config).expect("runtime");
+
+    assert!(!runtime.state().destination_trace_enabled());
+}
+
+#[test]
+fn structured_access_log_enables_destination_traces() {
+    let mut config = base_config();
+    config.telemetry.access_log.output.enabled = true;
+    config.telemetry.access_log.output.format = "json".to_string();
+    let runtime = Runtime::new(config).expect("runtime");
+
+    assert!(runtime.state().destination_trace_enabled());
+}
+
 fn temp_named_set_file(name: &str, contents: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

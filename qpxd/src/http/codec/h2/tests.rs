@@ -19,14 +19,10 @@ fn scheduler_buffer_budget_preserves_single_stream_throughput_and_bounds_multipl
 }
 
 #[test]
-fn upstream_read_ahead_scales_with_process_wide_load() {
-    assert_eq!(h2_upstream_response_frame_size_for(0), 1024 * 1024);
-    assert_eq!(h2_upstream_response_frame_size_for(1), 1024 * 1024);
-    assert_eq!(h2_upstream_response_frame_size_for(16), 1024 * 1024);
-    assert_eq!(h2_upstream_response_frame_size_for(64), 256 * 1024);
+fn upstream_read_ahead_is_bounded_to_one_transport_frame() {
     assert_eq!(
-        h2_upstream_response_frame_size_for(1024),
-        H2_MAX_SEND_BUFFER_SIZE
+        h2_upstream_response_frame_size(),
+        H2_MAX_FRAME_SIZE as usize
     );
 }
 

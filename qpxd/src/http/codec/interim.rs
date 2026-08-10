@@ -116,8 +116,9 @@ where
                 }
             }
         }
+        // Fair branch selection prevents a continuously ready completion queue from
+        // starving admission of new streams on a multiplexed connection.
         tokio::select! {
-            biased;
             Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
                     if !accepting_streams {
@@ -266,7 +267,6 @@ async fn serve_h2_stream<S>(
 
 struct ActiveH2Stream {
     active: Arc<AtomicUsize>,
-    _global: crate::http::codec::h2::GlobalActiveH2Stream,
 }
 
 impl ActiveH2Stream {
@@ -274,7 +274,6 @@ impl ActiveH2Stream {
         active.fetch_add(1, Ordering::Relaxed);
         Self {
             active: active.clone(),
-            _global: crate::http::codec::h2::GlobalActiveH2Stream::begin(),
         }
     }
 

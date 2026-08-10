@@ -21,7 +21,15 @@ pub fn take(minimum_capacity: usize) -> HeaderMap {
 
 /// Copies a header map into reusable per-thread storage.
 pub fn clone_map(source: &HeaderMap) -> HeaderMap {
-    let mut target = take(source.len());
+    clone_map_with_additional_capacity(source, 0)
+}
+
+/// Copies a header map while reserving room for known downstream additions.
+pub fn clone_map_with_additional_capacity(
+    source: &HeaderMap,
+    additional_capacity: usize,
+) -> HeaderMap {
+    let mut target = take(source.len().saturating_add(additional_capacity));
     for (name, value) in source {
         target.append(name.clone(), value.clone());
     }
@@ -71,6 +79,16 @@ mod tests {
             .map(|value| value.to_str().expect("header text"))
             .collect::<Vec<_>>();
         assert_eq!(values, ["a=1", "b=2"]);
+    }
+
+    #[test]
+    fn cloned_map_reserves_capacity_for_downstream_fields() {
+        let mut source = HeaderMap::new();
+        source.insert("x-test", HeaderValue::from_static("value"));
+
+        let cloned = clone_map_with_additional_capacity(&source, 5);
+
+        assert!(cloned.capacity().saturating_sub(cloned.len()) >= 5);
     }
 
     #[test]

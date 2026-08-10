@@ -24,36 +24,14 @@ const H2_INITIAL_STREAM_WINDOW_SIZE: u32 = 1024 * 1024;
 const H2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
 const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
 const H2_MAX_SEND_BUFFER_SIZE: usize = 16 * 1024;
-const H2_MAX_UPSTREAM_RESPONSE_FRAME_SIZE: usize = 1024 * 1024;
-const H2_UPSTREAM_RESPONSE_READ_AHEAD_TARGET_BYTES: usize = 16 * 1024 * 1024;
+const H2_UPSTREAM_RESPONSE_FRAME_SIZE: usize = H2_MAX_FRAME_SIZE as usize;
 pub(crate) const H2_MAX_CONCURRENT_STREAMS: usize = 256;
 const H2_DIRECT_SEND_BODY_MAX_BYTES: u64 = 16 * 1024;
 const H2_INITIAL_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_FRAME_SIZE as usize;
 const H2_MIN_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_SEND_BUFFER_SIZE;
-static ACTIVE_H2_STREAMS: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn h2_upstream_response_frame_size() -> usize {
-    h2_upstream_response_frame_size_for(ACTIVE_H2_STREAMS.load(Ordering::Relaxed))
-}
-
-fn h2_upstream_response_frame_size_for(active_streams: usize) -> usize {
-    (H2_UPSTREAM_RESPONSE_READ_AHEAD_TARGET_BYTES / active_streams.max(1))
-        .clamp(H2_MAX_SEND_BUFFER_SIZE, H2_MAX_UPSTREAM_RESPONSE_FRAME_SIZE)
-}
-
-pub(crate) struct GlobalActiveH2Stream;
-
-impl GlobalActiveH2Stream {
-    pub(crate) fn begin() -> Self {
-        ACTIVE_H2_STREAMS.fetch_add(1, Ordering::Relaxed);
-        Self
-    }
-}
-
-impl Drop for GlobalActiveH2Stream {
-    fn drop(&mut self) {
-        ACTIVE_H2_STREAMS.fetch_sub(1, Ordering::Relaxed);
-    }
+    H2_UPSTREAM_RESPONSE_FRAME_SIZE
 }
 
 #[derive(Clone, Copy)]

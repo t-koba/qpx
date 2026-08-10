@@ -299,7 +299,9 @@ impl RuntimeState {
 
     pub(crate) fn destination_trace_enabled(&self) -> bool {
         self.plan.limits.general.trace_enabled
-            || self.resources.access_log.output.enabled
+            || qpx_observability::access_log::access_log_response_context_required(
+                &self.resources.access_log,
+            )
             || self.resources.audit_log.output.enabled
             || qpx_observability::otel_enabled()
     }

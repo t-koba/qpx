@@ -255,7 +255,11 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
     };
     let mut response = Response::new(params.body);
     *response.status_mut() = status;
-    *response.headers_mut() = qpx_http::header_pool::clone_map(params.envelope.header_map());
+    const CACHE_RESPONSE_ADDITIONAL_HEADERS: usize = 5;
+    *response.headers_mut() = qpx_http::header_pool::clone_map_with_additional_capacity(
+        params.envelope.header_map(),
+        CACHE_RESPONSE_ADDITIONAL_HEADERS,
+    );
     response.headers_mut().remove(AGE);
     response.headers_mut().remove(CONTENT_LENGTH);
     response.headers_mut().remove(CONTENT_RANGE);
@@ -273,9 +277,9 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
     response.headers_mut().insert(AGE, age);
     response.headers_mut().insert(CACHE_HEADER, cache_status);
     let content_length = params.content_length_override.unwrap_or(params.body_len);
-    if let Ok(length) = http::HeaderValue::from_str(content_length.to_string().as_str()) {
-        response.headers_mut().insert(CONTENT_LENGTH, length);
-    }
+    response
+        .headers_mut()
+        .insert(CONTENT_LENGTH, http::HeaderValue::from(content_length));
     if let Some(content_range) = params.content_range {
         response
             .headers_mut()

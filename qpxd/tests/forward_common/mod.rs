@@ -215,6 +215,10 @@ async fn run_tcp_echo_once(listener: TcpListener, tx: oneshot::Sender<Vec<u8>>) 
     } else {
         stream.write_all(&received).await?;
     }
-    let _ = stream.shutdown().await;
+    stream.shutdown().await?;
+    // Keep the real TCP peer alive until the tunnel propagates the half-close. Dropping
+    // a socket with unread peer data can turn the graceful FIN into an abortive reset.
+    let mut trailing = Vec::new();
+    let _ = timeout(Duration::from_secs(3), stream.read_to_end(&mut trailing)).await;
     Ok(())
 }
