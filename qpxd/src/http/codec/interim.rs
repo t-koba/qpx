@@ -280,7 +280,7 @@ async fn serve_h2_stream<S>(
     let request_method = request.method().clone();
     let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
 
-    let mut service_call = Box::pin(service.call(request));
+    let mut service_call = service.call_pinned(request);
     let mut response = tokio::select! {
         biased;
         response = &mut service_call => match response {

@@ -81,7 +81,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 tokio-rustls = "0.26"
 webpki-roots = "1"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
-lru = "0.16.3"
+lru = "0.18.2"
 native-tls = { version = "0.2", features = ["alpn"] }
 tokio-native-tls = "0.3"
 x509-parser = { version = "0.18", default-features = false }
