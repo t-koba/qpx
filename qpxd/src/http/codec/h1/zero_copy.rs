@@ -24,7 +24,7 @@ const LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const LOW_CONTENTION_FILE_TRANSFER_LIMIT: usize = 64;
+const LOW_CONTENTION_FILE_TRANSFER_LIMIT: usize = 1;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ACTIVE_ZERO_COPY_TRANSFERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -445,8 +445,8 @@ mod tests {
             LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM
         );
         assert_eq!(
-            zero_copy_scheduling_quantum_for(32, ZeroCopyTransferKind::File),
-            LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM
+            zero_copy_scheduling_quantum_for(2, ZeroCopyTransferKind::File),
+            CONTENDED_FILE_ZERO_COPY_QUANTUM
         );
         assert_eq!(
             zero_copy_scheduling_quantum_for(
