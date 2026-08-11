@@ -156,7 +156,7 @@ struct HotResponseEntry {
     file: Option<std::sync::Arc<File>>,
     expires_at_ms: u64,
     source_slots: [usize; 3],
-    sources: [RecentHotCacheEntry; 3],
+    source_identities: [std::sync::Arc<()>; 3],
 }
 
 struct BodyStreamWriteOptions {
@@ -862,7 +862,7 @@ impl CacheBackend for DiskCacheBackend {
                 && hot_response_sources_are_current(
                     &recent,
                     &entry.source_slots,
-                    &entry.sources,
+                    &entry.source_identities,
                     now,
                 )
             {
@@ -892,17 +892,19 @@ impl CacheBackend for DiskCacheBackend {
         if body_entry.value.len() as u64 != envelope.body_len {
             return Ok(None);
         }
-        let sources = [
-            index_entry.clone(),
-            metadata_entry.clone(),
-            body_entry.clone(),
-        ];
-        let source_slots = std::array::from_fn(|index| {
+        let source_slots = [
+            hot_slot(index_entry.namespace.as_ref(), index_entry.key.as_ref()),
             hot_slot(
-                sources[index].namespace.as_ref(),
-                sources[index].key.as_ref(),
-            )
-        });
+                metadata_entry.namespace.as_ref(),
+                metadata_entry.key.as_ref(),
+            ),
+            hot_slot(body_entry.namespace.as_ref(), body_entry.key.as_ref()),
+        ];
+        let source_identities = [
+            index_entry.identity.clone(),
+            metadata_entry.identity.clone(),
+            body_entry.identity.clone(),
+        ];
         let entry = std::sync::Arc::new(HotResponseEntry {
             namespace: std::sync::Arc::from(namespace),
             index_key: std::sync::Arc::from(index_key),
@@ -915,7 +917,7 @@ impl CacheBackend for DiskCacheBackend {
                 .min(metadata_entry.expires_at_ms)
                 .min(body_entry.expires_at_ms),
             source_slots,
-            sources,
+            source_identities,
         });
         let candidate = hot_response_candidate(entry.as_ref());
         if candidate.is_some() {
@@ -1168,17 +1170,17 @@ fn hot_response_candidate(entry: &HotResponseEntry) -> Option<CachedResponseCand
 fn hot_response_sources_are_current(
     recent: &RecentHotCache,
     source_slots: &[usize; 3],
-    sources: &[RecentHotCacheEntry; 3],
+    source_identities: &[std::sync::Arc<()>; 3],
     now: u64,
 ) -> bool {
     source_slots
         .iter()
         .copied()
-        .zip(sources)
-        .all(|(slot, source)| {
+        .zip(source_identities)
+        .all(|(slot, source_identity)| {
             recent_hot_entry_at(recent, slot).is_some_and(|current| {
                 current.expires_at_ms > now
-                    && std::sync::Arc::ptr_eq(&current.identity, &source.identity)
+                    && std::sync::Arc::ptr_eq(&current.identity, source_identity)
             })
         })
 }

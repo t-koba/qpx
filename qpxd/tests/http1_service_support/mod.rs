@@ -5,8 +5,9 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::net::TcpListener as StdTcpListener;
+use tokio::sync::oneshot;
 
-pub fn spawn_http1_service<S>(listener: StdTcpListener, service: S)
+pub async fn spawn_http1_service<S>(listener: StdTcpListener, service: S)
 where
     S: hyper::service::Service<
             Request<Incoming>,
@@ -17,8 +18,10 @@ where
         + 'static,
     S::Future: Send + 'static,
 {
+    let (ready_tx, ready_rx) = oneshot::channel();
     tokio::spawn(async move {
         let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+        ready_tx.send(()).expect("service readiness receiver");
         loop {
             let (stream, _) = listener.accept().await.expect("accept");
             let service = service.clone();
@@ -29,4 +32,5 @@ where
             });
         }
     });
+    ready_rx.await.expect("HTTP/1 service task readiness");
 }

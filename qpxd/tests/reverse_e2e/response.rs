@@ -8,7 +8,7 @@ async fn reverse_cache_uses_http_backend_store() -> Result<()> {
     fs::create_dir_all(&state_dir)?;
     let cache_state = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
     let cache_ops = Arc::new(AtomicUsize::new(0));
-    let cache_addr = start_http_cache_backend(cache_state.clone(), cache_ops.clone())?;
+    let cache_addr = start_http_cache_backend(cache_state.clone(), cache_ops.clone()).await?;
     let origin_headers = vec![
         (
             http::header::CACHE_CONTROL,
@@ -19,8 +19,7 @@ async fn reverse_cache_uses_http_backend_store() -> Result<()> {
             http::HeaderValue::from_str(&httpdate::fmt_http_date(SystemTime::now()))?,
         ),
     ];
-    let (origin_addr, origin_hits) = start_text_backend("CACHE", origin_headers)?;
-    tokio::task::yield_now().await;
+    let (origin_addr, origin_hits) = start_text_backend("CACHE", origin_headers).await?;
 
     let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("reverse-cache.log"), |port| {
         let state_dir_yaml = yaml_quote_path(&state_dir);

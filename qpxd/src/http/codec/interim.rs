@@ -23,6 +23,21 @@ pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 // Keep request admission aligned with the protocol stream limit. This remains bounded while
 // avoiding an artificial half-capacity bottleneck for a single connection's stream fan-out.
 const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
+// Release response buffers promptly without letting a continuously ready completion queue
+// postpone admission until every previously admitted stream has finished.
+const H2_COMPLETION_BURST: usize = 8;
+
+enum H2ConnectionEvent {
+    ConcurrentStreamCompleted,
+    PrimaryStreamCompleted,
+    Accepted,
+    IdleTimeout,
+}
+
+fn prioritize_h2_admission(completions_since_admission: usize) -> bool {
+    completions_since_admission >= H2_COMPLETION_BURST
+}
+
 #[cfg(test)]
 pub(crate) async fn serve_h2_with_interim<I, S>(
     io: I,
@@ -92,6 +107,7 @@ where
     let mut primary_stream = None;
     let mut concurrent_streams = FuturesUnordered::new();
     let mut accepting_streams = true;
+    let mut completions_since_admission = 0usize;
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     loop {
@@ -116,11 +132,45 @@ where
                 }
             }
         }
-        // Reap completed streams before admitting more work. This keeps ready
-        // completions from retaining service futures and their response buffers.
-        tokio::select! {
-            biased;
-            Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+        // Reap completed streams first to release response buffers. After a bounded
+        // burst, prefer a ready admission so multiplexed requests cannot starve.
+        let mut accepted_stream = None;
+        let event = if prioritize_h2_admission(completions_since_admission) {
+            tokio::select! {
+                biased;
+                accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
+                    accepted_stream = Some(accepted);
+                    H2ConnectionEvent::Accepted
+                }
+                Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                    H2ConnectionEvent::ConcurrentStreamCompleted
+                }
+                completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
+                    let () = completed;
+                    H2ConnectionEvent::PrimaryStreamCompleted
+                }
+                () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                    H2ConnectionEvent::ConcurrentStreamCompleted
+                }
+                completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
+                    let () = completed;
+                    H2ConnectionEvent::PrimaryStreamCompleted
+                }
+                accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
+                    accepted_stream = Some(accepted);
+                    H2ConnectionEvent::Accepted
+                }
+                () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
+            }
+        };
+        match event {
+            H2ConnectionEvent::ConcurrentStreamCompleted => {
+                completions_since_admission = completions_since_admission.saturating_add(1);
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
                     if !accepting_streams {
                         break;
@@ -130,8 +180,8 @@ where
                         .reset(tokio::time::Instant::now() + idle_timeout);
                 }
             }
-            completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
-                let () = completed;
+            H2ConnectionEvent::PrimaryStreamCompleted => {
+                completions_since_admission = completions_since_admission.saturating_add(1);
                 reusable_primary_stream = primary_stream.take();
                 if !accepting_streams && concurrent_streams.is_empty() {
                     break;
@@ -142,7 +192,10 @@ where
                         .reset(tokio::time::Instant::now() + idle_timeout);
                 }
             }
-            accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
+            H2ConnectionEvent::Accepted => {
+                let accepted = accepted_stream.ok_or_else(|| {
+                    anyhow::anyhow!("accepted stream event is missing its result")
+                })?;
                 let Some(result) = accepted else {
                     accepting_streams = false;
                     if primary_stream.is_none() && concurrent_streams.is_empty() {
@@ -150,6 +203,7 @@ where
                     }
                     continue;
                 };
+                completions_since_admission = 0;
                 let (request, respond) = result?;
                 let active_stream = ActiveH2Stream::new(&active_streams);
                 let stream = serve_h2_stream(
@@ -172,7 +226,7 @@ where
                     concurrent_streams.push(Box::pin(stream));
                 }
             }
-            () = idle_timer.as_mut() => {
+            H2ConnectionEvent::IdleTimeout => {
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
                     return Ok(());
                 }
@@ -327,7 +381,7 @@ pub(crate) fn take_interim_response_heads(
 
 #[cfg(test)]
 mod tests {
-    use super::{H2_PREFACE, serve_h2_with_interim};
+    use super::{H2_COMPLETION_BURST, H2_PREFACE, prioritize_h2_admission, serve_h2_with_interim};
     use h2::Reason;
     use http::{Request, Response};
     use qpx_http::body::Body;
@@ -340,6 +394,13 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Notify;
     use tokio::time::{Duration, sleep, timeout};
+
+    #[test]
+    fn h2_admission_priority_starts_after_a_bounded_completion_burst() {
+        assert!(!prioritize_h2_admission(H2_COMPLETION_BURST - 1));
+        assert!(prioritize_h2_admission(H2_COMPLETION_BURST));
+        assert!(prioritize_h2_admission(H2_COMPLETION_BURST + 1));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn h2_server_advertises_extended_connect_when_enabled() {

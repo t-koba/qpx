@@ -67,7 +67,7 @@ async fn wait_for_counter(counter: &Arc<AtomicUsize>, expected: usize) -> Result
     ))
 }
 
-fn start_text_backend(
+async fn start_text_backend(
     body: &'static str,
     extra_headers: Vec<(http::header::HeaderName, http::HeaderValue)>,
 ) -> Result<(SocketAddr, Arc<AtomicUsize>)> {
@@ -90,11 +90,11 @@ fn start_text_backend(
             Ok::<_, Infallible>(response.body(full_body(body.clone())).unwrap())
         }
     });
-    spawn_http1_service(listener, service);
+    spawn_http1_service(listener, service).await;
     Ok((addr, hits))
 }
 
-fn start_http_cache_backend(
+async fn start_http_cache_backend(
     state: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     ops: Arc<AtomicUsize>,
 ) -> Result<SocketAddr> {
@@ -106,7 +106,7 @@ fn start_http_cache_backend(
         let ops = ops.clone();
         async move { handle_cache_backend(req, state, ops).await }
     });
-    spawn_http1_service(listener, service);
+    spawn_http1_service(listener, service).await;
     Ok(addr)
 }
 

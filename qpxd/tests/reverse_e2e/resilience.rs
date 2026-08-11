@@ -4,9 +4,9 @@ use super::*;
 async fn reverse_route_retries_and_mirrors() -> Result<()> {
     let dir = temp_dir("qpxd-reverse-route-e2e")?;
     let cfg = dir.join("reverse-route.yaml");
-    let (live_addr, live_hits) = start_text_backend("LIVE", vec![])?;
+    let (live_addr, live_hits) = start_text_backend("LIVE", vec![]).await?;
     let dead_port = reverse_support::pick_free_tcp_port()?;
-    let (mirror_addr, mirror_hits) = start_text_backend("MIRROR", vec![])?;
+    let (mirror_addr, mirror_hits) = start_text_backend("MIRROR", vec![]).await?;
 
     let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("reverse-route.log"), |port| {
         format!(
