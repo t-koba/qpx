@@ -99,7 +99,6 @@ struct HotCacheEntry {
 
 #[derive(Clone)]
 struct RecentHotCacheEntry {
-    identity: std::sync::Arc<()>,
     namespace: std::sync::Arc<str>,
     key: std::sync::Arc<str>,
     path: PathBuf,
@@ -111,6 +110,7 @@ struct RecentHotCacheEntry {
 
 #[derive(Clone)]
 struct RecentHotCache {
+    identity: std::sync::Arc<()>,
     shards: Vec<std::sync::Arc<RecentHotCacheShard>>,
 }
 
@@ -122,6 +122,7 @@ struct RecentHotCacheShard {
 impl Default for RecentHotCache {
     fn default() -> Self {
         Self {
+            identity: std::sync::Arc::new(()),
             shards: (0..DISK_CACHE_RECENT_SHARDS)
                 .map(|_| {
                     std::sync::Arc::new(RecentHotCacheShard {
@@ -155,8 +156,7 @@ struct HotResponseEntry {
     body_offset: u64,
     file: Option<std::sync::Arc<File>>,
     expires_at_ms: u64,
-    source_slots: [usize; 3],
-    source_identities: [std::sync::Arc<()>; 3],
+    source_identity: std::sync::Arc<()>,
 }
 
 struct BodyStreamWriteOptions {
@@ -387,7 +387,6 @@ impl DiskCacheBackend {
             let file = open_zero_copy_source(key, &path, value.len() as u64);
             self.hot_recent_upsert(
                 RecentHotCacheEntry {
-                    identity: std::sync::Arc::new(()),
                     namespace: std::sync::Arc::from(namespace),
                     key: std::sync::Arc::from(key),
                     path,
@@ -474,7 +473,6 @@ impl DiskCacheBackend {
             return;
         }
         let recent = RecentHotCacheEntry {
-            identity: std::sync::Arc::new(()),
             namespace: std::sync::Arc::from(namespace),
             key: std::sync::Arc::from(key),
             path: path.clone(),
@@ -547,7 +545,10 @@ impl DiskCacheBackend {
             }
             let slot = hot_slot(entry.namespace.as_ref(), entry.key.as_ref());
             *recent_hot_entry_mut(&mut shards, slot) = Some(entry.clone());
-            RecentHotCache { shards }
+            RecentHotCache {
+                identity: std::sync::Arc::new(()),
+                shards,
+            }
         });
     }
 
@@ -569,7 +570,10 @@ impl DiskCacheBackend {
                     *recent_hot_entry_mut(&mut shards, slot) = None;
                 }
             }
-            RecentHotCache { shards }
+            RecentHotCache {
+                identity: std::sync::Arc::new(()),
+                shards,
+            }
         });
     }
 
@@ -853,18 +857,13 @@ impl CacheBackend for DiskCacheBackend {
         let slot_index = hot_slot(namespace, index_key);
         let now = now_ms();
         let slot = &self.hot_responses[slot_index];
-        if let Some(entry) = slot.load_full()
+        if let Some(entry) = slot.load().as_ref()
             && entry.namespace.as_ref() == namespace
             && entry.index_key.as_ref() == index_key
         {
             let recent = self.hot_recent.load();
             if entry.expires_at_ms > now
-                && hot_response_sources_are_current(
-                    &recent,
-                    &entry.source_slots,
-                    &entry.source_identities,
-                    now,
-                )
+                && std::sync::Arc::ptr_eq(&recent.identity, &entry.source_identity)
             {
                 return Ok(hot_response_candidate(entry.as_ref()));
             }
@@ -892,19 +891,6 @@ impl CacheBackend for DiskCacheBackend {
         if body_entry.value.len() as u64 != envelope.body_len {
             return Ok(None);
         }
-        let source_slots = [
-            hot_slot(index_entry.namespace.as_ref(), index_entry.key.as_ref()),
-            hot_slot(
-                metadata_entry.namespace.as_ref(),
-                metadata_entry.key.as_ref(),
-            ),
-            hot_slot(body_entry.namespace.as_ref(), body_entry.key.as_ref()),
-        ];
-        let source_identities = [
-            index_entry.identity.clone(),
-            metadata_entry.identity.clone(),
-            body_entry.identity.clone(),
-        ];
         let entry = std::sync::Arc::new(HotResponseEntry {
             namespace: std::sync::Arc::from(namespace),
             index_key: std::sync::Arc::from(index_key),
@@ -916,8 +902,7 @@ impl CacheBackend for DiskCacheBackend {
                 .expires_at_ms
                 .min(metadata_entry.expires_at_ms)
                 .min(body_entry.expires_at_ms),
-            source_slots,
-            source_identities,
+            source_identity: recent.identity.clone(),
         });
         let candidate = hot_response_candidate(entry.as_ref());
         if candidate.is_some() {
@@ -1165,24 +1150,6 @@ fn hot_response_candidate(entry: &HotResponseEntry) -> Option<CachedResponseCand
         entry.body_offset,
     )?;
     Some(CachedResponseCandidate::new(entry.envelope.clone(), body))
-}
-
-fn hot_response_sources_are_current(
-    recent: &RecentHotCache,
-    source_slots: &[usize; 3],
-    source_identities: &[std::sync::Arc<()>; 3],
-    now: u64,
-) -> bool {
-    source_slots
-        .iter()
-        .copied()
-        .zip(source_identities)
-        .all(|(slot, source_identity)| {
-            recent_hot_entry_at(recent, slot).is_some_and(|current| {
-                current.expires_at_ms > now
-                    && std::sync::Arc::ptr_eq(&current.identity, source_identity)
-            })
-        })
 }
 
 fn hot_slot(namespace: &str, key: &str) -> usize {
@@ -1809,8 +1776,8 @@ mod tests {
             recent_hot_entry_mut(&mut updated_recent.shards, hot_slot("ns", variant_key))
                 .as_mut()
                 .expect("hot metadata");
-        updated_entry.identity = std::sync::Arc::new(());
         updated_entry.value = updated_metadata;
+        updated_recent.identity = std::sync::Arc::new(());
         backend
             .hot_recent
             .store(std::sync::Arc::new(updated_recent));

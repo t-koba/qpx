@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
 
+const HOT_BUCKET_LAST_SEEN_REFRESH_NANOS: u64 = 1_000_000_000;
+
 #[derive(Debug, Clone)]
 struct TokenBucket {
     capacity: f64,
@@ -283,10 +285,7 @@ impl RateLimiter {
         if let Some(cached) = cached.as_ref()
             && cached.key == key
         {
-            cached
-                .entry
-                .last_seen_nanos
-                .store(now_nanos, Ordering::Relaxed);
+            refresh_hot_bucket_last_seen(&cached.entry, now_nanos);
             return operation(&cached.entry.bucket);
         }
         drop(cached);
@@ -343,6 +342,20 @@ impl RateLimiter {
     }
 }
 
+fn refresh_hot_bucket_last_seen(entry: &BucketEntry, now_nanos: u64) {
+    let current = entry.last_seen_nanos.load(Ordering::Relaxed);
+    if current > now_nanos {
+        return;
+    }
+    let retain_until = now_nanos.saturating_add(HOT_BUCKET_LAST_SEEN_REFRESH_NANOS);
+    let _ = entry.last_seen_nanos.compare_exchange(
+        current,
+        retain_until,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+}
+
 #[cfg(test)]
 mod atomic_tests {
     use super::*;
@@ -377,5 +390,27 @@ mod atomic_tests {
         assert!(AtomicGcra::new(10.0, 7.0).is_none());
         let state = BucketState::new(10.0, 7.0, Instant::now());
         assert!(matches!(state, BucketState::Locked(_)));
+    }
+
+    #[test]
+    fn hot_bucket_last_seen_refresh_is_amortized_and_conservative() {
+        let entry = BucketEntry {
+            bucket: BucketState::new(1.0, 1.0, Instant::now()),
+            last_seen_nanos: AtomicU64::new(0),
+        };
+        let now = 123;
+
+        refresh_hot_bucket_last_seen(&entry, now);
+        let retained = entry.last_seen_nanos.load(Ordering::Relaxed);
+        assert_eq!(retained, now + HOT_BUCKET_LAST_SEEN_REFRESH_NANOS);
+
+        refresh_hot_bucket_last_seen(&entry, now + 1);
+        assert_eq!(entry.last_seen_nanos.load(Ordering::Relaxed), retained);
+
+        refresh_hot_bucket_last_seen(&entry, retained);
+        assert_eq!(
+            entry.last_seen_nanos.load(Ordering::Relaxed),
+            retained + HOT_BUCKET_LAST_SEEN_REFRESH_NANOS
+        );
     }
 }

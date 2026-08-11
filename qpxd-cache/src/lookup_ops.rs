@@ -43,10 +43,9 @@ pub async fn lookup(
 
     let namespace = cache_namespace(policy, "default");
     if can_use_hot_response_candidate(request_method, &req) {
-        let primary = key.primary_hash_arc();
-        let storage_key = super::vary::index_storage_key(primary.as_ref());
+        let storage_key = key.primary_index_storage_key_arc();
         if let Some(candidate) = backend
-            .get_response_candidate(namespace, storage_key.as_str())
+            .get_response_candidate(namespace, storage_key.as_ref())
             .await?
             && matches_vary(
                 request_headers,

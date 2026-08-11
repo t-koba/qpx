@@ -25,7 +25,7 @@ pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
 // Release response buffers promptly without letting a continuously ready completion queue
 // postpone admission until every previously admitted stream has finished.
-const H2_COMPLETION_BURST: usize = 8;
+const H2_COMPLETION_BURST: usize = 1;
 
 enum H2ConnectionEvent {
     ConcurrentStreamCompleted,
@@ -132,7 +132,9 @@ where
                 }
             }
         }
-        // Reap completed streams first to release response buffers. After a bounded
+        // Reap completed streams first to release response buffers. The reusable primary
+        // future sits outside FuturesUnordered, so poll it before the concurrent completion
+        // queue to give it the same bounded progress guarantee. After a bounded completion
         // burst, prefer a ready admission so multiplexed requests cannot starve.
         let mut accepted_stream = None;
         let event = if prioritize_h2_admission(completions_since_admission) {
@@ -142,24 +144,24 @@ where
                     accepted_stream = Some(accepted);
                     H2ConnectionEvent::Accepted
                 }
-                Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
-                    H2ConnectionEvent::ConcurrentStreamCompleted
-                }
                 completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
                     let () = completed;
                     H2ConnectionEvent::PrimaryStreamCompleted
+                }
+                Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                    H2ConnectionEvent::ConcurrentStreamCompleted
                 }
                 () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
             }
         } else {
             tokio::select! {
                 biased;
-                Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
-                    H2ConnectionEvent::ConcurrentStreamCompleted
-                }
                 completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
                     let () = completed;
                     H2ConnectionEvent::PrimaryStreamCompleted
+                }
+                Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                    H2ConnectionEvent::ConcurrentStreamCompleted
                 }
                 accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
                     accepted_stream = Some(accepted);

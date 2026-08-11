@@ -229,6 +229,7 @@ pub struct CacheRequestKey {
     pub authority: std::sync::Arc<str>,
     pub path_and_query: std::sync::Arc<str>,
     pub content_digest: Option<std::sync::Arc<str>>,
+    pub(crate) primary_index_storage_key: std::sync::Arc<OnceLock<std::sync::Arc<str>>>,
 }
 
 #[derive(Debug)]

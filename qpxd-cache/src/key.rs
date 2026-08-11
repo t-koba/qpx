@@ -115,6 +115,7 @@ impl CacheRequestKey {
             authority: self.authority.clone(),
             path_and_query: self.path_and_query.clone(),
             content_digest: self.content_digest.clone(),
+            primary_index_storage_key: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -136,6 +137,7 @@ impl CacheRequestKey {
             authority,
             path_and_query,
             content_digest: None,
+            primary_index_storage_key: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -152,6 +154,16 @@ impl CacheRequestKey {
             return primary_hash;
         }
         Arc::from(self.compute_primary_hash())
+    }
+
+    pub(crate) fn primary_index_storage_key_arc(&self) -> Arc<str> {
+        self.primary_index_storage_key
+            .get_or_init(|| {
+                Arc::from(super::vary::index_storage_key(
+                    self.primary_hash_arc().as_ref(),
+                ))
+            })
+            .clone()
     }
 
     fn compute_primary_hash(&self) -> String {
@@ -283,6 +295,22 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(
             &first.primary_hash_arc(),
             &second.primary_hash_arc()
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &first.primary_index_storage_key_arc(),
+            &second.primary_index_storage_key_arc()
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &first.primary_index_storage_key_arc(),
+            &first
+                .with_content_digest("sha-256:body")
+                .primary_index_storage_key_arc()
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            &first.primary_index_storage_key_arc(),
+            &first
+                .with_method_group("HEAD")
+                .primary_index_storage_key_arc()
         ));
 
         let other_host = Request::builder()

@@ -20,7 +20,11 @@ const LOW_CONTENTION_ZERO_COPY_QUANTUM: u64 = 8 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const BALANCED_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const FILE_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
+const LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const LOW_CONTENTION_FILE_TRANSFER_LIMIT: usize = 64;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ACTIVE_ZERO_COPY_TRANSFERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -68,7 +72,10 @@ fn zero_copy_scheduling_quantum_for(
         (ZeroCopyTransferKind::Socket, 0..=1) => LOW_CONTENTION_ZERO_COPY_QUANTUM,
         #[cfg(target_os = "linux")]
         (ZeroCopyTransferKind::Socket, _) => BALANCED_ZERO_COPY_QUANTUM,
-        (ZeroCopyTransferKind::File, _) => FILE_ZERO_COPY_QUANTUM,
+        (ZeroCopyTransferKind::File, 0..=LOW_CONTENTION_FILE_TRANSFER_LIMIT) => {
+            LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM
+        }
+        (ZeroCopyTransferKind::File, _) => CONTENDED_FILE_ZERO_COPY_QUANTUM,
     }
 }
 
@@ -435,11 +442,18 @@ mod tests {
         );
         assert_eq!(
             zero_copy_scheduling_quantum_for(1, ZeroCopyTransferKind::File),
-            FILE_ZERO_COPY_QUANTUM
+            LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM
         );
         assert_eq!(
             zero_copy_scheduling_quantum_for(32, ZeroCopyTransferKind::File),
-            FILE_ZERO_COPY_QUANTUM
+            LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM
+        );
+        assert_eq!(
+            zero_copy_scheduling_quantum_for(
+                LOW_CONTENTION_FILE_TRANSFER_LIMIT + 1,
+                ZeroCopyTransferKind::File,
+            ),
+            CONTENDED_FILE_ZERO_COPY_QUANTUM
         );
         #[cfg(target_os = "linux")]
         assert_eq!(
