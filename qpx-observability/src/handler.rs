@@ -1,6 +1,10 @@
 use std::future::Future;
 use std::pin::Pin;
 
+/// Heap-allocated request future used by multiplexed transports.
+pub type BoxRequestFuture<'a, Response, Error> =
+    Pin<Box<dyn Future<Output = Result<Response, Error>> + Send + 'a>>;
+
 /// Minimal async request handler trait.
 pub trait RequestHandler<Request>: Send + Sync {
     /// Response produced by the handler.
@@ -22,7 +26,7 @@ pub trait RequestHandler<Request>: Send + Sync {
     fn call_pinned<'a>(
         &'a self,
         request: Request,
-    ) -> Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'a>>
+    ) -> BoxRequestFuture<'a, Self::Response, Self::Error>
     where
         Request: 'a,
     {

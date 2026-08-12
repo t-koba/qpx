@@ -414,6 +414,11 @@ async fn handle_tls_connection(
                 .collect::<Vec<_>>(),
         )
     });
+    // Coalesce plaintext protocol frames after the handshake so rustls can
+    // encrypt adjacent small writes as one record. Wrapping the TCP stream
+    // below rustls would only combine already-encrypted records and would not
+    // avoid their per-record encryption and allocation costs.
+    let tls_stream = crate::reverse::tls::AdaptiveWriteCoalescer::new(tls_stream);
     let header_read_timeout = Duration::from_millis(
         reverse
             .runtime

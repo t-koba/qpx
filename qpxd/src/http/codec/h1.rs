@@ -46,7 +46,7 @@ pub(crate) async fn send_http1_response_with_interim_tcp(
     body_read_timeout: Duration,
     head_buf: &mut BytesMut,
 ) -> Result<bool> {
-    let mut zero_copy = ZeroCopySocket::for_tcp(writer);
+    let zero_copy = ZeroCopySocket::for_tcp(writer);
     response::send_http1_response_with_interim_zero_copy(
         writer,
         request_version,
@@ -56,7 +56,7 @@ pub(crate) async fn send_http1_response_with_interim_tcp(
         request_keep_alive,
         body_read_timeout,
         head_buf,
-        zero_copy.as_mut(),
+        zero_copy.as_ref(),
     )
     .await
 }
@@ -203,7 +203,7 @@ where
     let ServeHttp1PartsOptions {
         header_read_timeout,
         body_channel_capacity,
-        mut zero_copy,
+        zero_copy,
         reunite,
     } = options;
     let mut reunite = Some(reunite);
@@ -327,7 +327,7 @@ where
             parsed.keep_alive,
             header_read_timeout,
             &mut response_head_buf,
-            zero_copy.as_mut(),
+            zero_copy.as_ref(),
         )
         .await?;
 

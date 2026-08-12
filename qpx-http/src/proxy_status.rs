@@ -7,6 +7,8 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 use std::cell::RefCell;
 use thiserror::Error;
 
+static PROXY_STATUS: HeaderName = HeaderName::from_static("proxy-status");
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProxyStatusError {
     #[error("Proxy-Status is not a valid RFC 9651 List: {0}")]
@@ -23,13 +25,12 @@ pub fn append_proxy_status(
     headers: &mut HeaderMap,
     proxy_identifier: &str,
 ) -> Result<(), ProxyStatusError> {
-    let name = HeaderName::from_static("proxy-status");
-    if !headers.contains_key(&name) && is_sfv_token(proxy_identifier.as_bytes()) {
+    if !headers.contains_key(&PROXY_STATUS) && is_sfv_token(proxy_identifier.as_bytes()) {
         let value = proxy_identifier_value(proxy_identifier)?;
-        headers.insert(name, value);
+        headers.insert(PROXY_STATUS.clone(), value);
         return Ok(());
     }
-    let mut list = parse_list_fields(headers, &name)
+    let mut list = parse_list_fields(headers, &PROXY_STATUS)
         .map_err(|error| ProxyStatusError::StructuredField(error.to_string()))?
         .unwrap_or_default();
     for entry in &list {
@@ -53,9 +54,9 @@ pub fn append_proxy_status(
     let value = serializer
         .finish()
         .ok_or(ProxyStatusError::InvalidHeaderValue)?;
-    headers.remove(&name);
+    headers.remove(&PROXY_STATUS);
     headers.insert(
-        name,
+        PROXY_STATUS.clone(),
         HeaderValue::from_str(&value).map_err(|_| ProxyStatusError::InvalidHeaderValue)?,
     );
     Ok(())

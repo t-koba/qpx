@@ -4,6 +4,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 pub(super) fn record_dispatch_outcome(kind: ProxyKind, outcome: DispatchOutcome) {
+    if !qpx_observability::metrics_enabled() {
+        return;
+    }
     let kind_label = kind.as_str();
     match outcome.as_str() {
         "http_guard_reject" => {

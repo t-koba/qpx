@@ -17,12 +17,13 @@
     "min_total_cpu_efficiency_ratio": 1.25
   },
   "metric": "multi_axis_total_system_streaming_dominance",
+  "resource_measurement": "sampled_workload_peak_v1",
   "stability": {
     "competitive_frontier_total_ratio": 1.25,
     "max_qpx_total_sample_spread_ratio": 1.1,
     "max_reference_total_sample_spread_ratio": 1.25
   },
-  "schema_version": 2,
+  "schema_version": 3,
   "slow": {
     "max_first_byte_ratio": 2.0,
     "max_gap_ratio": 1.5,

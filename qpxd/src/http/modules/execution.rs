@@ -408,6 +408,10 @@ impl HttpModuleExecution {
         Self::Active(Box::new(ActiveHttpModuleExecution { chain, context }))
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
     #[cfg(test)]
     pub(super) fn has_context(&self) -> bool {
         matches!(self, Self::Active(_))

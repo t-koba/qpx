@@ -57,6 +57,8 @@ pub struct DiskCacheBackend {
     hot_max_bytes: u64,
     hot_max_object_bytes: u64,
     hot_recent: std::sync::Arc<ArcSwap<RecentHotCache>>,
+    hot_recent_update: std::sync::Arc<std::sync::Mutex<()>>,
+    hot_recent_generation: std::sync::Arc<AtomicU64>,
     decoded_variants: std::sync::Arc<Vec<ArcSwapOption<DecodedVariantIndexEntry>>>,
     decoded_metadata: std::sync::Arc<Vec<ArcSwapOption<DecodedMetadataEntry>>>,
     hot_responses: std::sync::Arc<Vec<ArcSwapOption<HotResponseEntry>>>,
@@ -110,7 +112,6 @@ struct RecentHotCacheEntry {
 
 #[derive(Clone)]
 struct RecentHotCache {
-    identity: std::sync::Arc<()>,
     shards: Vec<std::sync::Arc<RecentHotCacheShard>>,
 }
 
@@ -122,7 +123,6 @@ struct RecentHotCacheShard {
 impl Default for RecentHotCache {
     fn default() -> Self {
         Self {
-            identity: std::sync::Arc::new(()),
             shards: (0..DISK_CACHE_RECENT_SHARDS)
                 .map(|_| {
                     std::sync::Arc::new(RecentHotCacheShard {
@@ -156,7 +156,33 @@ struct HotResponseEntry {
     body_offset: u64,
     file: Option<std::sync::Arc<File>>,
     expires_at_ms: u64,
-    source_identity: std::sync::Arc<()>,
+    source_generation: u64,
+}
+
+struct HotRecentUpdateGuard<'a> {
+    _writer: std::sync::MutexGuard<'a, ()>,
+    generation: &'a AtomicU64,
+    next_stable_generation: u64,
+}
+
+impl<'a> HotRecentUpdateGuard<'a> {
+    fn acquire(writer: &'a std::sync::Mutex<()>, generation: &'a AtomicU64) -> Self {
+        let writer = writer.lock().expect("hot recent update lock poisoned");
+        let stable_generation = generation.fetch_add(1, Ordering::AcqRel);
+        debug_assert_eq!(stable_generation & 1, 0);
+        Self {
+            _writer: writer,
+            generation,
+            next_stable_generation: stable_generation.wrapping_add(2),
+        }
+    }
+}
+
+impl Drop for HotRecentUpdateGuard<'_> {
+    fn drop(&mut self) {
+        self.generation
+            .store(self.next_stable_generation, Ordering::Release);
+    }
 }
 
 struct BodyStreamWriteOptions {
@@ -231,6 +257,8 @@ impl DiskCacheBackend {
             hot_max_object_bytes: (cfg.max_object_bytes as u64)
                 .min(DISK_CACHE_HOT_MAX_OBJECT_BYTES),
             hot_recent: std::sync::Arc::new(ArcSwap::from_pointee(RecentHotCache::default())),
+            hot_recent_update: std::sync::Arc::new(std::sync::Mutex::new(())),
+            hot_recent_generation: std::sync::Arc::new(AtomicU64::new(0)),
             decoded_variants: std::sync::Arc::new(decoded_slots()),
             decoded_metadata: std::sync::Arc::new(decoded_slots()),
             hot_responses: std::sync::Arc::new(decoded_slots()),
@@ -532,6 +560,8 @@ impl DiskCacheBackend {
     }
 
     fn hot_recent_upsert(&self, entry: RecentHotCacheEntry, removed: &[PathBuf]) {
+        let _update =
+            HotRecentUpdateGuard::acquire(&self.hot_recent_update, &self.hot_recent_generation);
         self.hot_recent.rcu(|current| {
             let mut shards = current.shards.clone();
             if !removed.is_empty() {
@@ -545,10 +575,7 @@ impl DiskCacheBackend {
             }
             let slot = hot_slot(entry.namespace.as_ref(), entry.key.as_ref());
             *recent_hot_entry_mut(&mut shards, slot) = Some(entry.clone());
-            RecentHotCache {
-                identity: std::sync::Arc::new(()),
-                shards,
-            }
+            RecentHotCache { shards }
         });
     }
 
@@ -563,6 +590,8 @@ impl DiskCacheBackend {
         {
             return;
         }
+        let _update =
+            HotRecentUpdateGuard::acquire(&self.hot_recent_update, &self.hot_recent_generation);
         self.hot_recent.rcu(|current| {
             let mut shards = current.shards.clone();
             for slot in 0..DISK_CACHE_RECENT_ENTRIES {
@@ -570,10 +599,7 @@ impl DiskCacheBackend {
                     *recent_hot_entry_mut(&mut shards, slot) = None;
                 }
             }
-            RecentHotCache {
-                identity: std::sync::Arc::new(()),
-                shards,
-            }
+            RecentHotCache { shards }
         });
     }
 
@@ -849,24 +875,33 @@ impl CacheBackend for DiskCacheBackend {
             .collect()
     }
 
-    async fn get_response_candidate(
+    fn get_response_candidate(
         &self,
         namespace: &str,
         index_key: &str,
+        now: u64,
     ) -> Result<Option<CachedResponseCandidate>> {
         let slot_index = hot_slot(namespace, index_key);
-        let now = now_ms();
         let slot = &self.hot_responses[slot_index];
-        if let Some(entry) = slot.load().as_ref()
+        let generation = self.hot_recent_generation.load(Ordering::Acquire);
+        if generation & 1 != 0 {
+            return Ok(None);
+        }
+        let cached = slot.load();
+        if let Some(entry) = cached.as_ref()
             && entry.namespace.as_ref() == namespace
             && entry.index_key.as_ref() == index_key
+            && entry.source_generation == generation
+            && entry.expires_at_ms > now
+            && self.hot_recent_generation.load(Ordering::Acquire) == generation
         {
-            let recent = self.hot_recent.load();
-            if entry.expires_at_ms > now
-                && std::sync::Arc::ptr_eq(&recent.identity, &entry.source_identity)
-            {
-                return Ok(hot_response_candidate(entry.as_ref()));
-            }
+            return Ok(hot_response_candidate(entry.as_ref()));
+        }
+        drop(cached);
+        if self.hot_recent_generation.load(Ordering::Acquire) != generation {
+            return Ok(None);
+        }
+        if slot.load().is_some() {
             slot.store(None);
         }
 
@@ -902,9 +937,12 @@ impl CacheBackend for DiskCacheBackend {
                 .expires_at_ms
                 .min(metadata_entry.expires_at_ms)
                 .min(body_entry.expires_at_ms),
-            source_identity: recent.identity.clone(),
+            source_generation: generation,
         });
         let candidate = hot_response_candidate(entry.as_ref());
+        if self.hot_recent_generation.load(Ordering::Acquire) != generation {
+            return Ok(None);
+        }
         if candidate.is_some() {
             slot.store(Some(entry));
         }
@@ -1756,8 +1794,7 @@ mod tests {
             .expect("put index");
 
         let mut first = backend
-            .get_response_candidate("ns", "index")
-            .await
+            .get_response_candidate("ns", "index", now_ms())
             .expect("get candidate")
             .expect("candidate");
         assert_eq!(first.envelope.status, 200);
@@ -1777,13 +1814,23 @@ mod tests {
                 .as_mut()
                 .expect("hot metadata");
         updated_entry.value = updated_metadata;
-        updated_recent.identity = std::sync::Arc::new(());
-        backend
-            .hot_recent
-            .store(std::sync::Arc::new(updated_recent));
+        {
+            let _update = HotRecentUpdateGuard::acquire(
+                &backend.hot_recent_update,
+                &backend.hot_recent_generation,
+            );
+            backend
+                .hot_recent
+                .store(std::sync::Arc::new(updated_recent));
+            assert!(
+                backend
+                    .get_response_candidate("ns", "index", now_ms())
+                    .expect("get candidate during replacement")
+                    .is_none()
+            );
+        }
         let raced_replacement = backend
-            .get_response_candidate("ns", "index")
-            .await
+            .get_response_candidate("ns", "index", now_ms())
             .expect("get concurrently replaced candidate")
             .expect("concurrently replaced candidate");
         assert_eq!(raced_replacement.envelope.status, 201);
@@ -1800,8 +1847,7 @@ mod tests {
             .await
             .expect("replace metadata");
         let replaced = backend
-            .get_response_candidate("ns", "index")
-            .await
+            .get_response_candidate("ns", "index", now_ms())
             .expect("get replaced candidate")
             .expect("replaced candidate");
         assert_eq!(replaced.envelope.status, 202);
@@ -1812,8 +1858,7 @@ mod tests {
             .expect("delete body");
         assert!(
             backend
-                .get_response_candidate("ns", "index")
-                .await
+                .get_response_candidate("ns", "index", now_ms())
                 .expect("get deleted candidate")
                 .is_none()
         );

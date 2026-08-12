@@ -169,14 +169,25 @@ def require_valid_sample(record):
         fail(f"proxy comparison record for {proxy} uses an unsupported aggregation")
     if record.get("sampling_order") != "round_robin_interleaved":
         fail(f"proxy comparison record for {proxy} uses an unsupported sampling order")
-    if positive_int(record, "benchmark_schema_version") != 3:
+    if positive_int(record, "benchmark_schema_version") != 4:
         fail(f"proxy comparison record for {proxy} uses an unsupported benchmark schema")
+    if record.get("resource_measurement") != "sampled_workload_peak_v1":
+        fail(f"proxy comparison record for {proxy} uses an unsupported resource measurement")
     positive_int(record, "backend_workers")
     positive_int(record, "health_check_interval_ms")
     positive_int(record, "logical_cpus")
     if record.get("kernel_resource_metrics") is not True:
         fail(f"proxy comparison record for {proxy} is missing Linux kernel resource metrics")
-    positive_int(record, "fd_peak")
+    rss_baseline_kb = positive_int(record, "rss_baseline_kb")
+    rss_peak_kb = positive_int(record, "rss_peak_kb")
+    rss_growth_kb = nonnegative_int(record, "rss_growth_kb")
+    fd_baseline = positive_int(record, "fd_baseline")
+    fd_peak = positive_int(record, "fd_peak")
+    fd_growth = nonnegative_int(record, "fd_growth")
+    if rss_peak_kb < rss_baseline_kb or rss_growth_kb != rss_peak_kb - rss_baseline_kb:
+        fail(f"proxy comparison record for {proxy} has inconsistent RSS measurements")
+    if fd_peak < fd_baseline or fd_growth != fd_peak - fd_baseline:
+        fail(f"proxy comparison record for {proxy} has inconsistent FD measurements")
     if nonnegative_int(record, "complete_requests") != nonnegative_int(record, "requests"):
         fail(f"proxy comparison record for {proxy} did not complete all requests")
     connect_errors = nonnegative_int(record, "connect_errors")
@@ -301,18 +312,22 @@ def collect_ratios(records, target_keys=None):
         }
         external_best_p99_ms = min(external_latency_p99_ms.values())
         p99_latency_ratio = qpxd_p99_ms / external_best_p99_ms
-        qpxd_rss_peak_kb = number(proxies["qpxd"], "rss_peak_kb")
+        qpxd_rss_peak_kb = nonnegative_number(proxies["qpxd"], "rss_peak_kb")
         external_rss_peak_kb = {
-            proxy: number(proxies[proxy], "rss_peak_kb") for proxy in EXTERNAL_PROXIES
+            proxy: nonnegative_number(proxies[proxy], "rss_peak_kb")
+            for proxy in EXTERNAL_PROXIES
         }
         external_best_rss_peak_kb = min(external_rss_peak_kb.values())
-        rss_peak_ratio = qpxd_rss_peak_kb / external_best_rss_peak_kb
-        qpxd_fd_peak = number(proxies["qpxd"], "fd_peak")
+        rss_peak_ratio = lower_is_better_ratio(
+            qpxd_rss_peak_kb, external_best_rss_peak_kb
+        )
+        qpxd_fd_peak = nonnegative_number(proxies["qpxd"], "fd_peak")
         external_fd_peak = {
-            proxy: number(proxies[proxy], "fd_peak") for proxy in EXTERNAL_PROXIES
+            proxy: nonnegative_number(proxies[proxy], "fd_peak")
+            for proxy in EXTERNAL_PROXIES
         }
         external_best_fd_peak = min(external_fd_peak.values())
-        fd_peak_ratio = qpxd_fd_peak / external_best_fd_peak
+        fd_peak_ratio = lower_is_better_ratio(qpxd_fd_peak, external_best_fd_peak)
         qpxd_scheduler_queue_delay = nonnegative_number(
             proxies["qpxd"], "scheduler_queue_delay_us_per_request"
         )
@@ -397,8 +412,9 @@ if MODE == "generate":
     threshold = parse_threshold(THRESHOLD_ARG, DEFAULT_THRESHOLD)
     baselines = collect_ratios(records)
     baseline = {
-        "schema_version": 3,
+        "schema_version": 4,
         "metric": METRIC,
+        "resource_measurement": "sampled_workload_peak_v1",
         "degradation_threshold": threshold,
         "baselines": baselines,
     }
@@ -415,17 +431,24 @@ if MODE != "compare":
 with open(BASELINE_PATH, "r", encoding="utf-8") as handle:
     baseline = json.load(handle)
 
-if baseline.get("schema_version") != 3:
+baseline_schema = baseline.get("schema_version")
+if baseline_schema not in (3, 4):
     fail("unsupported proxy baseline schema")
 if baseline.get("metric") != METRIC:
     fail("proxy baseline metric does not match this checker")
+if baseline_schema == 4 and baseline.get("resource_measurement") != "sampled_workload_peak_v1":
+    fail("proxy baseline schema 4 uses an unsupported resource measurement")
+if baseline_schema == 3 and "resource_measurement" in baseline:
+    fail("proxy baseline schema 3 must not claim a resource measurement")
 
 with open(OBJECTIVES_PATH, "r", encoding="utf-8") as handle:
     objectives = json.load(handle)
-if objectives.get("schema_version") != 1:
+if objectives.get("schema_version") != 2:
     fail("unsupported proxy performance objectives schema")
 if objectives.get("metric") != METRIC:
     fail("proxy performance objectives metric does not match this checker")
+if objectives.get("resource_measurement") != "sampled_workload_peak_v1":
+    fail("proxy performance objectives resource measurement does not match this checker")
 objective_defaults = objectives.get("defaults", {})
 min_throughput_ratio = number(objective_defaults, "min_throughput_ratio")
 min_cpu_ratio = number(objective_defaults, "min_cpu_efficiency_ratio")
@@ -524,14 +547,14 @@ for entry in baseline_entries:
     current_rss_peak_ratio = number(current_entry, "rss_peak_ratio")
     if current_rss_peak_ratio > max_rss_peak_ratio + 1e-12:
         failures.append(
-            "proxy RSS peak dominance objective failed for "
+            "proxy RSS workload-peak dominance objective failed for "
             f"{key}: current ratio {current_rss_peak_ratio:.6f} "
             f"> objective {max_rss_peak_ratio:.6f}"
         )
     current_fd_peak_ratio = number(current_entry, "fd_peak_ratio")
     if current_fd_peak_ratio > max_fd_peak_ratio + 1e-12:
         failures.append(
-            "proxy FD peak dominance objective failed for "
+            "proxy FD workload-peak dominance objective failed for "
             f"{key}: current ratio {current_fd_peak_ratio:.6f} "
             f"> objective {max_fd_peak_ratio:.6f}"
         )

@@ -233,6 +233,10 @@ impl<'a> PlanCompiler<'a> {
                 proxy_name: Arc::from(self.config.operational.identity.proxy_name.as_str()),
             },
             limits: compile_runtime_limits(self.config),
+            response_observability_required:
+                qpx_observability::access_log::access_log_response_context_required(
+                    &self.config.access_log,
+                ) || self.config.audit_log.output.enabled,
         })
     }
 }

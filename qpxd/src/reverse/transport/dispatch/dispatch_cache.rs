@@ -110,7 +110,6 @@ pub(super) async fn prepare_reverse_cache(
     let collapse = reverse_cache_collapse(
         &mut req,
         ReverseCacheCollapseInput {
-            runtime,
             state,
             request_method,
             request_version,
@@ -241,8 +240,8 @@ async fn reverse_cache_lookup(
         req,
         cache_lookup_key,
         Some(policy),
-        &runtime.state().cache.backends,
-        &runtime.state().cache.background_revalidations,
+        &state.cache.backends,
+        &state.cache.background_revalidations,
         state.messages.cache_miss.as_str(),
     )
     .await;
@@ -253,9 +252,11 @@ async fn reverse_cache_lookup(
     let lookup_decision = lookup_result.decision;
     let revalidation_state = lookup_result.revalidation_state;
     let request_headers_snapshot = lookup_result.request_headers_snapshot;
-    http_modules
-        .on_cache_lookup(cache_decision_is_hit(&lookup_decision))
-        .await?;
+    if !http_modules.is_empty() {
+        http_modules
+            .on_cache_lookup(cache_decision_is_hit(&lookup_decision))
+            .await?;
+    }
     let response_version = Some(request_version);
     match &lookup_decision {
         CacheLookupDecision::Hit(_) | CacheLookupDecision::OnlyIfCachedMiss(_) => {}
@@ -427,7 +428,6 @@ fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidat
 }
 
 struct ReverseCacheCollapseInput<'a> {
-    runtime: &'a Runtime,
     state: &'a Arc<runtime::RuntimeState>,
     request_method: &'a Method,
     request_version: http::Version,
@@ -448,7 +448,6 @@ async fn reverse_cache_collapse(
     input: ReverseCacheCollapseInput<'_>,
 ) -> Result<DispatchCacheCollapseOutcome> {
     let ReverseCacheCollapseInput {
-        runtime,
         state,
         request_method,
         request_version,
@@ -473,7 +472,7 @@ async fn reverse_cache_collapse(
     ) else {
         return Ok(dispatch_cache_collapse_continue(revalidation_state, None));
     };
-    match runtime.state().cache.begin_request_collapse(lookup_key) {
+    match state.cache.begin_request_collapse(lookup_key) {
         qpxd_cache::RequestCollapseJoin::Leader(guard) => Ok(dispatch_cache_collapse_continue(
             revalidation_state,
             Some(guard),
@@ -487,15 +486,17 @@ async fn reverse_cache_collapse(
                 snapshot,
                 Some(lookup_key),
                 Some(policy),
-                &runtime.state().cache.backends,
-                &runtime.state().cache.background_revalidations,
+                &state.cache.backends,
+                &state.cache.background_revalidations,
                 state.messages.cache_miss.as_str(),
             )
             .await?;
             revalidation_state = state_update;
-            http_modules
-                .on_cache_lookup(cache_decision_is_hit(&decision))
-                .await?;
+            if !http_modules.is_empty() {
+                http_modules
+                    .on_cache_lookup(cache_decision_is_hit(&decision))
+                    .await?;
+            }
             match reverse_cache_collapse_response(ReverseCacheCollapseResponseInput {
                 decision,
                 request_method,

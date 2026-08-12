@@ -24,5 +24,6 @@
     1,
     100
   ],
-  "schema_version": 2
+  "resource_measurement": "sampled_workload_peak_v1",
+  "schema_version": 3
 }

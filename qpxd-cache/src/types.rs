@@ -157,10 +157,11 @@ pub trait CacheBackend: Send + Sync {
     }
     /// Returns a compound single-variant response when the backend can do so
     /// without making the normal index, metadata, and body reads separately.
-    async fn get_response_candidate(
+    fn get_response_candidate(
         &self,
         _namespace: &str,
         _index_key: &str,
+        _now_ms: u64,
     ) -> Result<Option<CachedResponseCandidate>> {
         Ok(None)
     }

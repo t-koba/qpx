@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::time::{Duration, Sleep, sleep};
+use tokio::time::{Duration, Instant, Sleep, sleep};
 
 #[derive(Debug)]
 pub(crate) struct TimeoutElapsed;
@@ -12,6 +12,56 @@ struct TimeoutAfterPending<F, P> {
     timer: Option<Sleep>,
     on_pending: P,
     completed: bool,
+}
+
+pub(crate) struct ReusablePendingTimeout<'a> {
+    timer: Pin<&'a mut Sleep>,
+}
+
+struct TimeoutAfterPendingWithReusable<'a, 'timer, F, P> {
+    future: F,
+    duration: Duration,
+    timeout: &'a mut ReusablePendingTimeout<'timer>,
+    on_pending: P,
+    armed: bool,
+    completed: bool,
+}
+
+impl<'a> ReusablePendingTimeout<'a> {
+    pub(crate) fn new(timer: Pin<&'a mut Sleep>) -> Self {
+        Self { timer }
+    }
+
+    pub(crate) fn timeout_after_pending<F>(
+        &mut self,
+        duration: Duration,
+        future: F,
+    ) -> impl Future<Output = Result<F::Output, TimeoutElapsed>>
+    where
+        F: Future,
+    {
+        self.timeout_after_pending_with(duration, future, || {})
+    }
+
+    pub(crate) fn timeout_after_pending_with<F, P>(
+        &mut self,
+        duration: Duration,
+        future: F,
+        on_pending: P,
+    ) -> impl Future<Output = Result<F::Output, TimeoutElapsed>>
+    where
+        F: Future,
+        P: FnMut(),
+    {
+        TimeoutAfterPendingWithReusable {
+            future,
+            duration,
+            timeout: self,
+            on_pending,
+            armed: false,
+            completed: false,
+        }
+    }
 }
 
 pub(crate) fn timeout_after_pending<F>(
@@ -81,6 +131,40 @@ where
     }
 }
 
+impl<F, P> Future for TimeoutAfterPendingWithReusable<'_, '_, F, P>
+where
+    F: Future,
+    P: FnMut(),
+{
+    type Output = Result<F::Output, TimeoutElapsed>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: `future` is never moved after the wrapper is pinned. The other
+        // fields are not structurally pinned and may be updated independently.
+        let this = unsafe { self.get_unchecked_mut() };
+        assert!(!this.completed, "timeout future polled after completion");
+        // SAFETY: the wrapper owns `future` and never moves it while pinned.
+        let future = unsafe { Pin::new_unchecked(&mut this.future) };
+        if let Poll::Ready(output) = future.poll(cx) {
+            this.completed = true;
+            return Poll::Ready(Ok(output));
+        }
+
+        if !this.armed {
+            (this.on_pending)();
+            let deadline = Instant::now() + this.duration;
+            this.timeout.timer.as_mut().reset(deadline);
+            this.armed = true;
+        }
+        if this.timeout.timer.as_mut().poll(cx).is_ready() {
+            this.completed = true;
+            Poll::Ready(Err(TimeoutElapsed))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +202,35 @@ mod tests {
         .await;
         assert!(pending.is_err());
         assert_eq!(pending_hook_calls.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn reusable_timeout_restarts_the_same_pinned_timer() {
+        let timer = sleep(Duration::ZERO);
+        tokio::pin!(timer);
+        let timer_address = std::ptr::from_ref(timer.as_ref().get_ref());
+        let mut timeout = ReusablePendingTimeout::new(timer.as_mut());
+        let ready = timeout
+            .timeout_after_pending(Duration::ZERO, std::future::ready(42))
+            .await;
+        assert_eq!(ready.expect("immediate result"), 42);
+
+        let first = timeout
+            .timeout_after_pending(Duration::from_millis(1), std::future::pending::<()>())
+            .await;
+        assert!(first.is_err());
+        assert_eq!(
+            std::ptr::from_ref(timeout.timer.as_ref().get_ref()),
+            timer_address
+        );
+
+        let second = timeout
+            .timeout_after_pending(Duration::from_millis(1), std::future::pending::<()>())
+            .await;
+        assert!(second.is_err());
+        assert_eq!(
+            std::ptr::from_ref(timeout.timer.as_ref().get_ref()),
+            timer_address
+        );
     }
 }

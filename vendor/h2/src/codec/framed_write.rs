@@ -109,8 +109,11 @@ where
     /// to be flushed to `T`.
     pub fn poll_ready(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
         if !self.encoder.has_capacity() {
-            // Try flushing
-            ready!(self.flush(cx))?;
+            // Drain the encoded frame without flushing the transport. The
+            // caller may have more frames ready in this poll cycle, and the
+            // explicit `flush` below is the synchronization point that makes
+            // all drained frames visible to the peer.
+            ready!(self.drain(cx))?;
 
             if !self.encoder.has_capacity() {
                 return Poll::Pending;
@@ -130,6 +133,17 @@ where
 
     /// Flush buffered data to the wire
     pub fn flush(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
+        ready!(self.drain(cx))?;
+
+        h2_trace!("flushing transport");
+        ready!(Pin::new(&mut self.inner).poll_flush(cx))?;
+
+        Poll::Ready(Ok(()))
+    }
+
+    /// Drain encoded frames into the transport without forcing a transport
+    /// flush. This lets a bounded transport buffer coalesce adjacent frames.
+    fn drain(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
         let span = h2_trace_span!("FramedWrite::flush");
         let _e = h2_span_enter!(span);
 
@@ -157,10 +171,6 @@ where
                 ControlFlow::Break => break,
             }
         }
-
-        h2_trace!("flushing buffer");
-        // Flush the upstream
-        ready!(Pin::new(&mut self.inner).poll_flush(cx))?;
 
         Poll::Ready(Ok(()))
     }

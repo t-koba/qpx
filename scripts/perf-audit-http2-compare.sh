@@ -517,8 +517,13 @@ run_one() {
   local body_bytes="$5"
   local body_kind
   local out warmup_out calibration_out latency_file cpu_before_ms cpu_after_ms cpu_ms backend_cpu_before_ms backend_cpu_after_ms
-  local backend_cpu_ms total_cpu_ms rss_kb rss_peak_kb backend_rss_peak_kb total_rss_peak_kb metrics valid commit
-  local fd_peak backend_fd_peak total_fd_peak fd_peak_file backend_fd_peak_file fd_peak_monitor_pid backend_fd_peak_monitor_pid
+  local backend_cpu_ms total_cpu_ms metrics valid commit
+  local rss_kb rss_baseline_kb rss_peak_kb rss_growth_kb rss_peak_file rss_peak_monitor_pid
+  local backend_rss_baseline_kb backend_rss_peak_kb backend_rss_growth_kb backend_rss_peak_file backend_rss_peak_monitor_pid
+  local total_rss_peak_kb total_rss_growth_kb
+  local fd_baseline fd_peak fd_growth fd_peak_file fd_peak_monitor_pid
+  local backend_fd_baseline backend_fd_peak backend_fd_growth backend_fd_peak_file backend_fd_peak_monitor_pid
+  local total_fd_peak total_fd_growth
   local scheduler_before_ns scheduler_after_ns backend_scheduler_before_ns backend_scheduler_after_ns total_scheduler_run_delay_ns scheduler_queue_delay_us_per_request kernel_resource_metrics h2load_succeeded
   local requests_per_cpu_second requests_per_total_cpu_second
   local attempt failed_sample samples_file valid_sample_count selected_sample profile_pid
@@ -585,23 +590,48 @@ run_one() {
       profile_pid=$!
     fi
     kernel_resource_metrics=false
+    rss_baseline_kb=0
+    rss_peak_kb=0
+    rss_growth_kb=0
+    backend_rss_baseline_kb=0
+    backend_rss_peak_kb=0
+    backend_rss_growth_kb=0
+    rss_peak_monitor_pid=""
+    backend_rss_peak_monitor_pid=""
+    fd_baseline=0
     fd_peak=0
+    fd_growth=0
+    backend_fd_baseline=0
     backend_fd_peak=0
+    backend_fd_growth=0
     fd_peak_monitor_pid=""
     backend_fd_peak_monitor_pid=""
     scheduler_before_ns=0
     backend_scheduler_before_ns=0
     if [ -d /proc ]; then
       kernel_resource_metrics=true
+      rss_baseline_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
+      rss_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.rss-peak"
+      monitor_process_tree_rss_peak "$resource_pid" "$rss_peak_file" "$rss_baseline_kb" &
+      rss_peak_monitor_pid=$!
+      fd_baseline="$(process_tree_fd_count "$resource_pid")"
       fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.fd-peak"
-      monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" &
+      monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" "$fd_baseline" &
       fd_peak_monitor_pid=$!
       scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
       if [ "$resource_pid" != "$backend_pid" ]; then
+        backend_rss_baseline_kb="$(process_tree_status_kb "$backend_pid" "VmRSS")"
+        backend_rss_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-rss-peak"
+        monitor_process_tree_rss_peak "$backend_pid" "$backend_rss_peak_file" "$backend_rss_baseline_kb" &
+        backend_rss_peak_monitor_pid=$!
+        backend_fd_baseline="$(process_tree_fd_count "$backend_pid")"
         backend_fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-fd-peak"
-        monitor_process_tree_fd_peak "$backend_pid" "$backend_fd_peak_file" &
+        monitor_process_tree_fd_peak "$backend_pid" "$backend_fd_peak_file" "$backend_fd_baseline" &
         backend_fd_peak_monitor_pid=$!
         backend_scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$backend_pid")"
+      else
+        backend_rss_baseline_kb="$rss_baseline_kb"
+        backend_fd_baseline="$fd_baseline"
       fi
     fi
     cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
@@ -618,11 +648,25 @@ run_one() {
       kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
       wait "$fd_peak_monitor_pid" 2>/dev/null || true
       fd_peak="$(cat "$fd_peak_file" 2>/dev/null || echo 0)"
+      fd_growth="$(peak_growth "$fd_baseline" "$fd_peak")"
     fi
     if [ -n "$backend_fd_peak_monitor_pid" ]; then
       kill "$backend_fd_peak_monitor_pid" >/dev/null 2>&1 || true
       wait "$backend_fd_peak_monitor_pid" 2>/dev/null || true
       backend_fd_peak="$(cat "$backend_fd_peak_file" 2>/dev/null || echo 0)"
+      backend_fd_growth="$(peak_growth "$backend_fd_baseline" "$backend_fd_peak")"
+    fi
+    if [ -n "$rss_peak_monitor_pid" ]; then
+      kill "$rss_peak_monitor_pid" >/dev/null 2>&1 || true
+      wait "$rss_peak_monitor_pid" 2>/dev/null || true
+      rss_peak_kb="$(cat "$rss_peak_file" 2>/dev/null || echo 0)"
+      rss_growth_kb="$(peak_growth "$rss_baseline_kb" "$rss_peak_kb")"
+    fi
+    if [ -n "$backend_rss_peak_monitor_pid" ]; then
+      kill "$backend_rss_peak_monitor_pid" >/dev/null 2>&1 || true
+      wait "$backend_rss_peak_monitor_pid" 2>/dev/null || true
+      backend_rss_peak_kb="$(cat "$backend_rss_peak_file" 2>/dev/null || echo 0)"
+      backend_rss_growth_kb="$(peak_growth "$backend_rss_baseline_kb" "$backend_rss_peak_kb")"
     fi
     if [ "$h2load_succeeded" != true ]; then
       echo "h2load failed for ${proxy} attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
@@ -648,13 +692,8 @@ run_one() {
       total_cpu_ms=$((cpu_ms + backend_cpu_ms))
     fi
     rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
-    rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
-    backend_rss_peak_kb="$rss_peak_kb"
     scheduler_after_ns="$scheduler_before_ns"
     backend_scheduler_after_ns="$backend_scheduler_before_ns"
-    if [ "$resource_pid" != "$backend_pid" ]; then
-      backend_rss_peak_kb="$(process_tree_status_kb "$backend_pid" "VmHWM")"
-    fi
     if [ "$kernel_resource_metrics" = true ]; then
       scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
       if [ "$resource_pid" != "$backend_pid" ]; then
@@ -662,10 +701,18 @@ run_one() {
       fi
     fi
     total_rss_peak_kb=$((rss_peak_kb + backend_rss_peak_kb))
+    total_rss_growth_kb=$((rss_growth_kb + backend_rss_growth_kb))
     total_fd_peak=$((fd_peak + backend_fd_peak))
+    total_fd_growth=$((fd_growth + backend_fd_growth))
     if [ "$resource_pid" = "$backend_pid" ]; then
+      backend_rss_peak_kb="$rss_peak_kb"
+      backend_rss_growth_kb="$rss_growth_kb"
+      backend_fd_peak="$fd_peak"
+      backend_fd_growth="$fd_growth"
       total_rss_peak_kb="$rss_peak_kb"
+      total_rss_growth_kb="$rss_growth_kb"
       total_fd_peak="$fd_peak"
+      total_fd_growth="$fd_growth"
     fi
     total_scheduler_run_delay_ns="$(awk -v resource_before="$scheduler_before_ns" -v resource_after="$scheduler_after_ns" -v backend_before="$backend_scheduler_before_ns" -v backend_after="$backend_scheduler_after_ns" 'BEGIN { delta = (resource_after - resource_before) + (backend_after - backend_before); if (delta < 0) delta = 0; printf "%.0f", delta }')"
     if [ -n "$profile_pid" ]; then
@@ -713,8 +760,12 @@ print(f"{delay_ns / m['requests'] / 1000.0:.6f}")
 PY
 )"
       python3 - "$samples_file" "$metrics" "$cpu_ms" "$backend_cpu_ms" "$total_cpu_ms" \
-        "$rss_kb" "$rss_peak_kb" "$backend_rss_peak_kb" "$total_rss_peak_kb" \
-        "$fd_peak" "$backend_fd_peak" "$total_fd_peak" "$total_scheduler_run_delay_ns" \
+        "$rss_kb" "$rss_baseline_kb" "$rss_peak_kb" "$rss_growth_kb" \
+        "$backend_rss_baseline_kb" "$backend_rss_peak_kb" "$backend_rss_growth_kb" \
+        "$total_rss_peak_kb" "$total_rss_growth_kb" \
+        "$fd_baseline" "$fd_peak" "$fd_growth" \
+        "$backend_fd_baseline" "$backend_fd_peak" "$backend_fd_growth" \
+        "$total_fd_peak" "$total_fd_growth" "$total_scheduler_run_delay_ns" \
         "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$requests_per_cpu_second" \
         "$requests_per_total_cpu_second" "$calibration_requests" \
         "$calibration_duration_us" "$benchmark_requests" <<'PY'
@@ -728,12 +779,22 @@ import sys
     backend_cpu_ms,
     total_cpu_ms,
     rss_kb,
+    rss_baseline_kb,
     rss_peak_kb,
+    rss_growth_kb,
+    backend_rss_baseline_kb,
     backend_rss_peak_kb,
+    backend_rss_growth_kb,
     total_rss_peak_kb,
+    total_rss_growth_kb,
+    fd_baseline,
     fd_peak,
+    fd_growth,
+    backend_fd_baseline,
     backend_fd_peak,
+    backend_fd_growth,
     total_fd_peak,
+    total_fd_growth,
     total_scheduler_run_delay_ns,
     scheduler_queue_delay_us_per_request,
     kernel_resource_metrics,
@@ -742,18 +803,28 @@ import sys
     calibration_requests,
     calibration_duration_us,
     benchmark_requests,
-) = sys.argv[1:21]
+) = sys.argv[1:31]
 record = json.loads(metrics)
 record["cpu_ms"] = int(cpu_ms)
 record["backend_cpu_ms"] = int(backend_cpu_ms)
 record["total_cpu_ms"] = int(total_cpu_ms)
 record["rss_kb"] = int(rss_kb)
+record["rss_baseline_kb"] = int(rss_baseline_kb)
 record["rss_peak_kb"] = int(rss_peak_kb)
+record["rss_growth_kb"] = int(rss_growth_kb)
+record["backend_rss_baseline_kb"] = int(backend_rss_baseline_kb)
 record["backend_rss_peak_kb"] = int(backend_rss_peak_kb)
+record["backend_rss_growth_kb"] = int(backend_rss_growth_kb)
 record["total_rss_peak_kb"] = int(total_rss_peak_kb)
+record["total_rss_growth_kb"] = int(total_rss_growth_kb)
+record["fd_baseline"] = int(fd_baseline)
 record["fd_peak"] = int(fd_peak)
+record["fd_growth"] = int(fd_growth)
+record["backend_fd_baseline"] = int(backend_fd_baseline)
 record["backend_fd_peak"] = int(backend_fd_peak)
+record["backend_fd_growth"] = int(backend_fd_growth)
 record["total_fd_peak"] = int(total_fd_peak)
+record["total_fd_growth"] = int(total_fd_growth)
 record["total_scheduler_run_delay_ns"] = int(total_scheduler_run_delay_ns)
 record["scheduler_queue_delay_us_per_request"] = float(scheduler_queue_delay_us_per_request)
 record["kernel_resource_metrics"] = kernel_resource_metrics == "true"
@@ -1116,12 +1187,22 @@ for key in sorted(expected):
         "process_request_failures",
         "non_2xx_responses",
         "rss_kb",
+        "rss_baseline_kb",
         "rss_peak_kb",
+        "rss_growth_kb",
+        "backend_rss_baseline_kb",
         "backend_rss_peak_kb",
+        "backend_rss_growth_kb",
         "total_rss_peak_kb",
+        "total_rss_growth_kb",
+        "fd_baseline",
         "fd_peak",
+        "fd_growth",
+        "backend_fd_baseline",
         "backend_fd_peak",
+        "backend_fd_growth",
         "total_fd_peak",
+        "total_fd_growth",
         "total_scheduler_run_delay_ns",
         "scheduler_queue_delay_us_per_request",
     ):
@@ -1143,12 +1224,22 @@ for key in sorted(expected):
         "backend_cpu_ms",
         "total_cpu_ms",
         "rss_kb",
+        "rss_baseline_kb",
         "rss_peak_kb",
+        "rss_growth_kb",
+        "backend_rss_baseline_kb",
         "backend_rss_peak_kb",
+        "backend_rss_growth_kb",
         "total_rss_peak_kb",
+        "total_rss_growth_kb",
+        "fd_baseline",
         "fd_peak",
+        "fd_growth",
+        "backend_fd_baseline",
         "backend_fd_peak",
+        "backend_fd_growth",
         "total_fd_peak",
+        "total_fd_growth",
         "total_scheduler_run_delay_ns",
     ):
         if record[field] is not None:
@@ -1156,7 +1247,8 @@ for key in sorted(expected):
     record.update({
         "aggregation": "conservative_median_per_metric",
         "target_duration_seconds": target_duration,
-        "benchmark_schema_version": 6,
+        "benchmark_schema_version": 7,
+        "resource_measurement": "sampled_workload_peak_v1",
         "sample_attempts": attempts,
         "sampling_order": "round_robin_interleaved",
         "sample_spread": {

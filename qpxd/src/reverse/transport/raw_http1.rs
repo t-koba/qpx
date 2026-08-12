@@ -2,7 +2,7 @@ use super::mirrors::{
     record_reverse_upstream_error, record_reverse_upstream_status, record_reverse_upstream_timeout,
 };
 use super::{InterimList, ReverseConnInfo};
-use crate::http::codec::lazy_timeout::timeout_after_pending;
+use crate::http::codec::lazy_timeout::ReusablePendingTimeout;
 use crate::reverse::{CompiledReverse, ReloadableReverse};
 use crate::upstream::origin::{
     PreparedPlainHttp1Origin, PreparedPlainHttp1Session, prepare_plain_http1_origin,
@@ -119,27 +119,19 @@ impl RawHttp1ConnectionCache {
         if bytes.len() < consumed || &bytes[..consumed] != cached.downstream_head.as_ref() {
             return None;
         }
-        self.has_current_prepared(reverse, cached.downstream_head.as_ref())
-            .then_some(consumed)
+        self.has_current_prepared(reverse).then_some(consumed)
     }
 
-    fn has_current_prepared(&self, reverse: &ReloadableReverse, downstream_head: &[u8]) -> bool {
+    fn has_current_prepared(&self, reverse: &ReloadableReverse) -> bool {
         let Some(cached) = self.serialized.as_ref() else {
             return false;
         };
         if qpx_observability::metrics_enabled() || qpx_observability::request_spans_enabled() {
             return false;
         }
-        cached.downstream_head.as_ref() == downstream_head
-            && reverse.runtime.is_current_state(&cached.prepared.state)
-            && !cached.prepared.state.destination_trace_enabled()
-            && cached
-                .prepared
-                .state
-                .security
-                .identity_sources
-                .sources
-                .is_empty()
+        // Routing, tracing, and identity eligibility was validated before this
+        // immutable state was cached. A reload changes the Arc identity below.
+        reverse.runtime.is_current_state(&cached.prepared.state)
     }
 
     /// Return the cached request after the caller has validated its state.
@@ -238,7 +230,12 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
     if qpx_observability::metrics_enabled() || qpx_observability::request_spans_enabled() {
         return None;
     }
-    if cache.has_current_prepared(reverse, request.raw_head) {
+    if cache
+        .serialized
+        .as_ref()
+        .is_some_and(|cached| cached.downstream_head.as_ref() == request.raw_head)
+        && cache.has_current_prepared(reverse)
+    {
         let prepared = cache.prepared_request_ref_unchecked()?;
         return Some(prepared);
     }
@@ -351,6 +348,7 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     reverse: &ReloadableReverse,
     conn: &ReverseConnInfo,
     session: &mut PreparedPlainHttp1Session,
+    pending_timeout: &mut ReusablePendingTimeout<'_>,
 ) -> Result<PreparedRawHttp1Response> {
     if let Some(request) = prepared.generic_request() {
         session.release();
@@ -420,18 +418,19 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         .as_ref()
         .is_some_and(|policy| policy.latency_threshold.is_some())
         .then(tokio::time::Instant::now);
-    let response = timeout_after_pending(
-        route.policy.timeout,
-        proxy_prepared_plain_http1_head_raw_response_with_interim(
-            origin,
-            session,
-            &prepared.method,
-            request_head.as_ref(),
-            Version::HTTP_11,
-            prepared.state.plan.identity.proxy_name.as_ref(),
-        ),
-    )
-    .await;
+    let response = pending_timeout
+        .timeout_after_pending(
+            route.policy.timeout,
+            proxy_prepared_plain_http1_head_raw_response_with_interim(
+                origin,
+                session,
+                &prepared.method,
+                request_head.as_ref(),
+                Version::HTTP_11,
+                prepared.state.plan.identity.proxy_name.as_ref(),
+            ),
+        )
+        .await;
     let mut proxied = match response {
         Ok(Ok(proxied)) => proxied,
         Ok(Err(error)) => {

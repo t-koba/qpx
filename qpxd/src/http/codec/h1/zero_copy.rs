@@ -1,12 +1,12 @@
 #[cfg(target_os = "linux")]
-use crate::http::codec::lazy_timeout::timeout_after_pending;
+use crate::http::codec::lazy_timeout::ReusablePendingTimeout;
 use qpx_http::body::FileRegion;
 use std::io;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::TcpStream;
 #[cfg(target_os = "linux")]
-use tokio::time::Duration;
+use tokio::time::{Duration, sleep};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::fd::{AsRawFd, RawFd};
@@ -20,7 +20,9 @@ const LOW_CONTENTION_ZERO_COPY_QUANTUM: u64 = 8 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const BALANCED_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
+const LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 128 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ACTIVE_ZERO_COPY_TRANSFERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -68,15 +70,14 @@ fn zero_copy_scheduling_quantum_for(
         (ZeroCopyTransferKind::Socket, 0..=1) => LOW_CONTENTION_ZERO_COPY_QUANTUM,
         #[cfg(target_os = "linux")]
         (ZeroCopyTransferKind::Socket, _) => BALANCED_ZERO_COPY_QUANTUM,
-        (ZeroCopyTransferKind::File, _) => FILE_ZERO_COPY_QUANTUM,
+        (ZeroCopyTransferKind::File, 0..=1) => LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM,
+        (ZeroCopyTransferKind::File, _) => CONTENDED_FILE_ZERO_COPY_QUANTUM,
     }
 }
 
 pub(super) struct ZeroCopySocket {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     source_fd: RawFd,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    socket: Option<AsyncFd<OwnedSocketFd>>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -105,7 +106,6 @@ impl ZeroCopySocket {
         {
             Some(Self {
                 source_fd: stream.as_raw_fd(),
-                socket: None,
             })
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -116,22 +116,16 @@ impl ZeroCopySocket {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn socket(&mut self) -> io::Result<&AsyncFd<OwnedSocketFd>> {
-        if self.socket.is_none() {
-            // SAFETY: source_fd belongs to the live TcpStream for this connection.
-            let fd = unsafe { libc::dup(self.source_fd) };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let owned = OwnedSocketFd(fd);
-            self.socket = Some(AsyncFd::new(owned)?);
+    fn registered_socket(&self) -> io::Result<AsyncFd<OwnedSocketFd>> {
+        // SAFETY: source_fd belongs to the live TcpStream for this connection.
+        let fd = unsafe { libc::dup(self.source_fd) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
         }
-        self.socket
-            .as_ref()
-            .ok_or_else(|| io::Error::other("zero-copy socket initialization failed"))
+        AsyncFd::new(OwnedSocketFd(fd))
     }
 
-    pub(super) async fn send_file(&mut self, region: &FileRegion) -> io::Result<()> {
+    pub(super) async fn send_file(&self, region: &FileRegion) -> io::Result<()> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let _transfer = ZeroCopyTransferGuard::begin();
@@ -140,7 +134,10 @@ impl ZeroCopySocket {
             let end = offset
                 .checked_add(region.len())
                 .ok_or_else(|| io::Error::other("file region overflow"))?;
-            let socket = self.socket()?;
+            // The duplicate is needed because the TcpStream already owns a reactor
+            // registration for the original descriptor. Scope it to this transfer so
+            // idle keep-alive connections do not retain an additional descriptor.
+            let socket = self.registered_socket()?;
             let mut bytes_since_yield = 0_u64;
             while offset < end {
                 let scheduling_quantum = zero_copy_scheduling_quantum(ZeroCopyTransferKind::File);
@@ -160,7 +157,7 @@ impl ZeroCopySocket {
                 bytes_since_yield = bytes_since_yield.saturating_add(written as u64);
                 if offset < end && bytes_since_yield >= scheduling_quantum {
                     bytes_since_yield = 0;
-                    tokio::task::yield_now().await;
+                    tokio::task::consume_budget().await;
                 }
             }
             Ok(())
@@ -186,33 +183,39 @@ pub(super) async fn splice_tcp_exact(
 ) -> io::Result<()> {
     let _transfer = ZeroCopyTransferGuard::begin();
     let pipe = SplicePipe::new()?;
+    let pending_timer = sleep(Duration::ZERO);
+    tokio::pin!(pending_timer);
+    let mut pending_timeout = ReusablePendingTimeout::new(pending_timer.as_mut());
     let mut bytes_since_yield = 0_u64;
     let mut waited_for_io = false;
     while remaining > 0 {
         let scheduling_quantum = zero_copy_scheduling_quantum(ZeroCopyTransferKind::Socket);
         let requested = usize::try_from(remaining.min(scheduling_quantum))
             .unwrap_or(scheduling_quantum as usize);
-        let moved = timeout_after_pending(read_timeout, async {
-            loop {
-                match source.try_io(Interest::READABLE, || {
-                    splice_once(source.as_raw_fd(), pipe.write_fd, requested)
-                }) {
-                    Ok(moved) => return Ok(moved),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        if bytes_since_yield > 0 {
-                            // Re-applying TCP_NODELAY explicitly pushes any partial splice
-                            // batch before an upstream pause can leave it to the TCP flush timer.
-                            destination.set_nodelay(true)?;
+        let moved = pending_timeout
+            .timeout_after_pending(read_timeout, async {
+                loop {
+                    match source.try_io(Interest::READABLE, || {
+                        splice_once(source.as_raw_fd(), pipe.write_fd, requested)
+                    }) {
+                        Ok(moved) => return Ok(moved),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if bytes_since_yield > 0 {
+                                // Re-applying TCP_NODELAY explicitly pushes any partial splice
+                                // batch before an upstream pause can leave it to the TCP flush timer.
+                                destination.set_nodelay(true)?;
+                            }
+                            waited_for_io = true;
+                            source.readable().await?;
                         }
-                        waited_for_io = true;
-                        source.readable().await?;
+                        Err(error) => return Err(error),
                     }
-                    Err(error) => return Err(error),
                 }
-            }
-        })
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "splice source read timed out"))??;
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "splice source read timed out")
+            })??;
         if moved == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -222,27 +225,28 @@ pub(super) async fn splice_tcp_exact(
 
         let mut buffered = moved;
         while buffered > 0 {
-            let written = timeout_after_pending(write_timeout, async {
-                loop {
-                    match destination.try_io(Interest::WRITABLE, || {
-                        splice_once(pipe.read_fd, destination.as_raw_fd(), buffered)
-                    }) {
-                        Ok(written) => return Ok(written),
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            waited_for_io = true;
-                            destination.writable().await?;
+            let written = pending_timeout
+                .timeout_after_pending(write_timeout, async {
+                    loop {
+                        match destination.try_io(Interest::WRITABLE, || {
+                            splice_once(pipe.read_fd, destination.as_raw_fd(), buffered)
+                        }) {
+                            Ok(written) => return Ok(written),
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                waited_for_io = true;
+                                destination.writable().await?;
+                            }
+                            Err(error) => return Err(error),
                         }
-                        Err(error) => return Err(error),
                     }
-                }
-            })
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "splice destination write timed out",
-                )
-            })??;
+                })
+                .await
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "splice destination write timed out",
+                    )
+                })??;
             if written == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
@@ -256,7 +260,7 @@ pub(super) async fn splice_tcp_exact(
         if remaining > 0 && bytes_since_yield >= scheduling_quantum {
             bytes_since_yield = 0;
             if !waited_for_io {
-                tokio::task::yield_now().await;
+                tokio::task::consume_budget().await;
             }
             waited_for_io = false;
         }
@@ -280,36 +284,58 @@ impl SplicePipe {
         if result != 0 {
             return Err(io::Error::last_os_error());
         }
-        // A larger pipe lets splice coalesce adjacent upstream writes instead of forcing a
-        // source-read / destination-write wakeup at the kernel's small default pipe capacity.
-        // The requested size is an optimization only; kernels may reject it for an ordinary
-        // unprivileged process, while unrelated errors still indicate a broken pipe setup.
-        // SAFETY: descriptors[0] is the open read endpoint returned by pipe2 above.
-        let resize = unsafe {
-            libc::fcntl(
-                descriptors[0],
-                libc::F_SETPIPE_SZ,
-                1024_i32.saturating_mul(1024),
-            )
-        };
-        if resize < 0 {
-            let error = io::Error::last_os_error();
-            let optional_resize_rejection = matches!(error.raw_os_error(), Some(code)
-                if code == libc::EPERM || code == libc::EINVAL || code == libc::ENOMEM);
-            if !optional_resize_rejection {
-                // SAFETY: both descriptors were returned by pipe2 above and remain owned here.
-                unsafe {
-                    libc::close(descriptors[0]);
-                    libc::close(descriptors[1]);
-                }
-                return Err(error);
+        if let Err(error) = grow_splice_pipe(descriptors[0]) {
+            // SAFETY: both descriptors were returned by pipe2 above and remain owned here.
+            unsafe {
+                libc::close(descriptors[0]);
+                libc::close(descriptors[1]);
             }
+            return Err(error);
         }
         Ok(Self {
             read_fd: descriptors[0],
             write_fd: descriptors[1],
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+fn grow_splice_pipe(read_fd: RawFd) -> io::Result<()> {
+    // A larger pipe coalesces adjacent upstream writes and reduces source/destination
+    // readiness cycles. Unprivileged limits vary by host, so retain the largest size
+    // the kernel accepts instead of abandoning growth after one oversized request.
+    // SAFETY: read_fd is the live read endpoint returned by pipe2.
+    let current = unsafe { libc::fcntl(read_fd, libc::F_GETPIPE_SZ) };
+    if current < 0 {
+        let error = io::Error::last_os_error();
+        if optional_pipe_resize_rejection(&error) {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    for requested in [1024 * 1024, 512 * 1024, 256 * 1024, 128 * 1024, 64 * 1024] {
+        if requested <= current {
+            return Ok(());
+        }
+        // SAFETY: read_fd is a live pipe endpoint and requested is a positive i32 size.
+        if unsafe { libc::fcntl(read_fd, libc::F_SETPIPE_SZ, requested) } >= 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if !optional_pipe_resize_rejection(&error) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn optional_pipe_resize_rejection(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(code)
+        if code == libc::EPERM
+            || code == libc::EINVAL
+            || code == libc::ENOMEM
+            || code == libc::ENOSYS)
 }
 
 #[cfg(target_os = "linux")]
@@ -422,7 +448,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[test]
-    fn scheduling_quantum_bounds_work_without_fragmenting_file_sends() {
+    fn scheduling_quantum_adapts_to_active_transfer_pressure() {
         #[cfg(target_os = "linux")]
         assert_eq!(
             zero_copy_scheduling_quantum_for(1, ZeroCopyTransferKind::Socket),
@@ -435,15 +461,15 @@ mod tests {
         );
         assert_eq!(
             zero_copy_scheduling_quantum_for(1, ZeroCopyTransferKind::File),
-            FILE_ZERO_COPY_QUANTUM
+            LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM
         );
         assert_eq!(
             zero_copy_scheduling_quantum_for(2, ZeroCopyTransferKind::File),
-            FILE_ZERO_COPY_QUANTUM
+            CONTENDED_FILE_ZERO_COPY_QUANTUM
         );
         assert_eq!(
             zero_copy_scheduling_quantum_for(256, ZeroCopyTransferKind::File),
-            FILE_ZERO_COPY_QUANTUM
+            CONTENDED_FILE_ZERO_COPY_QUANTUM
         );
         #[cfg(target_os = "linux")]
         assert_eq!(
@@ -532,7 +558,7 @@ mod tests {
         let address = listener.local_addr().expect("address");
         let client = TcpStream::connect(address).await.expect("connect");
         let (server, _) = listener.accept().await.expect("accept");
-        let mut zero_copy = ZeroCopySocket::for_tcp(&server).expect("zero-copy socket");
+        let zero_copy = ZeroCopySocket::for_tcp(&server).expect("zero-copy socket");
         zero_copy.send_file(&region).await.expect("send file");
 
         let mut received = [0_u8; 7];
@@ -568,7 +594,7 @@ mod tests {
         let address = listener.local_addr().expect("address");
         let mut client = TcpStream::connect(address).await.expect("connect");
         let (mut server, _) = listener.accept().await.expect("accept");
-        let mut zero_copy = ZeroCopySocket::for_tcp(&server).expect("zero-copy socket");
+        let zero_copy = ZeroCopySocket::for_tcp(&server).expect("zero-copy socket");
         let mut head = BytesMut::new();
         super::super::response::send_http1_response_with_interim_zero_copy(
             &mut server,
@@ -579,7 +605,7 @@ mod tests {
             false,
             std::time::Duration::from_secs(1),
             &mut head,
-            Some(&mut zero_copy),
+            Some(&zero_copy),
         )
         .await
         .expect("send response");

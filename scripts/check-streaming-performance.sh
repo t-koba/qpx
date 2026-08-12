@@ -79,10 +79,12 @@ def ratio_limit(config, field):
 
 with open(OBJECTIVES_PATH, "r", encoding="utf-8") as handle:
     objectives = json.load(handle)
-if objectives.get("schema_version") != 2:
+if objectives.get("schema_version") != 3:
     fail("unsupported streaming performance objectives schema")
 if objectives.get("metric") != "multi_axis_total_system_streaming_dominance":
     fail("streaming performance metric does not match this checker")
+if objectives.get("resource_measurement") != "sampled_workload_peak_v1":
+    fail("streaming resource measurement does not match this checker")
 
 external_proxies = tuple(objectives.get("external_proxies", ()))
 if not external_proxies:
@@ -117,8 +119,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"streaming performance record for {key} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"streaming performance record for {key} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version") != 4:
+        if nonnegative_int(record, "benchmark_schema_version") != 5:
             fail(f"streaming performance record for {key} uses an unsupported benchmark schema")
+        if record.get("resource_measurement") != "sampled_workload_peak_v1":
+            fail(f"streaming performance record for {key} uses an unsupported resource measurement")
         if record.get("kernel_resource_metrics") is not True:
             fail(f"streaming performance record for {key} is missing Linux kernel resource metrics")
         stream_bytes = nonnegative_int(record, "stream_bytes")
@@ -151,10 +155,64 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             "cpu_ms",
             "backend_cpu_ms",
             "total_cpu_ms",
+            "rss_baseline_kb",
+            "rss_peak_kb",
+            "backend_rss_baseline_kb",
+            "backend_rss_peak_kb",
             "total_rss_peak_kb",
+            "fd_baseline",
+            "fd_peak",
+            "backend_fd_baseline",
+            "backend_fd_peak",
             "total_fd_peak",
         ):
             positive_number(record, field)
+        for field in (
+            "rss_growth_kb",
+            "backend_rss_growth_kb",
+            "total_rss_growth_kb",
+            "fd_growth",
+            "backend_fd_growth",
+            "total_fd_growth",
+        ):
+            nonnegative_number(record, field)
+        for baseline_field, peak_field, growth_field in (
+            ("rss_baseline_kb", "rss_peak_kb", "rss_growth_kb"),
+            ("backend_rss_baseline_kb", "backend_rss_peak_kb", "backend_rss_growth_kb"),
+            ("fd_baseline", "fd_peak", "fd_growth"),
+            ("backend_fd_baseline", "backend_fd_peak", "backend_fd_growth"),
+        ):
+            baseline = positive_number(record, baseline_field)
+            peak = positive_number(record, peak_field)
+            growth = nonnegative_number(record, growth_field)
+            if peak < baseline or growth != peak - baseline:
+                fail(f"streaming performance record for {key} has inconsistent {growth_field}")
+        if record["proxy"] == "direct-backend":
+            expected_total_rss_peak = positive_number(record, "rss_peak_kb")
+            expected_total_rss_growth = nonnegative_number(record, "rss_growth_kb")
+            expected_total_fd_peak = positive_number(record, "fd_peak")
+            expected_total_fd_growth = nonnegative_number(record, "fd_growth")
+        else:
+            expected_total_rss_peak = positive_number(record, "rss_peak_kb") + positive_number(
+                record, "backend_rss_peak_kb"
+            )
+            expected_total_rss_growth = nonnegative_number(
+                record, "rss_growth_kb"
+            ) + nonnegative_number(record, "backend_rss_growth_kb")
+            expected_total_fd_peak = positive_number(record, "fd_peak") + positive_number(
+                record, "backend_fd_peak"
+            )
+            expected_total_fd_growth = nonnegative_number(
+                record, "fd_growth"
+            ) + nonnegative_number(record, "backend_fd_growth")
+        if positive_number(record, "total_rss_peak_kb") != expected_total_rss_peak:
+            fail(f"streaming performance record for {key} has inconsistent total_rss_peak_kb")
+        if nonnegative_number(record, "total_rss_growth_kb") != expected_total_rss_growth:
+            fail(f"streaming performance record for {key} has inconsistent total_rss_growth_kb")
+        if positive_number(record, "total_fd_peak") != expected_total_fd_peak:
+            fail(f"streaming performance record for {key} has inconsistent total_fd_peak")
+        if nonnegative_number(record, "total_fd_growth") != expected_total_fd_growth:
+            fail(f"streaming performance record for {key} has inconsistent total_fd_growth")
         if positive_number(record, "total_cpu_ms") < positive_number(record, "cpu_ms"):
             fail(f"streaming performance record for {key} excludes proxy CPU from total CPU")
         if positive_number(record, "total_cpu_ms") < positive_number(record, "backend_cpu_ms"):
@@ -191,6 +249,11 @@ leader_name = min(external_proxies, key=lambda name: positive_number(fast[name],
 leader = fast[leader_name]
 qpx_fast = fast["qpxd"]
 direct_fast = fast["direct-backend"]
+slow = {proxy: records[("slow", proxy)] for proxy in required_proxies}
+slow_resource_leader_name = min(
+    external_proxies, key=lambda name: positive_number(slow[name], "total_ms")
+)
+slow_resource_leader = slow[slow_resource_leader_name]
 
 throughput_ratio = positive_number(leader, "total_ms") / positive_number(qpx_fast, "total_ms")
 direct_efficiency_ratio = positive_number(direct_fast, "total_ms") / positive_number(qpx_fast, "total_ms")
@@ -200,11 +263,13 @@ total_cpu_efficiency_ratio = qpx_cpu_efficiency / leader_cpu_efficiency
 first_byte_ratio = positive_number(qpx_fast, "first_byte_ms") / positive_number(leader, "first_byte_ms")
 p99_gap_ratio = positive_number(qpx_fast, "p99_chunk_gap_ms") / positive_number(leader, "p99_chunk_gap_ms")
 max_gap_ratio = positive_number(qpx_fast, "max_chunk_gap_ms") / positive_number(leader, "max_chunk_gap_ms")
-total_rss_peak_ratio = positive_number(qpx_fast, "total_rss_peak_kb") / positive_number(
-    leader, "total_rss_peak_kb"
+total_rss_peak_ratio = lower_is_better_ratio(
+    nonnegative_number(qpx_fast, "total_rss_peak_kb"),
+    nonnegative_number(leader, "total_rss_peak_kb"),
 )
-total_fd_peak_ratio = positive_number(qpx_fast, "total_fd_peak") / positive_number(
-    leader, "total_fd_peak"
+total_fd_peak_ratio = lower_is_better_ratio(
+    nonnegative_number(qpx_fast, "total_fd_peak"),
+    nonnegative_number(leader, "total_fd_peak"),
 )
 scheduler_queue_delay_ratio = lower_is_better_ratio(
     nonnegative_number(qpx_fast, "scheduler_queue_delay_us_per_transfer"),
@@ -237,6 +302,7 @@ stability_records = {
     ("fast", "direct-backend"),
     ("slow", "direct-backend"),
     ("fast", leader_name),
+    ("slow", slow_resource_leader_name),
 }
 leader_total = positive_number(leader, "total_ms")
 for proxy in external_proxies:
@@ -264,18 +330,24 @@ for name, current, objective, direction in fast_checks:
     if direction == "max" and current > objective + 1e-12:
         failures.append(f"fast streaming {name} {current:.6f} > objective {objective:.6f}")
 
-qpx_slow = records[("slow", "qpxd")]
-direct_slow = records[("slow", "direct-backend")]
+qpx_slow = slow["qpxd"]
+direct_slow = slow["direct-backend"]
 slow_ratios = {
     "max_total_time_ratio": positive_number(qpx_slow, "total_ms") / positive_number(direct_slow, "total_ms"),
     "max_first_byte_ratio": positive_number(qpx_slow, "first_byte_ms") / positive_number(direct_slow, "first_byte_ms"),
     "max_p99_gap_ratio": positive_number(qpx_slow, "p99_chunk_gap_ms") / positive_number(direct_slow, "p99_chunk_gap_ms"),
     "max_gap_ratio": positive_number(qpx_slow, "max_chunk_gap_ms") / positive_number(direct_slow, "max_chunk_gap_ms"),
-    "max_total_rss_peak_ratio": positive_number(qpx_slow, "total_rss_peak_kb") / positive_number(direct_slow, "total_rss_peak_kb"),
-    "max_total_fd_peak_ratio": positive_number(qpx_slow, "total_fd_peak") / positive_number(direct_slow, "total_fd_peak"),
+    "max_total_rss_peak_ratio": lower_is_better_ratio(
+        nonnegative_number(qpx_slow, "total_rss_peak_kb"),
+        nonnegative_number(slow_resource_leader, "total_rss_peak_kb"),
+    ),
+    "max_total_fd_peak_ratio": lower_is_better_ratio(
+        nonnegative_number(qpx_slow, "total_fd_peak"),
+        nonnegative_number(slow_resource_leader, "total_fd_peak"),
+    ),
     "max_scheduler_queue_delay_ratio": lower_is_better_ratio(
         nonnegative_number(qpx_slow, "scheduler_queue_delay_us_per_transfer"),
-        nonnegative_number(direct_slow, "scheduler_queue_delay_us_per_transfer"),
+        nonnegative_number(slow_resource_leader, "scheduler_queue_delay_us_per_transfer"),
     ),
 }
 slow_objectives = objectives.get("slow", {})
@@ -290,11 +362,13 @@ print(
     f"direct-efficiency={direct_efficiency_ratio:.3f}, total-CPU={total_cpu_efficiency_ratio:.3f}, "
     f"first-byte={first_byte_ratio:.3f}, p99-gap={p99_gap_ratio:.3f}, "
     f"max-gap={max_gap_ratio:.3f}, dominance={dominance_score:.3f}"
-    f", RSS={total_rss_peak_ratio:.3f}, FD={total_fd_peak_ratio:.3f}, "
+    f", RSS={total_rss_peak_ratio:.3f}, "
+    f"FD={total_fd_peak_ratio:.3f}, "
     f"queue={scheduler_queue_delay_ratio:.3f}"
 )
 print(
     "streaming backpressure: "
+    f"resource-leader={slow_resource_leader_name}, "
     + ", ".join(f"{name}={value:.3f}" for name, value in slow_ratios.items())
 )
 

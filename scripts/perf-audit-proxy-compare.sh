@@ -1177,8 +1177,9 @@ run_one() {
   local warmup_out="$TMP_DIR/${artifact_name}.warmup"
   local lua="$TMP_DIR/${artifact_name}.lua"
   local status_before status_after
-  local cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_peak_kb
-  local fd_peak fd_peak_file fd_peak_monitor_pid kernel_resource_metrics
+  local cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_baseline_kb rss_peak_kb rss_growth_kb
+  local rss_peak_file rss_peak_monitor_pid
+  local fd_baseline fd_peak fd_growth fd_peak_file fd_peak_monitor_pid kernel_resource_metrics
   local scheduler_before_ns scheduler_after_ns scheduler_run_delay_ns scheduler_queue_delay_us_per_request
   local attempt failed_sample samples_file valid_sample_count median_index selected_sample profile_pid wrk_succeeded
   body_kind="$(body_profile "$body_bytes")"
@@ -1303,13 +1304,24 @@ LUA
       profile_pid=$!
     fi
     kernel_resource_metrics=false
+    rss_baseline_kb=0
+    rss_peak_kb=0
+    rss_growth_kb=0
+    rss_peak_file="$TMP_DIR/${artifact_name}.attempt-${attempt}.rss-peak"
+    rss_peak_monitor_pid=""
+    fd_baseline=0
     fd_peak=0
+    fd_growth=0
     fd_peak_file="$TMP_DIR/${artifact_name}.attempt-${attempt}.fd-peak"
     fd_peak_monitor_pid=""
     scheduler_before_ns=0
     if [ -d /proc ]; then
       kernel_resource_metrics=true
-      monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" &
+      rss_baseline_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
+      fd_baseline="$(process_tree_fd_count "$resource_pid")"
+      monitor_process_tree_rss_peak "$resource_pid" "$rss_peak_file" "$rss_baseline_kb" &
+      rss_peak_monitor_pid=$!
+      monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" "$fd_baseline" &
       fd_peak_monitor_pid=$!
       scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
     fi
@@ -1322,6 +1334,13 @@ LUA
       kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
       wait "$fd_peak_monitor_pid" 2>/dev/null || true
       fd_peak="$(cat "$fd_peak_file" 2>/dev/null || echo 0)"
+      fd_growth="$(peak_growth "$fd_baseline" "$fd_peak")"
+    fi
+    if [ -n "$rss_peak_monitor_pid" ]; then
+      kill "$rss_peak_monitor_pid" >/dev/null 2>&1 || true
+      wait "$rss_peak_monitor_pid" 2>/dev/null || true
+      rss_peak_kb="$(cat "$rss_peak_file" 2>/dev/null || echo 0)"
+      rss_growth_kb="$(peak_growth "$rss_baseline_kb" "$rss_peak_kb")"
     fi
     scheduler_after_ns="$scheduler_before_ns"
     if [ "$kernel_resource_metrics" = true ]; then
@@ -1347,7 +1366,6 @@ LUA
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
     cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
     rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
-    rss_peak_kb="$(process_tree_status_kb "$resource_pid" "VmHWM")"
     if [ "$mode" = "forward" ]; then
       status_after="$(safe_probe_forward_status "$port" "$probe_path")"
     else
@@ -1409,8 +1427,8 @@ LUA
       cache_writeback_verified=true
     fi
     if [ "$valid" = true ]; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$rps" "$complete" "$summary_requests" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$mean_ms" "$transfer_kbps" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$cpu_ms" "$rss_kb" "$rss_peak_kb" "$requests_per_cpu_second" "$fd_peak" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$status_before" "$status_after" >>"$samples_file"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$rps" "$complete" "$summary_requests" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$mean_ms" "$transfer_kbps" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$cpu_ms" "$rss_kb" "$rss_baseline_kb" "$rss_peak_kb" "$rss_growth_kb" "$requests_per_cpu_second" "$fd_baseline" "$fd_peak" "$fd_growth" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$status_before" "$status_after" >>"$samples_file"
       if [ "${STOP_AFTER_FIRST_VALID_SAMPLE:-false}" = true ]; then
         break
       fi
@@ -1443,11 +1461,11 @@ LUA
     record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "${status_before:-200}" "${status_after:-200}" "sample_aggregation_failed"
     return 0
   fi
-  IFS=$'\t' read -r rps complete summary_requests failed connect_errors read_errors write_errors timeout_errors non_2xx bad_length cache_result_errors cache_writeback_verified mean_ms transfer_kbps latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms cpu_ms rss_kb rss_peak_kb requests_per_cpu_second fd_peak scheduler_run_delay_ns scheduler_queue_delay_us_per_request kernel_resource_metrics status_before status_after <<<"$selected_sample"
+  IFS=$'\t' read -r rps complete summary_requests failed connect_errors read_errors write_errors timeout_errors non_2xx bad_length cache_result_errors cache_writeback_verified mean_ms transfer_kbps latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms cpu_ms rss_kb rss_baseline_kb rss_peak_kb rss_growth_kb requests_per_cpu_second fd_baseline fd_peak fd_growth scheduler_run_delay_ns scheduler_queue_delay_us_per_request kernel_resource_metrics status_before status_after <<<"$selected_sample"
   commit="${GITHUB_SHA:-unknown}"
   valid=true
-  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"cache_result_errors":%s,"cache_writeback_verified":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_peak_kb":%s,"requests_per_cpu_second":%s,"fd_peak":%s,"scheduler_run_delay_ns":%s,"scheduler_queue_delay_us_per_request":%s,"kernel_resource_metrics":%s,"valid":%s,"commit":"%s"}\n' \
-    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_peak_kb")" "$requests_per_cpu_second" "$fd_peak" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$valid" "$commit" >>"$OUT_JSON"
+  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"cache_result_errors":%s,"cache_writeback_verified":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_baseline_kb":%s,"rss_peak_kb":%s,"rss_growth_kb":%s,"requests_per_cpu_second":%s,"fd_baseline":%s,"fd_peak":%s,"fd_growth":%s,"scheduler_run_delay_ns":%s,"scheduler_queue_delay_us_per_request":%s,"kernel_resource_metrics":%s,"valid":%s,"commit":"%s"}\n' \
+    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_baseline_kb")" "$(json_number_or_null "$rss_peak_kb")" "$(json_number_or_null "$rss_growth_kb")" "$requests_per_cpu_second" "$fd_baseline" "$fd_peak" "$fd_growth" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$valid" "$commit" >>"$OUT_JSON"
 }
 
 require_cmd curl
@@ -1838,7 +1856,8 @@ jq -cs \
         | .valid_samples = ($valid | length)
         | .sampling_order = "round_robin_interleaved"
         | .sample_spread_basis = "tightest_valid_majority"
-        | .benchmark_schema_version = 3
+        | .benchmark_schema_version = 4
+        | .resource_measurement = "sampled_workload_peak_v1"
         | .backend_workers = $backend_workers
         | .role_workers = (if .proxy == "qpxd-webdav" then $webdav_workers elif (.proxy == "apache" or .proxy == "apache-webdav") then $apache_request_workers elif (.proxy | endswith("feature-rich")) then $feature_rich_workers elif (.proxy == "qpxd-cache" or .proxy == "nginx-cache") then $cache_workers elif .proxy == "qpxd-local" then $local_origin_workers elif (.proxy == "direct-backend" or .proxy == "nginx-static") then $backend_workers elif (.proxy | startswith("qpxd-workers-")) then (.proxy | ltrimstr("qpxd-workers-") | tonumber) else 1 end)
         | .blocking_workers = (if .proxy == "qpxd-webdav" then $webdav_blocking_threads else null end)
@@ -1867,8 +1886,12 @@ jq -cs \
         | .transfer_kbytes_per_sec = ([$valid[].transfer_kbytes_per_sec] | lower_median)
         | .cpu_ms = ([$valid[].cpu_ms] | upper_median)
         | .rss_kb = ([$valid[].rss_kb] | maximum)
+        | .rss_baseline_kb = ([$valid[].rss_baseline_kb] | maximum)
         | .rss_peak_kb = ([$valid[].rss_peak_kb] | maximum)
+        | .rss_growth_kb = ([$valid[].rss_growth_kb] | maximum)
+        | .fd_baseline = ([$valid[].fd_baseline] | maximum)
         | .fd_peak = ([$valid[].fd_peak] | maximum)
+        | .fd_growth = ([$valid[].fd_growth] | maximum)
         | .scheduler_run_delay_ns = ([$valid[].scheduler_run_delay_ns] | maximum)
         | .scheduler_queue_delay_us_per_request = ([$valid[].scheduler_queue_delay_us_per_request] | maximum)
         | .kernel_resource_metrics = ([$valid[].kernel_resource_metrics] | all)
@@ -1885,7 +1908,8 @@ jq -cs \
         | .valid_samples = ($valid | length)
         | .sampling_order = "round_robin_interleaved"
         | .sample_spread_basis = "tightest_valid_majority"
-        | .benchmark_schema_version = 3
+        | .benchmark_schema_version = 4
+        | .resource_measurement = "sampled_workload_peak_v1"
         | .backend_workers = $backend_workers
         | .role_workers = (if .proxy == "qpxd-webdav" then $webdav_workers elif (.proxy == "apache" or .proxy == "apache-webdav") then $apache_request_workers elif (.proxy | endswith("feature-rich")) then $feature_rich_workers elif (.proxy == "qpxd-cache" or .proxy == "nginx-cache") then $cache_workers elif .proxy == "qpxd-local" then $local_origin_workers elif (.proxy == "direct-backend" or .proxy == "nginx-static") then $backend_workers elif (.proxy | startswith("qpxd-workers-")) then (.proxy | ltrimstr("qpxd-workers-") | tonumber) else 1 end)
         | .blocking_workers = (if .proxy == "qpxd-webdav" then $webdav_blocking_threads else null end)

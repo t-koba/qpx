@@ -45,6 +45,13 @@ pub(super) async fn prepare_reverse_modules(
             cache_default_scheme: Some(if conn.tls_terminated { "https" } else { "http" }),
         }
     });
+    if http_modules.is_empty() {
+        return Ok(ReverseModuleOutcome::Continue(ReverseModuleDispatch {
+            req,
+            http_modules,
+            request_cache_policy,
+        }));
+    }
     match http_modules.on_request_headers(&mut req).await? {
         crate::http::modules::RequestHeadersOutcome::Continue => {
             Ok(ReverseModuleOutcome::Continue(ReverseModuleDispatch {

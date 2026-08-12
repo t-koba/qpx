@@ -11,7 +11,6 @@ use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use std::future::poll_fn;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use tokio::io::AsyncReadExt;
@@ -25,7 +24,7 @@ pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
 // Release response buffers promptly without letting a continuously ready completion queue
 // postpone admission until every previously admitted stream has finished.
-const H2_COMPLETION_BURST: usize = 1;
+const H2_COMPLETION_BURST: usize = 8;
 
 enum H2ConnectionEvent {
     ConcurrentStreamCompleted,
@@ -102,7 +101,7 @@ where
         builder.enable_connect_protocol();
     }
     let mut conn = timeout(idle_timeout, builder.handshake(io)).await??;
-    let active_streams = Arc::new(AtomicUsize::new(0));
+    let active_streams = AtomicUsize::new(0);
     let mut reusable_primary_stream: Option<ReusableBoxFuture<'_, ()>> = None;
     let mut primary_stream = None;
     let mut concurrent_streams = FuturesUnordered::new();
@@ -173,6 +172,7 @@ where
         match event {
             H2ConnectionEvent::ConcurrentStreamCompleted => {
                 completions_since_admission = completions_since_admission.saturating_add(1);
+                drive_h2_connection_now(&mut conn).await?;
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
                     if !accepting_streams {
                         break;
@@ -185,6 +185,7 @@ where
             H2ConnectionEvent::PrimaryStreamCompleted => {
                 completions_since_admission = completions_since_admission.saturating_add(1);
                 reusable_primary_stream = primary_stream.take();
+                drive_h2_connection_now(&mut conn).await?;
                 if !accepting_streams && concurrent_streams.is_empty() {
                     break;
                 }
@@ -208,14 +209,14 @@ where
                 completions_since_admission = 0;
                 let (request, respond) = result?;
                 let active_stream = ActiveH2Stream::new(&active_streams);
-                let stream = serve_h2_stream(
+                let stream = tokio::task::unconstrained(serve_h2_stream(
                     request,
                     respond,
                     &service,
                     body_channel_capacity,
                     idle_timeout,
                     active_stream,
-                );
+                ));
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
                     let reusable = if let Some(mut reusable) = reusable_primary_stream.take() {
                         reusable.set(stream);
@@ -225,7 +226,7 @@ where
                     };
                     primary_stream = Some(reusable);
                 } else {
-                    concurrent_streams.push(Box::pin(stream));
+                    concurrent_streams.push(stream);
                 }
             }
             H2ConnectionEvent::IdleTimeout => {
@@ -253,13 +254,30 @@ async fn poll_optional_h2_stream<T>(stream: &mut Option<ReusableBoxFuture<'_, T>
     .await
 }
 
+async fn drive_h2_connection_now<I>(conn: &mut h2::server::Connection<I, Bytes>) -> Result<()>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if let Some(result) = poll_fn(|cx| {
+        Poll::Ready(match conn.poll_closed(cx) {
+            Poll::Ready(result) => Some(result),
+            Poll::Pending => None,
+        })
+    })
+    .await
+    {
+        result?;
+    }
+    Ok(())
+}
+
 async fn serve_h2_stream<S>(
     request: Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<Bytes>,
     service: &S,
     body_channel_capacity: usize,
     idle_timeout: Duration,
-    active_stream: ActiveH2Stream,
+    active_stream: ActiveH2Stream<'_>,
 ) where
     S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
         + Send
@@ -322,16 +340,14 @@ async fn serve_h2_stream<S>(
     }
 }
 
-struct ActiveH2Stream {
-    active: Arc<AtomicUsize>,
+struct ActiveH2Stream<'a> {
+    active: &'a AtomicUsize,
 }
 
-impl ActiveH2Stream {
-    fn new(active: &Arc<AtomicUsize>) -> Self {
+impl<'a> ActiveH2Stream<'a> {
+    fn new(active: &'a AtomicUsize) -> Self {
         active.fetch_add(1, Ordering::Relaxed);
-        Self {
-            active: active.clone(),
-        }
+        Self { active }
     }
 
     fn count(&self) -> usize {
@@ -339,7 +355,7 @@ impl ActiveH2Stream {
     }
 }
 
-impl Drop for ActiveH2Stream {
+impl Drop for ActiveH2Stream<'_> {
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::Relaxed);
     }

@@ -161,7 +161,7 @@ pub(super) async fn send_http1_response_with_interim_zero_copy<W>(
     request_keep_alive: bool,
     body_read_timeout: Duration,
     head_buf: &mut BytesMut,
-    zero_copy: Option<&mut ZeroCopySocket>,
+    zero_copy: Option<&ZeroCopySocket>,
 ) -> Result<bool>
 where
     W: AsyncWrite + Unpin,

@@ -1,9 +1,13 @@
 //! HTTP API lifecycle metadata for RFC 8594 and RFC 9745.
 
 use crate::structured_fields::{BareItem, Date, Integer, ItemSerializer, parse_item};
+use http::header::{HeaderName, LINK};
 use http::{HeaderMap, HeaderValue};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+static DEPRECATION: HeaderName = HeaderName::from_static("deprecation");
+static SUNSET: HeaderName = HeaderName::from_static("sunset");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkValue {
@@ -153,15 +157,23 @@ impl ApiMetadata {
 }
 
 impl PreparedApiMetadata {
+    /// Returns the number of field lines emitted by [`Self::apply`].
+    pub fn field_line_count(&self) -> usize {
+        usize::from(self.deprecation.is_some())
+            + usize::from(self.sunset.is_some())
+            + self.links.len()
+    }
+
     pub fn apply(&self, headers: &mut HeaderMap) {
+        headers.reserve(self.field_line_count());
         if let Some(value) = self.deprecation.as_ref() {
-            headers.insert("deprecation", value.clone());
+            headers.insert(DEPRECATION.clone(), value.clone());
         }
         if let Some(value) = self.sunset.as_ref() {
-            headers.insert("sunset", value.clone());
+            headers.insert(SUNSET.clone(), value.clone());
         }
         for value in &self.links {
-            headers.append("link", value.clone());
+            headers.append(LINK, value.clone());
         }
     }
 }

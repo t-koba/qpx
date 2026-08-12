@@ -111,7 +111,33 @@ pub(crate) async fn finalize_dispatch_cached_response(
         http_modules,
         audit,
     } = input;
-    let mut response = http_modules.prepare_downstream_response(response).await?;
+    let modules_empty = http_modules.is_empty();
+    let mut response = if modules_empty {
+        response
+    } else {
+        http_modules.prepare_downstream_response(response).await?
+    };
+    let route_response_fields = headers.map_or(0, |control| {
+        control
+            .response_set()
+            .len()
+            .saturating_add(control.response_add().len())
+    });
+    let route_metadata_fields = plan
+        .api_metadata
+        .as_deref()
+        .map_or(
+            0,
+            qpx_http::api_metadata::PreparedApiMetadata::field_line_count,
+        )
+        .saturating_add(usize::from(plan.hsts.is_some()));
+    if route_response_fields != 0 || route_metadata_fields != 0 {
+        response.headers_mut().reserve(
+            route_response_fields
+                .saturating_add(route_metadata_fields)
+                .saturating_add(3),
+        );
+    }
     let version = response_version.unwrap_or_else(|| response.version());
     finalize_response_with_headers_in_place(
         request_method,
@@ -121,7 +147,9 @@ pub(crate) async fn finalize_dispatch_cached_response(
         headers,
         false,
     );
-    http_modules.on_logging(Some(response.status()), None).await;
+    if !modules_empty {
+        http_modules.on_logging(Some(response.status()), None).await;
+    }
     annotate_dispatch_response(&mut response, audit, outcome, &[]);
     Ok(crate::http::capture::stream::limit_response_body_for_plan(
         response, plan,

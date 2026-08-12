@@ -20,6 +20,7 @@ pub struct RuntimePlan {
     pub edges: Arc<[CompiledEdge]>,
     pub identity: CompiledRuntimeIdentity,
     pub limits: CompiledRuntimeLimits,
+    pub(crate) response_observability_required: bool,
 }
 
 #[derive(Clone)]

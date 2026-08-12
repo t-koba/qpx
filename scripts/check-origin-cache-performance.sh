@@ -86,8 +86,10 @@ def nonnegative_integer(container, field, context):
 def require_record(record, context):
     if record.get("valid") is not True:
         fail(f"{context} is marked invalid")
-    if record.get("benchmark_schema_version") != 3:
+    if record.get("benchmark_schema_version") != 4:
         fail(f"{context} uses unsupported benchmark schema")
+    if record.get("resource_measurement") != "sampled_workload_peak_v1":
+        fail(f"{context} uses unsupported resource measurement")
     if record.get("aggregation") != "conservative_median_per_metric":
         fail(f"{context} uses unsupported aggregation")
     if record.get("sampling_order") != "round_robin_interleaved":
@@ -103,8 +105,24 @@ def require_record(record, context):
         fail(f"{context} is missing Linux kernel resource metrics")
     if context.startswith("proxy_cache_miss_http1/") and record.get("cache_writeback_verified") is not True:
         fail(f"{context} did not verify durable cache writeback")
-    if nonnegative_integer(record, "fd_peak", context) == 0:
+    rss_baseline_kb = nonnegative_integer(record, "rss_baseline_kb", context)
+    if rss_baseline_kb == 0:
+        fail(f"{context} has no RSS baseline measurement")
+    rss_peak_kb = nonnegative_integer(record, "rss_peak_kb", context)
+    if rss_peak_kb == 0:
+        fail(f"{context} has no peak RSS measurement")
+    rss_growth_kb = nonnegative_integer(record, "rss_growth_kb", context)
+    fd_baseline = nonnegative_integer(record, "fd_baseline", context)
+    if fd_baseline == 0:
+        fail(f"{context} has no FD baseline measurement")
+    fd_peak = nonnegative_integer(record, "fd_peak", context)
+    if fd_peak == 0:
         fail(f"{context} has no peak FD measurement")
+    fd_growth = nonnegative_integer(record, "fd_growth", context)
+    if rss_peak_kb < rss_baseline_kb or rss_growth_kb != rss_peak_kb - rss_baseline_kb:
+        fail(f"{context} has inconsistent RSS measurements")
+    if fd_peak < fd_baseline or fd_growth != fd_peak - fd_baseline:
+        fail(f"{context} has inconsistent FD measurements")
     attempts = nonnegative_integer(record, "sample_attempts", context)
     valid_samples = nonnegative_integer(record, "valid_samples", context)
     if attempts == 0 or valid_samples < attempts // 2 + 1 or valid_samples > attempts:
@@ -147,10 +165,12 @@ def require_record(record, context):
 
 
 objectives = load_json(OBJECTIVES_PATH)
-if objectives.get("schema_version") != 1:
+if objectives.get("schema_version") != 2:
     fail("unsupported origin/cache objectives schema")
 if objectives.get("metric") != "multi_axis_origin_cache_dominance":
     fail("origin/cache objectives metric does not match this checker")
+if objectives.get("resource_measurement") != "sampled_workload_peak_v1":
+    fail("origin/cache resource measurement does not match this checker")
 defaults = objectives.get("defaults")
 lanes = objectives.get("lanes")
 if not isinstance(defaults, dict) or not isinstance(lanes, list) or not lanes:
@@ -246,11 +266,13 @@ for lane in lanes:
     p99_ratio = number(qpx, "latency_p99_ms", qpx_context) / number(
         reference, "latency_p99_ms", reference_context
     )
-    rss_peak_ratio = number(qpx, "rss_peak_kb", qpx_context) / number(
-        reference, "rss_peak_kb", reference_context
+    rss_peak_ratio = lower_is_better_ratio(
+        nonnegative_number(qpx, "rss_peak_kb", qpx_context),
+        nonnegative_number(reference, "rss_peak_kb", reference_context),
     )
-    fd_peak_ratio = number(qpx, "fd_peak", qpx_context) / number(
-        reference, "fd_peak", reference_context
+    fd_peak_ratio = lower_is_better_ratio(
+        nonnegative_number(qpx, "fd_peak", qpx_context),
+        nonnegative_number(reference, "fd_peak", reference_context),
     )
     scheduler_queue_delay_ratio = lower_is_better_ratio(
         nonnegative_number(qpx, "scheduler_queue_delay_us_per_request", qpx_context),

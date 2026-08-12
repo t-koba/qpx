@@ -32,14 +32,7 @@ pub(super) async fn enforce_reverse_access_control(
         sanitized_headers,
         request_destination,
     } = input;
-    if selected_policy.decision_service.is_none()
-        && route.plan.guard.is_none()
-        && route
-            .plan
-            .rate_limits
-            .is_empty_for_scope(TransportScope::Request)
-        && route.local_response.is_none()
-    {
+    if selected_policy.decision_service.is_none() {
         let audit_ctx = build_dispatch_audit_context(DispatchAuditInput {
             state,
             kind: ProxyKind::Reverse,
@@ -55,6 +48,69 @@ pub(super) async fn enforce_reverse_access_control(
             destination: request_destination,
             decision_service: None,
         });
+        if let Some(profile) = route.plan.guard.as_deref()
+            && let Some(response) = evaluate_http_guard(DispatchGuardInput {
+                profile: Some(profile),
+                req: &req,
+                destination: request_destination,
+                proxy_name,
+                audit: audit_ctx.clone(),
+            })
+            .await?
+        {
+            return Ok(ReverseAccessOutcome::Response(Box::new(response)));
+        }
+        let request_limit_ctx = if route
+            .plan
+            .rate_limits
+            .requires_extended_context(TransportScope::Request)
+        {
+            RateLimitContext::from_identity(
+                conn.remote_addr.ip(),
+                identity,
+                route.name.as_deref(),
+                None,
+            )
+        } else {
+            RateLimitContext::from_source(conn.remote_addr.ip())
+        };
+        let mut request_limits = Default::default();
+        if !route
+            .plan
+            .rate_limits
+            .is_empty_for_scope(TransportScope::Request)
+        {
+            let acquired = state.policy.rate_limiters.collect_checked_plan_request(
+                &route.plan.rate_limits,
+                None,
+                TransportScope::Request,
+                &request_limit_ctx,
+                1,
+            )?;
+            request_limits = acquired.limits;
+            if let Some(retry_after) = acquired.retry_after {
+                return Ok(ReverseAccessOutcome::Response(Box::new(
+                    rate_limit_response_for_parts(
+                        request_method,
+                        req.version(),
+                        proxy_name,
+                        Some(retry_after),
+                        audit_ctx,
+                    ),
+                )));
+            }
+        }
+        if let Some(response) = reverse_local_route_response(
+            state,
+            route,
+            request_method,
+            req.version(),
+            proxy_name,
+            route.headers.as_deref(),
+            &audit_ctx,
+        )? {
+            return Ok(ReverseAccessOutcome::Response(Box::new(response)));
+        }
         return Ok(ReverseAccessOutcome::Continue(ReverseAccessControl {
             req,
             audit_ctx,
@@ -64,8 +120,8 @@ pub(super) async fn enforce_reverse_access_control(
             cache_bypass: false,
             decision_service_mirror_upstreams: Vec::new(),
             authorization_decision: None,
-            request_limit_ctx: RateLimitContext::from_source(conn.remote_addr.ip()),
-            request_limits: Default::default(),
+            request_limit_ctx,
+            request_limits,
         }));
     }
     let decision_service = enforce_decision_service(

@@ -44,32 +44,30 @@ pub async fn lookup(
     let namespace = cache_namespace(policy, "default");
     if can_use_hot_response_candidate(request_method, &req) {
         let storage_key = key.primary_index_storage_key_arc();
-        if let Some(candidate) = backend
-            .get_response_candidate(namespace, storage_key.as_ref())
-            .await?
+        let now = now_millis();
+        if let Some(candidate) =
+            backend.get_response_candidate(namespace, storage_key.as_ref(), now)?
             && matches_vary(
                 request_headers,
                 key.content_digest.as_deref(),
                 candidate.envelope.as_ref(),
             )
-        {
-            let now = now_millis();
-            if matches!(
+            && matches!(
                 classify_for_request(&req, candidate.envelope.as_ref(), now),
                 CacheEntryDisposition::ServeFresh | CacheEntryDisposition::ServeStale
-            ) {
-                return Ok(LookupOutcome::Hit(
-                    response_from_envelope_for_request_with_body(
-                        request_method,
-                        &req,
-                        candidate.envelope.as_ref(),
-                        now,
-                        "HIT",
-                        candidate.body.body,
-                        candidate.body.len,
-                    )?,
-                ));
-            }
+            )
+        {
+            return Ok(LookupOutcome::Hit(
+                response_from_envelope_for_request_with_body(
+                    request_method,
+                    &req,
+                    candidate.envelope.as_ref(),
+                    now,
+                    "HIT",
+                    candidate.body.body,
+                    candidate.body.len,
+                )?,
+            ));
         }
     }
     let variant_index =

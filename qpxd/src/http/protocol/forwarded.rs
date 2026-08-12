@@ -29,20 +29,31 @@ pub(crate) fn apply_forwarded_policy(
         .trusted_peers
         .iter()
         .any(|network| network.contains(&peer_ip));
-    let has_forwarded_chain = headers.contains_key(&FORWARDED);
+    let mut present_headers = 0_u8;
+    for name in headers.keys() {
+        present_headers |= match name.as_str() {
+            "forwarded" => 1 << 0,
+            "x-forwarded-for" => 1 << 1,
+            "x-forwarded-host" => 1 << 2,
+            "x-forwarded-proto" => 1 << 3,
+            "x-forwarded-port" => 1 << 4,
+            _ => 0,
+        };
+    }
+    let has_forwarded_chain = present_headers & 1 != 0;
     let mut chain = if trusted && has_forwarded_chain {
         parse_forwarded(headers)
             .map_err(|error| anyhow!("invalid trusted Forwarded chain: {error}"))?
     } else {
-        if headers.contains_key(&FORWARDED)
-            && policy.untrusted_chain == UntrustedForwardedChainPolicy::Reject
-        {
+        if has_forwarded_chain && policy.untrusted_chain == UntrustedForwardedChainPolicy::Reject {
             return Err(anyhow!("untrusted peer supplied a Forwarded chain"));
         }
         Vec::new()
     };
-    for name in &FORWARDED_CHAIN_HEADERS {
-        headers.remove(name);
+    for (index, name) in FORWARDED_CHAIN_HEADERS.iter().enumerate() {
+        if present_headers & (1 << index) != 0 {
+            headers.remove(name);
+        }
     }
 
     if chain.is_empty() {
@@ -212,6 +223,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("forwarded", "for=192.0.2.4".parse().expect("header"));
         headers.insert("x-forwarded-for", "192.0.2.4".parse().expect("header"));
+        headers.insert("x-forwarded-host", "old.example".parse().expect("header"));
+        headers.insert("x-forwarded-proto", "http".parse().expect("header"));
+        headers.insert("x-forwarded-port", "80".parse().expect("header"));
+        headers.insert("x-unrelated", "preserved".parse().expect("header"));
         apply_forwarded_policy(
             &mut headers,
             Some(&policy(UntrustedForwardedChainPolicy::Discard)),
@@ -225,6 +240,10 @@ mod tests {
             "for=203.0.113.8;by=qpx-edge;proto=https;host=example.com"
         );
         assert!(!headers.contains_key("x-forwarded-for"));
+        assert!(!headers.contains_key("x-forwarded-host"));
+        assert!(!headers.contains_key("x-forwarded-proto"));
+        assert!(!headers.contains_key("x-forwarded-port"));
+        assert_eq!(headers.get("x-unrelated").expect("unrelated"), "preserved");
     }
 
     #[test]

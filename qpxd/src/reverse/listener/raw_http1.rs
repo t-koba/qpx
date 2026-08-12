@@ -4,7 +4,7 @@ use crate::http::codec::h1::{
     send_static_http1_response, serve_http1_tcp_with_interim_and_capacity,
 };
 use crate::http::codec::h1_common::MAX_HEADER_BYTES;
-use crate::http::codec::lazy_timeout::{timeout_after_pending, timeout_after_pending_with};
+use crate::http::codec::lazy_timeout::ReusablePendingTimeout;
 use crate::http::dispatcher::InterimList;
 use crate::reverse::ReloadableReverse;
 use crate::reverse::transport::{
@@ -53,6 +53,9 @@ pub(super) async fn serve_raw_or_fallback(
     let mut response_head = BytesMut::with_capacity(512);
     let mut request_cache = RawHttp1ConnectionCache::default();
     let mut origin_session = PreparedPlainHttp1Session::default();
+    let pending_timer = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(pending_timer);
+    let mut pending_timeout = ReusablePendingTimeout::new(pending_timer.as_mut());
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_service = ReverseInterimService::new(reverse.clone(), conn.clone());
     let direct_combined_access = direct_combined_access_log_enabled(&access_cfg);
@@ -74,13 +77,14 @@ pub(super) async fn serve_raw_or_fallback(
             // the next keep-alive request is already queued. Release only before actually
             // waiting on an idle downstream connection so admission capacity is never held
             // by an inactive client.
-            let read = timeout_after_pending_with(
-                header_read_timeout,
-                stream.read_buf(&mut read_buf),
-                || origin_session.release(),
-            )
-            .await
-            .map_err(|_| anyhow!("HTTP/1 request header read timed out"))??;
+            let read = pending_timeout
+                .timeout_after_pending_with(
+                    header_read_timeout,
+                    stream.read_buf(&mut read_buf),
+                    || origin_session.release(),
+                )
+                .await
+                .map_err(|_| anyhow!("HTTP/1 request header read timed out"))??;
             if read == 0 {
                 return Ok(());
             }
@@ -138,6 +142,7 @@ pub(super) async fn serve_raw_or_fallback(
                         &reverse,
                         &conn,
                         &mut origin_session,
+                        &mut pending_timeout,
                     )
                     .await
                 };
@@ -252,10 +257,10 @@ pub(super) async fn serve_raw_or_fallback(
                 }
             }
             FastParse::Partial if read_buf.len() < MAX_HEADER_BYTES => {
-                let read =
-                    timeout_after_pending(header_read_timeout, stream.read_buf(&mut read_buf))
-                        .await
-                        .map_err(|_| anyhow!("HTTP/1 request header read timed out"))??;
+                let read = pending_timeout
+                    .timeout_after_pending(header_read_timeout, stream.read_buf(&mut read_buf))
+                    .await
+                    .map_err(|_| anyhow!("HTTP/1 request header read timed out"))??;
                 if read == 0 {
                     return Err(anyhow!("client connection closed mid-header"));
                 }

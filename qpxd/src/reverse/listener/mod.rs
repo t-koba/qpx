@@ -15,9 +15,9 @@ use qpx_observability::RequestHandler;
 use qpx_observability::access_log::{
     AccessLogContext, AccessLogService, access_log_service_required,
 };
+use qpx_observability::handler::BoxRequestFuture;
 use std::convert::Infallible;
 use std::future::Future;
-use std::pin::Pin;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::time::Duration;
@@ -86,14 +86,14 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
     fn call_pinned<'a>(
         &'a self,
         req: Request<Body>,
-    ) -> Pin<Box<dyn Future<Output = Result<Response<Body>, Infallible>> + Send + 'a>>
+    ) -> BoxRequestFuture<'a, Response<Body>, Infallible>
     where
         Request<Body>: 'a,
     {
         let reverse = &self.reverse;
         let conn = &self.conn;
         let origin_pool = &self.origin_pool;
-        Box::pin(async move {
+        Box::into_pin(Box::write(Box::new_uninit(), async move {
             let (interim, mut response) = handle_request_with_interim_and_origin_pool_ref(
                 req,
                 reverse,
@@ -105,7 +105,7 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
                 response.extensions_mut().insert(interim);
             }
             Ok(response)
-        })
+        }))
     }
 }
 

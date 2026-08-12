@@ -81,10 +81,12 @@ def positive_int_list(config, field):
 
 with open(OBJECTIVES_PATH, "r", encoding="utf-8") as handle:
     objectives = json.load(handle)
-if objectives.get("schema_version") != 2:
+if objectives.get("schema_version") != 3:
     fail("unsupported HTTP/2 performance objectives schema")
 if objectives.get("metric") != "multi_axis_total_system_http2_dominance":
     fail("HTTP/2 performance metric does not match this checker")
+if objectives.get("resource_measurement") != "sampled_workload_peak_v1":
+    fail("HTTP/2 performance objectives use an unsupported resource measurement")
 
 limits = objectives.get("defaults", {})
 limit_fields = (
@@ -145,8 +147,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"{owner} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"{owner} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version", owner) != 6:
+        if nonnegative_int(record, "benchmark_schema_version", owner) != 7:
             fail(f"{owner} uses an unsupported benchmark schema")
+        if record.get("resource_measurement") != "sampled_workload_peak_v1":
+            fail(f"{owner} uses an unsupported resource measurement")
         if record.get("kernel_resource_metrics") is not True:
             fail(f"{owner} is missing Linux kernel resource metrics")
         concurrency = nonnegative_int(record, "concurrency", owner)
@@ -179,7 +183,15 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             "cpu_ms",
             "backend_cpu_ms",
             "total_cpu_ms",
+            "rss_baseline_kb",
+            "rss_peak_kb",
+            "backend_rss_baseline_kb",
+            "backend_rss_peak_kb",
             "total_rss_peak_kb",
+            "fd_baseline",
+            "fd_peak",
+            "backend_fd_baseline",
+            "backend_fd_peak",
             "total_fd_peak",
         ):
             positive_number(record, field, owner)
@@ -187,6 +199,43 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"{owner} total CPU excludes the measured proxy or direct backend")
         if positive_number(record, "total_cpu_ms", owner) < positive_number(record, "backend_cpu_ms", owner):
             fail(f"{owner} total CPU excludes the measured backend")
+        for baseline_field, peak_field, growth_field in (
+            ("rss_baseline_kb", "rss_peak_kb", "rss_growth_kb"),
+            ("backend_rss_baseline_kb", "backend_rss_peak_kb", "backend_rss_growth_kb"),
+            ("fd_baseline", "fd_peak", "fd_growth"),
+            ("backend_fd_baseline", "backend_fd_peak", "backend_fd_growth"),
+        ):
+            baseline = positive_number(record, baseline_field, owner)
+            peak = positive_number(record, peak_field, owner)
+            growth = nonnegative_number(record, growth_field, owner)
+            if peak < baseline or growth != peak - baseline:
+                fail(f"{owner} has inconsistent {growth_field}")
+        if proxy == "direct-backend":
+            expected_total_rss_peak = positive_number(record, "rss_peak_kb", owner)
+            expected_total_rss_growth = nonnegative_number(record, "rss_growth_kb", owner)
+            expected_total_fd_peak = positive_number(record, "fd_peak", owner)
+            expected_total_fd_growth = nonnegative_number(record, "fd_growth", owner)
+        else:
+            expected_total_rss_peak = positive_number(record, "rss_peak_kb", owner) + positive_number(
+                record, "backend_rss_peak_kb", owner
+            )
+            expected_total_rss_growth = nonnegative_number(
+                record, "rss_growth_kb", owner
+            ) + nonnegative_number(record, "backend_rss_growth_kb", owner)
+            expected_total_fd_peak = positive_number(record, "fd_peak", owner) + positive_number(
+                record, "backend_fd_peak", owner
+            )
+            expected_total_fd_growth = nonnegative_number(
+                record, "fd_growth", owner
+            ) + nonnegative_number(record, "backend_fd_growth", owner)
+        if positive_number(record, "total_rss_peak_kb", owner) != expected_total_rss_peak:
+            fail(f"{owner} has inconsistent total_rss_peak_kb")
+        if nonnegative_number(record, "total_rss_growth_kb", owner) != expected_total_rss_growth:
+            fail(f"{owner} has inconsistent total_rss_growth_kb")
+        if positive_number(record, "total_fd_peak", owner) != expected_total_fd_peak:
+            fail(f"{owner} has inconsistent total_fd_peak")
+        if nonnegative_number(record, "total_fd_growth", owner) != expected_total_fd_growth:
+            fail(f"{owner} has inconsistent total_fd_growth")
         for field in (
             "requests_per_sec_ratio",
             "requests_per_cpu_second_ratio",
@@ -226,6 +275,7 @@ for body_bytes, max_streams in sorted(required_lanes):
         "sampling_order",
         "aggregation",
         "benchmark_schema_version",
+        "resource_measurement",
     ):
         if len({direct.get(field), qpx.get(field), nginx.get(field)}) != 1:
             fail(f"HTTP/2 records for {body_bytes} bytes and m={max_streams} disagree on {field}")

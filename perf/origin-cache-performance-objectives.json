@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "metric": "multi_axis_origin_cache_dominance",
+  "resource_measurement": "sampled_workload_peak_v1",
   "defaults": {
     "min_throughput_ratio": 1.25,
     "min_cpu_efficiency_ratio": 1.25,

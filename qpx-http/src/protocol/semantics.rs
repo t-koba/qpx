@@ -23,27 +23,45 @@ pub fn validate_http_status_class(status: StatusCode, context: &str) -> anyhow::
 }
 
 pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bool) {
-    if !headers.keys().any(is_hop_by_hop_header) {
+    let mut connection_present = false;
+    let mut upgrade_present = false;
+    let mut well_known_present = 0_u8;
+    for name in headers.keys() {
+        match name.as_str() {
+            "connection" => connection_present = true,
+            "upgrade" => upgrade_present = true,
+            "proxy-connection" => well_known_present |= 1 << 0,
+            "proxy-authorization" => well_known_present |= 1 << 1,
+            "proxy-authenticate" => well_known_present |= 1 << 2,
+            "proxy-authentication-info" => well_known_present |= 1 << 3,
+            "keep-alive" => well_known_present |= 1 << 4,
+            "te" => well_known_present |= 1 << 5,
+            "trailer" => well_known_present |= 1 << 6,
+            "transfer-encoding" => well_known_present |= 1 << 7,
+            _ => {}
+        }
+    }
+    if !connection_present && !upgrade_present && well_known_present == 0 {
         return;
     }
     let mut keep_upgrade = false;
     let mut extension_headers = Vec::new();
 
-    for value in headers.get_all(CONNECTION) {
-        if let Ok(value) = value.to_str() {
-            for token in value
-                .split(',')
-                .map(str::trim)
-                .filter(|token| !token.is_empty())
-            {
-                if token.eq_ignore_ascii_case("upgrade") {
-                    keep_upgrade |= preserve_upgrade;
-                } else if !WELL_KNOWN_HOP_HEADERS
-                    .iter()
-                    .any(|known| token.eq_ignore_ascii_case(known.as_str()))
-                    && let Ok(name) = HeaderName::from_bytes(token.as_bytes())
+    if connection_present {
+        for value in headers.get_all(CONNECTION) {
+            if let Ok(value) = value.to_str() {
+                for token in value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
                 {
-                    extension_headers.push(name);
+                    if token.eq_ignore_ascii_case("upgrade") {
+                        keep_upgrade |= preserve_upgrade;
+                    } else if !is_well_known_hop_token(token)
+                        && let Ok(name) = HeaderName::from_bytes(token.as_bytes())
+                    {
+                        extension_headers.push(name);
+                    }
                 }
             }
         }
@@ -53,32 +71,34 @@ pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bo
         headers.remove(name);
     }
 
-    for header in &WELL_KNOWN_HOP_HEADERS {
-        headers.remove(header);
+    for (index, header) in WELL_KNOWN_HOP_HEADERS.iter().enumerate() {
+        if well_known_present & (1 << index) != 0 {
+            headers.remove(header);
+        }
     }
 
     if preserve_upgrade && keep_upgrade {
         headers.insert(CONNECTION, HeaderValue::from_static("upgrade"));
     } else {
-        headers.remove(CONNECTION);
-        headers.remove("upgrade");
+        if connection_present {
+            headers.remove(CONNECTION);
+        }
+        if upgrade_present {
+            headers.remove("upgrade");
+        }
     }
 }
 
-fn is_hop_by_hop_header(name: &HeaderName) -> bool {
-    matches!(
-        name.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authentication-info"
-            | "proxy-authorization"
-            | "proxy-connection"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    )
+fn is_well_known_hop_token(token: &str) -> bool {
+    token.eq_ignore_ascii_case("connection")
+        || token.eq_ignore_ascii_case("keep-alive")
+        || token.eq_ignore_ascii_case("proxy-authenticate")
+        || token.eq_ignore_ascii_case("proxy-authentication-info")
+        || token.eq_ignore_ascii_case("proxy-authorization")
+        || token.eq_ignore_ascii_case("proxy-connection")
+        || token.eq_ignore_ascii_case("te")
+        || token.eq_ignore_ascii_case("trailer")
+        || token.eq_ignore_ascii_case("transfer-encoding")
 }
 
 pub fn append_via_for_version(headers: &mut HeaderMap, version: Version, proxy_name: &str) {

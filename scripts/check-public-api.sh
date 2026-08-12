@@ -60,4 +60,4 @@ check_crate qpx-core "$qpx_core_api_hash"
 check_crate qpx-auth c17be9a9eb26c0587c0425b1d2088ebe1ad09d5c7f43a00dc8677938ecf842c5
 check_crate qpx-h3 "$qpx_h3_api_hash"
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a
-check_crate qpx-observability 14acc450f63cf0605cf69c863f347f25c9c8dc30edfbcf702f9b795aa5bf0701
+check_crate qpx-observability ab5e618b4d29eb699f82a26513cd33476ddef6e588568b5b440fcd47d2a82ea7
