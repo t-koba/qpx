@@ -548,7 +548,9 @@ YAML
     dump_service_log "$LOG_DIR/qpxd-webdav-check.log"
     exit 1
   fi
-  QPX_STATE_DIR="$STATE_DIR" "$QPXD_BIN" run --config "$config" >"$LOG_DIR/qpxd-webdav.log" 2>&1 &
+  # Optional extra environment for the qpxd process (e.g. allocator tuning)
+  # passed as NAME=VALUE pairs; empty by default.
+  QPX_STATE_DIR="$STATE_DIR" env ${QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV:-} "$QPXD_BIN" run --config "$config" >"$LOG_DIR/qpxd-webdav.log" 2>&1 &
   local pid=$!
   QPX_WEBDAV_PID="$pid"
   register_pid "$pid"

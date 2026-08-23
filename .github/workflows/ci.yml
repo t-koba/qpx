@@ -443,6 +443,7 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
           QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-proxy-compare.jsonl
+          QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV: "MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728"
         run: |
           cargo build -p qpxd --release --locked --features http3-backend-qpx
           scripts/perf-audit-proxy-matrix.sh "$QPX_PROXY_COMPARE_JSON"
