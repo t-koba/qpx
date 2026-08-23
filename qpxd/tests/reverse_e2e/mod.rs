@@ -223,10 +223,39 @@ fn run_websocket_origin_once(
     upgraded_tx: oneshot::Sender<Vec<u8>>,
 ) -> Result<()> {
     loop {
-        let (mut stream, _) = listener.accept()?;
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         stream.set_read_timeout(Some(Duration::from_secs(3)))?;
         stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-        let req = read_until_blocking(&mut stream, b"\r\n\r\n", 128 * 1024)?;
+        // Idle probes (connects that never send a request) must not take the
+        // origin down; treat timeouts and resets like EOF and keep accepting.
+        let req = match read_until_blocking(&mut stream, b"\r\n\r\n", 128 * 1024) {
+            Ok(req) => req,
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+                    Some(
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::UnexpectedEof
+                    )
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if req.is_empty() {
             continue;
         }
