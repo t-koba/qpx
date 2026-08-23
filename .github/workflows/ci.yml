@@ -403,8 +403,7 @@ jobs:
       - name: install proxy comparison packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk
-          sudo apt-get install -y jq
+          sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk strace jq
       - name: criterion streaming throughput bench
         id: criterion_streaming_throughput_bench
         continue-on-error: true
@@ -444,6 +443,7 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
           QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-proxy-compare.jsonl
+          QPX_PROXY_COMPARE_STRACE: "1"
         run: |
           cargo build -p qpxd --release --locked --features http3-backend-qpx
           scripts/perf-audit-proxy-matrix.sh "$QPX_PROXY_COMPARE_JSON"

@@ -183,6 +183,7 @@ collect_artifacts() {
     fi
   done
   cp "$TMP_DIR"/*.wrk "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.wrk.strace.txt "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.lua "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.warmup "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.valid-samples.tsv "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
@@ -1332,6 +1333,11 @@ LUA
       io_syscr_before="$(process_tree_io_counter "$resource_pid" "syscr")"
       io_syscw_before="$(process_tree_io_counter "$resource_pid" "syscw")"
     fi
+    strace_pid=""
+    if command -v strace >/dev/null 2>&1 && [ "${QPX_PROXY_COMPARE_STRACE:-0}" = "1" ] && [ "$proxy" = "qpxd-webdav" ] && [ "$body_kind" != "short" ]; then
+      strace -f -c -p "$resource_pid" -o "$out.strace.txt" 2>/dev/null &
+      strace_pid=$!
+    fi
     wrk_succeeded=true
     if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "sample-${artifact_name}-${attempt}" >"$out" 2>&1; then
       wrk_succeeded=false
@@ -1367,6 +1373,12 @@ LUA
     fi
     if [ -n "$profile_pid" ]; then
       wait "$profile_pid" || true
+    fi
+    if [ -n "$strace_pid" ]; then
+      sleep 1
+      kill -INT "$strace_pid" >/dev/null 2>&1 || true
+      wait "$strace_pid" 2>/dev/null || true
+      strace_pid=""
     fi
     drain_feature_rich_access_log "$proxy"
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
