@@ -30,7 +30,7 @@
       "qpx": "qpxd-webdav",
       "reference": "apache-webdav",
       "qpx_role_workers": 2,
-      "qpx_blocking_workers": 16,
+      "qpx_blocking_workers": 128,
       "reference_role_workers": 400
     },
     {
@@ -40,7 +40,7 @@
       "qpx": "qpxd-webdav",
       "reference": "apache-webdav",
       "qpx_role_workers": 2,
-      "qpx_blocking_workers": 16,
+      "qpx_blocking_workers": 128,
       "reference_role_workers": 400,
       "min_throughput_ratio": 1.0,
       "min_cpu_efficiency_ratio": 1.5,
