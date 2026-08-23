@@ -243,7 +243,9 @@ fn run_websocket_origin_once(
             Ok(req) => req,
             Err(error)
                 if matches!(
-                    error.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+                    error
+                        .downcast_ref::<std::io::Error>()
+                        .map(std::io::Error::kind),
                     Some(
                         std::io::ErrorKind::WouldBlock
                             | std::io::ErrorKind::TimedOut
