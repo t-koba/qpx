@@ -87,6 +87,33 @@ proc_status_value_kb() {
   awk -v key="$key" '$1 == key ":" { print $2; found = 1; exit } END { if (!found) print 0 }' "$status"
 }
 
+proc_io_counter() {
+  local pid="$1"
+  local key="$2"
+  local io="/proc/${pid}/io"
+  if [ ! -r "$io" ]; then
+    echo 0
+    return
+  fi
+  awk -v key="$key" '$1 == key ":" { print $2; found = 1; exit } END { if (!found) print 0 }' "$io"
+}
+
+process_tree_io_counter() {
+  local root="$1"
+  local key="$2"
+  local pid value total
+  if [ -z "$root" ] || [ ! -d /proc ]; then
+    echo 0
+    return
+  fi
+  total=0
+  for pid in $(process_tree_pids "$root"); do
+    value="$(proc_io_counter "$pid" "$key")"
+    total=$((total + value))
+  done
+  echo "$total"
+}
+
 process_tree_cpu_ms() {
   local root="$1"
   local hz pid ticks total_ticks total_ms

@@ -1326,6 +1326,12 @@ LUA
       scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
     fi
     cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
+    io_syscr_before=0
+    io_syscw_before=0
+    if [ -d /proc ]; then
+      io_syscr_before="$(process_tree_io_counter "$resource_pid" "syscr")"
+      io_syscw_before="$(process_tree_io_counter "$resource_pid" "syscw")"
+    fi
     wrk_succeeded=true
     if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "sample-${artifact_name}-${attempt}" >"$out" 2>&1; then
       wrk_succeeded=false
@@ -1364,6 +1370,16 @@ LUA
     fi
     drain_feature_rich_access_log "$proxy"
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
+    if [ -d /proc ]; then
+      io_syscr_delta=$(( $(process_tree_io_counter "$resource_pid" "syscr") - io_syscr_before ))
+      io_syscw_delta=$(( $(process_tree_io_counter "$resource_pid" "syscw") - io_syscw_before ))
+      [ "$io_syscr_delta" -lt 0 ] 2>/dev/null && io_syscr_delta=0
+      [ "$io_syscw_delta" -lt 0 ] 2>/dev/null && io_syscw_delta=0
+      {
+        echo "qpx_proc_io_syscr_delta $io_syscr_delta"
+        echo "qpx_proc_io_syscw_delta $io_syscw_delta"
+      } >>"$out"
+    fi
     cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
     rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
     if [ "$mode" = "forward" ]; then
