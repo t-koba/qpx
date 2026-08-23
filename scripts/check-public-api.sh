@@ -45,19 +45,8 @@ check_crate() {
   fi
 }
 
-case "$(uname -s)" in
-  Darwin)
-    qpx_core_api_hash=d6d3412e7c07e276b300ec5efc65b294b2d3ba9dea1178638a2c357abe794101
-    qpx_h3_api_hash=400fc73c391d6a5963c922c2053bb7c18776d9ab5997762b7e2cac3a3b2376cb
-    ;;
-  *)
-    qpx_core_api_hash=4a2ae77412aa933b76a6e35b8ecc8a6d48a91d3f4101d7041d450977e1bcce38
-    qpx_h3_api_hash=cd9fcefc7ac1cb75406ab51a30de364be14e9ea72b243b850f43f03e649a211a
-    ;;
-esac
-
-check_crate qpx-core "$qpx_core_api_hash"
+check_crate qpx-core 4a2ae77412aa933b76a6e35b8ecc8a6d48a91d3f4101d7041d450977e1bcce38
 check_crate qpx-auth c17be9a9eb26c0587c0425b1d2088ebe1ad09d5c7f43a00dc8677938ecf842c5
-check_crate qpx-h3 "$qpx_h3_api_hash"
+check_crate qpx-h3 cd9fcefc7ac1cb75406ab51a30de364be14e9ea72b243b850f43f03e649a211a
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a
 check_crate qpx-observability ab5e618b4d29eb699f82a26513cd33476ddef6e588568b5b440fcd47d2a82ea7
