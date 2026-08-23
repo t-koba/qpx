@@ -266,8 +266,10 @@ fn parse_https_svc_param(key: u16, value: &[u8], record: &mut DnsHttpsRecord) ->
             }
             record.mandatory.extend(
                 value
-                    .chunks_exact(2)
-                    .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]])),
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|chunk| u16::from_be_bytes(*chunk)),
             );
         }
         1 => {
@@ -289,17 +291,15 @@ fn parse_https_svc_param(key: u16, value: &[u8], record: &mut DnsHttpsRecord) ->
             record.port = Some(u16::from_be_bytes([value[0], value[1]]));
         }
         4 if value.len().is_multiple_of(4) => {
-            for chunk in value.chunks_exact(4) {
+            for chunk in value.as_chunks::<4>().0 {
                 record
                     .ipv4_hints
                     .push(Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]));
             }
         }
         6 if value.len().is_multiple_of(16) => {
-            for chunk in value.chunks_exact(16) {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(chunk);
-                record.ipv6_hints.push(Ipv6Addr::from(octets));
+            for chunk in value.as_chunks::<16>().0 {
+                record.ipv6_hints.push(Ipv6Addr::from(*chunk));
             }
         }
         _ => {}
