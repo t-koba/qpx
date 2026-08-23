@@ -1851,6 +1851,20 @@ jq -cs \
     | if ($valid | length) >= $minimum then
         ($valid | sort_by(.requests_per_sec)) as $ordered
         | $ordered[((($ordered | length) - 1) / 2 | floor)]
+        # Resource triples must stay internally consistent (growth == peak -
+        # baseline), so copy each family from the single sample with the
+        # highest peak instead of maximizing every field independently.
+        | . as $record
+        | (($valid | max_by(.rss_peak_kb)) as $rss_sample
+          | (($valid | max_by(.fd_peak)) as $fd_sample
+            | $record
+            | .rss_kb = $rss_sample.rss_kb
+            | .rss_baseline_kb = $rss_sample.rss_baseline_kb
+            | .rss_peak_kb = $rss_sample.rss_peak_kb
+            | .rss_growth_kb = $rss_sample.rss_growth_kb
+            | .fd_baseline = $fd_sample.fd_baseline
+            | .fd_peak = $fd_sample.fd_peak
+            | .fd_growth = $fd_sample.fd_growth))
         | .aggregation = "conservative_median_per_metric"
         | .sample_attempts = $attempts
         | .valid_samples = ($valid | length)
@@ -1885,13 +1899,6 @@ jq -cs \
         | .latency_p999_ms = ([$valid[].latency_p999_ms] | upper_median)
         | .transfer_kbytes_per_sec = ([$valid[].transfer_kbytes_per_sec] | lower_median)
         | .cpu_ms = ([$valid[].cpu_ms] | upper_median)
-        | .rss_kb = ([$valid[].rss_kb] | maximum)
-        | .rss_baseline_kb = ([$valid[].rss_baseline_kb] | maximum)
-        | .rss_peak_kb = ([$valid[].rss_peak_kb] | maximum)
-        | .rss_growth_kb = ([$valid[].rss_growth_kb] | maximum)
-        | .fd_baseline = ([$valid[].fd_baseline] | maximum)
-        | .fd_peak = ([$valid[].fd_peak] | maximum)
-        | .fd_growth = ([$valid[].fd_growth] | maximum)
         | .scheduler_run_delay_ns = ([$valid[].scheduler_run_delay_ns] | maximum)
         | .scheduler_queue_delay_us_per_request = ([$valid[].scheduler_queue_delay_us_per_request] | maximum)
         | .kernel_resource_metrics = ([$valid[].kernel_resource_metrics] | all)

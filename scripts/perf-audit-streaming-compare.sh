@@ -822,6 +822,16 @@ for key in sorted(expected):
         records, "requests_per_total_cpu_second"
     )
     for field in (
+        "total_scheduler_run_delay_ns",
+        "scheduler_queue_delay_us_per_transfer",
+    ):
+        record[field] = maximum(records, field)
+    # Resource triples must stay internally consistent (growth == peak -
+    # baseline, totals == family sums), so copy them from the single sample
+    # with the highest aggregate peak instead of maximizing each field.
+    rss_sample = max(records, key=lambda item: item["total_rss_peak_kb"])
+    fd_sample = max(records, key=lambda item: item["total_fd_peak"])
+    for field in (
         "rss_kb",
         "rss_baseline_kb",
         "rss_peak_kb",
@@ -831,6 +841,9 @@ for key in sorted(expected):
         "backend_rss_growth_kb",
         "total_rss_peak_kb",
         "total_rss_growth_kb",
+    ):
+        record[field] = rss_sample[field]
+    for field in (
         "fd_baseline",
         "fd_peak",
         "fd_growth",
@@ -839,10 +852,8 @@ for key in sorted(expected):
         "backend_fd_growth",
         "total_fd_peak",
         "total_fd_growth",
-        "total_scheduler_run_delay_ns",
-        "scheduler_queue_delay_us_per_transfer",
     ):
-        record[field] = maximum(records, field)
+        record[field] = fd_sample[field]
     record["kernel_resource_metrics"] = all(
         item.get("kernel_resource_metrics") is True for item in records
     )
