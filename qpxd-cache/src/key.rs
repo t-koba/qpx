@@ -206,6 +206,17 @@ pub fn normalize_authority(raw: &str, scheme: &str) -> Option<String> {
     } else {
         "http"
     };
+    // Fast path for plain registrable names without a port or IPv6 brackets.
+    // The accepted character set is a strict subset of the URI authority
+    // grammar, so anything this accepts is also what the full validation
+    // below would return; everything else falls back to that path.
+    if !raw.contains(':')
+        && raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+    {
+        return Some(raw.to_ascii_lowercase());
+    }
     let uri = http::Uri::builder()
         .scheme(normalized_scheme)
         .authority(raw)
