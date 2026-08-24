@@ -220,20 +220,23 @@ impl CacheWriteback {
             response_header_values: std::sync::OnceLock::new(),
         };
         let metadata = encode_cached_response_metadata(&envelope)?;
-        self.backend
-            .put(
+        // The variant metadata publish and the removal of superseded variants
+        // are independent, so run them concurrently to shorten the writeback
+        // tail before the index update.
+        let (metadata_result, _) = tokio::join!(
+            self.backend.put(
                 self.namespace.as_str(),
                 self.variant_key.as_str(),
                 &metadata,
                 self.ttl,
+            ),
+            delete_obsolete_variants(
+                self.backend.clone(),
+                self.namespace.clone(),
+                upsert_variant_with_cap(&mut index, &self.variant_key),
             )
-            .await?;
-        delete_obsolete_variants(
-            self.backend.clone(),
-            self.namespace.clone(),
-            upsert_variant_with_cap(&mut index, &self.variant_key),
-        )
-        .await;
+        );
+        metadata_result?;
         let index_payload = serde_json::to_vec(&index)?;
         self.backend
             .put(

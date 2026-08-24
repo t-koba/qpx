@@ -27,6 +27,8 @@ use tracing::warn;
 const DISK_CACHE_MAGIC: &[u8] = b"QPX-DISK-CACHE\0\x01";
 const DISK_CACHE_SCHEMA_VERSION: u16 = 1;
 const DISK_CACHE_FILE_EXT: &str = "qpxc";
+// File size overhead of the on-disk header: magic bytes + u32 header length.
+const DISK_CACHE_HEADER_OVERHEAD_BYTES: u64 = DISK_CACHE_MAGIC.len() as u64 + 4;
 const DISK_CACHE_CHUNK_BYTES: usize = 64 * 1024;
 const DISK_CACHE_HOT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const DISK_CACHE_HOT_MAX_OBJECT_BYTES: u64 = 2 * 1024 * 1024;
@@ -63,6 +65,7 @@ pub struct DiskCacheBackend {
     decoded_metadata: std::sync::Arc<Vec<ArcSwapOption<DecodedMetadataEntry>>>,
     hot_responses: std::sync::Arc<Vec<ArcSwapOption<HotResponseEntry>>>,
     background_sweep_started: std::sync::Arc<AtomicBool>,
+    indexed_flag: std::sync::Arc<AtomicBool>,
     state: std::sync::Arc<Mutex<DiskCacheState>>,
 }
 
@@ -263,6 +266,7 @@ impl DiskCacheBackend {
             decoded_metadata: std::sync::Arc::new(decoded_slots()),
             hot_responses: std::sync::Arc::new(decoded_slots()),
             background_sweep_started: std::sync::Arc::new(AtomicBool::new(false)),
+            indexed_flag: std::sync::Arc::new(AtomicBool::new(false)),
             state: std::sync::Arc::new(Mutex::new(DiskCacheState::default())),
         };
         backend.ensure_background_sweep();
@@ -302,6 +306,11 @@ impl DiskCacheBackend {
     }
 
     async fn ensure_indexed(&self) -> Result<()> {
+        // Fast path: after the first successful scan, lookups must not pay for
+        // a state mutex acquisition just to observe the indexed marker.
+        if self.indexed_flag.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let mut state = self.state.lock().await;
         if state.indexed {
             return Ok(());
@@ -338,6 +347,8 @@ impl DiskCacheBackend {
         state.entries = entries;
         state.total_bytes = total_bytes;
         state.indexed = true;
+        drop(state);
+        self.indexed_flag.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -771,11 +782,13 @@ impl DiskCacheBackend {
         while let Some(chunk) = source.data().await {
             file.write_all(chunk?.as_ref()).await?;
         }
-        file.sync_all().await?;
-        let total_len = file.metadata().await?.len();
+        // Cache objects are re-fetchable, so commit to the page cache and
+        // publish atomically via rename instead of paying for an fsync.
+        let body_len = header.body_len;
         drop(file);
         fs::rename(&tmp_path, path)
             .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;
+        let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + body_len;
         self.remember_write(path.to_path_buf(), total_len, expires_at_ms)
             .await?;
         self.hot_remove(path).await;
@@ -1380,8 +1393,11 @@ fn write_cached_bytes_sync(
         let mut file = create_secure_new_file(&tmp_path)?;
         let body_offset = write_header(&mut file, &header)?;
         file.write_all(value.as_ref())?;
-        file.sync_all()?;
-        let total_len = file.metadata()?.len();
+        // Durability note: cache objects are re-fetchable from the origin, so
+        // writes are committed to the page cache and published atomically via
+        // rename without an fsync. This matches the behavior of other HTTP
+        // caches and keeps write-heavy miss workloads off the disk sync path.
+        let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + header.body_len;
         drop(file);
         fs::rename(&tmp_path, path)
             .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;
