@@ -488,7 +488,7 @@ require scripts/perf-audit-proxy-compare.sh 'LOCAL_ORIGIN_WORKERS="${QPX_PROXY_C
 require scripts/perf-audit-proxy-compare.sh 'CACHE_WORKERS="${QPX_PROXY_COMPARE_CACHE_WORKERS:-4}"'
 require scripts/perf-audit-proxy-compare.sh 'FEATURE_RICH_WORKERS="${QPX_PROXY_COMPARE_FEATURE_RICH_WORKERS:-4}"'
 require scripts/perf-audit-proxy-compare.sh 'WEBDAV_WORKERS="${QPX_PROXY_COMPARE_WEBDAV_WORKERS:-2}"'
-require scripts/perf-audit-proxy-compare.sh 'WEBDAV_BLOCKING_THREADS="${QPX_PROXY_COMPARE_WEBDAV_BLOCKING_THREADS:-16}"'
+require scripts/perf-audit-proxy-compare.sh 'WEBDAV_BLOCKING_THREADS="${QPX_PROXY_COMPARE_WEBDAV_BLOCKING_THREADS:-128}"'
 require scripts/perf-audit-proxy-compare.sh 'max_blocking_threads: ${WEBDAV_BLOCKING_THREADS}'
 require scripts/perf-audit-proxy-compare.sh 'APACHE_START_SERVERS="${QPX_PROXY_COMPARE_APACHE_START_SERVERS:-3}"'
 require scripts/perf-audit-proxy-compare.sh 'APACHE_THREADS_PER_CHILD="${QPX_PROXY_COMPARE_APACHE_THREADS_PER_CHILD:-25}"'

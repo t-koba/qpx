@@ -183,6 +183,7 @@ collect_artifacts() {
     fi
   done
   cp "$TMP_DIR"/*.wrk "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.threads.csv "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.lua "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.warmup "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.valid-samples.tsv "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
@@ -1334,6 +1335,11 @@ LUA
       io_syscr_before="$(process_tree_io_counter "$resource_pid" "syscr")"
       io_syscw_before="$(process_tree_io_counter "$resource_pid" "syscw")"
     fi
+    thread_sampler_pid=""
+    if [ -d /proc ] && [[ "$artifact_name" == *qpxd-webdav*1048576* ]] && [[ "$artifact_name" == *attempt-1* ]]; then
+      scripts/lib/perf-thread-sampler.sh "$resource_pid" "$DURATION_SECONDS" "$out.threads.csv" >/dev/null 2>&1 &
+      thread_sampler_pid=$!
+    fi
     wrk_succeeded=true
     if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "sample-${artifact_name}-${attempt}" >"$out" 2>&1; then
       wrk_succeeded=false
@@ -1369,6 +1375,10 @@ LUA
     fi
     if [ -n "$profile_pid" ]; then
       wait "$profile_pid" || true
+    fi
+    if [ -n "$thread_sampler_pid" ]; then
+      wait "$thread_sampler_pid" 2>/dev/null || true
+      thread_sampler_pid=""
     fi
     drain_feature_rich_access_log "$proxy"
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
