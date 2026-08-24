@@ -152,8 +152,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 async fn wait_for_file(path: &Path) -> Result<()> {
+    // Instrumented coverage builds start qpxd far slower than release builds;
+    // poll long enough to tolerate that instead of racing startup.
     let started = tokio::time::Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
+    while started.elapsed() < Duration::from_secs(30) {
         if path.is_file() {
             return Ok(());
         }
