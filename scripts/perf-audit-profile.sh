@@ -17,6 +17,7 @@ QPXD_BIN="${QPXD_BIN:-$DEFAULT_QPXD_BIN}"
 BACKEND_PORT="${QPX_PERF_PROFILE_BACKEND_PORT:-18480}"
 QPX_HTTP1_PORT="${QPX_PERF_PROFILE_HTTP1_PORT:-18481}"
 QPX_HTTP2_PORT="${QPX_PERF_PROFILE_HTTP2_PORT:-18482}"
+QPX_CACHE_PROFILE_PORT="${QPX_PERF_PROFILE_CACHE_PORT:-18483}"
 
 TMP_DIR="$(make_temp_dir qpx-perf-profile)"
 LOG_DIR="$TMP_DIR/logs"
@@ -118,6 +119,8 @@ write_qpx_config() {
   local port="$2"
   local config="$3"
   local tls=""
+  local cache_backend=""
+  local cache_route=""
   if [ "$protocol" = http2 ]; then
     tls="    enforce_sni_host_match: false
     tls:
@@ -126,13 +129,30 @@ write_qpx_config() {
           cert: \"$TMP_DIR/server.crt\"
           key: \"$TMP_DIR/server.key\""
   fi
+  if [ "$protocol" = cache-http1 ]; then
+    cache_backend="caches:
+  - name: profile-disk
+    kind: disk
+    path: \"$TMP_DIR/profile-cache\"
+    max_bytes: 1073741824
+    sweep_interval_secs: 60
+    timeout_ms: 1500
+    max_object_bytes: 2097152
+"
+    cache_route="        cache:
+          enabled: true
+          backend: profile-disk
+          namespace: profile
+          default_ttl_secs: 600
+          max_object_bytes: 2097152"
+  fi
   cat >"$config" <<YAML
 state_dir: "$TMP_DIR/state-${protocol}"
 telemetry:
   system_log:
     level: warn
     format: json
-runtime:
+${cache_backend}runtime:
   worker_threads: 1
   acceptor_tasks_per_listener: 1
   reuse_port: false
@@ -149,6 +169,7 @@ ${tls}
         streaming:
           max_response_body_bytes: 1048576
         match: {}
+${cache_route}
         target:
           type: upstream
           upstreams: [http://127.0.0.1:${BACKEND_PORT}]
@@ -188,7 +209,9 @@ wait_http() {
 run_http1_load() {
   local output="$1"
   local port="$2"
-  if ! python3 - "$port" "$PROFILE_REQUESTS" "$PROFILE_CONCURRENCY" >"$output" 2>&1 <<'PY'
+  local requests="${3:-$PROFILE_REQUESTS}"
+  local expected_cache_status="${4:-}"
+  if ! python3 - "$port" "$requests" "$PROFILE_CONCURRENCY" "$expected_cache_status" >"$output" 2>&1 <<'PY'
 import concurrent.futures
 import socket
 import sys
@@ -196,6 +219,7 @@ import sys
 port = int(sys.argv[1])
 requests = int(sys.argv[2])
 concurrency = int(sys.argv[3])
+expected_cache_status = sys.argv[4].encode("ascii") if sys.argv[4] else None
 
 
 def read_response(stream, buffered):
@@ -219,6 +243,12 @@ def read_response(stream, buffered):
     lengths = headers.get(b"content-length", [])
     if lengths != [b"1024"]:
         raise RuntimeError(f"unexpected content-length: {lengths!r}")
+    if expected_cache_status is not None:
+        values = headers.get(b"cache-status", [])
+        if not any(expected_cache_status in value for value in values):
+            raise RuntimeError(
+                f"unexpected cache-status: {values!r}, expected token {expected_cache_status!r}"
+            )
     while len(buffered) < 1024:
         chunk = stream.recv(64 * 1024)
         if not chunk:
@@ -384,11 +414,31 @@ select_profile_dump() {
   printf '%s\n' "$selected"
 }
 
+verify_cache_hit_response() {
+  local port="$1"
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS --http1.1 --max-time 5 -D - -o /dev/null "http://127.0.0.1:${port}/bench" 2>/dev/null \
+      | tr -d '\r' | grep -qi '^cache-status:.*hit'; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "cache profile did not observe a HIT response after warm-up" >&2
+  return 1
+}
+
 run_profile() {
   local protocol="$1"
   local port="$2"
+  local target="${3:-qpxd_reverse_${protocol}}"
+  local profile_protocol="http1"
+  case "$protocol" in
+    http2) profile_protocol="http2" ;;
+    *) profile_protocol="http1" ;;
+  esac
   local config="$TMP_DIR/qpxd-${protocol}.yaml"
-  local output="$PROFILE_DIR/callgrind.qpxd_reverse_${protocol}.out"
+  local output="$PROFILE_DIR/callgrind.${target}.out"
   local load_output="$LOG_DIR/load-${protocol}.txt"
   local qpx_log="$LOG_DIR/qpxd-${protocol}.log"
   local pid tls selected_output warmup_requests measured_requests
@@ -413,6 +463,16 @@ run_profile() {
     warmup_requests="$PROFILE_CONCURRENCY"
     run_http2_profile_load "$load_output" "$pid"
     measured_requests="$HTTP2_PROFILE_COMPLETED_REQUESTS"
+  elif [ "$protocol" = cache-http1 ]; then
+    # Warm up the disk cache and the keep-alive connections before recording,
+    # so the measured instructions reflect the cache hit path only. The loader
+    # rejects any response that is not served with a HIT cache status.
+    warmup_requests="$PROFILE_CONCURRENCY"
+    run_http1_load "$LOG_DIR/warmup-cache.txt" "$port" "$PROFILE_CONCURRENCY"
+    verify_cache_hit_response "$port"
+    callgrind_control -i on "$pid" >/dev/null
+    run_http1_load "$load_output" "$port" "" "hit"
+    callgrind_control -i off "$pid" >/dev/null
   else
     callgrind_control -i on "$pid" >/dev/null
     run_http1_load "$load_output" "$port"
@@ -427,13 +487,13 @@ run_profile() {
     return 1
   fi
   selected_output="$(select_profile_dump "$output")"
-  annotate_profile "qpxd_reverse_${protocol}" "$protocol" "$selected_output"
+  annotate_profile "$target" "$profile_protocol" "$selected_output"
   printf '{"bench":"callgrind_profile_load","target":%s,"requests":%s,"warmup_requests":%s,"concurrency":%s,"http1_connection_reuse":%s,"valid":true,"commit":%s}\n' \
-    "$(json_escape "qpxd_reverse_${protocol}")" \
+    "$(json_escape "$target")" \
     "$measured_requests" \
     "$warmup_requests" \
     "$PROFILE_CONCURRENCY" \
-    "$([ "$protocol" = http1 ] && echo true || echo false)" \
+    "$([ "$profile_protocol" = http1 ] && echo true || echo false)" \
     "$(json_escape "${GITHUB_SHA:-unknown}")" >>"$PROFILE_EVENTS"
 }
 
@@ -473,3 +533,4 @@ make_certificate
 start_backend
 run_profile http1 "$QPX_HTTP1_PORT"
 run_profile http2 "$QPX_HTTP2_PORT"
+run_profile cache-http1 "$QPX_CACHE_PROFILE_PORT" qpxd_cache_hit_http1
