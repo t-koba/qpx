@@ -1336,7 +1336,7 @@ LUA
       io_syscw_before="$(process_tree_io_counter "$resource_pid" "syscw")"
     fi
     thread_sampler_pid=""
-    if [ -d /proc ] && [[ "$artifact_name" == *qpxd-webdav*1048576* ]] && [[ "$artifact_name" == *attempt-1* ]]; then
+    if [ -d /proc ] && [ "$attempt" -eq 1 ] && [[ "$artifact_name" == *qpxd-webdav*1048576* ]]; then
       scripts/lib/perf-thread-sampler.sh "$resource_pid" "$DURATION_SECONDS" "$out.threads.csv" >/dev/null 2>&1 &
       thread_sampler_pid=$!
     fi
