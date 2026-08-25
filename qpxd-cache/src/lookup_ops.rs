@@ -7,9 +7,9 @@ use super::freshness::{
     active_range, conditional_not_modified, current_age_secs, precondition_failed,
 };
 use super::types::{
-    CACHE_HEADER, CacheBackend, CacheEntryDisposition, CacheRequestKey, CachedResponseEnvelope,
-    LookupOutcome, RequestDirectives, RevalidationState, VariantIndex, cache_body_storage_key,
-    cache_status_header,
+    CACHE_HEADER, CacheBackend, CacheEntryDisposition, CacheRequestKey, CachedResponseCandidate,
+    CachedResponseEnvelope, LookupOutcome, RequestDirectives, RevalidationState, VariantIndex,
+    cache_body_storage_key, cache_status_header,
 };
 use super::util::{cache_namespace, now_millis};
 use super::vary::matches_vary;
@@ -223,6 +223,41 @@ fn can_use_hot_response_candidate(request_method: &Method, req: &RequestDirectiv
         && req.if_unmodified_since.is_none()
         && req.if_range.is_none()
         && req.range.is_none()
+}
+
+/// Builds the unconditional-GET HIT response for an already validated hot
+/// candidate without touching the backend again.
+///
+/// Returns `Ok(None)` when the envelope requires request-specific handling
+/// (vary negotiation, conditionals, ranges, revalidation) so the caller can
+/// route the request through the full `lookup` path instead. This is the
+/// contract shared with the raw HTTP/1 fast path: anything this function does
+/// not serve must behave exactly as it would have without it.
+pub fn build_hot_hit_response(
+    candidate: CachedResponseCandidate,
+    now_ms: u64,
+) -> Result<Option<Response<Body>>> {
+    if !candidate.envelope.vary_values.is_empty() {
+        return Ok(None);
+    }
+    let directives = RequestDirectives::default();
+    if !matches!(
+        classify_for_request(&directives, candidate.envelope.as_ref(), now_ms),
+        CacheEntryDisposition::ServeFresh | CacheEntryDisposition::ServeStale
+    ) {
+        return Ok(None);
+    }
+    let envelope = candidate.envelope;
+    response_from_envelope_for_request_with_body(
+        &Method::GET,
+        &directives,
+        &envelope,
+        now_ms,
+        "HIT",
+        candidate.body.body,
+        candidate.body.len,
+    )
+    .map(Some)
 }
 
 fn lookup_precheck(request_method: &Method, req: &RequestDirectives) -> Option<LookupOutcome> {

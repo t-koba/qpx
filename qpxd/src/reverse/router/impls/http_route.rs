@@ -248,6 +248,47 @@ impl HttpRoute {
             && !self.plan.require_precondition
     }
 
+    pub(in crate::reverse) fn supports_raw_cache_hit_dispatch(&self) -> bool {
+        // Same eligibility as the plain raw HTTP/1 dispatch except the route
+        // may carry exactly a lookup+store cache policy: only unconditional
+        // GETs served from the hot response cache can take that path, and any
+        // other request shape falls back to the generic dispatch chain. The
+        // strict flag equality keeps every non-cache feature (guard, auth,
+        // forwarded, rate limits, header controls, modules, capture, ...)
+        // structurally out of scope for the fast path.
+        self.plan.flags
+            == crate::runtime::PlanFlags::CACHE_LOOKUP.union(crate::runtime::PlanFlags::CACHE_STORE)
+            && !self.matcher.requires_request_headers()
+            && !self.plan.require_precondition
+            && self.plan.api_metadata.is_none()
+            && self.plan.hsts.is_none()
+            && self.plan.forwarded.is_none()
+            && self
+                .plan
+                .rate_limits
+                .is_empty_for_scope(crate::rate_limit::TransportScope::Request)
+            && self.headers.is_none()
+            && self.local_response.is_none()
+            && self.ipc.is_none()
+            && self.webdav.is_none()
+            && self.response_rules.is_none()
+            && self.path_rewrite.is_none()
+            && self.mirrors.is_empty()
+            && self.policy.retry_attempts == 1
+            && self.policy.max_upstream_concurrency.is_none()
+            && self.selection_is_seed_independent()
+            && self.single_plain_http_upstream().is_some()
+            && !self.requires_destination_context()
+            && !self.requires_request_size()
+            && !self.requires_request_body_observation()
+            && !self.requires_request_rpc_context()
+            && matches!(
+                self.target,
+                crate::runtime::CompiledReverseRouteTarget::Upstream { .. }
+                    | crate::runtime::CompiledReverseRouteTarget::Weighted { .. }
+            )
+    }
+
     pub(in crate::reverse) fn supports_direct_local_response_dispatch(&self) -> bool {
         self.plan.flags.bits() == 0
             && self.plan.forwarded.is_none()

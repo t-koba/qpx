@@ -93,6 +93,25 @@ impl CacheRequestKey {
         )))
     }
 
+    /// Builds a lookup key from components that already satisfy the same
+    /// normalization rules as `for_target_uncached`: a lowercased scheme, the
+    /// output of `normalize_authority` for the authority, and the origin-form
+    /// path-and-query. Callers that already hold pre-parsed request data use
+    /// this to skip a redundant URI parse on hot paths.
+    pub fn from_normalized_parts(
+        method: &'static str,
+        scheme: &'static str,
+        authority: String,
+        path_and_query: String,
+    ) -> Self {
+        Self::from_parts(
+            std::sync::Arc::from(method),
+            std::sync::Arc::from(scheme),
+            std::sync::Arc::from(authority),
+            std::sync::Arc::from(path_and_query),
+        )
+    }
+
     pub fn primary_hash(&self) -> String {
         self.primary_hash_arc().to_string()
     }
@@ -164,6 +183,11 @@ impl CacheRequestKey {
                 ))
             })
             .clone()
+    }
+
+    /// Storage key of the primary variant index, computed once per key.
+    pub fn primary_index_storage_key(&self) -> Arc<str> {
+        self.primary_index_storage_key_arc()
     }
 
     fn compute_primary_hash(&self) -> String {

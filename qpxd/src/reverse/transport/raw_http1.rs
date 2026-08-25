@@ -31,6 +31,17 @@ pub(in crate::reverse) struct PreparedRawHttp1Request {
     raw_access_log_request: Option<Request<()>>,
     method: Method,
     keep_alive: bool,
+    cache_hit: Option<CacheHitFastPath>,
+}
+
+/// Everything needed to serve an unconditional GET straight from the hot
+/// response cache. Built only for routes whose plan carries exactly a
+/// lookup+store cache policy (`supports_raw_cache_hit_dispatch`), so no other
+/// request or response feature can be bypassed by taking this path.
+struct CacheHitFastPath {
+    namespace: Arc<str>,
+    backend: Arc<dyn qpxd_cache::CacheBackend>,
+    key: qpxd_cache::CacheRequestKey,
 }
 
 enum PreparedRawHttp1Target {
@@ -330,6 +341,24 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
         let headers = crate::http::codec::h1_common::parse_header_map(request.headers).ok()?;
         PreparedRawHttp1Target::Generic { uri, headers }
     };
+    // The cache-hit fast path only applies to routes that fell through to the
+    // generic target (cache routes never qualify for raw upstream dispatch)
+    // and only when the request shape is one the fast path can serve exactly
+    // like the generic chain would.
+    let cache_hit = if matches!(target, PreparedRawHttp1Target::Generic { .. }) {
+        build_raw_cache_hit_fast_path(
+            &compiled,
+            &state,
+            &route_match_context,
+            request.method,
+            request.target,
+            request.headers,
+            &cache.authority,
+            conn,
+        )
+    } else {
+        None
+    };
     cache.store_prepared_request(
         request.raw_head,
         PreparedRawHttp1Request {
@@ -339,8 +368,112 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
             raw_access_log_request,
             method,
             keep_alive,
+            cache_hit,
         },
     )
+}
+
+/// Conditional, negotiated, or directive-bearing requests must go through the
+/// full lookup chain; the fast path only serves plain unconditional GETs.
+fn raw_cache_hit_headers_eligible(headers: &[httparse::Header<'_>]) -> bool {
+    headers.iter().all(|header| {
+        !matches!(
+            header.name,
+            "if-match"
+                | "If-Match"
+                | "if-none-match"
+                | "If-None-Match"
+                | "if-modified-since"
+                | "If-Modified-Since"
+                | "if-unmodified-since"
+                | "If-Unmodified-Since"
+                | "if-range"
+                | "If-Range"
+                | "range"
+                | "Range"
+                | "cache-control"
+                | "Cache-Control"
+                | "pragma"
+                | "Pragma"
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_raw_cache_hit_fast_path(
+    compiled: &CompiledReverse,
+    state: &crate::runtime::RuntimeState,
+    route_match_context: &RuleMatchContext<'_>,
+    method: &str,
+    target: &str,
+    headers: &[httparse::Header<'_>],
+    authority: &Option<CachedAuthority>,
+    conn: &ReverseConnInfo,
+) -> Option<CacheHitFastPath> {
+    if method != "GET" || !target.starts_with('/') {
+        return None;
+    }
+    if !raw_cache_hit_headers_eligible(headers) {
+        return None;
+    }
+    let route = compiled.router.single_cache_hit_route()?;
+    if !route.matches(route_match_context) {
+        return None;
+    }
+    let policy = route.plan.cache.as_ref()?;
+    if !policy.enabled {
+        return None;
+    }
+    let backend = state.cache.backends.get(policy.backend.as_str())?.clone();
+    let scheme = if conn.tls_terminated { "https" } else { "http" };
+    let host_header = authority.as_ref()?.raw.as_str();
+    let normalized_authority = qpxd_cache::normalize_authority(host_header, scheme)?;
+    let namespace = Arc::from(qpxd_cache::cache_namespace(policy, "default"));
+    Some(CacheHitFastPath {
+        namespace,
+        backend,
+        key: qpxd_cache::CacheRequestKey::from_normalized_parts(
+            "GET",
+            scheme,
+            normalized_authority,
+            target.to_string(),
+        ),
+    })
+}
+
+/// Serves an unconditional GET from the hot response cache. Returns `None`
+/// for every request the fast path cannot serve exactly as the generic chain
+/// would (cold entry, stale beyond policy, vary negotiation, lookup errors),
+/// which is indistinguishable from the fast path not existing.
+fn try_raw_cache_hit_response(fast: &CacheHitFastPath) -> Option<Response<Body>> {
+    let now = qpx_http::now_millis();
+    let index_key = fast.key.primary_index_storage_key();
+    match fast
+        .backend
+        .get_response_candidate(&fast.namespace, index_key.as_ref(), now)
+    {
+        Ok(Some(candidate)) => {
+            let outcome = qpxd_cache::build_hot_hit_response(candidate, now);
+            match outcome {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        "raw cache-hit fast path failed to build the response; falling back"
+                    );
+                    None
+                }
+            }
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                error = ?error,
+                "raw cache-hit fast path lookup failed; falling back to generic dispatch"
+            );
+            None
+        }
+    }
 }
 
 pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
@@ -350,6 +483,23 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     session: &mut PreparedPlainHttp1Session,
     pending_timeout: &mut ReusablePendingTimeout<'_>,
 ) -> Result<PreparedRawHttp1Response> {
+    if let Some(fast) = prepared.cache_hit.as_ref()
+        && let Some(response) = try_raw_cache_hit_response(fast)
+    {
+        session.release();
+        let mut response = response;
+        if let Some(body) = take_in_memory_body(&[], &mut response) {
+            let (parts, _) = response.into_parts();
+            return Ok(PreparedRawHttp1Response::InMemory {
+                status: parts.status,
+                headers: parts.headers,
+                body,
+            });
+        }
+        // The hot entry unexpectedly produced a streamed body; the generic
+        // send path handles every body shape, so fall back to it.
+        return Ok(PreparedRawHttp1Response::Generic(Vec::new(), response));
+    }
     if let Some(request) = prepared.generic_request() {
         session.release();
         let (interim, response) =
@@ -694,5 +844,384 @@ mod tests {
         let body = take_in_memory_body(&[], &mut response).expect("single body frame");
         assert_eq!(body, Bytes::from_static(b"body"));
         assert!(take_in_memory_body(&[], &mut response).is_none());
+    }
+
+    #[test]
+    fn raw_cache_hit_headers_eligibility_rejects_directives_and_ranges() {
+        let eligible = [httparse::Header {
+            name: "Host",
+            value: b"bench.local",
+        }];
+        assert!(raw_cache_hit_headers_eligible(&eligible));
+        for name in [
+            "If-None-Match",
+            "if-match",
+            "Range",
+            "Cache-Control",
+            "pragma",
+            "if-modified-since",
+            "if-unmodified-since",
+            "If-Range",
+        ] {
+            let headers = [
+                httparse::Header {
+                    name: "Host",
+                    value: b"bench.local",
+                },
+                httparse::Header { name, value: b"1" },
+            ];
+            assert!(
+                !raw_cache_hit_headers_eligible(&headers),
+                "{name} must disqualify the fast path"
+            );
+        }
+    }
+
+    fn build_cache_hit_reverse_fixture(
+        upstream_addr: std::net::SocketAddr,
+        cache_dir: &std::path::Path,
+    ) -> crate::reverse::ReloadableReverse {
+        use qpx_core::config::{
+            AccessLogConfig, AuditLogConfig, CacheBackendConfig, CachePolicyConfig, Config,
+            IdentityConfig, MessagesConfig, ReverseEdgeConfig, ReverseRouteConfig,
+            ReverseRouteTargetConfig, RuntimeConfig, SystemLogConfig, UpstreamConfig,
+        };
+
+        let route = ReverseRouteConfig {
+            name: Some("route".to_string()),
+            r#match: Default::default(),
+            target: ReverseRouteTargetConfig::Upstream {
+                upstreams: vec!["upstream".to_string()],
+                lb: "round_robin".to_string(),
+            },
+            mirrors: Vec::new(),
+            headers: None,
+            timeout_ms: None,
+            health_check: None,
+            cache: Some(CachePolicyConfig {
+                enabled: true,
+                backend: "disk".to_string(),
+                namespace: Some("ns".to_string()),
+                default_ttl_secs: Some(600),
+                max_object_bytes: 1024 * 1024,
+                allow_set_cookie_store: false,
+            }),
+            capture: None,
+            rate_limit: None,
+            path_rewrite: None,
+            upstream_trust_profile: None,
+            upstream_trust: None,
+            lifecycle: None,
+            affinity: None,
+            policy_context: None,
+            http: None,
+            http_guard_profile: None,
+            destination_resolution: None,
+            resilience: None,
+            http_modules: Vec::new(),
+            streaming: None,
+            grpc: None,
+            sse: None,
+            streaming_requirement: None,
+        };
+        let reverse_cfg = ReverseEdgeConfig {
+            name: "test".to_string(),
+            listen: "127.0.0.1:0".to_string(),
+            tls: None,
+            http3: None,
+            xdp: None,
+            enforce_sni_host_match: false,
+            sni_host_exceptions: Vec::new(),
+            policy_context: None,
+            connection_filter: Vec::new(),
+            destination_resolution: None,
+            streaming: None,
+            grpc: None,
+            sse: None,
+            routes: vec![route],
+            tls_passthrough_routes: Vec::new(),
+        };
+        let upstream_cfg = UpstreamConfig {
+            name: "upstream".to_string(),
+            url: format!("http://{upstream_addr}"),
+            tls_trust_profile: None,
+            tls_trust: None,
+            discovery: None,
+            resilience: None,
+        };
+        let config = Config {
+            state_dir: None,
+            identity: IdentityConfig::default(),
+            messages: MessagesConfig::default(),
+            runtime: RuntimeConfig::default(),
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: SystemLogConfig::default(),
+                access_log: AccessLogConfig::default(),
+                audit_log: AuditLogConfig::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: Default::default(),
+            http: qpx_core::config::HttpGlobalConfig::default(),
+            traffic: qpx_core::config::TrafficConfig::default(),
+            acme: None,
+            edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
+            upstreams: vec![upstream_cfg],
+            caches: vec![CacheBackendConfig {
+                name: "disk".to_string(),
+                kind: "disk".to_string(),
+                endpoint: String::new(),
+                path: Some(cache_dir.to_string_lossy().to_string()),
+                max_bytes: Some(64 * 1024 * 1024),
+                sweep_interval_secs: 60,
+                timeout_ms: 1500,
+                max_object_bytes: 1024 * 1024,
+                auth_header_env: None,
+            }],
+        };
+        let runtime = crate::runtime::Runtime::new(config).expect("runtime");
+        crate::reverse::ReloadableReverse::new(
+            reverse_cfg,
+            runtime,
+            Arc::<str>::from("reverse_upstreams_unhealthy"),
+        )
+        .expect("reloadable reverse")
+    }
+
+    fn prepared_raw_request<'a>(
+        reverse: &'a crate::reverse::ReloadableReverse,
+        conn: &'a ReverseConnInfo,
+        connection_cache: &'a mut RawHttp1ConnectionCache,
+    ) -> &'a PreparedRawHttp1Request {
+        let headers = [httparse::Header {
+            name: "Host",
+            value: b"bench.local",
+        }];
+        let raw_head: &[u8] = b"GET /bench-1 HTTP/1.1\r\nHost: bench.local\r\n\r\n";
+        let view = RawHttp1RequestView {
+            raw_head,
+            method: "GET",
+            target: "/bench-1",
+            version: 1,
+            headers: &headers,
+        };
+        prepare_raw_http1_request(reverse, conn, view, connection_cache)
+            .expect("prepared raw request")
+    }
+
+    async fn dispatch_prepared(
+        prepared: &PreparedRawHttp1Request,
+        reverse: &crate::reverse::ReloadableReverse,
+        conn: &ReverseConnInfo,
+        session: &mut crate::upstream::origin::PreparedPlainHttp1Session,
+        pending_timeout: &mut ReusablePendingTimeout<'_>,
+    ) -> PreparedRawHttp1Response {
+        dispatch_prepared_raw_http1_request(prepared, reverse, conn, session, pending_timeout)
+            .await
+            .expect("dispatch")
+    }
+
+    /// Differential test: the fast path must serve exactly what the generic
+    /// chain would serve for the same cached entry.
+    #[tokio::test]
+    async fn raw_cache_hit_fast_path_matches_generic_lookup_responses() {
+        const BODY: &str = "fast-path-payload";
+        let upstream_addr = crate::test_util::spawn_static_http_server(
+            "200 OK",
+            vec![
+                ("ETag", "\"v1\"".to_string()),
+                ("Cache-Control", "max-age=600".to_string()),
+            ],
+            BODY.to_string(),
+            2,
+        )
+        .await;
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        // On macOS /var is a symlink to /private/var and the disk backend
+        // refuses symlinked path components, so resolve the real path first.
+        let cache_path = std::fs::canonicalize(cache_dir.path()).expect("canonicalize cache dir");
+        let reverse = build_cache_hit_reverse_fixture(upstream_addr, &cache_path);
+
+        let conn =
+            ReverseConnInfo::plain(std::net::SocketAddr::from(([127, 0, 0, 1], 4242)), 18080);
+        let mut connection_cache = RawHttp1ConnectionCache::default();
+        let prepared = prepared_raw_request(&reverse, &conn, &mut connection_cache);
+        assert!(
+            prepared.cache_hit.is_some(),
+            "a pure cache route with an unconditional GET must qualify for the fast path"
+        );
+
+        let pending_timer = tokio::time::sleep(std::time::Duration::ZERO);
+        tokio::pin!(pending_timer);
+        let mut pending_timeout = ReusablePendingTimeout::new(pending_timer.as_mut());
+        let mut session = crate::upstream::origin::PreparedPlainHttp1Session::default();
+
+        // First dispatch is a MISS served by the generic chain; it also stores
+        // the response in the background. The miss response body streams
+        // through the relay, so it arrives as a generic response.
+        let miss = dispatch_prepared(
+            prepared,
+            &reverse,
+            &conn,
+            &mut session,
+            &mut pending_timeout,
+        )
+        .await;
+        let (miss_status, miss_body) = match miss {
+            PreparedRawHttp1Response::InMemory { status, body, .. } => {
+                (status, Bytes::copy_from_slice(body.as_ref()))
+            }
+            PreparedRawHttp1Response::Generic(_, response) => {
+                let (parts, body) = response.into_parts();
+                let body = qpx_http::body::to_bytes(body).await.expect("miss body");
+                (parts.status, body)
+            }
+            PreparedRawHttp1Response::Direct(_) => {
+                panic!("cache MISS must not take the direct relay path")
+            }
+        };
+        assert_eq!(miss_status, StatusCode::OK);
+        assert_eq!(miss_body.as_ref(), BODY.as_bytes());
+
+        // Wait for the background writeback to publish the hot entry.
+        let fast = prepared.cache_hit.as_ref().expect("fast path data");
+        let mut hit_response = None;
+        for _ in 0..300 {
+            if let Some(response) = try_raw_cache_hit_response(fast) {
+                hit_response = Some(response);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let hit_response =
+            hit_response.expect("background writeback never published the hot entry");
+        let (hit_status, hit_headers, hit_body) = {
+            let (parts, body) = hit_response.into_parts();
+            let body = qpx_http::body::to_bytes(body).await.expect("hit body");
+            (parts.status, parts.headers, body)
+        };
+
+        // Reference: the generic lookup on the same key.
+        let snapshot_headers = HeaderMap::from_iter([(
+            http::header::HOST,
+            http::HeaderValue::from_static("bench.local"),
+        )]);
+        let reference_policy = qpx_core::config::CachePolicyConfig {
+            enabled: true,
+            backend: "disk".to_string(),
+            namespace: Some("ns".to_string()),
+            default_ttl_secs: Some(600),
+            max_object_bytes: 1024 * 1024,
+            allow_set_cookie_store: false,
+        };
+        let reference = qpxd_cache::lookup(
+            &Method::GET,
+            &snapshot_headers,
+            &fast.key,
+            &reference_policy,
+            &prepared.state.cache.backends,
+            &prepared.state.cache.background_revalidations,
+        )
+        .await
+        .expect("reference lookup");
+
+        let (ref_status, ref_headers, ref_body) = match reference {
+            qpxd_cache::LookupOutcome::Hit(response) => {
+                let (parts, body) = response.into_parts();
+                let body = qpx_http::body::to_bytes(body)
+                    .await
+                    .expect("reference body");
+                (parts.status, parts.headers, body)
+            }
+            outcome => panic!("generic lookup did not HIT: {outcome:?}"),
+        };
+
+        assert_eq!(hit_status, ref_status);
+        assert_eq!(hit_body.as_ref(), ref_body.as_ref());
+        assert_eq!(
+            hit_headers.get(http::header::ETAG),
+            ref_headers.get(http::header::ETAG),
+            "etag must match between fast path and generic lookup"
+        );
+        assert_eq!(
+            hit_headers.get(http::header::CONTENT_LENGTH),
+            ref_headers.get(http::header::CONTENT_LENGTH)
+        );
+        assert!(
+            hit_headers
+                .get(http::header::CACHE_STATUS)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("qpx; hit"))
+        );
+        assert!(hit_headers.contains_key(http::header::AGE));
+        assert_eq!(hit_body.as_ref(), BODY.as_bytes());
+    }
+
+    /// Conditional and HEAD requests must keep using the generic chain.
+    #[tokio::test]
+    async fn raw_cache_hit_fast_path_skips_conditional_and_head_requests() {
+        let upstream_addr = crate::test_util::spawn_static_http_server(
+            "200 OK",
+            vec![("Cache-Control", "max-age=600".to_string())],
+            "payload".to_string(),
+            1,
+        )
+        .await;
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        let cache_path = std::fs::canonicalize(cache_dir.path()).expect("canonicalize cache dir");
+        let reverse = build_cache_hit_reverse_fixture(upstream_addr, &cache_path);
+        let conn =
+            ReverseConnInfo::plain(std::net::SocketAddr::from(([127, 0, 0, 1], 4242)), 18080);
+
+        // A conditional GET disqualifies the fast path at prepare time.
+        let conditional_head = [
+            httparse::Header {
+                name: "Host",
+                value: b"bench.local",
+            },
+            httparse::Header {
+                name: "If-None-Match",
+                value: b"\"x\"",
+            },
+        ];
+        let conditional_raw: &[u8] =
+            b"GET /bench-1 HTTP/1.1\r\nHost: bench.local\r\nIf-None-Match: \"x\"\r\n\r\n";
+        let conditional_view = RawHttp1RequestView {
+            raw_head: conditional_raw,
+            method: "GET",
+            target: "/bench-1",
+            version: 1,
+            headers: &conditional_head,
+        };
+        let mut conditional_cache = RawHttp1ConnectionCache::default();
+        let prepared =
+            prepare_raw_http1_request(&reverse, &conn, conditional_view, &mut conditional_cache)
+                .expect("prepared conditional request");
+        assert!(
+            prepared.cache_hit.is_none(),
+            "conditional requests must not take the fast path"
+        );
+
+        // HEAD requests are also out of scope for the fast path.
+        let head_view_headers = [httparse::Header {
+            name: "Host",
+            value: b"bench.local",
+        }];
+        let head_raw: &[u8] = b"HEAD /bench-1 HTTP/1.1\r\nHost: bench.local\r\n\r\n";
+        let head_view = RawHttp1RequestView {
+            raw_head: head_raw,
+            method: "HEAD",
+            target: "/bench-1",
+            version: 1,
+            headers: &head_view_headers,
+        };
+        let mut head_cache = RawHttp1ConnectionCache::default();
+        let prepared = prepare_raw_http1_request(&reverse, &conn, head_view, &mut head_cache)
+            .expect("prepared head request");
+        assert!(
+            prepared.cache_hit.is_none(),
+            "HEAD requests must not take the fast path"
+        );
     }
 }

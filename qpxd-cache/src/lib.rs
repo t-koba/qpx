@@ -18,9 +18,10 @@ mod util;
 
 pub use backends::build_backends;
 pub use invalidate::{maybe_invalidate, purge_cache_key};
+pub use key::normalize_authority;
 pub use lookup_ops::{
-    attach_revalidation_headers, build_only_if_cached_miss_response, lookup,
-    maybe_build_stale_if_error_response,
+    attach_revalidation_headers, build_hot_hit_response, build_only_if_cached_miss_response,
+    lookup, maybe_build_stale_if_error_response,
 };
 pub use store::{CacheStoreContext, CacheStoreTiming, maybe_store, revalidate_not_modified};
 pub use types::{
@@ -30,6 +31,7 @@ pub use types::{
     CachedBody, CachedBodyStream, InFlightLookups, InFlightRevalidations, RequestCollapseGuard,
     RequestCollapseJoin,
 };
+pub use util::cache_namespace;
 
 #[cfg(test)]
 mod tests;
