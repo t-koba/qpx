@@ -67,5 +67,6 @@ impl std::fmt::Display for H3ResponseSendError {
 impl std::error::Error for H3ResponseSendError {}
 
 pub(crate) fn emit_h3_response_send_error(backend: &'static str, error: &H3ResponseSendError) {
+    tracing::warn!(backend, stage = error.stage().as_str(), error = %error, "HTTP/3 response send failed");
     crate::http3::metrics::h3_response_send_error(backend, error.stage().as_str());
 }

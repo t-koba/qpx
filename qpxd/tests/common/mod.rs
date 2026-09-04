@@ -7,11 +7,42 @@ use std::time::{Duration, Instant};
 
 pub struct QpxdHandle {
     pub(crate) child: Child,
+    #[allow(
+        dead_code,
+        reason = "log tail diagnostics are only consumed by tests that capture the qpxd log"
+    )]
+    log_path: Option<PathBuf>,
 }
 
 impl QpxdHandle {
+    #[allow(
+        dead_code,
+        reason = "shared integration support is compiled into tests that do not start qpxd"
+    )]
     pub fn new(child: Child) -> Self {
-        Self { child }
+        Self {
+            child,
+            log_path: None,
+        }
+    }
+
+    fn with_log_path(child: Child, log_path: PathBuf) -> Self {
+        Self {
+            child,
+            log_path: Some(log_path),
+        }
+    }
+
+    /// Tail of the captured qpxd process log, for embedding in failure messages.
+    #[allow(
+        dead_code,
+        reason = "shared integration support is compiled into tests that do not capture the qpxd log"
+    )]
+    pub fn log_tail(&self) -> String {
+        match &self.log_path {
+            Some(path) => log_excerpt(path),
+            None => String::new(),
+        }
     }
 }
 
@@ -77,7 +108,7 @@ pub fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Res
         .stderr(Stdio::from(log_err));
     let mut child = cmd.spawn().context("spawn qpxd")?;
     wait_for_qpxd(&mut child, ready_port, &log_path)?;
-    Ok(QpxdHandle::new(child))
+    Ok(QpxdHandle::with_log_path(child, log_path))
 }
 
 pub fn spawn_qpxd_on_random_port(

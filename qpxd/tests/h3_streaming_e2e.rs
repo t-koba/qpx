@@ -29,6 +29,12 @@ struct H3StreamingProxy {
     _permit: OwnedSemaphorePermit,
 }
 
+impl H3StreamingProxy {
+    fn log_tail(&self) -> String {
+        self._handle.log_tail()
+    }
+}
+
 struct H3ReadResult {
     status: http::StatusCode,
     ttfb: Duration,
@@ -93,7 +99,7 @@ async fn large_response_bounded_memory() -> Result<()> {
         None,
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(
+    let (proxy, port, cert_path) = spawn_reverse_h3_proxy(
         backend_port,
         "    streaming:\n      max_response_body_bytes: 12582912\n",
     )
@@ -102,7 +108,9 @@ async fn large_response_bounded_memory() -> Result<()> {
     let response = request_h3_counting(port, &cert_path, "/large", &[]).await?;
 
     assert_eq!(response.status, http::StatusCode::OK);
-    assert_eq!(response.data_error, None);
+    if let Some(err) = response.data_error.as_deref() {
+        anyhow::bail!("unexpected response body error: {err}{}", proxy.log_tail());
+    }
     assert_eq!(response.body_len, 625 * 16 * 1024);
     assert!(
         response.body.is_empty(),
