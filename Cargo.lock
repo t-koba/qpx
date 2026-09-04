@@ -2791,7 +2791,6 @@ name = "qpx-core"
 version = "0.4.2"
 dependencies = [
  "anyhow",
- "base64",
  "bytes",
  "chrono",
  "cidr",
@@ -2869,7 +2868,6 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "url",
- "x509-parser",
  "zstd",
 ]
 
