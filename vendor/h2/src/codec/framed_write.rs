@@ -123,6 +123,12 @@ where
         Poll::Ready(Ok(()))
     }
 
+    /// Returns whether a frame can be buffered without first flushing the
+    /// underlying I/O object.
+    pub(crate) fn has_capacity(&self) -> bool {
+        self.encoder.has_capacity()
+    }
+
     /// Buffer a frame.
     ///
     /// `poll_ready` must be called first to ensure that a frame may be
@@ -149,7 +155,7 @@ where
 
         loop {
             while !self.encoder.is_empty() {
-                match self.encoder.next {
+                let n = match self.encoder.next {
                     Some(Next::Data(ref mut frame)) => {
                         h2_trace!(queued_data_frame = true);
                         let mut buf = (&mut self.encoder.buf).chain(frame.payload_mut());
@@ -164,6 +170,11 @@ where
                         ))?
                     }
                 };
+                if n == 0 {
+                    // No progress is possible; retrying would busy-loop.
+                    h2_trace!("write returned zero, but non-zero bytes remaining");
+                    return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                }
             }
 
             match self.encoder.unset_frame() {

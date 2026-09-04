@@ -219,7 +219,7 @@ jobs:
           git clone https://github.com/python-caldav/caldav-server-tester.git "$RUNNER_TEMP/caldav-server-tester"
           git -C "$RUNNER_TEMP/caldav-server-tester" checkout --detach 8d2fc13636abf82c82436771990e8e65a28c7cb4
           python3 -m venv "$RUNNER_TEMP/caldav-venv"
-          "$RUNNER_TEMP/caldav-venv/bin/pip" install "$RUNNER_TEMP/caldav-server-tester" vobject==0.9.9
+          "$RUNNER_TEMP/caldav-venv/bin/pip" install "$RUNNER_TEMP/caldav-server-tester" vobject==0.9.9 "caldav==3.2.1"
       - name: run external DAV and CalDAV suites against qpxd
         env:
           QPXD_BIN: ${{ github.workspace }}/target/debug/qpxd

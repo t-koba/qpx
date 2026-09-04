@@ -1,10 +1,16 @@
 # qpx h2 transport patch
 
-This directory pins upstream `h2` 0.4.13. qpx changes the two internal
+This directory pins upstream `h2` 0.4.16. qpx changes the two internal
 stream-state mutexes from `std::sync::Mutex` to `parking_lot::Mutex` and makes
 per-frame, HPACK, flow-control, and queue tracing opt-in through the
 `wire-tracing` feature. The public API, HTTP/2 state machine, flow control,
-framing, and wire behavior are unchanged.
+framing, and wire behavior are unchanged. One default is raised: the
+small-DATA-frame overhead budget (`DEFAULT_DATA_FRAME_BUDGET`) is 4096 units
+instead of upstream's 100, because upstream's default sends ENHANCE_YOUR_CALM
+GOAWAYs on legitimate bursts of multiplexed small frames when the connection
+driver drains the socket faster than the consumer dequeues events. The budget
+still bounds framing-overhead exposure, so the upstream flood mitigation
+remains in effect.
 
 The patch removes kernel mutex contention when independent HTTP/2 streams are
 processed by different runtime workers. `parking_lot` mutexes do not implement

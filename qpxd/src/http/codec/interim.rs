@@ -727,24 +727,34 @@ mod tests {
         tokio::spawn(async move {
             connection.await.expect("client connection");
         });
-        let mut responses = Vec::with_capacity(REQUESTS);
-        for request_id in 0..REQUESTS {
-            client = client.ready().await.expect("client ready");
-            let request = ::http::Request::builder()
-                .method("GET")
-                .uri(format!("https://reverse_edges.test/{request_id}"))
-                .body(())
-                .expect("request");
-            let (response, _) = client.send_request(request, true).expect("send request");
-            responses.push(response);
-        }
-        for response in responses {
+        // Send and consume concurrently: responses are polled while the send
+        // loop continues, so the upstream small-DATA-frame overhead budget is
+        // replenished as frames leave internal buffering instead of piling up.
+        let (pending_tx, mut pending_rx) = tokio::sync::mpsc::channel(REQUESTS);
+        let send_loop = tokio::spawn(async move {
+            for request_id in 0..REQUESTS {
+                client = client.ready().await.expect("client ready");
+                let request = ::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("https://reverse_edges.test/{request_id}"))
+                    .body(())
+                    .expect("request");
+                let (response, _) = client.send_request(request, true).expect("send request");
+                pending_tx
+                    .send(response)
+                    .await
+                    .expect("send response future");
+            }
+        });
+        for _ in 0..REQUESTS {
+            let response = pending_rx.recv().await.expect("response future queued");
             let response = timeout(Duration::from_secs(1), response)
                 .await
                 .expect("multiplexed response timed out")
                 .expect("multiplexed response");
             assert_eq!(response.status(), ::http::StatusCode::OK);
         }
+        send_loop.await.expect("send loop completes");
     }
 
     #[tokio::test]
