@@ -94,6 +94,27 @@ impl PreparedRawHttp1Request {
         }
         self.raw_access_log_request.as_ref()
     }
+
+    /// Direct combined access log built at prepare time, for fast-path
+    /// responses whose target is generic (cache-hit routes).
+    pub(in crate::reverse) fn direct_combined_log_request(&self) -> Option<&Request<()>> {
+        self.raw_access_log_request.as_ref()
+    }
+
+    /// Serves the request from the cache-hit fast path when it can. Returns
+    /// `None` for every request the fast path cannot serve exactly as the
+    /// generic chain would, so the caller falls through without behavior
+    /// change.
+    pub(in crate::reverse) fn try_serving_cache_hit(&self) -> Option<PreparedRawHttp1Response> {
+        let mut response = try_raw_cache_hit_response(self.cache_hit.as_ref()?)?;
+        let body = take_in_memory_body(&[], &mut response)?;
+        let (parts, _) = response.into_parts();
+        Some(PreparedRawHttp1Response::InMemory {
+            status: parts.status,
+            headers: parts.headers,
+            body,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -483,23 +504,10 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     session: &mut PreparedPlainHttp1Session,
     pending_timeout: &mut ReusablePendingTimeout<'_>,
 ) -> Result<PreparedRawHttp1Response> {
-    if let Some(fast) = prepared.cache_hit.as_ref()
-        && let Some(response) = try_raw_cache_hit_response(fast)
-    {
-        session.release();
-        let mut response = response;
-        if let Some(body) = take_in_memory_body(&[], &mut response) {
-            let (parts, _) = response.into_parts();
-            return Ok(PreparedRawHttp1Response::InMemory {
-                status: parts.status,
-                headers: parts.headers,
-                body,
-            });
-        }
-        // The hot entry unexpectedly produced a streamed body; the generic
-        // send path handles every body shape, so fall back to it.
-        return Ok(PreparedRawHttp1Response::Generic(Vec::new(), response));
-    }
+    // Cache-hit fast paths are served by the caller before reaching this
+    // dispatcher: cache routes fall through to a generic request target, so
+    // the generic arm in the listener handles both their fast hits and their
+    // full-chain fallbacks.
     if let Some(request) = prepared.generic_request() {
         session.release();
         let (interim, response) =

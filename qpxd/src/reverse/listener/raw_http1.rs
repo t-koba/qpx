@@ -96,7 +96,17 @@ pub(super) async fn serve_raw_or_fallback(
                 let request_method = request.method();
                 let request_keep_alive = request.keep_alive();
                 let direct_log_started = request.raw_access_log_request().map(|_| Instant::now());
-                let dispatched = if let Some(generic) = request.generic_request() {
+                // The cache-hit fast path must be attempted before the
+                // generic dispatch: cache routes fall through to a generic
+                // request target, and serving their unconditional GET hot
+                // hits here skips the generic chain entirely. A miss falls
+                // through to the same generic handling as before.
+                let fast_served = request.try_serving_cache_hit();
+                let fast_served_hit = fast_served.is_some();
+                let fast_log_started = direct_combined_access.then(Instant::now);
+                let dispatched = if let Some(response) = fast_served {
+                    Ok(response)
+                } else if let Some(generic) = request.generic_request() {
                     let direct_generic_started = direct_combined_access.then(Instant::now);
                     let direct_generic_log =
                         direct_combined_access.then(|| direct_combined_log_request(&generic));
@@ -187,6 +197,23 @@ pub(super) async fn serve_raw_or_fallback(
                         ),
                     };
                     service.record_direct_combined_status(log_request, status, bytes_out, started);
+                }
+                if fast_served_hit
+                    && let (Some(service), Some(log_request), Some(started)) = (
+                        access_service.as_ref(),
+                        request.direct_combined_log_request(),
+                        fast_log_started,
+                    )
+                {
+                    let PreparedRawHttp1Response::InMemory { status, body, .. } = &response else {
+                        unreachable!("fast cache-hit responses are always in-memory");
+                    };
+                    service.record_direct_combined_status(
+                        log_request,
+                        *status,
+                        body.len() as u64,
+                        started,
+                    );
                 }
                 let keep_alive = match response {
                     PreparedRawHttp1Response::Direct(response) => {
