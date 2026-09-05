@@ -222,7 +222,7 @@ port = int(sys.argv[1])
 requests = int(sys.argv[2])
 concurrency = int(sys.argv[3])
 expected_cache_status = sys.argv[4].encode("ascii") if sys.argv[4] else None
-unique_miss = bool(sys.argv[5])
+unique_miss_prefix = sys.argv[5]
 
 
 def read_response(stream, buffered):
@@ -267,9 +267,9 @@ def run_connection(connection_index):
     assigned = requests // concurrency
     if connection_index < requests % concurrency:
         assigned += 1
-    if unique_miss:
+    if unique_miss_prefix:
         request_template = (
-            f"GET /bench?qpx_cache_miss=profile-{connection_index}-{{sequence}} HTTP/1.1\r\n"
+            f"GET /bench?qpx_cache_miss={unique_miss_prefix}-{connection_index}-{{sequence}} HTTP/1.1\r\n"
             f"Host: 127.0.0.1:{port}\r\n"
             "Connection: keep-alive\r\n"
             "\r\n"
@@ -286,7 +286,7 @@ def run_connection(connection_index):
     with socket.create_connection(("127.0.0.1", port), timeout=30) as stream:
         stream.settimeout(30)
         for sequence in range(assigned):
-            if unique_miss:
+            if unique_miss_prefix:
                 request = request_template.format(sequence=sequence).encode("ascii")
             else:
                 request = request_template.encode("ascii")
@@ -493,9 +493,9 @@ run_profile() {
     # runs the full lookup chain, the upstream fetch, and the async disk
     # writeback, so the profile reflects the cache miss path only.
     warmup_requests="$PROFILE_CONCURRENCY"
-    run_http1_load "$LOG_DIR/warmup-cache-miss.txt" "$port" "$PROFILE_CONCURRENCY" "" "miss"
+    run_http1_load "$LOG_DIR/warmup-cache-miss.txt" "$port" "$PROFILE_CONCURRENCY" "" "miss-warmup"
     callgrind_control -i on "$pid" >/dev/null
-    run_http1_load "$load_output" "$port" "" "miss" "miss"
+    run_http1_load "$load_output" "$port" "" "miss" "miss-measure"
     callgrind_control -i off "$pid" >/dev/null
   else
     callgrind_control -i on "$pid" >/dev/null
