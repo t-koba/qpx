@@ -1252,12 +1252,7 @@ fn cache_file_id(namespace: &str, key: &str) -> DiskCacheFileId {
 }
 
 fn cache_file_id_hex(id: DiskCacheFileId) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in id.0 {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
+    super::hash::hex_lower(id.0.as_slice())
 }
 
 fn cache_file_id_from_path(root: &Path, path: &Path) -> Option<DiskCacheFileId> {
