@@ -18,6 +18,7 @@ BACKEND_PORT="${QPX_PERF_PROFILE_BACKEND_PORT:-18480}"
 QPX_HTTP1_PORT="${QPX_PERF_PROFILE_HTTP1_PORT:-18481}"
 QPX_HTTP2_PORT="${QPX_PERF_PROFILE_HTTP2_PORT:-18482}"
 QPX_CACHE_PROFILE_PORT="${QPX_PERF_PROFILE_CACHE_PORT:-18483}"
+QPX_CACHE_MISS_PROFILE_PORT="${QPX_PERF_PROFILE_CACHE_MISS_PORT:-18484}"
 
 TMP_DIR="$(make_temp_dir qpx-perf-profile)"
 LOG_DIR="$TMP_DIR/logs"
@@ -129,7 +130,7 @@ write_qpx_config() {
           cert: \"$TMP_DIR/server.crt\"
           key: \"$TMP_DIR/server.key\""
   fi
-  if [ "$protocol" = cache-http1 ]; then
+  if [ "$protocol" = cache-http1 ] || [ "$protocol" = cache-miss-http1 ]; then
     cache_backend="caches:
   - name: profile-disk
     kind: disk
@@ -211,7 +212,8 @@ run_http1_load() {
   local port="$2"
   local requests="${3:-$PROFILE_REQUESTS}"
   local expected_cache_status="${4:-}"
-  if ! python3 - "$port" "$requests" "$PROFILE_CONCURRENCY" "$expected_cache_status" >"$output" 2>&1 <<'PY'
+  local unique_miss="${5:-}"
+  if ! python3 - "$port" "$requests" "$PROFILE_CONCURRENCY" "$expected_cache_status" "$unique_miss" >"$output" 2>&1 <<'PY'
 import concurrent.futures
 import socket
 import sys
@@ -220,6 +222,7 @@ port = int(sys.argv[1])
 requests = int(sys.argv[2])
 concurrency = int(sys.argv[3])
 expected_cache_status = sys.argv[4].encode("ascii") if sys.argv[4] else None
+unique_miss = bool(sys.argv[5])
 
 
 def read_response(stream, buffered):
@@ -264,17 +267,29 @@ def run_connection(connection_index):
     assigned = requests // concurrency
     if connection_index < requests % concurrency:
         assigned += 1
-    request = (
-        f"GET /bench HTTP/1.1\r\n"
-        f"Host: 127.0.0.1:{port}\r\n"
-        "Connection: keep-alive\r\n"
-        "\r\n"
-    ).encode("ascii")
+    if unique_miss:
+        request_template = (
+            f"GET /bench?qpx_cache_miss=profile-{connection_index}-{{sequence}} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Connection: keep-alive\r\n"
+            "\r\n"
+        )
+    else:
+        request_template = (
+            f"GET /bench HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Connection: keep-alive\r\n"
+            "\r\n"
+        )
     completed = 0
     buffered = b""
     with socket.create_connection(("127.0.0.1", port), timeout=30) as stream:
         stream.settimeout(30)
-        for _ in range(assigned):
+        for sequence in range(assigned):
+            if unique_miss:
+                request = request_template.format(sequence=sequence).encode("ascii")
+            else:
+                request = request_template.encode("ascii")
             stream.sendall(request)
             buffered = read_response(stream, buffered)
             completed += 1
@@ -473,6 +488,15 @@ run_profile() {
     callgrind_control -i on "$pid" >/dev/null
     run_http1_load "$load_output" "$port" "" "hit"
     callgrind_control -i off "$pid" >/dev/null
+  elif [ "$protocol" = cache-miss-http1 ]; then
+    # Unique URLs per request: every measured request is a cold miss that
+    # runs the full lookup chain, the upstream fetch, and the async disk
+    # writeback, so the profile reflects the cache miss path only.
+    warmup_requests="$PROFILE_CONCURRENCY"
+    run_http1_load "$LOG_DIR/warmup-cache-miss.txt" "$port" "$PROFILE_CONCURRENCY" "" "miss"
+    callgrind_control -i on "$pid" >/dev/null
+    run_http1_load "$load_output" "$port" "" "miss" "miss"
+    callgrind_control -i off "$pid" >/dev/null
   else
     callgrind_control -i on "$pid" >/dev/null
     run_http1_load "$load_output" "$port"
@@ -534,3 +558,4 @@ start_backend
 run_profile http1 "$QPX_HTTP1_PORT"
 run_profile http2 "$QPX_HTTP2_PORT"
 run_profile cache-http1 "$QPX_CACHE_PROFILE_PORT" qpxd_cache_hit_http1
+run_profile cache-miss-http1 "$QPX_CACHE_MISS_PROFILE_PORT" qpxd_cache_miss_http1
