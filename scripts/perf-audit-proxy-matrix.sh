@@ -42,11 +42,16 @@ run_group \
   "1 2 4"
 run_group origin "1024" "qpxd-local,nginx-static" ""
 run_group webdav "1024 1048576" "qpxd-webdav,apache-webdav" ""
-run_group cache "1024 1048576" "qpxd-cache,nginx-cache" ""
+run_group cache-hit "1024 1048576" "qpxd-cache,nginx-cache" ""
+# The unique-URL miss workload pays for origin fetches plus disk writeback on
+# every request, so its per-sample spread is much wider than the hit path;
+# five samples keep the majority-median stable across runs.
+QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS=5 \
+  run_group cache-miss "1024" "qpxd-cache,nginx-cache" ""
 run_group feature-rich "1024 1048576" "qpxd-feature-rich,nginx-feature-rich" ""
 
 : >"$CANDIDATE"
-for group in proxy origin webdav cache feature-rich; do
+for group in proxy origin webdav cache-hit cache-miss feature-rich; do
   cat "$TMP_DIR/$group.jsonl" >>"$CANDIDATE"
 done
 
