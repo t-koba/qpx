@@ -13,6 +13,9 @@ WRK_TIMEOUT="${QPX_PROXY_COMPARE_WRK_TIMEOUT:-30s}"
 BODY_SIZES="${QPX_PROXY_COMPARE_BODY_SIZES:-1024 1048576}"
 LOCAL_ORIGIN_BODY_BYTES=1024
 SAMPLE_ATTEMPTS="${QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS:-3}"
+# The unique-URL cache-miss workload is far noisier per sample than the hit
+# path, so it accepts its own attempt count.
+MISS_SAMPLE_ATTEMPTS="${QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS:-$SAMPLE_ATTEMPTS}"
 MIN_VALID_SAMPLES="${QPX_PROXY_COMPARE_MIN_VALID_SAMPLES:-}"
 WARMUP_COOLDOWN_SECONDS="${QPX_PROXY_COMPARE_WARMUP_COOLDOWN_SECONDS:-0.25}"
 ACCESS_LOG_DRAIN_SECONDS="${QPX_PROXY_COMPARE_ACCESS_LOG_DRAIN_SECONDS:-1.25}"
@@ -1576,6 +1579,16 @@ if [ "$SAMPLE_ATTEMPTS" -eq 0 ]; then
   echo "QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS must be a positive integer" >&2
   exit 1
 fi
+case "$MISS_SAMPLE_ATTEMPTS" in
+  ''|*[!0-9]*)
+    echo "QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$MISS_SAMPLE_ATTEMPTS" -eq 0 ]; then
+  echo "QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS must be a positive integer" >&2
+  exit 1
+fi
 case "$PROFILE_SECONDS" in
   ''|*[!0-9]*)
     echo "QPX_PROXY_COMPARE_PROFILE_SECONDS must be a non-negative integer" >&2
@@ -1687,6 +1700,7 @@ fi
 FINAL_OUT_JSON="$OUT_JSON"
 RAW_OUT_JSON="$TMP_DIR/interleaved-raw.jsonl"
 REQUESTED_SAMPLE_ATTEMPTS="$SAMPLE_ATTEMPTS"
+REQUESTED_MISS_SAMPLE_ATTEMPTS="$MISS_SAMPLE_ATTEMPTS"
 REQUESTED_MIN_VALID_SAMPLES="$MIN_VALID_SAMPLES"
 OUT_JSON="$RAW_OUT_JSON"
 SAMPLE_ATTEMPTS=3
@@ -1842,6 +1856,7 @@ done
 
 jq -cs \
   --argjson attempts "$REQUESTED_SAMPLE_ATTEMPTS" \
+  --argjson miss_attempts "$REQUESTED_MISS_SAMPLE_ATTEMPTS" \
   --argjson minimum "$REQUESTED_MIN_VALID_SAMPLES" \
   --argjson backend_workers "$BACKEND_WORKERS" \
   --argjson local_origin_workers "$LOCAL_ORIGIN_WORKERS" \
@@ -1894,7 +1909,7 @@ jq -cs \
             | .fd_peak = $fd_sample.fd_peak
             | .fd_growth = $fd_sample.fd_growth))
         | .aggregation = "conservative_median_per_metric"
-        | .sample_attempts = $attempts
+        | .sample_attempts = (if .bench == "proxy_cache_miss_http1" then $miss_attempts else $attempts end)
         | .valid_samples = ($valid | length)
         | .sampling_order = "round_robin_interleaved"
         | .sample_spread_basis = "tightest_valid_majority"
@@ -1939,7 +1954,7 @@ jq -cs \
       else
         $all[0]
         | .aggregation = "conservative_median_per_metric"
-        | .sample_attempts = $attempts
+        | .sample_attempts = (if .bench == "proxy_cache_miss_http1" then $miss_attempts else $attempts end)
         | .valid_samples = ($valid | length)
         | .sampling_order = "round_robin_interleaved"
         | .sample_spread_basis = "tightest_valid_majority"
