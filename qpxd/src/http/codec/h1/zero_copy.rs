@@ -67,19 +67,6 @@ pub(crate) fn buffered_relay_quantum(max_frame_size: usize) -> usize {
     }
 }
 
-/// Bytes a buffered relay may move before yielding to the scheduler. Write
-/// syscalls complete synchronously on loopback, so the relay loop would
-/// otherwise stream an entire body inside one poll.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn buffered_relay_yield_budget() -> u64 {
-    buffered_relay_quantum(512 * 1024) as u64
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn buffered_relay_yield_budget() -> u64 {
-    buffered_relay_quantum(512 * 1024) as u64
-}
-
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) struct BufferedRelayGuard;
 

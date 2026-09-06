@@ -770,8 +770,6 @@ where
     W: AsyncWrite + Unpin,
 {
     let _relay_guard = super::BufferedRelayGuard::begin();
-    let yield_budget = super::buffered_relay_yield_budget();
-    let mut yielded_bytes = 0u64;
     while let Some(chunk) = read_response_body_chunk(body, body_read_timeout).await? {
         let chunk = chunk?;
         let chunk_len = chunk.len() as u64;
@@ -782,14 +780,6 @@ where
             write_all_with_timeout(writer, &chunk).await?;
         }
         remaining -= chunk_len;
-        // The write above usually completes synchronously on loopback, so the
-        // whole body would otherwise run inside one poll and monopolize the
-        // worker. Bound each scheduling slot explicitly.
-        yielded_bytes += chunk_len;
-        if yielded_bytes >= yield_budget {
-            tokio::task::yield_now().await;
-            yielded_bytes = 0;
-        }
     }
     if remaining != 0 {
         return Err(anyhow!(
@@ -819,20 +809,11 @@ where
     W: AsyncWrite + Unpin,
 {
     let _relay_guard = super::BufferedRelayGuard::begin();
-    let yield_budget = super::buffered_relay_yield_budget();
-    let mut yielded_bytes = 0u64;
     if let Some(chunk) = first_chunk {
         write_chunk(writer, &chunk).await?;
-        yielded_bytes += chunk.len() as u64;
     }
     while let Some(chunk) = read_response_body_chunk(body, body_read_timeout).await? {
-        let chunk = chunk?;
-        write_chunk(writer, &chunk).await?;
-        yielded_bytes += chunk.len() as u64;
-        if yielded_bytes >= yield_budget {
-            tokio::task::yield_now().await;
-            yielded_bytes = 0;
-        }
+        write_chunk(writer, &chunk?).await?;
     }
     let mut trailers = match first_trailers {
         Some(trailers) => Some(trailers),
@@ -861,23 +842,15 @@ where
     W: AsyncWrite + Unpin,
 {
     let _relay_guard = super::BufferedRelayGuard::begin();
-    let yield_budget = super::buffered_relay_yield_budget();
-    let mut yielded_bytes = 0u64;
     if let Some(chunk) = first_chunk
         && !chunk.is_empty()
     {
         write_all_with_timeout(writer, &chunk).await?;
-        yielded_bytes += chunk.len() as u64;
     }
     while let Some(chunk) = read_response_body_chunk(body, body_read_timeout).await? {
         let chunk = chunk?;
         if !chunk.is_empty() {
             write_all_with_timeout(writer, &chunk).await?;
-            yielded_bytes += chunk.len() as u64;
-        }
-        if yielded_bytes >= yield_budget {
-            tokio::task::yield_now().await;
-            yielded_bytes = 0;
         }
     }
     Ok(())
