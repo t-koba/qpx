@@ -4,74 +4,167 @@
       "bench": "proxy_compare_http1_reverse",
       "body_bytes": 1024,
       "concurrency": 64,
-      "cpu_efficiency_ratio": 1.169517,
-      "direct_backend_requests_per_sec": 50710.647447,
-      "direct_efficiency_ratio": 0.345751,
-      "dominance_score": 0.787956,
-      "external_proxy_best_latency_p99_ms": 3.212,
-      "external_proxy_best_requests_per_sec": 29575.816967,
-      "external_proxy_best_requests_per_cpu_second": 14991.967871,
+      "cpu_efficiency_ratio": 1.341674,
+      "direct_backend_requests_per_sec": 42877.273126,
+      "direct_efficiency_ratio": 0.65495,
+      "direct_headroom_ratio": 1.526834,
+      "dominance_score": 1.27582,
+      "duration_seconds": 10,
+      "external_proxy_best_latency_p99_ms": 5.368,
+      "external_proxy_best_requests_per_cpu_second": 21975.617284,
+      "external_proxy_best_requests_per_sec": 21344.003571,
+      "external_proxy_fd_peak": {
+        "apache": 251.0,
+        "lighttpd": 139.0,
+        "nginx": 147.0
+      },
       "external_proxy_latency_p99_ms": {
-        "apache": 3.212,
-        "lighttpd": 5.832,
-        "nginx": 13.369
+        "apache": 8.211,
+        "lighttpd": 10.183,
+        "nginx": 5.368
       },
       "external_proxy_requests_per_cpu_second": {
-        "apache": 13098.759965,
-        "lighttpd": 14991.967871,
-        "nginx": 13988.654618
+        "apache": 8213.516161,
+        "lighttpd": 9385.943775,
+        "nginx": 21975.617284
       },
       "external_proxy_requests_per_sec": {
-        "apache": 29575.816967,
-        "lighttpd": 14924.80326,
-        "nginx": 13929.99758
+        "apache": 16743.489187,
+        "lighttpd": 9325.803578,
+        "nginx": 21344.003571
       },
-      "duration_seconds": 10,
-      "p99_latency_ratio": 1.417186,
-      "qpxd_latency_p99_ms": 4.552,
-      "qpxd_requests_per_cpu_second": 17533.366337,
-      "qpxd_requests_per_sec": 17533.253499,
-      "requests": 177087,
-      "source_commit": "1a9f9fa742b4e3738c7f4fe42b281767e98733f7",
-      "throughput_ratio": 0.592824
+      "external_proxy_rss_peak_kb": {
+        "apache": 50804.0,
+        "lighttpd": 3672.0,
+        "nginx": 11768.0
+      },
+      "external_proxy_scheduler_queue_delay_us_per_request": {
+        "apache": 571.035742,
+        "lighttpd": 0.721619,
+        "nginx": 1.343256
+      },
+      "fd_peak_ratio": 1.035971,
+      "p99_latency_ratio": 0.850037,
+      "qpxd_latency_p99_ms": 4.563,
+      "qpxd_requests_per_cpu_second": 29484.117032,
+      "qpxd_requests_per_sec": 28082.481183,
+      "requests": 281006,
+      "rss_peak_ratio": 1.575119,
+      "sample_spread": {
+        "apache": {
+          "latency_p99_ratio": 1.0051150895140666,
+          "requests_per_cpu_second_ratio": 1.002127334927069,
+          "requests_per_sec_ratio": 1.0022883317836355
+        },
+        "direct-backend": {
+          "latency_p99_ratio": 1.0011961722488039,
+          "requests_per_cpu_second_ratio": 1.0014946196061814,
+          "requests_per_sec_ratio": 1.002916575982631
+        },
+        "lighttpd": {
+          "latency_p99_ratio": 1.0038299125994303,
+          "requests_per_cpu_second_ratio": 1.001639326720652,
+          "requests_per_sec_ratio": 1.0012038673675834
+        },
+        "nginx": {
+          "latency_p99_ratio": 1.001866368047779,
+          "requests_per_cpu_second_ratio": 1.0030141763548197,
+          "requests_per_sec_ratio": 1.0000790591134594
+        },
+        "qpxd": {
+          "latency_p99_ratio": 1.0024165202108963,
+          "requests_per_cpu_second_ratio": 1.0003575434465881,
+          "requests_per_sec_ratio": 1.003564241006617
+        }
+      },
+      "scheduler_queue_delay_ratio": 2.40422,
+      "source_commit": "8e79dd6ebf6b62d06b765a635207726343122b48",
+      "throughput_ratio": 1.315708
     },
     {
       "bench": "proxy_compare_http1_reverse",
       "body_bytes": 1048576,
       "concurrency": 64,
-      "cpu_efficiency_ratio": 1.552643,
-      "direct_backend_requests_per_sec": 2098.952942,
-      "direct_efficiency_ratio": 0.841119,
-      "dominance_score": 0.345617,
-      "external_proxy_best_latency_p99_ms": 67.368,
-      "external_proxy_best_requests_per_sec": 1737.001939,
-      "external_proxy_best_requests_per_cpu_second": 1192.992993,
+      "cpu_efficiency_ratio": 5.830616,
+      "direct_backend_requests_per_sec": 1420.323445,
+      "direct_efficiency_ratio": 1.003432,
+      "direct_headroom_ratio": 0.99658,
+      "dominance_score": 2.942642,
+      "duration_seconds": 10,
+      "external_proxy_best_latency_p99_ms": 137.266,
+      "external_proxy_best_requests_per_cpu_second": 822.89767,
+      "external_proxy_best_requests_per_sec": 890.193682,
+      "external_proxy_fd_peak": {
+        "apache": 238.0,
+        "lighttpd": 203.0,
+        "nginx": 147.0
+      },
       "external_proxy_latency_p99_ms": {
-        "apache": 4807.607,
-        "lighttpd": 67.368,
-        "nginx": 130.745
+        "apache": 631.507,
+        "lighttpd": 137.266,
+        "nginx": 179.16
       },
       "external_proxy_requests_per_cpu_second": {
-        "apache": 831.556402,
-        "lighttpd": 1192.992993,
-        "nginx": 604.1
+        "apache": 668.577811,
+        "lighttpd": 822.89767,
+        "nginx": 466.968781
       },
       "external_proxy_requests_per_sec": {
-        "apache": 1737.001939,
-        "lighttpd": 1186.968918,
-        "nginx": 603.845781
+        "apache": 890.193682,
+        "lighttpd": 800.564932,
+        "nginx": 461.976182
       },
-      "duration_seconds": 10,
-      "p99_latency_ratio": 38.224929,
-      "qpxd_latency_p99_ms": 2575.137,
-      "qpxd_requests_per_cpu_second": 1852.291667,
-      "qpxd_requests_per_sec": 1765.469552,
-      "requests": 17782,
-      "source_commit": "1a9f9fa742b4e3738c7f4fe42b281767e98733f7",
-      "throughput_ratio": 1.016389
+      "external_proxy_rss_peak_kb": {
+        "apache": 53872.0,
+        "lighttpd": 4352.0,
+        "nginx": 14320.0
+      },
+      "external_proxy_scheduler_queue_delay_us_per_request": {
+        "apache": 10751.317704,
+        "lighttpd": 38.739865,
+        "nginx": 29.139082
+      },
+      "fd_peak_ratio": 1.006803,
+      "p99_latency_ratio": 0.366347,
+      "qpxd_latency_p99_ms": 50.287,
+      "qpxd_requests_per_cpu_second": 4798.0,
+      "qpxd_requests_per_sec": 1425.19748,
+      "requests": 14394,
+      "rss_peak_ratio": 1.294693,
+      "sample_spread": {
+        "apache": {
+          "latency_p99_ratio": 1.7903055250795916,
+          "requests_per_cpu_second_ratio": 1.0094007848011868,
+          "requests_per_sec_ratio": 1.005760762178914
+        },
+        "direct-backend": {
+          "latency_p99_ratio": 1.0238513102380102,
+          "requests_per_cpu_second_ratio": 1.011060379360247,
+          "requests_per_sec_ratio": 1.0019650524039614
+        },
+        "lighttpd": {
+          "latency_p99_ratio": 1.0016027275508865,
+          "requests_per_cpu_second_ratio": 1.0034658878059528,
+          "requests_per_sec_ratio": 1.0061738764745194
+        },
+        "nginx": {
+          "latency_p99_ratio": 1.0194797945970082,
+          "requests_per_cpu_second_ratio": 1.0035730311487354,
+          "requests_per_sec_ratio": 1.00913720482672
+        },
+        "qpxd": {
+          "latency_p99_ratio": 1.0096574709874313,
+          "requests_per_cpu_second_ratio": 1.0184706281784077,
+          "requests_per_sec_ratio": 1.0021311046115668
+        }
+      },
+      "scheduler_queue_delay_ratio": 5.660438,
+      "source_commit": "8e79dd6ebf6b62d06b765a635207726343122b48",
+      "throughput_ratio": 1.600997
     }
   ],
   "degradation_threshold": 0.05,
   "metric": "multi_axis_proxy_dominance",
-  "schema_version": 3
+  "resource_measurement": "sampled_workload_peak_v1",
+  "schema_version": 4
 }
