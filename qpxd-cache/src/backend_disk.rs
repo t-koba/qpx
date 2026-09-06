@@ -689,13 +689,21 @@ impl DiskCacheBackend {
         value: &[u8],
         ttl_secs: u64,
     ) -> Result<()> {
-        let write_path = path.to_path_buf();
         let value = Bytes::copy_from_slice(value);
-        let (write, value) = tokio::task::spawn_blocking(move || {
-            write_cached_bytes_sync(write_path.as_path(), value, ttl_secs)
-        })
-        .await
-        .context("disk cache writer task failed")??;
+        // Small objects (cache index and envelope entries, small bodies) are
+        // page-cache writes of a few microseconds; dispatching them to the
+        // blocking pool costs more in task hops than the write itself, and
+        // every cache miss performs three of these writes.
+        let (write, value) = if value.len() <= INLINE_DISK_WRITE_MAX_BYTES {
+            write_cached_bytes_sync(path, value, ttl_secs)
+        } else {
+            let write_path = path.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                write_cached_bytes_sync(write_path.as_path(), value, ttl_secs)
+            })
+            .await
+            .context("disk cache writer task failed")?
+        }?;
         self.remember_write(path.to_path_buf(), write.total_len, write.expires_at_ms)
             .await?;
         self.hot_insert(
@@ -744,13 +752,17 @@ impl DiskCacheBackend {
         ttl_secs: u64,
     ) -> Result<()> {
         if let CachedBody::Memory(value) = body {
-            let write_path = path.to_path_buf();
-            let value = value.clone();
-            let (write, value) = tokio::task::spawn_blocking(move || {
-                write_cached_bytes_sync(write_path.as_path(), value, ttl_secs)
-            })
-            .await
-            .context("disk cache body writer task failed")??;
+            let (write, value) = if value.len() <= INLINE_DISK_WRITE_MAX_BYTES {
+                write_cached_bytes_sync(path, value.clone(), ttl_secs)
+            } else {
+                let write_path = path.to_path_buf();
+                let value = value.clone();
+                tokio::task::spawn_blocking(move || {
+                    write_cached_bytes_sync(write_path.as_path(), value, ttl_secs)
+                })
+                .await
+                .context("disk cache body writer task failed")?
+            }?;
             self.remember_write(path.to_path_buf(), write.total_len, write.expires_at_ms)
                 .await?;
             self.hot_insert(
@@ -1531,6 +1543,9 @@ static ENSURED_PRIVATE_DIRS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashSet<PathBuf>>,
 > = std::sync::OnceLock::new();
 const ENSURED_PRIVATE_DIR_LIMIT: usize = 4096;
+// Page-cache writes up to this size run inline on the caller; larger bodies
+// keep using the blocking pool.
+const INLINE_DISK_WRITE_MAX_BYTES: usize = 16 * 1024;
 
 /// Drops the memoized entry for `dir` so the next write re-runs the directory
 /// guard. Write paths call this when the parent stops accepting files.
