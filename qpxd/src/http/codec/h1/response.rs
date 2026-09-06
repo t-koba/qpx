@@ -769,6 +769,7 @@ async fn write_content_length_response_body<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    let _relay_guard = super::BufferedRelayGuard::begin();
     while let Some(chunk) = read_response_body_chunk(body, body_read_timeout).await? {
         let chunk = chunk?;
         let chunk_len = chunk.len() as u64;
@@ -807,6 +808,7 @@ async fn write_chunked_response_body<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    let _relay_guard = super::BufferedRelayGuard::begin();
     if let Some(chunk) = first_chunk {
         write_chunk(writer, &chunk).await?;
     }
@@ -839,6 +841,7 @@ async fn write_close_delimited_response_body<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    let _relay_guard = super::BufferedRelayGuard::begin();
     if let Some(chunk) = first_chunk
         && !chunk.is_empty()
     {

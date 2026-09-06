@@ -146,6 +146,7 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.as_mut().get_mut();
+        let frame_cap = crate::http::codec::h1::buffered_relay_quantum(this.max_frame_size);
         loop {
             match &mut this.state {
                 BodyState::ContentLength { remaining } => {
@@ -155,20 +156,15 @@ where
                         return Poll::Ready(None);
                     }
                     if !this.buf.is_empty() {
-                        let take = this
-                            .buf
-                            .len()
-                            .min(*remaining as usize)
-                            .min(this.max_frame_size);
+                        let take = this.buf.len().min(*remaining as usize).min(frame_cap);
                         *remaining -= take as u64;
                         return Poll::Ready(Some(Ok(Frame::data(
                             this.buf.split_to(take).freeze(),
                         ))));
                     }
                     // Bounded read-ahead keeps unexpected bytes from entering the reusable pool.
-                    let read_size = (*remaining)
-                        .clamp(INITIAL_READ_BUF_SIZE as u64, this.max_frame_size as u64)
-                        as usize;
+                    let read_size =
+                        (*remaining).clamp(INITIAL_READ_BUF_SIZE as u64, frame_cap as u64) as usize;
                     match poll_read_with_timeout(this, cx, read_size) {
                         Poll::Ready(Ok(0)) => {
                             this.state = BodyState::Done;
@@ -188,12 +184,12 @@ where
                 }
                 BodyState::CloseDelimited => {
                     if !this.buf.is_empty() {
-                        let take = this.buf.len().min(this.max_frame_size);
+                        let take = this.buf.len().min(frame_cap);
                         return Poll::Ready(Some(Ok(Frame::data(
                             this.buf.split_to(take).freeze(),
                         ))));
                     }
-                    match poll_read_with_timeout(this, cx, this.max_frame_size) {
+                    match poll_read_with_timeout(this, cx, frame_cap) {
                         Poll::Ready(Ok(0)) => {
                             this.state = BodyState::Done;
                             this.discard();
@@ -266,13 +262,13 @@ where
                             continue;
                         }
                         if !this.buf.is_empty() {
-                            let take = this.buf.len().min(*remaining).min(this.max_frame_size);
+                            let take = this.buf.len().min(*remaining).min(frame_cap);
                             *remaining -= take;
                             return Poll::Ready(Some(Ok(Frame::data(
                                 this.buf.split_to(take).freeze(),
                             ))));
                         }
-                        let read_size = (*remaining).min(this.max_frame_size);
+                        let read_size = (*remaining).min(frame_cap);
                         match poll_read_with_timeout(this, cx, read_size) {
                             Poll::Ready(Ok(0)) => {
                                 this.state = BodyState::Done;
