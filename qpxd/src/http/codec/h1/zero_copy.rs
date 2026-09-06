@@ -25,7 +25,7 @@ const BALANCED_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 256 * 1024;
+const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
 
 // Buffered body relays move up to one read buffer per readiness event. The
 // same fairness rule as the zero-copy path applies under concurrent transfer

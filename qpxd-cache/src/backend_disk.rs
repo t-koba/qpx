@@ -777,17 +777,27 @@ impl DiskCacheBackend {
             body_len: body.len(),
         };
         let tmp_path = temp_path(parent);
-        let mut file = TokioFile::from_std(create_secure_new_file(&tmp_path)?);
-        write_header_async(&mut file, &header).await?;
-        while let Some(chunk) = source.data().await {
-            file.write_all(chunk?.as_ref()).await?;
+        let streamed: std::result::Result<u64, anyhow::Error> = async {
+            let mut file = TokioFile::from_std(create_secure_new_file(&tmp_path)?);
+            write_header_async(&mut file, &header).await?;
+            while let Some(chunk) = source.data().await {
+                file.write_all(chunk?.as_ref()).await?;
+            }
+            // Cache objects are re-fetchable, so commit to the page cache and
+            // publish atomically via rename instead of paying for an fsync.
+            let body_len = header.body_len;
+            drop(file);
+            fs::rename(&tmp_path, path).with_context(|| {
+                format!("failed to commit disk cache object {}", path.display())
+            })?;
+            Ok(body_len)
         }
-        // Cache objects are re-fetchable, so commit to the page cache and
-        // publish atomically via rename instead of paying for an fsync.
-        let body_len = header.body_len;
-        drop(file);
-        fs::rename(&tmp_path, path)
-            .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;
+        .await;
+        if streamed.is_err() {
+            let _ = fs::remove_file(&tmp_path);
+            invalidate_ensured_dir(parent);
+        }
+        let body_len = streamed?;
         let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + body_len;
         self.remember_write(path.to_path_buf(), total_len, expires_at_ms)
             .await?;
@@ -1404,6 +1414,9 @@ fn write_cached_bytes_sync(
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp_path);
+        if let Some(parent) = path.parent() {
+            invalidate_ensured_dir(parent);
+        }
     }
     result.map(|write| (write, value))
 }
@@ -1455,6 +1468,15 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
             path.display()
         ));
     }
+    // Cache-miss writebacks rebuild the directory chain on every store; a
+    // process-wide memo of verified parents keeps repeat writes off the
+    // mkdir/stat path. The walk itself is the security boundary (symlink and
+    // type checks), so only full successful walks are memoized.
+    if let Some(ensured) = ENSURED_PRIVATE_DIRS.get()
+        && ensured.lock().expect("ensured dir lock").contains(path)
+    {
+        return Ok(());
+    }
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
@@ -1494,7 +1516,30 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
             }
         }
     }
+    if let Some(ensured) = ENSURED_PRIVATE_DIRS.get()
+        && let Ok(mut set) = ensured.lock()
+        && set.len() < ENSURED_PRIVATE_DIR_LIMIT
+    {
+        set.insert(path.to_path_buf());
+    }
     Ok(())
+}
+
+/// Verified private disk-cache parents. The guard walks directories afresh on
+/// first use, so entries are trusted for the lifetime of the process only.
+static ENSURED_PRIVATE_DIRS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+> = std::sync::OnceLock::new();
+const ENSURED_PRIVATE_DIR_LIMIT: usize = 4096;
+
+/// Drops the memoized entry for `dir` so the next write re-runs the directory
+/// guard. Write paths call this when the parent stops accepting files.
+fn invalidate_ensured_dir(dir: &Path) {
+    if let Some(ensured) = ENSURED_PRIVATE_DIRS.get()
+        && let Ok(mut set) = ensured.lock()
+    {
+        set.remove(dir);
+    }
 }
 
 fn reject_symlink(path: &Path) -> Result<()> {
