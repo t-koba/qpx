@@ -118,7 +118,7 @@ pem = "3.0.6"
 ring = "0.17.14"
 
 # Hashing
-sha2 = { version = "0.10", features = ["asm"] }
+sha2 = "0.10"
 
 # PCAP
 pcap-file = "2"
