@@ -56,7 +56,9 @@ caches:
     if origin_hits.load(Ordering::SeqCst) != 1 {
         return Err(anyhow!("expected exactly 1 origin hit after first request"));
     }
-    wait_for_cache_store_entries(cache_store.clone(), 3).await?;
+    // Vary-less stores publish only the variant metadata and body; the
+    // variant index is gone for the common case.
+    wait_for_cache_store_entries(cache_store.clone(), 2).await?;
     let (_, headers2, _) = send_http1_and_read_response(proxy_addr, h1_req.as_bytes()).await?;
     assert_header_present_contains(&headers2, "cache-status", "hit");
     if origin_hits.load(Ordering::SeqCst) != 1 {
