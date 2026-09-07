@@ -289,6 +289,9 @@ impl DiskCacheBackend {
         }
         let cloned = self.clone();
         handle.spawn(async move {
+            // Index pre-existing files up front so the first sweep never
+            // pays the directory scan while traffic is being served.
+            let _ = cloned.ensure_indexed().await;
             cloned.background_sweep().await;
         });
     }
@@ -311,10 +314,10 @@ impl DiskCacheBackend {
         if self.indexed_flag.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut state = self.state.lock().await;
-        if state.indexed {
-            return Ok(());
-        }
+        // Scan without the state lock: the per-file header reads dominate,
+        // and holding the lock would stall every cache write for the whole
+        // scan. Writes concurrent with the scan re-register themselves, so
+        // the merge below only fills gaps.
         let mut entries = HashMap::new();
         let mut total_bytes = 0u64;
         for path in collect_cache_files(&self.root)? {
@@ -344,8 +347,23 @@ impl DiskCacheBackend {
                 }
             }
         }
-        state.entries = entries;
-        state.total_bytes = total_bytes;
+        let mut state = self.state.lock().await;
+        if state.indexed {
+            return Ok(());
+        }
+        for (id, entry) in entries {
+            let entry_len = entry.total_len;
+            let inserted = match state.entries.entry(id) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(entry);
+                    true
+                }
+                std::collections::hash_map::Entry::Occupied(_) => false,
+            };
+            if inserted {
+                state.total_bytes = state.total_bytes.saturating_add(entry_len);
+            }
+        }
         state.indexed = true;
         drop(state);
         self.indexed_flag.store(true, Ordering::Release);
