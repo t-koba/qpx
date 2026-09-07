@@ -157,10 +157,13 @@ pub trait CacheBackend: Send + Sync {
     }
     /// Returns a compound single-variant response when the backend can do so
     /// without making the normal index, metadata, and body reads separately.
+    /// `default_variant_key` is the canonical Vary-less variant the backend
+    /// probes when no variant index exists for the primary.
     fn get_response_candidate(
         &self,
         _namespace: &str,
         _index_key: &str,
+        _default_variant_key: &str,
         _now_ms: u64,
     ) -> Result<Option<CachedResponseCandidate>> {
         Ok(None)
@@ -231,6 +234,7 @@ pub struct CacheRequestKey {
     pub path_and_query: std::sync::Arc<str>,
     pub content_digest: Option<std::sync::Arc<str>>,
     pub(crate) primary_index_storage_key: std::sync::Arc<OnceLock<std::sync::Arc<str>>>,
+    pub(crate) primary_default_variant_storage_key: std::sync::Arc<OnceLock<std::sync::Arc<str>>>,
 }
 
 #[derive(Debug)]

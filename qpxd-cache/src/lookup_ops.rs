@@ -45,18 +45,19 @@ pub async fn lookup(
     if can_use_hot_response_candidate(request_method, &req) {
         let storage_key = key.primary_index_storage_key_arc();
         let now = now_millis();
-        if let Some(candidate) =
-            backend.get_response_candidate(namespace, storage_key.as_ref(), now)?
-            && matches_vary(
-                request_headers,
-                key.content_digest.as_deref(),
-                candidate.envelope.as_ref(),
-            )
-            && matches!(
-                classify_for_request(&req, candidate.envelope.as_ref(), now),
-                CacheEntryDisposition::ServeFresh | CacheEntryDisposition::ServeStale
-            )
-        {
+        if let Some(candidate) = backend.get_response_candidate(
+            namespace,
+            storage_key.as_ref(),
+            key.primary_default_variant_storage_key().as_ref(),
+            now,
+        )? && matches_vary(
+            request_headers,
+            key.content_digest.as_deref(),
+            candidate.envelope.as_ref(),
+        ) && matches!(
+            classify_for_request(&req, candidate.envelope.as_ref(), now),
+            CacheEntryDisposition::ServeFresh | CacheEntryDisposition::ServeStale
+        ) {
             return Ok(LookupOutcome::Hit(
                 response_from_envelope_for_request_with_body(
                     request_method,
@@ -293,10 +294,11 @@ async fn load_candidate_variant_keys(
         .get_decoded_variant_index(namespace, storage_key.as_str())
         .await?
         .unwrap_or_else(|| Arc::new(VariantIndex::default()));
+    let mut get_primary = None;
     if variants.variants.is_empty() && *request_method == Method::HEAD {
         let get_key = key.with_method_group("GET");
-        let get_primary = get_key.primary_hash_arc();
-        let get_storage_key = super::vary::index_storage_key(get_primary.as_ref());
+        get_primary = Some(get_key.primary_hash_arc());
+        let get_storage_key = super::vary::index_storage_key(get_primary.as_ref().unwrap());
         let get_variants = backend
             .get_decoded_variant_index(namespace, get_storage_key.as_str())
             .await?
@@ -304,6 +306,15 @@ async fn load_candidate_variant_keys(
         if !get_variants.variants.is_empty() {
             variants = get_variants;
         }
+    }
+    if variants.variants.is_empty() {
+        // Vary-less stores publish no variant index; probe the canonical
+        // default variant, falling back to the GET method group for HEAD.
+        let mut probed = vec![super::vary::variant_storage_key(primary.as_ref(), &[])];
+        if let Some(get_primary) = get_primary.as_ref() {
+            probed.push(super::vary::variant_storage_key(get_primary, &[]));
+        }
+        variants = Arc::new(VariantIndex { variants: probed });
     }
     Ok(variants)
 }

@@ -168,3 +168,55 @@ async fn maybe_store_does_not_block_downstream_on_idle_cacheable_body() {
     .expect("lookup");
     assert!(matches!(out, LookupOutcome::Miss));
 }
+
+#[tokio::test]
+async fn vary_less_store_publishes_no_variant_index() {
+    let req = make_get_request("/vary-less");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let backend = Arc::new(MockBackend::new());
+    let mut backends = HashMap::new();
+    backends.insert("b".to_string(), backend.clone() as Arc<dyn CacheBackend>);
+    let response = make_response(StatusCode::OK, "max-age=60", "body-a");
+    let _ = store_and_drain(
+        req.method(),
+        req.headers(),
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    let primary = key.primary_hash();
+    assert!(
+        backend
+            .get("ns", index_storage_key(primary.as_str()).as_str())
+            .await
+            .expect("get index")
+            .is_none(),
+        "Vary-less stores must not publish a variant index"
+    );
+
+    let outcome = lookup(
+        req.method(),
+        req.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(
+        matches!(outcome, LookupOutcome::Hit(_)),
+        "lookup must hit the canonical default variant without an index"
+    );
+}

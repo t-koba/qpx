@@ -469,10 +469,13 @@ fn build_raw_cache_hit_fast_path(
 fn try_raw_cache_hit_response(fast: &CacheHitFastPath) -> Option<Response<Body>> {
     let now = qpx_http::now_millis();
     let index_key = fast.key.primary_index_storage_key();
-    match fast
-        .backend
-        .get_response_candidate(&fast.namespace, index_key.as_ref(), now)
-    {
+    let default_variant_key = fast.key.primary_default_variant_storage_key();
+    match fast.backend.get_response_candidate(
+        &fast.namespace,
+        index_key.as_ref(),
+        default_variant_key.as_ref(),
+        now,
+    ) {
         Ok(Some(candidate)) => {
             let outcome = qpxd_cache::build_hot_hit_response(candidate, now);
             match outcome {

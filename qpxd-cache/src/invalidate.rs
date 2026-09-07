@@ -2,6 +2,7 @@ use super::key::normalize_url_authority;
 use super::types::{CacheBackend, CacheRequestKey, cache_body_storage_key};
 use super::util::{cache_namespace, load_variant_index};
 use super::vary::index_storage_key;
+use super::vary::variant_storage_key;
 use anyhow::Result;
 use http::header::{CONTENT_LOCATION, LOCATION};
 use hyper::{Method, StatusCode};
@@ -73,6 +74,16 @@ pub async fn invalidate_primary(
             .delete(namespace, cache_body_storage_key(variant.as_str()).as_str())
             .await;
     }
+    // Vary-less responses publish no variant index, so the canonical default
+    // variant is removed directly.
+    let default_variant = variant_storage_key(primary, &[]);
+    let _ = backend.delete(namespace, default_variant.as_str()).await;
+    let _ = backend
+        .delete(
+            namespace,
+            cache_body_storage_key(default_variant.as_str()).as_str(),
+        )
+        .await;
     let _ = backend
         .delete(namespace, index_storage_key(primary).as_str())
         .await;

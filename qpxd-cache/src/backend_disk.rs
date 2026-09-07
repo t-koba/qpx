@@ -902,6 +902,7 @@ impl CacheBackend for DiskCacheBackend {
         &self,
         namespace: &str,
         index_key: &str,
+        default_variant_key: &str,
         now: u64,
     ) -> Result<Option<CachedResponseCandidate>> {
         let slot_index = hot_slot(namespace, index_key);
@@ -929,20 +930,34 @@ impl CacheBackend for DiskCacheBackend {
         }
 
         let recent = self.hot_recent.load();
-        let Some(index_entry) = recent_hot_entry(&recent, namespace, index_key, now) else {
+        // Vary-less responses publish no variant index; when the index is
+        // missing or holds no single variant, the canonical default variant
+        // is probed directly.
+        let resolved = match recent_hot_entry(&recent, namespace, index_key, now) {
+            Some(index_entry) => {
+                let variants =
+                    self.decode_variant_index(namespace, index_key, index_entry.value.clone())?;
+                match variants.variants.first() {
+                    Some(only) if variants.variants.len() == 1 => {
+                        Some((only.clone(), index_entry.expires_at_ms))
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        };
+        let (variant_key, index_expires_at_ms) =
+            resolved.unwrap_or((default_variant_key.to_string(), u64::MAX));
+        let Some(metadata_entry) = recent_hot_entry(&recent, namespace, variant_key.as_str(), now)
+        else {
             return Ok(None);
         };
-        let variant_index =
-            self.decode_variant_index(namespace, index_key, index_entry.value.clone())?;
-        let [variant_key] = variant_index.variants.as_slice() else {
-            return Ok(None);
-        };
-        let Some(metadata_entry) = recent_hot_entry(&recent, namespace, variant_key, now) else {
-            return Ok(None);
-        };
-        let envelope =
-            self.decode_response_metadata(namespace, variant_key, metadata_entry.value.clone())?;
-        let body_key = cache_body_storage_key(variant_key);
+        let envelope = self.decode_response_metadata(
+            namespace,
+            variant_key.as_str(),
+            metadata_entry.value.clone(),
+        )?;
+        let body_key = cache_body_storage_key(variant_key.as_str());
         let Some(body_entry) = recent_hot_entry(&recent, namespace, body_key.as_str(), now) else {
             return Ok(None);
         };
@@ -956,8 +971,7 @@ impl CacheBackend for DiskCacheBackend {
             body: body_entry.value.clone(),
             body_offset: body_entry.body_offset,
             file: body_entry.file.clone(),
-            expires_at_ms: index_entry
-                .expires_at_ms
+            expires_at_ms: index_expires_at_ms
                 .min(metadata_entry.expires_at_ms)
                 .min(body_entry.expires_at_ms),
             source_generation: generation,
@@ -1850,7 +1864,7 @@ mod tests {
             .expect("put index");
 
         let mut first = backend
-            .get_response_candidate("ns", "index", now_ms())
+            .get_response_candidate("ns", "index", "obj:default", now_ms())
             .expect("get candidate")
             .expect("candidate");
         assert_eq!(first.envelope.status, 200);
@@ -1880,13 +1894,13 @@ mod tests {
                 .store(std::sync::Arc::new(updated_recent));
             assert!(
                 backend
-                    .get_response_candidate("ns", "index", now_ms())
+                    .get_response_candidate("ns", "index", "obj:default", now_ms())
                     .expect("get candidate during replacement")
                     .is_none()
             );
         }
         let raced_replacement = backend
-            .get_response_candidate("ns", "index", now_ms())
+            .get_response_candidate("ns", "index", "obj:default", now_ms())
             .expect("get concurrently replaced candidate")
             .expect("concurrently replaced candidate");
         assert_eq!(raced_replacement.envelope.status, 201);
@@ -1903,7 +1917,7 @@ mod tests {
             .await
             .expect("replace metadata");
         let replaced = backend
-            .get_response_candidate("ns", "index", now_ms())
+            .get_response_candidate("ns", "index", "obj:default", now_ms())
             .expect("get replaced candidate")
             .expect("replaced candidate");
         assert_eq!(replaced.envelope.status, 202);
@@ -1914,7 +1928,7 @@ mod tests {
             .expect("delete body");
         assert!(
             backend
-                .get_response_candidate("ns", "index", now_ms())
+                .get_response_candidate("ns", "index", "obj:default", now_ms())
                 .expect("get deleted candidate")
                 .is_none()
         );

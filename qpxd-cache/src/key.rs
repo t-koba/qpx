@@ -135,6 +135,7 @@ impl CacheRequestKey {
             path_and_query: self.path_and_query.clone(),
             content_digest: self.content_digest.clone(),
             primary_index_storage_key: Arc::new(std::sync::OnceLock::new()),
+            primary_default_variant_storage_key: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -157,6 +158,7 @@ impl CacheRequestKey {
             path_and_query,
             content_digest: None,
             primary_index_storage_key: Arc::new(std::sync::OnceLock::new()),
+            primary_default_variant_storage_key: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -188,6 +190,19 @@ impl CacheRequestKey {
     /// Storage key of the primary variant index, computed once per key.
     pub fn primary_index_storage_key(&self) -> Arc<str> {
         self.primary_index_storage_key_arc()
+    }
+
+    /// Storage key of the canonical Vary-less variant. Vary-less responses
+    /// publish no variant index, so lookups probe this deterministic key.
+    pub fn primary_default_variant_storage_key(&self) -> Arc<str> {
+        self.primary_default_variant_storage_key
+            .get_or_init(|| {
+                Arc::from(super::vary::variant_storage_key(
+                    self.primary_hash_arc().as_ref(),
+                    &[],
+                ))
+            })
+            .clone()
     }
 
     fn compute_primary_hash(&self) -> String {

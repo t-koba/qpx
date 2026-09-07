@@ -197,12 +197,22 @@ impl CacheWriteback {
             self.body_read_timeout,
             self.ttl,
         );
-        let index_load = load_variant_index(
-            self.backend.as_ref(),
-            self.namespace.as_str(),
-            self.storage_primary.as_ref(),
-        );
-        let (body_len, mut index) = tokio::try_join!(body_put, index_load)?;
+        let index_load = async {
+            // Vary-less responses use the deterministic `obj:{primary}:default`
+            // variant key and publish no variant index, removing one read and
+            // one write per store for the common case.
+            if self.vary_values.is_empty() {
+                return Ok(None);
+            }
+            load_variant_index(
+                self.backend.as_ref(),
+                self.namespace.as_str(),
+                self.storage_primary.as_ref(),
+            )
+            .await
+            .map(Some)
+        };
+        let (body_len, loaded_index) = tokio::try_join!(body_put, index_load)?;
         record_cache_writeback_body_stream(body_len);
         let envelope = CachedResponseEnvelope {
             status: self.status,
@@ -223,29 +233,46 @@ impl CacheWriteback {
         // The variant metadata publish and the removal of superseded variants
         // are independent, so run them concurrently to shorten the writeback
         // tail before the index update.
-        let (metadata_result, _) = tokio::join!(
-            self.backend.put(
-                self.namespace.as_str(),
-                self.variant_key.as_str(),
-                &metadata,
-                self.ttl,
-            ),
-            delete_obsolete_variants(
-                self.backend.clone(),
-                self.namespace.clone(),
-                upsert_variant_with_cap(&mut index, &self.variant_key),
-            )
-        );
-        metadata_result?;
-        let index_payload = serde_json::to_vec(&index)?;
-        self.backend
-            .put(
-                self.namespace.as_str(),
-                index_storage_key(self.storage_primary.as_ref()).as_str(),
-                &index_payload,
-                self.ttl.max(INDEX_TTL_SECS),
-            )
-            .await?;
+        let index_payload = match loaded_index {
+            Some(mut index) => {
+                let (metadata_result, _) = tokio::join!(
+                    self.backend.put(
+                        self.namespace.as_str(),
+                        self.variant_key.as_str(),
+                        &metadata,
+                        self.ttl,
+                    ),
+                    delete_obsolete_variants(
+                        self.backend.clone(),
+                        self.namespace.clone(),
+                        upsert_variant_with_cap(&mut index, &self.variant_key),
+                    )
+                );
+                metadata_result?;
+                Some(serde_json::to_vec(&index)?)
+            }
+            None => {
+                self.backend
+                    .put(
+                        self.namespace.as_str(),
+                        self.variant_key.as_str(),
+                        &metadata,
+                        self.ttl,
+                    )
+                    .await?;
+                None
+            }
+        };
+        if let Some(index_payload) = index_payload {
+            self.backend
+                .put(
+                    self.namespace.as_str(),
+                    index_storage_key(self.storage_primary.as_ref()).as_str(),
+                    &index_payload,
+                    self.ttl.max(INDEX_TTL_SECS),
+                )
+                .await?;
+        }
         Ok(())
     }
 }
