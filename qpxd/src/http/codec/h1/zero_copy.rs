@@ -32,58 +32,6 @@ const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
 // pressure: shrink the per-poll quantum so one connection cannot monopolize a
 // worker and inflate every peer's scheduler queue delay.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const CONTENDED_RELAY_THRESHOLD: usize = 4;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const CONTENDED_RELAY_QUANTUM: usize = 64 * 1024;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-static ACTIVE_BUFFERED_RELAYS: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) struct BufferedRelayGuard;
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-impl BufferedRelayGuard {
-    pub(crate) fn begin() -> Self {
-        ACTIVE_BUFFERED_RELAYS.fetch_add(1, Ordering::AcqRel);
-        Self
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-impl Drop for BufferedRelayGuard {
-    fn drop(&mut self) {
-        ACTIVE_BUFFERED_RELAYS.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-/// Emission quantum for buffered body relays, capped by the caller's own
-/// frame limit.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn buffered_relay_quantum(max_frame_size: usize) -> usize {
-    if ACTIVE_BUFFERED_RELAYS.load(Ordering::Acquire) > CONTENDED_RELAY_THRESHOLD {
-        max_frame_size.min(CONTENDED_RELAY_QUANTUM)
-    } else {
-        max_frame_size
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) struct BufferedRelayGuard;
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-impl BufferedRelayGuard {
-    pub(crate) fn begin() -> Self {
-        Self
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn buffered_relay_quantum(max_frame_size: usize) -> usize {
-    max_frame_size
-}
-// Beyond this many concurrent file transfers, shrink the per-readiness quantum
-// so large transfers interleave between socket-buffer drains instead of
-// letting a single connection monopolize a worker and inflate tail latency.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const CONTENDED_FILE_TRANSFER_THRESHOLD: usize = 4;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

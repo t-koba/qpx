@@ -28,7 +28,6 @@ pub(crate) use self::response::{
     send_static_http1_response,
 };
 use self::zero_copy::ZeroCopySocket;
-pub(crate) use self::zero_copy::{BufferedRelayGuard, buffered_relay_quantum};
 const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Sends a response on a plain TCP HTTP/1.1 connection, retaining the file-region
