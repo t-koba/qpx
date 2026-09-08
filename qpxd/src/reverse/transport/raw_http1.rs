@@ -42,6 +42,21 @@ struct CacheHitFastPath {
     namespace: Arc<str>,
     backend: Arc<dyn qpxd_cache::CacheBackend>,
     key: qpxd_cache::CacheRequestKey,
+    headers: http::HeaderMap,
+    miss: Option<RawCacheMissDispatch>,
+}
+
+/// Origin fetch state for serving cache misses without the generic dispatch
+/// chain. Built alongside the hot-hit fast path only for routes whose plan is
+/// exactly a lookup+store cache policy, so no other request or response
+/// feature can be bypassed by taking this path.
+struct RawCacheMissDispatch {
+    request_head: Bytes,
+    origin: PreparedPlainHttp1Origin,
+    endpoint: Arc<crate::reverse::health::UpstreamEndpoint>,
+    policy: super::super::router::RoutePolicy,
+    max_response_body_bytes: usize,
+    cache_policy: qpx_core::config::CachePolicyConfig,
 }
 
 enum PreparedRawHttp1Target {
@@ -450,6 +465,11 @@ fn build_raw_cache_hit_fast_path(
     let host_header = authority.as_ref()?.raw.as_str();
     let normalized_authority = qpxd_cache::normalize_authority(host_header, scheme)?;
     let namespace = Arc::from(qpxd_cache::cache_namespace(policy, "default"));
+    let parsed_headers = crate::http::codec::h1_common::parse_header_map(headers).ok()?;
+    // Misses are served through the same raw origin machinery as plain
+    // upstream dispatch; if the origin cannot be prepared, misses fall back
+    // to the generic chain while hot hits keep working.
+    let miss = build_raw_cache_miss_dispatch(route, state, method, target, headers);
     Some(CacheHitFastPath {
         namespace,
         backend,
@@ -459,6 +479,41 @@ fn build_raw_cache_hit_fast_path(
             normalized_authority,
             target.to_string(),
         ),
+        headers: parsed_headers,
+        miss,
+    })
+}
+
+/// Prepares the raw origin fetch for cache misses. Returns `None` when the
+/// origin cannot be prepared; the caller then keeps the generic chain.
+fn build_raw_cache_miss_dispatch(
+    route: &crate::reverse::router::HttpRoute,
+    state: &crate::runtime::RuntimeState,
+    method: &str,
+    target: &str,
+    headers: &[httparse::Header<'_>],
+) -> Option<RawCacheMissDispatch> {
+    let selected_upstream = route.single_plain_http_upstream_arc()?;
+    if selected_upstream.has_time_dependent_admission_state() {
+        return None;
+    }
+    let (connect_authority, host_authority) =
+        selected_upstream.origin.direct_plain_http1_authorities()?;
+    let origin = prepare_plain_http1_origin(&state.pools, connect_authority, host_authority);
+    let request_head = serialize_upstream_request_head(
+        method,
+        target,
+        headers,
+        host_authority,
+        state.plan.identity.proxy_name.as_ref(),
+    )?;
+    Some(RawCacheMissDispatch {
+        request_head,
+        origin,
+        endpoint: selected_upstream,
+        policy: route.policy.clone(),
+        max_response_body_bytes: route.plan.streaming.max_response_body_bytes,
+        cache_policy: route.plan.cache.clone()?,
     })
 }
 
@@ -508,9 +563,14 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     pending_timeout: &mut ReusablePendingTimeout<'_>,
 ) -> Result<PreparedRawHttp1Response> {
     // Cache-hit fast paths are served by the caller before reaching this
-    // dispatcher: cache routes fall through to a generic request target, so
-    // the generic arm in the listener handles both their fast hits and their
-    // full-chain fallbacks.
+    // dispatcher. When the hot probe missed, this raw cache dispatch serves
+    // the request without the generic chain: a full cache lookup first (so
+    // stale, revalidation, and vary cases still fall back), then a miss
+    // fetches the origin and writes the response back through the same
+    // store pipeline as the generic chain.
+    if let Some(response) = dispatch_raw_cache_miss(prepared, session, pending_timeout).await? {
+        return Ok(response);
+    }
     if let Some(request) = prepared.generic_request() {
         session.release();
         let (interim, response) =
@@ -632,6 +692,165 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         });
     }
     Ok(PreparedRawHttp1Response::Generic(proxied.interim, response))
+}
+
+/// Serves a cache-qualified request outside the generic chain when the cache
+/// state allows it. Returns `Ok(None)` whenever the request must fall back to
+/// the generic dispatch (revalidation, stale serving, request collapse, or an
+/// unprepared origin); only plain hits and misses are handled here.
+async fn dispatch_raw_cache_miss(
+    prepared: &PreparedRawHttp1Request,
+    session: &mut PreparedPlainHttp1Session,
+    pending_timeout: &mut ReusablePendingTimeout<'_>,
+) -> Result<Option<PreparedRawHttp1Response>> {
+    let Some(fast) = prepared.cache_hit.as_ref() else {
+        return Ok(None);
+    };
+    let Some(miss) = fast.miss.as_ref() else {
+        return Ok(None);
+    };
+    if miss.endpoint.has_time_dependent_admission_state() {
+        return Ok(None);
+    }
+    let outcome = qpxd_cache::lookup(
+        &prepared.method,
+        &fast.headers,
+        &fast.key,
+        &miss.cache_policy,
+        &prepared.state.cache.backends,
+        &prepared.state.cache.background_revalidations,
+    )
+    .await?;
+    let response = match outcome {
+        qpxd_cache::LookupOutcome::Hit(response) => response,
+        qpxd_cache::LookupOutcome::Miss => {
+            return serve_raw_cache_miss(fast, miss, prepared, session, pending_timeout).await;
+        }
+        // Revalidation, stale-while-revalidate, and only-if-cached responses
+        // keep their full generic-chain semantics.
+        _ => return Ok(None),
+    };
+    Ok(Some(PreparedRawHttp1Response::Generic(
+        Vec::new(),
+        response,
+    )))
+}
+
+/// Fetches the origin for a cache miss and runs the response through the
+/// same store pipeline the generic chain uses, then hands the response back
+/// for the raw body relay.
+async fn serve_raw_cache_miss(
+    fast: &CacheHitFastPath,
+    miss: &RawCacheMissDispatch,
+    prepared: &PreparedRawHttp1Request,
+    session: &mut PreparedPlainHttp1Session,
+    pending_timeout: &mut ReusablePendingTimeout<'_>,
+) -> Result<Option<PreparedRawHttp1Response>> {
+    let started = miss
+        .policy
+        .passive_health
+        .as_ref()
+        .is_some_and(|policy| policy.latency_threshold.is_some())
+        .then(tokio::time::Instant::now);
+    let response = pending_timeout
+        .timeout_after_pending(
+            miss.policy.timeout,
+            proxy_prepared_plain_http1_head_raw_response_with_interim(
+                &miss.origin,
+                session,
+                &prepared.method,
+                miss.request_head.as_ref(),
+                Version::HTTP_11,
+                prepared.state.plan.identity.proxy_name.as_ref(),
+            ),
+        )
+        .await;
+    let mut proxied = match response {
+        Ok(Ok(proxied)) => proxied,
+        Ok(Err(error)) => {
+            record_reverse_upstream_error(&miss.endpoint, &miss.policy, &error);
+            return Err(error);
+        }
+        Err(_) => {
+            record_reverse_upstream_timeout(&miss.endpoint, &miss.policy);
+            return Err(anyhow!("upstream timeout"));
+        }
+    };
+    let response_delay_secs = started
+        .map(|started| started.elapsed().as_secs())
+        .unwrap_or(0);
+    record_reverse_upstream_status(&miss.endpoint, &miss.policy, proxied.status(), started);
+    session.recycle_response_globally(&mut proxied);
+    let proxied = proxied.into_http_response()?;
+    let mut response = proxied.response;
+    limit_response_body_for_max_bytes(&mut response, miss.max_response_body_bytes);
+    crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        &prepared.method,
+        Version::HTTP_11,
+        prepared.state.plan.identity.proxy_name.as_ref(),
+        &mut response,
+        None,
+        false,
+    );
+    let mut response = qpxd_cache::maybe_store(
+        &prepared.method,
+        &fast.headers,
+        &fast.key,
+        &miss.cache_policy,
+        response,
+        qpxd_cache::CacheStoreContext {
+            timing: qpxd_cache::CacheStoreTiming {
+                response_delay_secs,
+                body_read_timeout: std::time::Duration::from_millis(
+                    prepared
+                        .state
+                        .plan
+                        .limits
+                        .timeouts
+                        .upstream_http_timeout_ms
+                        .max(1),
+                ),
+                request_collapse_guard: None,
+            },
+            writeback_admission: &prepared.state.cache.writeback_admission,
+            backends: &prepared.state.cache.backends,
+        },
+    )
+    .await?;
+    if let Some(body) = take_in_memory_body(&proxied.interim, &mut response) {
+        let (parts, _) = response.into_parts();
+        return Ok(Some(PreparedRawHttp1Response::InMemory {
+            status: parts.status,
+            headers: parts.headers,
+            body,
+        }));
+    }
+    Ok(Some(PreparedRawHttp1Response::Generic(
+        proxied.interim,
+        response,
+    )))
+}
+
+/// Mirrors `limit_response_body_for_plan_in_place` for the raw cache miss
+/// path, which carries the streaming limit without a full execution plan.
+fn limit_response_body_for_max_bytes(response: &mut Response<Body>, max_bytes: usize) {
+    if http_body::Body::size_hint(response.body())
+        .exact()
+        .is_some_and(|len| len <= max_bytes as u64)
+    {
+        return;
+    }
+    if let Some(len) = response
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        && len > max_bytes
+    {
+        response.headers_mut().remove(http::header::CONTENT_LENGTH);
+    }
+    let body = std::mem::replace(response.body_mut(), Body::empty());
+    *response.body_mut() = body.limit_bytes(max_bytes);
 }
 
 fn take_in_memory_body(
