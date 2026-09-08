@@ -1843,6 +1843,9 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    // The streamed-file body path spills through qpx-core secure temp files,
+    // which only implement owner-only semantics on Unix today.
+    #[cfg(unix)]
     #[tokio::test]
     async fn disk_backend_put_response_serves_metadata_after_hot_expiry() {
         let dir = temp_dir("put-response-file-body");
