@@ -1,6 +1,6 @@
 use super::types::{
     CacheBackend, CachedBody, CachedBodyStream, CachedResponseCandidate, CachedResponseEnvelope,
-    VariantIndex, bounded_cache_body_stream, cache_body_storage_key,
+    MetadataEncoder, VariantIndex, bounded_cache_body_stream, cache_body_storage_key,
     decode_cached_response_metadata, is_cache_body_storage_key,
 };
 use anyhow::{Context, Result, anyhow};
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -25,7 +25,7 @@ use tokio::time::timeout;
 use tracing::warn;
 
 const DISK_CACHE_MAGIC: &[u8] = b"QPX-DISK-CACHE\0\x01";
-const DISK_CACHE_SCHEMA_VERSION: u16 = 1;
+const DISK_CACHE_SCHEMA_VERSION: u16 = 2;
 const DISK_CACHE_FILE_EXT: &str = "qpxc";
 // File size overhead of the on-disk header: magic bytes + u32 header length.
 const DISK_CACHE_HEADER_OVERHEAD_BYTES: u64 = DISK_CACHE_MAGIC.len() as u64 + 4;
@@ -199,6 +199,18 @@ struct DiskCacheHeader {
     schema_version: u16,
     expires_at_ms: u64,
     body_len: u64,
+    // Co-located envelope metadata trailer length; zero for plain values.
+    meta_len: u64,
+}
+
+impl DiskCacheHeader {
+    fn trailer_len(&self) -> u64 {
+        if self.meta_len == 0 {
+            0
+        } else {
+            4 + self.meta_len
+        }
+    }
 }
 
 struct DiskCacheRead {
@@ -735,6 +747,7 @@ impl DiskCacheBackend {
         path: &Path,
         body: Body,
         options: BodyStreamWriteOptions,
+        metadata: Option<(String, MetadataEncoder)>,
     ) -> Result<u64> {
         let parent = path
             .parent()
@@ -748,9 +761,27 @@ impl DiskCacheBackend {
         let len = len_rx
             .await
             .map_err(|_| anyhow!("disk cache body writer closed"))??;
-        self.put_object_path(namespace, key, path, &cached, options.ttl_secs)
+        let metadata = match metadata {
+            Some((meta_key, encode)) => Some((meta_key, Bytes::from(encode(len)?))),
+            None => None,
+        };
+        self.put_object_path(namespace, key, path, &cached, metadata, options.ttl_secs)
             .await?;
         Ok(len)
+    }
+
+    async fn read_response_metadata(&self, namespace: &str, key: &str) -> Result<Option<Bytes>> {
+        let now = now_ms();
+        let recent = self.hot_recent.load();
+        if let Some(entry) = recent_hot_entry(&recent, namespace, key, now) {
+            return Ok(Some(entry.value.clone()));
+        }
+        let body_key = cache_body_storage_key(key);
+        let path = self.path_for(namespace, body_key.as_str());
+        let read_path = path.clone();
+        tokio::task::spawn_blocking(move || read_metadata_trailer_sync(&read_path))
+            .await
+            .context("disk cache metadata reader task failed")?
     }
 
     async fn put_object_path(
@@ -759,13 +790,16 @@ impl DiskCacheBackend {
         key: &str,
         path: &Path,
         body: &CachedBody,
+        metadata: Option<(String, Bytes)>,
         ttl_secs: u64,
     ) -> Result<()> {
         if let CachedBody::Memory(value) = body {
             let write_path = path.to_path_buf();
             let value = value.clone();
-            let (write, value) = tokio::task::spawn_blocking(move || {
-                write_cached_bytes_sync(write_path.as_path(), value, ttl_secs)
+            let meta_key = metadata.as_ref().map(|(meta_key, _)| meta_key.clone());
+            let meta_bytes = metadata.as_ref().map(|(_, meta)| meta.clone());
+            let (write, value, written_meta) = tokio::task::spawn_blocking(move || {
+                write_cached_object_sync(write_path.as_path(), value, meta_bytes, ttl_secs)
             })
             .await
             .context("disk cache body writer task failed")??;
@@ -780,6 +814,17 @@ impl DiskCacheBackend {
                 write.body_offset,
             )
             .await;
+            if let (Some(meta_key), Some(meta)) = (meta_key, written_meta) {
+                self.hot_insert(
+                    namespace,
+                    meta_key.as_str(),
+                    path.to_path_buf(),
+                    meta,
+                    write.expires_at_ms,
+                    write.body_offset,
+                )
+                .await;
+            }
             return Ok(());
         }
 
@@ -793,6 +838,7 @@ impl DiskCacheBackend {
             schema_version: DISK_CACHE_SCHEMA_VERSION,
             expires_at_ms,
             body_len: body.len(),
+            meta_len: metadata.as_ref().map_or(0, |(_, meta)| meta.len() as u64),
         };
         let tmp_path = temp_path(parent);
         let streamed: std::result::Result<u64, anyhow::Error> = async {
@@ -800,6 +846,10 @@ impl DiskCacheBackend {
             write_header_async(&mut file, &header).await?;
             while let Some(chunk) = source.data().await {
                 file.write_all(chunk?.as_ref()).await?;
+            }
+            if let Some((_, meta)) = metadata.as_ref() {
+                file.write_all(&(meta.len() as u32).to_be_bytes()).await?;
+                file.write_all(meta.as_ref()).await?;
             }
             // Cache objects are re-fetchable, so commit to the page cache and
             // publish atomically via rename instead of paying for an fsync.
@@ -816,7 +866,7 @@ impl DiskCacheBackend {
             invalidate_ensured_dir(parent);
         }
         let body_len = streamed?;
-        let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + body_len;
+        let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + body_len + header.trailer_len();
         self.remember_write(path.to_path_buf(), total_len, expires_at_ms)
             .await?;
         self.hot_remove(path).await;
@@ -906,14 +956,16 @@ impl CacheBackend for DiskCacheBackend {
         namespace: &str,
         keys: &[String],
     ) -> Result<Vec<Option<std::sync::Arc<CachedResponseEnvelope>>>> {
-        let values = self.get_many(namespace, keys).await?;
-        keys.iter()
-            .zip(values)
-            .map(|(key, raw)| {
-                raw.map(|raw| self.decode_response_metadata(namespace, key, raw))
-                    .transpose()
-            })
-            .collect()
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let raw = self.read_response_metadata(namespace, key).await?;
+            let decoded = match raw {
+                Some(raw) => Some(self.decode_response_metadata(namespace, key, raw)?),
+                None => None,
+            };
+            out.push(decoded);
+        }
+        Ok(out)
     }
 
     fn get_response_candidate(
@@ -1127,7 +1179,7 @@ impl CacheBackend for DiskCacheBackend {
         }
         self.ensure_background_sweep();
         let path = self.path_for(namespace, key);
-        self.put_object_path(namespace, key, &path, body, ttl_secs)
+        self.put_object_path(namespace, key, &path, body, None, ttl_secs)
             .await
     }
 
@@ -1159,6 +1211,46 @@ impl CacheBackend for DiskCacheBackend {
                     body_read_timeout,
                     ttl_secs,
                 },
+                None,
+            ),
+        )
+        .await?
+    }
+
+    async fn put_response(
+        &self,
+        namespace: &str,
+        key: &str,
+        body: Body,
+        max_body_bytes: usize,
+        body_read_timeout: Duration,
+        ttl_secs: u64,
+        encode_metadata: MetadataEncoder,
+    ) -> Result<u64> {
+        if max_body_bytes as u64 > self.max_bytes {
+            return Err(anyhow!(
+                "disk cache max_body_bytes exceeds backend max_bytes"
+            ));
+        }
+        self.ensure_background_sweep();
+        // The response is one file: the envelope metadata rides in a trailer
+        // after the body, so a cache miss creates a single file and a cache
+        // hit opens one file instead of two.
+        let body_key = cache_body_storage_key(key);
+        let path = self.path_for(namespace, body_key.as_str());
+        timeout(
+            body_read_timeout,
+            self.write_body_stream(
+                namespace,
+                body_key.as_str(),
+                &path,
+                body,
+                BodyStreamWriteOptions {
+                    max_body_bytes,
+                    body_read_timeout,
+                    ttl_secs,
+                },
+                Some((key.to_string(), encode_metadata)),
             ),
         )
         .await?
@@ -1402,6 +1494,32 @@ fn read_disk_cache_header_sync(path: &Path) -> Result<DiskCacheRead> {
     })
 }
 
+fn read_metadata_trailer_sync(path: &Path) -> Result<Option<Bytes>> {
+    // Same semantics as open_valid: an unreadable object is a miss, not a
+    // lookup failure; the entry is re-fetchable from the origin.
+    let Ok(read) = read_disk_cache_header_sync(path) else {
+        return Ok(None);
+    };
+    if read.header.meta_len == 0 {
+        return Ok(None);
+    }
+    if read.header.expires_at_ms <= now_ms() {
+        return Ok(None);
+    }
+    let mut file = File::open(path)?;
+    let trailer_start = read.total_len - 4 - read.header.meta_len;
+    file.seek(std::io::SeekFrom::Start(trailer_start as u64))?;
+    let mut len = [0u8; 4];
+    file.read_exact(&mut len)?;
+    let meta_len = u32::from_be_bytes(len) as u64;
+    if meta_len != read.header.meta_len {
+        return Err(anyhow!("disk cache metadata trailer length mismatch"));
+    }
+    let mut meta = vec![0u8; meta_len as usize];
+    file.read_exact(&mut meta)?;
+    Ok(Some(Bytes::from(meta)))
+}
+
 fn write_header(file: &mut File, header: &DiskCacheHeader) -> Result<u64> {
     let raw = serde_json::to_vec(header)?;
     file.write_all(DISK_CACHE_MAGIC)?;
@@ -1415,6 +1533,18 @@ fn write_cached_bytes_sync(
     value: Bytes,
     ttl_secs: u64,
 ) -> Result<(DiskCacheWrite, Bytes)> {
+    write_cached_object_sync(path, value, None, ttl_secs).map(|(write, value, _)| (write, value))
+}
+
+/// Writes one disk cache object: `[magic][header][body][meta trailer]`. The
+/// optional envelope metadata trailer keeps a response to a single file so a
+/// cache miss creates one file instead of two.
+fn write_cached_object_sync(
+    path: &Path,
+    value: Bytes,
+    metadata: Option<Bytes>,
+    ttl_secs: u64,
+) -> Result<(DiskCacheWrite, Bytes, Option<Bytes>)> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("disk cache path missing parent: {}", path.display()))?;
@@ -1424,17 +1554,22 @@ fn write_cached_bytes_sync(
         schema_version: DISK_CACHE_SCHEMA_VERSION,
         expires_at_ms,
         body_len: value.len() as u64,
+        meta_len: metadata.as_ref().map_or(0, |meta| meta.len() as u64),
     };
     let tmp_path = temp_path(parent);
     let result = (|| {
         let mut file = create_secure_new_file(&tmp_path)?;
         let body_offset = write_header(&mut file, &header)?;
         file.write_all(value.as_ref())?;
+        if let Some(meta) = metadata.as_ref() {
+            file.write_all(&(meta.len() as u32).to_be_bytes())?;
+            file.write_all(meta.as_ref())?;
+        }
         // Durability note: cache objects are re-fetchable from the origin, so
         // writes are committed to the page cache and published atomically via
         // rename without an fsync. This matches the behavior of other HTTP
         // caches and keeps write-heavy miss workloads off the disk sync path.
-        let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + header.body_len;
+        let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + header.body_len + header.trailer_len();
         drop(file);
         fs::rename(&tmp_path, path)
             .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;
@@ -1450,7 +1585,7 @@ fn write_cached_bytes_sync(
             invalidate_ensured_dir(parent);
         }
     }
-    result.map(|write| (write, value))
+    result.map(|write| (write, value, metadata))
 }
 
 async fn write_header_async(file: &mut TokioFile, header: &DiskCacheHeader) -> Result<u64> {

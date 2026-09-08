@@ -188,20 +188,50 @@ struct CacheWriteback {
 
 impl CacheWriteback {
     async fn store(self, body: Body) -> Result<()> {
-        let body_key = cache_body_storage_key(&self.variant_key);
-        let body_put = self.backend.put_object_stream(
+        let vary_less = self.vary_values.is_empty();
+        let CacheWriteback {
+            status,
+            headers,
+            stored_at_ms,
+            initial_age_secs,
+            response_delay_secs,
+            freshness_lifetime_secs,
+            vary_headers,
+            vary_values,
+            ..
+        } = self;
+        let response_put = self.backend.put_response(
             self.namespace.as_str(),
-            body_key.as_str(),
+            self.variant_key.as_str(),
             body,
             self.max_cacheable_body_bytes,
             self.body_read_timeout,
             self.ttl,
+            Box::new(move |body_len| {
+                record_cache_writeback_body_stream(body_len);
+                let envelope = CachedResponseEnvelope {
+                    status,
+                    headers,
+                    body: CachedBody::default(),
+                    body_len,
+                    stored_at_ms,
+                    initial_age_secs,
+                    response_delay_secs,
+                    freshness_lifetime_secs,
+                    vary_headers,
+                    vary_values,
+                    header_map: std::sync::OnceLock::new(),
+                    response_directives: std::sync::OnceLock::new(),
+                    response_header_values: std::sync::OnceLock::new(),
+                };
+                encode_cached_response_metadata(&envelope)
+            }),
         );
         let index_load = async {
             // Vary-less responses use the deterministic `obj:{primary}:default`
             // variant key and publish no variant index, removing one read and
             // one write per store for the common case.
-            if self.vary_values.is_empty() {
+            if vary_less {
                 return Ok(None);
             }
             load_variant_index(
@@ -212,56 +242,23 @@ impl CacheWriteback {
             .await
             .map(Some)
         };
-        let (body_len, loaded_index) = tokio::try_join!(body_put, index_load)?;
-        record_cache_writeback_body_stream(body_len);
-        let envelope = CachedResponseEnvelope {
-            status: self.status,
-            headers: self.headers,
-            body: CachedBody::default(),
-            body_len,
-            stored_at_ms: self.stored_at_ms,
-            initial_age_secs: self.initial_age_secs,
-            response_delay_secs: self.response_delay_secs,
-            freshness_lifetime_secs: self.freshness_lifetime_secs,
-            vary_headers: self.vary_headers,
-            vary_values: self.vary_values,
-            header_map: std::sync::OnceLock::new(),
-            response_directives: std::sync::OnceLock::new(),
-            response_header_values: std::sync::OnceLock::new(),
-        };
-        let metadata = encode_cached_response_metadata(&envelope)?;
-        // The variant metadata publish and the removal of superseded variants
-        // are independent, so run them concurrently to shorten the writeback
-        // tail before the index update.
+        let (_body_len, loaded_index) = tokio::try_join!(response_put, index_load)?;
+        // The removal of superseded variants is independent of the index
+        // update and runs concurrently to shorten the writeback tail.
         let index_payload = match loaded_index {
             Some(mut index) => {
-                let (metadata_result, _) = tokio::join!(
-                    self.backend.put(
-                        self.namespace.as_str(),
-                        self.variant_key.as_str(),
-                        &metadata,
-                        self.ttl,
-                    ),
+                let obsolete = upsert_variant_with_cap(&mut index, &self.variant_key);
+                let (_, payload) = tokio::join!(
                     delete_obsolete_variants(
                         self.backend.clone(),
                         self.namespace.clone(),
-                        upsert_variant_with_cap(&mut index, &self.variant_key),
-                    )
+                        obsolete,
+                    ),
+                    async { serde_json::to_vec(&index) },
                 );
-                metadata_result?;
-                Some(serde_json::to_vec(&index)?)
+                Some(payload?)
             }
-            None => {
-                self.backend
-                    .put(
-                        self.namespace.as_str(),
-                        self.variant_key.as_str(),
-                        &metadata,
-                        self.ttl,
-                    )
-                    .await?;
-                None
-            }
+            None => None,
         };
         if let Some(index_payload) = index_payload {
             self.backend

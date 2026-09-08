@@ -118,6 +118,9 @@ async fn vary_controls_cache_hits() {
     )
     .await
     .expect("lookup");
+    if !matches!(out, LookupOutcome::Hit(_)) {
+        eprintln!("OUTCOME_DEBUG {:?}", out);
+    }
     assert!(matches!(out, LookupOutcome::Hit(_)));
 
     let mut miss_req = make_get_request("/vary");

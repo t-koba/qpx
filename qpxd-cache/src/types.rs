@@ -11,6 +11,11 @@ use std::time::Duration;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 pub const CACHE_HEADER: &str = "cache-status";
+
+/// Builds the serialized response envelope once the body length is known.
+/// Keeping this synchronous lets co-locating backends write the body and the
+/// envelope in one object.
+pub type MetadataEncoder = Box<dyn FnOnce(u64) -> Result<Vec<u8>> + Send>;
 pub const INDEX_TTL_SECS: u64 = 24 * 60 * 60;
 pub const MAX_CACHE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_VARIANTS_PER_PRIMARY: usize = 256;
@@ -210,6 +215,37 @@ pub trait CacheBackend: Send + Sync {
         Err(anyhow!(
             "cache backend must implement streaming put_object_stream"
         ))
+    }
+
+    /// Stores a response body together with its envelope metadata.
+    /// `encode_metadata` receives the body length and returns the serialized
+    /// envelope, so backends can co-locate metadata with the body in a single
+    /// object. The default keeps the body and the metadata as separate
+    /// objects.
+    async fn put_response(
+        &self,
+        namespace: &str,
+        key: &str,
+        body: Body,
+        max_body_bytes: usize,
+        body_read_timeout: Duration,
+        ttl_secs: u64,
+        encode_metadata: MetadataEncoder,
+    ) -> Result<u64> {
+        let body_key = cache_body_storage_key(key);
+        let body_len = self
+            .put_object_stream(
+                namespace,
+                body_key.as_str(),
+                body,
+                max_body_bytes,
+                body_read_timeout,
+                ttl_secs,
+            )
+            .await?;
+        let metadata = encode_metadata(body_len)?;
+        self.put(namespace, key, &metadata, ttl_secs).await?;
+        Ok(body_len)
     }
     async fn delete(&self, namespace: &str, key: &str) -> Result<()>;
 }
