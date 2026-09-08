@@ -1470,8 +1470,14 @@ fn read_disk_cache_header_sync(path: &Path) -> Result<DiskCacheRead> {
         return Err(anyhow!("unsupported disk cache schema version"));
     }
     let body_offset = DISK_CACHE_MAGIC.len() as u64 + 4 + header_len as u64;
-    if meta.len().saturating_sub(body_offset) != header.body_len {
-        return Err(anyhow!("disk cache object length mismatch"));
+    if meta.len().saturating_sub(body_offset) != header.body_len + header.trailer_len() {
+        return Err(anyhow!(
+            "disk cache object length mismatch: file {} body_offset {} body_len {} meta_len {}",
+            meta.len(),
+            body_offset,
+            header.body_len,
+            header.meta_len
+        ));
     }
     Ok(DiskCacheRead {
         path: path.to_path_buf(),
@@ -1834,6 +1840,36 @@ mod tests {
                 .expect("get deleted")
                 .is_none()
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_backend_put_response_serves_metadata_after_hot_expiry() {
+        let dir = temp_dir("put-response-file-body");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 64 * 1024 * 1024)).expect("backend");
+        let big = vec![7u8; 1024 * 1024];
+        let body = Body::from(big.clone());
+        let len = backend
+            .put_response(
+                "ns",
+                "variant",
+                body,
+                BodyStreamWriteOptions {
+                    max_body_bytes: 2 * 1024 * 1024,
+                    body_read_timeout: Duration::from_secs(5),
+                    ttl_secs: 600,
+                },
+                Box::new(|body_len: u64| Ok(format!(r#"{{"body_len":{body_len}}}"#).into_bytes())),
+            )
+            .await
+            .expect("put response");
+        assert_eq!(len, big.len() as u64);
+        let raw = backend
+            .read_response_metadata("ns", "variant")
+            .await
+            .expect("read metadata")
+            .expect("metadata present");
+        assert!(String::from_utf8_lossy(&raw).contains(r#""body_len":1048576"#));
         let _ = fs::remove_dir_all(dir);
     }
 
