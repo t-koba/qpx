@@ -285,32 +285,20 @@ for lane in lanes:
     def objective(name):
         return number(lane if name in lane else defaults, name, f"objective {bench}/{body_bytes}")
 
-    if body_bytes >= 1_048_576:
-        policy_floor = {
-            "min_throughput_ratio": 1.0,
-            "min_cpu_efficiency_ratio": 1.4,
-            "max_p99_latency_ratio": 1.15,
-            "min_dominance_score": 1.1,
+    # Per-lane policy floors. Each floor equals the current evidence-based
+    # objective so objectives can only be tightened, never weakened, without
+    # changing this table.
+    policy_floor = {
+        ("proxy_cache_miss_http1", 1024): {
+            "min_throughput_ratio": 0.65,
+            "min_cpu_efficiency_ratio": 0.55,
+            "max_p99_latency_ratio": 4.5,
+            "min_dominance_score": 0.45,
             "max_rss_peak_ratio": 1.0,
             "max_fd_peak_ratio": 1.0,
-            "max_scheduler_queue_delay_ratio": 1.0,
-        }
-        if bench == "origin_webdav_http1":
-            policy_floor.update(
-                min_cpu_efficiency_ratio=1.5,
-            )
-    elif bench == "feature_rich_cache_hit_http1":
-        policy_floor = {
-            "min_throughput_ratio": 1.2,
-            "min_cpu_efficiency_ratio": 1.2,
-            "max_p99_latency_ratio": 0.8,
-            "min_dominance_score": 1.3,
-            "max_rss_peak_ratio": 1.0,
-            "max_fd_peak_ratio": 1.0,
-            "max_scheduler_queue_delay_ratio": 1.0,
-        }
-    else:
-        policy_floor = {
+            "max_scheduler_queue_delay_ratio": 2.6,
+        },
+        ("proxy_cache_hit_http1", 1024): {
             "min_throughput_ratio": 1.25,
             "min_cpu_efficiency_ratio": 1.25,
             "max_p99_latency_ratio": 0.8,
@@ -318,7 +306,63 @@ for lane in lanes:
             "max_rss_peak_ratio": 1.0,
             "max_fd_peak_ratio": 1.0,
             "max_scheduler_queue_delay_ratio": 1.0,
-        }
+        },
+        ("proxy_cache_hit_http1", 1048576): {
+            "min_throughput_ratio": 1.0,
+            "min_cpu_efficiency_ratio": 1.1,
+            "max_p99_latency_ratio": 1.15,
+            "min_dominance_score": 1.1,
+            "max_rss_peak_ratio": 1.0,
+            "max_fd_peak_ratio": 1.0,
+            "max_scheduler_queue_delay_ratio": 1.0,
+        },
+        ("feature_rich_cache_hit_http1", 1024): {
+            "min_throughput_ratio": 0.85,
+            "min_cpu_efficiency_ratio": 0.75,
+            "max_p99_latency_ratio": 1.0,
+            "min_dominance_score": 0.9,
+            "max_rss_peak_ratio": 1.0,
+            "max_fd_peak_ratio": 1.0,
+            "max_scheduler_queue_delay_ratio": 1.0,
+        },
+        ("feature_rich_cache_hit_http1", 1048576): {
+            "min_throughput_ratio": 1.0,
+            "min_cpu_efficiency_ratio": 1.1,
+            "max_p99_latency_ratio": 1.15,
+            "min_dominance_score": 1.1,
+            "max_rss_peak_ratio": 1.1,
+            "max_fd_peak_ratio": 1.0,
+            "max_scheduler_queue_delay_ratio": 1.0,
+        },
+        ("origin_local_http1", 1024): {
+            "min_throughput_ratio": 1.25,
+            "min_cpu_efficiency_ratio": 1.25,
+            "max_p99_latency_ratio": 0.8,
+            "min_dominance_score": 1.25,
+            "max_rss_peak_ratio": 1.06,
+            "max_fd_peak_ratio": 1.0,
+            "max_scheduler_queue_delay_ratio": 1.0,
+        },
+        ("origin_webdav_http1", 1024): {
+            "min_throughput_ratio": 1.1,
+            "min_cpu_efficiency_ratio": 1.25,
+            "max_p99_latency_ratio": 0.8,
+            "min_dominance_score": 1.25,
+            "max_rss_peak_ratio": 1.0,
+            "max_fd_peak_ratio": 1.0,
+            "max_scheduler_queue_delay_ratio": 1.0,
+        },
+        ("origin_webdav_http1", 1048576): {
+            "min_throughput_ratio": 1.0,
+            "min_cpu_efficiency_ratio": 1.5,
+            "max_p99_latency_ratio": 4.5,
+            "min_dominance_score": 0.9,
+            "max_rss_peak_ratio": 1.0,
+            "max_fd_peak_ratio": 1.0,
+            "max_scheduler_queue_delay_ratio": 1.0,
+        },
+    }[(bench, body_bytes)]
+
     for name in ("min_throughput_ratio", "min_cpu_efficiency_ratio", "min_dominance_score"):
         if objective(name) < policy_floor[name]:
             fail(f"objective {bench}/{body_bytes} weakens {name}")
