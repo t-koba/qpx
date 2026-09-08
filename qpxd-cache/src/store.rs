@@ -3,10 +3,10 @@ use super::entry::{header_map_from_vec, merge_headers_after_304, primary_from_va
 use super::freshness::{freshness_lifetime_secs, initial_age_secs};
 use super::invalidate::invalidate_primary;
 use super::types::{
-    CACHE_HEADER, CacheBackend, CacheRequestKey, CacheWritebackAdmission, CacheWritebackPermit,
-    CachedBody, CachedResponseEnvelope, INDEX_TTL_SECS, MAX_CACHE_OBJECT_BYTES,
-    RequestCollapseGuard, ResponseDirectives, RevalidationState, VarySpec, cache_body_storage_key,
-    cache_status_header, encode_cached_response_metadata,
+    BodyStreamWriteOptions, CACHE_HEADER, CacheBackend, CacheRequestKey, CacheWritebackAdmission,
+    CacheWritebackPermit, CachedBody, CachedResponseEnvelope, INDEX_TTL_SECS,
+    MAX_CACHE_OBJECT_BYTES, RequestCollapseGuard, ResponseDirectives, RevalidationState, VarySpec,
+    cache_body_storage_key, cache_status_header, encode_cached_response_metadata,
 };
 use super::util::{
     cache_namespace, load_variant_index, now_millis, sanitize_cached_headers_for_storage,
@@ -204,9 +204,11 @@ impl CacheWriteback {
             self.namespace.as_str(),
             self.variant_key.as_str(),
             body,
-            self.max_cacheable_body_bytes,
-            self.body_read_timeout,
-            self.ttl,
+            BodyStreamWriteOptions {
+                max_body_bytes: self.max_cacheable_body_bytes,
+                body_read_timeout: self.body_read_timeout,
+                ttl_secs: self.ttl,
+            },
             Box::new(move |body_len| {
                 record_cache_writeback_body_stream(body_len);
                 let envelope = CachedResponseEnvelope {

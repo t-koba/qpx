@@ -1,7 +1,7 @@
 use super::types::{
-    CacheBackend, CachedBody, CachedBodyStream, CachedResponseCandidate, CachedResponseEnvelope,
-    MetadataEncoder, VariantIndex, bounded_cache_body_stream, cache_body_storage_key,
-    decode_cached_response_metadata, is_cache_body_storage_key,
+    BodyStreamWriteOptions, CacheBackend, CachedBody, CachedBodyStream, CachedResponseCandidate,
+    CachedResponseEnvelope, MetadataEncoder, VariantIndex, bounded_cache_body_stream,
+    cache_body_storage_key, decode_cached_response_metadata, is_cache_body_storage_key,
 };
 use anyhow::{Context, Result, anyhow};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -186,12 +186,6 @@ impl Drop for HotRecentUpdateGuard<'_> {
         self.generation
             .store(self.next_stable_generation, Ordering::Release);
     }
-}
-
-struct BodyStreamWriteOptions {
-    max_body_bytes: usize,
-    body_read_timeout: Duration,
-    ttl_secs: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -778,10 +772,9 @@ impl DiskCacheBackend {
         }
         let body_key = cache_body_storage_key(key);
         let path = self.path_for(namespace, body_key.as_str());
-        let read_path = path.clone();
-        tokio::task::spawn_blocking(move || read_metadata_trailer_sync(&read_path))
-            .await
-            .context("disk cache metadata reader task failed")?
+        // Inline like open_valid: the header and trailer reads are two small
+        // preads, far cheaper than a blocking-pool dispatch per lookup.
+        read_metadata_trailer_sync(&path)
     }
 
     async fn put_object_path(
@@ -1222,12 +1215,10 @@ impl CacheBackend for DiskCacheBackend {
         namespace: &str,
         key: &str,
         body: Body,
-        max_body_bytes: usize,
-        body_read_timeout: Duration,
-        ttl_secs: u64,
+        options: BodyStreamWriteOptions,
         encode_metadata: MetadataEncoder,
     ) -> Result<u64> {
-        if max_body_bytes as u64 > self.max_bytes {
+        if options.max_body_bytes as u64 > self.max_bytes {
             return Err(anyhow!(
                 "disk cache max_body_bytes exceeds backend max_bytes"
             ));
@@ -1239,17 +1230,13 @@ impl CacheBackend for DiskCacheBackend {
         let body_key = cache_body_storage_key(key);
         let path = self.path_for(namespace, body_key.as_str());
         timeout(
-            body_read_timeout,
+            options.body_read_timeout,
             self.write_body_stream(
                 namespace,
                 body_key.as_str(),
                 &path,
                 body,
-                BodyStreamWriteOptions {
-                    max_body_bytes,
-                    body_read_timeout,
-                    ttl_secs,
-                },
+                options,
                 Some((key.to_string(), encode_metadata)),
             ),
         )
@@ -1508,7 +1495,7 @@ fn read_metadata_trailer_sync(path: &Path) -> Result<Option<Bytes>> {
     }
     let mut file = File::open(path)?;
     let trailer_start = read.total_len - 4 - read.header.meta_len;
-    file.seek(std::io::SeekFrom::Start(trailer_start as u64))?;
+    file.seek(std::io::SeekFrom::Start(trailer_start))?;
     let mut len = [0u8; 4];
     file.read_exact(&mut len)?;
     let meta_len = u32::from_be_bytes(len) as u64;
