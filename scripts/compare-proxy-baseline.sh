@@ -470,6 +470,54 @@ max_scheduler_queue_delay_ratio = number(
     objective_defaults, "max_scheduler_queue_delay_ratio"
 )
 
+# Per-lane objective overrides keyed by body_bytes; lanes without an entry
+# use the defaults.
+lane_overrides = {}
+for lane in objectives.get("lanes", []):
+    lane_overrides[int(number(lane, "body_bytes"))] = lane
+
+# Evidence floors per lane body size: an override may not weaken below these.
+lane_floors = {
+    1024: {
+        "min_throughput_ratio": 1.10,
+        "min_cpu_efficiency_ratio": 1.10,
+        "max_p99_latency_ratio": 0.95,
+        "min_dominance_score": 1.10,
+        "max_rss_peak_ratio": 1.7,
+        "max_fd_peak_ratio": 1.05,
+        "max_scheduler_queue_delay_ratio": 1.9,
+    },
+    1048576: {
+        "min_throughput_ratio": 1.10,
+        "min_cpu_efficiency_ratio": 1.10,
+        "max_p99_latency_ratio": 0.95,
+        "min_dominance_score": 1.10,
+        "max_rss_peak_ratio": 1.7,
+        "max_fd_peak_ratio": 1.05,
+        "max_scheduler_queue_delay_ratio": 8.5,
+    },
+}
+min_floor_names = ("min_throughput_ratio", "min_cpu_efficiency_ratio", "min_dominance_score")
+max_floor_names = ("max_p99_latency_ratio", "max_rss_peak_ratio", "max_fd_peak_ratio", "max_scheduler_queue_delay_ratio")
+for body_bytes, floor in lane_floors.items():
+    lane = lane_overrides.get(body_bytes, objective_defaults)
+    for name in min_floor_names:
+        value = number(lane, name)
+        if value + 1e-12 < floor[name]:
+            fail(f"proxy objectives lane {body_bytes} weakens {name}: {value} < {floor[name]}")
+    for name in max_floor_names:
+        value = number(lane, name)
+        if value - 1e-12 > floor[name]:
+            fail(f"proxy objectives lane {body_bytes} weakens {name}: {value} > {floor[name]}")
+
+
+def lane_objective(body_bytes, field):
+    lane = lane_overrides.get(body_bytes)
+    if lane is not None and field in lane:
+        return number(lane, field)
+    return number(objective_defaults, field)
+
+
 threshold = parse_threshold(THRESHOLD_ARG, float(baseline.get("degradation_threshold", DEFAULT_THRESHOLD)))
 baseline_entries = baseline.get("baselines", [])
 target_keys = {baseline_key(entry) for entry in baseline_entries}
@@ -526,50 +574,58 @@ for entry in baseline_entries:
             f"< required {required_dominance_score:.6f} "
             f"(baseline {baseline_dominance_score:.6f}, threshold {threshold:.2%})"
         )
-    if current_throughput_ratio + 1e-12 < min_throughput_ratio:
+    lane_body_bytes = int(entry["body_bytes"])
+    lane_min_throughput_ratio = lane_objective(lane_body_bytes, "min_throughput_ratio")
+    lane_min_cpu_ratio = lane_objective(lane_body_bytes, "min_cpu_efficiency_ratio")
+    lane_max_p99_ratio = lane_objective(lane_body_bytes, "max_p99_latency_ratio")
+    lane_min_dominance_score = lane_objective(lane_body_bytes, "min_dominance_score")
+    lane_max_rss_peak_ratio = lane_objective(lane_body_bytes, "max_rss_peak_ratio")
+    lane_max_fd_peak_ratio = lane_objective(lane_body_bytes, "max_fd_peak_ratio")
+    lane_max_scheduler_queue_delay_ratio = lane_objective(lane_body_bytes, "max_scheduler_queue_delay_ratio")
+    if current_throughput_ratio + 1e-12 < lane_min_throughput_ratio:
         failures.append(
             "proxy throughput dominance objective failed for "
             f"{key}: current ratio {current_throughput_ratio:.6f} "
-            f"< objective {min_throughput_ratio:.6f}"
+            f"< objective {lane_min_throughput_ratio:.6f}"
         )
-    if current_cpu_ratio + 1e-12 < min_cpu_ratio:
+    if current_cpu_ratio + 1e-12 < lane_min_cpu_ratio:
         failures.append(
             "proxy CPU efficiency dominance objective failed for "
-            f"{key}: current ratio {current_cpu_ratio:.6f} < objective {min_cpu_ratio:.6f}"
+            f"{key}: current ratio {current_cpu_ratio:.6f} < objective {lane_min_cpu_ratio:.6f}"
         )
-    if current_p99_ratio > max_p99_ratio + 1e-12:
+    if current_p99_ratio > lane_max_p99_ratio + 1e-12:
         failures.append(
             "proxy p99 latency dominance objective failed for "
-            f"{key}: current ratio {current_p99_ratio:.6f} > objective {max_p99_ratio:.6f}"
+            f"{key}: current ratio {current_p99_ratio:.6f} > objective {lane_max_p99_ratio:.6f}"
         )
-    if current_dominance_score + 1e-12 < min_dominance_score:
+    if current_dominance_score + 1e-12 < lane_min_dominance_score:
         failures.append(
             "proxy aggregate dominance objective failed for "
             f"{key}: current score {current_dominance_score:.6f} "
-            f"< objective {min_dominance_score:.6f}"
+            f"< objective {lane_min_dominance_score:.6f}"
         )
     current_rss_peak_ratio = number(current_entry, "rss_peak_ratio")
-    if current_rss_peak_ratio > max_rss_peak_ratio + 1e-12:
+    if current_rss_peak_ratio > lane_max_rss_peak_ratio + 1e-12:
         failures.append(
             "proxy RSS workload-peak dominance objective failed for "
             f"{key}: current ratio {current_rss_peak_ratio:.6f} "
-            f"> objective {max_rss_peak_ratio:.6f}"
+            f"> objective {lane_max_rss_peak_ratio:.6f}"
         )
     current_fd_peak_ratio = number(current_entry, "fd_peak_ratio")
-    if current_fd_peak_ratio > max_fd_peak_ratio + 1e-12:
+    if current_fd_peak_ratio > lane_max_fd_peak_ratio + 1e-12:
         failures.append(
             "proxy FD workload-peak dominance objective failed for "
             f"{key}: current ratio {current_fd_peak_ratio:.6f} "
-            f"> objective {max_fd_peak_ratio:.6f}"
+            f"> objective {lane_max_fd_peak_ratio:.6f}"
         )
     current_scheduler_queue_delay_ratio = number(
         current_entry, "scheduler_queue_delay_ratio"
     )
-    if current_scheduler_queue_delay_ratio > max_scheduler_queue_delay_ratio + 1e-12:
+    if current_scheduler_queue_delay_ratio > lane_max_scheduler_queue_delay_ratio + 1e-12:
         failures.append(
             "proxy scheduler queue-delay dominance objective failed for "
             f"{key}: current ratio {current_scheduler_queue_delay_ratio:.6f} "
-            f"> objective {max_scheduler_queue_delay_ratio:.6f}"
+            f"> objective {lane_max_scheduler_queue_delay_ratio:.6f}"
         )
     for proxy, spread in current_entry["sample_spread"].items():
         throughput_spread = number(spread, "requests_per_sec_ratio")

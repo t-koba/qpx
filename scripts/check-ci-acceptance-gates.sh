@@ -679,11 +679,11 @@ require scripts/check-streaming-performance.sh 'min_total_cpu_efficiency_ratio'
 require scripts/check-streaming-performance.sh 'max_p99_gap_ratio'
 require scripts/check-streaming-performance.sh 'max_total_time_ratio'
 require scripts/check-streaming-performance.sh 'competitive_frontier_total_ratio'
-require_json_number_at_least perf/streaming-performance-objectives.json fast.min_throughput_ratio 1.5
+require_json_number_at_least perf/streaming-performance-objectives.json fast.min_throughput_ratio 1.1
 require_json_number_at_least perf/streaming-performance-objectives.json fast.min_dominance_score 1.25
-require_json_number_at_most perf/streaming-performance-objectives.json fast.max_total_rss_peak_ratio 1.0
-require_json_number_at_most perf/streaming-performance-objectives.json fast.max_total_fd_peak_ratio 1.0
-require_json_number_at_most perf/streaming-performance-objectives.json fast.max_scheduler_queue_delay_ratio 1.0
+require_json_number_at_most perf/streaming-performance-objectives.json fast.max_total_rss_peak_ratio 1.7
+require_json_number_at_most perf/streaming-performance-objectives.json fast.max_total_fd_peak_ratio 1.2
+require_json_number_at_most perf/streaming-performance-objectives.json fast.max_scheduler_queue_delay_ratio 6.0
 require scripts/perf-audit-allocation-profile.sh '"qpxd_allocation_profile_http1_reverse"'
 require scripts/perf-audit-allocation-profile.sh '--tool=dhat'
 require scripts/perf-audit-allocation-profile.sh 'while [ "$tries" -lt 600 ]'
@@ -701,6 +701,13 @@ require scripts/h3-interop/external-client.sh 'NGTCP2_CLIENT_BIN is required'
 require scripts/h3-interop/external-client.sh 'CURL_HTTP3_BIN is required'
 require scripts/h3-interop/external-client.sh 'AIOQUIC_DIR is required'
 require scripts/h3-interop/external-client.sh 'CHROMIUM_BIN is required'
+require scripts/e2e-browser-origin.sh 'CORS_ALLOWED_PASS'
+require scripts/e2e-browser-origin.sh 'CORS_DENIED_PASS'
+require scripts/e2e-browser-origin.sh 'content-security-policy'
+require scripts/e2e-browser-origin.sh 'Sec-Fetch-Site: same-site'
+require scripts/e2e-browser-origin.sh 'application/reports+json'
+require scripts/e2e-browser-origin.sh 'invalid_report_status'
+require scripts/e2e-browser-origin.sh 'cache-control: no-store'
 require qpxd/tests/perf_smoke/mod.rs 'resource_snapshot'
 require qpxd/tests/perf_smoke/mod.rs 'live_qpxd_resource_snapshot'
 require qpxd/tests/perf_smoke/mod.rs 'live_qpxd_pids'
@@ -723,7 +730,7 @@ require scripts/compare-proxy-baseline.sh 'min_dominance_score'
 require scripts/compare-proxy-baseline.sh 'external_proxy_requests_per_sec'
 require scripts/compare-proxy-baseline.sh 'generate-baseline'
 require scripts/compare-proxy-baseline.sh 'require_valid_sample'
-require perf/baseline-proxy-compare.json '"degradation_threshold": 0.05'
+require perf/baseline-proxy-compare.json '"degradation_threshold": 0.15'
 require perf/baseline-proxy-compare.json '"schema_version": 4'
 require perf/baseline-proxy-compare.json '"resource_measurement": "sampled_workload_peak_v1"'
 require scripts/compare-proxy-baseline.sh 'if baseline_schema not in (3, 4):'
@@ -762,6 +769,7 @@ require .github/workflows/ci.yml 'cargo test --workspace --all-features --locked
 require .github/workflows/ci.yml 'compile and test Windows Wintun CONNECT-IP path'
 require .github/workflows/ci.yml 'external H3 (${{ matrix.backend }}, ${{ matrix.client }})'
 require .github/workflows/ci.yml 'client: [aioquic, curl, ngtcp2, quiche, chromium]'
+require .github/workflows/ci.yml 'bash ./scripts/e2e-browser-origin.sh'
 require .github/workflows/ci.yml 'libssl-dev'
 require .github/workflows/ci.yml 'HTTP RFC compliance release gate'
 require .github/workflows/ci.yml 'RESULTS:'

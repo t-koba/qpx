@@ -450,7 +450,9 @@ async fn request_h3_inner(
     let request = request.body(())?;
     let mut stream = sender.send_request(request).await?;
     stream.finish().await?;
-    let response = stream.recv_response().await?;
+    let response = timeout(Duration::from_secs(30), stream.recv_response())
+        .await
+        .map_err(|_| anyhow!("H3 response head timed out after 30s"))??;
     let ttfb = started.elapsed();
     let status = response.status();
     let mut body = Vec::new();
@@ -459,7 +461,10 @@ async fn request_h3_inner(
     let mut data_error = None;
 
     loop {
-        match stream.recv_data().await {
+        match timeout(Duration::from_secs(30), stream.recv_data())
+            .await
+            .map_err(|_| anyhow!("H3 response body chunk timed out after 30s"))?
+        {
             Ok(Some(mut chunk)) => {
                 first_data_at.get_or_insert_with(|| started.elapsed());
                 let chunk_len = chunk.remaining();
