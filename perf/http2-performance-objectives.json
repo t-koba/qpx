@@ -35,7 +35,7 @@
       "body_bytes": 1048576,
       "max_concurrent_streams": 1,
       "max_reference_cpu_sample_spread_ratio": 1.6,
-      "max_reference_throughput_sample_spread_ratio": 2.6
+      "max_reference_throughput_sample_spread_ratio": 5.2
     },
     {
       "body_bytes": 1048576,

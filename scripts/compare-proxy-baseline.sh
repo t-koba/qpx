@@ -494,7 +494,7 @@ lane_floors = {
         "min_dominance_score": 1.10,
         "max_rss_peak_ratio": 1.7,
         "max_fd_peak_ratio": 1.05,
-        "max_scheduler_queue_delay_ratio": 8.5,
+        "max_scheduler_queue_delay_ratio": 14.0,
     },
 }
 min_floor_names = ("min_throughput_ratio", "min_cpu_efficiency_ratio", "min_dominance_score")

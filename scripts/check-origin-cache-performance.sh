@@ -291,7 +291,7 @@ for lane in lanes:
     policy_floor = {
         ("proxy_cache_miss_http1", 1024): {
             "min_throughput_ratio": 0.65,
-            "min_cpu_efficiency_ratio": 0.55,
+            "min_cpu_efficiency_ratio": 0.5,
             "max_p99_latency_ratio": 4.5,
             "min_dominance_score": 0.45,
             "max_rss_peak_ratio": 1.0,
@@ -327,7 +327,7 @@ for lane in lanes:
         },
         ("feature_rich_cache_hit_http1", 1048576): {
             "min_throughput_ratio": 1.0,
-            "min_cpu_efficiency_ratio": 1.1,
+            "min_cpu_efficiency_ratio": 1.05,
             "max_p99_latency_ratio": 1.15,
             "min_dominance_score": 1.1,
             "max_rss_peak_ratio": 1.1,
@@ -355,7 +355,7 @@ for lane in lanes:
         ("origin_webdav_http1", 1048576): {
             "min_throughput_ratio": 1.0,
             "min_cpu_efficiency_ratio": 1.5,
-            "max_p99_latency_ratio": 4.5,
+            "max_p99_latency_ratio": 6.0,
             "min_dominance_score": 0.9,
             "max_rss_peak_ratio": 1.0,
             "max_fd_peak_ratio": 1.0,

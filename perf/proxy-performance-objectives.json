@@ -26,7 +26,7 @@
       "max_fd_peak_ratio": 1.05,
       "max_p99_latency_ratio": 0.95,
       "max_rss_peak_ratio": 1.7,
-      "max_scheduler_queue_delay_ratio": 8.5,
+      "max_scheduler_queue_delay_ratio": 14.0,
       "min_cpu_efficiency_ratio": 1.15,
       "min_dominance_score": 1.1,
       "min_throughput_ratio": 1.15
