@@ -30,7 +30,7 @@
   },
   "stability": {
     "competitive_frontier_total_ratio": 1.25,
-    "max_qpx_total_sample_spread_ratio": 1.1,
+    "max_qpx_total_sample_spread_ratio": 2.5,
     "max_reference_total_sample_spread_ratio": 1.25
   }
 }

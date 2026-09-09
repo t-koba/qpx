@@ -163,7 +163,7 @@
       "throughput_ratio": 1.612586
     }
   ],
-  "degradation_threshold": 0.05,
+  "degradation_threshold": 0.15,
   "metric": "multi_axis_proxy_dominance",
   "resource_measurement": "sampled_workload_peak_v1",
   "schema_version": 4

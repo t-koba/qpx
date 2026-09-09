@@ -68,6 +68,13 @@ def nested_number(record, container, field, owner):
     return positive_number(nested, field, owner)
 
 
+def positive_int(record, field, owner="record"):
+    value = record.get(field)
+    if not isinstance(value, int) or value <= 0:
+        fail(f"{owner} {field} must be a positive integer")
+    return value
+
+
 def positive_int_list(config, field):
     values = config.get(field)
     if not isinstance(values, list) or not values:
@@ -115,6 +122,21 @@ required_lanes = {
     for body_bytes in required_body_bytes
     for max_streams in required_streams
 }
+
+# Per-lane objective overrides; lanes without an entry use the defaults.
+lane_overrides = {}
+for lane in objectives.get("lanes", []):
+    key = (positive_int(lane, "body_bytes", "HTTP/2 lane"), positive_int(lane, "max_concurrent_streams", "HTTP/2 lane"))
+    for field in limit_fields:
+        if field in lane:
+            lane_overrides.setdefault(key, {})[field] = positive_number(lane, field, "HTTP/2 lane")
+
+
+def lane_limit(field, key):
+    overrides = lane_overrides.get(key)
+    if overrides is not None and field in overrides:
+        return overrides[field]
+    return positive_number(limits, field, "HTTP/2 objectives")
 
 records = {}
 with open(JSONL_PATH, "r", encoding="utf-8") as handle:
@@ -326,7 +348,7 @@ for body_bytes, max_streams in sorted(required_lanes):
         ("scheduler queue-delay ratio", scheduler_queue_delay_ratio, "max_lane_scheduler_queue_delay_ratio", "max"),
     )
     for label, current, field, direction in checks:
-        objective = positive_number(limits, field, "HTTP/2 objectives")
+        objective = lane_limit(field, (body_bytes, max_streams))
         if direction == "min" and current + 1e-12 < objective:
             failures.append(
                 f"HTTP/2 {body_bytes}-byte m={max_streams} {label} "
@@ -340,18 +362,18 @@ for body_bytes, max_streams in sorted(required_lanes):
 
     for proxy, record in (("direct-backend", direct), ("qpxd", qpx), ("nginx", nginx)):
         if proxy == "qpxd":
-            throughput_limit = positive_number(
-                limits, "max_qpx_throughput_sample_spread_ratio", "HTTP/2 objectives"
+            throughput_limit = lane_limit(
+                "max_qpx_throughput_sample_spread_ratio", (body_bytes, max_streams)
             )
-            cpu_limit = positive_number(
-                limits, "max_qpx_cpu_sample_spread_ratio", "HTTP/2 objectives"
+            cpu_limit = lane_limit(
+                "max_qpx_cpu_sample_spread_ratio", (body_bytes, max_streams)
             )
         else:
-            throughput_limit = positive_number(
-                limits, "max_reference_throughput_sample_spread_ratio", "HTTP/2 objectives"
+            throughput_limit = lane_limit(
+                "max_reference_throughput_sample_spread_ratio", (body_bytes, max_streams)
             )
-            cpu_limit = positive_number(
-                limits, "max_reference_cpu_sample_spread_ratio", "HTTP/2 objectives"
+            cpu_limit = lane_limit(
+                "max_reference_cpu_sample_spread_ratio", (body_bytes, max_streams)
             )
         throughput_spread = nested_number(
             record, "sample_spread", "requests_per_sec_ratio", proxy

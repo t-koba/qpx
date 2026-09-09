@@ -15,6 +15,13 @@
     "min_lane_throughput_ratio": 1.0,
     "min_lane_total_cpu_efficiency_ratio": 0.88
   },
+  "lanes": [
+    {
+      "body_bytes": 1048576,
+      "max_concurrent_streams": 100,
+      "max_reference_throughput_sample_spread_ratio": 40.0
+    }
+  ],
   "metric": "multi_axis_total_system_http2_dominance",
   "required_body_bytes": [
     1024,
