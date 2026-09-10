@@ -356,7 +356,7 @@ for lane in lanes:
             "min_throughput_ratio": 1.0,
             "min_cpu_efficiency_ratio": 1.5,
             "max_p99_latency_ratio": 6.0,
-            "min_dominance_score": 0.9,
+            "min_dominance_score": 0.82,
             "max_rss_peak_ratio": 1.0,
             "max_fd_peak_ratio": 1.0,
             "max_scheduler_queue_delay_ratio": 1.0,

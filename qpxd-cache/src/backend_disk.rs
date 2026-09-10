@@ -1867,11 +1867,36 @@ mod tests {
             .await
             .expect("put response");
         assert_eq!(len, big.len() as u64);
+        // Verify the on-disk object directly first, so a failing metadata
+        // read below can be told apart from a bad write.
+        let stored_path = backend.path_for("ns", cache_body_storage_key("variant").as_str());
+        let bytes = fs::read(&stored_path).expect("read stored object");
+        let header_len =
+            u32::from_be_bytes(bytes[16..20].try_into().expect("header length")) as usize;
+        let header: DiskCacheHeader =
+            serde_json::from_slice(&bytes[20..20 + header_len]).expect("parse header");
+        assert_eq!(header.body_len, big.len() as u64, "stored body length");
+        assert!(
+            header.meta_len > 0,
+            "stored object must carry a metadata trailer"
+        );
+        assert_eq!(
+            bytes.len() as u64,
+            20 + header_len as u64 + header.body_len + header.trailer_len(),
+            "stored object length accounting"
+        );
         let raw = backend
             .read_response_metadata("ns", "variant")
             .await
             .expect("read metadata")
-            .expect("metadata present");
+            .unwrap_or_else(|| {
+                panic!(
+                    "metadata present (stored {} bytes, header body_len {} meta_len {})",
+                    bytes.len(),
+                    header.body_len,
+                    header.meta_len
+                )
+            });
         assert!(String::from_utf8_lossy(&raw).contains(r#""body_len":1048576"#));
         let _ = fs::remove_dir_all(dir);
     }
