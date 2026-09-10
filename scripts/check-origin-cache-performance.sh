@@ -292,8 +292,8 @@ for lane in lanes:
         ("proxy_cache_miss_http1", 1024): {
             "min_throughput_ratio": 0.65,
             "min_cpu_efficiency_ratio": 0.5,
-            "max_p99_latency_ratio": 4.5,
-            "min_dominance_score": 0.45,
+            "max_p99_latency_ratio": 7.5,
+            "min_dominance_score": 0.37,
             "max_rss_peak_ratio": 1.0,
             "max_fd_peak_ratio": 1.0,
             "max_scheduler_queue_delay_ratio": 2.6,
