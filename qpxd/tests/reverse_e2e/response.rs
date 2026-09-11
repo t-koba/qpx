@@ -1,5 +1,11 @@
 use super::*;
 
+fn qpxd_log_tail(dir: &std::path::Path) -> String {
+    let log = std::fs::read_to_string(dir.join("reverse-cache.log")).unwrap_or_default();
+    let lines: Vec<&str> = log.lines().rev().take(20).collect();
+    lines.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reverse_cache_uses_http_backend_store() -> Result<()> {
     let dir = temp_dir("qpxd-reverse-cache-e2e")?;
@@ -73,7 +79,15 @@ edges:
                 .body(empty_body())?,
         )
         .await?;
-    assert_eq!(first.status(), StatusCode::OK);
+    if first.status() != StatusCode::OK {
+        let status = first.status();
+        let body = collect_body(first.into_body()).await?;
+        panic!(
+            "first request failed with {status}: {} (qpxd log: {})",
+            String::from_utf8_lossy(&body),
+            qpxd_log_tail(&dir)
+        );
+    }
     assert_eq!(&collect_body(first.into_body()).await?[..], b"CACHE");
     wait_for_counter(&cache_ops, 2).await?;
 
@@ -86,7 +100,15 @@ edges:
                 .body(empty_body())?,
         )
         .await?;
-    assert_eq!(second.status(), StatusCode::OK);
+    if second.status() != StatusCode::OK {
+        let status = second.status();
+        let body = collect_body(second.into_body()).await?;
+        panic!(
+            "second (cached) request failed with {status}: {} (qpxd log: {})",
+            String::from_utf8_lossy(&body),
+            qpxd_log_tail(&dir)
+        );
+    }
     assert_eq!(&collect_body(second.into_body()).await?[..], b"CACHE");
 
     assert!(
