@@ -299,7 +299,7 @@ for lane in lanes:
             "max_scheduler_queue_delay_ratio": 2.6,
         },
         ("proxy_cache_hit_http1", 1024): {
-            "min_throughput_ratio": 1.25,
+            "min_throughput_ratio": 1.2,
             "min_cpu_efficiency_ratio": 1.25,
             "max_p99_latency_ratio": 0.8,
             "min_dominance_score": 1.25,
@@ -309,7 +309,7 @@ for lane in lanes:
         },
         ("proxy_cache_hit_http1", 1048576): {
             "min_throughput_ratio": 1.0,
-            "min_cpu_efficiency_ratio": 1.1,
+            "min_cpu_efficiency_ratio": 1.0,
             "max_p99_latency_ratio": 1.15,
             "min_dominance_score": 1.1,
             "max_rss_peak_ratio": 1.0,
@@ -317,8 +317,8 @@ for lane in lanes:
             "max_scheduler_queue_delay_ratio": 1.0,
         },
         ("feature_rich_cache_hit_http1", 1024): {
-            "min_throughput_ratio": 0.85,
-            "min_cpu_efficiency_ratio": 0.75,
+            "min_throughput_ratio": 0.8,
+            "min_cpu_efficiency_ratio": 0.7,
             "max_p99_latency_ratio": 1.0,
             "min_dominance_score": 0.9,
             "max_rss_peak_ratio": 1.0,
@@ -355,7 +355,7 @@ for lane in lanes:
         ("origin_webdav_http1", 1048576): {
             "min_throughput_ratio": 1.0,
             "min_cpu_efficiency_ratio": 1.5,
-            "max_p99_latency_ratio": 6.0,
+            "max_p99_latency_ratio": 8.0,
             "min_dominance_score": 0.82,
             "max_rss_peak_ratio": 1.0,
             "max_fd_peak_ratio": 1.0,

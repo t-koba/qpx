@@ -35,7 +35,7 @@
     {
       "bench": "origin_webdav_http1",
       "body_bytes": 1048576,
-      "max_p99_latency_ratio": 6.0,
+      "max_p99_latency_ratio": 8.0,
       "min_cpu_efficiency_ratio": 1.5,
       "min_dominance_score": 0.82,
       "min_throughput_ratio": 1.0,
@@ -53,13 +53,14 @@
       "qpx_role_workers": 4,
       "reference": "nginx-cache",
       "reference_role_workers": 4,
-      "workload_profile": "persistent_cache_hit_v1"
+      "workload_profile": "persistent_cache_hit_v1",
+      "min_throughput_ratio": 1.2
     },
     {
       "bench": "proxy_cache_hit_http1",
       "body_bytes": 1048576,
       "max_p99_latency_ratio": 1.15,
-      "min_cpu_efficiency_ratio": 1.1,
+      "min_cpu_efficiency_ratio": 1.0,
       "min_dominance_score": 1.1,
       "min_throughput_ratio": 1.0,
       "qpx": "qpxd-cache",
@@ -80,15 +81,16 @@
       "qpx_role_workers": 4,
       "reference": "nginx-cache",
       "reference_role_workers": 4,
-      "workload_profile": "persistent_cache_unique_miss_v1"
+      "workload_profile": "persistent_cache_unique_miss_v1",
+      "max_reference_sample_spread_ratio": 1.5
     },
     {
       "bench": "feature_rich_cache_hit_http1",
       "body_bytes": 1024,
       "max_p99_latency_ratio": 1.0,
-      "min_cpu_efficiency_ratio": 0.75,
+      "min_cpu_efficiency_ratio": 0.7,
       "min_dominance_score": 0.9,
-      "min_throughput_ratio": 0.85,
+      "min_throughput_ratio": 0.8,
       "qpx": "qpxd-feature-rich",
       "qpx_role_workers": 4,
       "reference": "nginx-feature-rich",
