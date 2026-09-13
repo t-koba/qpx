@@ -23,7 +23,6 @@ default = [
 # force the system allocator when all features are enabled.
 mimalloc-allocator = ["dep:mimalloc"]
 system-allocator = []
-h2-wire-tracing = ["h2/wire-tracing"]
 
 tls-rustls = [
   "dep:rustls",

@@ -6,7 +6,6 @@ use rustls::Side;
 use rustls::quic::{Keys, Version};
 
 const QUIC_V1: u32 = 0x0000_0001;
-const QUIC_V2: u32 = 0x6b33_43cf;
 
 #[derive(Debug, Clone, Copy)]
 struct ProtectedInitialHeader<'a> {
@@ -100,9 +99,10 @@ fn parse_protected_initial_header(packet: &[u8]) -> Option<ProtectedInitialHeade
         return None;
     }
 
+    // QUIC v2 Initials use packet type bits 0b01, which the Initial-only
+    // check above already rejects; only version 1 is parsed here.
     let version = match u32::from_be_bytes(packet.get(1..5)?.try_into().ok()?) {
         QUIC_V1 => Version::V1,
-        QUIC_V2 => Version::V2,
         _ => return None,
     };
 

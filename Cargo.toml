@@ -16,7 +16,7 @@ members = [
   "qpxf",
   "xtask"
 ]
-exclude = ["fuzz", "vendor/h2", "vendor/quinn-proto"]
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"
@@ -145,7 +145,3 @@ strip = "symbols"
 inherits = "release"
 debug = 1
 strip = "none"
-
-[patch.crates-io]
-h2 = { path = "vendor/h2" }
-quinn-proto = { path = "vendor/quinn-proto" }

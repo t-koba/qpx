@@ -65,7 +65,7 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 | Authentication and integrity | 6750, 6797, 7616, 7617, 9421, 9530, 9931 | complete / external-authority | resource-server Bearer handling, HSTS, Basic/Digest, signatures, digests, optimistic-data safety |
 | Provider-neutral security interfaces | 6749, 7517, 7519, 7662, 8705 | external-authority | client credentials, JWK/JWKS, JWT, introspection, mTLS client authentication |
 | HTTP API design | 9205, 9457 | complete | API design validation and Problem Details |
-| QUIC and HTTP/3 | 9000, 9001, 9002, 9204, 9218, 9221, 9368, 9369 | transport-library-with-contract / complete | QUIC transport, TLS, recovery, QPACK, priority, DATAGRAM, v2 negotiation |
+| QUIC and HTTP/3 | 9000, 9001, 9002, 9204, 9218, 9221 | transport-library-with-contract / complete | QUIC transport, TLS, recovery, QPACK, priority, DATAGRAM (QUIC v1 and reserved-version negotiation via quinn) |
 | MASQUE and tunnels | 9297, 9298, 9484 | complete | capsules, CONNECT-UDP, CONNECT-IP |
 | WebSocket | 6455, 8441, 9220 | complete | HTTP/1.1, HTTP/2, and HTTP/3 WebSocket paths |
 | WebDAV and CalDAV | 3253, 3744, 4791, 4918, 5323, 5689, 5842 | complete | versioning, ACL, calendars, core DAV, search, MKCOL, bindings |
@@ -146,7 +146,6 @@ mTLS, and RFC 9421 transport protection are separate configuration concerns.
 | 9218 | native | RFC 9651 Priority parsing and live PRIORITY_UPDATE scheduling | qpx-h3 priority tests |
 | 9000, 9001, 9002 | transport-library-with-contract | QUIC transport/TLS/loss behavior with qpx resource limits | qpx-h3 E2E and interop lane |
 | 9221 | transport-library-with-contract | bounded QUIC DATAGRAM handling | qpx-h3 datagram tests |
-| 9368, 9369 | transport-library-with-contract | pinned Quinn protocol implementation for compatible negotiation and QUIC v2 | `vendor/quinn-proto` tests and QUIC-v2 interop lane |
 | 9297 | native | HTTP Datagrams, context IDs, Capsule fallback | both-backend datagram/capsule tests |
 | 9298 | native | CONNECT-UDP URI template, flow policy, chained relay; no H1 optimistic data | both-backend MASQUE tests |
 | 9484 | native | CONNECT-IP capsules, MTU/CIDR policy, chained relay, Linux TUN, macOS utun, Windows Wintun | `connect_ip` codec/relay tests; platform and interop lanes |
@@ -201,7 +200,7 @@ All gates below must pass on one commit before a release is published:
 4. every checked-in configuration sample
 5. real AuthZEN/schema-mapped provider matrix using the same qpx binary
 6. HTTP/1.1, HTTP/2, and HTTP/3 RFC contract matrix
-7. QUIC v2, H3, WebSocket, CONNECT-UDP, CONNECT-IP, and WebTransport interop
+7. H3, WebSocket, CONNECT-UDP, CONNECT-IP, and WebTransport interop
 8. DAV litmus and CalDAV tester against a real qpxd listener and filesystem/redb
 9. memory, file-descriptor, queue, and p95 performance budgets
 10. provider-neutral authorization and resource-server contract tests
