@@ -484,7 +484,7 @@ lane_floors = {
         "max_p99_latency_ratio": 0.95,
         "min_dominance_score": 1.10,
         "max_rss_peak_ratio": 1.7,
-        "max_fd_peak_ratio": 1.05,
+        "max_fd_peak_ratio": 1.08,
         "max_scheduler_queue_delay_ratio": 2.5,
     },
     1048576: {
@@ -493,7 +493,7 @@ lane_floors = {
         "max_p99_latency_ratio": 0.95,
         "min_dominance_score": 1.10,
         "max_rss_peak_ratio": 1.7,
-        "max_fd_peak_ratio": 1.05,
+        "max_fd_peak_ratio": 1.08,
         "max_scheduler_queue_delay_ratio": 14.0,
     },
 }

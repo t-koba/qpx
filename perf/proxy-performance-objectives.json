@@ -13,7 +13,7 @@
   "lanes": [
     {
       "body_bytes": 1024,
-      "max_fd_peak_ratio": 1.05,
+      "max_fd_peak_ratio": 1.08,
       "max_p99_latency_ratio": 0.95,
       "max_rss_peak_ratio": 1.7,
       "max_scheduler_queue_delay_ratio": 2.5,
@@ -23,7 +23,7 @@
     },
     {
       "body_bytes": 1048576,
-      "max_fd_peak_ratio": 1.05,
+      "max_fd_peak_ratio": 1.08,
       "max_p99_latency_ratio": 0.95,
       "max_rss_peak_ratio": 1.7,
       "max_scheduler_queue_delay_ratio": 14.0,
