@@ -24,6 +24,7 @@ fn rate_limit_plan_requires_extended_context_only_for_extended_keys() {
     ] {
         let config = RateLimitConfig {
             enabled: true,
+            experimental_rate_limit_fields: false,
             apply_to: vec![RateLimitApplyTo::Request],
             key: key.to_string(),
             requests: Some(qpx_core::config::RateLimitRequestsConfig {
@@ -84,6 +85,7 @@ fn collect_profile_rejects_unknown_profile_name() {
         name: "known".to_string(),
         limit: RateLimitConfig {
             enabled: true,
+            experimental_rate_limit_fields: false,
             apply_to: vec![RateLimitApplyTo::Request],
             key: "user".to_string(),
             requests: Some(qpx_core::config::RateLimitRequestsConfig {
@@ -119,6 +121,7 @@ fn collect_profile_rejects_unknown_profile_name() {
 fn absent_decision_profile_does_not_consume_route_limit_twice() {
     let config = RateLimitConfig {
         enabled: true,
+        experimental_rate_limit_fields: false,
         apply_to: vec![RateLimitApplyTo::Request],
         key: "global".to_string(),
         requests: Some(qpx_core::config::RateLimitRequestsConfig {
@@ -163,6 +166,7 @@ fn absent_decision_profile_does_not_consume_route_limit_twice() {
 fn initial_profile_check_also_enforces_route_limit() {
     let route_config = RateLimitConfig {
         enabled: true,
+        experimental_rate_limit_fields: false,
         apply_to: vec![RateLimitApplyTo::Request],
         key: "global".to_string(),
         requests: Some(qpx_core::config::RateLimitRequestsConfig {
@@ -177,6 +181,7 @@ fn initial_profile_check_also_enforces_route_limit() {
         name: "external".to_string(),
         limit: RateLimitConfig {
             enabled: true,
+            experimental_rate_limit_fields: false,
             apply_to: vec![RateLimitApplyTo::Request],
             key: "global".to_string(),
             requests: Some(qpx_core::config::RateLimitRequestsConfig {
@@ -224,6 +229,151 @@ fn initial_profile_check_also_enforces_route_limit() {
             .retry_after
             .is_some(),
         "the route limit must remain authoritative when a profile is present"
+    );
+}
+
+#[test]
+fn experimental_rate_limit_fields_describe_rejected_fixed_quota() {
+    let config = RateLimitConfig {
+        enabled: true,
+        experimental_rate_limit_fields: true,
+        apply_to: vec![RateLimitApplyTo::Request],
+        key: "global".to_string(),
+        requests: Some(qpx_core::config::RateLimitRequestsConfig {
+            rps: None,
+            burst: None,
+            quota: Some(qpx_core::config::RateLimitQuotaConfig {
+                interval_secs: 60,
+                amount: Some(1),
+            }),
+        }),
+        traffic: None,
+        sessions: None,
+    };
+    let plan = CompiledRateLimitPlan::from_sets(
+        RateLimitSet::from_config(Some(&config)),
+        RateLimitSet::default(),
+    );
+    let mut limits = plan.collect(TransportScope::Request);
+    let context = RateLimitContext::default();
+    assert_eq!(limits.try_acquire_request(&context, 1), None);
+    let retry_after = limits
+        .try_acquire_request(&context, 1)
+        .expect("second request must exceed the fixed quota");
+
+    let mut headers = http::HeaderMap::new();
+    limits.apply_rate_limit_fields(&mut headers, Some(retry_after));
+    assert_eq!(
+        headers
+            .get("rate-limit-policy")
+            .expect("RateLimit-Policy")
+            .to_str()
+            .expect("ASCII header"),
+        "\"requests\";q=1;w=60;qu=\"requests\""
+    );
+    assert_eq!(
+        headers
+            .get("ratelimit")
+            .expect("RateLimit")
+            .to_str()
+            .expect("ASCII header"),
+        format!("\"requests\";r=0;t={}", retry_after.as_secs().max(1))
+    );
+    assert_eq!(
+        headers
+            .get(http::header::CACHE_CONTROL)
+            .expect("Cache-Control")
+            .to_str()
+            .expect("ASCII header"),
+        "private, no-store"
+    );
+}
+
+#[test]
+fn rate_limit_fields_are_not_emitted_without_opt_in() {
+    let config = RateLimitConfig {
+        enabled: true,
+        experimental_rate_limit_fields: false,
+        apply_to: vec![RateLimitApplyTo::Request],
+        key: "global".to_string(),
+        requests: Some(qpx_core::config::RateLimitRequestsConfig {
+            rps: None,
+            burst: None,
+            quota: Some(qpx_core::config::RateLimitQuotaConfig {
+                interval_secs: 60,
+                amount: Some(1),
+            }),
+        }),
+        traffic: None,
+        sessions: None,
+    };
+    let plan = CompiledRateLimitPlan::from_sets(
+        RateLimitSet::from_config(Some(&config)),
+        RateLimitSet::default(),
+    );
+    let mut limits = plan.collect(TransportScope::Request);
+    let context = RateLimitContext::default();
+    assert_eq!(limits.try_acquire_request(&context, 1), None);
+    let retry_after = limits
+        .try_acquire_request(&context, 1)
+        .expect("second request must exceed the fixed quota");
+    let mut headers = http::HeaderMap::new();
+    limits.apply_rate_limit_fields(&mut headers, Some(retry_after));
+    assert!(headers.get("rate-limit-policy").is_none());
+    assert!(headers.get("ratelimit").is_none());
+    assert!(headers.get(http::header::CACHE_CONTROL).is_none());
+}
+
+#[test]
+fn experimental_rate_limit_fields_describe_rejected_session_quota() {
+    let config = RateLimitConfig {
+        enabled: true,
+        experimental_rate_limit_fields: true,
+        apply_to: vec![RateLimitApplyTo::Request],
+        key: "global".to_string(),
+        requests: None,
+        traffic: None,
+        sessions: Some(qpx_core::config::RateLimitSessionsConfig {
+            max_concurrency: None,
+            quota_sessions: Some(qpx_core::config::RateLimitQuotaConfig {
+                interval_secs: 60,
+                amount: Some(1),
+            }),
+        }),
+    };
+    let plan = CompiledRateLimitPlan::from_sets(
+        RateLimitSet::from_config(Some(&config)),
+        RateLimitSet::default(),
+    );
+    let mut limits = plan.collect(TransportScope::Request);
+    let context = RateLimitContext::default();
+    assert!(
+        limits
+            .acquire_concurrency_with_retry(&context)
+            .permits
+            .is_some()
+    );
+    let rejected = limits.acquire_concurrency_with_retry(&context);
+    assert!(rejected.permits.is_none());
+    let retry_after = rejected.retry_after.expect("session quota retry delay");
+
+    let mut headers = http::HeaderMap::new();
+    limits.apply_rate_limit_fields(&mut headers, Some(retry_after));
+    assert_eq!(
+        headers
+            .get("rate-limit-policy")
+            .expect("RateLimit-Policy")
+            .to_str()
+            .expect("ASCII header"),
+        "\"sessions\";q=1;w=60;qu=\"concurrent-requests\""
+    );
+    assert_eq!(
+        headers
+            .get("ratelimit")
+            .expect("RateLimit")
+            .to_str()
+            .expect("ASCII header"),
+        format!("\"sessions\";r=0;t={}", retry_after.as_secs().max(1))
     );
 }
 

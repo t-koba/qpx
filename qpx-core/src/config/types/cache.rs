@@ -43,6 +43,9 @@ pub struct CachePolicyConfig {
 pub struct RateLimitConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Enables the experimental RateLimit-Policy and RateLimit response fields.
+    #[serde(default)]
+    pub experimental_rate_limit_fields: bool,
     #[serde(default = "default_rate_limit_apply_to")]
     pub apply_to: Vec<RateLimitApplyTo>,
     #[serde(default = "default_rate_limit_key")]

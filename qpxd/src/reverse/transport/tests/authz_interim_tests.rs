@@ -93,6 +93,7 @@ async fn reverse_decision_service_rate_limit_profile_is_enforced() {
                 name: "reverse-profile".to_string(),
                 limit: RateLimitConfig {
                     enabled: true,
+                    experimental_rate_limit_fields: false,
                     apply_to: vec![qpx_core::config::RateLimitApplyTo::Request],
                     key: "global".to_string(),
                     requests: Some(qpx_core::config::RateLimitRequestsConfig {

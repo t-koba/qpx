@@ -1,6 +1,106 @@
 use super::*;
 
 #[test]
+fn load_config_rejects_unsupported_dpop_algorithm() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("invalid-dpop-algorithm.yaml");
+    write_config(
+        &cfg,
+        r#"edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action:
+    type: direct
+security:
+  identity_sources:
+  - name: oauth
+    type: bearer
+    bearer:
+      source:
+        mode: jwt
+        issuer: https://issuer.example
+        audience: https://api.example
+        jwks_url: https://issuer.example/.well-known/jwks.json
+      dpop:
+        algorithms: [HS256]"#,
+    )
+    .expect("write");
+    let err = load_config(&cfg).expect_err("unsupported DPoP algorithm must fail");
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        err.to_string().contains("unsupported algorithm: HS256"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn load_config_rejects_experimental_rate_limit_fields_without_fixed_quota() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("invalid-rate-limit-fields.yaml");
+    write_config(
+        &cfg,
+        r#"edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action:
+    type: direct
+  rate_limit:
+    enabled: true
+    experimental_rate_limit_fields: true
+    apply_to: [request]
+    key: global
+    requests:
+      rps: 10
+      burst: 10"#,
+    )
+    .expect("write");
+    let err = load_config(&cfg).expect_err("must fail");
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        err.to_string()
+            .contains("experimental_rate_limit_fields requires at least one fixed quota"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn load_config_rejects_experimental_rate_limit_fields_when_disabled() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("disabled-rate-limit-fields.yaml");
+    write_config(
+        &cfg,
+        r#"edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action:
+    type: direct
+  rate_limit:
+    enabled: false
+    experimental_rate_limit_fields: true
+    apply_to: [request]
+    key: global
+    requests:
+      quota:
+        interval_secs: 60
+        amount: 10"#,
+    )
+    .expect("write");
+    let err = load_config(&cfg).expect_err("must fail");
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        err.to_string()
+            .contains("experimental_rate_limit_fields requires rate_limit.enabled"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn load_config_rejects_plain_ldap_without_starttls() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");

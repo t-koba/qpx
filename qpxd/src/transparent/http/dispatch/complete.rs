@@ -7,7 +7,7 @@ use crate::http::dispatch::{
     DispatchAuditContext, DispatchOutcome, DispatchResponsePolicyInput,
     DispatchResponsePolicyOutcome, ProxyKind, annotate_dispatch_response,
     annotated_max_forwards_response, apply_dispatch_response_policy,
-    concurrency_limited_response_for_parts as concurrency_limited_response,
+    concurrency_limited_response_for_parts_with_limits as concurrency_limited_response,
     prepare_http_module_local_response, record_upstream_request_duration,
     request_body_too_large_response as body_too_large_response,
 };
@@ -218,13 +218,16 @@ pub(super) async fn complete_transparent_request(
         matched_rule.as_deref(),
         upstream.as_ref().map(|upstream| upstream.key()),
     );
-    let _concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_ctx) {
+    let concurrency = request_limits.acquire_concurrency_with_retry(&rate_limit_ctx);
+    let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
             let response = concurrency_limited_response(
                 req.method(),
                 req.version(),
                 proxy_name,
+                &request_limits,
+                concurrency.retry_after,
                 audit.clone(),
             );
             return Ok(response);

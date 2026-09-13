@@ -161,9 +161,117 @@ pub struct HttpPolicyConfig {
     #[serde(default)]
     pub hsts: Option<HstsConfig>,
     #[serde(default)]
+    pub cors: Option<CorsConfig>,
+    #[serde(default)]
+    pub client_certificate: Option<ClientCertificateForwardingConfig>,
+    #[serde(default)]
+    pub cookies: Option<CookieSecurityConfig>,
+    #[serde(default)]
+    pub fetch_metadata: Option<crate::browser_policy::FetchMetadataPolicyConfig>,
+    #[serde(default)]
+    pub browser_security: Option<crate::browser_policy::BrowserResponsePolicyConfig>,
+    #[serde(default)]
+    pub reporting_collector: Option<ReportingCollectorConfig>,
+    #[serde(default)]
     pub require_precondition: bool,
     #[serde(default)]
     pub capport: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClientCertificateForwardingConfig {
+    #[serde(default)]
+    pub include_chain: bool,
+    #[serde(default = "crate::config::defaults::default_true")]
+    pub reject_inbound: bool,
+    #[serde(default = "default_client_certificate_bytes")]
+    pub max_certificate_bytes: usize,
+    #[serde(default = "default_client_certificate_chain_length")]
+    pub max_chain_certificates: usize,
+    #[serde(default = "default_client_certificate_field_bytes")]
+    pub max_field_bytes: usize,
+    #[serde(default = "default_client_certificate_total_field_bytes")]
+    pub max_total_field_bytes: usize,
+}
+
+const fn default_client_certificate_bytes() -> usize {
+    64 * 1024
+}
+
+const fn default_client_certificate_chain_length() -> usize {
+    16
+}
+
+const fn default_client_certificate_field_bytes() -> usize {
+    128 * 1024
+}
+
+const fn default_client_certificate_total_field_bytes() -> usize {
+    256 * 1024
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CookieSecurityConfig {
+    #[serde(default = "crate::config::defaults::default_true")]
+    pub require_secure: bool,
+    #[serde(default = "crate::config::defaults::default_true")]
+    pub require_http_only: bool,
+    #[serde(default)]
+    pub same_site: Option<CookieSameSiteConfig>,
+    #[serde(default)]
+    pub require_partitioned: bool,
+    #[serde(default = "default_cookie_field_bytes")]
+    pub max_field_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CookieSameSiteConfig {
+    Strict,
+    Lax,
+    None,
+}
+
+const fn default_cookie_field_bytes() -> usize {
+    16 * 1024
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReportingCollectorConfig {
+    #[serde(default = "default_reporting_body_bytes")]
+    pub max_body_bytes: usize,
+    #[serde(default = "default_reporting_report_count")]
+    pub max_reports: usize,
+    #[serde(default)]
+    pub accept_legacy_csp_reports: bool,
+}
+
+const fn default_reporting_body_bytes() -> usize {
+    256 * 1024
+}
+
+const fn default_reporting_report_count() -> usize {
+    128
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CorsConfig {
+    pub allowed_origins: Vec<String>,
+    pub allowed_methods: Vec<String>,
+    #[serde(default)]
+    pub allowed_headers: Vec<String>,
+    #[serde(default)]
+    pub expose_headers: Vec<String>,
+    #[serde(default)]
+    pub allow_credentials: bool,
+    #[serde(default)]
+    pub max_age_seconds: Option<u64>,
+    #[serde(default)]
+    pub allow_private_network: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

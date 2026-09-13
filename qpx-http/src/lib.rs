@@ -7,6 +7,7 @@
 pub mod accept_query;
 pub mod api_metadata;
 pub mod body;
+pub mod client_cert;
 pub mod compression_dictionary;
 pub mod connect_ip;
 pub mod content_disposition;
@@ -19,6 +20,7 @@ pub mod prefer;
 pub mod problem;
 pub mod protocol;
 pub mod proxy_status;
+pub mod rate_limit_fields;
 pub mod sharding;
 pub mod structured_fields;
 pub mod tls;

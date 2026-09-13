@@ -135,6 +135,12 @@ jobs:
         run: bash ./scripts/e2e-config-samples.sh
       - name: run local-response e2e
         run: bash ./scripts/e2e-local-response.sh
+      - name: run real-browser origin policy e2e
+        env:
+          CHROMIUM_BIN: /usr/bin/google-chrome
+        run: |
+          command -v google-chrome
+          bash ./scripts/e2e-browser-origin.sh
       - name: run http2 e2e
         run: bash ./scripts/e2e-http2.sh
       - name: run ACME Pebble e2e

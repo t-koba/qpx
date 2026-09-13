@@ -16,11 +16,11 @@ use crate::http::protocol::common::{
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::http3::codec::h1_headers_to_http;
 use crate::http3::listener::H3ConnInfo;
-use crate::http3::server::{H3ServerRequestStream, send_h3_static_response};
+use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};
 use crate::policy_context::{
-    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
-    enforce_decision_service, prepare_decision_service_allow, resolve_identity,
-    sanitize_headers_for_policy,
+    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
+    authentication_response_for_error, enforce_decision_service, prepare_decision_service_allow,
+    resolve_identity_for_request, sanitize_headers_for_policy,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
@@ -61,6 +61,7 @@ pub(crate) async fn prepare_h3_connect_request(
     let authority_host_for_validation = target.authority_host_for_validation;
     let authority_port_for_validation = target.authority_port_for_validation;
     let auth_uri = target.auth_uri;
+    let request_scheme = req_head.uri().scheme_str().unwrap_or("https");
     macro_rules! reject_bad_request {
         ($message:expr) => {
             send_h3_static_response(
@@ -120,7 +121,13 @@ pub(crate) async fn prepare_h3_connect_request(
         conn.remote_addr.ip(),
         &mut sanitized_headers,
     )?;
-    let mut identity = resolve_identity(
+    let request_context = IdentityRequestContext::from_request_parts(
+        req_head.method().as_str(),
+        req_head.uri(),
+        &sanitized_headers,
+        request_scheme,
+    );
+    let mut identity = match resolve_identity_for_request(
         &state,
         &effective_policy,
         conn.remote_addr.ip(),
@@ -128,8 +135,31 @@ pub(crate) async fn prepare_h3_connect_request(
         conn.peer_certificates
             .as_deref()
             .map(|certs| certs.as_slice()),
+        request_context.as_ref(),
     )
-    .await?;
+    .await
+    {
+        Ok(identity) => identity,
+        Err(error) => {
+            if let Some(response) = authentication_response_for_error(
+                req_head.method(),
+                http::Version::HTTP_3,
+                proxy_name,
+                &error,
+            ) {
+                send_h3_response(
+                    response?,
+                    req_head.method(),
+                    req_stream,
+                    max_h3_response_body_bytes,
+                    std::time::Duration::from_secs(1),
+                )
+                .await?;
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
     let destination = state.classify_destination(
         &DestinationInputs {
             host: Some(host.as_str()),
@@ -188,15 +218,18 @@ pub(crate) async fn prepare_h3_connect_request(
         ($response:expr, $outcome:expr, $log_context:expr) => {{ respond_with_policy!($response, $outcome, None, None, $log_context) }};
     }
     macro_rules! rate_limited_response {
-        ($retry_after:expr) => {
-            finalize_response_for_request(
+        ($retry_after:expr, $limits:expr) => {{
+            let retry_after = $retry_after;
+            let mut response = finalize_response_for_request(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name,
-                too_many_requests(Some($retry_after)),
+                too_many_requests(Some(retry_after)),
                 false,
-            )
-        };
+            );
+            $limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
+            response
+        }};
     }
     let ctx = build_dispatch_connect_rule_context(DispatchConnectRuleContextInput {
         remote_ip: conn.remote_addr.ip(),
@@ -293,7 +326,7 @@ pub(crate) async fn prepare_h3_connect_request(
     )?;
     if let Some(retry_after) = retry_after {
         let log_context = identity.to_log_context(matched_rule_name, None, None);
-        let response = rate_limited_response!(retry_after);
+        let response = rate_limited_response!(retry_after, &request_limits);
         respond_with_policy!(
             response,
             DispatchOutcome::RateLimited,
@@ -346,7 +379,7 @@ pub(crate) async fn prepare_h3_connect_request(
                 &request_limit_ctx,
                 1,
             )? {
-                let response = rate_limited_response!(retry_after);
+                let response = rate_limited_response!(retry_after, &request_limits);
                 respond_with_policy!(
                     response,
                     DispatchOutcome::RateLimited,

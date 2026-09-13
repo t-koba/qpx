@@ -1,6 +1,6 @@
 use super::{
     DispatchAuditContext, DispatchOutcome, annotate_dispatch_response, annotated_local_response,
-    rate_limit_response_for_parts,
+    rate_limit_response_for_parts_with_limits,
 };
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::policy_context::{
@@ -52,11 +52,12 @@ pub(crate) fn apply_decision_service_http_access(
                 )?
             {
                 return Ok(DecisionServiceHttpAccessOutcome::Blocked(
-                    rate_limit_response_for_parts(
+                    rate_limit_response_for_parts_with_limits(
                         input.request_head.0,
                         input.request_head.1,
                         input.proxy_name,
                         Some(retry_after),
+                        request_limits,
                         input.audit.clone(),
                     ),
                     true,

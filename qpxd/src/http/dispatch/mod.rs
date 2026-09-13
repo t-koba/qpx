@@ -40,7 +40,7 @@ pub(crate) use decision_service_access::{
 pub(crate) use error::DispatchError;
 pub(crate) use guard::{DispatchGuardInput, evaluate_http_guard};
 pub(crate) use limit_response::{
-    concurrency_limited_response_for_parts, rate_limit_response_for_parts,
+    concurrency_limited_response_for_parts_with_limits, rate_limit_response_for_parts_with_limits,
 };
 pub(crate) use metrics::{
     record_cache_lookup_duration, record_cache_lookup_result, record_response_policy_action,

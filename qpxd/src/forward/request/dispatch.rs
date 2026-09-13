@@ -3,7 +3,8 @@ use crate::http::dispatch::{
     DispatchAuditContext, DispatchAuditInput, DispatchError, DispatchGuardInput,
     DispatchRequestPrepareInput, PreparedDispatchRequest, ProxyKind,
     annotated_max_forwards_response, build_dispatch_audit_context, evaluate_http_guard,
-    prepare_dispatch_request, rate_limit_response_for_parts, request_body_too_large_response,
+    prepare_dispatch_request, rate_limit_response_for_parts_with_limits,
+    request_body_too_large_response,
 };
 use crate::http::pipeline::PolicyStage;
 use crate::http::policy::response_policy::response_request_obs;
@@ -200,6 +201,7 @@ async fn prepare_forward_request(
         state: &state,
         effective_policy: &effective_policy,
         remote_ip: remote_addr.ip(),
+        request_scheme: "http",
     })
     .await?
     {
@@ -365,11 +367,12 @@ async fn prepare_forward_request(
         1,
     )?;
     if let Some(retry_after) = retry_after {
-        let response = rate_limit_response_for_parts(
+        let response = rate_limit_response_for_parts_with_limits(
             req.method(),
             req.version(),
             proxy_name,
             Some(retry_after),
+            &request_limits,
             build_forward_rate_limit_audit_context(
                 state.clone(),
                 policy_response,

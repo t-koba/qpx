@@ -3,11 +3,14 @@ use super::super::super::connect::parse::{
     parse_connect_udp_target, validate_connect_udp_scheme,
 };
 use super::super::connect_upstream::validate_qpx_connect_head;
-use super::super::response::send_qpx_static_response;
+use super::super::response::{send_qpx_response_stream, send_qpx_static_response};
 use super::ForwardQpxHandler;
 use crate::destination::DestinationInputs;
 use crate::http3::codec::h1_headers_to_http;
-use crate::policy_context::{resolve_identity, sanitize_headers_for_policy};
+use crate::policy_context::{
+    IdentityRequestContext, authentication_response_for_error, resolve_identity_for_request,
+    sanitize_headers_for_policy,
+};
 use crate::rate_limit::RateLimitContext;
 use anyhow::{Result, anyhow};
 use hyper::StatusCode;
@@ -88,7 +91,42 @@ pub(super) async fn prepare_qpx_connect_request(
     let Some(validated) = validate_connect_request(&mut input).await? else {
         return Ok(None);
     };
-    let context = build_connect_policy_context(&input, validated).await?;
+    let context = match build_connect_policy_context(&input, validated).await {
+        Ok(context) => context,
+        Err(error) => {
+            if let Some(response) = authentication_response_for_error(
+                input.req_head.method(),
+                http::Version::HTTP_3,
+                input
+                    .handler
+                    .runtime
+                    .state()
+                    .plan
+                    .identity
+                    .proxy_name
+                    .as_ref(),
+                &error,
+            ) {
+                send_qpx_response_stream(
+                    input.req_stream,
+                    response?,
+                    input.req_head.method(),
+                    input
+                        .handler
+                        .runtime
+                        .state()
+                        .plan
+                        .limits
+                        .body
+                        .max_h3_response_body_bytes,
+                    Duration::from_secs(1),
+                )
+                .await?;
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
     let Some(evaluated) = evaluate_connect_policy(&mut input, context).await? else {
         return Ok(None);
     };
@@ -450,7 +488,12 @@ async fn build_connect_policy_context(
         conn.remote_addr.ip(),
         &mut sanitized_headers,
     )?;
-    let identity = resolve_identity(
+    let request_uri = auth_uri
+        .split_once('#')
+        .map(|(uri, _)| uri.to_string())
+        .unwrap_or_else(|| auth_uri.clone());
+    let request_context = IdentityRequestContext::new(req_head.method().as_str(), request_uri);
+    let identity = resolve_identity_for_request(
         &state,
         &effective_policy,
         conn.remote_addr.ip(),
@@ -458,6 +501,7 @@ async fn build_connect_policy_context(
         conn.peer_certificates
             .as_deref()
             .map(|certs| certs.as_slice()),
+        Some(&request_context),
     )
     .await?;
     let destination = state.classify_destination(

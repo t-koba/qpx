@@ -240,6 +240,12 @@ fn build_router(response_rules: Vec<HttpResponseRuleConfig>) -> ReverseRouter {
                     forwarded: None,
                     api_metadata: None,
                     hsts: None,
+                    cors: None,
+                    client_certificate: None,
+                    cookies: None,
+                    fetch_metadata: None,
+                    browser_security: None,
+                    reporting_collector: None,
                     require_precondition: false,
                     capport: false,
                 }),
@@ -275,6 +281,7 @@ fn single_featureless_route_enables_plain_http_dispatch() {
 }
 
 mod authz_interim_tests;
+mod cors_tests;
 mod interim_tests;
 mod module_tests;
 mod path_rewrite_tests;

@@ -146,7 +146,7 @@ async fn run_qpx_traditional_connect_tunnel(
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled qpx-h3 CONNECT execution plan not found"))?;
     let matched_rule_name = matched_rule.as_deref();
-    let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
+    let mut request_limits = state.policy.rate_limiters.collect_plan_with_profile(
         &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
         TransportScope::Connect,
@@ -190,17 +190,20 @@ async fn run_qpx_traditional_connect_tunnel(
         return Ok(());
     }
 
-    let _concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_context) {
+    let concurrency = request_limits.acquire_concurrency_with_retry(&rate_limit_context);
+    let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
-            let response = finalize_response_with_headers(
+            let retry_after = concurrency.retry_after;
+            let mut response = finalize_response_with_headers(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                too_many_requests(None),
+                too_many_requests(retry_after),
                 response_headers.as_deref(),
                 false,
             );
+            request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
             send_policy!(
                 &mut req_stream,
                 response,
@@ -371,7 +374,7 @@ async fn handle_qpx_extended_connect_stream(
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled qpx-h3 CONNECT execution plan not found"))?;
     let matched_rule_name = matched_rule.as_deref();
-    let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
+    let mut request_limits = state.policy.rate_limiters.collect_plan_with_profile(
         &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
         TransportScope::Connect,
@@ -415,17 +418,20 @@ async fn handle_qpx_extended_connect_stream(
         return Ok(());
     }
 
-    let _concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_context) {
+    let concurrency = request_limits.acquire_concurrency_with_retry(&rate_limit_context);
+    let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
-            let response = finalize_response_with_headers(
+            let retry_after = concurrency.retry_after;
+            let mut response = finalize_response_with_headers(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                too_many_requests(None),
+                too_many_requests(retry_after),
                 response_headers.as_deref(),
                 false,
             );
+            request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
             send_policy!(
                 &mut req_stream,
                 response,

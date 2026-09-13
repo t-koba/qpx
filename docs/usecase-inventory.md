@@ -31,6 +31,8 @@ The acceptance rule is not “old YAML still parses”. The rule is:
 
 ## 03-service-publishing
 
+- `reverse-cors-origin.yaml`: route-owned CORS for browser-facing qpx origins and proxied applications.
+- `reverse-browser-security.yaml`: strict browser-origin request gates, response policies, Client Hints, and report collection.
 - `reverse-load-balance-retry.yaml`: reverse publish with load balancing, health checks, and route resilience.
 - `reverse-path-rewrite.yaml`: reverse path rewrite.
 - `reverse-advanced-routing.yaml`: canary, mirroring, affinity, resilience, and response-stage rules.

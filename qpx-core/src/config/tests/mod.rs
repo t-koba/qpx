@@ -25,7 +25,9 @@ fn write_config(path: &PathBuf, input: &str) -> std::io::Result<()> {
     fs::write(path, input)
 }
 
+mod browser_policy_tests;
 mod capture_tests;
+mod cors_tests;
 mod http_module_tests;
 mod load_merge_tests;
 mod observability_tests;

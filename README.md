@@ -243,6 +243,8 @@ smoke tests, multi-platform builds, and end-to-end reload/upgrade paths.
   `qpxr`, and `qpxc`
 - [`docs/http-modules.md`](docs/http-modules.md): built-in and custom HTTP
   modules
+- [`docs/cors.md`](docs/cors.md): reverse-route CORS and preflight handling
+- [`docs/browser-origin-security.md`](docs/browser-origin-security.md): Fetch Metadata, browser response policy, Reporting API, secure cookies, RFC 9440, DPoP, and experimental RateLimit fields
 - [`docs/enterprise-edge-scope.md`](docs/enterprise-edge-scope.md): enterprise
   cloud-edge positioning
 - [`docs/http-rfc-compliance.md`](docs/http-rfc-compliance.md): comprehensive HTTP RFC compliance matrix

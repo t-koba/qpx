@@ -1,4 +1,5 @@
 use super::*;
+use qpx_core::config::LocalResponseConfig;
 
 #[test]
 fn runtime_rejects_unregistered_custom_http_modules() {
@@ -139,10 +140,38 @@ fn runtime_plan_marks_cache_lookup_and_store() {
 }
 
 #[test]
+fn runtime_plan_compiles_reporting_collector_and_disables_fast_paths() {
+    let mut route = reverse_route("reports");
+    route.target = ReverseRouteTargetConfig::LocalResponse {
+        response: Box::new(LocalResponseConfig {
+            status: 204,
+            ..Default::default()
+        }),
+    };
+    route
+        .http
+        .as_mut()
+        .expect("HTTP policy")
+        .reporting_collector = Some(qpx_core::config::ReportingCollectorConfig {
+        max_body_bytes: 4096,
+        max_reports: 8,
+        accept_legacy_csp_reports: false,
+    });
+    let mut config = base_config();
+    push_reverse(&mut config, reverse_edge(route));
+
+    let plan = single_reverse_route_plan(config);
+
+    assert!(plan.reporting_collector.is_some());
+    assert!(plan.flags.contains(PlanFlags::ORIGIN_REQUEST_POLICY));
+}
+
+#[test]
 fn runtime_plan_compiles_route_rate_limits() {
     let mut route = reverse_route("limited");
     route.rate_limit = Some(RateLimitConfig {
         enabled: true,
+        experimental_rate_limit_fields: false,
         apply_to: vec![RateLimitApplyTo::Request],
         key: "src_ip".to_string(),
         requests: Some(RateLimitRequestsConfig {
@@ -288,6 +317,12 @@ fn export_session_for_plan_is_absent_without_capture_flags() {
         forwarded: None,
         api_metadata: None,
         hsts: None,
+        cors: None,
+        client_certificate: qpx_http::client_cert::ClientCertPolicy::disabled(),
+        cookies: None,
+        fetch_metadata: None,
+        browser_security: None,
+        reporting_collector: None,
         require_precondition: false,
         guard: None,
         destination_resolution: None,

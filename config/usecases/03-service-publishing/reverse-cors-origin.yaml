@@ -1,0 +1,35 @@
+edges:
+- kind: reverse
+  name: browser-api
+  listen: 127.0.0.1:19080
+  routes:
+  - name: api
+    match:
+      host:
+      - api.example.com
+      method:
+      - GET
+      - PUT
+      path:
+      - /api/**
+    http:
+      cors:
+        allowed_origins:
+        - https://app.example.com
+        allowed_methods:
+        - GET
+        - PUT
+        allowed_headers:
+        - content-type
+        - x-request-id
+        expose_headers:
+        - etag
+        allow_credentials: true
+        max_age_seconds: 600
+        allow_private_network: false
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: application/json
+        body: '{"status":"ok"}'

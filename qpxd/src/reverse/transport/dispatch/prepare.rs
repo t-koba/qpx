@@ -9,7 +9,8 @@ use crate::http::policy::response_policy::response_request_obs;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::policy_context::{
-    EffectivePolicyContext, resolve_identity, sanitize_headers_for_policy,
+    EffectivePolicyContext, IdentityRequestContext, authentication_response_for_error,
+    resolve_identity_for_request, sanitize_headers_for_policy,
 };
 use crate::reverse::health::UpstreamEndpoint;
 use crate::reverse::router::SelectedMirrorTarget;
@@ -247,12 +248,17 @@ async fn scan_reverse_routes(
     prefilter_ctx: MatchPrefilterContext<'_>,
     request_size: Option<u64>,
     request_rpc: Option<&crate::http::rpc::RpcMatchContext>,
+    cors_only: bool,
+    identity_request: Option<&IdentityRequestContext>,
     selection: &mut ReverseRouteSelection,
 ) -> Result<()> {
     let empty_destination = crate::destination::DestinationMetadata::default();
     if !state.security.identity_sources.sources.is_empty() {
         let mut unresolved_policies = InlineCache::new();
         router.try_for_each_candidate_route(prefilter_ctx.clone(), |_idx, route| {
+            if cors_only {
+                return Ok::<bool, anyhow::Error>(false);
+            }
             let policy = &route.plan.policy_context;
             let key = policy_context_cache_key(policy);
             if !policy.identity_sources.is_empty()
@@ -264,7 +270,7 @@ async fn scan_reverse_routes(
             Ok::<bool, anyhow::Error>(false)
         })?;
         for (policy_key, policy) in unresolved_policies {
-            let identity = resolve_identity(
+            let identity = resolve_identity_for_request(
                 state,
                 &policy,
                 conn.remote_addr.ip(),
@@ -272,21 +278,29 @@ async fn scan_reverse_routes(
                 conn.peer_certificates
                     .as_deref()
                     .map(|certs| certs.as_slice()),
+                identity_request,
             )
             .await?;
             selection.identity_cache.push(policy_key, identity);
         }
     }
     router.try_for_each_candidate_route(prefilter_ctx.clone(), |idx, route| {
+        if cors_only && route.plan.cors.is_none() {
+            return Ok::<bool, anyhow::Error>(false);
+        }
         let resolution_override = route.plan.destination_resolution.as_ref();
         let effective_policy = &route.plan.policy_context;
         let policy_key = policy_context_cache_key(effective_policy);
-        let identity = match selection.identity_cache.get(policy_key) {
-            Some(identity) => identity.clone(),
-            None if effective_policy.identity_sources.is_empty() => {
-                crate::policy_context::ResolvedIdentity::default()
+        let identity = if cors_only {
+            crate::policy_context::ResolvedIdentity::default()
+        } else {
+            match selection.identity_cache.get(policy_key) {
+                Some(identity) => identity.clone(),
+                None if effective_policy.identity_sources.is_empty() => {
+                    crate::policy_context::ResolvedIdentity::default()
+                }
+                None => return Err(anyhow!("identity cache was not populated for route policy")),
             }
-            None => return Err(anyhow!("identity cache was not populated for route policy")),
         };
         let request_destination = if route.requires_destination_context() {
             let override_key = super::destination_override_key(resolution_override);
@@ -316,6 +330,15 @@ async fn scan_reverse_routes(
                 upstream_cert: None,
             },
         );
+        if cors_only {
+            if route.matches(&ctx) {
+                selection.route_idx = Some(idx);
+                selection.selected_policy = effective_policy.clone();
+                selection.selected_identity = Some(identity);
+                return Ok::<bool, anyhow::Error>(true);
+            }
+            return Ok::<bool, anyhow::Error>(false);
+        }
         if request_size.is_some() || request_rpc.is_some() {
             if route.matches(&ctx) {
                 selection.route_idx = Some(idx);
@@ -427,9 +450,72 @@ pub(super) fn enforce_selected_reverse_route_constraints(
     route: &crate::reverse::router::HttpRoute,
     request_method: &Method,
     state: &crate::runtime::RuntimeState,
+    conn: &ReverseConnInfo,
 ) -> Result<ReverseEarlyResult<Request<Body>>> {
     let request_version = req.version();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
+    if let Err(error) = route.plan.client_certificate.apply(
+        req.headers_mut(),
+        conn.peer_certificates.as_deref().map(Vec::as_slice),
+    ) {
+        if matches!(
+            error,
+            qpx_http::client_cert::ClientCertError::InboundHeader { .. }
+        ) {
+            let status = StatusCode::BAD_REQUEST;
+            let body = qpx_http::problem::ProblemDetails::new(
+                status,
+                "Untrusted client certificate field",
+            )
+            .with_detail(error.to_string())
+            .to_json()?;
+            let response = Response::builder()
+                .status(status)
+                .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
+                .body(Body::from(body))?;
+            return Ok(Err(empty_interim_response(finalize_response_for_request(
+                request_method,
+                request_version,
+                proxy_name,
+                response,
+                false,
+            ))));
+        }
+        return Err(error.into());
+    }
+    if let Some(policy) = route.plan.fetch_metadata.as_deref() {
+        let decision = match policy.evaluate_headers(req.headers()) {
+            Ok(decision) => decision,
+            Err(error) => {
+                return fetch_metadata_rejection(
+                    request_method,
+                    request_version,
+                    proxy_name,
+                    route,
+                    conn,
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Invalid Fetch Metadata",
+                        error.to_string(),
+                    ),
+                );
+            }
+        };
+        if decision != qpx_core::browser_policy::FetchMetadataDecision::Allowed {
+            return fetch_metadata_rejection(
+                request_method,
+                request_version,
+                proxy_name,
+                route,
+                conn,
+                (
+                    StatusCode::FORBIDDEN,
+                    "Fetch Metadata policy rejected request",
+                    format!("request rejected by {decision:?} policy decision"),
+                ),
+            );
+        }
+    }
     if route.plan.require_precondition
         && qpx_http::protocol::method::precondition_is_missing(request_method, req.headers())
     {
@@ -475,6 +561,28 @@ pub(super) fn enforce_selected_reverse_route_constraints(
         Err(err) => return Err(err),
     };
     Ok(Ok(req))
+}
+
+fn fetch_metadata_rejection(
+    request_method: &Method,
+    request_version: http::Version,
+    proxy_name: &str,
+    route: &crate::reverse::router::HttpRoute,
+    conn: &ReverseConnInfo,
+    problem: (StatusCode, &'static str, String),
+) -> Result<ReverseEarlyResult<Request<Body>>> {
+    let (status, title, detail) = problem;
+    let body = qpx_http::problem::ProblemDetails::new(status, title)
+        .with_detail(detail)
+        .to_json()?;
+    let response = Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
+        .body(Body::from(body))?;
+    let mut response =
+        finalize_response_for_request(request_method, request_version, proxy_name, response, false);
+    super::apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;
+    Ok(Err(empty_interim_response(response)))
 }
 
 pub(super) fn prepare_single_plain_reverse_request(
@@ -548,9 +656,12 @@ fn prepare_single_reverse_route_request(
         }
     }
 
-    match enforce_selected_reverse_route_constraints(req, route, &base.method, state)? {
+    match enforce_selected_reverse_route_constraints(req, route, &base.method, state, conn)? {
         Ok(req) => Ok(Ok(Some(req))),
-        Err(response) => Ok(Err(response)),
+        Err(mut response) => {
+            super::apply_reverse_route_metadata(route, conn.tls_terminated, &mut response.1)?;
+            Ok(Err(response))
+        }
     }
 }
 
@@ -560,6 +671,7 @@ pub(super) async fn prepare_reverse_request(
     conn: &ReverseConnInfo,
     state: Arc<crate::runtime::RuntimeState>,
     compiled: Arc<crate::reverse::CompiledReverse>,
+    cors_request: Option<&qpx_core::cors::CorsRequest>,
 ) -> Result<std::result::Result<PreparedReverseRequest, (InterimList, Response<Body>)>> {
     let router = &compiled.router;
     let proxy_name = state.plan.identity.proxy_name.as_ref();
@@ -567,9 +679,26 @@ pub(super) async fn prepare_reverse_request(
         return Ok(Err(response));
     }
 
+    if let Some(cors_request) = cors_request.filter(|request| request.is_preflight())
+        && let Some(response) = prepare_cors_preflight(
+            req.headers().clone(),
+            req.version(),
+            base,
+            conn,
+            &state,
+            router,
+            cors_request,
+        )
+        .await?
+    {
+        return Ok(Err(response));
+    }
+
     let host = base.host().unwrap_or_default();
     let request_method = &base.method;
     let request_version = req.version();
+    let identity_request =
+        IdentityRequestContext::from_base(base, if conn.tls_terminated { "https" } else { "http" });
     if !state.destination_trace_enabled()
         && state.security.identity_sources.sources.is_empty()
         && let Some(route) = router.single_http_route()
@@ -607,11 +736,20 @@ pub(super) async fn prepare_reverse_request(
             state.plan.limits.body.max_observed_request_body_bytes;
         let override_key =
             super::destination_override_key(route.plan.destination_resolution.as_ref());
-        let req =
-            match enforce_selected_reverse_route_constraints(req, route, request_method, &state)? {
-                Ok(req) => req,
-                Err(response) => return Ok(Err(response)),
-            };
+        let req = match enforce_selected_reverse_route_constraints(
+            req,
+            route,
+            request_method,
+            &state,
+            conn,
+        )? {
+            Ok(req) => req,
+            Err(mut response) => {
+                super::apply_reverse_route_metadata(route, conn.tls_terminated, &mut response.1)?;
+                apply_cors_to_early_response(route, cors_request, &mut response.1);
+                return Ok(Err(response));
+            }
+        };
         let mut request_destination_cache = InlineCache::new();
         request_destination_cache.push(override_key, destination);
         return Ok(Ok(PreparedReverseRequest {
@@ -656,7 +794,7 @@ pub(super) async fn prepare_reverse_request(
         collect_observation_from_remaining: false,
     };
     let sanitized_route_headers = sanitized_headers_for_route_scan(&req, &state, conn)?;
-    scan_reverse_routes(
+    if let Err(error) = scan_reverse_routes(
         router,
         req.headers(),
         sanitized_route_headers.as_ref(),
@@ -667,9 +805,19 @@ pub(super) async fn prepare_reverse_request(
         prefilter_ctx.clone(),
         None,
         None,
+        false,
+        identity_request.as_ref(),
         &mut selection,
     )
-    .await?;
+    .await
+    {
+        if let Some(response) =
+            authentication_response_for_error(request_method, request_version, proxy_name, &error)
+        {
+            return Ok(Err(empty_interim_response(response?)));
+        }
+        return Err(error);
+    }
     let mut owned_sanitized_headers = match sanitized_route_headers {
         std::borrow::Cow::Borrowed(_) => None,
         std::borrow::Cow::Owned(headers) => Some(headers),
@@ -698,8 +846,8 @@ pub(super) async fn prepare_reverse_request(
         None
     };
 
-    if selection.route_idx.is_none() {
-        scan_reverse_routes(
+    if selection.route_idx.is_none()
+        && let Err(error) = scan_reverse_routes(
             router,
             req.headers(),
             owned_sanitized_headers
@@ -712,9 +860,18 @@ pub(super) async fn prepare_reverse_request(
             prefilter_ctx,
             observed_request_size(&req),
             request_rpc.as_ref(),
+            false,
+            identity_request.as_ref(),
             &mut selection,
         )
-        .await?;
+        .await
+    {
+        if let Some(response) =
+            authentication_response_for_error(request_method, request_version, proxy_name, &error)
+        {
+            return Ok(Err(empty_interim_response(response?)));
+        }
+        return Err(error);
     }
 
     let selected_route_idx = selection
@@ -745,9 +902,18 @@ pub(super) async fn prepare_reverse_request(
         selected_route,
         &base.method,
         &state,
+        conn,
     )? {
         Ok(req) => req,
-        Err(response) => return Ok(Err(response)),
+        Err(mut response) => {
+            super::apply_reverse_route_metadata(
+                selected_route,
+                conn.tls_terminated,
+                &mut response.1,
+            )?;
+            apply_cors_to_early_response(selected_route, cors_request, &mut response.1);
+            return Ok(Err(response));
+        }
     };
 
     Ok(Ok(PreparedReverseRequest {
@@ -770,4 +936,141 @@ pub(super) async fn prepare_reverse_request(
             request_rpc_observed: selection.observation_plan.needs_rpc,
         },
     }))
+}
+
+async fn prepare_cors_preflight(
+    request_headers: http::HeaderMap,
+    request_version: http::Version,
+    base: &BaseRequestFields,
+    conn: &ReverseConnInfo,
+    state: &Arc<crate::runtime::RuntimeState>,
+    router: &ReverseRouter,
+    cors_request: &qpx_core::cors::CorsRequest,
+) -> Result<Option<(InterimList, Response<Body>)>> {
+    let preflight = cors_request
+        .preflight()
+        .ok_or_else(|| anyhow!("CORS preflight facts are missing"))?;
+    let mut route_base = base.clone();
+    route_base.method = preflight.method().clone();
+    let host = route_base.host().unwrap_or_default();
+    let prefilter_ctx = MatchPrefilterContext {
+        method: Some(route_base.method.as_str()),
+        dst_port: Some(conn.dst_port),
+        src_ip: Some(conn.remote_addr.ip()),
+        host: (!host.is_empty()).then_some(host),
+        sni: conn.tls_sni.as_deref(),
+        path: route_base.path(),
+    };
+    let mut selection = ReverseRouteSelection {
+        route_idx: None,
+        selected_policy: EffectivePolicyContext::default(),
+        selected_identity: None,
+        request_destination_cache: InlineCache::new(),
+        identity_cache: InlineCache::new(),
+        observation_plan: RequestObservationPlan::default(),
+        max_observed_request_body_bytes: state.plan.limits.body.max_observed_request_body_bytes,
+        collect_observation_from_remaining: false,
+    };
+    scan_reverse_routes(
+        router,
+        &request_headers,
+        &request_headers,
+        &route_base,
+        state,
+        conn,
+        host,
+        prefilter_ctx,
+        None,
+        None,
+        true,
+        None,
+        &mut selection,
+    )
+    .await?;
+    let Some(route_idx) = selection.route_idx else {
+        return Ok(None);
+    };
+    let route = router
+        .route_at(route_idx)
+        .ok_or_else(|| anyhow!("selected CORS route is unavailable"))?;
+    let policy = route
+        .plan
+        .cors
+        .as_deref()
+        .ok_or_else(|| anyhow!("selected CORS route has no compiled policy"))?;
+    if let Some(fetch_metadata) = route.plan.fetch_metadata.as_deref() {
+        let (status, detail) = match fetch_metadata.evaluate_headers(&request_headers) {
+            Ok(qpx_core::browser_policy::FetchMetadataDecision::Allowed) => (StatusCode::OK, None),
+            Ok(decision) => (
+                StatusCode::FORBIDDEN,
+                Some(format!("request rejected by {decision:?} policy decision")),
+            ),
+            Err(error) => (StatusCode::BAD_REQUEST, Some(error.to_string())),
+        };
+        if let Some(detail) = detail {
+            let body = qpx_http::problem::ProblemDetails::new(
+                status,
+                "Fetch Metadata policy rejected preflight",
+            )
+            .with_detail(detail)
+            .to_json()?;
+            let mut response = Response::builder()
+                .status(status)
+                .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
+                .body(Body::from(body))?;
+            crate::http::protocol::l7::finalize_response_with_headers_in_place(
+                &Method::OPTIONS,
+                request_version,
+                state.plan.identity.proxy_name.as_ref(),
+                &mut response,
+                route.headers.as_deref(),
+                false,
+            );
+            policy.apply_actual_response(Some(cors_request), response.headers_mut());
+            super::apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;
+            return Ok(Some(empty_interim_response(response)));
+        }
+    }
+    let mut response = Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())?;
+    crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        &Method::OPTIONS,
+        request_version,
+        state.plan.identity.proxy_name.as_ref(),
+        &mut response,
+        route.headers.as_deref(),
+        false,
+    );
+    if let Err(rejection) = policy.apply_preflight_response(cors_request, response.headers_mut()) {
+        let status = StatusCode::FORBIDDEN;
+        let body = qpx_http::problem::ProblemDetails::new(status, "CORS preflight rejected")
+            .with_detail(rejection.to_string())
+            .to_json()?;
+        response = Response::builder()
+            .status(status)
+            .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
+            .body(Body::from(body))?;
+        crate::http::protocol::l7::finalize_response_with_headers_in_place(
+            &Method::OPTIONS,
+            request_version,
+            state.plan.identity.proxy_name.as_ref(),
+            &mut response,
+            route.headers.as_deref(),
+            false,
+        );
+        policy.apply_actual_response(None, response.headers_mut());
+    }
+    super::apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;
+    Ok(Some(empty_interim_response(response)))
+}
+
+fn apply_cors_to_early_response(
+    route: &crate::reverse::router::HttpRoute,
+    cors_request: Option<&qpx_core::cors::CorsRequest>,
+    response: &mut Response<Body>,
+) {
+    if let Some(policy) = route.plan.cors.as_deref() {
+        policy.apply_actual_response(cors_request, response.headers_mut());
+    }
 }

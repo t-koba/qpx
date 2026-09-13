@@ -289,6 +289,73 @@ fn execution_plan_for_common(
             Ok::<_, anyhow::Error>(policy)
         })
         .transpose()?;
+    plan.cors = inputs
+        .http
+        .and_then(|http| http.cors.as_ref())
+        .map(qpx_core::cors::CorsPolicy::compile)
+        .transpose()?
+        .map(Arc::new);
+    if plan.cors.is_some() {
+        plan.flags.insert(PlanFlags::CORS);
+    }
+    if let Some(client_certificate) = inputs
+        .http
+        .and_then(|http| http.client_certificate.as_ref())
+    {
+        plan.client_certificate = qpx_http::client_cert::ClientCertPolicy {
+            enabled: true,
+            include_chain: client_certificate.include_chain,
+            reject_inbound: client_certificate.reject_inbound,
+            limits: qpx_http::client_cert::ClientCertLimits::new(
+                client_certificate.max_certificate_bytes,
+                client_certificate.max_chain_certificates,
+                client_certificate.max_field_bytes,
+                client_certificate.max_total_field_bytes,
+            ),
+        };
+    }
+    plan.cookies = inputs
+        .http
+        .and_then(|http| http.cookies.as_ref())
+        .map(|cookies| qpx_http::cookie_policy::CookieSecurityPolicy {
+            require_secure: cookies.require_secure,
+            require_http_only: cookies.require_http_only,
+            same_site: cookies.same_site.map(|same_site| match same_site {
+                qpx_core::config::CookieSameSiteConfig::Strict => {
+                    qpx_http::cookie_policy::SameSite::Strict
+                }
+                qpx_core::config::CookieSameSiteConfig::Lax => {
+                    qpx_http::cookie_policy::SameSite::Lax
+                }
+                qpx_core::config::CookieSameSiteConfig::None => {
+                    qpx_http::cookie_policy::SameSite::None
+                }
+            }),
+            require_partitioned: cookies.require_partitioned,
+            max_field_bytes: cookies.max_field_bytes,
+        });
+    plan.fetch_metadata = inputs
+        .http
+        .and_then(|http| http.fetch_metadata.as_ref())
+        .map(qpx_core::browser_policy::FetchMetadataPolicy::compile)
+        .transpose()?
+        .map(Arc::new);
+    plan.browser_security = inputs
+        .http
+        .and_then(|http| http.browser_security.as_ref())
+        .map(qpx_core::browser_policy::BrowserResponsePolicy::compile)
+        .transpose()?
+        .map(Arc::new);
+    plan.reporting_collector = inputs
+        .http
+        .and_then(|http| http.reporting_collector.clone());
+    if inputs.http.is_some_and(|http| {
+        http.client_certificate.is_some()
+            || http.fetch_metadata.is_some()
+            || http.reporting_collector.is_some()
+    }) {
+        plan.flags.insert(PlanFlags::ORIGIN_REQUEST_POLICY);
+    }
     plan.require_precondition = inputs.http.is_some_and(|http| http.require_precondition);
     if let Some(rules) = plan.response_rules.clone() {
         plan.flags.insert(PlanFlags::RESPONSE_RULES);

@@ -80,6 +80,8 @@ HTTP/3 backend selection is a build-time `qpxd` feature choice. YAML does not se
 - `forward-destination-intelligence-and-trust.yaml`: named destination sets, file-backed feeds, destination-resolution precedence/confidence policy, upstream discovery, and trust profiles.
 
 ### 03-service-publishing (`config/usecases/03-service-publishing`)
+- `reverse-cors-origin.yaml`: route-owned CORS for browser-facing upstream, IPC, local-response, and WebDAV origins.
+- `reverse-browser-security.yaml`: Fetch Metadata, browser response fields, secure cookies, Client Hints, and Reporting API collection.
 - `reverse-load-balance-retry.yaml`: load balancing, route `resilience`, and health-check policy.
 - `reverse-path-rewrite.yaml`: reverse route path rewrite (strip/add prefix).
 - `reverse-advanced-routing.yaml`: reverse route header rewrite + canary + mirroring + regex rewrite.
@@ -213,6 +215,8 @@ cargo build -p qpxd -p qpxf
 - `connection_filter` is a separate early-drop DSL on `edges[]`. It requires `match:` plus `action.type: block`, is limited to transport/TLS metadata such as `src_ip`, `dst_port`, `sni`, `alpn`, `tls_version`, and `tls_fingerprint`, and emits `connection_filter_drop` audit entries when it blocks a connection.
 - `security.destination.defaults` is the shared destination-intelligence arbitration policy. Override it on `edges[]` and `edges[kind=reverse].routes[]` when a scope needs different evidence precedence, conflict handling, or minimum confidence thresholds.
 - `http.guard_profiles` is the reusable lightweight HTTP guard surface. Attach a profile with `edges[].http_guard_profile` or `edges[kind=reverse].routes[].http_guard_profile` to enable smuggling/framing checks and bounded path/query/header/body parsing.
+- Reverse-route CORS lives at `edges[kind=reverse].routes[].http.cors`. qpx answers matching preflights before the target and makes the configured policy authoritative over target response fields. See `reverse-cors-origin.yaml` and [`docs/cors.md`](../docs/cors.md).
+- Browser-origin request and response enforcement lives under `routes[].http.fetch_metadata`, `browser_security`, `cookies`, `reporting_collector`, and `client_certificate`. See [`docs/browser-origin-security.md`](../docs/browser-origin-security.md).
 - Runtime knobs worth calling out explicitly: `runtime.max_h3_streams_per_connection`, `runtime.upstream_http_timeout_ms`, `runtime.upstream_max_idle_connections_per_origin`, `runtime.h2_initial_stream_window_size_bytes`, `runtime.h2_initial_connection_window_size_bytes`, `runtime.max_observed_request_body_bytes`, `runtime.max_observed_response_body_bytes`, `runtime.trace_enabled`, and `runtime.trace_reflect_all_headers`. See `runtime-multicore-scaling.yaml` and `config/qpx.example.yaml`.
 - `forward-trace-debug.yaml` is the dedicated loopback-only sample for TRACE diagnostics. Keep `trace_reflect_all_headers: false` unless you explicitly need full header echo for local troubleshooting.
 - Optional built-in auth supports `auth.users[].ha1` for Digest HA1 preload, and LDAP supports `user_filter`, `group_filter`, and `group_attr`. These require explicit `qpxd` auth features. See `forward-local-auth-basic-digest.yaml` and `forward-ldap-group-policy.yaml`.
@@ -241,4 +245,5 @@ cargo build -p qpxd -p qpxf
 - [`docs/function-executor.md`](../docs/function-executor.md) — `qpxf` and QPX-IPC.
 - [`docs/capture-pipeline.md`](../docs/capture-pipeline.md) — capture exporter, `qpxr`, and `qpxc`.
 - [`docs/http-modules.md`](../docs/http-modules.md) — built-in and custom HTTP modules.
+- [`docs/cors.md`](../docs/cors.md) — reverse-route CORS policy and preflight behavior.
 - [`docs/operations.md`](../docs/operations.md) — reload, upgrade, runtime tuning, and security QA.

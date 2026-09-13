@@ -111,3 +111,36 @@ fn canonical_schema_exposes_streaming_grpc_and_sse_knobs() {
     assert!(route.get("sse").is_some());
     assert!(route.get("streaming_requirement").is_some());
 }
+
+#[test]
+fn canonical_schema_exposes_browser_origin_policies() {
+    let schema = canonical_schema_value();
+    let properties = schema
+        .pointer("/$defs/httpPolicy/properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("HTTP policy properties");
+    for name in [
+        "cors",
+        "client_certificate",
+        "cookies",
+        "fetch_metadata",
+        "browser_security",
+        "reporting_collector",
+    ] {
+        assert!(properties.contains_key(name), "missing {name} schema");
+    }
+    assert_eq!(
+        schema
+            .pointer("/$defs/httpPolicy/properties/client_certificate/properties/max_certificate_bytes/minimum")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        schema
+            .pointer(
+                "/$defs/httpPolicy/properties/reporting_collector/properties/max_reports/minimum"
+            )
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+}

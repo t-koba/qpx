@@ -135,6 +135,87 @@ pub fn canonical_schema_value() -> serde_json::Value {
                             "max_age_seconds": {"type": "integer", "minimum": 1},
                             "include_subdomains": {"type": "boolean"}
                         }
+                    },
+                    "cors": {
+                        "type": "object",
+                        "required": ["allowed_origins", "allowed_methods"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "allowed_origins": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                            "allowed_methods": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                            "allowed_headers": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                            "expose_headers": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                            "allow_credentials": {"type": "boolean"},
+                            "max_age_seconds": {"type": "integer", "minimum": 0},
+                            "allow_private_network": {"type": "boolean"}
+                        }
+                    },
+                    "client_certificate": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "include_chain": {"type": "boolean"},
+                            "reject_inbound": {"type": "boolean"},
+                            "max_certificate_bytes": {"type": "integer", "minimum": 1},
+                            "max_chain_certificates": {"type": "integer", "minimum": 1},
+                            "max_field_bytes": {"type": "integer", "minimum": 1},
+                            "max_total_field_bytes": {"type": "integer", "minimum": 1}
+                        }
+                    },
+                    "cookies": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "require_secure": {"type": "boolean"},
+                            "require_http_only": {"type": "boolean"},
+                            "same_site": {"enum": ["strict", "lax", "none"]},
+                            "require_partitioned": {"type": "boolean"},
+                            "max_field_bytes": {"type": "integer", "minimum": 1}
+                        }
+                    },
+                    "fetch_metadata": {
+                        "type": "object",
+                        "required": ["allowed_sites"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "allowed_sites": {"type": "array", "minItems": 1, "items": {"enum": ["same-origin", "same-site", "cross-site", "none"]}},
+                            "allowed_modes": {"type": "array", "items": {"enum": ["navigate", "same-origin", "cors", "no-cors", "websocket"]}},
+                            "allowed_destinations": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                            "allow_missing": {"type": "boolean"},
+                            "require_user_activation_for_navigation": {"type": "boolean"}
+                        }
+                    },
+                    "browser_security": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "content_security_policy": {"type": "string", "minLength": 1},
+                            "content_security_policy_report_only": {"type": "string", "minLength": 1},
+                            "referrer_policy": {"type": "string", "minLength": 1},
+                            "permissions_policy": {"type": "string", "minLength": 1},
+                            "permissions_policy_report_only": {"type": "string", "minLength": 1},
+                            "cross_origin_opener_policy": {"type": "string", "minLength": 1},
+                            "cross_origin_opener_policy_report_only": {"type": "string", "minLength": 1},
+                            "cross_origin_embedder_policy": {"type": "string", "minLength": 1},
+                            "cross_origin_embedder_policy_report_only": {"type": "string", "minLength": 1},
+                            "cross_origin_resource_policy": {"type": "string", "minLength": 1},
+                            "x_content_type_options": {"type": "string", "minLength": 1},
+                            "origin_agent_cluster": {"type": "string", "minLength": 1},
+                            "clear_site_data": {"type": "string", "minLength": 1},
+                            "reporting_endpoints": {"type": "string", "minLength": 1},
+                            "timing_allow_origin": {"type": "string", "minLength": 1},
+                            "accept_ch": {"type": "string", "minLength": 1},
+                            "critical_ch": {"type": "string", "minLength": 1}
+                        }
+                    },
+                    "reporting_collector": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "max_body_bytes": {"type": "integer", "minimum": 1},
+                            "max_reports": {"type": "integer", "minimum": 1},
+                            "accept_legacy_csp_reports": {"type": "boolean"}
+                        }
                     }
                 }
             },

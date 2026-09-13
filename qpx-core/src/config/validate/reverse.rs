@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 
-use super::super::types::{Config, ReverseRouteTargetConfig, StreamingRequirement};
+use super::super::types::{Config, MatchConfig, ReverseRouteTargetConfig, StreamingRequirement};
 use super::observability::validate_capture_policy;
 use super::rules::{
     has_cache_purge_module, validate_affinity_config, validate_cache_policy,
@@ -365,6 +365,110 @@ pub(super) fn validate_reverse_edge_configs(
                 Some(&route.r#match).and_then(|m| m.identity.as_ref()),
                 &format!("reverse_edge {} route", reverse_edge.name),
             )?;
+            if let Some(cors) = route.http.as_ref().and_then(|http| http.cors.as_ref()) {
+                crate::cors::CorsPolicy::compile(cors).map_err(|error| {
+                    anyhow!(
+                        "reverse_edge {} route has invalid http.cors: {}",
+                        reverse_edge.name,
+                        error
+                    )
+                })?;
+                validate_cors_route_match(&route.r#match, reverse_edge.name.as_str())?;
+            }
+            if let Some(client_certificate) = route
+                .http
+                .as_ref()
+                .and_then(|http| http.client_certificate.as_ref())
+            {
+                if !reverse_has_mtls_identity {
+                    return Err(anyhow!(
+                        "reverse_edge {} route http.client_certificate requires tls.client_ca",
+                        reverse_edge.name
+                    ));
+                }
+                if client_certificate.max_certificate_bytes == 0
+                    || client_certificate.max_chain_certificates == 0
+                    || client_certificate.max_field_bytes == 0
+                    || client_certificate.max_total_field_bytes == 0
+                {
+                    return Err(anyhow!(
+                        "reverse_edge {} route http.client_certificate limits must be >= 1",
+                        reverse_edge.name
+                    ));
+                }
+            }
+            if let Some(cookies) = route.http.as_ref().and_then(|http| http.cookies.as_ref()) {
+                if cookies.max_field_bytes == 0 {
+                    return Err(anyhow!(
+                        "reverse_edge {} route http.cookies.max_field_bytes must be >= 1",
+                        reverse_edge.name
+                    ));
+                }
+                if cookies.require_partitioned && !cookies.require_secure {
+                    return Err(anyhow!(
+                        "reverse_edge {} route http.cookies.require_partitioned requires require_secure",
+                        reverse_edge.name
+                    ));
+                }
+                if matches!(
+                    cookies.same_site,
+                    Some(crate::config::CookieSameSiteConfig::None)
+                ) && !cookies.require_secure
+                {
+                    return Err(anyhow!(
+                        "reverse_edge {} route http.cookies.same_site none requires require_secure",
+                        reverse_edge.name
+                    ));
+                }
+            }
+            if let Some(fetch_metadata) = route
+                .http
+                .as_ref()
+                .and_then(|http| http.fetch_metadata.as_ref())
+            {
+                crate::browser_policy::FetchMetadataPolicy::compile(fetch_metadata).map_err(
+                    |error| {
+                        anyhow!(
+                            "reverse_edge {} route has invalid http.fetch_metadata: {}",
+                            reverse_edge.name,
+                            error
+                        )
+                    },
+                )?;
+            }
+            if let Some(browser_security) = route
+                .http
+                .as_ref()
+                .and_then(|http| http.browser_security.as_ref())
+            {
+                crate::browser_policy::BrowserResponsePolicy::compile(browser_security).map_err(
+                    |error| {
+                        anyhow!(
+                            "reverse_edge {} route has invalid http.browser_security: {}",
+                            reverse_edge.name,
+                            error
+                        )
+                    },
+                )?;
+            }
+            if let Some(collector) = route
+                .http
+                .as_ref()
+                .and_then(|http| http.reporting_collector.as_ref())
+            {
+                if collector.max_body_bytes == 0 || collector.max_reports == 0 {
+                    return Err(anyhow!(
+                        "reverse_edge {} route http.reporting_collector limits must be >= 1",
+                        reverse_edge.name
+                    ));
+                }
+                if !route.target.is_local_response() {
+                    return Err(anyhow!(
+                        "reverse_edge {} route http.reporting_collector requires a local_response target",
+                        reverse_edge.name
+                    ));
+                }
+            }
             validate_policy_context_refs(
                 route.policy_context.as_ref(),
                 &config.security.identity_sources,
@@ -727,6 +831,29 @@ pub(super) fn validate_reverse_edge_configs(
                 "reverse_edge tls_passthrough route",
             )?;
         }
+    }
+    Ok(())
+}
+
+fn validate_cors_route_match(raw: &MatchConfig, edge_name: &str) -> Result<()> {
+    let unsupported = [
+        (!raw.headers.is_empty(), "headers"),
+        (raw.identity.is_some(), "identity"),
+        (!raw.request_size.is_empty(), "request_size"),
+        (!raw.response_status.is_empty(), "response_status"),
+        (!raw.response_size.is_empty(), "response_size"),
+        (raw.tls_fingerprint.is_some(), "tls_fingerprint"),
+        (raw.upstream_cert.is_some(), "upstream_cert"),
+        (raw.rpc.is_some(), "rpc"),
+    ]
+    .into_iter()
+    .find_map(|(present, field)| present.then_some(field));
+    if let Some(field) = unsupported {
+        return Err(anyhow!(
+            "reverse_edge {} CORS route match.{} depends on facts unavailable during preflight",
+            edge_name,
+            field
+        ));
     }
     Ok(())
 }

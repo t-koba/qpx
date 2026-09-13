@@ -27,7 +27,6 @@ tls-rustls = [
 tls-native = ["tls-cert-info"]
 
 tls-cert-info = [
-  "dep:sha2",
   "dep:x509-parser",
 ]
 
@@ -48,13 +47,14 @@ chrono = { workspace = true, optional = true }
 dirs-next = { workspace = true, optional = true }
 http.workspace = true
 libc.workspace = true
+base64.workspace = true
+sha2.workspace = true
 
 # TLS (rustls)
 rustls = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 lru = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
 x509-parser = { workspace = true, optional = true }
 
 # Async runtime

@@ -10,6 +10,7 @@ mod upstream;
 use self::chained::{apply_connect_udp_bandwidth_controls, relay_h3_connect_udp_stream_chained};
 use self::upstream::{UpstreamConnectUdpParams, open_upstream_connect_udp_stream};
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
+use crate::http::protocol::common::too_many_requests_response as too_many_requests;
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::capsule::{
     CapsuleBuffer, decode_quic_varint, encode_datagram_capsule_context_header,
@@ -73,7 +74,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled HTTP/3 CONNECT-UDP execution plan not found"))?;
     let matched_rule_name = matched_rule.as_deref();
-    let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
+    let mut request_limits = state.policy.rate_limiters.collect_plan_with_profile(
         &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
         TransportScope::Http3Datagram,
@@ -138,21 +139,19 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         };
     }
     macro_rules! send_concurrency_limited {
-        () => {
-            send_policy!(
-                finalize_response_with_headers(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name.as_str(),
-                    Response::builder()
-                        .status(StatusCode::TOO_MANY_REQUESTS)
-                        .body(Body::from("too many requests"))?,
-                    response_headers.as_deref(),
-                    false,
-                ),
-                DispatchOutcome::ConcurrencyLimited
-            )
-        };
+        ($retry_after:expr) => {{
+            let retry_after = $retry_after;
+            let mut response = finalize_response_with_headers(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
+                proxy_name.as_str(),
+                too_many_requests(retry_after),
+                response_headers.as_deref(),
+                false,
+            );
+            request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
+            send_policy!(response, DispatchOutcome::ConcurrencyLimited)
+        }};
     }
     let upstream = match crate::forward::request::resolve_upstream_url(
         &action,
@@ -172,10 +171,11 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
     rate_limit_context.upstream = upstream
         .clone()
         .or_else(|| Some(format!("{}:{}", host, port)));
-    let _concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_context) {
+    let concurrency = request_limits.acquire_concurrency_with_retry(&rate_limit_context);
+    let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
-            send_concurrency_limited!().await?;
+            send_concurrency_limited!(concurrency.retry_after).await?;
             return Ok(());
         }
     };

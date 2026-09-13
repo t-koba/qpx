@@ -1,0 +1,54 @@
+state_dir: /tmp/qpx-reverse-browser-security
+edges:
+- kind: reverse
+  name: browser-origin
+  listen: 127.0.0.1:19484
+  routes:
+  - name: browser-reports
+    match:
+      method: [POST]
+      path: [/reports]
+    http:
+      reporting_collector:
+        max_body_bytes: 262144
+        max_reports: 128
+    target:
+      type: local_response
+      response:
+        status: 204
+  - name: browser-application
+    match:
+      method: [GET]
+      path: [/**]
+    http:
+      fetch_metadata:
+        allowed_sites: [same-origin, same-site, none]
+        allowed_modes: [navigate, same-origin, cors]
+        allowed_destinations: [document, empty]
+        allow_missing: false
+        require_user_activation_for_navigation: false
+      browser_security:
+        content_security_policy: "default-src 'self'; object-src 'none'; frame-ancestors 'none'"
+        referrer_policy: strict-origin-when-cross-origin
+        permissions_policy: "camera=(), geolocation=(), microphone=()"
+        cross_origin_opener_policy: same-origin
+        cross_origin_embedder_policy: require-corp
+        cross_origin_resource_policy: same-origin
+        x_content_type_options: nosniff
+        origin_agent_cluster: "?1"
+        reporting_endpoints: 'default="/reports"'
+        timing_allow_origin: https://app.example
+        accept_ch: Sec-CH-UA, Sec-CH-UA-Mobile
+        critical_ch: Sec-CH-UA-Mobile
+      cookies:
+        require_secure: true
+        require_http_only: true
+        same_site: lax
+        require_partitioned: false
+        max_field_bytes: 16384
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: text/html
+        body: '<!doctype html><meta charset="utf-8"><title>qpx browser origin</title>'

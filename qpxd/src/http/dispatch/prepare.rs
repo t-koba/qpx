@@ -5,7 +5,8 @@ use crate::http::body::size::{is_observed_body_limit_exceeded, limit_request_bod
 use crate::http::policy::guard::CompiledHttpGuardProfile;
 use crate::http::policy::response_policy::ResponseRuleCandidates;
 use crate::policy_context::{
-    EffectivePolicyContext, ResolvedIdentity, resolve_identity, sanitize_headers_for_policy,
+    EffectivePolicyContext, IdentityRequestContext, ResolvedIdentity,
+    authentication_response_for_error, resolve_identity_for_request, sanitize_headers_for_policy,
 };
 use anyhow::Result;
 use hyper::{Method, Request, Response};
@@ -31,6 +32,7 @@ pub(crate) struct DispatchRequestPrepareInput<'a> {
     pub(crate) state: &'a Arc<crate::runtime::RuntimeState>,
     pub(crate) effective_policy: &'a EffectivePolicyContext,
     pub(crate) remote_ip: IpAddr,
+    pub(crate) request_scheme: &'a str,
 }
 
 pub(crate) struct PreparedDispatchRequest {
@@ -102,14 +104,35 @@ pub(crate) async fn prepare_dispatch_request(
         input.remote_ip,
         &mut sanitized_headers,
     )?;
-    let identity = resolve_identity(
+    let request_context = IdentityRequestContext::from_request_parts(
+        req.method().as_str(),
+        req.uri(),
+        &sanitized_headers,
+        input.request_scheme,
+    );
+    let identity = match resolve_identity_for_request(
         input.state,
         input.effective_policy,
         input.remote_ip,
         Some(&sanitized_headers),
         None,
+        request_context.as_ref(),
     )
-    .await?;
+    .await
+    {
+        Ok(identity) => identity,
+        Err(error) => {
+            if let Some(response) = authentication_response_for_error(
+                input.request_method,
+                input.request_version,
+                input.proxy_name,
+                &error,
+            ) {
+                return Ok(Err(response?));
+            }
+            return Err(error);
+        }
+    };
     let request_rpc = if observation_plan.needs_rpc {
         Some(crate::http::rpc::inspect_request(&req).await)
     } else {

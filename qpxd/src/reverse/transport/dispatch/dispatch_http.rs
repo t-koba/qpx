@@ -15,7 +15,7 @@ use super::{
 };
 use crate::http::dispatch::{
     DispatchCacheWriteInput, DispatchOutcome, annotate_dispatch_response,
-    concurrency_limited_response_for_parts, finalize_dispatch_stale_if_error_response,
+    concurrency_limited_response_for_parts_with_limits, finalize_dispatch_stale_if_error_response,
     write_dispatch_cache_result,
 };
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
@@ -84,15 +84,18 @@ pub(super) async fn dispatch_reverse_http_route(
             conn.remote_addr,
             upstream_origin.upstream.as_str(),
         );
-        let Some(_concurrency_permits) = acquire_reverse_upstream_concurrency(
+        let concurrency = acquire_reverse_upstream_concurrency(
             request_limits,
             request_limit_ctx,
             selected_upstream.as_ref(),
-        ) else {
-            let response = concurrency_limited_response_for_parts(
+        );
+        let Some(_concurrency_permits) = concurrency.permits else {
+            let response = concurrency_limited_response_for_parts_with_limits(
                 request_method,
                 request_version,
                 proxy_name,
+                request_limits,
+                concurrency.retry_after,
                 audit_ctx.clone(),
             );
             return Ok(empty_interim_response(response));

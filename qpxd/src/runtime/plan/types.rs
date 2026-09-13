@@ -398,6 +398,8 @@ impl PlanFlags {
     pub const CAPTURE_BODY: Self = Self(1 << 18);
     pub const FROZEN_REQUEST: Self = Self(1 << 19);
     pub const TLS_FINGERPRINT: Self = Self(1 << 20);
+    pub const CORS: Self = Self(1 << 21);
+    pub const ORIGIN_REQUEST_POLICY: Self = Self(1 << 22);
 
     pub fn empty() -> Self {
         Self(0)
@@ -433,6 +435,12 @@ pub struct ExecutionPlan {
     pub(crate) forwarded: Option<Arc<CompiledForwardedPolicy>>,
     pub(crate) api_metadata: Option<Arc<qpx_http::api_metadata::PreparedApiMetadata>>,
     pub(crate) hsts: Option<qpx_http::hsts::HstsPolicy>,
+    pub(crate) cors: Option<Arc<qpx_core::cors::CorsPolicy>>,
+    pub(crate) client_certificate: qpx_http::client_cert::ClientCertPolicy,
+    pub(crate) cookies: Option<qpx_http::cookie_policy::CookieSecurityPolicy>,
+    pub(crate) fetch_metadata: Option<Arc<qpx_core::browser_policy::FetchMetadataPolicy>>,
+    pub(crate) browser_security: Option<Arc<qpx_core::browser_policy::BrowserResponsePolicy>>,
+    pub(crate) reporting_collector: Option<qpx_core::config::ReportingCollectorConfig>,
     pub(crate) require_precondition: bool,
     pub(crate) guard: Option<Arc<CompiledHttpGuardProfile>>,
     pub(crate) destination_resolution: Option<DestinationResolutionOverrideConfig>,
@@ -502,6 +510,12 @@ impl ExecutionPlan {
             forwarded: None,
             api_metadata: None,
             hsts: None,
+            cors: None,
+            client_certificate: qpx_http::client_cert::ClientCertPolicy::disabled(),
+            cookies: None,
+            fetch_metadata: None,
+            browser_security: None,
+            reporting_collector: None,
             require_precondition: false,
             guard: None,
             destination_resolution: None,

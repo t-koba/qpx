@@ -5,7 +5,7 @@ use super::ForwardQpxHandler;
 use super::connect_upstream::{
     OpenUpstreamQpxExtendedConnectInput, open_upstream_qpx_extended_connect_stream,
 };
-use super::response::send_qpx_static_response;
+use super::response::{send_qpx_response_stream, send_qpx_static_response};
 use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
@@ -20,9 +20,9 @@ use crate::http::protocol::common::{
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
-    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
-    enforce_decision_service, prepare_decision_service_allow, resolve_identity,
-    sanitize_headers_for_policy,
+    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
+    authentication_response_for_error, enforce_decision_service, prepare_decision_service_allow,
+    resolve_identity_for_request, sanitize_headers_for_policy,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
@@ -80,7 +80,18 @@ pub(super) async fn handle_qpx_webtransport_connect(
         conn.remote_addr.ip(),
         &mut sanitized_headers,
     )?;
-    let mut identity = resolve_identity(
+    let auth_uri = format!(
+        "{}://{}{}",
+        req_head.uri().scheme_str().unwrap_or("https"),
+        req_authority,
+        req_head
+            .uri()
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/"),
+    );
+    let request_context = IdentityRequestContext::new(req_head.method().as_str(), auth_uri.clone());
+    let mut identity = match resolve_identity_for_request(
         &state,
         &effective_policy,
         conn.remote_addr.ip(),
@@ -88,8 +99,31 @@ pub(super) async fn handle_qpx_webtransport_connect(
         conn.peer_certificates
             .as_deref()
             .map(|certs| certs.as_slice()),
+        Some(&request_context),
     )
-    .await?;
+    .await
+    {
+        Ok(identity) => identity,
+        Err(error) => {
+            if let Some(response) = authentication_response_for_error(
+                req_head.method(),
+                http::Version::HTTP_3,
+                proxy_name.as_str(),
+                &error,
+            ) {
+                send_qpx_response_stream(
+                    &mut req_stream,
+                    response?,
+                    req_head.method(),
+                    max_h3_response_body_bytes,
+                    Duration::from_secs(1),
+                )
+                .await?;
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
 
     let destination = state.classify_destination(
         &crate::destination::DestinationInputs {
@@ -107,16 +141,6 @@ pub(super) async fn handle_qpx_webtransport_connect(
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str().to_string());
-    let auth_uri = format!(
-        "{}://{}{}",
-        req_head.uri().scheme_str().unwrap_or("https"),
-        req_authority,
-        req_head
-            .uri()
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/")
-    );
     let policy_responder = WebTransportPolicyResponder {
         state: &state,
         listener_name: handler.listener_name.as_ref(),
@@ -144,15 +168,18 @@ pub(super) async fn handle_qpx_webtransport_connect(
         ($response:expr, $outcome:expr, $log_context:expr) => {{ return_with_policy!($response, $outcome, None, None, $log_context) }};
     }
     macro_rules! return_rate_limited {
-        ($retry_after:expr, $matched_rule:expr, $decision_service_policy_id:expr, $log_context:expr) => {{
+        ($retry_after:expr, $limits:expr, $matched_rule:expr, $decision_service_policy_id:expr, $log_context:expr) => {{
+            let retry_after = $retry_after;
+            let mut response = finalize_response_for_request(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
+                proxy_name.as_str(),
+                too_many_requests(retry_after),
+                false,
+            );
+            $limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
             return_with_policy!(
-                finalize_response_for_request(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name.as_str(),
-                    too_many_requests($retry_after),
-                    false,
-                ),
+                response,
                 DispatchOutcome::RateLimited,
                 $matched_rule,
                 $decision_service_policy_id,
@@ -247,7 +274,13 @@ pub(super) async fn handle_qpx_webtransport_connect(
     )?;
     if let Some(retry_after) = retry_after {
         let log_context = identity.to_log_context(matched_rule_name, None, None);
-        return_rate_limited!(Some(retry_after), matched_rule_name, None, &log_context);
+        return_rate_limited!(
+            Some(retry_after),
+            &request_limits,
+            matched_rule_name,
+            None,
+            &log_context
+        );
     }
 
     let decision_service = enforce_decision_service(
@@ -295,6 +328,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
             )? {
                 return_rate_limited!(
                     Some(retry_after),
+                    &request_limits,
                     matched_rule_name,
                     decision_service_policy_id.as_deref(),
                     &log_context
@@ -380,11 +414,13 @@ pub(super) async fn handle_qpx_webtransport_connect(
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
     });
-    let _concurrency_permits = match request_limits.acquire_concurrency(&request_limit_ctx) {
+    let concurrency = request_limits.acquire_concurrency_with_retry(&request_limit_ctx);
+    let _concurrency_permits = match concurrency.permits {
         Some(permits) => Some(permits),
         None => {
             return_rate_limited!(
-                None,
+                concurrency.retry_after,
+                &request_limits,
                 matched_rule_name,
                 decision_service_policy_id.as_deref(),
                 &log_context

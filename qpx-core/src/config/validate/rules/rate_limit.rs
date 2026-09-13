@@ -4,6 +4,8 @@ use crate::config::types::{RateLimitConfig, RateLimitQuotaConfig};
 
 use super::{Validate, validate_optional};
 
+const MAX_STRUCTURED_INTEGER: u64 = 999_999_999_999_999;
+
 impl Validate for RateLimitConfig {
     fn validate(&self, context: &str) -> Result<()> {
         validate_rate_limit_fields(self, context)
@@ -93,6 +95,33 @@ fn validate_rate_limit_fields(rate: &RateLimitConfig, context: &str) -> Result<(
             "{context} rate_limit.enabled requires at least one of rate_limit.requests, rate_limit.traffic, or rate_limit.sessions"
         ));
     }
+    if rate.experimental_rate_limit_fields {
+        if !rate.enabled {
+            return Err(anyhow!(
+                "{context} rate_limit.experimental_rate_limit_fields requires rate_limit.enabled"
+            ));
+        }
+        let has_fixed_quota = rate
+            .requests
+            .as_ref()
+            .and_then(|requests| requests.quota.as_ref())
+            .is_some()
+            || rate
+                .traffic
+                .as_ref()
+                .and_then(|traffic| traffic.quota_bytes.as_ref())
+                .is_some()
+            || rate
+                .sessions
+                .as_ref()
+                .and_then(|sessions| sessions.quota_sessions.as_ref())
+                .is_some();
+        if !has_fixed_quota {
+            return Err(anyhow!(
+                "{context} rate_limit.experimental_rate_limit_fields requires at least one fixed quota"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -106,11 +135,24 @@ fn validate_rate_limit_quota_config(
     if quota.interval_secs == 0 {
         return Err(anyhow!("{context}.interval_secs must be >= 1"));
     }
+    if quota.interval_secs > MAX_STRUCTURED_INTEGER {
+        return Err(anyhow!(
+            "{context}.interval_secs exceeds the RateLimit Structured Fields range"
+        ));
+    }
     if matches!(quota.amount, Some(0)) {
         return Err(anyhow!("{context}.amount must be >= 1"));
     }
     if quota.amount.is_none() {
         return Err(anyhow!("{context}.amount must be set"));
+    }
+    if quota
+        .amount
+        .is_some_and(|amount| amount > MAX_STRUCTURED_INTEGER)
+    {
+        return Err(anyhow!(
+            "{context}.amount exceeds the RateLimit Structured Fields range"
+        ));
     }
     Ok(())
 }

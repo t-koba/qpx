@@ -1,7 +1,8 @@
 use super::super::ConnectTarget;
 use super::types::*;
 use crate::http::dispatch::{
-    DispatchAuditInput, ProxyKind, build_dispatch_audit_context, rate_limit_response_for_parts,
+    DispatchAuditInput, ProxyKind, build_dispatch_audit_context,
+    rate_limit_response_for_parts_with_limits,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use anyhow::Result;
@@ -81,11 +82,12 @@ pub(super) fn build_transparent_prepared(
         1,
     )?;
     if let Some(retry_after) = retry_after {
-        let response = rate_limit_response_for_parts(
+        let response = rate_limit_response_for_parts_with_limits(
             req.method(),
             req.version(),
             proxy_name,
             Some(retry_after),
+            &request_limits,
             build_dispatch_audit_context(DispatchAuditInput {
                 state: &state,
                 kind: ProxyKind::Transparent,

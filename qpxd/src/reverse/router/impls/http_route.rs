@@ -217,6 +217,7 @@ impl HttpRoute {
             && self.plan.api_metadata.is_none()
             && self.plan.hsts.is_none()
             && self.plan.forwarded.is_none()
+            && self.plan.reporting_collector.is_none()
             && self
                 .plan
                 .rate_limits

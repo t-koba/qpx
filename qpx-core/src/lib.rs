@@ -10,8 +10,14 @@
 #![recursion_limit = "256"]
 #![warn(missing_docs)]
 
+/// Typed browser-facing policy parsing and response application.
+pub mod browser_policy;
 /// Canonical configuration types, defaults, merge logic, and validation.
 pub mod config;
+/// Cross-Origin Resource Sharing policy compilation and request semantics.
+pub mod cors;
+/// Demonstrating Proof-of-Possession validation primitives.
+pub mod dpop;
 /// Environment-variable substitution helpers for configuration loading.
 pub mod envsubst;
 /// Shared exporter configuration and queue policy types.

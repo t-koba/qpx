@@ -8,6 +8,7 @@ mod signed_assertion;
 mod util;
 
 pub(crate) use audit::{AuditRecord, emit_audit_log};
+pub(crate) use bearer::authentication_response_for_error;
 pub(crate) use decision_service::{
     CompiledDecisionService, DecisionServiceAllow, DecisionServiceDeny, DecisionServiceEnforcement,
     DecisionServiceInput, DecisionServiceMode, enforce_decision_service, merge_header_controls,
@@ -16,8 +17,9 @@ pub(crate) use decision_service::{
 #[cfg(feature = "http3")]
 pub(crate) use identity::resolve_identity_local;
 pub(crate) use identity::{
-    CompiledIdentitySource, EffectivePolicyContext, ResolvedIdentity, resolve_identity,
-    sanitize_headers_for_policy, strip_untrusted_identity_headers,
+    CompiledIdentitySource, EffectivePolicyContext, IdentityRequestContext, ResolvedIdentity,
+    resolve_identity, resolve_identity_for_request, sanitize_headers_for_policy,
+    strip_untrusted_identity_headers,
 };
 
 pub(crate) fn attach_log_context(

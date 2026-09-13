@@ -1,0 +1,118 @@
+state_dir: "${QPX_STATE_DIR}"
+edges:
+- kind: reverse
+  name: browser-page-allowed
+  listen: 127.0.0.1:19480
+  routes:
+  - match:
+      host: [127.0.0.1]
+      path: [/**]
+    http:
+      browser_security:
+        content_security_policy: "default-src 'self'; script-src 'unsafe-inline'; connect-src http://127.0.0.1:19481"
+        referrer_policy: no-referrer
+        permissions_policy: "camera=(), geolocation=(), microphone=()"
+        cross_origin_opener_policy: same-origin
+        x_content_type_options: nosniff
+        origin_agent_cluster: "?1"
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: text/html
+        body: |-
+          <!doctype html><meta charset="utf-8"><title>qpx browser origin test</title>
+          <body>RUNNING<script>
+          (async () => {
+            try {
+              const response = await fetch("http://127.0.0.1:19481/api/check", {
+                method: "PUT",
+                headers: {"Content-Type": "application/json", "X-Request-Id": "browser-e2e"},
+                body: "{}"
+              });
+              const payload = await response.json();
+              document.body.textContent = response.ok && payload.status === "ok" ? "CORS_ALLOWED_PASS" : "CORS_ALLOWED_FAIL";
+            } catch (error) {
+              document.body.textContent = "CORS_ALLOWED_FAIL:" + error.name;
+            }
+          })();
+          </script></body>
+- kind: reverse
+  name: browser-api
+  listen: 127.0.0.1:19481
+  routes:
+  - match:
+      host: [127.0.0.1]
+      method: [POST]
+      path: [/reports]
+    http:
+      reporting_collector:
+        max_body_bytes: 65536
+        max_reports: 16
+    target:
+      type: local_response
+      response:
+        status: 204
+  - match:
+      host: [127.0.0.1]
+      method: [PUT]
+      path: [/api/**]
+    http:
+      cors:
+        allowed_origins: [http://127.0.0.1:19480]
+        allowed_methods: [PUT]
+        allowed_headers: [content-type, x-request-id]
+        expose_headers: [etag]
+        max_age_seconds: 600
+      fetch_metadata:
+        allowed_sites: [same-origin, same-site]
+        allowed_modes: [cors]
+        allowed_destinations: [empty]
+      browser_security:
+        cross_origin_resource_policy: same-site
+        x_content_type_options: nosniff
+        reporting_endpoints: 'default="/reports"'
+        timing_allow_origin: http://127.0.0.1:19480
+        accept_ch: Sec-CH-UA
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: application/json
+        body: '{"status":"ok"}'
+- kind: reverse
+  name: browser-page-denied
+  listen: 127.0.0.1:19482
+  routes:
+  - match:
+      host: [127.0.0.1]
+      path: [/**]
+    http:
+      browser_security:
+        content_security_policy: "default-src 'self'; script-src 'unsafe-inline'; connect-src http://127.0.0.1:19481"
+        referrer_policy: no-referrer
+        permissions_policy: "camera=(), geolocation=(), microphone=()"
+        cross_origin_opener_policy: same-origin
+        x_content_type_options: nosniff
+        origin_agent_cluster: "?1"
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: text/html
+        body: |-
+          <!doctype html><meta charset="utf-8"><title>qpx browser origin denial test</title>
+          <body>RUNNING<script>
+          (async () => {
+            try {
+              await fetch("http://127.0.0.1:19481/api/check", {
+                method: "PUT",
+                headers: {"X-Request-Id": "browser-e2e-denied"},
+                body: "{}"
+              });
+              document.body.textContent = "CORS_DENIED_FAIL";
+            } catch (error) {
+              document.body.textContent = error.name === "TypeError" ? "CORS_DENIED_PASS" : "CORS_DENIED_FAIL:" + error.name;
+            }
+          })();
+          </script></body>

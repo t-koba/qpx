@@ -12,7 +12,8 @@ use crate::http::dispatch::{
     DispatchGuardInput, DispatchOutcome, DispatchRequestPrepareInput, PreparedDispatchRequest,
     ProxyKind, annotate_dispatch_response, annotated_local_response,
     apply_decision_service_http_access, build_dispatch_audit_context, evaluate_http_guard,
-    prepare_dispatch_request, rate_limit_response_for_parts, request_body_too_large_response,
+    prepare_dispatch_request, rate_limit_response_for_parts_with_limits,
+    request_body_too_large_response,
 };
 use crate::http::pipeline::PolicyStage;
 use crate::http::policy::response_policy::response_request_obs;
@@ -131,6 +132,7 @@ async fn execute_mitm_request(
         state: &state,
         effective_policy: &effective_policy,
         remote_ip: route.src_addr.ip(),
+        request_scheme: "https",
     })
     .await?
     {
@@ -444,11 +446,12 @@ async fn execute_mitm_request(
         }
     }
     if let Some(retry_after) = retry_after {
-        let response = rate_limit_response_for_parts(
+        let response = rate_limit_response_for_parts_with_limits(
             req.method(),
             req.version(),
             proxy_name,
             Some(retry_after),
+            &request_limits,
             audit.clone(),
         );
         return Ok(crate::http::capture::stream::limit_response_body_for_plan(

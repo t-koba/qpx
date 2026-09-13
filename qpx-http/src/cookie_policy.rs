@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use http::header::{HeaderMap, HeaderValue, SET_COOKIE};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,65 @@ pub struct SetCookie {
     pub secure: bool,
     pub http_only: bool,
     pub same_site: Option<SameSite>,
+    pub partitioned: bool,
+    pub extensions: Vec<CookieAttribute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CookieAttribute {
+    pub name: String,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CookieSecurityPolicy {
+    pub require_secure: bool,
+    pub require_http_only: bool,
+    pub same_site: Option<SameSite>,
+    pub require_partitioned: bool,
+    pub max_field_bytes: usize,
+}
+
+impl CookieSecurityPolicy {
+    pub fn apply_response(&self, headers: &mut HeaderMap, secure_transport: bool) -> Result<()> {
+        if headers.get_all(SET_COOKIE).iter().next().is_none() {
+            return Ok(());
+        }
+        if (self.require_secure || self.require_partitioned) && !secure_transport {
+            return Err(anyhow!(
+                "secure Set-Cookie policy cannot be applied on an insecure origin"
+            ));
+        }
+        let values = headers
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|value| {
+                if value.as_bytes().len() > self.max_field_bytes {
+                    return Err(anyhow!("Set-Cookie field exceeds configured limit"));
+                }
+                let raw = value
+                    .to_str()
+                    .map_err(|_| anyhow!("Set-Cookie field is not ASCII"))?;
+                let mut cookie = SetCookie::parse(raw)?;
+                cookie.secure |= self.require_secure || self.require_partitioned;
+                cookie.http_only |= self.require_http_only;
+                if let Some(same_site) = self.same_site {
+                    cookie.same_site = Some(same_site);
+                }
+                cookie.partitioned |= self.require_partitioned;
+                HeaderValue::from_str(&cookie.serialize()?)
+                    .map_err(|_| anyhow!("serialized Set-Cookie field is invalid"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if values.is_empty() {
+            return Ok(());
+        }
+        headers.remove(SET_COOKIE);
+        for value in values {
+            headers.append(SET_COOKIE, value);
+        }
+        Ok(())
+    }
 }
 
 impl SetCookie {
@@ -41,6 +101,8 @@ impl SetCookie {
             secure: false,
             http_only: false,
             same_site: None,
+            partitioned: false,
+            extensions: Vec::new(),
         };
         let mut seen = HashSet::new();
         for attribute in parts {
@@ -99,7 +161,14 @@ impl SetCookie {
                         },
                     );
                 }
-                _ => return Err(anyhow!("unsupported Set-Cookie attribute: {name}")),
+                "partitioned" if value.is_none() => cookie.partitioned = true,
+                _ => {
+                    validate_extension_attribute(name, value)?;
+                    cookie.extensions.push(CookieAttribute {
+                        name: name.to_string(),
+                        value: value.map(str::to_string),
+                    });
+                }
             }
         }
         cookie.validate()?;
@@ -121,6 +190,12 @@ impl SetCookie {
         }
         if self.same_site == Some(SameSite::None) && !self.secure {
             return Err(anyhow!("SameSite=None cookies require Secure"));
+        }
+        if self.partitioned && !self.secure {
+            return Err(anyhow!("Partitioned cookies require Secure"));
+        }
+        for extension in &self.extensions {
+            validate_extension_attribute(&extension.name, extension.value.as_deref())?;
         }
         Ok(())
     }
@@ -158,8 +233,37 @@ impl SetCookie {
                 SameSite::None => "None",
             });
         }
+        if self.partitioned {
+            output.push_str("; Partitioned");
+        }
+        for extension in &self.extensions {
+            output.push_str("; ");
+            output.push_str(&extension.name);
+            if let Some(value) = extension.value.as_deref() {
+                output.push('=');
+                output.push_str(value);
+            }
+        }
         Ok(output)
     }
+}
+
+fn validate_extension_attribute(name: &str, value: Option<&str>) -> Result<()> {
+    if name.is_empty()
+        || name
+            .bytes()
+            .any(|byte| !byte.is_ascii_graphic() || matches!(byte, b'=' | b';'))
+    {
+        return Err(anyhow!("invalid Set-Cookie extension attribute name"));
+    }
+    if value.is_some_and(|value| {
+        value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b';')
+    }) {
+        return Err(anyhow!("invalid Set-Cookie extension attribute value"));
+    }
+    Ok(())
 }
 
 pub fn parse_cookie_header(value: &str) -> Result<Vec<CookiePair>> {
@@ -256,5 +360,78 @@ mod tests {
     fn rejects_unsafe_cookie_prefix_configuration() {
         assert!(SetCookie::parse("__Host-session=abc; Path=/").is_err());
         assert!(SetCookie::parse("sid=abc; SameSite=None").is_err());
+        assert!(SetCookie::parse("sid=abc; Partitioned").is_err());
+    }
+
+    #[test]
+    fn set_cookie_preserves_partitioned_and_extension_attributes() {
+        let raw = "sid=abc; Secure; Partitioned; Priority=High; SameParty";
+        let cookie = SetCookie::parse(raw).expect("modern Set-Cookie");
+        assert!(cookie.partitioned);
+        assert_eq!(cookie.extensions.len(), 2);
+        assert_eq!(cookie.serialize().expect("serialized cookie"), raw);
+    }
+
+    #[test]
+    fn rejects_invalid_extension_attributes() {
+        assert!(SetCookie::parse("sid=abc; Bad=one\r\ntwo").is_err());
+    }
+
+    #[test]
+    fn response_policy_hardens_every_set_cookie_field() {
+        let mut headers = HeaderMap::new();
+        headers.append(SET_COOKIE, HeaderValue::from_static("a=1"));
+        headers.append(SET_COOKIE, HeaderValue::from_static("b=2; Priority=High"));
+        CookieSecurityPolicy {
+            require_secure: true,
+            require_http_only: true,
+            same_site: Some(SameSite::Lax),
+            require_partitioned: false,
+            max_field_bytes: 4096,
+        }
+        .apply_response(&mut headers, true)
+        .expect("cookie hardening");
+        let values = headers
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().expect("Set-Cookie"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            [
+                "a=1; Secure; HttpOnly; SameSite=Lax",
+                "b=2; Secure; HttpOnly; SameSite=Lax; Priority=High"
+            ]
+        );
+    }
+
+    #[test]
+    fn response_policy_fails_closed_on_insecure_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(SET_COOKIE, HeaderValue::from_static("a=1"));
+        let error = CookieSecurityPolicy {
+            require_secure: true,
+            require_http_only: false,
+            same_site: None,
+            require_partitioned: false,
+            max_field_bytes: 4096,
+        }
+        .apply_response(&mut headers, false)
+        .expect_err("insecure origin must fail");
+        assert!(error.to_string().contains("insecure origin"));
+    }
+
+    #[test]
+    fn response_policy_allows_insecure_response_without_cookies() {
+        let mut headers = HeaderMap::new();
+        CookieSecurityPolicy {
+            require_secure: true,
+            require_http_only: true,
+            same_site: Some(SameSite::Strict),
+            require_partitioned: false,
+            max_field_bytes: 4096,
+        }
+        .apply_response(&mut headers, false)
+        .expect("a response without Set-Cookie must not require TLS");
     }
 }

@@ -42,6 +42,7 @@ tokio-util.workspace = true
 thiserror.workspace = true
 metrics.workspace = true
 h2.workspace = true
+x509-parser.workspace = true
 rustls = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 native-tls = { workspace = true, optional = true }

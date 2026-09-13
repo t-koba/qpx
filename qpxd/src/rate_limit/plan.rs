@@ -12,6 +12,33 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Debug, Clone)]
+pub(crate) struct RateLimitPolicy {
+    pub(crate) name: &'static str,
+    pub(crate) quota: u64,
+    pub(crate) window_seconds: u64,
+    pub(crate) quota_unit: Option<&'static str>,
+    limiter: Arc<QuotaLimiter>,
+}
+
+impl RateLimitPolicy {
+    fn new(
+        name: &'static str,
+        quota: u64,
+        window_seconds: u64,
+        quota_unit: Option<&'static str>,
+        limiter: Arc<QuotaLimiter>,
+    ) -> Self {
+        Self {
+            name,
+            quota,
+            window_seconds,
+            quota_unit,
+            limiter,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RateLimitSet {
     apply_to: Arc<[TransportScope]>,
@@ -22,6 +49,7 @@ pub(crate) struct RateLimitSet {
     pub(crate) request_quota: Option<Arc<QuotaLimiter>>,
     pub(crate) byte_quota: Option<Arc<QuotaLimiter>>,
     pub(crate) session_quota: Option<Arc<QuotaLimiter>>,
+    rate_limit_policies: Arc<[RateLimitPolicy]>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -59,6 +87,8 @@ pub(crate) struct AppliedRateLimits {
     pub(crate) request_quota_limiters: SmallVec<[Arc<QuotaLimiter>; 2]>,
     pub(crate) byte_quota_limiters: SmallVec<[Arc<QuotaLimiter>; 2]>,
     pub(crate) session_quota_limiters: SmallVec<[Arc<QuotaLimiter>; 2]>,
+    pub(crate) rate_limit_policies: SmallVec<[RateLimitPolicy; 3]>,
+    pub(crate) rejected_rate_limit_policies: SmallVec<[usize; 3]>,
 }
 
 impl AppliedRateLimits {
@@ -70,12 +100,19 @@ impl AppliedRateLimits {
             && self.request_quota_limiters.is_empty()
             && self.byte_quota_limiters.is_empty()
             && self.session_quota_limiters.is_empty()
+            && self.rate_limit_policies.is_empty()
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct ConcurrencyPermits {
     _permits: Vec<ConcurrencyPermit>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ConcurrencyAcquire {
+    pub(crate) permits: Option<ConcurrencyPermits>,
+    pub(crate) retry_after: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -196,6 +233,15 @@ impl AppliedRateLimits {
             .extend(other.byte_quota_limiters.iter().cloned());
         self.session_quota_limiters
             .extend(other.session_quota_limiters.iter().cloned());
+        let policy_offset = self.rate_limit_policies.len();
+        self.rate_limit_policies
+            .extend(other.rate_limit_policies.iter().cloned());
+        self.rejected_rate_limit_policies.extend(
+            other
+                .rejected_rate_limit_policies
+                .iter()
+                .map(|index| policy_offset + index),
+        );
     }
 
     pub(crate) fn extend_set(&mut self, set: &RateLimitSet, scope: TransportScope) {
@@ -220,6 +266,57 @@ impl AppliedRateLimits {
         if let Some(limiter) = set.session_quota.as_ref() {
             self.session_quota_limiters.push(limiter.clone());
         }
+        self.rate_limit_policies
+            .extend(set.rate_limit_policies.iter().cloned());
+    }
+
+    pub(crate) fn apply_rate_limit_fields(
+        &self,
+        headers: &mut http::HeaderMap,
+        retry_after: Option<Duration>,
+    ) {
+        if self.rate_limit_policies.is_empty() {
+            return;
+        }
+
+        let policy_header = http::HeaderName::from_static("rate-limit-policy");
+        let current_header = http::HeaderName::from_static("ratelimit");
+        headers.remove(&policy_header);
+        headers.remove(&current_header);
+
+        for policy in &self.rate_limit_policies {
+            let value = qpx_http::rate_limit_fields::RateLimitPolicyField {
+                name: policy.name.to_string(),
+                quota: policy.quota,
+                window_seconds: policy.window_seconds,
+                quota_unit: policy.quota_unit.map(str::to_string),
+                partition_key: None,
+            }
+            .to_header_value()
+            .expect("validated RateLimit policy must serialize");
+            headers.append(policy_header.clone(), value);
+        }
+
+        for index in &self.rejected_rate_limit_policies {
+            let policy = self
+                .rate_limit_policies
+                .get(*index)
+                .expect("rate limit rejection index must reference a policy");
+            let value = qpx_http::rate_limit_fields::RateLimitField {
+                name: policy.name.to_string(),
+                remaining: 0,
+                reset_seconds: retry_after.map(|retry_after| retry_after.as_secs().max(1)),
+                partition_key: None,
+            }
+            .to_header_value()
+            .expect("validated RateLimit service limit must serialize");
+            headers.append(current_header.clone(), value);
+        }
+
+        headers.insert(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_static("private, no-store"),
+        );
     }
 
     pub(crate) fn has_concurrency_controls(&self) -> bool {
@@ -227,11 +324,12 @@ impl AppliedRateLimits {
     }
 
     pub(crate) fn try_acquire_request(
-        &self,
+        &mut self,
         ctx: &RateLimitContext,
         cost: u64,
     ) -> Option<Duration> {
         let mut retry_after = Duration::ZERO;
+        self.rejected_rate_limit_policies.clear();
         for limiter in &self.request_limiters {
             if let Some(delay) = limiter.try_acquire_with_context(ctx, cost) {
                 retry_after = retry_after.max(delay);
@@ -240,6 +338,13 @@ impl AppliedRateLimits {
         for limiter in &self.request_quota_limiters {
             if let Some(delay) = limiter.try_take_requests_with_context(ctx, cost) {
                 retry_after = retry_after.max(delay);
+                if let Some(index) = self
+                    .rate_limit_policies
+                    .iter()
+                    .position(|policy| Arc::ptr_eq(&policy.limiter, limiter))
+                {
+                    self.rejected_rate_limit_policies.push(index);
+                }
             }
         }
         (!retry_after.is_zero()).then_some(retry_after)
@@ -255,6 +360,49 @@ impl AppliedRateLimits {
             quota.try_take_requests_with_context(ctx, 1)?;
         }
         Some(ConcurrencyPermits { _permits: permits })
+    }
+
+    pub(crate) fn acquire_concurrency_with_retry(
+        &mut self,
+        ctx: &RateLimitContext,
+    ) -> ConcurrencyAcquire {
+        let mut permits = Vec::with_capacity(self.concurrency_limiters.len());
+        for limiter in &self.concurrency_limiters {
+            let Some(permit) = limiter.try_acquire_with_context(ctx) else {
+                return ConcurrencyAcquire {
+                    permits: None,
+                    retry_after: None,
+                };
+            };
+            permits.push(permit);
+        }
+
+        let session_quota_limiters = self.session_quota_limiters.clone();
+        for quota in session_quota_limiters {
+            if let Some(delay) = quota.try_take_requests_with_context(ctx, 1) {
+                self.mark_rejected_rate_limit_policy(&quota);
+                return ConcurrencyAcquire {
+                    permits: None,
+                    retry_after: Some(delay),
+                };
+            }
+        }
+
+        ConcurrencyAcquire {
+            permits: Some(ConcurrencyPermits { _permits: permits }),
+            retry_after: None,
+        }
+    }
+
+    fn mark_rejected_rate_limit_policy(&mut self, limiter: &Arc<QuotaLimiter>) {
+        if let Some(index) = self
+            .rate_limit_policies
+            .iter()
+            .position(|policy| Arc::ptr_eq(&policy.limiter, limiter))
+            && !self.rejected_rate_limit_policies.contains(&index)
+        {
+            self.rejected_rate_limit_policies.push(index);
+        }
     }
 
     #[cfg(any(feature = "http3", test))]
@@ -284,7 +432,7 @@ impl AppliedRateLimits {
         cost: u64,
     ) -> Result<Option<Duration>> {
         if let Some(profile) = profile {
-            let profile_limits = rate_limiters.collect_profile(Some(profile), scope)?;
+            let mut profile_limits = rate_limiters.collect_profile(Some(profile), scope)?;
             let retry_after = profile_limits.try_acquire_request(ctx, cost);
             self.extend_from(&profile_limits);
             Ok(retry_after)
@@ -394,6 +542,54 @@ impl RateLimitSet {
                     None,
                 ))
             });
+        let mut rate_limit_policies = Vec::new();
+        if cfg.experimental_rate_limit_fields {
+            if let (Some(quota), Some(limiter)) = (
+                cfg.requests
+                    .as_ref()
+                    .and_then(|requests| requests.quota.as_ref()),
+                request_quota.as_ref(),
+            ) && let Some(amount) = quota.amount
+            {
+                rate_limit_policies.push(RateLimitPolicy::new(
+                    "requests",
+                    amount,
+                    quota.interval_secs.max(1),
+                    Some("requests"),
+                    limiter.clone(),
+                ));
+            }
+            if let (Some(quota), Some(limiter)) = (
+                cfg.traffic
+                    .as_ref()
+                    .and_then(|traffic| traffic.quota_bytes.as_ref()),
+                byte_quota.as_ref(),
+            ) && let Some(amount) = quota.amount
+            {
+                rate_limit_policies.push(RateLimitPolicy::new(
+                    "traffic",
+                    amount,
+                    quota.interval_secs.max(1),
+                    Some("content-bytes"),
+                    limiter.clone(),
+                ));
+            }
+            if let (Some(quota), Some(limiter)) = (
+                cfg.sessions
+                    .as_ref()
+                    .and_then(|sessions| sessions.quota_sessions.as_ref()),
+                session_quota.as_ref(),
+            ) && let Some(amount) = quota.amount
+            {
+                rate_limit_policies.push(RateLimitPolicy::new(
+                    "sessions",
+                    amount,
+                    quota.interval_secs.max(1),
+                    Some("concurrent-requests"),
+                    limiter.clone(),
+                ));
+            }
+        }
         let has_limits = requests.is_some()
             || bytes.is_some()
             || concurrency.is_some()
@@ -410,6 +606,7 @@ impl RateLimitSet {
             request_quota,
             byte_quota,
             session_quota,
+            rate_limit_policies: Arc::from(rate_limit_policies),
         }
     }
 

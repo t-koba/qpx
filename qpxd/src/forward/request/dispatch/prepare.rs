@@ -7,7 +7,7 @@ use super::types::{
     ForwardDispatchPrepareInput, ForwardDispatchPrepareOutcome, ForwardDispatchReady,
 };
 use crate::http::dispatch::{
-    DispatchError, ProxyKind, concurrency_limited_response_for_parts,
+    DispatchError, ProxyKind, concurrency_limited_response_for_parts_with_limits,
     prepare_http_module_local_response,
 };
 use crate::http::protocol::forwarded::apply_forwarded_policy;
@@ -31,7 +31,7 @@ pub(super) async fn prepare_forward_dispatch(
         headers,
         cache_policy,
         identity,
-        request_limits,
+        mut request_limits,
         mut request_limit_ctx,
         timeout_override,
         host,
@@ -90,11 +90,14 @@ pub(super) async fn prepare_forward_dispatch(
     let upstream = resolve_upstream(action, &state, listener_name)
         .map_err(|err| DispatchError::UpstreamUnavailable(err.to_string()))?;
     request_limit_ctx.upstream = upstream.as_ref().map(|upstream| upstream.key().to_string());
-    let Some(_concurrency_permits) = request_limits.acquire_concurrency(&request_limit_ctx) else {
-        let response = concurrency_limited_response_for_parts(
+    let concurrency = request_limits.acquire_concurrency_with_retry(&request_limit_ctx);
+    let Some(_concurrency_permits) = concurrency.permits else {
+        let response = concurrency_limited_response_for_parts_with_limits(
             req.method(),
             req.version(),
             proxy_name,
+            &request_limits,
+            concurrency.retry_after,
             audit.clone(),
         );
         let response =

@@ -78,6 +78,9 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                     bearer.header.as_deref().unwrap_or("authorization"),
                     &format!("identity_sources {} bearer.header", source.name),
                 )?;
+                if let Some(dpop) = bearer.dpop.as_ref() {
+                    validate_dpop_config(dpop, &source.name)?;
+                }
                 match &bearer.source {
                     BearerIdentitySourceConfig::Jwt {
                         issuer,
@@ -424,6 +427,66 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_dpop_config(config: &super::super::types::DpopConfig, source_name: &str) -> Result<()> {
+    if config.max_age_seconds == 0 || config.max_age_seconds > 86_400 {
+        return Err(anyhow!(
+            "identity_sources {} bearer.dpop.max_age_seconds must be between 1 and 86400",
+            source_name
+        ));
+    }
+    if config.clock_skew_seconds > 3_600 {
+        return Err(anyhow!(
+            "identity_sources {} bearer.dpop.clock_skew_seconds must be <= 3600",
+            source_name
+        ));
+    }
+    if config.replay_cache_capacity == 0 || config.replay_cache_capacity > 1_000_000 {
+        return Err(anyhow!(
+            "identity_sources {} bearer.dpop.replay_cache_capacity must be between 1 and 1000000",
+            source_name
+        ));
+    }
+    if let Some(nonce) = config.nonce.as_deref()
+        && (nonce.is_empty()
+            || nonce.len() > 512
+            || !nonce.is_ascii()
+            || nonce.chars().any(char::is_control))
+    {
+        return Err(anyhow!(
+            "identity_sources {} bearer.dpop.nonce must be 1..512 ASCII non-control characters",
+            source_name
+        ));
+    }
+    let mut algorithms = HashSet::new();
+    for algorithm in &config.algorithms {
+        let normalized = algorithm.trim();
+        if !algorithms.insert(normalized.to_string()) {
+            return Err(anyhow!(
+                "identity_sources {} bearer.dpop.algorithms contains duplicate {}",
+                source_name,
+                algorithm
+            ));
+        }
+        if !matches!(
+            normalized,
+            "ES256" | "ES384" | "RS256" | "RS384" | "RS512" | "EdDSA"
+        ) {
+            return Err(anyhow!(
+                "identity_sources {} bearer.dpop.algorithms contains unsupported algorithm: {}",
+                source_name,
+                algorithm
+            ));
+        }
+    }
+    if config.algorithms.is_empty() {
+        return Err(anyhow!(
+            "identity_sources {} bearer.dpop.algorithms must not be empty",
+            source_name
+        ));
     }
     Ok(())
 }

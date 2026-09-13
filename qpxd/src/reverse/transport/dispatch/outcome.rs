@@ -72,15 +72,12 @@ pub(super) fn acquire_reverse_upstream_concurrency(
     request_limits: &mut crate::rate_limit::AppliedRateLimits,
     request_limit_ctx: &crate::rate_limit::RateLimitContext,
     selected_upstream: Option<&Arc<UpstreamEndpoint>>,
-) -> Option<crate::rate_limit::ConcurrencyPermits> {
-    if !request_limits.has_concurrency_controls() {
-        return request_limits.acquire_concurrency(request_limit_ctx);
-    }
+) -> crate::rate_limit::ConcurrencyAcquire {
     let mut concurrency_ctx = request_limit_ctx.clone();
-    if concurrency_ctx.upstream.is_none() {
+    if request_limits.has_concurrency_controls() && concurrency_ctx.upstream.is_none() {
         concurrency_ctx.upstream = selected_upstream.map(|upstream| upstream.target.clone());
     }
-    request_limits.acquire_concurrency(&concurrency_ctx)
+    request_limits.acquire_concurrency_with_retry(&concurrency_ctx)
 }
 
 pub(super) async fn capture_reverse_response_outcome(

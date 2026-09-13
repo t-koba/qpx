@@ -193,20 +193,23 @@ pub(super) async fn apply_connect_rate_limits(
         };
     }
     macro_rules! send_rate_limited {
-        ($retry_after:expr, $decision_service_policy_id:expr, $log_context:expr) => {
+        ($retry_after:expr, $limits:expr, $decision_service_policy_id:expr, $log_context:expr) => {{
+            let retry_after = $retry_after;
+            let mut response = finalize_response_for_request(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
+                proxy_name,
+                too_many_requests(Some(retry_after)),
+                false,
+            );
+            $limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
             send_policy_response!(
-                finalize_response_for_request(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name,
-                    too_many_requests(Some($retry_after)),
-                    false,
-                ),
+                response,
                 crate::http::dispatch::DispatchOutcome::RateLimited,
                 $decision_service_policy_id,
                 $log_context
             )
-        };
+        }};
     }
 
     let request_limit_ctx =
@@ -223,7 +226,7 @@ pub(super) async fn apply_connect_rate_limits(
     )?;
     if let Some(retry_after) = retry_after {
         let log_context = identity.to_log_context(matched_rule_name, None, None);
-        send_rate_limited!(retry_after, None, &log_context);
+        send_rate_limited!(retry_after, &request_limits, None, &log_context);
         return Ok(None);
     }
 
@@ -272,6 +275,7 @@ pub(super) async fn apply_connect_rate_limits(
             )? {
                 send_rate_limited!(
                     retry_after,
+                    &request_limits,
                     decision_service_policy_id.as_deref(),
                     &log_context
                 );

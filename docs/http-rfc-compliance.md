@@ -60,9 +60,9 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 |---|---|---|---|
 | HTTP semantics and versions | 9110, 9111, 9112, 9113, 9114 | complete / transport-library-with-contract | semantics, cache, HTTP/1.1, HTTP/2, HTTP/3 |
 | Methods and status codes | 5789, 6585, 7725, 8297, 8470, 10008 | complete | PATCH, additional status codes, Early Hints, early data, QUERY |
-| Fields and metadata | 6265, 6266, 7239, 7240, 7838, 8288, 8594, 9209, 9651, 9745, 9842 | complete | cookies, disposition, forwarding, preferences, links, proxy metadata, structured fields, dictionary compression |
+| Fields and metadata | 6265, 6266, 7239, 7240, 7838, 8288, 8594, 8942, 9209, 9440, 9651, 9745, 9842 | complete | cookies, disposition, forwarding, preferences, links, Client Hints, client certificates, proxy metadata, structured fields, dictionary compression |
 | Cache extensions | 5861, 8246, 9211, 9213 | complete | stale controls, immutable, Cache-Status, targeted controls |
-| Authentication and integrity | 6750, 6797, 7616, 7617, 9421, 9530, 9931 | complete / external-authority | resource-server Bearer handling, HSTS, Basic/Digest, signatures, digests, optimistic-data safety |
+| Authentication and integrity | 6750, 6797, 7616, 7617, 9421, 9449, 9530, 9931 | complete / external-authority | resource-server Bearer and DPoP handling, HSTS, Basic/Digest, signatures, digests, optimistic-data safety |
 | Provider-neutral security interfaces | 6749, 7517, 7519, 7662, 8705 | external-authority | client credentials, JWK/JWKS, JWT, introspection, mTLS client authentication |
 | HTTP API design | 9205, 9457 | complete | API design validation and Problem Details |
 | QUIC and HTTP/3 | 9000, 9001, 9002, 9204, 9218, 9221 | transport-library-with-contract / complete | QUIC transport, TLS, recovery, QPACK, priority, DATAGRAM (QUIC v1 and reserved-version negotiation via quinn) |
@@ -96,6 +96,8 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 | 7239 | native | strict Forwarded codec and configured trusted-chain handling | `forwarded::tests`, qpxd forwarded tests |
 | 7240 | native | strict Prefer parser/serializer | `prefer::tests` |
 | 8288 | native | Link generation and validation for API lifecycle metadata | `api_metadata::tests` |
+| 8942 | native | validated Accept-CH and Critical-CH, including critical-subset consistency | `browser_policy::tests` and browser-origin E2E |
+| 9440 | native | opt-in Client-Cert and ordered Client-Cert-Chain generation from the authenticated TLS peer; inbound spoofing rejection and bounded X.509/field sizes | `client_cert::tests` and reverse route policy tests |
 | 9651 | native | shared Structured Fields codec; duplicate dictionary members use last-member semantics | `structured_fields::tests` |
 | 7838 | native | authenticated Alt-Svc authority, expiry, clear, and failure handling | `h3_pool::alt_svc` tests |
 | 9209 | native | Proxy-Status append on proxy responses only | `proxy_status::tests`, response-path tests |
@@ -112,6 +114,7 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 | 9213 | native | named targeted cache control precedence over CDN-Cache-Control and Cache-Control | `qpxd-cache` directive tests |
 | 7617, 7616 | native | explicitly enabled Basic/Digest authentication | authentication contract tests |
 | 6750 | external-authority | resource-server JWT/JWKS or RFC 7662 introspection; qpx never issues tokens | bearer identity tests and real-provider integration lane |
+| 9449 | native / external-authority | DPoP proof signature, htm/htu/iat/jti/ath/nonce, cnf.jkt binding, and bounded atomic replay protection; the authorization server remains the token issuer | `dpop::tests`, bearer runtime tests, and HTTP transport contract tests |
 | 6797 | native | reverse TLS origin HSTS policy | `hsts::tests` and response module tests |
 | 9421 | native | generic HTTP message signing/verification and external-service request signing | decision-service signature tests |
 | 9530 | native | Content-Digest/Repr-Digest parse, generation, and verification | `digest_fields::tests`, body-spool tests |
@@ -181,6 +184,38 @@ explicit opt-in.
 The filesystem store rejects traversal and symlink escape. Metadata mutations
 use redb transactions. OPTIONS/DAV advertises only implemented capabilities.
 
+## Web-platform behavior
+
+CORS is defined by the WHATWG Fetch Standard rather than an RFC. Reverse routes
+can own a validated CORS policy for upstream, weighted, IPC, local-response, and
+WebDAV targets. qpx handles matching preflights without invoking the target,
+uses the requested method for route selection, enforces credential/wildcard and
+`Authorization` wildcard restrictions, and makes the route policy authoritative
+over target response fields. Private Network Access is explicit and disabled by
+default because it remains a draft web-platform extension. Evidence is provided
+by `qpx_core::cors::tests`, reverse transport CORS tests across HTTP/1.1,
+HTTP/2, and HTTP/3, configuration validation tests, and the checked
+`reverse-cors-origin.yaml` sample.
+
+Reverse routes can additionally enforce Fetch Metadata before origin dispatch
+and publish authoritative CSP, Referrer-Policy, Permissions-Policy, COOP, COEP,
+CORP, nosniff, Origin-Agent-Cluster, Clear-Site-Data, Reporting-Endpoints,
+Timing-Allow-Origin, Accept-CH, and Critical-CH fields. Configured fields replace
+conflicting target values. Fetch-dependent responses carry the corresponding
+`Vary` fields. The built-in Reporting API collector accepts bounded
+`application/reports+json` batches, rejects malformed payloads, and emits
+structured logs and `qpx_browser_reports_received_total` metrics. Cookie policy
+can enforce Secure, HttpOnly, SameSite, and Partitioned attributes on every
+Set-Cookie field while preserving validated extension attributes. Evidence is
+provided by `browser_policy::tests`, `cookie_policy::tests`, reverse collector
+tests, and `scripts/e2e-browser-origin.sh` using an unmodified headless browser.
+
+RateLimit and RateLimit-Policy fields implement the current IETF draft syntax
+behind `experimental_rate_limit_fields: true`. The opt-in requires fixed quota
+metadata, preserves Retry-After, marks generated 429 responses private and
+non-storable, and covers request, CONNECT, HTTP/3 tunnel, and WebTransport rate
+limit responses. It is deliberately not presented as a published RFC.
+
 ## Shared foundations
 
 | RFC | Classification | Contract | Evidence |
@@ -204,6 +239,7 @@ All gates below must pass on one commit before a release is published:
 8. DAV litmus and CalDAV tester against a real qpxd listener and filesystem/redb
 9. memory, file-descriptor, queue, and p95 performance budgets
 10. provider-neutral authorization and resource-server contract tests
+11. real-browser CORS, Fetch Metadata, browser-security-field, and Reporting API contracts
 
 Platform-specific CONNECT-IP gates run on their native OS. A cross-check that
 stops before Rust compilation because the host lacks a Windows SDK is not a

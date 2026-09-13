@@ -23,6 +23,15 @@ validate a concrete config file.
 Reverse routes use exactly one typed `target`: `upstream`, `weighted`, `ipc`,
 `local_response`, or `tls_passthrough`.
 
+Browser-facing reverse routes can own CORS under
+`edges[kind=reverse].routes[].http.cors`. The same policy surface covers every
+HTTP reverse target. See [`docs/cors.md`](cors.md).
+
+The same `http` object also accepts `fetch_metadata`, `browser_security`,
+`cookies`, `reporting_collector`, and RFC 9440 `client_certificate` policies.
+These fields are reverse-route-only and are validated before the runtime plan
+is built. See [`browser-origin-security.md`](browser-origin-security.md).
+
 Cache backends support `redis`, `http`, and `disk` kinds. `disk` backends use
 `path`, `max_bytes`, and optional `sweep_interval_secs`; the path is created as
 owner-only directories, symlinked path components are rejected, and objects are

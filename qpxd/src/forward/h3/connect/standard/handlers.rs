@@ -61,7 +61,7 @@ pub(crate) async fn handle_h3_connect(
         .plan
         .ingress_edge_execution_plan(handler.listener_name.as_ref(), matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled HTTP/3 CONNECT execution plan not found"))?;
-    let request_limits = state.policy.rate_limiters.collect_plan_with_profile(
+    let mut request_limits = state.policy.rate_limiters.collect_plan_with_profile(
         &selected_plan.rate_limits,
         rate_limit_profile.as_deref(),
         crate::rate_limit::TransportScope::Connect,
@@ -161,10 +161,21 @@ pub(crate) async fn handle_h3_connect(
         }
     };
     rate_limit_context.upstream = upstream.as_ref().map(|upstream| upstream.key().to_string());
-    let _concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_context) {
+    let concurrency = request_limits.acquire_concurrency_with_retry(&rate_limit_context);
+    let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
-            send_finalized!(too_many_requests(None), DispatchOutcome::ConcurrencyLimited).await?;
+            let retry_after = concurrency.retry_after;
+            let mut response = finalize_response_with_headers(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
+                proxy_name.as_str(),
+                too_many_requests(retry_after),
+                response_headers.as_deref(),
+                false,
+            );
+            request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
+            send_policy!(response, DispatchOutcome::ConcurrencyLimited).await?;
             return Ok(());
         }
     };

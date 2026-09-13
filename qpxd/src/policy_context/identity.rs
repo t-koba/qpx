@@ -2,14 +2,16 @@ use crate::runtime::RuntimeState;
 use crate::runtime::auth::AuthenticatedUser;
 use anyhow::{Result, anyhow};
 use http::header::HeaderName;
-use hyper::HeaderMap;
+use hyper::{HeaderMap, Uri};
 use qpx_core::config::{
     IdentitySourceConfig, IdentitySourceHeadersConfig, IdentitySourceKind, MtlsIdentityMapConfig,
     PolicyContextConfig,
 };
 use qpx_observability::access_log::RequestLogContext;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::net::IpAddr;
+use std::sync::{Arc, Mutex as StdMutex};
 
 #[cfg(feature = "tls-rustls")]
 use x509_parser::certificate::X509Certificate;
@@ -25,10 +27,87 @@ use super::util::{
     merge_identity_source_labels, peer_matches,
 };
 
+type DpopValidationMarker = (String, [u8; 32]);
+type DpopValidationSet = Arc<StdMutex<HashSet<DpopValidationMarker>>>;
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EffectivePolicyContext {
     pub(crate) identity_sources: Vec<String>,
     pub(crate) decision_service: Option<String>,
+}
+
+/// Request facts required to validate an RFC 9449 proof of possession.
+#[derive(Debug, Clone)]
+pub(crate) struct IdentityRequestContext {
+    pub(crate) method: String,
+    pub(crate) request_uri: String,
+    dpop_validations: DpopValidationSet,
+}
+
+impl IdentityRequestContext {
+    pub(crate) fn new(method: impl Into<String>, request_uri: impl Into<String>) -> Self {
+        Self {
+            method: method.into(),
+            request_uri: request_uri.into(),
+            dpop_validations: Arc::new(StdMutex::new(HashSet::new())),
+        }
+    }
+
+    pub(crate) fn dpop_was_validated(&self, identity_source: &str, proof: &[u8]) -> Result<bool> {
+        let marker = (identity_source.to_string(), Sha256::digest(proof).into());
+        let cache = self
+            .dpop_validations
+            .lock()
+            .map_err(|_| anyhow!("DPoP request validation cache lock is poisoned"))?;
+        Ok(cache.contains(&marker))
+    }
+
+    pub(crate) fn mark_dpop_validated(&self, identity_source: &str, proof: &[u8]) -> Result<()> {
+        let marker = (identity_source.to_string(), Sha256::digest(proof).into());
+        let mut cache = self
+            .dpop_validations
+            .lock()
+            .map_err(|_| anyhow!("DPoP request validation cache lock is poisoned"))?;
+        cache.insert(marker);
+        Ok(())
+    }
+
+    pub(crate) fn from_request_parts(
+        method: &str,
+        uri: &Uri,
+        headers: &HeaderMap,
+        default_scheme: &str,
+    ) -> Option<Self> {
+        let request_uri = if uri.scheme().is_some() {
+            uri.to_string()
+        } else {
+            let authority = uri
+                .authority()
+                .map(|value| value.as_str())
+                .or_else(|| headers.get(http::header::HOST)?.to_str().ok())?;
+            let path = uri
+                .path_and_query()
+                .map(|value| value.as_str())
+                .unwrap_or("/");
+            format!("{default_scheme}://{authority}{path}")
+        };
+        Some(Self::new(method, request_uri))
+    }
+
+    pub(crate) fn from_base(
+        base: &crate::http::protocol::base_fields::BaseRequestFields,
+        default_scheme: &str,
+    ) -> Option<Self> {
+        let request_uri = if base.uri.scheme().is_some() {
+            base.uri.to_string()
+        } else {
+            let authority = base.authority()?;
+            let path = base.request_uri();
+            let path = if path.is_empty() { "/" } else { path };
+            format!("{default_scheme}://{authority}{path}")
+        };
+        Some(Self::new(base.method.as_str(), request_uri))
+    }
 }
 
 impl EffectivePolicyContext {
@@ -335,6 +414,17 @@ pub(crate) async fn resolve_identity(
     headers: Option<&HeaderMap>,
     peer_certificates: Option<&[Vec<u8>]>,
 ) -> Result<ResolvedIdentity> {
+    resolve_identity_for_request(state, policy, peer_ip, headers, peer_certificates, None).await
+}
+
+pub(crate) async fn resolve_identity_for_request(
+    state: &RuntimeState,
+    policy: &EffectivePolicyContext,
+    peer_ip: IpAddr,
+    headers: Option<&HeaderMap>,
+    peer_certificates: Option<&[Vec<u8>]>,
+    request: Option<&IdentityRequestContext>,
+) -> Result<ResolvedIdentity> {
     let mut resolved = resolve_identity_local(state, policy, peer_ip, headers, peer_certificates)?;
 
     for source_name in &policy.identity_sources {
@@ -346,7 +436,7 @@ pub(crate) async fn resolve_identity(
             .ok_or_else(|| anyhow!("identity source missing at runtime: {}", source_name))?;
         if let CompiledIdentitySourceKind::Bearer(cfg) = &source.kind {
             let extracted = match headers {
-                Some(headers) => cfg.extract(state, headers).await?,
+                Some(headers) => cfg.extract(state, headers, request).await?,
                 None => ResolvedIdentity::default(),
             };
             resolved.merge(extracted);

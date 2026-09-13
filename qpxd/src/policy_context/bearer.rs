@@ -1,4 +1,5 @@
 use super::crypto::JwtAlgorithm;
+use super::identity::IdentityRequestContext;
 use super::identity::ResolvedIdentity;
 use super::signed_assertion::CompiledAssertionClaims;
 use super::util::{decode_jwt_segment, json_i64_claim, load_public_key_from_env};
@@ -9,13 +10,21 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http::header::HeaderName;
 use http_body_util::BodyExt as _;
 use hyper::{HeaderMap, Request};
-use qpx_core::config::{BearerIdentityConfig, BearerIdentitySourceConfig};
+use qpx_core::config::{BearerIdentityConfig, BearerIdentitySourceConfig, DpopConfig};
+use qpx_core::dpop::{
+    DpopAlgorithm, DpopError, DpopJwk, DpopPolicy, DpopReplayError, DpopReplayKey, DpopReplayStore,
+    DpopSignatureError, DpopSignatureVerifier, DpopValidationContext, access_token_jkt,
+    validate_dpop,
+};
 use qpx_http::body::Body;
+use qpx_http::problem::{PROBLEM_JSON, ProblemDetails};
+use ring::signature;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, timeout};
 use url::Url;
@@ -30,6 +39,330 @@ pub(super) struct CompiledBearerIdentity {
     header: HeaderName,
     claims: CompiledAssertionClaims,
     source: BearerSource,
+    dpop: Option<DpopRuntime>,
+}
+
+#[derive(Debug)]
+struct DpopRuntime {
+    required: bool,
+    policy: DpopPolicy,
+    algorithms: Vec<DpopAlgorithm>,
+    nonce: Option<String>,
+    replay: StdMutex<DpopReplayCache>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DpopAuthErrorCode {
+    InvalidProof,
+    UseNonce,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthenticationErrorCode {
+    Dpop(DpopAuthErrorCode),
+    DpopInvalidToken,
+    BearerInvalidToken,
+}
+
+#[derive(Debug, Error)]
+#[error("{detail}")]
+pub(crate) struct BearerAuthenticationError {
+    detail: String,
+    nonce: Option<String>,
+    code: AuthenticationErrorCode,
+}
+
+impl BearerAuthenticationError {
+    fn new(detail: impl Into<String>, nonce: Option<&str>) -> Self {
+        Self {
+            detail: detail.into(),
+            nonce: nonce.map(str::to_string),
+            code: AuthenticationErrorCode::Dpop(DpopAuthErrorCode::InvalidProof),
+        }
+    }
+
+    fn with_nonce_challenge(detail: impl Into<String>, nonce: Option<&str>) -> Self {
+        Self {
+            detail: detail.into(),
+            nonce: nonce.map(str::to_string),
+            code: AuthenticationErrorCode::Dpop(DpopAuthErrorCode::UseNonce),
+        }
+    }
+
+    fn dpop_invalid_token(detail: impl Into<String>, nonce: Option<&str>) -> Self {
+        Self {
+            detail: detail.into(),
+            nonce: nonce.map(str::to_string),
+            code: AuthenticationErrorCode::DpopInvalidToken,
+        }
+    }
+
+    fn bearer_invalid_token(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            nonce: None,
+            code: AuthenticationErrorCode::BearerInvalidToken,
+        }
+    }
+
+    pub(crate) fn nonce(&self) -> Option<&str> {
+        self.nonce.as_deref()
+    }
+
+    fn challenge(&self) -> String {
+        match self.code {
+            AuthenticationErrorCode::Dpop(DpopAuthErrorCode::InvalidProof) => {
+                "DPoP error=\"invalid_dpop_proof\"".to_string()
+            }
+            AuthenticationErrorCode::Dpop(DpopAuthErrorCode::UseNonce) => {
+                "DPoP error=\"use_dpop_nonce\"".to_string()
+            }
+            AuthenticationErrorCode::DpopInvalidToken => "DPoP error=\"invalid_token\"".to_string(),
+            AuthenticationErrorCode::BearerInvalidToken => {
+                "Bearer error=\"invalid_token\"".to_string()
+            }
+        }
+    }
+
+    fn error_code(&self) -> &'static str {
+        match self.code {
+            AuthenticationErrorCode::Dpop(DpopAuthErrorCode::InvalidProof) => "invalid_dpop_proof",
+            AuthenticationErrorCode::Dpop(DpopAuthErrorCode::UseNonce) => "use_dpop_nonce",
+            AuthenticationErrorCode::DpopInvalidToken => "invalid_token",
+            AuthenticationErrorCode::BearerInvalidToken => "invalid_token",
+        }
+    }
+
+    fn is_dpop(&self) -> bool {
+        matches!(
+            self.code,
+            AuthenticationErrorCode::Dpop(_) | AuthenticationErrorCode::DpopInvalidToken
+        )
+    }
+}
+
+pub(crate) fn authentication_response(
+    method: &http::Method,
+    version: http::Version,
+    proxy_name: &str,
+    error: &BearerAuthenticationError,
+) -> Result<hyper::Response<Body>> {
+    let challenge = error.challenge();
+    let title = if error.is_dpop() {
+        "DPoP authentication required"
+    } else {
+        "Bearer authentication required"
+    };
+    let body = ProblemDetails::new(http::StatusCode::UNAUTHORIZED, title)
+        .with_detail(error.to_string())
+        .with_extension(
+            "error",
+            serde_json::Value::String(error.error_code().to_string()),
+        )?
+        .to_json()?;
+    let mut builder = hyper::Response::builder()
+        .status(http::StatusCode::UNAUTHORIZED)
+        .header(http::header::WWW_AUTHENTICATE, challenge)
+        .header(http::header::CONTENT_TYPE, PROBLEM_JSON);
+    if error.is_dpop()
+        && let Some(nonce) = error.nonce()
+    {
+        builder = builder.header("DPoP-Nonce", nonce);
+    }
+    let mut response = builder.body(Body::from(body))?;
+    response = crate::http::protocol::l7::finalize_response_for_request(
+        method, version, proxy_name, response, false,
+    );
+    Ok(response)
+}
+
+pub(crate) fn authentication_response_for_error(
+    method: &http::Method,
+    version: http::Version,
+    proxy_name: &str,
+    error: &anyhow::Error,
+) -> Option<Result<hyper::Response<Body>>> {
+    error
+        .downcast_ref::<BearerAuthenticationError>()
+        .map(|error| authentication_response(method, version, proxy_name, error))
+}
+
+#[derive(Debug)]
+struct DpopReplayCache {
+    entries: HashMap<(String, String), i64>,
+    capacity: usize,
+    lifetime_seconds: u64,
+}
+
+impl DpopRuntime {
+    fn from_config(config: &DpopConfig) -> Result<Self> {
+        let policy = DpopPolicy::new(config.max_age_seconds, config.clock_skew_seconds)
+            .map_err(|error| anyhow!("invalid DPoP policy: {error}"))?;
+        let algorithms = config
+            .algorithms
+            .iter()
+            .map(|algorithm| {
+                let algorithm = DpopAlgorithm::parse(algorithm.trim())
+                    .map_err(|error| anyhow!("invalid DPoP algorithm: {error}"))?;
+                if !matches!(
+                    algorithm,
+                    DpopAlgorithm::Es256
+                        | DpopAlgorithm::Es384
+                        | DpopAlgorithm::Rs256
+                        | DpopAlgorithm::Rs384
+                        | DpopAlgorithm::Rs512
+                        | DpopAlgorithm::Ed25519
+                ) {
+                    return Err(anyhow!(
+                        "DPoP algorithm {} is unavailable in the ring backend",
+                        algorithm.as_str()
+                    ));
+                }
+                Ok(algorithm)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if algorithms.is_empty() {
+            return Err(anyhow!("DPoP algorithm allow-list must not be empty"));
+        }
+        let lifetime_seconds = config
+            .max_age_seconds
+            .saturating_add(config.clock_skew_seconds);
+        Ok(Self {
+            required: config.required,
+            policy,
+            algorithms,
+            nonce: config.nonce.clone(),
+            replay: StdMutex::new(DpopReplayCache {
+                entries: HashMap::new(),
+                capacity: config.replay_cache_capacity,
+                lifetime_seconds,
+            }),
+        })
+    }
+
+    fn validate(
+        &self,
+        headers: &HeaderMap,
+        access_token: &str,
+        payload: &Value,
+        request: &IdentityRequestContext,
+    ) -> Result<()> {
+        let expected_jkt = access_token_jkt(payload).map_err(|error| {
+            BearerAuthenticationError::new(
+                format!("DPoP access token binding is invalid: {error}"),
+                self.nonce.as_deref(),
+            )
+        })?;
+        let context = DpopValidationContext {
+            method: request.method.as_str(),
+            request_uri: request.request_uri.as_str(),
+            access_token: Some(access_token),
+            expected_jkt: Some(expected_jkt.as_str()),
+            expected_nonce: self.nonce.as_deref(),
+            now: unix_seconds(),
+        };
+        let verifier = RingDpopSignatureVerifier {
+            algorithms: &self.algorithms,
+        };
+        let mut replay = self
+            .replay
+            .lock()
+            .map_err(|_| anyhow!("DPoP replay store lock is poisoned"))?;
+        validate_dpop(headers, &context, self.policy, &verifier, &mut *replay).map_err(
+            |error| {
+                let detail = format!("DPoP validation failed: {error}");
+                if matches!(error, DpopError::InvalidNonce) {
+                    BearerAuthenticationError::with_nonce_challenge(detail, self.nonce.as_deref())
+                } else {
+                    BearerAuthenticationError::new(detail, self.nonce.as_deref())
+                }
+            },
+        )?;
+        Ok(())
+    }
+}
+
+impl DpopReplayStore for DpopReplayCache {
+    fn check_and_store(&mut self, key: &DpopReplayKey) -> std::result::Result<(), DpopReplayError> {
+        let now = unix_seconds();
+        self.entries.retain(|_, expires_at| *expires_at > now);
+        let replay_key = (key.jkt.clone(), key.jti.clone());
+        if self.entries.contains_key(&replay_key) {
+            return Err(DpopReplayError::Replay);
+        }
+        if self.entries.len() >= self.capacity {
+            return Err(DpopReplayError::Unavailable);
+        }
+        let lifetime = i64::try_from(self.lifetime_seconds).unwrap_or(i64::MAX);
+        let expires_at = key.iat.saturating_add(lifetime).max(now.saturating_add(1));
+        self.entries.insert(replay_key, expires_at);
+        Ok(())
+    }
+}
+
+struct RingDpopSignatureVerifier<'a> {
+    algorithms: &'a [DpopAlgorithm],
+}
+
+impl DpopSignatureVerifier for RingDpopSignatureVerifier<'_> {
+    fn verify(
+        &self,
+        algorithm: DpopAlgorithm,
+        key: &DpopJwk,
+        signing_input: &[u8],
+        signature_bytes: &[u8],
+    ) -> std::result::Result<(), DpopSignatureError> {
+        if !self.algorithms.contains(&algorithm) {
+            return Err(DpopSignatureError::Unavailable);
+        }
+        let (verification_algorithm, public_key): (
+            &'static dyn signature::VerificationAlgorithm,
+            Vec<u8>,
+        ) = match algorithm {
+            DpopAlgorithm::Es256 => (
+                &signature::ECDSA_P256_SHA256_FIXED,
+                key.ec_uncompressed_point()
+                    .ok_or(DpopSignatureError::Invalid)?,
+            ),
+            DpopAlgorithm::Es384 => (
+                &signature::ECDSA_P384_SHA384_FIXED,
+                key.ec_uncompressed_point()
+                    .ok_or(DpopSignatureError::Invalid)?,
+            ),
+            DpopAlgorithm::Rs256 => (
+                &signature::RSA_PKCS1_2048_8192_SHA256,
+                der_rsa_public_key(
+                    key.n_bytes().ok_or(DpopSignatureError::Invalid)?,
+                    key.e_bytes().ok_or(DpopSignatureError::Invalid)?,
+                ),
+            ),
+            DpopAlgorithm::Rs384 => (
+                &signature::RSA_PKCS1_2048_8192_SHA384,
+                der_rsa_public_key(
+                    key.n_bytes().ok_or(DpopSignatureError::Invalid)?,
+                    key.e_bytes().ok_or(DpopSignatureError::Invalid)?,
+                ),
+            ),
+            DpopAlgorithm::Rs512 => (
+                &signature::RSA_PKCS1_2048_8192_SHA512,
+                der_rsa_public_key(
+                    key.n_bytes().ok_or(DpopSignatureError::Invalid)?,
+                    key.e_bytes().ok_or(DpopSignatureError::Invalid)?,
+                ),
+            ),
+            DpopAlgorithm::Ed25519 => (
+                &signature::ED25519,
+                key.x_bytes().ok_or(DpopSignatureError::Invalid)?.to_vec(),
+            ),
+            DpopAlgorithm::Es512
+            | DpopAlgorithm::Ps256
+            | DpopAlgorithm::Ps384
+            | DpopAlgorithm::Ps512 => return Err(DpopSignatureError::Unavailable),
+        };
+        signature::UnparsedPublicKey::new(verification_algorithm, public_key)
+            .verify(signing_input, signature_bytes)
+            .map_err(|_| DpopSignatureError::Invalid)
+    }
 }
 
 #[derive(Debug)]
@@ -154,11 +487,17 @@ impl CompiledBearerIdentity {
                 cache: Mutex::new(HashMap::new()),
             }),
         };
+        let dpop = config
+            .dpop
+            .as_ref()
+            .map(DpopRuntime::from_config)
+            .transpose()?;
         Ok(Self {
             name: name.to_string(),
             header,
             claims: CompiledAssertionClaims::from_config(&config.claims),
             source,
+            dpop,
         })
     }
 
@@ -166,20 +505,121 @@ impl CompiledBearerIdentity {
         &self,
         state: &RuntimeState,
         headers: &HeaderMap,
+        request: Option<&IdentityRequestContext>,
     ) -> Result<ResolvedIdentity> {
-        let Some(token) = bearer_token(headers, &self.header)? else {
+        let authorization = match authorization_token(headers, &self.header, self.dpop.is_some()) {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                if let Some(dpop) = self.dpop.as_ref() {
+                    return Err(BearerAuthenticationError::new(
+                        format!("bearer authorization rejected: {error}"),
+                        dpop.nonce.as_deref(),
+                    )
+                    .into());
+                }
+                return Err(BearerAuthenticationError::bearer_invalid_token(format!(
+                    "bearer authorization rejected: {error}"
+                ))
+                .into());
+            }
+        };
+        let Some((token, dpop_scheme)) = authorization else {
+            if let Some(dpop) = self.dpop.as_ref()
+                && (dpop.required || headers.contains_key("dpop"))
+            {
+                return Err(BearerAuthenticationError::dpop_invalid_token(
+                    "DPoP authorization is required",
+                    dpop.nonce.as_deref(),
+                )
+                .into());
+            }
             return Ok(ResolvedIdentity::default());
         };
         let payload = match &self.source {
-            BearerSource::Jwt(source) => source.verify(state, token).await?,
-            BearerSource::Introspection(source) => {
-                let Some(payload) = source.introspect(state, token).await? else {
-                    return Err(anyhow!("bearer token is inactive"));
-                };
-                payload
+            BearerSource::Jwt(source) => source.verify(state, token).await,
+            BearerSource::Introspection(source) => match source.introspect(state, token).await {
+                Ok(Some(payload)) => Ok(payload),
+                Ok(None) => Err(anyhow!("bearer token is inactive")),
+                Err(error) => Err(error),
+            },
+        };
+        let payload = match payload {
+            Ok(payload) => payload,
+            Err(error) => {
+                if let Some(dpop) = self.dpop.as_ref() {
+                    let error = if dpop_scheme {
+                        BearerAuthenticationError::dpop_invalid_token(
+                            format!("bearer token rejected: {error}"),
+                            dpop.nonce.as_deref(),
+                        )
+                    } else {
+                        BearerAuthenticationError::bearer_invalid_token(format!(
+                            "bearer token rejected: {error}"
+                        ))
+                    };
+                    return Err(error.into());
+                }
+                return Err(BearerAuthenticationError::bearer_invalid_token(format!(
+                    "bearer token rejected: {error}"
+                ))
+                .into());
             }
         };
-        self.claims.extract(&self.name, &payload)
+        if let Some(dpop) = self.dpop.as_ref() {
+            if dpop_scheme {
+                let request = request.ok_or_else(|| {
+                    BearerAuthenticationError::new(
+                        "DPoP validation requires an HTTP request context",
+                        dpop.nonce.as_deref(),
+                    )
+                })?;
+                let already_validated = headers
+                    .get("dpop")
+                    .map(|proof| request.dpop_was_validated(&self.name, proof.as_bytes()))
+                    .transpose()?
+                    .unwrap_or(false);
+                if !already_validated {
+                    dpop.validate(headers, token, &payload, request)?;
+                    if let Some(proof) = headers.get("dpop") {
+                        request.mark_dpop_validated(&self.name, proof.as_bytes())?;
+                    }
+                }
+            } else if dpop.required {
+                return Err(BearerAuthenticationError::new(
+                    "DPoP authorization scheme is required",
+                    dpop.nonce.as_deref(),
+                )
+                .into());
+            } else if headers.contains_key("dpop") {
+                return Err(BearerAuthenticationError::new(
+                    "DPoP proof requires the DPoP authorization scheme",
+                    dpop.nonce.as_deref(),
+                )
+                .into());
+            }
+        }
+        match self.claims.extract(&self.name, &payload) {
+            Ok(identity) => Ok(identity),
+            Err(error) => {
+                if let Some(dpop) = self.dpop.as_ref() {
+                    let error = if dpop_scheme {
+                        BearerAuthenticationError::dpop_invalid_token(
+                            format!("bearer identity claims rejected: {error}"),
+                            dpop.nonce.as_deref(),
+                        )
+                    } else {
+                        BearerAuthenticationError::bearer_invalid_token(format!(
+                            "bearer identity claims rejected: {error}"
+                        ))
+                    };
+                    return Err(error.into());
+                }
+                Err(BearerAuthenticationError::bearer_invalid_token(format!(
+                    "bearer identity claims rejected: {error}"
+                ))
+                .into())
+            }
+        }
     }
 }
 
@@ -299,23 +739,38 @@ impl IntrospectionSource {
     }
 }
 
-fn bearer_token<'a>(headers: &'a HeaderMap, header: &HeaderName) -> Result<Option<&'a str>> {
-    let Some(value) = headers.get(header) else {
+fn authorization_token<'a>(
+    headers: &'a HeaderMap,
+    header: &HeaderName,
+    dpop_enabled: bool,
+) -> Result<Option<(&'a str, bool)>> {
+    let mut values = headers.get_all(header).iter();
+    let Some(value) = values.next() else {
         return Ok(None);
     };
+    if values.next().is_some() {
+        return Err(anyhow!("authorization field must occur exactly once"));
+    }
     let value = value
         .to_str()
         .map_err(|_| anyhow!("bearer field is not ASCII"))?;
     let Some((scheme, token)) = value.trim().split_once(' ') else {
         return Err(anyhow!("bearer field is malformed"));
     };
-    if !scheme.eq_ignore_ascii_case("bearer")
-        || token.is_empty()
-        || token.contains(char::is_whitespace)
-    {
+    let dpop_scheme = if scheme.eq_ignore_ascii_case("dpop") {
+        if !dpop_enabled {
+            return Err(anyhow!("DPoP authorization scheme is not enabled"));
+        }
+        true
+    } else if scheme.eq_ignore_ascii_case("bearer") {
+        false
+    } else {
+        return Err(anyhow!("authorization field is malformed"));
+    };
+    if token.is_empty() || token.contains(char::is_whitespace) {
         return Err(anyhow!("bearer field is malformed"));
     }
-    Ok(Some(token))
+    Ok(Some((token, dpop_scheme)))
 }
 
 async fn fetch_jwks(state: &RuntimeState, url: &Url) -> Result<CachedJwks> {
@@ -608,6 +1063,7 @@ fn der_tlv(tag: u8, body: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ring::signature::KeyPair;
 
     fn parse_jwks(json: &str) -> JwksDocument {
         serde_json::from_str(json).expect("JWKS should parse")
@@ -649,5 +1105,152 @@ mod tests {
         let err = verification_keys(document).expect_err("missing modulus must fail");
 
         assert!(err.to_string().contains("JWK n is missing"));
+    }
+
+    #[test]
+    fn ring_verifier_accepts_ed25519_proof_signature() {
+        let key_pair = signature::Ed25519KeyPair::from_seed_unchecked(&[7u8; 32])
+            .expect("test key should be valid");
+        let public_key = key_pair.public_key().as_ref();
+        let key = DpopJwk::Okp {
+            crv: "Ed25519".to_string(),
+            x: URL_SAFE_NO_PAD.encode(public_key),
+            x_bytes: public_key.to_vec(),
+        };
+        let input = b"dpop-signing-input";
+        let signature = key_pair.sign(input);
+        let allowed = [DpopAlgorithm::Ed25519];
+        let verifier = RingDpopSignatureVerifier {
+            algorithms: &allowed,
+        };
+        verifier
+            .verify(DpopAlgorithm::Ed25519, &key, input, signature.as_ref())
+            .expect("ring must verify Ed25519 signatures");
+    }
+
+    #[test]
+    fn replay_cache_rejects_same_jti_for_same_key() {
+        let now = unix_seconds();
+        let mut cache = DpopReplayCache {
+            entries: HashMap::new(),
+            capacity: 2,
+            lifetime_seconds: 300,
+        };
+        let key = DpopReplayKey {
+            jkt: "key".to_string(),
+            jti: "proof".to_string(),
+            iat: now,
+        };
+        cache
+            .check_and_store(&key)
+            .expect("first proof should store");
+        assert_eq!(cache.check_and_store(&key), Err(DpopReplayError::Replay));
+        let same_jti_different_iat = DpopReplayKey {
+            iat: now + 1,
+            ..key
+        };
+        assert_eq!(
+            cache.check_and_store(&same_jti_different_iat),
+            Err(DpopReplayError::Replay)
+        );
+    }
+
+    #[test]
+    fn dpop_authentication_failure_is_structured_401_with_nonce_header() {
+        let error = BearerAuthenticationError::new("proof was replayed", Some("server-nonce"));
+        let response =
+            authentication_response(&http::Method::GET, http::Version::HTTP_11, "qpx", &error)
+                .expect("DPoP authentication response should be constructible");
+
+        assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some(r#"DPoP error="invalid_dpop_proof""#)
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some(PROBLEM_JSON)
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("DPoP-Nonce")
+                .and_then(|value| value.to_str().ok()),
+            Some("server-nonce")
+        );
+    }
+
+    #[test]
+    fn dpop_nonce_failure_uses_nonce_challenge_and_header() {
+        let error =
+            BearerAuthenticationError::with_nonce_challenge("nonce is missing", Some("nonce-1"));
+        let response =
+            authentication_response(&http::Method::GET, http::Version::HTTP_2, "qpx", &error)
+                .expect("DPoP nonce response should be constructible");
+
+        assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some(r#"DPoP error="use_dpop_nonce""#)
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("DPoP-Nonce")
+                .and_then(|value| value.to_str().ok()),
+            Some("nonce-1")
+        );
+    }
+
+    #[test]
+    fn dpop_missing_credential_uses_invalid_token_challenge() {
+        let error = BearerAuthenticationError::dpop_invalid_token(
+            "DPoP authorization is required",
+            Some("nonce-2"),
+        );
+        let response =
+            authentication_response(&http::Method::GET, http::Version::HTTP_11, "qpx", &error)
+                .expect("missing DPoP credential response should be constructible");
+
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some(r#"DPoP error="invalid_token""#)
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("DPoP-Nonce")
+                .and_then(|value| value.to_str().ok()),
+            Some("nonce-2")
+        );
+    }
+
+    #[test]
+    fn bearer_invalid_token_uses_bearer_challenge_without_dpop_nonce() {
+        let error = BearerAuthenticationError::bearer_invalid_token("token is invalid");
+        let response =
+            authentication_response(&http::Method::GET, http::Version::HTTP_2, "qpx", &error)
+                .expect("Bearer authentication response should be constructible");
+
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some(r#"Bearer error="invalid_token""#)
+        );
+        assert!(!response.headers().contains_key("DPoP-Nonce"));
     }
 }

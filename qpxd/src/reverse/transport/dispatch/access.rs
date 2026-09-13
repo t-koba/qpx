@@ -3,7 +3,7 @@ use crate::http::dispatch::{
     DecisionServiceHttpAccessInput, DecisionServiceHttpAccessOutcome, DispatchAuditContext,
     DispatchAuditInput, DispatchGuardInput, DispatchOutcome, ProxyKind,
     annotated_compiled_local_response, apply_decision_service_http_access,
-    build_dispatch_audit_context, evaluate_http_guard, rate_limit_response_for_parts,
+    build_dispatch_audit_context, evaluate_http_guard, rate_limit_response_for_parts_with_limits,
 };
 use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use crate::rate_limit::{RateLimitContext, TransportScope};
@@ -90,25 +90,28 @@ pub(super) async fn enforce_reverse_access_control(
             request_limits = acquired.limits;
             if let Some(retry_after) = acquired.retry_after {
                 return Ok(ReverseAccessOutcome::Response(Box::new(
-                    rate_limit_response_for_parts(
+                    rate_limit_response_for_parts_with_limits(
                         request_method,
                         req.version(),
                         proxy_name,
                         Some(retry_after),
+                        &request_limits,
                         audit_ctx,
                     ),
                 )));
             }
         }
-        if let Some(response) = reverse_local_route_response(
-            state,
-            route,
-            request_method,
-            req.version(),
-            proxy_name,
-            route.headers.as_deref(),
-            &audit_ctx,
-        )? {
+        if route.plan.reporting_collector.is_none()
+            && let Some(response) = reverse_local_route_response(
+                state,
+                route,
+                request_method,
+                req.version(),
+                proxy_name,
+                route.headers.as_deref(),
+                &audit_ctx,
+            )?
+        {
             return Ok(ReverseAccessOutcome::Response(Box::new(response)));
         }
         return Ok(ReverseAccessOutcome::Continue(ReverseAccessControl {
@@ -191,12 +194,13 @@ pub(super) async fn enforce_reverse_access_control(
     };
     let route_timeout = allowed.timeout_override.unwrap_or(route.policy.timeout);
     let request_version = req.version();
-    let rate_limited_response = |retry_after| {
-        ReverseAccessOutcome::Response(Box::new(rate_limit_response_for_parts(
+    let rate_limited_response = |retry_after, limits: &crate::rate_limit::AppliedRateLimits| {
+        ReverseAccessOutcome::Response(Box::new(rate_limit_response_for_parts_with_limits(
             request_method,
             request_version,
             proxy_name,
             Some(retry_after),
+            limits,
             audit_ctx.clone(),
         )))
     };
@@ -226,7 +230,7 @@ pub(super) async fn enforce_reverse_access_control(
         1,
     )?;
     if let Some(retry_after) = retry_after {
-        return Ok(rate_limited_response(retry_after));
+        return Ok(rate_limited_response(retry_after, &request_limits));
     }
     if let Some(retry_after) = request_limits.merge_profile_and_check(
         &state.policy.rate_limiters,
@@ -235,17 +239,19 @@ pub(super) async fn enforce_reverse_access_control(
         &request_limit_ctx,
         1,
     )? {
-        return Ok(rate_limited_response(retry_after));
+        return Ok(rate_limited_response(retry_after, &request_limits));
     }
-    if let Some(response) = reverse_local_route_response(
-        state,
-        route,
-        request_method,
-        req.version(),
-        proxy_name,
-        allowed.headers.as_deref(),
-        &audit_ctx,
-    )? {
+    if route.plan.reporting_collector.is_none()
+        && let Some(response) = reverse_local_route_response(
+            state,
+            route,
+            request_method,
+            req.version(),
+            proxy_name,
+            allowed.headers.as_deref(),
+            &audit_ctx,
+        )?
+    {
         return Ok(ReverseAccessOutcome::Response(Box::new(response)));
     }
     let authorization_decision = qpx_core::ipc::meta::AuthorizationDecisionContext {

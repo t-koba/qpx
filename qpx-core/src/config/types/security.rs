@@ -71,6 +71,69 @@ pub struct BearerIdentityConfig {
     pub source: BearerIdentitySourceConfig,
     #[serde(default)]
     pub claims: AssertionClaimsMapConfig,
+    /// Enables RFC 9449 Demonstrating Proof of Possession validation.
+    #[serde(default)]
+    pub dpop: Option<DpopConfig>,
+}
+
+/// RFC 9449 resource-server validation policy for a bearer identity source.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DpopConfig {
+    /// Require the `DPoP` authorization scheme instead of accepting `Bearer`.
+    #[serde(default = "default_dpop_required")]
+    pub required: bool,
+    /// Maximum accepted proof age in seconds.
+    #[serde(default = "default_dpop_max_age_seconds")]
+    pub max_age_seconds: u64,
+    /// Permitted clock skew in seconds.
+    #[serde(default = "default_dpop_clock_skew_seconds")]
+    pub clock_skew_seconds: u64,
+    /// Optional server nonce that every proof must carry.
+    #[serde(default)]
+    pub nonce: Option<String>,
+    /// Maximum number of unexpired proof identifiers retained per process.
+    #[serde(default = "default_dpop_replay_cache_capacity")]
+    pub replay_cache_capacity: usize,
+    /// Allowed asymmetric DPoP algorithms.
+    #[serde(default = "default_dpop_algorithms")]
+    pub algorithms: Vec<String>,
+}
+
+impl Default for DpopConfig {
+    fn default() -> Self {
+        Self {
+            required: default_dpop_required(),
+            max_age_seconds: default_dpop_max_age_seconds(),
+            clock_skew_seconds: default_dpop_clock_skew_seconds(),
+            nonce: None,
+            replay_cache_capacity: default_dpop_replay_cache_capacity(),
+            algorithms: default_dpop_algorithms(),
+        }
+    }
+}
+
+fn default_dpop_required() -> bool {
+    true
+}
+
+fn default_dpop_max_age_seconds() -> u64 {
+    300
+}
+
+fn default_dpop_clock_skew_seconds() -> u64 {
+    5
+}
+
+fn default_dpop_replay_cache_capacity() -> usize {
+    8192
+}
+
+fn default_dpop_algorithms() -> Vec<String> {
+    ["ES256", "ES384", "RS256", "RS384", "RS512", "EdDSA"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

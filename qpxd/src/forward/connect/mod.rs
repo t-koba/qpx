@@ -14,9 +14,9 @@ use crate::http::protocol::common::{
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
-    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
-    enforce_decision_service, prepare_decision_service_allow, resolve_identity,
-    sanitize_headers_for_policy,
+    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
+    authentication_response_for_error, enforce_decision_service, prepare_decision_service_allow,
+    resolve_identity_for_request, sanitize_headers_for_policy,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
@@ -84,14 +84,32 @@ pub(super) async fn handle_connect(
         remote_addr.ip(),
         &mut sanitized_headers,
     )?;
-    let mut identity = resolve_identity(
+    let request_context = IdentityRequestContext::from_request_parts(
+        req.method().as_str(),
+        req.uri(),
+        &sanitized_headers,
+        "https",
+    );
+    let mut identity = match resolve_identity_for_request(
         &state,
         &effective_policy,
         remote_addr.ip(),
         Some(&sanitized_headers),
         None,
+        request_context.as_ref(),
     )
-    .await?;
+    .await
+    {
+        Ok(identity) => identity,
+        Err(error) => {
+            if let Some(response) =
+                authentication_response_for_error(req.method(), req_version, proxy_name, &error)
+            {
+                return response;
+            }
+            return Err(error);
+        }
+    };
     let destination = state.classify_destination(
         &DestinationInputs {
             host: Some(host.as_str()),
@@ -192,13 +210,15 @@ pub(super) async fn handle_connect(
         1,
     )?;
     if let Some(retry_after) = retry_after {
-        return Ok(finalize_response_for_request(
+        let mut response = finalize_response_for_request(
             &Method::CONNECT,
             req_version,
             proxy_name,
             too_many_requests(Some(retry_after)),
             false,
-        ));
+        );
+        request_limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
+        return Ok(response);
     }
     let decision_service = enforce_decision_service(
         &state,
@@ -252,13 +272,15 @@ pub(super) async fn handle_connect(
                 &request_limit_ctx,
                 1,
             )? {
-                return Ok(finalize_response_for_request(
+                let mut response = finalize_response_for_request(
                     &Method::CONNECT,
                     req_version,
                     proxy_name,
                     too_many_requests(Some(retry_after)),
                     false,
-                ));
+                );
+                request_limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
+                return Ok(response);
             }
             allow.apply_action_overrides(&mut action);
             (allow.headers, allow.timeout_override)
@@ -319,9 +341,15 @@ pub(super) async fn handle_connect(
         };
     }
     macro_rules! too_many_connect_response {
-        () => {
-            connect_response!(too_many_requests(None), DispatchOutcome::ConcurrencyLimited)
-        };
+        ($retry_after:expr) => {{
+            let retry_after = $retry_after;
+            let mut response = connect_response!(
+                too_many_requests(retry_after),
+                DispatchOutcome::ConcurrencyLimited
+            );
+            request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
+            response
+        }};
     }
     macro_rules! proxy_error_connect_response {
         () => {
@@ -385,10 +413,10 @@ pub(super) async fn handle_connect(
                     matched_rule_name,
                     upstream.as_ref().map(|upstream| upstream.key()),
                 );
-                let concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_ctx)
-                {
+                let concurrency = request_limits.acquire_concurrency_with_retry(&rate_limit_ctx);
+                let concurrency_permits = match concurrency.permits {
                     Some(permits) => Some(permits),
-                    None => return Ok(too_many_connect_response!()),
+                    None => return Ok(too_many_connect_response!(concurrency.retry_after)),
                 };
                 let upstream_connected = match connect_tunnel_target(
                     &host,
@@ -445,9 +473,10 @@ pub(super) async fn handle_connect(
                 matched_rule_name,
                 upstream.as_ref().map(|upstream| upstream.key()),
             );
-            let concurrency_permits = match request_limits.acquire_concurrency(&rate_limit_ctx) {
+            let concurrency = request_limits.acquire_concurrency_with_retry(&rate_limit_ctx);
+            let concurrency_permits = match concurrency.permits {
                 Some(permits) => Some(permits),
-                None => return Ok(too_many_connect_response!()),
+                None => return Ok(too_many_connect_response!(concurrency.retry_after)),
             };
             let connected = match connect_tunnel_target(
                 &host,

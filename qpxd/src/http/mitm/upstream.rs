@@ -5,7 +5,7 @@ use crate::http::dispatch::{
     DispatchAuditContext, DispatchOutcome, DispatchResponsePolicyInput,
     DispatchResponsePolicyOutcome, ProxyKind, annotate_dispatch_response,
     annotated_max_forwards_response, apply_dispatch_response_policy,
-    concurrency_limited_response_for_parts as concurrency_limited_response,
+    concurrency_limited_response_for_parts_with_limits as concurrency_limited_response,
     prepare_http_module_local_response, record_upstream_request_duration,
 };
 use crate::http::policy::response_policy::ResponseBodyObservationLimits;
@@ -74,13 +74,18 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
         input.matched_rule.as_deref(),
         Some(export_server.as_str()),
     );
-    let _concurrency_permits = match input.request_limits.acquire_concurrency(&rate_ctx) {
+    let concurrency = input
+        .request_limits
+        .acquire_concurrency_with_retry(&rate_ctx);
+    let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
             let response = concurrency_limited_response(
                 input.req.method(),
                 input.req.version(),
                 proxy_name,
+                &input.request_limits,
+                concurrency.retry_after,
                 (*audit).clone(),
             );
             return Ok(response);

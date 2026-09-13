@@ -188,6 +188,42 @@ pub(super) fn validate_ingress_edge_configs(
             &format!("edge {}", edge.name),
         )?;
         if let Some(http) = edge.http.as_ref() {
+            if http.cors.is_some() {
+                return Err(anyhow!(
+                    "edge {} http.cors is only valid on reverse routes",
+                    edge.name
+                ));
+            }
+            if http.client_certificate.is_some() {
+                return Err(anyhow!(
+                    "edge {} http.client_certificate is only valid on reverse routes",
+                    edge.name
+                ));
+            }
+            if http.cookies.is_some() {
+                return Err(anyhow!(
+                    "edge {} http.cookies is only valid on reverse routes",
+                    edge.name
+                ));
+            }
+            if http.fetch_metadata.is_some() {
+                return Err(anyhow!(
+                    "edge {} http.fetch_metadata is only valid on reverse routes",
+                    edge.name
+                ));
+            }
+            if http.browser_security.is_some() {
+                return Err(anyhow!(
+                    "edge {} http.browser_security is only valid on reverse routes",
+                    edge.name
+                ));
+            }
+            if http.reporting_collector.is_some() {
+                return Err(anyhow!(
+                    "edge {} http.reporting_collector is only valid on reverse routes",
+                    edge.name
+                ));
+            }
             for response_rule in &http.response_rules {
                 validate_match_config(
                     response_rule.r#match.as_ref(),
