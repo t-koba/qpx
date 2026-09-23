@@ -292,25 +292,27 @@ impl AppliedRateLimits {
                 quota_unit: policy.quota_unit.map(str::to_string),
                 partition_key: None,
             }
-            .to_header_value()
-            .expect("validated RateLimit policy must serialize");
-            headers.append(policy_header.clone(), value);
+            .to_header_value();
+            if let Ok(value) = value {
+                headers.append(policy_header.clone(), value);
+            }
         }
 
         for index in &self.rejected_rate_limit_policies {
-            let policy = self
-                .rate_limit_policies
-                .get(*index)
-                .expect("rate limit rejection index must reference a policy");
+            let policy = self.rate_limit_policies.get(*index);
+            let Some(policy) = policy else {
+                continue;
+            };
             let value = qpx_http::rate_limit_fields::RateLimitField {
                 name: policy.name.to_string(),
                 remaining: 0,
                 reset_seconds: retry_after.map(|retry_after| retry_after.as_secs().max(1)),
                 partition_key: None,
             }
-            .to_header_value()
-            .expect("validated RateLimit service limit must serialize");
-            headers.append(current_header.clone(), value);
+            .to_header_value();
+            if let Ok(value) = value {
+                headers.append(current_header.clone(), value);
+            }
         }
 
         headers.insert(

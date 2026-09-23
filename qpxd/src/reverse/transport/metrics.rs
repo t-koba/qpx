@@ -81,3 +81,11 @@ pub(super) fn mirror_dropped(target: &str, reason: &'static str) {
     )
     .increment(1);
 }
+
+pub(super) fn browser_reports_received(report_count: u64, legacy: bool) {
+    counter!(
+        "qpx_browser_reports_received_total",
+        "format" => if legacy { "legacy_csp" } else { "reporting_api" }
+    )
+    .increment(report_count);
+}

@@ -776,11 +776,7 @@ async fn collect_browser_reports(
                 ));
             }
         };
-    metrics::counter!(
-        "qpx_browser_reports_received_total",
-        "format" => if legacy { "legacy_csp" } else { "reporting_api" }
-    )
-    .increment(report_count as u64);
+    super::metrics::browser_reports_received(report_count as u64, legacy);
     let response = Response::builder()
         .status(StatusCode::NO_CONTENT)
         .header(http::header::CACHE_CONTROL, "no-store")

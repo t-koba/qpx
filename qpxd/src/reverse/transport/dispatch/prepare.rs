@@ -697,8 +697,6 @@ pub(super) async fn prepare_reverse_request(
     let host = base.host().unwrap_or_default();
     let request_method = &base.method;
     let request_version = req.version();
-    let identity_request =
-        IdentityRequestContext::from_base(base, if conn.tls_terminated { "https" } else { "http" });
     if !state.destination_trace_enabled()
         && state.security.identity_sources.sources.is_empty()
         && let Some(route) = router.single_http_route()
@@ -794,6 +792,11 @@ pub(super) async fn prepare_reverse_request(
         collect_observation_from_remaining: false,
     };
     let sanitized_route_headers = sanitized_headers_for_route_scan(&req, &state, conn)?;
+    let identity_request = if state.security.identity_sources.sources.is_empty() {
+        None
+    } else {
+        IdentityRequestContext::from_base(base, if conn.tls_terminated { "https" } else { "http" })
+    };
     if let Err(error) = scan_reverse_routes(
         router,
         req.headers(),

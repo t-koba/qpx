@@ -77,9 +77,9 @@ fn invalid(field: &'static str, detail: impl Into<String>) -> BrowserPolicyError
 
 fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
     let name = HeaderName::from_static(name);
-    let value = HeaderValue::from_str(value)
-        .expect("validated browser policy must produce a valid HTTP field value");
-    headers.insert(name, value);
+    if let Ok(value) = HeaderValue::from_str(value) {
+        headers.insert(name, value);
+    }
 }
 
 fn remove_header(headers: &mut HeaderMap, name: &'static str) {
