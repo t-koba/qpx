@@ -57,12 +57,16 @@ jobs:
             exit 1
           fi
           dpkg-query -L "${perf_packages[@]}" > target/perf/native-perf-package-files.txt
-          mapfile -t perf_tools < <(rg '^/usr/lib/.*/perf$' target/perf/native-perf-package-files.txt | sort -V)
+          mapfile -t perf_tools < <(rg '^/usr/lib/linux-tools[^[:space:]]*/perf$' target/perf/native-perf-package-files.txt | sort -V)
           if [ "${#perf_tools[@]}" -eq 0 ]; then
             echo "native perf executable is missing" >&2
             exit 1
           fi
           perf_binary="${perf_tools[-1]}"
+          if [ ! -f "$perf_binary" ] || [ ! -x "$perf_binary" ]; then
+            echo "native perf path is not an executable file: $perf_binary" >&2
+            exit 1
+          fi
           "$perf_binary" --version
           "$perf_binary" record -e cpu-clock -F 199 --clockid CLOCK_MONOTONIC \
             --call-graph dwarf,16384 -o target/perf/native-perf-probe.data \

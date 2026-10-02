@@ -298,7 +298,9 @@ impl DiskCacheBackend {
         handle.spawn(async move {
             // Index pre-existing files up front so the first sweep never
             // pays the directory scan while traffic is being served.
-            let _ = cloned.ensure_indexed().await;
+            if let Err(error) = cloned.ensure_indexed().await {
+                warn!(error = ?error, "failed to initialize disk cache index");
+            }
             cloned.background_sweep().await;
         });
     }
@@ -333,20 +335,23 @@ impl DiskCacheBackend {
         // scan. Writes concurrent with the scan re-register themselves, so
         // the merge below only fills gaps.
         let mut entries = HashMap::new();
-        let mut total_bytes = 0u64;
         for path in collect_cache_files(&self.root)? {
             let Some(id) = cache_file_id_from_path(&self.root, &path) else {
-                let _ = fs::remove_file(&path);
+                remove_cache_file_sync(&path)?;
                 continue;
             };
             match read_disk_cache_header_sync(&path) {
                 Ok(read) => {
                     if read.header.expires_at_ms <= now_ms() {
-                        let _ = fs::remove_file(&path);
+                        remove_cache_file_sync(&path)?;
                         continue;
                     }
-                    let touched_at_ms = file_touched_at_ms(&path).unwrap_or(0);
-                    total_bytes = total_bytes.saturating_add(read.total_len);
+                    let touched_at_ms = read
+                        .file
+                        .metadata()?
+                        .modified()?
+                        .duration_since(UNIX_EPOCH)?
+                        .as_millis() as u64;
                     entries.insert(
                         id,
                         DiskCacheIndexEntry {
@@ -356,9 +361,8 @@ impl DiskCacheBackend {
                         },
                     );
                 }
-                Err(_) => {
-                    let _ = fs::remove_file(&path);
-                }
+                Err(error) if cache_file_not_found(&error) => continue,
+                Err(error) => return Err(error),
             }
         }
         let mut state = self.state.lock().await;
@@ -392,7 +396,7 @@ impl DiskCacheBackend {
             Err(error) => return Err(error),
         };
         if read.header.expires_at_ms <= now_ms() {
-            self.delete_path(&path).await;
+            self.delete_path(&path).await?;
             return Ok(None);
         }
         let mut state = self.state.lock().await;
@@ -598,8 +602,16 @@ impl DiskCacheBackend {
         }
     }
 
-    async fn delete_path(&self, path: &Path) {
-        let _ = tokio::fs::remove_file(path).await;
+    async fn delete_path(&self, path: &Path) -> Result<()> {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to remove disk cache object {}", path.display())
+                });
+            }
+        }
         self.hot_recent_remove(path);
         let mut state = self.state.lock().await;
         if let Some(entry) = state.hot_entries.pop(path) {
@@ -610,6 +622,7 @@ impl DiskCacheBackend {
         {
             state.total_bytes = state.total_bytes.saturating_sub(entry.total_len);
         }
+        Ok(())
     }
 
     fn hot_recent_upsert(&self, entry: RecentHotCacheEntry, removed: &[DiskCacheFileId]) {
@@ -689,10 +702,8 @@ impl DiskCacheBackend {
         self.evict_if_needed().await
     }
 
-    async fn sweep_expired(&self) {
-        if self.ensure_indexed().await.is_err() {
-            return;
-        }
+    async fn sweep_expired(&self) -> Result<()> {
+        self.ensure_indexed().await?;
         let now = now_ms();
         let expired = {
             let state = self.state.lock().await;
@@ -705,8 +716,9 @@ impl DiskCacheBackend {
         };
         for id in expired {
             let path = self.path_for_id(id);
-            self.delete_path(&path).await;
+            self.delete_path(&path).await?;
         }
+        Ok(())
     }
 
     async fn evict_if_needed(&self) -> Result<()> {
@@ -723,10 +735,12 @@ impl DiskCacheBackend {
                     .map(|(id, _)| *id)
             };
             let Some(id) = victim else {
-                return Ok(());
+                return Err(anyhow!(
+                    "disk cache capacity accounting has no eviction candidate"
+                ));
             };
             let path = self.path_for_id(id);
-            self.delete_path(&path).await;
+            self.delete_path(&path).await?;
         }
     }
 
@@ -901,8 +915,12 @@ impl DiskCacheBackend {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            self.sweep_expired().await;
-            let _ = self.evict_if_needed().await;
+            if let Err(error) = self.sweep_expired().await {
+                warn!(error = ?error, "failed to expire disk cache objects");
+            }
+            if let Err(error) = self.evict_if_needed().await {
+                warn!(error = ?error, "failed to enforce disk cache capacity");
+            }
         }
     }
 }
@@ -1272,8 +1290,7 @@ impl CacheBackend for DiskCacheBackend {
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
         let path = self.path_for(namespace, key);
-        self.delete_path(&path).await;
-        Ok(())
+        self.delete_path(&path).await
     }
 }
 
@@ -1448,12 +1465,13 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn file_touched_at_ms(path: &Path) -> Option<u64> {
-    fs::metadata(path)
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as u64)
+fn remove_cache_file_sync(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to remove disk cache object {}", path.display())),
+    }
 }
 
 fn collect_cache_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -1463,9 +1481,6 @@ fn collect_cache_files(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn collect_cache_files_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -2492,6 +2507,59 @@ mod tests {
         fs::create_dir(&path).expect("create invalid object directory");
         assert!(backend.get("ns", "directory").await.is_err());
         assert!(read_metadata_trailer_sync(&path).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_backend_rejects_invalid_initial_objects_without_deleting_evidence() {
+        let dir = temp_dir("initial-index-error");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let path = backend.path_for("ns", "invalid");
+        ensure_private_dir(path.parent().expect("object parent")).expect("create object parent");
+        fs::write(&path, b"invalid cache object").expect("write invalid object");
+        assert!(backend.ensure_indexed().await.is_err());
+        assert!(!backend.indexed_flag.load(Ordering::Acquire));
+        assert_eq!(
+            fs::read(&path).expect("preserved invalid object"),
+            b"invalid cache object"
+        );
+        assert!(backend.get("ns", "absent").await.is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_backend_preserves_capacity_accounting_after_failed_eviction() {
+        let dir = temp_dir("failed-eviction-accounting");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let value = vec![b'a'; 600 * 1024];
+        backend
+            .put("ns", "first", &value, 60)
+            .await
+            .expect("put first");
+        let path = backend.path_for("ns", "first");
+        let id = cache_file_id("ns", "first");
+        let first_len = backend.state.lock().await.total_bytes;
+        fs::remove_file(&path).expect("remove first object");
+        fs::create_dir(&path).expect("replace first object with directory");
+        assert!(backend.delete("ns", "first").await.is_err());
+        {
+            let state = backend.state.lock().await;
+            assert_eq!(state.total_bytes, first_len);
+            assert!(state.entries.contains_key(&id));
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert!(backend.put("ns", "second", &value, 60).await.is_err());
+        {
+            let state = backend.state.lock().await;
+            assert!(state.total_bytes > backend.max_bytes);
+            assert!(state.entries.contains_key(&id));
+        }
+        fs::remove_dir(&path).expect("remove invalid object directory");
+        backend
+            .evict_if_needed()
+            .await
+            .expect("reconcile absent object");
+        assert!(backend.state.lock().await.total_bytes <= backend.max_bytes);
         let _ = fs::remove_dir_all(dir);
     }
 
