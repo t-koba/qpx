@@ -118,7 +118,7 @@ struct RecentHotCache {
 
 #[derive(Clone)]
 struct RecentHotCacheShard {
-    entries: Vec<Option<RecentHotCacheEntry>>,
+    entries: Vec<Option<std::sync::Arc<RecentHotCacheEntry>>>,
 }
 
 impl Default for RecentHotCache {
@@ -306,10 +306,17 @@ impl DiskCacheBackend {
 
     fn path_for_id(&self, id: DiskCacheFileId) -> PathBuf {
         let digest = cache_file_id_hex(id);
-        self.root
-            .join(&digest[0..2])
-            .join(&digest[2..4])
-            .join(format!("{digest}.{DISK_CACHE_FILE_EXT}"))
+        let capacity = self.root.as_os_str().as_encoded_bytes().len()
+            + digest.len()
+            + DISK_CACHE_FILE_EXT.len()
+            + 8;
+        let mut path = PathBuf::with_capacity(capacity);
+        path.push(&self.root);
+        path.push(&digest[0..2]);
+        path.push(&digest[2..4]);
+        path.push(&digest);
+        path.set_extension(DISK_CACHE_FILE_EXT);
+        path
     }
 
     async fn ensure_indexed(&self) -> Result<()> {
@@ -593,6 +600,9 @@ impl DiskCacheBackend {
     }
 
     fn hot_recent_upsert(&self, entry: RecentHotCacheEntry, removed: &[PathBuf]) {
+        // Snapshot updates share immutable records instead of copying every
+        // retained path, payload handle, and key in the affected shard.
+        let entry = std::sync::Arc::new(entry);
         let _update =
             HotRecentUpdateGuard::acquire(&self.hot_recent_update, &self.hot_recent_generation);
         self.hot_recent.rcu(|current| {
@@ -1305,13 +1315,13 @@ fn recent_hot_entry_at(recent: &RecentHotCache, slot: usize) -> Option<&RecentHo
     shard
         .entries
         .get(slot % DISK_CACHE_RECENT_ENTRIES_PER_SHARD)?
-        .as_ref()
+        .as_deref()
 }
 
 fn recent_hot_entry_mut(
     shards: &mut [std::sync::Arc<RecentHotCacheShard>],
     slot: usize,
-) -> &mut Option<RecentHotCacheEntry> {
+) -> &mut Option<std::sync::Arc<RecentHotCacheEntry>> {
     let shard = std::sync::Arc::make_mut(&mut shards[slot / DISK_CACHE_RECENT_ENTRIES_PER_SHARD]);
     &mut shard.entries[slot % DISK_CACHE_RECENT_ENTRIES_PER_SHARD]
 }
@@ -2139,7 +2149,7 @@ mod tests {
             recent_hot_entry_mut(&mut updated_recent.shards, hot_slot("ns", variant_key))
                 .as_mut()
                 .expect("hot metadata");
-        updated_entry.value = updated_metadata;
+        std::sync::Arc::make_mut(updated_entry).value = updated_metadata;
         {
             let _update = HotRecentUpdateGuard::acquire(
                 &backend.hot_recent_update,
