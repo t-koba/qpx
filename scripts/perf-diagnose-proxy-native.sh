@@ -63,4 +63,37 @@ if [ "$profiles" -ne 2 ]; then
   echo "native CPU profiling requires both cache roles: observed $profiles" >&2
   exit 1
 fi
+reports=0
+for role in qpxd-cache qpxd-feature-rich; do
+  for sample in "$ROOT_DIR"/target/perf/proxy-compare-logs/*."$role".*.rss-peak.samples.csv; do
+    [ -f "$sample" ] || continue
+    window="$(python3 - "$sample" <<'PY'
+import csv
+import sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+if len(rows) < 2:
+    raise SystemExit("native profile window requires at least two real workload samples")
+first, last = int(rows[0]["monotonic_ns"]), int(rows[-1]["monotonic_ns"])
+if first >= last:
+    raise SystemExit("native profile workload sample times are not increasing")
+def timestamp(value):
+    return f"{value // 1_000_000_000}.{value % 1_000_000_000:09d}"
+print(f"{timestamp(first)},{timestamp(last)}")
+PY
+)"
+    "$QPX_NATIVE_PERF_BIN" report --stdio --header --no-children \
+      --sort symbol --percent-limit 0.5 --time "$window" \
+      -i "$QPX_NATIVE_PROFILE_DIR/$role.data" >"$sample.cpu-report.txt"
+    if ! rg -q '^# Samples: [1-9]' "$sample.cpu-report.txt"; then
+      echo "native workload CPU profile contains no samples: $sample" >&2
+      exit 1
+    fi
+    reports=$((reports + 1))
+  done
+done
+if [ "$reports" -lt 9 ]; then
+  echo "native CPU profiling lacks complete workload windows: observed $reports" >&2
+  exit 1
+fi
 echo "Native CPU profiles: $profiles"
+echo "Native workload CPU reports: $reports"
