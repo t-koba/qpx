@@ -55,6 +55,13 @@ for category in ("proxy", "http2", "streaming", "netem"):
     require("scripts/verify-perf-binaries.py" in job, f"{category} does not verify binary identity")
     require("cargo build" not in job, f"{category} builds during its measurement job")
 
+for category in ("proxy", "http2", "streaming"):
+    job = jobs[f"perf_audit_{category}"]
+    require("bash scripts/perf-audit-revision-compare.sh" in job,
+            f"{category} does not invoke the revision comparison through bash")
+    require(not re.search(r"^\s+scripts/perf-audit-revision-compare\.sh", job, re.MULTILINE),
+            f"{category} depends on the revision comparison executable bit")
+
 aggregate = jobs.get("perf_audit", "")
 require("if: always()" in aggregate, "aggregate may skip failed categories")
 for category in CATEGORIES:

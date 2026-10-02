@@ -705,7 +705,7 @@ jobs:
         run: |
           python3 scripts/perf-evaluate.py "external http2 comparison bench" -- bash -euo pipefail <<'PERF_STEP'
           if [ "$QPX_PERF_REPEAT" = 1 ]; then
-            scripts/perf-audit-revision-compare.sh http2 "$QPX_HTTP2_COMPARE_JSON"
+            bash scripts/perf-audit-revision-compare.sh http2 "$QPX_HTTP2_COMPARE_JSON"
           else
             scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
           fi
@@ -793,7 +793,7 @@ jobs:
         run: |
           python3 scripts/perf-evaluate.py "external long streaming comparison bench" -- bash -euo pipefail <<'PERF_STEP'
           if [ "$QPX_PERF_REPEAT" = 1 ]; then
-            scripts/perf-audit-revision-compare.sh streaming "$QPX_STREAMING_COMPARE_JSON"
+            bash scripts/perf-audit-revision-compare.sh streaming "$QPX_STREAMING_COMPARE_JSON"
           else
             scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"
           fi
