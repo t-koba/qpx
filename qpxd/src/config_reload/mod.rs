@@ -41,7 +41,7 @@ impl ConfigReloadHandler {
         current: &mut ProxyConfig,
         runtime: &mut runtime::Runtime,
         proxy: &mut ProxyTasks,
-        watcher: &mut dyn notify::Watcher,
+        watcher: &mut crate::config_watch::ConfigFileWatcher,
         watched: &mut HashSet<PathBuf>,
     ) -> Result<()> {
         let (new_config, sources) = match load_configs_with_sources(&self.config_paths) {
@@ -99,7 +99,7 @@ impl ConfigReloadHandler {
         &self,
         current: &mut ProxyConfig,
         runtime: &runtime::Runtime,
-        watcher: &mut dyn notify::Watcher,
+        watcher: &mut crate::config_watch::ConfigFileWatcher,
         watched: &mut HashSet<PathBuf>,
         watch_sources: Vec<PathBuf>,
         new_config: ProxyConfig,
@@ -125,7 +125,8 @@ impl ConfigReloadHandler {
                 runtime.swap(state);
                 // Flush direct-origin connections so the reload picks up new TLS/routing.
                 runtime.state().pools.direct_origin.clear();
-                let _ = refresh_watches(watcher, watched, watch_sources);
+                refresh_watches(watcher, watched, watch_sources)
+                    .context("failed to refresh configuration watches after reload")?;
                 info!("config reloaded");
                 emit_config_reload_audit(
                     "applied",

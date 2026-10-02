@@ -24,6 +24,7 @@ compile_error!("qpxd: feature acme requires tls-rustls");
 mod cli;
 mod cli_render;
 mod config_reload;
+mod config_watch;
 #[cfg(feature = "http3-backend-qpx")]
 mod connect_ip;
 mod daemon;

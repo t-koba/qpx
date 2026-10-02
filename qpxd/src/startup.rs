@@ -252,16 +252,12 @@ pub(crate) async fn run(
 }
 
 struct ConfigWatcher {
-    rx: tokio::sync::mpsc::Receiver<notify::Result<notify::Event>>,
-    watcher: notify::RecommendedWatcher,
+    watcher: crate::config_watch::ConfigFileWatcher,
     watched: std::collections::HashSet<PathBuf>,
 }
 
 fn start_config_watcher(config_paths: &[PathBuf]) -> Result<ConfigWatcher> {
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
-    let mut watcher = notify::recommended_watcher(move |res| {
-        let _ = tx.blocking_send(res);
-    })?;
+    let mut watcher = crate::config_watch::ConfigFileWatcher::new()?;
     let mut watched = std::collections::HashSet::new();
     let (watch_config, sources) = load_configs_with_sources(config_paths)?;
     refresh_watches(
@@ -269,11 +265,7 @@ fn start_config_watcher(config_paths: &[PathBuf]) -> Result<ConfigWatcher> {
         &mut watched,
         watch_sources_for_config(&watch_config, sources),
     )?;
-    Ok(ConfigWatcher {
-        rx,
-        watcher,
-        watched,
-    })
+    Ok(ConfigWatcher { watcher, watched })
 }
 
 async fn run_control_loop(
@@ -315,9 +307,9 @@ async fn run_control_loop(
                     Err(err) => Err(anyhow::anyhow!("brokered HTTP/3 sidecar join failed: {err}")),
                 };
             },
-            event = config_watcher.rx.recv() => {
+            event = config_watcher.watcher.next_event() => {
                 let Some(event) = event else {
-                    return Ok(());
+                    return Err(anyhow::anyhow!("configuration watcher event stream closed"));
                 };
                 match event {
                     Ok(_) => {
@@ -528,7 +520,7 @@ pub(crate) fn watch_sources_for_config(
 }
 
 pub(crate) fn refresh_watches(
-    watcher: &mut dyn notify::Watcher,
+    watcher: &mut crate::config_watch::ConfigFileWatcher,
     watched: &mut std::collections::HashSet<PathBuf>,
     sources: Vec<PathBuf>,
 ) -> Result<()> {
@@ -538,10 +530,10 @@ pub(crate) fn refresh_watches(
     // bind file watches to the old inode/handle, so refresh every retained path
     // after a successful reload instead of only adding/removing set differences.
     for stale in watched.iter() {
-        let _ = watcher.unwatch(stale);
+        watcher.unwatch(stale)?;
     }
     for source in &next {
-        watcher.watch(source, notify::RecursiveMode::NonRecursive)?;
+        watcher.watch(source)?;
     }
 
     *watched = next;

@@ -2,7 +2,7 @@ use super::{ConfigReloadHandler, emit_config_reload_audit};
 use crate::server::ProxyTasks;
 use crate::startup::{log_runtime_ready, refresh_watches, validate_runtime_state};
 use crate::{runtime, tcp_bindings, udp_bindings};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use qpx_core::config::Config as ProxyConfig;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ pub(super) struct RestartReloadInput<'a> {
     pub(super) current: &'a mut ProxyConfig,
     pub(super) runtime: &'a mut runtime::Runtime,
     pub(super) proxy: &'a mut ProxyTasks,
-    pub(super) watcher: &'a mut dyn notify::Watcher,
+    pub(super) watcher: &'a mut crate::config_watch::ConfigFileWatcher,
     pub(super) watched: &'a mut HashSet<PathBuf>,
     pub(super) watch_sources: Vec<PathBuf>,
     pub(super) new_config: ProxyConfig,
@@ -107,7 +107,8 @@ impl ConfigReloadHandler {
         }
         // `new_runtime` owns freshly built connection pools, so there is nothing to flush.
         log_runtime_ready(&new_runtime);
-        let _ = refresh_watches(watcher, watched, watch_sources);
+        refresh_watches(watcher, watched, watch_sources)
+            .context("failed to refresh configuration watches after reload")?;
         info!("config reloaded; listener/reverse server set restarted");
         emit_config_reload_audit(
             "applied",

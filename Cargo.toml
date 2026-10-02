@@ -70,6 +70,7 @@ crossbeam-channel = "0.5"
 parking_lot = "0.12"
 smallvec = "1"
 notify = "6"
+inotify = "0.9.6"
 async-trait = "0.1"
 futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
