@@ -165,13 +165,13 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.89"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -3854,6 +3854,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
 name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4513,16 +4524,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-encoder"
-version = "0.260.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1e9692da9ef627c5ee12b45378f68ac2689ce306f88078f5cf849b7c3444ed8"
-dependencies = [
- "leb128fmt",
- "wasmparser 0.260.0",
-]
-
-[[package]]
 name = "wasm-metadata"
 version = "0.244.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4569,17 +4570,6 @@ dependencies = [
  "indexmap",
  "semver",
  "serde",
-]
-
-[[package]]
-name = "wasmparser"
-version = "0.260.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c94519d78304dc4a4bb5925eda6ff153bf06167467cff9233dc9593bae28fdd"
-dependencies = [
- "bitflags 2.11.1",
- "indexmap",
- "semver",
 ]
 
 [[package]]
@@ -4867,24 +4857,24 @@ dependencies = [
 
 [[package]]
 name = "wast"
-version = "260.0.0"
+version = "254.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17573754cde137d26852892330414efb6d1d33480adcd10e8825d092b2132229"
+checksum = "e7ed4dfc8f6b9fc38b231065e2cdfbf7359af5ab945990abf09658dcc63c3e32"
 dependencies = [
  "bumpalo",
  "leb128fmt",
  "memchr",
  "unicode-width",
- "wasm-encoder 0.260.0",
+ "wasm-encoder 0.254.0",
 ]
 
 [[package]]
 name = "wat"
-version = "1.260.0"
+version = "1.254.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f56de9341c410d04121da51dd16c11d095cb6a914bd2b2850cd3c60558c0c15"
+checksum = "7127f7f9b8f127c879991cecd35f494e4628bae1b0874c681414d8d8831e952c"
 dependencies = [
- "wast 260.0.0",
+ "wast 254.0.0",
 ]
 
 [[package]]
