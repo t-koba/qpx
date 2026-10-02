@@ -116,10 +116,16 @@ impl HttpCacheBackend {
         host: &str,
         port: u16,
     ) -> Result<Http1SendRequest> {
-        if let Some(sender) = self.idle.lock().await.pop() {
-            return Ok(sender);
-        }
-        self.open_sender(scheme, host, port).await
+        let idle_sender = { self.idle.lock().await.pop() };
+        let mut sender = match idle_sender {
+            Some(sender) => sender,
+            None => self.open_sender(scheme, host, port).await?,
+        };
+        // Consuming a response body can precede the connection driver's
+        // transition back to ready. Synchronize before submitting a request,
+        // including the first request after the handshake.
+        timeout(self.timeout, sender.ready()).await??;
+        Ok(sender)
     }
 
     async fn recycle_sender(&self, sender: Http1SendRequest) {
