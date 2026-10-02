@@ -17,6 +17,73 @@ def reject_nonfinite(value):
     raise ValueError(f"nonfinite JSON value: {value}")
 
 
+def objective_coverage(category, evaluations, scope):
+    """Require every workload and criterion, including failed measurements."""
+    directory = Path(__file__).resolve().parent.parent / "perf"
+    expected = {}
+    if category in ("proxy", "http2"):
+        filename = "origin-cache" if category == "proxy" else "http2"
+        objectives = json.loads((directory / f"{filename}-performance-objectives.json").read_text())
+        performance = {key for key in objectives["defaults"]
+                       if "sample_spread" not in key and key != "min_aggregate_dominance_score"}
+        for lane in objectives["lanes"]:
+            if category == "proxy":
+                key = (lane["bench"], lane["body_bytes"], None, None)
+                quality = {f"{role}.{metric}" for role in ("qpx", "reference")
+                           for metric in ("requests_per_sec_ratio", "requests_per_cpu_second_ratio")}
+            else:
+                key = ("proxy_compare_http2_reverse", lane["body_bytes"], lane["max_concurrent_streams"], None)
+                quality = {f"{role}.{metric}" for role in ("qpxd", "nginx", "direct-backend")
+                           for metric in ("throughput_sample_spread", "cpu_sample_spread")}
+            expected[key] = quality | (performance if scope == "acceptance" else set())
+    else:
+        objectives = json.loads((directory / "streaming-performance-objectives.json").read_text())
+        fast = {"throughput ratio", "direct efficiency ratio", "total CPU efficiency ratio",
+                "first-byte ratio", "p99 gap ratio", "maximum gap ratio", "dominance score",
+                "total RSS peak ratio", "total FD peak ratio", "scheduler queue-delay ratio"}
+        quality = {f"{role}.total_time_sample_spread" for role in ("qpxd", "direct-backend")}
+        for mode in ("fast", "slow"):
+            performance = fast if mode == "fast" else set(objectives["slow"])
+            expected[("proxy_compare_http1_streaming_reverse", 104857600, None, mode)] = (
+                quality | (performance if scope == "acceptance" else set()))
+    failures = []
+    seen = set()
+    for evaluation in evaluations:
+        if not isinstance(evaluation, dict):
+            failures.append("objective record is not an object")
+            continue
+        key = tuple(evaluation.get(field) for field in
+                    ("bench", "body_bytes", "max_concurrent_streams", "read_mode"))
+        if any(value is not None and type(value) not in (str, int) for value in key):
+            failures.append("invalid workload identity")
+            continue
+        if key in seen or key not in expected:
+            failures.append(f"duplicate or unexpected workload: {key}")
+            continue
+        seen.add(key)
+        if evaluation.get("scope") != scope:
+            failures.append(f"invalid objective scope: {key}")
+        checks = evaluation.get("checks")
+        if not isinstance(checks, list) or not all(isinstance(check, dict) for check in checks):
+            failures.append(f"invalid objective checks: {key}")
+            continue
+        metrics = [check.get("metric") for check in checks]
+        if not all(isinstance(metric, str) for metric in metrics):
+            failures.append(f"invalid objective metric: {key}")
+            continue
+        missing = expected[key] - set(metrics)
+        if missing:
+            failures.append(f"missing objective checks: {key}: {sorted(missing)}")
+        if len(set(metrics)) != len(metrics):
+            failures.append(f"duplicate objective checks: {key}")
+        if category == "streaming" and not any(
+                f"{role}.total_time_sample_spread" in metrics for role in objectives["external_proxies"]):
+            failures.append(f"missing reference stability check: {key}")
+    for key in expected.keys() - seen:
+        failures.append(f"missing required workload: {key}")
+    return failures
+
+
 def summarize(root, destination, commit, repetitions, needs, download_outcome):
     failures = []
     results = []
@@ -75,13 +142,16 @@ def summarize(root, destination, commit, repetitions, needs, download_outcome):
                         raise ValueError("evaluation identity or outcome is invalid")
                     if not isinstance(result.get("evaluations"), list):
                         raise ValueError("structured evaluations are missing")
-                    if category in ("proxy", "http2", "streaming") and label.startswith("enforce ") and not result["evaluations"]:
-                        raise ValueError("required objective checks are missing")
                     diagnostics = log.read_text()
                 except (OSError, ValueError, KeyError, TypeError) as error:
                     failures.append(f"missing or invalid evaluation {artifact.name}/{label}: {error}")
                     continue
                 results.append({"category": category, "repetition": repetition, **result})
+                if category in ("proxy", "http2", "streaming") and (
+                        label.startswith("enforce ") or label.endswith(" measurement quality")):
+                    scope = "measurement-quality" if label.endswith(" measurement quality") else "acceptance"
+                    failures.extend(f"{category}, run {repetition}, {label}: {failure}"
+                                    for failure in objective_coverage(category, result["evaluations"], scope))
                 lines.extend(["", f"### {category}, run {repetition}: {label}", "",
                               f"Result: **{result['outcome']}**; exit code: {status}; elapsed: {elapsed:.3f} s.", ""])
                 if status != 0:

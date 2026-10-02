@@ -453,7 +453,7 @@ for lane in lanes:
         "fd_peak_ratio": round(fd_peak_ratio, 6),
         "scheduler_queue_delay_ratio": round(scheduler_queue_delay_ratio, 6),
     }
-    print(json.dumps(result, sort_keys=True))
+    print(json.dumps(result, sort_keys=True), flush=True)
     results.append((bench, body_bytes, failures))
 
 failed = [(bench, body, failures) for bench, body, failures in results if failures]

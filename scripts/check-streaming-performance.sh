@@ -402,7 +402,7 @@ print(
 
 for mode in ("fast", "slow"):
     print(json.dumps({"bench": BENCH, "body_bytes": records[(mode, "qpxd")]["stream_bytes"],
-                      "read_mode": mode, "scope": MODE, "checks": evaluations[mode]}))
+                      "read_mode": mode, "scope": MODE, "checks": evaluations[mode]}), flush=True)
 
 if failures:
     for failure in failures:

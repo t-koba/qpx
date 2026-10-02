@@ -35,8 +35,9 @@ def main():
             for line in process.stdout:
                 log.write(line)
                 print(line, end="", flush=True)
+                # Merged stderr may follow a complete JSON value on the same line.
                 try:
-                    record = json.loads(line)
+                    record, _ = json.JSONDecoder().raw_decode(line.lstrip())
                 except json.JSONDecodeError:
                     continue
                 if isinstance(record, dict) and "checks" in record:

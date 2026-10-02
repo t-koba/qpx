@@ -427,7 +427,7 @@ for body_bytes, max_streams in sorted(required_lanes):
             )}
             for proxy, sample in (("direct-backend", direct), ("qpxd", qpx), ("nginx", nginx))
         },
-    }, sort_keys=True))
+    }, sort_keys=True), flush=True)
 
     print(
         f"HTTP/2 {body_bytes} bytes m={max_streams}: throughput={throughput_ratio:.3f}, "
