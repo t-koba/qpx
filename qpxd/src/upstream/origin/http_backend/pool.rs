@@ -33,7 +33,6 @@ static NEXT_DIRECT_ORIGIN_POOL_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_HTTP1_IDLE_AFFINITY: AtomicU64 = AtomicU64::new(1);
 static NEXT_HTTP1_IDLE_SHARD: AtomicUsize = AtomicUsize::new(0);
 const THREAD_PLAIN_SLOT_CACHE_CAPACITY: usize = 16;
-const LOCAL_HTTP1_IDLE_PROBE_AFTER_SECONDS: u64 = 5;
 
 struct CachedPlainOriginSlot {
     pool_id: u64,
@@ -81,7 +80,6 @@ pub(super) struct PlainHttp1OriginConnection {
     pub(super) stream: TcpStream,
     pub(super) read_buf: BytesMut,
     pub(super) write_buf: BytesMut,
-    idle_epoch_second: u64,
     idle_affinity: Option<u64>,
 }
 
@@ -91,18 +89,8 @@ impl PlainHttp1OriginConnection {
             stream,
             read_buf,
             write_buf,
-            idle_epoch_second: crate::http::protocol::l7::cached_epoch_second(),
             idle_affinity: None,
         }
-    }
-
-    fn mark_idle(&mut self) {
-        self.idle_epoch_second = crate::http::protocol::l7::cached_epoch_second();
-    }
-
-    pub(super) fn requires_idle_probe(&self) -> bool {
-        crate::http::protocol::l7::cached_epoch_second().saturating_sub(self.idle_epoch_second)
-            >= LOCAL_HTTP1_IDLE_PROBE_AFTER_SECONDS
     }
 }
 
@@ -373,7 +361,6 @@ impl PlainHttpOriginSlot {
 
     pub(super) fn recycle_idle(&self, mut connection: PlainHttp1OriginConnection) {
         trim_recycled_http1_buffers(&mut connection.read_buf, &mut connection.write_buf);
-        connection.mark_idle();
         connection.idle_affinity = None;
         self.idle.push(connection, &self.max_http1_idle);
     }
@@ -384,7 +371,6 @@ impl PlainHttpOriginSlot {
         affinity: u64,
     ) {
         trim_recycled_http1_buffers(&mut connection.read_buf, &mut connection.write_buf);
-        connection.mark_idle();
         connection.idle_affinity = Some(affinity);
         self.idle
             .push_preferred(connection, &self.max_http1_idle, affinity as usize);

@@ -188,6 +188,29 @@ async fn connection_local_pool_keeps_reusable_origins_isolated() -> Result<()> {
     Ok(())
 }
 
+async fn await_pooled_plain_http1_eof(
+    pools: &crate::pool::PoolRegistry,
+    origin: &OriginEndpoint,
+) -> Result<()> {
+    let default_port = origin.default_port_hint();
+    let connect_authority = origin.connect_authority_ref(default_port)?;
+    let host_authority = origin.host_header_authority_ref(default_port)?;
+    let slot = pools
+        .direct_origin
+        .plain_slot_for(connect_authority.as_ref(), host_authority.as_ref());
+    let connection = slot.pop_idle().expect("recycled origin connection");
+    let mut byte = [0_u8; 1];
+    // A server-side close notification does not synchronize the client's TCP EOF.
+    let received = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        connection.stream.peek(&mut byte),
+    )
+    .await??;
+    assert_eq!(received, 0, "idle connection must have received TCP EOF");
+    slot.recycle_idle(connection);
+    Ok(())
+}
+
 #[tokio::test]
 async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()> {
     let (origin, accepts, closes, closed) = spawn_closing_keepalive_http1_origin().await?;
@@ -211,6 +234,8 @@ async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()>
         }
     }
 
+    await_pooled_plain_http1_eof(&pools, &origin).await?;
+
     let second = proxy_http_with_interim(
         &pools,
         Request::builder()
@@ -228,7 +253,7 @@ async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()>
 }
 
 #[tokio::test]
-async fn bodyless_raw_response_path_retries_a_stale_idle_connection() -> Result<()> {
+async fn bodyless_raw_response_path_discards_closed_idle_connection() -> Result<()> {
     let (origin, accepts, closes, closed) = spawn_closing_keepalive_http1_origin().await?;
     let pools = crate::pool::PoolRegistry::new();
     let default_port = origin.default_port_hint();
@@ -259,6 +284,8 @@ async fn bodyless_raw_response_path_retries_a_stale_idle_connection() -> Result<
             notified.await;
         }
     }
+
+    await_pooled_plain_http1_eof(&pools, &origin).await?;
 
     let second = prepare_proxy_http1_request(
         Request::builder()

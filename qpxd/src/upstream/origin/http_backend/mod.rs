@@ -513,9 +513,7 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
         let Some(mut connection) = pooled else {
             break None;
         };
-        if connection.requires_idle_probe()
-            && idle_connection_closed_or_dirty(&mut connection.stream).await
-        {
+        if idle_connection_closed_or_dirty(&mut connection.stream).await {
             continue;
         }
         break Some(connection);
