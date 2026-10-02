@@ -107,6 +107,7 @@ where
     let mut concurrent_streams = FuturesUnordered::new();
     let mut accepting_streams = true;
     let mut completions_since_admission = 0usize;
+    let mut completions_since_drive = 0usize;
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     loop {
@@ -119,6 +120,7 @@ where
                 })
             })
             .await;
+            completions_since_drive = 0;
             if let Some(result) = progress {
                 match result {
                     Ok(()) => {
@@ -172,7 +174,14 @@ where
         match event {
             H2ConnectionEvent::ConcurrentStreamCompleted => {
                 completions_since_admission = completions_since_admission.saturating_add(1);
-                drive_h2_connection_now(&mut conn).await?;
+                completions_since_drive += 1;
+                if completions_since_drive >= H2_COMPLETION_BURST
+                    || !accepting_streams
+                    || (primary_stream.is_none() && concurrent_streams.is_empty())
+                {
+                    drive_h2_connection_now(&mut conn).await?;
+                    completions_since_drive = 0;
+                }
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
                     if !accepting_streams {
                         break;
@@ -185,7 +194,14 @@ where
             H2ConnectionEvent::PrimaryStreamCompleted => {
                 completions_since_admission = completions_since_admission.saturating_add(1);
                 reusable_primary_stream = primary_stream.take();
-                drive_h2_connection_now(&mut conn).await?;
+                completions_since_drive += 1;
+                if completions_since_drive >= H2_COMPLETION_BURST
+                    || !accepting_streams
+                    || concurrent_streams.is_empty()
+                {
+                    drive_h2_connection_now(&mut conn).await?;
+                    completions_since_drive = 0;
+                }
                 if !accepting_streams && concurrent_streams.is_empty() {
                     break;
                 }
@@ -196,6 +212,9 @@ where
                 }
             }
             H2ConnectionEvent::Accepted => {
+                // Admission polls the driver too. Batch ready completions between
+                // those polls while always flushing the final outstanding stream.
+                completions_since_drive = 0;
                 let accepted = accepted_stream.ok_or_else(|| {
                     anyhow::anyhow!("accepted stream event is missing its result")
                 })?;
@@ -713,17 +732,24 @@ mod tests {
     #[tokio::test]
     async fn h2_scheduler_completes_a_multiplexed_request_batch() {
         const REQUESTS: usize = 128;
-        let (client_io, server_io) = duplex(1024 * 1024);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind actual HTTP/2 server");
+        let address = listener.local_addr().expect("HTTP/2 server address");
         let service = handler_fn(|_req: Request<Body>| async move {
             Ok::<_, Infallible>(Response::new(Body::from("ok")))
         });
         tokio::spawn(async move {
-            serve_h2_with_interim(server_io, service, false, Duration::from_secs(5))
+            let (socket, _) = listener.accept().await.expect("accept HTTP/2 client");
+            serve_h2_with_interim(socket, service, false, Duration::from_secs(5))
                 .await
                 .expect("serve h2");
         });
 
-        let (mut client, connection) = h2::client::handshake(client_io).await.expect("handshake");
+        let socket = TcpStream::connect(address)
+            .await
+            .expect("connect HTTP/2 client");
+        let (mut client, connection) = h2::client::handshake(socket).await.expect("handshake");
         tokio::spawn(async move {
             connection.await.expect("client connection");
         });
@@ -753,8 +779,81 @@ mod tests {
                 .expect("multiplexed response timed out")
                 .expect("multiplexed response");
             assert_eq!(response.status(), ::http::StatusCode::OK);
+            let mut body = response.into_body();
+            let mut received = Vec::new();
+            timeout(Duration::from_secs(1), async {
+                while let Some(chunk) = body.data().await {
+                    let chunk = chunk.expect("HTTP/2 response data");
+                    received.extend_from_slice(&chunk);
+                    body.flow_control()
+                        .release_capacity(chunk.len())
+                        .expect("release HTTP/2 receive capacity");
+                }
+            })
+            .await
+            .expect("multiplexed response body timed out");
+            assert_eq!(received, b"ok");
         }
         send_loop.await.expect("send loop completes");
+    }
+
+    #[tokio::test]
+    async fn h2_completion_batch_preserves_slow_client_flow_control() {
+        const REQUESTS: usize = 3;
+        const BODY_BYTES: usize = 256 * 1024;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind HTTP/2 server");
+        let address = listener.local_addr().expect("HTTP/2 server address");
+        let payload = bytes::Bytes::from(vec![b'x'; BODY_BYTES]);
+        let service = handler_fn(move |_req: Request<Body>| {
+            let payload = payload.clone();
+            async move { Ok::<_, Infallible>(Response::new(Body::from(payload))) }
+        });
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept slow HTTP/2 client");
+            serve_h2_with_interim(socket, service, false, Duration::from_secs(5))
+                .await
+                .expect("serve flow-controlled HTTP/2 connection");
+        });
+        let socket = TcpStream::connect(address)
+            .await
+            .expect("connect slow HTTP/2 client");
+        let (mut client, connection) = h2::client::handshake(socket).await.expect("handshake");
+        tokio::spawn(async move {
+            connection.await.expect("drive slow HTTP/2 client");
+        });
+        let mut responses = Vec::new();
+        for request_id in 0..REQUESTS {
+            client = client.ready().await.expect("client ready");
+            let request = Request::builder()
+                .uri(format!("https://reverse.test/{request_id}"))
+                .body(())
+                .expect("flow-controlled request");
+            responses.push(client.send_request(request, true).expect("send request").0);
+        }
+        // Drain all streams concurrently so shared connection credit is returned.
+        timeout(
+            Duration::from_secs(5),
+            futures_util::future::join_all(responses.into_iter().map(|response| async move {
+                let response = response.await.expect("flow-controlled response");
+                assert_eq!(response.status(), ::http::StatusCode::OK);
+                let mut body = response.into_body();
+                let mut received = 0;
+                while let Some(chunk) = body.data().await {
+                    let chunk = chunk.expect("flow-controlled response data");
+                    assert!(chunk.iter().all(|byte| *byte == b'x'));
+                    received += chunk.len();
+                    sleep(Duration::from_millis(1)).await;
+                    body.flow_control()
+                        .release_capacity(chunk.len())
+                        .expect("release slow-client capacity");
+                }
+                assert_eq!(received, BODY_BYTES);
+            })),
+        )
+        .await
+        .expect("slow-client flow control stopped making progress");
     }
 
     #[tokio::test]
