@@ -33,6 +33,17 @@ case "$workload" in
     expected_profiles=2
     minimum_reports=11
     ;;
+  webdav)
+    QPXD_BIN="$wrapper" QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+      QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-webdav,apache-webdav \
+      QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
+      QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV="MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728" \
+      bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh"
+    roles="qpxd-webdav"
+    log_directory="$ROOT_DIR/target/perf/proxy-compare-logs"
+    expected_profiles=1
+    minimum_reports=6
+    ;;
   http2)
     QPXD_BIN="$wrapper" QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 \
       QPX_HTTP2_COMPARE_BODY_SIZES=1024 QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
@@ -118,7 +129,7 @@ PY
     if [ "$workload" = proxy ] && [[ "$sample" = *.round-2.* ]]; then
       echo "Native memory-copy caller report started: $sample"
       timeout --signal=TERM --kill-after=10s 180s "$QPX_NATIVE_PERF_BIN" report --stdio --header --no-children \
-        --call-graph flat,0.5,32,caller --symbol-filter memmove --percentage absolute \
+        --no-inline --call-graph flat,0.5,32,caller --symbol-filter memmove --percentage absolute \
         --sort symbol --show-nr-samples --time "$window" \
         -i "$QPX_NATIVE_PROFILE_DIR/$role.data" >"$sample.memmove-callers.txt"
     fi

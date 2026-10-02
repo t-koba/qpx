@@ -16,7 +16,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, origin-cache, http2]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, origin-cache, http2]
         default: streaming
 
 permissions:
@@ -45,7 +45,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
       - name: verify native CPU profiler before build
-        if: inputs.category == 'proxy-native' || inputs.category == 'http2-native' || inputs.category == 'streaming-native'
+        if: inputs.category == 'proxy-native' || inputs.category == 'http2-native' || inputs.category == 'streaming-native' || inputs.category == 'webdav-native'
         run: |
           sudo apt-get install -y linux-tools-generic ripgrep
           sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
@@ -117,6 +117,9 @@ jobs:
               ;;
             proxy-native)
               python3 scripts/perf-evaluate.py "native CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
+              ;;
+            webdav-native)
+              QPX_NATIVE_WORKLOAD=webdav python3 scripts/perf-evaluate.py "native WebDAV CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
               ;;
             http2-native)
               QPX_NATIVE_WORKLOAD=http2 python3 scripts/perf-evaluate.py "native HTTP/2 CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh

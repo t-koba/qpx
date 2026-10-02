@@ -519,3 +519,12 @@ Completed thread CPU time remains included in its process clock. Workload sizes,
 reference pairing, sample aggregation, and all acceptance thresholds are unchanged.
 A disappearing measured process, inadequate clock resolution, or decreasing CPU
 counter invalidates the measurement instead of becoming zero CPU consumption.
+
+Native copy-call reports disable perf's inline source expansion: the runner's
+addr2line resolver failed to read its cached ELF and retried each address until
+the report deadline. Function call chains remain recorded and displayed; the
+raw DWARF stacks and real binary are preserved for source-level analysis.
+The `webdav-native` diagnostic profiles the normal 1 KiB and 1 MiB WebDAV
+workloads against Apache, retaining per-thread waiting snapshots and six timed
+CPU reports. It preserves the normal allocator environment and does not replace
+any required performance gate.
