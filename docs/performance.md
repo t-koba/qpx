@@ -57,6 +57,13 @@ Sampled Linux file sends also record the TCP send queue and its unsent subset
 after handing the body to the kernel. `socket-queue-summary.json` preserves
 their byte distributions by source and body size. Sampling failures invalidate
 the diagnostic summary; these measurements never run in ordinary gates.
+The Linux sample on `0c16efb` showed a median 917,610 unsent bytes when a
+1 MiB WebDAV send returned, while the send itself took a median 70.8 us.
+File-backed transfers now temporarily apply a 64 KiB `TCP_NOTSENT_LOWAT` so
+socket readiness follows client progress. The original setting is restored
+after success, I/O failure, and cancellation. This changes queue management,
+not the total socket buffer or the file contents. See the
+[Linux TCP queue documentation](https://kernel.org/doc/html/v5.12/networking/ip-sysctl.html#tcp-notsent-lowat-unsigned-integer).
 
 The `feature-callgrind` diagnostic profiles the actual 1 KiB feature-rich
 configuration after warmup, with collection enabled only during the timed

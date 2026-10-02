@@ -107,6 +107,8 @@ pub(super) fn split_tcp_file_region_sender()
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Result<()> {
     let _phase = crate::perf_diagnostics::phase_timer!("file_body_send");
+    #[cfg(target_os = "linux")]
+    let mut send_queue = FileSendQueueGuard::begin(stream)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let _transfer = ZeroCopyTransferGuard::begin();
@@ -162,6 +164,8 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        send_queue.restore()?;
         Ok(())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -171,6 +175,47 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
             io::ErrorKind::Unsupported,
             "sendfile is unavailable on this platform",
         ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct FileSendQueueGuard<'a> {
+    stream: &'a TcpStream,
+    original: u32,
+    restored: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl<'a> FileSendQueueGuard<'a> {
+    fn begin(stream: &'a TcpStream) -> io::Result<Self> {
+        let socket = socket2::SockRef::from(stream);
+        let original = socket.tcp_notsent_lowat()?;
+        // Bound data waiting for transmission, not the socket's total buffer.
+        // This makes readiness reflect client progress before a complete large
+        // response can sit in the kernel behind the other active transfers.
+        socket.set_tcp_notsent_lowat(CONTENDED_FILE_ZERO_COPY_QUANTUM as u32)?;
+        Ok(Self {
+            stream,
+            original,
+            restored: false,
+        })
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        socket2::SockRef::from(self.stream).set_tcp_notsent_lowat(self.original)?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for FileSendQueueGuard<'_> {
+    fn drop(&mut self) {
+        if !self.restored
+            && let Err(error) = self.restore()
+        {
+            tracing::error!(error = %error, "failed to restore file transfer send queue limit");
+        }
     }
 }
 
@@ -575,7 +620,21 @@ mod tests {
         let address = listener.local_addr().expect("address");
         let client = TcpStream::connect(address).await.expect("connect");
         let (server, _) = listener.accept().await.expect("accept");
+        #[cfg(target_os = "linux")]
+        {
+            socket2::SockRef::from(&server)
+                .set_tcp_notsent_lowat(512 * 1024)
+                .expect("set original socket send queue limit");
+        }
         send_file(&server, &region).await.expect("send file");
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            socket2::SockRef::from(&server)
+                .tcp_notsent_lowat()
+                .expect("read socket send queue limit"),
+            512 * 1024,
+            "completed file transfer did not restore the original socket setting"
+        );
 
         let mut received = [0_u8; 7];
         let mut client = client;
@@ -587,6 +646,39 @@ mod tests {
         drop(server);
         drop(client);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_file_transfer_restores_socket_send_queue_limit() {
+        let file = tempfile::tempfile().expect("create empty transfer file");
+        let mut body = Body::empty().with_file_region_for_zero_copy(Arc::new(file), 0, 1024);
+        let region = body
+            .take_file_region_without_trailers()
+            .expect("file region");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let client = TcpStream::connect(listener.local_addr().expect("listener address"))
+            .await
+            .expect("connect client");
+        let (server, _) = listener.accept().await.expect("accept client");
+        socket2::SockRef::from(&server)
+            .set_tcp_notsent_lowat(512 * 1024)
+            .expect("set original socket send queue limit");
+        let error = send_file(&server, &region)
+            .await
+            .expect_err("empty file must not satisfy the declared region");
+        assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+        assert_eq!(
+            socket2::SockRef::from(&server)
+                .tcp_notsent_lowat()
+                .expect("read restored send queue limit"),
+            512 * 1024,
+            "failed file transfer did not restore the original socket setting"
+        );
+        drop(server);
+        drop(client);
     }
 
     #[tokio::test]
@@ -661,8 +753,11 @@ mod tests {
             .expect("connect client");
         let (server, _) = listener.accept().await.expect("accept client");
         socket2::SockRef::from(&server)
-            .set_send_buffer_size(4096)
-            .expect("bound server send buffer");
+            .set_send_buffer_size(4 * 1024 * 1024)
+            .expect("allow a large server send buffer");
+        let original_limit = socket2::SockRef::from(&server)
+            .tcp_notsent_lowat()
+            .expect("read original send queue limit");
         let socket_target = std::fs::read_link(format!("/proc/self/fd/{}", server.as_raw_fd()))
             .expect("socket descriptor identity");
         let mut transfer = Box::pin(send_file(&server, &region));
@@ -681,7 +776,18 @@ mod tests {
         );
         let (queued, unsent) = socket_send_queue(&server).expect("read real TCP send queue");
         assert!(unsent <= queued, "unsent bytes exceed the total send queue");
+        assert!(
+            unsent < 1024 * 1024,
+            "file sender queued an entire large response before client progress: {unsent} bytes"
+        );
         drop(transfer);
+        assert_eq!(
+            socket2::SockRef::from(&server)
+                .tcp_notsent_lowat()
+                .expect("read restored send queue limit"),
+            original_limit,
+            "cancelled file transfer did not restore the original socket setting"
+        );
         drop(server);
         drop(client);
     }
