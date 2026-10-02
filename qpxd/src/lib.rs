@@ -36,6 +36,7 @@ mod http;
 #[cfg(feature = "http3")]
 mod http3;
 mod ipc_client;
+mod perf_diagnostics;
 mod policy_context;
 mod pool;
 mod rate_limit;

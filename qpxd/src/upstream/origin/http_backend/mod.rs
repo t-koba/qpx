@@ -200,7 +200,9 @@ pub(crate) async fn proxy_http(
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<Response<Body>> {
+    let fetch_phase = crate::perf_diagnostics::phase_timer!("origin_fetch_headers");
     let mut proxied = proxy_http_with_interim(pools, req, origin, proxy_name, trust).await?;
+    drop(fetch_phase);
     if !proxied.interim.is_empty() {
         proxied.response.extensions_mut().insert(proxied.interim);
     }

@@ -4,6 +4,7 @@ mod backend_redis;
 mod directives;
 mod freshness;
 mod hash;
+mod perf_diagnostics;
 mod vary;
 
 mod backends;

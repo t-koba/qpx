@@ -13,7 +13,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, http2]
+        options: [streaming, proxy-threads, proxy-phases, http2]
         default: streaming
 
 permissions:
@@ -53,6 +53,14 @@ jobs:
               ;;
             proxy-threads)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 python3 scripts/perf-evaluate.py "thread diagnostics" -- bash scripts/perf-audit-proxy-matrix.sh
+              ;;
+            proxy-phases)
+              RUST_LOG=warn,qpx_perf_phase=debug \
+                QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+                QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-local,nginx-static,qpxd-cache,nginx-cache,qpxd-feature-rich,nginx-feature-rich,qpxd-webdav,apache-webdav \
+                QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
+                python3 scripts/perf-evaluate.py "phase diagnostics" -- bash scripts/perf-audit-proxy-compare.sh
+              python3 scripts/summarize-perf-phases.py target/perf/proxy-compare-logs target/perf/phase-summary.json
               ;;
             http2)
               python3 scripts/perf-evaluate.py "http2 diagnostics" -- bash scripts/perf-audit-http2-compare.sh

@@ -4,6 +4,7 @@ mod acl;
 mod caldav;
 mod filesystem;
 mod metadata;
+mod perf_diagnostics;
 mod resource;
 mod service;
 mod store;

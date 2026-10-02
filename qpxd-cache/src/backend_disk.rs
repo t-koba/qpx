@@ -642,6 +642,7 @@ impl DiskCacheBackend {
         total_len: u64,
         expires_at_ms: u64,
     ) -> Result<()> {
+        let _phase = crate::perf_diagnostics::phase_timer!("cache_index_update");
         self.ensure_indexed().await?;
         let id = cache_file_id_from_path(&self.root, &path)
             .ok_or_else(|| anyhow!("invalid disk cache object path: {}", path.display()))?;
@@ -748,9 +749,11 @@ impl DiskCacheBackend {
         // The collector already enforces size and read deadlines. Passing the
         // source through another bounded channel duplicates tasks and checks
         // on every miss without changing the storage boundary.
+        let transfer_phase = crate::perf_diagnostics::phase_timer!("cache_body_transfer");
         let cached =
             CachedBody::from_body_limited(body, options.max_body_bytes, options.body_read_timeout)
                 .await?;
+        drop(transfer_phase);
         let len = cached.len();
         let metadata = match metadata {
             Some((meta_key, encode)) => Some((meta_key, Bytes::from(encode(len)?))),
@@ -783,6 +786,7 @@ impl DiskCacheBackend {
         metadata: Option<(String, Bytes)>,
         ttl_secs: u64,
     ) -> Result<()> {
+        let _phase = crate::perf_diagnostics::phase_timer!("cache_persistence");
         if let CachedBody::Memory(value) = body {
             let write_path = path.to_path_buf();
             let value = value.clone();

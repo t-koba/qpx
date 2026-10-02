@@ -114,6 +114,7 @@ impl FileSystemDataStore {
     }
 
     fn resolve_existing(&self, resource: &ResourceId) -> Result<(PathBuf, fs::Metadata)> {
+        let _phase = crate::perf_diagnostics::phase_timer!("webdav_metadata");
         let mut path = self.resource_path_buffer(resource);
         if resource.is_root() {
             return Ok((path, fs::symlink_metadata(&self.root)?));
@@ -219,6 +220,7 @@ impl FileSystemDataStore {
         &self,
         resource: &ResourceId,
     ) -> Result<Option<ResourceRead>> {
+        let _phase = crate::perf_diagnostics::phase_timer!("webdav_file_read");
         let (path, metadata) = match self.resolve_existing(resource) {
             Ok(resolved) => resolved,
             Err(error)

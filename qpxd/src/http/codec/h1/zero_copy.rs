@@ -139,6 +139,7 @@ impl ZeroCopySocket {
     }
 
     pub(super) async fn send_file(&self, region: &FileRegion) -> io::Result<()> {
+        let _phase = crate::perf_diagnostics::phase_timer!("file_body_send");
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let _transfer = ZeroCopyTransferGuard::begin();

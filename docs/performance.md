@@ -45,8 +45,20 @@ Set `QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1` only for a separate Linux
 diagnostic run. It samples every implementation's process tree, including
 per-thread CPU, scheduler queue time, and wait channel, into CSV files. This
 sampling perturbs the workload; diagnostic records cannot satisfy either
-HTTP/1 performance gate. Normal WebDAV comparisons do not sample only qpx's
-threads. HTTP/2 reference instability must fail measurement quality checks;
+HTTP/1 performance gate. The `proxy-phases` diagnostic enables the internal
+`qpx_perf_phase` tracing target and records one timing per 1024 invocations at
+each phase call site. It separates origin response headers, cache body transfer,
+persistence and index updates, WebDAV metadata/file reads, blocking dispatch,
+and file-backed sending. Timings are elapsed wall time, include scheduling and
+can overlap; they must not be added together or interpreted as CPU time. The
+phase summary retains the source log, sample count, interval, median, p99 and
+maximum. Raw logs and thread samples remain diagnostic artifacts.
+
+Linux descriptor snapshots and I/O counters use the same privileged reader for
+both implementations because reference servers can disable process dumping.
+Unreadable data is a measurement failure. FD peak sampling uses one persistent
+reader at 20 Hz to avoid repeated privilege and interpreter startup during load.
+Normal WebDAV comparisons do not sample only qpx's threads. HTTP/2 reference instability must fail measurement quality checks;
 a permissive spread value must not be used to turn an unstable lane green.
 
 A CI run passing the old role thresholds does not prove nginx/Apache parity.
