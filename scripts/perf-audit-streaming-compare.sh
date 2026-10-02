@@ -6,6 +6,11 @@ source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 OUT_JSON="${1:-${QPX_STREAMING_COMPARE_JSON:-$ROOT_DIR/target/perf/perf-audit-streaming-compare.jsonl}}"
 LOG_ARTIFACT_DIR="${QPX_STREAMING_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/streaming-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
+export QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS="${QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS:-0}"
+case "$QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS" in
+  0|1) ;;
+  *) echo "streaming native diagnostics must be 0 or 1" >&2; exit 2 ;;
+esac
 STREAM_BYTES="${QPX_STREAMING_COMPARE_BYTES:-104857600}"
 CHUNK_BYTES="${QPX_STREAMING_COMPARE_CHUNK_BYTES:-65536}"
 SLOW_READ_DELAY_MS="${QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS:-1}"
@@ -758,6 +763,7 @@ python3 - "$RAW_OUT_JSON" "$FINAL_OUT_JSON" "$REQUESTED_SAMPLE_ATTEMPTS" \
   "$REQUESTED_MIN_VALID_SAMPLES" <<'PY'
 import json
 import math
+import os
 import sys
 from collections import defaultdict
 
@@ -894,7 +900,8 @@ for key in sorted(expected):
             record[field] = int(record[field])
     record.update({
         "aggregation": "conservative_median_per_metric",
-        "benchmark_schema_version": 5,
+        "benchmark_schema_version": 6,
+        "diagnostic_instrumentation": os.environ["QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS"] == "1",
         "resource_measurement": "sampled_workload_peak_v1",
         "sample_attempts": attempts,
         "sampling_order": "round_robin_interleaved",

@@ -42,6 +42,14 @@ case "$workload" in
     expected_profiles=1
     minimum_reports=3
     ;;
+  streaming)
+    QPXD_BIN="$wrapper" QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS=1 \
+      bash "$ROOT_DIR/scripts/perf-audit-streaming-compare.sh"
+    roles="qpxd-streaming"
+    log_directory="$ROOT_DIR/target/perf/streaming-compare-logs"
+    expected_profiles=1
+    minimum_reports=6
+    ;;
   *) echo "unsupported native CPU workload: $workload" >&2; exit 2 ;;
 esac
 
@@ -80,7 +88,7 @@ fi
 reports=0
 for role in $roles; do
   sample_role="$role"
-  if [ "$workload" = http2 ]; then
+  if [ "$workload" = http2 ] || [ "$workload" = streaming ]; then
     sample_role=qpxd
   fi
   for sample in "$log_directory"/*."$sample_role".*.rss-peak.samples.csv; do

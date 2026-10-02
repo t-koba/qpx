@@ -126,6 +126,11 @@ way. HTTP/2 schema 8 requires explicit instrumentation provenance; native
 diagnostic rows and rows missing that provenance are rejected by the required
 gate. Reports are restricted to the workload windows recorded by the real RSS
 sampler's monotonic timestamps, separating warmup and the individual samples.
+The `streaming-native` variant records the fast and slow 100 MiB transfers with
+the same owned profiler group and workload-window reports. Streaming schema 6
+also requires explicit instrumentation provenance and rejects native diagnostic
+records in the required gate. CPU profiles are diagnostic evidence only; the
+uninstrumented streaming comparison remains mandatory.
 The persistent miss instruction profile exposes an eviction-specific cost:
 after the hot cache fills, repeated path-component comparisons dominate the
 second and third samples. Recent-entry invalidation now compares the existing

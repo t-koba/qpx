@@ -70,4 +70,8 @@ require("qpx-perf-audit-jsonl-*" in aggregate, "aggregate does not collect all c
 require("qpx-perf-audit-summary" in aggregate, "aggregate does not retain its report")
 require("      - perf_audit\n" in jobs.get("http_rfc_compliance", ""),
         "release gate does not require performance audit")
+for category in ("http2", "streaming"):
+    checker = Path(f"scripts/check-{category}-performance.sh").read_text(encoding="utf-8")
+    require('record.get("diagnostic_instrumentation") is not False' in checker,
+            f"{category} may accept instrumented diagnostic measurements")
 print("performance acceptance gates complete: 8 categories, 16 evaluations")
