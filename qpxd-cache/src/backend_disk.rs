@@ -95,6 +95,7 @@ struct DiskCacheIndexEntry {
 }
 
 struct HotCacheEntry {
+    file_id: DiskCacheFileId,
     value: Bytes,
     expires_at_ms: u64,
     body_offset: u64,
@@ -102,6 +103,7 @@ struct HotCacheEntry {
 
 #[derive(Clone)]
 struct RecentHotCacheEntry {
+    file_id: DiskCacheFileId,
     namespace: std::sync::Arc<str>,
     key: std::sync::Arc<str>,
     path: PathBuf,
@@ -448,15 +450,20 @@ impl DiskCacheBackend {
             }
             return HotCacheLookup::Miss(path);
         }
-        let value = state
-            .hot_entries
-            .get(&path)
-            .map(|entry| (entry.value.clone(), entry.expires_at_ms, entry.body_offset));
+        let value = state.hot_entries.get(&path).map(|entry| {
+            (
+                entry.file_id,
+                entry.value.clone(),
+                entry.expires_at_ms,
+                entry.body_offset,
+            )
+        });
         drop(state);
-        if let Some((value, expires_at_ms, body_offset)) = value {
+        if let Some((file_id, value, expires_at_ms, body_offset)) = value {
             let file = open_zero_copy_source(key, &path, value.len() as u64);
             self.hot_recent_upsert(
                 RecentHotCacheEntry {
+                    file_id,
                     namespace: std::sync::Arc::from(namespace),
                     key: std::sync::Arc::from(key),
                     path,
@@ -542,7 +549,10 @@ impl DiskCacheBackend {
         {
             return;
         }
+        let file_id = cache_file_id_from_path(&self.root, &path)
+            .expect("hot cache entry must reference a canonical disk object");
         let recent = RecentHotCacheEntry {
+            file_id,
             namespace: std::sync::Arc::from(namespace),
             key: std::sync::Arc::from(key),
             path: path.clone(),
@@ -559,24 +569,25 @@ impl DiskCacheBackend {
         state.hot_entries.put(
             path,
             HotCacheEntry {
+                file_id,
                 value,
                 expires_at_ms,
                 body_offset,
             },
         );
-        let mut evicted_paths = Vec::new();
+        let mut evicted_ids = Vec::new();
         while state.hot_bytes > self.hot_max_bytes
             || state.hot_entries.len() > DISK_CACHE_HOT_MAX_ENTRIES
         {
-            let Some((evicted_path, evicted)) = state.hot_entries.pop_lru() else {
+            let Some((_evicted_path, evicted)) = state.hot_entries.pop_lru() else {
                 state.hot_bytes = 0;
                 break;
             };
-            evicted_paths.push(evicted_path);
+            evicted_ids.push(evicted.file_id);
             state.hot_bytes = state.hot_bytes.saturating_sub(evicted.value.len() as u64);
         }
         drop(state);
-        self.hot_recent_upsert(recent, &evicted_paths);
+        self.hot_recent_upsert(recent, &evicted_ids);
     }
 
     async fn hot_remove(&self, path: &Path) {
@@ -601,7 +612,7 @@ impl DiskCacheBackend {
         }
     }
 
-    fn hot_recent_upsert(&self, entry: RecentHotCacheEntry, removed: &[PathBuf]) {
+    fn hot_recent_upsert(&self, entry: RecentHotCacheEntry, removed: &[DiskCacheFileId]) {
         // Snapshot updates share immutable records instead of copying every
         // retained path, payload handle, and key in the affected shard.
         let entry = std::sync::Arc::new(entry);
@@ -612,7 +623,7 @@ impl DiskCacheBackend {
             if !removed.is_empty() {
                 for slot in 0..DISK_CACHE_RECENT_ENTRIES {
                     if recent_hot_entry_at(current, slot)
-                        .is_some_and(|candidate| removed.iter().any(|path| path == &candidate.path))
+                        .is_some_and(|candidate| removed.contains(&candidate.file_id))
                     {
                         *recent_hot_entry_mut(&mut shards, slot) = None;
                     }
@@ -625,13 +636,15 @@ impl DiskCacheBackend {
     }
 
     fn hot_recent_remove(&self, path: &Path) {
+        let file_id = cache_file_id_from_path(&self.root, path)
+            .expect("hot cache removal must reference a canonical disk object");
         if !self
             .hot_recent
             .load()
             .shards
             .iter()
             .flat_map(|shard| shard.entries.iter().flatten())
-            .any(|entry| entry.path == path)
+            .any(|entry| entry.file_id == file_id)
         {
             return;
         }
@@ -640,7 +653,8 @@ impl DiskCacheBackend {
         self.hot_recent.rcu(|current| {
             let mut shards = current.shards.clone();
             for slot in 0..DISK_CACHE_RECENT_ENTRIES {
-                if recent_hot_entry_at(current, slot).is_some_and(|entry| entry.path == path) {
+                if recent_hot_entry_at(current, slot).is_some_and(|entry| entry.file_id == file_id)
+                {
                     *recent_hot_entry_mut(&mut shards, slot) = None;
                 }
             }
@@ -1390,11 +1404,24 @@ fn cache_file_id_hex(id: DiskCacheFileId) -> String {
 }
 
 fn cache_file_id_from_path(root: &Path, path: &Path) -> Option<DiskCacheFileId> {
+    let relative = path.strip_prefix(root).ok()?;
+    let mut components = relative.components();
+    let first = components.next()?.as_os_str().to_str()?;
+    let second = components.next()?.as_os_str().to_str()?;
+    let filename = components.next()?.as_os_str();
+    if components.next().is_some() || path.file_name()? != filename {
+        return None;
+    }
     if path.extension().and_then(|extension| extension.to_str()) != Some(DISK_CACHE_FILE_EXT) {
         return None;
     }
     let encoded = path.file_stem()?.to_str()?;
     if encoded.len() != 64 {
+        return None;
+    }
+    if first.as_bytes() != &encoded.as_bytes()[0..2]
+        || second.as_bytes() != &encoded.as_bytes()[2..4]
+    {
         return None;
     }
     let mut digest = [0_u8; 32];
@@ -1403,13 +1430,7 @@ fn cache_file_id_from_path(root: &Path, path: &Path) -> Option<DiskCacheFileId> 
             .checked_mul(16)?
             .checked_add(decode_hex_nibble(pair[1])?)?;
     }
-    let id = DiskCacheFileId(digest);
-    let expected = cache_file_id_hex(id);
-    let expected_path = root
-        .join(&expected[0..2])
-        .join(&expected[2..4])
-        .join(format!("{expected}.{DISK_CACHE_FILE_EXT}"));
-    (expected_path == path).then_some(id)
+    Some(DiskCacheFileId(digest))
 }
 
 fn decode_hex_nibble(value: u8) -> Option<u8> {
@@ -2314,6 +2335,73 @@ mod tests {
             .join(&encoded[2..4])
             .join(format!("{encoded}.{DISK_CACHE_FILE_EXT}"));
         assert_eq!(cache_file_id_from_path(&dir, &misplaced), None);
+        let non_ascii = format!("{}x", "€".repeat(21));
+        assert_eq!(non_ascii.len(), 64);
+        assert_eq!(
+            cache_file_id_from_path(
+                &dir,
+                &dir.join("00")
+                    .join("00")
+                    .join(format!("{non_ascii}.{DISK_CACHE_FILE_EXT}"))
+            ),
+            None
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_hot_eviction_invalidates_body_and_metadata_by_file_identity() {
+        let dir = temp_dir("hot-file-identity-eviction");
+        let mut backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend.hot_max_bytes = 8;
+        let body_key = cache_body_storage_key("obj:eviction:default");
+        let metadata_key = "obj:eviction:default";
+        assert_ne!(hot_slot("ns", &body_key), hot_slot("ns", metadata_key));
+        let path = backend.path_for("ns", &body_key);
+        backend
+            .put_object_path(
+                "ns",
+                &body_key,
+                &path,
+                &CachedBody::from_bytes(Bytes::from_static(b"original")),
+                Some((metadata_key.to_string(), Bytes::from_static(b"metadata"))),
+                60,
+            )
+            .await
+            .expect("persist source body and metadata");
+        assert!(matches!(
+            backend.hot_recent_lookup("ns", &body_key, now_ms()),
+            Some(HotCacheLookup::Hit { .. })
+        ));
+        assert!(matches!(
+            backend.hot_recent_lookup("ns", metadata_key, now_ms()),
+            Some(HotCacheLookup::Hit { .. })
+        ));
+        backend
+            .put("ns", "other", b"replaced", 60)
+            .await
+            .expect("evict source hot entry");
+        assert!(
+            backend
+                .hot_recent_lookup("ns", &body_key, now_ms())
+                .is_none()
+        );
+        assert!(
+            backend
+                .hot_recent_lookup("ns", metadata_key, now_ms())
+                .is_none()
+        );
+        assert!(
+            path.is_file(),
+            "hot eviction must retain the persistent object"
+        );
+        assert_eq!(
+            backend
+                .get("ns", &body_key)
+                .await
+                .expect("read persistent source"),
+            Some(Bytes::from_static(b"original"))
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

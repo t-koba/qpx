@@ -81,6 +81,13 @@ with DWARF call stacks, including kernel CPU work. It preserves raw profiles
 and symbol reports for the cache and feature-rich roles. Its isolated process
 group owns both the profiler and server and waits for their shutdown. These
 instrumented records cannot satisfy normal performance acceptance gates.
+The persistent miss instruction profile exposes an eviction-specific cost:
+after the hot cache fills, repeated path-component comparisons dominate the
+second and third samples. Recent-entry invalidation now compares the existing
+32-byte disk file identity, shared by a response's body and metadata, rather
+than reparsing every path. Canonical path validation also avoids constructing
+temporary paths. Real-file eviction tests verify that both recent entries are
+invalidated while the persistent object remains readable.
 These diagnostic percentages and type sizes are not throughput improvements;
 acceptance still requires three independent normal comparisons. The `origin-cache` diagnostic
 runs the normal origin/cache workload and its unchanged objectives separately
