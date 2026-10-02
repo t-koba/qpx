@@ -22,7 +22,7 @@ pub async fn spawn_slow_chunked_backend(
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
-            if read_request_head(&mut stream).await.is_err() {
+            if read_request(&mut stream).await.is_err() {
                 continue;
             }
             if serve_slow_chunked_response(
@@ -93,27 +93,95 @@ async fn serve_slow_chunked_response(
     stream.shutdown().await
 }
 
-async fn read_request_head(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {
-    const MAX_REQUEST_HEAD_BYTES: usize = 64 * 1024;
+async fn read_request(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+    const MAX_REQUEST_BYTES: usize = 64 * 1024;
     let mut request = Vec::with_capacity(1024);
-    while request.len() < MAX_REQUEST_HEAD_BYTES {
+    // Closing with unread request bytes can reset the TCP connection and
+    // truncate an otherwise complete streaming response on Linux.
+    while request.len() < MAX_REQUEST_BYTES {
         let mut chunk = [0_u8; 1024];
-        let read = stream.read(&mut chunk).await?;
+        let available = chunk.len().min(MAX_REQUEST_BYTES - request.len());
+        let read = stream.read(&mut chunk[..available]).await?;
         if read == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                "request closed before the header terminator",
+                "request closed before message completion",
             ));
         }
         request.extend_from_slice(&chunk[..read]);
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+        if request_message_complete(&request)? {
             return Ok(());
         }
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
-        "request header exceeded the test server limit",
+        "request message exceeded the test server limit",
     ))
+}
+
+fn request_message_complete(bytes: &[u8]) -> std::io::Result<bool> {
+    let invalid = |message| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+    let mut headers = [httparse::EMPTY_HEADER; 128];
+    let mut request = httparse::Request::new(&mut headers);
+    let httparse::Status::Complete(head_len) = request
+        .parse(bytes)
+        .map_err(|error| invalid(format!("invalid request headers: {error}")))?
+    else {
+        return Ok(false);
+    };
+    let mut content_length = None;
+    let mut chunked = false;
+    for header in request.headers {
+        if header.name.eq_ignore_ascii_case("transfer-encoding") {
+            if chunked || !header.value.trim_ascii().eq_ignore_ascii_case(b"chunked") {
+                return Err(invalid("unsupported request transfer encoding".to_string()));
+            }
+            chunked = true;
+        } else if header.name.eq_ignore_ascii_case("content-length") {
+            let value = std::str::from_utf8(header.value.trim_ascii())
+                .map_err(|_| invalid("invalid request content length".to_string()))?
+                .parse::<usize>()
+                .map_err(|_| invalid("invalid request content length".to_string()))?;
+            if content_length.is_some_and(|previous| previous != value) {
+                return Err(invalid("conflicting request content lengths".to_string()));
+            }
+            content_length = Some(value);
+        }
+    }
+    if !chunked {
+        return Ok(bytes.len() - head_len >= content_length.unwrap_or(0));
+    }
+    if content_length.is_some() {
+        return Err(invalid("ambiguous request body framing".to_string()));
+    }
+    let mut cursor = head_len;
+    loop {
+        let httparse::Status::Complete((prefix_len, size)) =
+            httparse::parse_chunk_size(&bytes[cursor..])
+                .map_err(|error| invalid(format!("invalid request chunk size: {error}")))?
+        else {
+            return Ok(false);
+        };
+        cursor += prefix_len;
+        if size == 0 {
+            let mut trailers = [httparse::EMPTY_HEADER; 128];
+            return httparse::parse_headers(&bytes[cursor..], &mut trailers)
+                .map(|status| status.is_complete())
+                .map_err(|error| invalid(format!("invalid request trailers: {error}")));
+        }
+        let end = usize::try_from(size)
+            .ok()
+            .and_then(|size| cursor.checked_add(size))
+            .and_then(|end| end.checked_add(2))
+            .ok_or_else(|| invalid("request chunk length overflow".to_string()))?;
+        if end > bytes.len() {
+            return Ok(false);
+        }
+        if &bytes[end - 2..end] != b"\r\n" {
+            return Err(invalid("invalid request chunk terminator".to_string()));
+        }
+        cursor = end;
+    }
 }
 
 pub async fn spawn_infinite_stream_backend(
@@ -129,7 +197,7 @@ pub async fn spawn_infinite_stream_backend(
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
-            if read_request_head(&mut stream).await.is_err() {
+            if read_request(&mut stream).await.is_err() {
                 continue;
             }
             if stream
@@ -168,7 +236,7 @@ pub async fn spawn_abort_after_partial_backend(
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
-            if read_request_head(&mut stream).await.is_err() {
+            if read_request(&mut stream).await.is_err() {
                 continue;
             }
             let mut head = format!("{response_line}\r\n");
@@ -240,4 +308,100 @@ pub fn build_grpc_web_trailer_frame(trailers: &[(&str, &str)]) -> Bytes {
     out.extend_from_slice(&(block.len() as u32).to_be_bytes());
     out.extend_from_slice(&block);
     Bytes::from(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::timeout;
+
+    async fn assert_request_completion(head: &[u8], partial: &[u8], remainder: &[u8]) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind real request server");
+        let address = listener.local_addr().expect("request server address");
+        let mut reader = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request connection");
+            read_request(&mut stream).await
+        });
+        let mut client = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect request client");
+        client.write_all(head).await.expect("write request headers");
+        client
+            .write_all(partial)
+            .await
+            .expect("write partial request body");
+        assert!(
+            timeout(Duration::from_millis(100), &mut reader)
+                .await
+                .is_err(),
+            "request server must consume the complete request body before closing"
+        );
+        client
+            .write_all(remainder)
+            .await
+            .expect("finish request body");
+        timeout(Duration::from_secs(1), reader)
+            .await
+            .expect("request completion deadline")
+            .expect("request reader task")
+            .expect("complete request body");
+    }
+
+    #[tokio::test]
+    async fn chunked_request_terminator_is_consumed_before_response_completion() {
+        assert_request_completion(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"0\r\n",
+            b"\r\n",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn fixed_request_body_is_consumed_before_response_completion() {
+        assert_request_completion(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\n",
+            b"xy",
+            b"z",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn chunked_request_payload_and_trailers_are_consumed() {
+        assert_request_completion(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"2\r\nxy\r\n0\r\nX-Test: complete\r\n",
+            b"\r\n",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn truncated_request_body_reports_unexpected_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind request server");
+        let address = listener.local_addr().expect("request server address");
+        let reader = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request connection");
+            read_request(&mut stream).await
+        });
+        let mut client = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect request client");
+        client
+            .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\nxy")
+            .await
+            .expect("write truncated request");
+        client.shutdown().await.expect("close request write half");
+        let error = timeout(Duration::from_secs(1), reader)
+            .await
+            .expect("request read deadline")
+            .expect("request reader task")
+            .expect_err("reject incomplete request body");
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
 }
