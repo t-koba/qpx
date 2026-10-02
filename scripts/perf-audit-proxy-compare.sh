@@ -187,6 +187,7 @@ collect_artifacts() {
     fi
   done
   cp "$TMP_DIR"/*.wrk "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.threads.log "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.threads.csv "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.lua "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.warmup "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
@@ -278,6 +279,17 @@ register_pid() {
 
 source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"
 
+record_ready_rss() {
+  local pid="$1"
+  local rss
+  rss="$(process_tree_status_kb "$pid" "VmRSS")"
+  if [ -d /proc ] && [ "$rss" -le 0 ]; then
+    echo "missing startup RSS for ready process: $pid" >&2
+    exit 1
+  fi
+  printf '%s\n' "$rss" >"$LOG_DIR/startup-rss-${pid}.txt"
+}
+
 json_number_or_null() {
   local value="$1"
   if [ -z "$value" ]; then
@@ -355,6 +367,7 @@ wait_http() {
   local tries=0
   while [ "$tries" -lt 100 ]; do
     if curl -fsS --max-time 2 -H "Host: ${HOST_HEADER}" "http://127.0.0.1:${port}${path}" >/dev/null 2>&1; then
+      record_ready_rss "$pid"
       return 0
     fi
     if ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -1140,6 +1153,7 @@ wait_forward() {
   local tries=0
   while [ "$tries" -lt 100 ]; do
     if curl -fsS --max-time 2 --noproxy '' -x "http://127.0.0.1:${port}" "http://127.0.0.1:${BACKEND_PORT}${path}" >/dev/null 2>&1; then
+      record_ready_rss "$pid"
       return 0
     fi
     if ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -1185,7 +1199,8 @@ run_one() {
   local lua="$TMP_DIR/${artifact_name}.lua"
   local status_before status_after
   local cpu_before_ms cpu_after_ms cpu_ms rss_kb rss_baseline_kb rss_peak_kb rss_growth_kb
-  local rss_peak_file rss_peak_monitor_pid
+  local rss_peak_file rss_peak_monitor_pid rss_startup_kb rss_since_startup_growth_kb
+  rss_startup_kb="$(cat "$LOG_DIR/startup-rss-${resource_pid}.txt")"
   local fd_baseline fd_peak fd_growth fd_peak_file fd_peak_monitor_pid kernel_resource_metrics
   local scheduler_before_ns scheduler_after_ns scheduler_run_delay_ns scheduler_queue_delay_us_per_request
   local attempt failed_sample samples_file valid_sample_count median_index selected_sample profile_pid wrk_succeeded
@@ -1498,8 +1513,9 @@ LUA
   IFS=$'\t' read -r rps complete summary_requests failed connect_errors read_errors write_errors timeout_errors non_2xx bad_length cache_result_errors cache_writeback_verified mean_ms transfer_kbps latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms cpu_ms rss_kb rss_baseline_kb rss_peak_kb rss_growth_kb requests_per_cpu_second fd_baseline fd_peak fd_growth scheduler_run_delay_ns scheduler_queue_delay_us_per_request kernel_resource_metrics status_before status_after <<<"$selected_sample"
   commit="${GITHUB_SHA:-unknown}"
   valid=true
-  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","thread_diagnostics":%s,"requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"cache_result_errors":%s,"cache_writeback_verified":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_baseline_kb":%s,"rss_peak_kb":%s,"rss_growth_kb":%s,"requests_per_cpu_second":%s,"fd_baseline":%s,"fd_peak":%s,"fd_growth":%s,"scheduler_run_delay_ns":%s,"scheduler_queue_delay_us_per_request":%s,"kernel_resource_metrics":%s,"valid":%s,"commit":"%s"}\n' \
-    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$([ "$THREAD_DIAGNOSTICS" = 1 ] && echo true || echo false)" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_baseline_kb")" "$(json_number_or_null "$rss_peak_kb")" "$(json_number_or_null "$rss_growth_kb")" "$requests_per_cpu_second" "$fd_baseline" "$fd_peak" "$fd_growth" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$valid" "$commit" >>"$OUT_JSON"
+  rss_since_startup_growth_kb="$(peak_growth "$rss_startup_kb" "$rss_peak_kb")"
+  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","thread_diagnostics":%s,"rss_startup_kb":%s,"rss_since_startup_growth_kb":%s,"startup_measurement":"ready_after_one_probe","requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"cache_result_errors":%s,"cache_writeback_verified":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_baseline_kb":%s,"rss_peak_kb":%s,"rss_growth_kb":%s,"requests_per_cpu_second":%s,"fd_baseline":%s,"fd_peak":%s,"fd_growth":%s,"scheduler_run_delay_ns":%s,"scheduler_queue_delay_us_per_request":%s,"kernel_resource_metrics":%s,"valid":%s,"commit":"%s"}\n' \
+    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$([ "$THREAD_DIAGNOSTICS" = 1 ] && echo true || echo false)" "$rss_startup_kb" "$rss_since_startup_growth_kb" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_baseline_kb")" "$(json_number_or_null "$rss_peak_kb")" "$(json_number_or_null "$rss_growth_kb")" "$requests_per_cpu_second" "$fd_baseline" "$fd_peak" "$fd_growth" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$valid" "$commit" >>"$OUT_JSON"
 }
 
 require_cmd curl
@@ -1919,6 +1935,8 @@ jq -cs \
             | .rss_baseline_kb = $rss_sample.rss_baseline_kb
             | .rss_peak_kb = $rss_sample.rss_peak_kb
             | .rss_growth_kb = $rss_sample.rss_growth_kb
+            | .rss_startup_kb = $rss_sample.rss_startup_kb
+            | .rss_since_startup_growth_kb = $rss_sample.rss_since_startup_growth_kb
             | .fd_baseline = $fd_sample.fd_baseline
             | .fd_peak = $fd_sample.fd_peak
             | .fd_growth = $fd_sample.fd_growth))

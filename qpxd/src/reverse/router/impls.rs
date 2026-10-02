@@ -56,7 +56,7 @@ impl RetryBudgetRuntime {
 
     pub(in crate::reverse) fn try_consume_retry(&self) -> bool {
         self.balance
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 (current > 0).then_some(current - 1)
             })
             .is_ok()
@@ -68,7 +68,7 @@ impl RetryBudgetRuntime {
         }
         let _ = self
             .balance
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some((current + 1).min(self.max_balance))
             });
     }

@@ -8,6 +8,49 @@ the competing proxies on the same runner and uses dimensionless ratios. A
 dedicated benchmark claim still requires fixed hardware, pinned CPU policy, and
 representative upstream/downstream latency.
 
+## Required audit categories and independent comparisons
+
+The audit has eight isolated jobs: protocol, HTTP/1 proxy and origin/cache,
+HTTP/2, streaming, allocation, netem, HTTP/3 interoperability, and callgrind.
+The aggregate `perf_audit` gate requires every category to succeed, including
+all 16 existing measurements and evaluations. Missing or skipped evaluations
+fail the category and the release gate. `scripts/check-perf-audit-gates.py`
+checks this wiring as part of the CI acceptance checks.
+
+Every evaluation preserves its command exit status and writes its complete
+output and a structured result under `target/perf/evaluations/`. Each category
+uploads those files even on failure. Origin/cache and HTTP/2 results also list
+the actual ratio, limit, direction, and violation percentage in the Actions
+summary. Invalid sample diagnostics remain in the full log and summary.
+
+For three independent Linux comparisons, dispatch CI on the implementation
+branch with `repeat_perf=true` and an explicit `baseline_ref` commit. HTTP/1,
+HTTP/2, and streaming each run on three separate Ubuntu 24.04 runners. Each
+HTTP/1 runner builds the baseline and candidate before measuring, then runs
+both revisions sequentially with the candidate's measurement harness. Run 2
+reverses revision order. The proxy comparison pins Rust 1.98.1 for both builds
+so a compiler update cannot change the before/after comparison. Baseline
+results and logs are separate artifacts; baseline failures remain failures of
+the comparison step. Other benchmarks never run concurrently on that runner.
+
+The runner manifest records CPU model, memory, kernel, runner image, compiler,
+and revision. HTTP/1 records retain ready-process RSS (after one successful
+readiness probe), the baseline before load, peak RSS, and both growth values.
+A readiness measurement includes the probe and is not a pre-request allocation
+measurement. This distinction must be preserved when interpreting memory costs.
+
+Set `QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1` only for a separate Linux
+diagnostic run. It samples every implementation's process tree, including
+per-thread CPU, scheduler queue time, and wait channel, into CSV files. This
+sampling perturbs the workload; diagnostic records cannot satisfy either
+HTTP/1 performance gate. Normal WebDAV comparisons do not sample only qpx's
+threads. HTTP/2 reference instability must fail measurement quality checks;
+a permissive spread value must not be used to turn an unstable lane green.
+
+A CI run passing the old role thresholds does not prove nginx/Apache parity.
+Tighten the principal role objectives only after all three independent valid
+comparisons demonstrate the new limits; retain raw results for that decision.
+
 Set `QPX_PERF_SMOKE_JSON=/path/to/perf.jsonl` when running
 `cargo test -p qpxd --release --test perf_smoke -- --nocapture` to append
 machine-readable perf smoke records.

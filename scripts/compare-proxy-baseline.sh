@@ -154,6 +154,8 @@ def nested_number(record, container, field):
 
 
 def require_valid_sample(record):
+    if record.get("thread_diagnostics") is True:
+        fail("intrusive thread diagnostics cannot satisfy performance gates")
     proxy = record.get("proxy", "<missing>")
     if record.get("valid") is not True:
         fail(f"proxy comparison record for {proxy} is marked invalid")

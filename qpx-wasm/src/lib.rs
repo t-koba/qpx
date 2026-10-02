@@ -255,7 +255,7 @@ impl tokio::io::AsyncWrite for ChannelOutputWriter {
         let len = buf.len();
         if self
             .written
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current
                     .checked_add(len)
                     .filter(|next| *next <= self.max_bytes)
