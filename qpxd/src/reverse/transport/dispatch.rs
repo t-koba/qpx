@@ -212,7 +212,7 @@ pub(super) async fn execute_reverse_dispatch(
         match prepare_single_plain_reverse_request(req, &base, conn, &state, &compiled)? {
             Ok(Some(req)) => {
                 let secure_transport = conn.tls_terminated;
-                let (interim, mut response) = dispatch_plain_reverse_http(
+                let (interim, mut response) = Box::pin(dispatch_plain_reverse_http(
                     req,
                     &state,
                     route,
@@ -220,7 +220,7 @@ pub(super) async fn execute_reverse_dispatch(
                     request_version,
                     state.plan.identity.proxy_name.as_ref(),
                     connection_pool,
-                )
+                ))
                 .await?;
                 apply_reverse_route_metadata(route, secure_transport, &mut response)?;
                 return Ok((interim, response));
@@ -329,14 +329,16 @@ pub(super) async fn execute_reverse_dispatch(
     let reverse_error = prepared.context.state.messages.reverse_error.clone();
     let request_method = base.method.clone();
     let secure_transport = conn.tls_terminated;
-    let (interim, mut response) = match execute_reverse_request(
+    // The general route state is large. Keep it out of the outer dispatcher's
+    // allocation so constructing a request does not copy its inactive storage.
+    let (interim, mut response) = match Box::pin(execute_reverse_request(
         prepared,
         base,
         reverse,
         runtime,
         conn,
         connection_pool,
-    )
+    ))
     .await
     {
         Ok(response) => response,

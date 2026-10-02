@@ -294,7 +294,7 @@ async fn reverse_dispatch_future_keeps_cold_transports_out_of_inline_state() {
     );
     let bytes = std::mem::size_of_val(&future);
     assert!(
-        bytes <= 24 * 1024,
+        bytes <= 8 * 1024,
         "reverse dispatcher inline state exceeded its size budget: {bytes} bytes"
     );
 }

@@ -66,7 +66,12 @@ A second instruction profile still placed about 50% of its instructions in
 memory copies, now in that constructor. Boxing only the cold IPC/HTTP dispatch
 branches after a cache miss reduces the outer future from 30,488 to 20,544 bytes
 on the local ARM64 debug build; cache hits do not allocate those branches.
-The future-size regression uses a real compiled route and a 24 KiB budget.
+Separating the general route state and allocating provider resolution only when
+needed reduces this further to 6,472 bytes in the same compiler diagnostic.
+The future-size regression uses a real compiled route and an 8 KiB budget.
+The `cache-miss-callgrind` diagnostic profiles the actual persistent cache
+workload, including warm hits and unique misses, with the same instrumentation
+boundaries and raw profiles as `feature-callgrind`.
 These diagnostic percentages and type sizes are not throughput improvements;
 acceptance still requires three independent normal comparisons. The `origin-cache` diagnostic
 runs the normal origin/cache workload and its unchanged objectives separately

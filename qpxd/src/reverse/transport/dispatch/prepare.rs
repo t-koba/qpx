@@ -270,7 +270,9 @@ async fn scan_reverse_routes(
             Ok::<bool, anyhow::Error>(false)
         })?;
         for (policy_key, policy) in unresolved_policies {
-            let identity = resolve_identity_for_request(
+            // Identity resolution may contain network-backed providers. Its
+            // state is needed only when the selected policy uses a provider.
+            let identity = Box::pin(resolve_identity_for_request(
                 state,
                 &policy,
                 conn.remote_addr.ip(),
@@ -279,7 +281,7 @@ async fn scan_reverse_routes(
                     .as_deref()
                     .map(|certs| certs.as_slice()),
                 identity_request,
-            )
+            ))
             .await?;
             selection.identity_cache.push(policy_key, identity);
         }
