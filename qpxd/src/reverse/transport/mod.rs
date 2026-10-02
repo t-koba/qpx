@@ -213,16 +213,7 @@ async fn handle_request_inner_with_origin_pool(
     );
     // Keep the full feature-rich dispatcher behind an allocation boundary so
     // unconditional routes do not move its large state machine on every request.
-    Box::pin(dispatch_reverse_request(
-        req,
-        base,
-        reverse,
-        runtime,
-        conn,
-        state,
-        origin_pool,
-    ))
-    .await
+    dispatch_reverse_request(req, base, reverse, runtime, conn, state, origin_pool).await
 }
 
 #[cfg(test)]

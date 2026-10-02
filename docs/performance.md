@@ -54,6 +54,19 @@ can overlap; they must not be added together or interpreted as CPU time. The
 phase summary retains the source log, sample count, interval, median, p99 and
 maximum. Raw logs and thread samples remain diagnostic artifacts.
 
+The `feature-callgrind` diagnostic profiles the actual 1 KiB feature-rich
+configuration after warmup, with collection enabled only during the timed
+requests. It preserves instruction profiles and annotations. On revision
+`30d2ddc`, memory copies accounted for 50.72% of instructions in the first
+sample; the outer reverse dispatcher contributed 36.76% through copies into
+its heap allocation. The dispatcher now constructs the pinned future in a
+separate function and boxes only the selected span variant. This preserves
+request-span behavior and avoids moving both inactive variants on the hot path.
+These diagnostic percentages are not throughput improvements; acceptance still
+requires three independent normal comparisons. The `origin-cache` diagnostic
+runs the normal origin/cache workload and its unchanged objectives separately
+from instrumentation, to obtain focused feedback before the complete CI matrix.
+
 Linux descriptor snapshots and I/O counters use the same privileged reader for
 both implementations because reference servers can disable process dumping.
 Unreadable data is a measurement failure. FD and RSS peak sampling use persistent readers at 20 Hz and 100 Hz respectively,

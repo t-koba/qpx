@@ -16,7 +16,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, http2]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, origin-cache, http2]
         default: streaming
 
 permissions:
@@ -61,6 +61,13 @@ jobs:
           case "$CATEGORY" in
             streaming)
               python3 scripts/perf-evaluate.py "streaming diagnostics" -- bash scripts/perf-audit-streaming-compare.sh
+              ;;
+            origin-cache)
+              QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-local,nginx-static,qpxd-cache,nginx-cache,qpxd-feature-rich,nginx-feature-rich,qpxd-webdav,apache-webdav \
+                QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
+                QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS=5 \
+                python3 scripts/perf-evaluate.py "origin and cache comparison" -- bash scripts/perf-audit-proxy-compare.sh
+              python3 scripts/perf-evaluate.py "origin and cache objectives" -- bash scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl
               ;;
             proxy-threads)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 python3 scripts/perf-evaluate.py "thread diagnostics" -- bash scripts/perf-audit-proxy-matrix.sh

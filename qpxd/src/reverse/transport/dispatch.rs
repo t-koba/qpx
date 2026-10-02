@@ -68,15 +68,19 @@ use self::prepare::{
 };
 use self::types::*;
 
-pub(super) async fn dispatch_reverse_request(
+// Keep the dispatcher state machine inside this constructor. Returning an
+// inline async wrapper duplicates the large instrumented and uninstrumented
+// variants and copies their inactive storage into every request allocation.
+#[inline(never)]
+pub(super) fn dispatch_reverse_request<'a>(
     req: Request<Body>,
     base: BaseRequestFields,
-    reverse: &ReloadableReverse,
-    runtime: &Runtime,
-    conn: &ReverseConnInfo,
+    reverse: &'a ReloadableReverse,
+    runtime: &'a Runtime,
+    conn: &'a ReverseConnInfo,
     state: Arc<crate::runtime::RuntimeState>,
-    connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
-) -> Result<(InterimList, Response<Body>)> {
+    connection_pool: Option<&'a PreparedPlainHttp1ConnectionAffinity>,
+) -> futures_util::future::BoxFuture<'a, Result<(InterimList, Response<Body>)>> {
     use tracing::Instrument as _;
     if qpx_observability::request_spans_enabled() {
         let span = tracing::info_span!(
@@ -85,11 +89,20 @@ pub(super) async fn dispatch_reverse_request(
             host = %base.host().unwrap_or(""),
             method = %base.method,
         );
-        return execute_reverse_dispatch(req, base, reverse, runtime, conn, state, connection_pool)
-            .instrument(span)
-            .await;
+        return Box::pin(
+            execute_reverse_dispatch(req, base, reverse, runtime, conn, state, connection_pool)
+                .instrument(span),
+        );
     }
-    execute_reverse_dispatch(req, base, reverse, runtime, conn, state, connection_pool).await
+    Box::pin(execute_reverse_dispatch(
+        req,
+        base,
+        reverse,
+        runtime,
+        conn,
+        state,
+        connection_pool,
+    ))
 }
 
 pub(super) async fn try_dispatch_unconditional_plain_reverse_request(

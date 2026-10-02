@@ -78,7 +78,8 @@ edges:
                 .header("host", "cache.local")
                 .body(empty_body())?,
         )
-        .await?;
+        .await
+        .with_context(|| format!("first request connection failed{}", _qpxd.log_tail()))?;
     if first.status() != StatusCode::OK {
         let status = first.status();
         let body = collect_body(first.into_body()).await?;
@@ -99,7 +100,8 @@ edges:
                 .header("host", "cache.local")
                 .body(empty_body())?,
         )
-        .await?;
+        .await
+        .with_context(|| format!("cached request connection failed{}", _qpxd.log_tail()))?;
     if second.status() != StatusCode::OK {
         let status = second.status();
         let body = collect_body(second.into_body()).await?;
