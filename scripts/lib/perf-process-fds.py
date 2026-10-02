@@ -21,7 +21,11 @@ def descriptors(root, include_targets=False):
         base = Path('/proc') / pid
         try:
             for task in (base / 'task').iterdir():
-                pending.extend((task / 'children').read_text().split())
+                try:
+                    pending.extend((task / 'children').read_text().split())
+                except FileNotFoundError:
+                    # A completed thread does not invalidate its live process.
+                    continue
             for fd in (base / 'fd').iterdir():
                 record = {'pid': int(pid), 'fd': int(fd.name)}
                 if include_targets:
@@ -50,7 +54,11 @@ def rss(root):
         base = Path('/proc') / pid
         try:
             for task in (base / 'task').iterdir():
-                pending.extend((task / 'children').read_text().split())
+                try:
+                    pending.extend((task / 'children').read_text().split())
+                except FileNotFoundError:
+                    # A completed thread does not invalidate its live process.
+                    continue
             fields = dict(line.split(':', 1) for line in (base / 'status').read_text().splitlines()
                           if ':' in line)
             if fields['State'].lstrip().startswith('Z'):

@@ -21,9 +21,16 @@ import ctypes
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) != 0:
     raise SystemExit('failed to disable process dumping')
+def churn_threads():
+    while True:
+        worker = threading.Thread(target=time.sleep, args=(0.001,))
+        worker.start()
+        worker.join()
+threading.Thread(target=churn_threads, daemon=True).start()
 Path(sys.argv[1]).write_text(str(os.getpid()))
 time.sleep(30)
 PY_SERVER

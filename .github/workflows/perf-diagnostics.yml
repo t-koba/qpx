@@ -6,6 +6,9 @@ on:
     paths:
       - .github/workflows/perf-diagnostics.yml
       - scripts/lib/perf-process-metrics.sh
+      - scripts/lib/perf-process-fds.py
+      - scripts/lib/perf-thread-sampler.sh
+      - scripts/check-perf-process-sampler.sh
       - scripts/perf-audit-streaming-compare.sh
       - qpxd/src/config_watch/**
   workflow_dispatch:
