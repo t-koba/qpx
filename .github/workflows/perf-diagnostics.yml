@@ -33,6 +33,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: perf-audit-streaming
+      - name: verify real process resource sampling
+        run: bash scripts/check-perf-process-sampler.sh
       - name: record environment
         run: bash scripts/check-perf-runner.sh
       - name: install comparison dependencies

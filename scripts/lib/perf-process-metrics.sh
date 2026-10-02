@@ -202,39 +202,31 @@ monitor_process_tree_rss_peak() {
   local root="$1"
   local output="$2"
   local initial="${3:-}"
-  local current peak stopping
   if [ -z "$initial" ]; then
     initial="$(process_tree_status_kb "$root" "VmRSS")"
   fi
-  peak="$initial"
-  stopping=0
-  trap 'stopping=1' TERM INT
-  printf '%s\n' "$peak" >"$output"
-  while [ "$stopping" -eq 0 ] && kill -0 "$root" >/dev/null 2>&1; do
-    current="$(process_tree_status_kb "$root" "VmRSS")"
-    if [ "$current" -gt "$peak" ]; then
-      peak="$current"
-      printf '%s\n' "$peak" >"$output"
-    fi
-    sleep 0.01
-  done
-  trap - TERM INT
+  monitor_process_tree_peak rss-monitor "$root" "$output" "$initial"
 }
 
 monitor_process_tree_fd_peak() {
   local root="$1"
   local output="$2"
   local initial="${3:-}"
-  local stop="${output}.stop"
-  local reader status=0
   if [ -z "$initial" ]; then
     initial="$(process_tree_fd_count "$root")"
   fi
+  monitor_process_tree_peak monitor "$root" "$output" "$initial"
+}
+
+monitor_process_tree_peak() {
+  local mode="$1" root="$2" output="$3" initial="$4"
+  local stop="${output}.stop"
+  local reader status=0
   rm -f "$stop" "${output}.error"
   # Keep one reader alive across samples so privilege setup and interpreter
-  # startup do not compete with the load generator every 50 milliseconds.
+  # startup do not compete with the load generator on every polling interval.
   perf_proc_python "$(dirname "${BASH_SOURCE[0]}")/perf-process-fds.py" \
-    monitor "$root" "$output" "$stop" "$initial" &
+    "$mode" "$root" "$output" "$stop" "$initial" &
   reader=$!
   trap 'touch "$stop"' TERM INT
   if wait "$reader"; then
@@ -254,6 +246,10 @@ read_process_peak_file() {
   local output="$1"
   if [ -f "${output}.error" ]; then
     cat "${output}.error" >&2
+    return 1
+  fi
+  if [ ! -s "${output}.sampling.json" ]; then
+    echo "process peak sampler did not complete: $output" >&2
     return 1
   fi
   cat "$output"

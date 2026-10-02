@@ -71,6 +71,9 @@ collect_artifacts() {
   find "$TMP_DIR" -name '*.latency.tsv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.sample.txt' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.valid-samples.jsonl' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
+  find "$TMP_DIR" -name '*.samples.csv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
+  find "$TMP_DIR" -name '*.sampling.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
+  find "$TMP_DIR" -name '*.error' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
 }
 
 cleanup() {
@@ -659,13 +662,13 @@ run_one() {
     if [ -n "$rss_peak_monitor_pid" ]; then
       kill "$rss_peak_monitor_pid" >/dev/null 2>&1 || true
       wait "$rss_peak_monitor_pid" 2>/dev/null || true
-      rss_peak_kb="$(cat "$rss_peak_file" 2>/dev/null || echo 0)"
+      rss_peak_kb="$(read_process_peak_file "$rss_peak_file")"
       rss_growth_kb="$(peak_growth "$rss_baseline_kb" "$rss_peak_kb")"
     fi
     if [ -n "$backend_rss_peak_monitor_pid" ]; then
       kill "$backend_rss_peak_monitor_pid" >/dev/null 2>&1 || true
       wait "$backend_rss_peak_monitor_pid" 2>/dev/null || true
-      backend_rss_peak_kb="$(cat "$backend_rss_peak_file" 2>/dev/null || echo 0)"
+      backend_rss_peak_kb="$(read_process_peak_file "$backend_rss_peak_file")"
       backend_rss_growth_kb="$(peak_growth "$backend_rss_baseline_kb" "$backend_rss_peak_kb")"
     fi
     if [ "$h2load_succeeded" != true ]; then

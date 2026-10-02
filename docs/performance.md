@@ -56,8 +56,10 @@ maximum. Raw logs and thread samples remain diagnostic artifacts.
 
 Linux descriptor snapshots and I/O counters use the same privileged reader for
 both implementations because reference servers can disable process dumping.
-Unreadable data is a measurement failure. FD peak sampling uses one persistent
-reader at 20 Hz to avoid repeated privilege and interpreter startup during load.
+Unreadable data is a measurement failure. FD and RSS peak sampling use persistent readers at 20 Hz and 100 Hz respectively,
+so polling does not repeatedly launch interpreters or shell utilities during
+load. Raw observations and achieved sampling gaps are preserved with the logs;
+a sampler failure or missing completion record invalidates the measurement.
 Normal WebDAV comparisons do not sample only qpx's threads. HTTP/2 reference instability must fail measurement quality checks;
 a permissive spread value must not be used to turn an unstable lane green.
 

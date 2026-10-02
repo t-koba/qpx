@@ -197,6 +197,9 @@ collect_artifacts() {
   cp "$TMP_DIR"/*.jsonl "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.yaml "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   find "$TMP_DIR" -name '*.conf' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
+  find "$TMP_DIR" -name '*.samples.csv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
+  find "$TMP_DIR" -name '*.sampling.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
+  find "$TMP_DIR" -name '*.error' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
 }
 
 cleanup() {
@@ -1379,7 +1382,7 @@ LUA
     if [ -n "$rss_peak_monitor_pid" ]; then
       kill "$rss_peak_monitor_pid" >/dev/null 2>&1 || true
       wait "$rss_peak_monitor_pid" 2>/dev/null || true
-      rss_peak_kb="$(cat "$rss_peak_file" 2>/dev/null || echo 0)"
+      rss_peak_kb="$(read_process_peak_file "$rss_peak_file")"
       rss_growth_kb="$(peak_growth "$rss_baseline_kb" "$rss_peak_kb")"
     fi
     scheduler_after_ns="$scheduler_before_ns"

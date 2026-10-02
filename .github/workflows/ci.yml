@@ -510,6 +510,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: perf-audit-streaming
+      - name: verify real process resource sampling
+        run: bash scripts/check-perf-process-sampler.sh
       - name: build candidate before all measurements
         env:
           RUSTFLAGS: "-D warnings"
