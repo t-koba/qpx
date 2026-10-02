@@ -22,7 +22,6 @@ MAX_CONCURRENT_STREAMS_VALUES="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES
 MAX_CONCURRENT_STREAMS=""
 BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1024 1048576}"
 SAMPLE_ATTEMPTS="${QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS:-3}"
-MIN_VALID_SAMPLES="${QPX_HTTP2_COMPARE_MIN_VALID_SAMPLES:-}"
 PROFILE_QPXD_SECONDS="${QPX_HTTP2_COMPARE_PROFILE_QPXD_SECONDS:-0}"
 QPXD_TLS_FORMAT="${QPX_HTTP2_COMPARE_QPXD_TLS_FORMAT:-pem}"
 TLS_HOST="${QPX_HTTP2_COMPARE_TLS_HOST:-localhost}"
@@ -880,9 +879,6 @@ record["benchmark_request_count"] = int(benchmark_requests)
 with open(path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 PY
-      if [ "${STOP_AFTER_FIRST_VALID_SAMPLE:-false}" = true ]; then
-        break
-      fi
       attempt=$((attempt + 1))
       continue
     fi
@@ -1041,20 +1037,6 @@ if [ "$PROFILE_QPXD_SECONDS" -gt 0 ] && [ ! -x /usr/bin/sample ]; then
   echo "QPX_HTTP2_COMPARE_PROFILE_QPXD_SECONDS requires /usr/bin/sample" >&2
   exit 1
 fi
-if [ -z "$MIN_VALID_SAMPLES" ]; then
-  MIN_VALID_SAMPLES=$((SAMPLE_ATTEMPTS / 2 + 1))
-fi
-case "$MIN_VALID_SAMPLES" in
-  ''|*[!0-9]*)
-    echo "QPX_HTTP2_COMPARE_MIN_VALID_SAMPLES must be a positive integer no greater than sample attempts" >&2
-    exit 1
-    ;;
-esac
-if [ "$MIN_VALID_SAMPLES" -eq 0 ] || [ "$MIN_VALID_SAMPLES" -gt "$SAMPLE_ATTEMPTS" ]; then
-  echo "QPX_HTTP2_COMPARE_MIN_VALID_SAMPLES must be a positive integer no greater than sample attempts" >&2
-  exit 1
-fi
-
 max_stream_value_count=0
 for max_streams in $MAX_CONCURRENT_STREAMS_VALUES; do
   case "$max_streams" in
@@ -1091,11 +1073,8 @@ start_nginx_h2
 FINAL_OUT_JSON="$OUT_JSON"
 RAW_OUT_JSON="$TMP_DIR/interleaved-raw.jsonl"
 REQUESTED_SAMPLE_ATTEMPTS="$SAMPLE_ATTEMPTS"
-REQUESTED_MIN_VALID_SAMPLES="$MIN_VALID_SAMPLES"
 OUT_JSON="$RAW_OUT_JSON"
-SAMPLE_ATTEMPTS=3
-MIN_VALID_SAMPLES=1
-STOP_AFTER_FIRST_VALID_SAMPLE=true
+SAMPLE_ATTEMPTS=1
 : >"$OUT_JSON"
 
 run_http2_proxy_by_index() {
@@ -1132,16 +1111,15 @@ for body_bytes in $BODY_SIZES; do
 done
 
 python3 - "$RAW_OUT_JSON" "$FINAL_OUT_JSON" "$REQUESTED_SAMPLE_ATTEMPTS" \
-  "$REQUESTED_MIN_VALID_SAMPLES" "$BODY_SIZES" "$MAX_CONCURRENT_STREAMS_VALUES" \
+  "$BODY_SIZES" "$MAX_CONCURRENT_STREAMS_VALUES" \
   "$TARGET_DURATION_SECONDS" <<'PY'
 import json
 import math
 import sys
 from collections import defaultdict
 
-raw_path, out_path, attempts, minimum, body_sizes, stream_values, target_duration = sys.argv[1:8]
+raw_path, out_path, attempts, body_sizes, stream_values, target_duration = sys.argv[1:7]
 attempts = int(attempts)
-minimum = int(minimum)
 target_duration = float(target_duration)
 expected = {
     (proxy, int(body_bytes), int(max_streams))
