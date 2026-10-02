@@ -16,7 +16,8 @@ if [ -z "$root" ] || [ ! -d /proc ]; then
   exit 1
 fi
 
-python3 - "$root" "$duration" "$output" <<'PY'
+source "$(dirname "${BASH_SOURCE[0]}")/perf-process-metrics.sh"
+perf_proc_python - "$root" "$duration" "$output" <<'PY'
 import csv
 import os
 import sys
@@ -77,11 +78,8 @@ def sample_threads(pid):
             state = fields[0]
             utime = int(fields[11])
             stime = int(fields[12])
-            try:
-                with open(wchan_path) as handle:
-                    wchan = handle.read().strip() or "-"
-            except OSError:
-                wchan = "-"
+            with open(wchan_path) as handle:
+                wchan = handle.read().strip() or "-"
             with open(f"{base}/{tid}/schedstat") as handle:
                 run_ns, queue_ns, timeslices = map(int, handle.read().split())
             comm = raw[raw.index("(") + 1:head_end]
