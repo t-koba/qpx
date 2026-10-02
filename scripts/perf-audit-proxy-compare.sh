@@ -281,6 +281,7 @@ source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"
 
 record_ready_rss() {
   local pid="$1"
+  snapshot_process_tree_fds "$pid" "$LOG_DIR/startup-fds-${pid}.json"
   local rss
   rss="$(process_tree_status_kb "$pid" "VmRSS")"
   if [ -d /proc ] && [ "$rss" -le 0 ]; then

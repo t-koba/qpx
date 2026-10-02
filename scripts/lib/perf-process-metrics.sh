@@ -251,3 +251,42 @@ peak_growth() {
     echo 0
   fi
 }
+
+
+snapshot_process_tree_fds() {
+  local root="$1"
+  local output="$2"
+  if [ ! -d /proc ]; then
+    return
+  fi
+  python3 - "$root" "$output" <<'PY_FDS'
+import json
+import os
+from pathlib import Path
+import sys
+
+root, output = sys.argv[1:]
+seen = set()
+pending = [root]
+records = []
+while pending:
+    pid = pending.pop()
+    if pid in seen:
+        continue
+    seen.add(pid)
+    base = Path("/proc") / pid
+    try:
+        for task in (base / "task").iterdir():
+            pending.extend((task / "children").read_text().split())
+        for fd in (base / "fd").iterdir():
+            try:
+                records.append({"pid": int(pid), "fd": int(fd.name), "target": os.readlink(fd)})
+            except FileNotFoundError:
+                continue
+    except FileNotFoundError:
+        continue
+if not records:
+    raise SystemExit("process descriptor snapshot is empty")
+Path(output).write_text(json.dumps(records, sort_keys=True) + "\n")
+PY_FDS
+}

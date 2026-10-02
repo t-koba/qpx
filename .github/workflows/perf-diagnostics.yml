@@ -1,0 +1,61 @@
+name: performance diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      category:
+        description: Diagnostic workload; does not replace required CI gates
+        type: choice
+        options: [streaming, proxy-threads, http2]
+        default: streaming
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-audit-streaming
+      - name: record environment
+        run: bash scripts/check-perf-runner.sh
+      - name: install comparison dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid wrk jq
+      - name: build before measurement
+        run: cargo build -p qpxd --release --locked --features http3-backend-qpx
+        env:
+          RUSTFLAGS: "-D warnings"
+      - name: diagnostic comparison
+        env:
+          CATEGORY: ${{ inputs.category }}
+        run: |
+          case "$CATEGORY" in
+            streaming)
+              python3 scripts/perf-evaluate.py "streaming diagnostics" -- bash scripts/perf-audit-streaming-compare.sh
+              ;;
+            proxy-threads)
+              QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 python3 scripts/perf-evaluate.py "thread diagnostics" -- bash scripts/perf-audit-proxy-matrix.sh
+              ;;
+            http2)
+              python3 scripts/perf-evaluate.py "http2 diagnostics" -- bash scripts/perf-audit-http2-compare.sh
+              ;;
+            *) echo "unsupported diagnostic category: $CATEGORY" >&2; exit 2 ;;
+          esac
+      - name: upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-diagnostics-${{ inputs.category }}
+          path: target/perf/**
+          if-no-files-found: error

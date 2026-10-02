@@ -132,6 +132,7 @@ wait_http() {
   local tries=0
   while [ "$tries" -lt 100 ]; do
     if curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+      snapshot_process_tree_fds "$pid" "$LOG_DIR/${name}.startup-fds.json"
       return 0
     fi
     if ! kill -0 "$pid" >/dev/null 2>&1; then
