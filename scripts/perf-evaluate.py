@@ -21,6 +21,7 @@ def main():
     log_path = directory / f"{name}.log"
     started = time.monotonic()
     evaluations = []
+    measurement_failures = []
     with log_path.open("w", encoding="utf-8") as log:
         try:
             process = subprocess.Popen(
@@ -35,6 +36,8 @@ def main():
             for line in process.stdout:
                 log.write(line)
                 print(line, end="", flush=True)
+                if line.startswith("Invalid measurement:"):
+                    measurement_failures.append({"reason": line.strip()})
                 # Merged stderr may follow a complete JSON value on the same line.
                 try:
                     record, _ = json.JSONDecoder().raw_decode(line.lstrip())
@@ -42,6 +45,8 @@ def main():
                     continue
                 if isinstance(record, dict) and "checks" in record:
                     evaluations.append(record)
+                if isinstance(record, dict) and record.get("valid") is False:
+                    measurement_failures.append(record)
             status = process.wait()
     result = {
         "label": label,
@@ -51,6 +56,7 @@ def main():
         "log": str(log_path),
         "commit": os.environ.get("GITHUB_SHA", "unknown"),
         "evaluations": evaluations,
+        "measurement_failures": measurement_failures,
     }
     (directory / f"{name}.json").write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -61,6 +67,10 @@ def main():
             report.write(f"### {label}\n\n")
             report.write(f"Outcome: **{result['outcome']}**; exit code: {status}; elapsed: {result['elapsed_seconds']:.3f} s.\n\n")
             report.write(f"Full log: `{log_path}` (job artifact).\n\n")
+            if measurement_failures:
+                report.write("Measurement invalidity records:\n\n```json\n")
+                report.write(json.dumps(measurement_failures, indent=2).replace("```", "` ` `"))
+                report.write("\n```\n\n")
             if evaluations:
                 report.write("| Workload | Metric | Actual | Limit | Violation | Result |\n|---|---|---:|---:|---:|---|\n")
                 for evaluation in evaluations:

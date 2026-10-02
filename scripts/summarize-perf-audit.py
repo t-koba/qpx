@@ -142,6 +142,9 @@ def summarize(root, destination, commit, repetitions, needs, download_outcome):
                         raise ValueError("evaluation identity or outcome is invalid")
                     if not isinstance(result.get("evaluations"), list):
                         raise ValueError("structured evaluations are missing")
+                    if not isinstance(result.get("measurement_failures"), list) or any(
+                            not isinstance(item, dict) for item in result["measurement_failures"]):
+                        raise ValueError("measurement validity records are missing or invalid")
                     diagnostics = log.read_text()
                 except (OSError, ValueError, KeyError, TypeError) as error:
                     failures.append(f"missing or invalid evaluation {artifact.name}/{label}: {error}")
@@ -156,6 +159,11 @@ def summarize(root, destination, commit, repetitions, needs, download_outcome):
                               f"Result: **{result['outcome']}**; exit code: {status}; elapsed: {elapsed:.3f} s.", ""])
                 if status != 0:
                     failures.append(f"{category}, run {repetition}, {label}: exit {status}")
+                if result["measurement_failures"]:
+                    failures.append(f"{category}, run {repetition}, {label}: invalid measurements")
+                    lines.extend(["Measurement invalidity records:", "", "```json",
+                                  json.dumps(result["measurement_failures"], indent=2).replace("```", "` ` `"),
+                                  "```", ""])
                 evaluations = result.get("evaluations", [])
                 if evaluations:
                     lines.extend(["| Workload | Metric | Actual | Limit | Violation | Result |",
