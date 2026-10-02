@@ -32,7 +32,22 @@ def churn_threads():
         worker.join()
 threading.Thread(target=churn_threads, daemon=True).start()
 Path(sys.argv[1]).write_text(str(os.getpid()))
-time.sleep(30)
+work = Path(sys.argv[1]).parent
+deadline = time.monotonic() + 30
+while time.monotonic() < deadline:
+    if (work / 'cpu-work').exists() and not (work / 'cpu-done').exists():
+        consumed = []
+        def consume_cpu():
+            started = time.thread_time_ns()
+            value = 1
+            while time.thread_time_ns() - started < 35_000_000:
+                value = (value * 3 + 1) % 1_000_003
+            consumed.append(time.thread_time_ns() - started)
+        worker = threading.Thread(target=consume_cpu)
+        worker.start()
+        worker.join()
+        (work / 'cpu-done').write_text(str(consumed[0]))
+    time.sleep(0.01)
 PY_SERVER
 root=$!
 for attempt in {1..100}; do
@@ -83,11 +98,42 @@ for kind in ('fd', 'rss'):
     assert all(int(row['value']) > 0 for row in rows)
 assert json.loads((root / 'descriptors.json').read_text())
 PY_RESULTS
+cpu_before="$(process_tree_cpu_clock_ms "$root" "$work/cpu-before.json")"
+touch "$work/cpu-work"
+for attempt in {1..100}; do
+  [ -s "$work/cpu-done" ] && break
+  kill -0 "$root"
+  sleep 0.02
+done
+cpu_after="$(process_tree_cpu_clock_ms "$root" "$work/cpu-after.json")"
+cpu_delta="$(python3 "$ROOT_DIR/scripts/lib/perf-process-cpu.py" delta \
+  "$work/cpu-before.json" "$work/cpu-after.json")"
+[ "$(awk -v value="$cpu_delta" 'BEGIN { print (value >= 35) }')" -eq 1 ]
+python3 - "$work" "$cpu_before" "$cpu_after" <<'PY_CPU'
+import json
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+before = json.loads((root / 'cpu-before.json').read_text())
+after = json.loads((root / 'cpu-after.json').read_text())
+consumed = int((root / 'cpu-done').read_text())
+assert before['measurement'] == after['measurement'] == 'linux_process_cpu_clock_ns_v1'
+assert after['total_cpu_ns'] - before['total_cpu_ns'] >= consumed
+assert float(sys.argv[3]) > float(sys.argv[2])
+for record in (before, after):
+    assert record['total_cpu_ns'] == sum(row['cpu_ns'] for row in record['processes'])
+    assert all(0 < row['resolution_ns'] <= 1_000_000 for row in record['processes'])
+    assert record['finished_monotonic_ns'] >= record['started_monotonic_ns']
+PY_CPU
 kill "$root"
 wait "$root" || true
 if process_tree_fd_count "$root" >"$work/terminated-count" 2>"$work/terminated-error"; then
   echo "terminated process produced valid descriptor data" >&2
   exit 1
 fi
+if process_tree_cpu_clock_ms "$root" >"$work/terminated-cpu" 2>"$work/terminated-cpu-error"; then
+  echo "terminated process produced valid CPU clock data" >&2
+  exit 1
+fi
 root=""
-echo "Real non-dumpable process resource sampling verified"
+echo "Real non-dumpable process resource and CPU clock sampling verified"

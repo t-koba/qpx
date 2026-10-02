@@ -63,6 +63,7 @@ collect_artifacts() {
   find "$TMP_DIR" -name '*.samples.csv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.sampling.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.error' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
+  find "$TMP_DIR" -name '*cpu-*.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
 }
 
 cleanup() {
@@ -385,7 +386,7 @@ run_one() {
   local resource_pid="$3"
   local read_mode="$4"
   local delay_ms="0"
-  local cpu_before_ms cpu_after_ms cpu_ms backend_cpu_before_ms backend_cpu_after_ms
+  local cpu_ms
   local backend_cpu_ms total_cpu_ms metrics commit
   local rss_kb rss_baseline_kb rss_peak_kb rss_growth_kb rss_peak_file rss_peak_monitor_pid
   local backend_rss_baseline_kb backend_rss_peak_kb backend_rss_growth_kb backend_rss_peak_file backend_rss_peak_monitor_pid
@@ -450,11 +451,9 @@ run_one() {
         backend_fd_baseline="$fd_baseline"
       fi
     fi
-    cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
-    if [ "$resource_pid" = "$BACKEND_PID" ]; then
-      backend_cpu_before_ms="$cpu_before_ms"
-    else
-      backend_cpu_before_ms="$(process_tree_cpu_ms "$BACKEND_PID")"
+    process_tree_cpu_clock_ms "$resource_pid" "$TMP_DIR/${artifact}.attempt-${attempt}.cpu-before.json" >/dev/null
+    if [ "$resource_pid" != "$BACKEND_PID" ]; then
+      process_tree_cpu_clock_ms "$BACKEND_PID" "$TMP_DIR/${artifact}.attempt-${attempt}.backend-cpu-before.json" >/dev/null
     fi
     if ! metrics="$(run_client "$proxy" "$port" "$read_mode" "$delay_ms")"; then
       if [ -n "$fd_peak_monitor_pid" ]; then
@@ -501,18 +500,24 @@ run_one() {
       backend_rss_peak_kb="$(read_process_peak_file "$backend_rss_peak_file")"
       backend_rss_growth_kb="$(peak_growth "$backend_rss_baseline_kb" "$backend_rss_peak_kb")"
     fi
-    cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
-    if [ "$resource_pid" = "$BACKEND_PID" ]; then
-      backend_cpu_after_ms="$cpu_after_ms"
-    else
-      backend_cpu_after_ms="$(process_tree_cpu_ms "$BACKEND_PID")"
+    process_tree_cpu_clock_ms "$resource_pid" "$TMP_DIR/${artifact}.attempt-${attempt}.cpu-after.json" >/dev/null
+    if [ "$resource_pid" != "$BACKEND_PID" ]; then
+      process_tree_cpu_clock_ms "$BACKEND_PID" "$TMP_DIR/${artifact}.attempt-${attempt}.backend-cpu-after.json" >/dev/null
     fi
-    cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
-    backend_cpu_ms="$(awk -v before="$backend_cpu_before_ms" -v after="$backend_cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    cpu_ms="$(python3 "$ROOT_DIR/scripts/lib/perf-process-cpu.py" delta \
+      "$TMP_DIR/${artifact}.attempt-${attempt}.cpu-before.json" \
+      "$TMP_DIR/${artifact}.attempt-${attempt}.cpu-after.json")"
+    if [ "$resource_pid" = "$BACKEND_PID" ]; then
+      backend_cpu_ms="$cpu_ms"
+    else
+      backend_cpu_ms="$(python3 "$ROOT_DIR/scripts/lib/perf-process-cpu.py" delta \
+        "$TMP_DIR/${artifact}.attempt-${attempt}.backend-cpu-before.json" \
+        "$TMP_DIR/${artifact}.attempt-${attempt}.backend-cpu-after.json")"
+    fi
     if [ "$resource_pid" = "$BACKEND_PID" ]; then
       total_cpu_ms="$cpu_ms"
     else
-      total_cpu_ms=$((cpu_ms + backend_cpu_ms))
+      total_cpu_ms="$(awk -v proxy="$cpu_ms" -v backend="$backend_cpu_ms" 'BEGIN { printf "%.6f", proxy + backend }')"
     fi
     rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
     scheduler_after_ns="$scheduler_before_ns"
@@ -537,7 +542,7 @@ run_one() {
       total_fd_peak="$fd_peak"
       total_fd_growth="$fd_growth"
     fi
-    total_scheduler_run_delay_ns="$(awk -v resource_before="$scheduler_before_ns" -v resource_after="$scheduler_after_ns" -v backend_before="$backend_scheduler_before_ns" -v backend_after="$backend_scheduler_after_ns" 'BEGIN { delta = (resource_after - resource_before) + (backend_after - backend_before); if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    total_scheduler_run_delay_ns="$(awk -v resource_before="$scheduler_before_ns" -v resource_after="$scheduler_after_ns" -v backend_before="$backend_scheduler_before_ns" -v backend_after="$backend_scheduler_after_ns" 'BEGIN { delta = (resource_after - resource_before) + (backend_after - backend_before); if (delta < 0) { print "process CPU clock decreased" > "/dev/stderr"; exit 1 }; printf "%.6f", delta }')"
     valid="$(python3 - "$metrics" <<'PY'
 import json
 import sys
@@ -585,9 +590,9 @@ import sys
 
 path, metrics, cpu_ms, backend_cpu_ms, total_cpu_ms, rss_kb, rss_baseline_kb, rss_peak_kb, rss_growth_kb, backend_rss_baseline_kb, backend_rss_peak_kb, backend_rss_growth_kb, total_rss_peak_kb, total_rss_growth_kb, fd_baseline, fd_peak, fd_growth, backend_fd_baseline, backend_fd_peak, backend_fd_growth, total_fd_peak, total_fd_growth, total_scheduler_run_delay_ns, scheduler_queue_delay_us_per_transfer, kernel_resource_metrics, rpcpu, total_rpcpu = sys.argv[1:28]
 record = json.loads(metrics)
-record["cpu_ms"] = int(cpu_ms)
-record["backend_cpu_ms"] = int(backend_cpu_ms)
-record["total_cpu_ms"] = int(total_cpu_ms)
+record["cpu_ms"] = float(cpu_ms)
+record["backend_cpu_ms"] = float(backend_cpu_ms)
+record["total_cpu_ms"] = float(total_cpu_ms)
 record["rss_kb"] = int(rss_kb)
 record["rss_baseline_kb"] = int(rss_baseline_kb)
 record["rss_peak_kb"] = int(rss_peak_kb)
@@ -900,7 +905,8 @@ for key in sorted(expected):
             record[field] = int(record[field])
     record.update({
         "aggregation": "conservative_median_per_metric",
-        "benchmark_schema_version": 6,
+        "benchmark_schema_version": 7,
+        "cpu_measurement": "linux_process_cpu_clock_ns_v1",
         "diagnostic_instrumentation": os.environ["QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS"] == "1",
         "resource_measurement": "sampled_workload_peak_v1",
         "sample_attempts": attempts,

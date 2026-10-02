@@ -142,6 +142,16 @@ process_tree_cpu_ms() {
   awk -v ticks="$total_ticks" -v hz="$hz" 'BEGIN { printf "%.0f", (ticks * 1000) / hz }'
 }
 
+process_tree_cpu_clock_ms() {
+  local root="$1"
+  local output="${2:-}"
+  local arguments=("$root")
+  if [ -n "$output" ]; then
+    arguments+=("$output")
+  fi
+  perf_proc_python "$(dirname "${BASH_SOURCE[0]}")/perf-process-cpu.py" "${arguments[@]}"
+}
+
 process_tree_status_kb() {
   local root="$1"
   local key="$2"

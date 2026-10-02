@@ -127,7 +127,7 @@ diagnostic rows and rows missing that provenance are rejected by the required
 gate. Reports are restricted to the workload windows recorded by the real RSS
 sampler's monotonic timestamps, separating warmup and the individual samples.
 The `streaming-native` variant records the fast and slow 100 MiB transfers with
-the same owned profiler group and workload-window reports. Streaming schema 6
+the same owned profiler group and workload-window reports. Streaming schema 7
 also requires explicit instrumentation provenance and rejects native diagnostic
 records in the required gate. CPU profiles are diagnostic evidence only; the
 uninstrumented streaming comparison remains mandatory.
@@ -510,3 +510,12 @@ The native proxy diagnostic also preserves bounded memory-copy caller reports
 for each second timed window, with absolute sample percentages. These reports
 identify the remaining copy paths without treating instruction counts or
 instrumented timings as acceptance measurements.
+
+Streaming CPU efficiency uses Linux process CPU clocks, not `/proc/stat` tick
+counts. The previous 100 Hz accounting quantized subsecond fast-transfer CPU
+measurements to 10 ms. Schema 7 requires nanosecond process-clock provenance;
+raw before/after snapshots preserve per-process CPU values and clock resolution.
+Completed thread CPU time remains included in its process clock. Workload sizes,
+reference pairing, sample aggregation, and all acceptance thresholds are unchanged.
+A disappearing measured process, inadequate clock resolution, or decreasing CPU
+counter invalidates the measurement instead of becoming zero CPU consumption.

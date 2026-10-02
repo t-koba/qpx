@@ -126,8 +126,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"streaming performance record for {key} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"streaming performance record for {key} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version") != 6:
+        if nonnegative_int(record, "benchmark_schema_version") != 7:
             fail(f"streaming performance record for {key} uses an unsupported benchmark schema")
+        if record.get("cpu_measurement") != "linux_process_cpu_clock_ns_v1":
+            fail(f"streaming performance record for {key} lacks high-resolution process CPU measurement")
         if record.get("diagnostic_instrumentation") is not False:
             fail(f"streaming performance record for {key} is instrumented or lacks diagnostic provenance")
         if record.get("resource_measurement") != "sampled_workload_peak_v1":

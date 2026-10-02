@@ -74,4 +74,6 @@ for category in ("http2", "streaming"):
     checker = Path(f"scripts/check-{category}-performance.sh").read_text(encoding="utf-8")
     require('record.get("diagnostic_instrumentation") is not False' in checker,
             f"{category} may accept instrumented diagnostic measurements")
+require('record.get("cpu_measurement") != "linux_process_cpu_clock_ns_v1"' in checker,
+        "streaming may accept coarse CPU tick measurements")
 print("performance acceptance gates complete: 8 categories, 16 evaluations")
