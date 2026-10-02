@@ -5,7 +5,20 @@ async fn reverse_route_retries_and_mirrors() -> Result<()> {
     let dir = temp_dir("qpxd-reverse-route-e2e")?;
     let cfg = dir.join("reverse-route.yaml");
     let (live_addr, live_hits) = start_text_backend("LIVE", vec![]).await?;
-    let dead_port = reverse_support::pick_free_tcp_port()?;
+    // Keep the unavailable origin port owned for the entire test. Releasing a
+    // picked port can let qpxd or another test bind it and turn retries into
+    // recursive proxy requests instead of connection-refused failures.
+    let dead_origin = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    dead_origin.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into())?;
+    let dead_port = dead_origin
+        .local_addr()?
+        .as_socket()
+        .ok_or_else(|| anyhow::anyhow!("unavailable origin socket has no IP address"))?
+        .port();
     let (mirror_addr, mirror_hits) = start_text_backend("MIRROR", vec![]).await?;
 
     let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("reverse-route.log"), |port| {

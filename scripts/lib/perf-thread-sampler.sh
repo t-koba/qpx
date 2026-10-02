@@ -2,8 +2,8 @@
 
 # Samples per-thread scheduler state for a process tree at high frequency.
 # Usage: perf-sample-threads <root_pid> <duration_seconds> <output_csv>
-# Emits one CSV row per sample: epoch_ms,pid,tid,state,wchan,utime_ticks,stime_ticks
-# The consumer diffs consecutive rows per tid to attribute stall time.
+# Emits CPU and scheduler counters per thread, plus process RSS.
+# Counter differences attribute workload CPU and run-queue delay.
 
 set -euo pipefail
 
@@ -12,10 +12,12 @@ duration="$2"
 output="$3"
 
 if [ -z "$root" ] || [ ! -d /proc ]; then
-  exit 0
+  echo "thread diagnostics require a live Linux process" >&2
+  exit 1
 fi
 
 python3 - "$root" "$duration" "$output" <<'PY'
+import csv
 import os
 import sys
 import time
@@ -27,36 +29,25 @@ output = sys.argv[3]
 INTERVAL = 0.01
 
 
-def tree_pids(pid):
-    pids = [pid]
-    stack = [pid]
-    while stack:
-        current = stack.pop()
-        try:
-            children = os.listdir(f"/proc/{current}/task")
-        except OSError:
-            continue
-        for task in children:
-            try:
-                pids.extend(int(child) for child in os.listdir(f"/proc/{current}/task/{task}/children"))
-            except OSError:
-                pass
-    # Include child processes discovered through children files above.
-    return pids
-
-
 def all_pids():
-    seen = []
+    seen = set()
     stack = [int(root)]
     while stack:
         pid = stack.pop()
-        seen.append(pid)
+        if pid in seen:
+            continue
+        seen.add(pid)
         try:
-            with open(f"/proc/{pid}/task/{pid}/children") as handle:
-                stack.extend(int(child) for child in handle.read().split())
-        except OSError:
-            pass
-    return seen
+            tasks = os.listdir(f"/proc/{pid}/task")
+        except FileNotFoundError:
+            continue
+        for task in tasks:
+            try:
+                with open(f"/proc/{pid}/task/{task}/children") as handle:
+                    stack.extend(int(child) for child in handle.read().split())
+            except FileNotFoundError:
+                pass
+    return sorted(seen)
 
 
 def sample_threads(pid):
@@ -64,7 +55,16 @@ def sample_threads(pid):
     base = f"/proc/{pid}/task"
     try:
         tasks = os.listdir(base)
-    except OSError:
+    except FileNotFoundError:
+        return rows
+    rss_kb = 0
+    try:
+        with open(f"/proc/{pid}/status") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    rss_kb = int(line.split()[1])
+                    break
+    except FileNotFoundError:
         return rows
     for tid in tasks:
         stat_path = f"{base}/{tid}/stat"
@@ -82,22 +82,31 @@ def sample_threads(pid):
                     wchan = handle.read().strip() or "-"
             except OSError:
                 wchan = "-"
-            rows.append((pid, int(tid), state, wchan, utime, stime))
-        except (OSError, ValueError):
+            with open(f"{base}/{tid}/schedstat") as handle:
+                run_ns, queue_ns, timeslices = map(int, handle.read().split())
+            comm = raw[raw.index("(") + 1:head_end]
+            rows.append((pid, int(tid), state, wchan, utime, stime,
+                         comm, run_ns, queue_ns, timeslices, rss_kb))
+        except FileNotFoundError:
             continue
     return rows
 
 
+if not os.path.isdir(f"/proc/{root}"):
+    raise SystemExit("thread diagnostic root process does not exist")
+
 deadline = time.monotonic() + duration
-with open(output, "w") as out:
-    out.write("epoch_ms,pid,tid,state,wchan,utime,stime\n")
+with open(output, "w", newline="") as out:
+    writer = csv.writer(out)
+    writer.writerow(("epoch_ms", "monotonic_ns", "pid", "tid", "state", "wchan",
+                     "utime", "stime", "comm", "run_ns", "queue_delay_ns",
+                     "timeslices", "rss_kb"))
     while time.monotonic() < deadline:
         stamp = int(time.time() * 1000)
+        monotonic = time.monotonic_ns()
         for pid in all_pids():
             for row in sample_threads(pid):
-                out.write(
-                    f"{stamp},{row[0]},{row[1]},{row[2]},{row[3]},{row[4]},{row[5]}\n"
-                )
+                writer.writerow((stamp, monotonic, *row))
         out.flush()
         time.sleep(INTERVAL)
 PY

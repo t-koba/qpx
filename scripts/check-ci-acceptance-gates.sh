@@ -3,6 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+python3 scripts/check-perf-audit-gates.py
+
 while IFS= read -r script; do
   bash -n "$script"
 done < <(find scripts -type f -name '*.sh' -print)

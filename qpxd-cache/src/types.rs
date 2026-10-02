@@ -270,11 +270,12 @@ impl CachedResponseCandidate {
 
 #[derive(Debug, Clone)]
 pub struct CacheRequestKey {
-    pub method: std::sync::Arc<str>,
-    pub scheme: std::sync::Arc<str>,
-    pub authority: std::sync::Arc<str>,
-    pub path_and_query: std::sync::Arc<str>,
-    pub content_digest: Option<std::sync::Arc<str>>,
+    pub(crate) method: std::sync::Arc<str>,
+    pub(crate) scheme: std::sync::Arc<str>,
+    pub(crate) authority: std::sync::Arc<str>,
+    pub(crate) path_and_query: std::sync::Arc<str>,
+    pub(crate) content_digest: Option<std::sync::Arc<str>>,
+    pub(crate) primary_hash: std::sync::Arc<OnceLock<std::sync::Arc<str>>>,
     pub(crate) primary_index_storage_key: std::sync::Arc<OnceLock<std::sync::Arc<str>>>,
     pub(crate) primary_default_variant_storage_key: std::sync::Arc<OnceLock<std::sync::Arc<str>>>,
 }

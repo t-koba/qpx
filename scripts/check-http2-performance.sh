@@ -347,17 +347,22 @@ for body_bytes, max_streams in sorted(required_lanes):
         ("total FD peak ratio", total_fd_peak_ratio, "max_lane_total_fd_peak_ratio", "max"),
         ("scheduler queue-delay ratio", scheduler_queue_delay_ratio, "max_lane_scheduler_queue_delay_ratio", "max"),
     )
+    evaluations = []
     for label, current, field, direction in checks:
         objective = lane_limit(field, (body_bytes, max_streams))
+        deviation = (objective - current) / objective if direction == "min" else (current - objective) / objective
+        evaluations.append({"metric": field, "actual": current, "limit": objective,
+                            "direction": direction, "passed": deviation <= 1e-12,
+                            "violation_percent": max(0.0, deviation * 100)})
         if direction == "min" and current + 1e-12 < objective:
             failures.append(
                 f"HTTP/2 {body_bytes}-byte m={max_streams} {label} "
-                f"{current:.6f} < objective {objective:.6f}"
+                f"{current:.6f} < objective {objective:.6f} ({deviation * 100:.2f}% violation)"
             )
         if direction == "max" and current > objective + 1e-12:
             failures.append(
                 f"HTTP/2 {body_bytes}-byte m={max_streams} {label} "
-                f"{current:.6f} > objective {objective:.6f}"
+                f"{current:.6f} > objective {objective:.6f} ({deviation * 100:.2f}% violation)"
             )
 
     for proxy, record in (("direct-backend", direct), ("qpxd", qpx), ("nginx", nginx)):
@@ -391,6 +396,20 @@ for body_bytes, max_streams in sorted(required_lanes):
                 f"HTTP/2 {body_bytes}-byte m={max_streams} {proxy} total CPU sample spread "
                 f"{cpu_spread:.6f} > objective {cpu_limit:.6f}"
             )
+
+    print(json.dumps({
+        "bench": BENCH, "body_bytes": body_bytes, "max_concurrent_streams": max_streams,
+        "checks": evaluations,
+        "measurements": {
+            proxy: {field: sample[field] for field in (
+                "requests_per_sec", "requests_per_total_cpu_second", "latency_p99_ms",
+                "rss_baseline_kb", "rss_peak_kb", "rss_growth_kb", "total_rss_peak_kb",
+                "scheduler_queue_delay_us_per_request", "sample_spread",
+                "benchmark_request_count", "complete_requests", "concurrency", "client_threads",
+            )}
+            for proxy, sample in (("direct-backend", direct), ("qpxd", qpx), ("nginx", nginx))
+        },
+    }, sort_keys=True))
 
     print(
         f"HTTP/2 {body_bytes} bytes m={max_streams}: throughput={throughput_ratio:.3f}, "

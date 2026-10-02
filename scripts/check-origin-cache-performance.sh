@@ -84,6 +84,8 @@ def nonnegative_integer(container, field, context):
 
 
 def require_record(record, context):
+    if record.get("thread_diagnostics") is True:
+        fail(f"{context} contains intrusive diagnostic sampling")
     if record.get("valid") is not True:
         fail(f"{context} is marked invalid")
     if record.get("benchmark_schema_version") != 4:
@@ -377,32 +379,47 @@ for lane in lanes:
             fail(f"objective {bench}/{body_bytes} weakens {name}")
 
     failures = []
-    if throughput_ratio < objective("min_throughput_ratio"):
-        failures.append(f"throughput ratio {throughput_ratio:.3f}")
-    if cpu_ratio < objective("min_cpu_efficiency_ratio"):
-        failures.append(f"CPU-efficiency ratio {cpu_ratio:.3f}")
-    if p99_ratio > objective("max_p99_latency_ratio"):
-        failures.append(f"p99 ratio {p99_ratio:.3f}")
-    if dominance < objective("min_dominance_score"):
-        failures.append(f"dominance score {dominance:.3f}")
-    if rss_peak_ratio > objective("max_rss_peak_ratio"):
-        failures.append(f"RSS peak ratio {rss_peak_ratio:.3f}")
-    if fd_peak_ratio > objective("max_fd_peak_ratio"):
-        failures.append(f"FD peak ratio {fd_peak_ratio:.3f}")
-    if scheduler_queue_delay_ratio > objective("max_scheduler_queue_delay_ratio"):
-        failures.append(f"scheduler queue-delay ratio {scheduler_queue_delay_ratio:.3f}")
+    checks = []
+    for label, current, field, direction in (
+        ("throughput ratio", throughput_ratio, "min_throughput_ratio", "min"),
+        ("CPU-efficiency ratio", cpu_ratio, "min_cpu_efficiency_ratio", "min"),
+        ("p99 ratio", p99_ratio, "max_p99_latency_ratio", "max"),
+        ("dominance score", dominance, "min_dominance_score", "min"),
+        ("RSS peak ratio", rss_peak_ratio, "max_rss_peak_ratio", "max"),
+        ("FD peak ratio", fd_peak_ratio, "max_fd_peak_ratio", "max"),
+        ("scheduler queue-delay ratio", scheduler_queue_delay_ratio, "max_scheduler_queue_delay_ratio", "max"),
+    ):
+        limit = objective(field)
+        passed = current >= limit if direction == "min" else current <= limit
+        deviation = (limit - current) / limit if direction == "min" else (current - limit) / limit
+        checks.append({"metric": field, "actual": current, "limit": limit,
+                       "direction": direction, "passed": passed,
+                       "violation_percent": max(0.0, deviation * 100)})
+        if not passed:
+            relation = "<" if direction == "min" else ">"
+            failures.append(f"{label} {current:.6f} {relation} objective {limit:.6f} ({deviation * 100:.2f}% violation)")
     qpx_spread = qpx["sample_spread"]
     reference_spread = reference["sample_spread"]
     for field in ("requests_per_sec_ratio", "requests_per_cpu_second_ratio"):
         if number(qpx_spread, field, qpx_context) > objective("max_qpx_sample_spread_ratio"):
-            failures.append(f"qpx {field} is unstable")
+            failures.append(f"qpx {field} is unstable: {number(qpx_spread, field, qpx_context):.6f} > objective {objective("max_qpx_sample_spread_ratio"):.6f}")
         if number(reference_spread, field, reference_context) > objective(
             "max_reference_sample_spread_ratio"
         ):
-            failures.append(f"reference {field} is unstable")
+            failures.append(f"reference {field} is unstable: {number(reference_spread, field, reference_context):.6f} > objective {objective("max_reference_sample_spread_ratio"):.6f}")
     result = {
         "bench": bench,
         "body_bytes": body_bytes,
+        "checks": checks,
+        "failures": failures,
+        "measurements": {
+            owner: {field: sample[field] for field in (
+                "requests_per_sec", "requests_per_cpu_second", "latency_p99_ms",
+                "rss_baseline_kb", "rss_peak_kb", "rss_growth_kb",
+                "scheduler_queue_delay_us_per_request", "sample_spread",
+            )}
+            for owner, sample in (("qpx", qpx), ("reference", reference))
+        },
         "qpx": qpx_name,
         "reference": reference_name,
         "qpx_execution_model": qpx_model,

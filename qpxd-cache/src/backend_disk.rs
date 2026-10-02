@@ -1,7 +1,7 @@
 use super::types::{
     BodyStreamWriteOptions, CacheBackend, CachedBody, CachedBodyStream, CachedResponseCandidate,
-    CachedResponseEnvelope, MetadataEncoder, VariantIndex, bounded_cache_body_stream,
-    cache_body_storage_key, decode_cached_response_metadata, is_cache_body_storage_key,
+    CachedResponseEnvelope, MetadataEncoder, VariantIndex, cache_body_storage_key,
+    decode_cached_response_metadata, is_cache_body_storage_key,
 };
 use anyhow::{Context, Result, anyhow};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -27,8 +27,6 @@ use tracing::warn;
 const DISK_CACHE_MAGIC: &[u8] = b"QPX-DISK-CACHE\0\x01";
 const DISK_CACHE_SCHEMA_VERSION: u16 = 2;
 const DISK_CACHE_FILE_EXT: &str = "qpxc";
-// File size overhead of the on-disk header: magic bytes + u32 header length.
-const DISK_CACHE_HEADER_OVERHEAD_BYTES: u64 = DISK_CACHE_MAGIC.len() as u64 + 4;
 const DISK_CACHE_CHUNK_BYTES: usize = 64 * 1024;
 const DISK_CACHE_HOT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const DISK_CACHE_HOT_MAX_OBJECT_BYTES: u64 = 2 * 1024 * 1024;
@@ -747,14 +745,13 @@ impl DiskCacheBackend {
             .parent()
             .ok_or_else(|| anyhow!("disk cache path missing parent: {}", path.display()))?;
         ensure_private_dir(parent)?;
-        let (body, len_rx) =
-            bounded_cache_body_stream(body, options.max_body_bytes, options.body_read_timeout);
+        // The collector already enforces size and read deadlines. Passing the
+        // source through another bounded channel duplicates tasks and checks
+        // on every miss without changing the storage boundary.
         let cached =
             CachedBody::from_body_limited(body, options.max_body_bytes, options.body_read_timeout)
                 .await?;
-        let len = len_rx
-            .await
-            .map_err(|_| anyhow!("disk cache body writer closed"))??;
+        let len = cached.len();
         let metadata = match metadata {
             Some((meta_key, encode)) => Some((meta_key, Bytes::from(encode(len)?))),
             None => None,
@@ -836,7 +833,7 @@ impl DiskCacheBackend {
         let tmp_path = temp_path(parent);
         let streamed: std::result::Result<u64, anyhow::Error> = async {
             let mut file = TokioFile::from_std(create_secure_new_file(&tmp_path)?);
-            write_header_async(&mut file, &header).await?;
+            let body_offset = write_header_async(&mut file, &header).await?;
             while let Some(chunk) = source.data().await {
                 file.write_all(chunk?.as_ref()).await?;
             }
@@ -844,6 +841,9 @@ impl DiskCacheBackend {
                 file.write_all(&(meta.len() as u32).to_be_bytes()).await?;
                 file.write_all(meta.as_ref()).await?;
             }
+            // Tokio file writes can complete before their blocking I/O has
+            // drained. Finish those writes before publishing the object.
+            file.flush().await?;
             // Cache objects are re-fetchable, so commit to the page cache and
             // publish atomically via rename instead of paying for an fsync.
             let body_len = header.body_len;
@@ -851,15 +851,14 @@ impl DiskCacheBackend {
             fs::rename(&tmp_path, path).with_context(|| {
                 format!("failed to commit disk cache object {}", path.display())
             })?;
-            Ok(body_len)
+            Ok(body_offset + body_len + header.trailer_len())
         }
         .await;
         if streamed.is_err() {
             let _ = fs::remove_file(&tmp_path);
             invalidate_ensured_dir(parent);
         }
-        let body_len = streamed?;
-        let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + body_len + header.trailer_len();
+        let total_len = streamed?;
         self.remember_write(path.to_path_buf(), total_len, expires_at_ms)
             .await?;
         self.hot_remove(path).await;
@@ -1562,7 +1561,7 @@ fn write_cached_object_sync(
         // writes are committed to the page cache and published atomically via
         // rename without an fsync. This matches the behavior of other HTTP
         // caches and keeps write-heavy miss workloads off the disk sync path.
-        let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + header.body_len + header.trailer_len();
+        let total_len = body_offset + header.body_len + header.trailer_len();
         drop(file);
         fs::rename(&tmp_path, path)
             .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;
@@ -1811,6 +1810,46 @@ mod tests {
             .expect("get")
             .expect("value");
         assert_eq!(value.as_ref(), b"value");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_budget_accounts_for_complete_memory_and_spooled_object_files() {
+        let dir = temp_dir("physical-file-budget");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        for (key, size) in [("memory", 1024), ("spooled", 128 * 1024)] {
+            let body = CachedBody::from_body_limited(
+                Body::from(vec![b'x'; size]),
+                256 * 1024,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("collect real cache body");
+            backend
+                .put_object("ns", key, &body, 60)
+                .await
+                .expect("write cache object");
+        }
+        let mut physical_bytes = 0;
+        for key in ["memory", "spooled"] {
+            let path = backend.path_for("ns", key);
+            let size = fs::metadata(&path).expect("persisted cache file").len();
+            physical_bytes += size;
+            let id = cache_file_id("ns", key);
+            assert_eq!(backend.state.lock().await.entries[&id].total_len, size);
+        }
+        assert_eq!(backend.state.lock().await.total_bytes, physical_bytes);
+        let stored = backend
+            .get_object_stream("ns", "spooled", 128 * 1024, None)
+            .await
+            .expect("read spooled cache object")
+            .expect("complete cache object");
+        assert_eq!(
+            qpx_http::body::to_bytes(stored.body)
+                .await
+                .expect("read persisted body"),
+            vec![b'x'; 128 * 1024]
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

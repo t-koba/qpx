@@ -91,7 +91,7 @@ impl CachedBody {
         body_read_timeout: Duration,
     ) -> Result<Self> {
         let mut chunks = Vec::new();
-        let mut file: Option<(TokioFile, PathBuf)> = None;
+        let mut file: Option<(TokioFile, CachedBodyFile)> = None;
         let mut size = 0usize;
         while let Some(chunk) = timeout(body_read_timeout, body.data())
             .await
@@ -113,23 +113,23 @@ impl CachedBody {
                 continue;
             }
             if file.is_none() {
-                let (mut spool, path) = create_cache_body_spool()?;
+                let (spool, path) = create_cache_body_spool()?;
+                // The file owner removes partially collected bodies on read
+                // failure, write failure, or cancellation as well as success.
+                file = Some((spool, CachedBodyFile { path, len: 0 }));
+            }
+            if let Some((spool, _)) = file.as_mut() {
                 for existing in chunks.drain(..) {
                     spool.write_all(existing.as_ref()).await?;
                 }
-                file = Some((spool, path));
-            }
-            if let Some((spool, _)) = file.as_mut() {
                 spool.write_all(chunk.as_ref()).await?;
             }
         }
-        if let Some((mut spool, path)) = file {
+        if let Some((mut spool, mut file)) = file {
             spool.flush().await?;
             drop(spool);
-            return Ok(Self::File(Arc::new(CachedBodyFile {
-                path,
-                len: size as u64,
-            })));
+            file.len = size as u64;
+            return Ok(Self::File(Arc::new(file)));
         }
         Ok(Self::Memory(bytes_from_chunks(chunks)))
     }
@@ -161,7 +161,7 @@ impl CachedBodyFile {
                     buf.reserve(want);
                     let read = (&mut file).take(want as u64).read_buf(&mut buf).await?;
                     if read == 0 {
-                        break;
+                        return Err(anyhow!("spooled cache body length mismatch"));
                     }
                     remaining = remaining.saturating_sub(read as u64);
                     if sender.send_data(buf.split().freeze()).await.is_err() {
@@ -240,4 +240,30 @@ fn bytes_from_chunks(chunks: Vec<Bytes>) -> Bytes {
         out.extend_from_slice(chunk.as_ref());
     }
     Bytes::from(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn truncated_spooled_body_fails_instead_of_completing() {
+        let cached = CachedBody::from_body_limited(
+            Body::from(vec![b'x'; CACHE_BODY_MEMORY_BYTES * 2]),
+            CACHE_BODY_MEMORY_BYTES * 3,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("collect real spooled body");
+        let CachedBody::File(file) = &cached else {
+            panic!("large body must use a spool file");
+        };
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file.path)
+            .expect("open real spool file")
+            .set_len(CACHE_BODY_MEMORY_BYTES as u64)
+            .expect("truncate real spool file");
+        assert!(qpx_http::body::to_bytes(cached.to_body()).await.is_err());
+    }
 }

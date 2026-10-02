@@ -106,9 +106,10 @@ pub fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Res
         .env("RUST_LOG", "warn")
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
-    let mut child = cmd.spawn().context("spawn qpxd")?;
-    wait_for_qpxd(&mut child, ready_port, &log_path)?;
-    Ok(QpxdHandle::with_log_path(child, log_path))
+    let child = cmd.spawn().context("spawn qpxd")?;
+    let mut handle = QpxdHandle::with_log_path(child, log_path.clone());
+    wait_for_qpxd(&mut handle.child, ready_port, &log_path)?;
+    Ok(handle)
 }
 
 pub fn spawn_qpxd_on_random_port(
@@ -183,9 +184,6 @@ fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<
     let started = Instant::now();
     let addr = SocketAddr::from(([127, 0, 0, 1], ready_port));
     while started.elapsed() < Duration::from_secs(15) {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
-            return Ok(());
-        }
         if let Some(status) = child.try_wait().context("qpxd wait")? {
             let _ = child.kill();
             let _ = child.wait();
@@ -194,6 +192,9 @@ fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<
                 log_path.display(),
                 log_excerpt(log_path)
             ));
+        }
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));
     }

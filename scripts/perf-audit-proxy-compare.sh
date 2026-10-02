@@ -29,6 +29,7 @@ MAX_SCALE_WORKERS="${QPX_PROXY_COMPARE_MAX_SCALE_WORKERS:-4}"
 PROXY_FILTER="${QPX_PROXY_COMPARE_PROXY_FILTER:-}"
 PROFILE_PROXY="${QPX_PROXY_COMPARE_PROFILE_PROXY:-}"
 PROFILE_SECONDS="${QPX_PROXY_COMPARE_PROFILE_SECONDS:-0}"
+THREAD_DIAGNOSTICS="${QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS:-0}"
 ARTIFACT_LOG_HEAD_LINES="${QPX_PROXY_COMPARE_ARTIFACT_LOG_HEAD_LINES:-3}"
 ARTIFACT_LOG_TAIL_LINES="${QPX_PROXY_COMPARE_ARTIFACT_LOG_TAIL_LINES:-100}"
 
@@ -1339,13 +1340,19 @@ LUA
       io_syscw_before="$(process_tree_io_counter "$resource_pid" "syscw")"
     fi
     thread_sampler_pid=""
-    if [ -d /proc ] && [ "$attempt" -eq 1 ] && [[ "$artifact_name" == *qpxd-webdav*1048576* ]]; then
-      scripts/lib/perf-thread-sampler.sh "$resource_pid" "$DURATION_SECONDS" "$out.threads.csv" >/dev/null 2>&1 &
+    # Thread sampling is an explicit diagnostic run for both competitors.
+    # Sampling only WebDAV's qpxd workers perturbs the comparison itself.
+    if [ "$THREAD_DIAGNOSTICS" = 1 ]; then
+      scripts/lib/perf-thread-sampler.sh "$resource_pid" "$DURATION_SECONDS" "$out.threads.csv" >"$out.threads.log" 2>&1 &
       thread_sampler_pid=$!
     fi
     wrk_succeeded=true
     if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "sample-${artifact_name}-${attempt}" >"$out" 2>&1; then
       wrk_succeeded=false
+    fi
+    if [ -n "$thread_sampler_pid" ]; then
+      wait "$thread_sampler_pid"
+      thread_sampler_pid=""
     fi
     if [ -n "$fd_peak_monitor_pid" ]; then
       kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
@@ -1378,10 +1385,6 @@ LUA
     fi
     if [ -n "$profile_pid" ]; then
       wait "$profile_pid" || true
-    fi
-    if [ -n "$thread_sampler_pid" ]; then
-      wait "$thread_sampler_pid" 2>/dev/null || true
-      thread_sampler_pid=""
     fi
     drain_feature_rich_access_log "$proxy"
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
@@ -1495,8 +1498,8 @@ LUA
   IFS=$'\t' read -r rps complete summary_requests failed connect_errors read_errors write_errors timeout_errors non_2xx bad_length cache_result_errors cache_writeback_verified mean_ms transfer_kbps latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms cpu_ms rss_kb rss_baseline_kb rss_peak_kb rss_growth_kb requests_per_cpu_second fd_baseline fd_peak fd_growth scheduler_run_delay_ns scheduler_queue_delay_us_per_request kernel_resource_metrics status_before status_after <<<"$selected_sample"
   commit="${GITHUB_SHA:-unknown}"
   valid=true
-  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"cache_result_errors":%s,"cache_writeback_verified":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_baseline_kb":%s,"rss_peak_kb":%s,"rss_growth_kb":%s,"requests_per_cpu_second":%s,"fd_baseline":%s,"fd_peak":%s,"fd_growth":%s,"scheduler_run_delay_ns":%s,"scheduler_queue_delay_us_per_request":%s,"kernel_resource_metrics":%s,"valid":%s,"commit":"%s"}\n' \
-    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_baseline_kb")" "$(json_number_or_null "$rss_peak_kb")" "$(json_number_or_null "$rss_growth_kb")" "$requests_per_cpu_second" "$fd_baseline" "$fd_peak" "$fd_growth" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$valid" "$commit" >>"$OUT_JSON"
+  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","thread_diagnostics":%s,"requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"cache_result_errors":%s,"cache_writeback_verified":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_baseline_kb":%s,"rss_peak_kb":%s,"rss_growth_kb":%s,"requests_per_cpu_second":%s,"fd_baseline":%s,"fd_peak":%s,"fd_growth":%s,"scheduler_run_delay_ns":%s,"scheduler_queue_delay_us_per_request":%s,"kernel_resource_metrics":%s,"valid":%s,"commit":"%s"}\n' \
+    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$([ "$THREAD_DIAGNOSTICS" = 1 ] && echo true || echo false)" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_baseline_kb")" "$(json_number_or_null "$rss_peak_kb")" "$(json_number_or_null "$rss_growth_kb")" "$requests_per_cpu_second" "$fd_baseline" "$fd_peak" "$fd_growth" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$valid" "$commit" >>"$OUT_JSON"
 }
 
 require_cmd curl
@@ -1589,6 +1592,17 @@ if [ "$MISS_SAMPLE_ATTEMPTS" -eq 0 ]; then
   echo "QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS must be a positive integer" >&2
   exit 1
 fi
+case "$THREAD_DIAGNOSTICS" in
+  0) ;;
+  1)
+    if [ ! -d /proc ]; then
+      echo "thread diagnostics require Linux /proc" >&2
+      exit 1
+    fi
+    ;;
+  *) echo "QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS must be 0 or 1" >&2; exit 1 ;;
+esac
+
 case "$PROFILE_SECONDS" in
   ''|*[!0-9]*)
     echo "QPX_PROXY_COMPARE_PROFILE_SECONDS must be a non-negative integer" >&2

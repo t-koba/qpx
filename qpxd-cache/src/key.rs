@@ -14,7 +14,6 @@ struct CachedRequestKey {
     host: Option<http::HeaderValue>,
     default_scheme: String,
     key: Option<CacheRequestKey>,
-    primary_hash: Option<Arc<str>>,
 }
 
 thread_local! {
@@ -42,9 +41,6 @@ impl CacheRequestKey {
             return Ok(key);
         }
         let key = Self::for_target_uncached(req, default_scheme)?;
-        let primary_hash = key
-            .as_ref()
-            .map(|key| Arc::from(key.compute_primary_hash()));
         CACHED_REQUEST_KEY.with_borrow_mut(|cached| {
             *cached = Some(CachedRequestKey {
                 method: req.method().clone(),
@@ -52,7 +48,6 @@ impl CacheRequestKey {
                 host: host.cloned(),
                 default_scheme: default_scheme.to_string(),
                 key: key.clone(),
-                primary_hash,
             });
         });
         Ok(key)
@@ -134,6 +129,7 @@ impl CacheRequestKey {
             authority: self.authority.clone(),
             path_and_query: self.path_and_query.clone(),
             content_digest: self.content_digest.clone(),
+            primary_hash: Arc::new(std::sync::OnceLock::new()),
             primary_index_storage_key: Arc::new(std::sync::OnceLock::new()),
             primary_default_variant_storage_key: Arc::new(std::sync::OnceLock::new()),
         }
@@ -157,24 +153,18 @@ impl CacheRequestKey {
             authority,
             path_and_query,
             content_digest: None,
+            primary_hash: Arc::new(std::sync::OnceLock::new()),
             primary_index_storage_key: Arc::new(std::sync::OnceLock::new()),
             primary_default_variant_storage_key: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
     pub(crate) fn primary_hash_arc(&self) -> Arc<str> {
-        if let Some(primary_hash) = CACHED_REQUEST_KEY.with_borrow(|cached| {
-            cached.as_ref().and_then(|cached| {
-                cached
-                    .key
-                    .as_ref()
-                    .filter(|key| self.same_primary_key(key))
-                    .and(cached.primary_hash.clone())
-            })
-        }) {
-            return primary_hash;
-        }
-        Arc::from(self.compute_primary_hash())
+        // A request can move between runtime workers before writeback. Keep
+        // its digest with the key so every clone shares the same computation.
+        self.primary_hash
+            .get_or_init(|| Arc::from(self.compute_primary_hash()))
+            .clone()
     }
 
     pub(crate) fn primary_index_storage_key_arc(&self) -> Arc<str> {
@@ -215,13 +205,6 @@ impl CacheRequestKey {
             b"|",
             self.path_and_query.as_bytes(),
         ])
-    }
-
-    fn same_primary_key(&self, other: &Self) -> bool {
-        self.method == other.method
-            && self.scheme == other.scheme
-            && self.authority == other.authority
-            && self.path_and_query == other.path_and_query
     }
 }
 
@@ -304,6 +287,23 @@ pub fn normalize_url_authority(url: &Url) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_digest_is_shared_across_worker_migration_and_reset_for_a_new_method() {
+        let key = CacheRequestKey::from_normalized_parts(
+            "GET",
+            "https",
+            "example.com".to_string(),
+            "/asset?sequence=1".to_string(),
+        );
+        let digest = key.primary_hash_arc();
+        let migrated = key.clone();
+        let migrated_digest = std::thread::spawn(move || migrated.primary_hash_arc())
+            .join()
+            .expect("cache key worker");
+        assert!(Arc::ptr_eq(&digest, &migrated_digest));
+        assert_ne!(digest, key.with_method_group("POST").primary_hash_arc());
+    }
 
     #[test]
     fn query_content_digest_selects_variant_without_fragmenting_primary_index() {
