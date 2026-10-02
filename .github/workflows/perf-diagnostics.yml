@@ -89,6 +89,7 @@ jobs:
           case "$CATEGORY" in
             streaming)
               python3 scripts/perf-evaluate.py "streaming diagnostics" -- bash scripts/perf-audit-streaming-compare.sh
+              python3 scripts/perf-evaluate.py "streaming diagnostic objectives" -- bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl
               ;;
             origin-cache)
               QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-local,nginx-static,qpxd-cache,nginx-cache,qpxd-feature-rich,nginx-feature-rich,qpxd-webdav,apache-webdav \
@@ -125,6 +126,7 @@ jobs:
               ;;
             http2)
               python3 scripts/perf-evaluate.py "http2 diagnostics" -- bash scripts/perf-audit-http2-compare.sh
+              python3 scripts/perf-evaluate.py "http2 diagnostic objectives" -- bash scripts/check-http2-performance.sh target/perf/perf-audit-http2-compare.jsonl
               ;;
             *) echo "unsupported diagnostic category: $CATEGORY" >&2; exit 2 ;;
           esac
