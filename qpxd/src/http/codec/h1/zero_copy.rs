@@ -32,7 +32,6 @@ const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
 // pressure: shrink the per-poll quantum so one connection cannot monopolize a
 // worker and inflate every peer's scheduler queue delay.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 const CONTENDED_FILE_TRANSFER_THRESHOLD: usize = 4;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ACTIVE_ZERO_COPY_TRANSFERS: AtomicUsize = AtomicUsize::new(0);
@@ -171,7 +170,16 @@ impl ZeroCopySocket {
                 bytes_since_yield = bytes_since_yield.saturating_add(written as u64);
                 if offset < end && bytes_since_yield >= scheduling_quantum {
                     bytes_since_yield = 0;
-                    tokio::task::consume_budget().await;
+                    if ACTIVE_ZERO_COPY_TRANSFERS.load(Ordering::Acquire)
+                        > CONTENDED_FILE_TRANSFER_THRESHOLD
+                    {
+                        // Cooperative budget accounting alone can defer the
+                        // handoff for many quanta. Enforce the file quantum
+                        // while peers are actively competing for the worker.
+                        tokio::task::yield_now().await;
+                    } else {
+                        tokio::task::consume_budget().await;
+                    }
                 }
             }
             Ok(())
