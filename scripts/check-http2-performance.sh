@@ -169,8 +169,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"{owner} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"{owner} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version", owner) != 7:
+        if nonnegative_int(record, "benchmark_schema_version", owner) != 8:
             fail(f"{owner} uses an unsupported benchmark schema")
+        if record.get("diagnostic_instrumentation") is not False:
+            fail(f"{owner} is instrumented or lacks measurement provenance")
         if record.get("resource_measurement") != "sampled_workload_peak_v1":
             fail(f"{owner} uses an unsupported resource measurement")
         if record.get("kernel_resource_metrics") is not True:

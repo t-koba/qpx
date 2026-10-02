@@ -16,7 +16,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, origin-cache, http2]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, origin-cache, http2]
         default: streaming
 
 permissions:
@@ -45,7 +45,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
       - name: verify native CPU profiler before build
-        if: inputs.category == 'proxy-native'
+        if: inputs.category == 'proxy-native' || inputs.category == 'http2-native'
         run: |
           sudo apt-get install -y linux-tools-generic ripgrep
           sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
@@ -64,7 +64,7 @@ jobs:
           echo "QPX_NATIVE_PERF_BIN=$perf_binary" >> "$GITHUB_ENV"
       - name: build before measurement
         run: |
-          if [[ "$CATEGORY" = *-callgrind || "$CATEGORY" = proxy-native ]]; then
+          if [[ "$CATEGORY" = *-callgrind || "$CATEGORY" = *-native ]]; then
             cargo build -p qpxd --profile callgrind --locked --features http3-backend-qpx
           else
             cargo build -p qpxd --release --locked --features http3-backend-qpx
@@ -106,6 +106,9 @@ jobs:
               ;;
             proxy-native)
               python3 scripts/perf-evaluate.py "native CPU diagnostics" -- bash scripts/perf-diagnose-proxy-native.sh
+              ;;
+            http2-native)
+              QPX_NATIVE_WORKLOAD=http2 python3 scripts/perf-evaluate.py "native HTTP/2 CPU diagnostics" -- bash scripts/perf-diagnose-proxy-native.sh
               ;;
             http2)
               python3 scripts/perf-evaluate.py "http2 diagnostics" -- bash scripts/perf-audit-http2-compare.sh

@@ -6,6 +6,11 @@ source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 OUT_JSON="${1:-${QPX_HTTP2_COMPARE_JSON:-$ROOT_DIR/target/perf/perf-audit-http2-compare.jsonl}}"
 LOG_ARTIFACT_DIR="${QPX_HTTP2_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/http2-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
+export QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS="${QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS:-0}"
+case "$QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS" in
+  0|1) ;;
+  *) echo "HTTP/2 native diagnostics must be 0 or 1" >&2; exit 2 ;;
+esac
 TARGET_DURATION_SECONDS="${QPX_HTTP2_COMPARE_TARGET_DURATION_SECONDS:-10}"
 CALIBRATION_BYTES="${QPX_HTTP2_COMPARE_CALIBRATION_BYTES:-16777216}"
 CALIBRATION_MIN_DURATION_MS="${QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS:-2000}"
@@ -773,6 +778,7 @@ PY
         "$requests_per_total_cpu_second" "$calibration_requests" \
         "$calibration_duration_us" "$benchmark_requests" <<'PY'
 import json
+import os
 import sys
 
 (
@@ -808,6 +814,7 @@ import sys
     benchmark_requests,
 ) = sys.argv[1:31]
 record = json.loads(metrics)
+record["diagnostic_instrumentation"] = os.environ["QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS"] == "1"
 record["cpu_ms"] = int(cpu_ms)
 record["backend_cpu_ms"] = int(backend_cpu_ms)
 record["total_cpu_ms"] = int(total_cpu_ms)
@@ -1261,7 +1268,7 @@ for key in sorted(expected):
     record.update({
         "aggregation": "conservative_median_per_metric",
         "target_duration_seconds": target_duration,
-        "benchmark_schema_version": 7,
+        "benchmark_schema_version": 8,
         "resource_measurement": "sampled_workload_peak_v1",
         "sample_attempts": attempts,
         "sampling_order": "round_robin_interleaved",

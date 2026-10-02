@@ -88,6 +88,11 @@ with DWARF call stacks, including kernel CPU work. It preserves raw profiles
 and symbol reports for the cache and feature-rich roles. Its isolated process
 group owns both the profiler and server and waits for their shutdown. These
 instrumented records cannot satisfy normal performance acceptance gates.
+The `http2-native` variant records the 1 KiB, 100-stream workload in the same
+way. HTTP/2 schema 8 requires explicit instrumentation provenance; native
+diagnostic rows and rows missing that provenance are rejected by the required
+gate. Reports are restricted to the workload windows recorded by the real RSS
+sampler's monotonic timestamps, separating warmup and the individual samples.
 The persistent miss instruction profile exposes an eviction-specific cost:
 after the hot cache fills, repeated path-component comparisons dominate the
 second and third samples. Recent-entry invalidation now compares the existing
