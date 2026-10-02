@@ -542,7 +542,7 @@ run_one() {
       total_fd_peak="$fd_peak"
       total_fd_growth="$fd_growth"
     fi
-    total_scheduler_run_delay_ns="$(awk -v resource_before="$scheduler_before_ns" -v resource_after="$scheduler_after_ns" -v backend_before="$backend_scheduler_before_ns" -v backend_after="$backend_scheduler_after_ns" 'BEGIN { delta = (resource_after - resource_before) + (backend_after - backend_before); if (delta < 0) { print "process CPU clock decreased" > "/dev/stderr"; exit 1 }; printf "%.6f", delta }')"
+    total_scheduler_run_delay_ns="$(awk -v resource_before="$scheduler_before_ns" -v resource_after="$scheduler_after_ns" -v backend_before="$backend_scheduler_before_ns" -v backend_after="$backend_scheduler_after_ns" 'BEGIN { delta = (resource_after - resource_before) + (backend_after - backend_before); if (delta < 0) { print "scheduler queue delay decreased" > "/dev/stderr"; exit 1 }; printf "%.0f", delta }')"
     valid="$(python3 - "$metrics" <<'PY'
 import json
 import sys
@@ -879,9 +879,6 @@ for key in sorted(expected):
         "chunk_observations",
         "stream_bytes",
         "chunk_bytes",
-        "cpu_ms",
-        "backend_cpu_ms",
-        "total_cpu_ms",
         "rss_kb",
         "rss_baseline_kb",
         "rss_peak_kb",
