@@ -1814,10 +1814,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disk_budget_accounts_for_complete_memory_and_spooled_object_files() {
+    async fn disk_budget_accounts_for_complete_object_files() {
         let dir = temp_dir("physical-file-budget");
         let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
-        for (key, size) in [("memory", 1024), ("spooled", 128 * 1024)] {
+        let objects: &[(&str, usize)] = if cfg!(unix) {
+            &[("memory", 1024), ("spooled", 128 * 1024)]
+        } else {
+            &[("memory", 1024)]
+        };
+        for &(key, size) in objects {
             let body = CachedBody::from_body_limited(
                 Body::from(vec![b'x'; size]),
                 256 * 1024,
@@ -1831,7 +1836,7 @@ mod tests {
                 .expect("write cache object");
         }
         let mut physical_bytes = 0;
-        for key in ["memory", "spooled"] {
+        for &(key, _) in objects {
             let path = backend.path_for("ns", key);
             let size = fs::metadata(&path).expect("persisted cache file").len();
             physical_bytes += size;
@@ -1839,17 +1844,19 @@ mod tests {
             assert_eq!(backend.state.lock().await.entries[&id].total_len, size);
         }
         assert_eq!(backend.state.lock().await.total_bytes, physical_bytes);
-        let stored = backend
-            .get_object_stream("ns", "spooled", 128 * 1024, None)
-            .await
-            .expect("read spooled cache object")
-            .expect("complete cache object");
-        assert_eq!(
-            qpx_http::body::to_bytes(stored.body)
+        for &(key, size) in objects {
+            let stored = backend
+                .get_object_stream("ns", key, size as u64, None)
                 .await
-                .expect("read persisted body"),
-            vec![b'x'; 128 * 1024]
-        );
+                .expect("read persisted cache object")
+                .expect("complete cache object");
+            assert_eq!(
+                qpx_http::body::to_bytes(stored.body)
+                    .await
+                    .expect("read persisted body"),
+                vec![b'x'; size]
+            );
+        }
         let _ = fs::remove_dir_all(dir);
     }
 

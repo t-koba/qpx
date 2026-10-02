@@ -246,6 +246,7 @@ fn bytes_from_chunks(chunks: Vec<Bytes>) -> Bytes {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn truncated_spooled_body_fails_instead_of_completing() {
         let cached = CachedBody::from_body_limited(
@@ -265,5 +266,18 @@ mod tests {
             .set_len(CACHE_BODY_MEMORY_BYTES as u64)
             .expect("truncate real spool file");
         assert!(qpx_http::body::to_bytes(cached.to_body()).await.is_err());
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn spooling_fails_without_owner_only_file_permissions() {
+        let result = CachedBody::from_body_limited(
+            Body::from(vec![b'x'; CACHE_BODY_MEMORY_BYTES * 2]),
+            CACHE_BODY_MEMORY_BYTES * 3,
+            Duration::from_secs(5),
+        )
+        .await;
+        let error = result.expect_err("insecure spooling must be rejected");
+        assert!(error.to_string().contains("owner-only file permissions"));
     }
 }
