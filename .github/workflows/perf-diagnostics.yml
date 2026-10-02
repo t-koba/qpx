@@ -44,6 +44,24 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
+      - name: verify native CPU profiler before build
+        if: inputs.category == 'proxy-native'
+        run: |
+          sudo apt-get install -y linux-tools-generic ripgrep
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          mkdir -p target/perf
+          dpkg-query -L 'linux-tools-*' > target/perf/native-perf-package-files.txt
+          mapfile -t perf_tools < <(rg '^/usr/lib/.*/perf$' target/perf/native-perf-package-files.txt | sort -V)
+          if [ "${#perf_tools[@]}" -eq 0 ]; then
+            echo "native perf executable is missing" >&2
+            exit 1
+          fi
+          perf_binary="${perf_tools[-1]}"
+          "$perf_binary" --version
+          "$perf_binary" record -e cpu-clock -F 199 --clockid CLOCK_MONOTONIC \
+            --call-graph dwarf,16384 -o target/perf/native-perf-probe.data \
+            -- python3 -c $'import time\nend = time.monotonic() + 0.1\nwhile time.monotonic() < end:\n    pass'
+          echo "QPX_NATIVE_PERF_BIN=$perf_binary" >> "$GITHUB_ENV"
       - name: build before measurement
         run: |
           if [[ "$CATEGORY" = *-callgrind || "$CATEGORY" = proxy-native ]]; then
@@ -87,14 +105,7 @@ jobs:
               QPX_CALLGRIND_WORKLOAD=cache-miss python3 scripts/perf-evaluate.py "cache miss callgrind diagnostics" -- bash scripts/perf-diagnose-proxy-callgrind.sh
               ;;
             proxy-native)
-              sudo apt-get install -y linux-tools-generic ripgrep
-              sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
-              mapfile -t perf_tools < <(rg --files /usr/lib/linux-tools | rg '/perf$' | sort -V)
-              if [ "${#perf_tools[@]}" -eq 0 ]; then
-                echo "native perf executable is missing" >&2
-                exit 1
-              fi
-              QPX_NATIVE_PERF_BIN="${perf_tools[-1]}" python3 scripts/perf-evaluate.py "native CPU diagnostics" -- bash scripts/perf-diagnose-proxy-native.sh
+              python3 scripts/perf-evaluate.py "native CPU diagnostics" -- bash scripts/perf-diagnose-proxy-native.sh
               ;;
             http2)
               python3 scripts/perf-evaluate.py "http2 diagnostics" -- bash scripts/perf-audit-http2-compare.sh
