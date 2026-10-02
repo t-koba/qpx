@@ -54,7 +54,7 @@ pub(super) async fn enforce_reverse_access_control(
                 req: &req,
                 destination: request_destination,
                 proxy_name,
-                audit: audit_ctx.clone(),
+                audit: std::borrow::Cow::Borrowed(&audit_ctx),
             })
             .await?
         {
@@ -127,7 +127,8 @@ pub(super) async fn enforce_reverse_access_control(
             request_limits,
         }));
     }
-    let decision_service = enforce_decision_service(
+    // Allocate provider state only for routes that actually invoke a provider.
+    let decision_service = Box::pin(enforce_decision_service(
         state,
         selected_policy,
         DecisionServiceInput {
@@ -148,7 +149,7 @@ pub(super) async fn enforce_reverse_access_control(
             headers: Some(sanitized_headers.unwrap_or_else(|| req.headers())),
             identity,
         },
-    )
+    ))
     .await?;
     let audit_ctx = build_dispatch_audit_context(DispatchAuditInput {
         state,
@@ -171,7 +172,7 @@ pub(super) async fn enforce_reverse_access_control(
             req: &req,
             destination: request_destination,
             proxy_name,
-            audit: audit_ctx.clone(),
+            audit: std::borrow::Cow::Borrowed(&audit_ctx),
         })
         .await?
     {
@@ -298,4 +299,19 @@ fn reverse_local_route_response(
         DispatchOutcome::Respond,
     )
     .map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn access_control_future_excludes_inactive_provider_storage() {
+        fn future_size<I, O>(_: impl FnOnce(I) -> O) -> usize {
+            std::mem::size_of::<O>()
+        }
+        let bytes = future_size(super::enforce_reverse_access_control);
+        assert!(
+            bytes <= 4 * 1024,
+            "access control inline state exceeded its size budget: {bytes} bytes"
+        );
+    }
 }

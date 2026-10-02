@@ -229,7 +229,7 @@ async fn prepare_forward_request(
         req: &req,
         destination: &destination,
         proxy_name,
-        audit: build_dispatch_audit_context(DispatchAuditInput {
+        audit: std::borrow::Cow::Owned(build_dispatch_audit_context(DispatchAuditInput {
             state: &state,
             kind: ProxyKind::Forward,
             scope_name: listener_name,
@@ -243,7 +243,7 @@ async fn prepare_forward_request(
             identity: &identity,
             destination: &destination,
             decision_service: None,
-        }),
+        })),
     })
     .await?
     {

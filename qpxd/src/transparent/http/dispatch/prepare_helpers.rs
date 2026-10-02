@@ -63,7 +63,7 @@ pub(super) fn guard_input<'a>(
         req,
         destination,
         proxy_name,
-        audit: build_dispatch_audit_context(DispatchAuditInput {
+        audit: std::borrow::Cow::Owned(build_dispatch_audit_context(DispatchAuditInput {
             state,
             kind: ProxyKind::Transparent,
             scope_name: listener_name,
@@ -77,7 +77,7 @@ pub(super) fn guard_input<'a>(
             identity,
             destination,
             decision_service: None,
-        }),
+        })),
     }
 }
 

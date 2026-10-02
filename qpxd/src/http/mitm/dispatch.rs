@@ -176,7 +176,7 @@ async fn execute_mitm_request(
         req: &req,
         destination: &destination,
         proxy_name,
-        audit: build_dispatch_audit_context(DispatchAuditInput {
+        audit: std::borrow::Cow::Owned(build_dispatch_audit_context(DispatchAuditInput {
             state: &state,
             kind: ProxyKind::Mitm,
             scope_name: route.listener_name,
@@ -190,7 +190,7 @@ async fn execute_mitm_request(
             identity: &identity,
             destination: &destination,
             decision_service: None,
-        }),
+        })),
     })
     .await?
     {
