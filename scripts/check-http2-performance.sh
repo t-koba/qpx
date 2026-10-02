@@ -170,14 +170,22 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"{owner} is marked invalid")
         attempts = nonnegative_int(record, "sample_attempts", owner)
         valid_samples = nonnegative_int(record, "valid_samples", owner)
-        if attempts == 0 or valid_samples > attempts or valid_samples < attempts // 2 + 1:
-            fail(f"{owner} lacks a majority of valid samples")
+        if attempts == 0 or valid_samples != attempts:
+            fail(f"{owner} does not have valid measurements for every sample")
         if record.get("aggregation") != "conservative_median_per_metric":
             fail(f"{owner} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"{owner} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version", owner) != 8:
+        if nonnegative_int(record, "benchmark_schema_version", owner) != 9:
             fail(f"{owner} uses an unsupported benchmark schema")
+        target_duration = positive_number(record, "target_duration_seconds", owner)
+        duration_range = record.get("sample_duration_seconds")
+        if not isinstance(duration_range, dict) or target_duration <= 0:
+            fail(f"{owner} lacks per-sample measurement durations")
+        minimum_duration = positive_number(duration_range, "min", owner)
+        maximum_duration = positive_number(duration_range, "max", owner)
+        if not target_duration / 1.25 <= minimum_duration <= maximum_duration <= target_duration * 1.25:
+            fail(f"{owner} measurement duration range {minimum_duration}..{maximum_duration}s is outside {target_duration / 1.25}..{target_duration * 1.25}s")
         if record.get("diagnostic_instrumentation") is not False:
             fail(f"{owner} is instrumented or lacks measurement provenance")
         if record.get("resource_measurement") != "sampled_workload_peak_v1":

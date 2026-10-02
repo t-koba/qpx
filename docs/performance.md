@@ -122,7 +122,7 @@ shutdown is a diagnostic failure. CPU diagnostics have a 20-minute deadline,
 and individual symbol reports have a three-minute deadline. Self-CPU reports omit
 rendered call graphs while raw DWARF stacks remain available for further analysis.
 The `http2-native` variant records the 1 KiB, 100-stream workload in the same
-way. HTTP/2 schema 8 requires explicit instrumentation provenance; native
+way. HTTP/2 schema 9 requires explicit instrumentation provenance; native
 diagnostic rows and rows missing that provenance are rejected by the required
 gate. Reports are restricted to the workload windows recorded by the real RSS
 sampler's monotonic timestamps, separating warmup and the individual samples.
@@ -544,3 +544,14 @@ identity, timestamps, TCP MSS, and observed bytes per data segment for every
 workload round. This instrumented run is excluded from acceptance. Its segment
 density describes observed active connections rather than a total packet count;
 missing traffic attribution or workload rounds fail the diagnostic.
+
+HTTP/2 request-count calibration must finish within 1.25 times the target
+measurement duration. Each measured sample must last between target / 1.25
+and target * 1.25 (8–12.5 seconds for the default 10-second workload). This
+budget uses the reference throughput stability envelope: a short sample can
+underrepresent scheduler and resource costs, while a stalled calibration can
+underestimate the subsequent request count. Every scheduled sample must be
+valid; failed samples cannot be discarded to obtain a passing majority. The
+gate verifies the minimum and maximum durations across all samples. Invalid
+samples retain their actual metrics, limits, and reasons in JSONL artifacts,
+and the raw per-request latency logs are retained for valid and invalid runs.

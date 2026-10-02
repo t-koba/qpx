@@ -76,6 +76,7 @@ collect_artifacts() {
   find "$TMP_DIR" -name '*.latency.tsv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.sample.txt' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.valid-samples.jsonl' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
+  find "$TMP_DIR" -name '*.invalid-samples.jsonl' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.samples.csv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.sampling.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.error' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
@@ -583,6 +584,22 @@ run_one() {
     }
     read -r calibration_requests calibration_duration_us < <(parse_h2load_calibration "$calibration_out")
   done
+  if [ "$((calibration_duration_us * 4))" -gt "$((TARGET_DURATION_SECONDS * 1000000 * 5))" ]; then
+    python3 - "$TMP_DIR/${artifact}.invalid-samples.jsonl" "$proxy" "$calibration_duration_us" "$TARGET_DURATION_SECONDS" <<'PY_DURATION'
+import json
+import sys
+path, proxy, elapsed, target = sys.argv[1:]
+record = {"proxy": proxy, "stage": "calibration", "valid": False,
+          "reason": "calibration exceeds the measurement duration budget",
+          "actual_duration_seconds": int(elapsed) / 1_000_000,
+          "maximum_duration_seconds": float(target) * 1.25}
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+print(json.dumps(record), file=sys.stderr)
+PY_DURATION
+    INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
+    return
+  fi
   benchmark_requests=$(((calibration_requests * TARGET_DURATION_SECONDS * 1000000 + calibration_duration_us - 1) / calibration_duration_us))
   if [ "$benchmark_requests" -lt "$minimum_requests" ]; then
     benchmark_requests="$minimum_requests"
@@ -729,19 +746,34 @@ run_one() {
       wait "$profile_pid" || true
     fi
     if ! metrics="$(parse_h2load "$out" "$latency_file")"; then
-      rm -f "$latency_file"
       failed_sample="$out"
       echo "${proxy} produced unparsable HTTP/2 metrics on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       cat "$out" >&2 || true
       attempt=$((attempt + 1))
       continue
     fi
-    rm -f "$latency_file"
-    valid="$(python3 - "$metrics" <<'PY'
+    valid="$(python3 - "$metrics" "$TARGET_DURATION_SECONDS" "$TMP_DIR/${artifact}.invalid-samples.jsonl" "$proxy" "$attempt" <<'PY'
 import json
+import math
 import sys
 m = json.loads(sys.argv[1])
-print("true" if m["requests"] > 0 and m["requests"] == m["started_requests"] == m["complete_requests"] == m["succeeded_requests"] and m["failed_requests"] == 0 and m["non_2xx_responses"] == 0 else "false")
+target = float(sys.argv[2])
+minimum, maximum = target / 1.25, target * 1.25
+reasons = []
+if not (m["requests"] > 0 and m["requests"] == m["started_requests"] == m["complete_requests"] == m["succeeded_requests"]):
+    reasons.append("not every requested transfer completed successfully")
+if m["failed_requests"] != 0 or m["non_2xx_responses"] != 0:
+    reasons.append("requests failed or returned non-2xx responses")
+if not math.isfinite(m["duration_seconds"]) or not minimum <= m["duration_seconds"] <= maximum:
+    reasons.append("measurement duration is outside the target budget")
+if reasons:
+    m.update(proxy=sys.argv[4], attempt=int(sys.argv[5]), valid=False,
+             reasons=reasons, minimum_duration_seconds=minimum,
+             maximum_duration_seconds=maximum)
+    with open(sys.argv[3], "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(m) + "\n")
+    print(json.dumps(m), file=sys.stderr)
+print("false" if reasons else "true")
 PY
     )"
     if [ "$valid" = true ]; then
@@ -860,8 +892,8 @@ PY
     attempt=$((attempt + 1))
   done
   valid_sample_count="$(wc -l <"$samples_file" | tr -d '[:space:]')"
-  if [ "$valid_sample_count" -lt "$MIN_VALID_SAMPLES" ]; then
-    echo "${proxy} produced ${valid_sample_count}/${SAMPLE_ATTEMPTS} valid HTTP/2 samples; ${MIN_VALID_SAMPLES} required" >&2
+  if [ "$valid_sample_count" -ne "$SAMPLE_ATTEMPTS" ]; then
+    echo "${proxy} produced ${valid_sample_count}/${SAMPLE_ATTEMPTS} valid HTTP/2 samples; ${SAMPLE_ATTEMPTS} required" >&2
     if [ -n "$failed_sample" ]; then
       cat "$failed_sample" >&2 || true
     fi
@@ -931,18 +963,12 @@ for concurrency_value in "$CONCURRENCY" "$MULTIPLEX_CONCURRENCY"; do
     exit 1
   fi
 done
-for duration_value in "$TARGET_DURATION_SECONDS"; do
-  case "$duration_value" in
-    ''|*[!0-9]*)
-      echo "HTTP/2 comparison duration values must be positive integers" >&2
-      exit 1
-      ;;
-  esac
-  if [ "$duration_value" -eq 0 ]; then
-    echo "HTTP/2 comparison duration values must be positive integers" >&2
+case "$TARGET_DURATION_SECONDS" in
+  ''|*[!0-9]*|0)
+    echo "HTTP/2 comparison duration must be a positive integer" >&2
     exit 1
-  fi
-done
+    ;;
+esac
 case "$SERVER_WORKERS" in
   ''|*[!0-9]*)
     echo "QPX_HTTP2_COMPARE_SERVER_WORKERS must be a positive integer" >&2
@@ -1161,10 +1187,10 @@ def spread(records, field):
 aggregated = []
 for key in sorted(expected):
     records = groups.get(key, [])
-    if len(records) < minimum:
+    if len(records) != attempts:
         raise SystemExit(
             f"{key[0]} produced {len(records)}/{attempts} valid HTTP/2 samples "
-            f"for {key[1]} bytes and m={key[2]}; {minimum} required"
+            f"for {key[1]} bytes and m={key[2]}; {attempts} required"
         )
     records.sort(key=lambda record: record["requests_per_sec"])
     record = dict(records[(len(records) - 1) // 2])
@@ -1270,7 +1296,11 @@ for key in sorted(expected):
     record.update({
         "aggregation": "conservative_median_per_metric",
         "target_duration_seconds": target_duration,
-        "benchmark_schema_version": 8,
+        "benchmark_schema_version": 9,
+        "sample_duration_seconds": {
+            "min": min(item["duration_seconds"] for item in records),
+            "max": max(item["duration_seconds"] for item in records),
+        },
         "resource_measurement": "sampled_workload_peak_v1",
         "sample_attempts": attempts,
         "sampling_order": "round_robin_interleaved",
