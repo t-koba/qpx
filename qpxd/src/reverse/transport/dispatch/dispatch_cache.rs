@@ -57,8 +57,11 @@ pub(super) async fn prepare_reverse_cache(
         }));
     }
     let query_digest = if request_cache_policy.is_some() && request_method.as_str() == "QUERY" {
-        let (buffered, digest) =
-            buffer_query_for_cache_key(req, route.plan.streaming.max_request_body_bytes).await?;
+        let (buffered, digest) = Box::pin(buffer_query_for_cache_key(
+            req,
+            route.plan.streaming.max_request_body_bytes,
+        ))
+        .await?;
         req = buffered;
         Some(digest)
     } else {
@@ -443,10 +446,11 @@ struct ReverseCacheCollapseInput<'a> {
     revalidation_state: Option<qpxd_cache::RevalidationState>,
 }
 
-async fn reverse_cache_collapse(
-    req: &mut Request<Body>,
-    input: ReverseCacheCollapseInput<'_>,
-) -> Result<DispatchCacheCollapseOutcome> {
+fn reverse_cache_collapse<'a>(
+    req: &'a mut Request<Body>,
+    input: ReverseCacheCollapseInput<'a>,
+) -> impl std::future::Future<Output = Result<DispatchCacheCollapseOutcome>> + Send + 'a {
+    use futures_util::future::{Either, ready};
     let ReverseCacheCollapseInput {
         state,
         request_method,
@@ -463,21 +467,26 @@ async fn reverse_cache_collapse(
         mut revalidation_state,
     } = input;
     if *request_method != Method::GET {
-        return Ok(dispatch_cache_collapse_continue(revalidation_state, None));
+        return Either::Left(ready(Ok(dispatch_cache_collapse_continue(
+            revalidation_state,
+            None,
+        ))));
     }
     let (Some(snapshot), Some(policy), Some(lookup_key)) = (
         request_headers_snapshot,
         request_cache_policy,
         cache_lookup_key,
     ) else {
-        return Ok(dispatch_cache_collapse_continue(revalidation_state, None));
+        return Either::Left(ready(Ok(dispatch_cache_collapse_continue(
+            revalidation_state,
+            None,
+        ))));
     };
     match state.cache.begin_request_collapse(lookup_key) {
-        qpxd_cache::RequestCollapseJoin::Leader(guard) => Ok(dispatch_cache_collapse_continue(
-            revalidation_state,
-            Some(guard),
-        )),
-        qpxd_cache::RequestCollapseJoin::Follower(waiter) => {
+        qpxd_cache::RequestCollapseJoin::Leader(guard) => Either::Left(ready(Ok(
+            dispatch_cache_collapse_continue(revalidation_state, Some(guard)),
+        ))),
+        qpxd_cache::RequestCollapseJoin::Follower(waiter) => Either::Right(Box::pin(async move {
             if !waiter.wait(route_timeout).await {
                 return Ok(dispatch_cache_collapse_continue(revalidation_state, None));
             }
@@ -512,7 +521,7 @@ async fn reverse_cache_collapse(
                 Some(response) => Ok(dispatch_cache_collapse_response(response)),
                 None => Ok(dispatch_cache_collapse_continue(revalidation_state, None)),
             }
-        }
+        })),
     }
 }
 
@@ -546,6 +555,18 @@ async fn reverse_cache_collapse_response(
 #[cfg(test)]
 mod query_cache_tests {
     use super::*;
+
+    #[test]
+    fn cache_leader_future_excludes_inactive_follower_storage() {
+        fn future_size<I, O>(_: impl FnOnce(I) -> O) -> usize {
+            std::mem::size_of::<O>()
+        }
+        let bytes = future_size(|(req, input)| reverse_cache_collapse(req, input));
+        assert!(
+            bytes <= 256,
+            "cache leader inline state exceeded its size budget: {bytes} bytes"
+        );
+    }
 
     async fn digest(content_type: &str, body: &'static str) -> String {
         let request = Request::builder()
