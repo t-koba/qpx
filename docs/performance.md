@@ -25,11 +25,13 @@ summary. Invalid sample diagnostics remain in the full log and summary.
 
 For three independent Linux comparisons, dispatch CI on the implementation
 branch with `repeat_perf=true` and an explicit `baseline_ref` commit. HTTP/1,
-HTTP/2, and streaming each run on three separate Ubuntu 24.04 runners. Each
-HTTP/1 runner builds the baseline and candidate before measuring, then runs
-both revisions sequentially with the candidate's measurement harness. Run 2
-reverses revision order. The proxy comparison pins Rust 1.98.1 for both builds
-so a compiler update cannot change the before/after comparison. Baseline
+HTTP/2, and streaming each run on three separate Ubuntu 24.04 runners. A shared build job builds the baseline and candidate before any comparison,
+and every HTTP/1 runner runs both revisions sequentially with the candidate's
+measurement harness. Run 2 reverses revision order. HTTP/1, HTTP/2, streaming,
+and netem use the same artifact binaries built with Rust 1.98.1; every runner
+verifies the revision, compiler, executable permissions, and SHA-256 checksum
+before measuring. This avoids redundant builds and prevents compiler updates
+from changing the before/after comparison. Baseline
 results and logs are separate artifacts; baseline failures remain failures of
 the comparison step. Other benchmarks never run concurrently on that runner.
 

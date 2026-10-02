@@ -48,6 +48,13 @@ for category, steps in CATEGORIES.items():
     require("if: always()" in upload, f"{name} does not preserve failure artifacts")
     require("target/perf/evaluations/**" in upload, f"{name} does not retain diagnostics")
 
+require("perf_audit_build" in jobs, "shared measurement build is missing")
+for category in ("proxy", "http2", "streaming", "netem"):
+    job = jobs[f"perf_audit_{category}"]
+    require("needs: perf_audit_build" in job, f"{category} may measure before the shared build")
+    require("scripts/verify-perf-binaries.py" in job, f"{category} does not verify binary identity")
+    require("cargo build" not in job, f"{category} builds during its measurement job")
+
 aggregate = jobs.get("perf_audit", "")
 require("if: always()" in aggregate, "aggregate may skip failed categories")
 for category in CATEGORIES:

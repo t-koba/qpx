@@ -499,13 +499,9 @@ jobs:
             target/perf/evaluations/**
           if-no-files-found: ignore
 
-  perf_audit_proxy:
-    name: perf audit (proxy, run ${{ matrix.repetition }})
+  perf_audit_build:
+    name: perf audit build
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        repetition: ${{ fromJSON(inputs.repeat_perf && '[1,2,3]' || '[1]') }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -513,19 +509,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: perf-audit-proxy
-      - name: verify perf runner capacity
+          shared-key: perf-audit-streaming
+      - name: build candidate before all measurements
         env:
-          QPX_PERF_RUNNER_JSON: ${{ github.workspace }}/target/perf/runner.jsonl
-        run: |
-          mkdir -p target/perf
-          scripts/check-perf-runner.sh
-      - name: install proxy comparison packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
-      - name: build baseline measurement binary
-        id: build_baseline
+          RUSTFLAGS: "-D warnings"
+        run: cargo build -p qpxd --release --locked --features http3-backend-qpx
+      - name: build baseline before all measurements
+        id: baseline
         if: inputs.repeat_perf
         env:
           BASELINE_REF: ${{ inputs.baseline_ref }}
@@ -536,6 +526,72 @@ jobs:
           git worktree add --detach target/perf-baseline "$baseline_sha"
           cd target/perf-baseline
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/perf-baseline-build" cargo build -p qpxd --release --locked --features http3-backend-qpx
+      - name: package identical measurement binaries
+        env:
+          BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
+        run: |
+          mkdir -p target/perf
+          python3 - <<'PY_MANIFEST'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          binaries = {"candidate": "target/release/qpxd"}
+          if os.environ["BASELINE_SHA"]:
+              binaries["baseline"] = "target/perf-baseline-build/release/qpxd"
+          manifest = {
+              "commit": os.environ["GITHUB_SHA"],
+              "baseline_commit": os.environ["BASELINE_SHA"] or None,
+              "rustc": subprocess.check_output(["rustc", "-Vv"], text=True).strip(),
+              "binaries": {name: {"path": path, "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
+                           for name, path in binaries.items()},
+          }
+          Path("target/perf/binaries.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+          PY_MANIFEST
+          files=(target/release/qpxd target/perf/binaries.json)
+          if [ -n "$BASELINE_SHA" ]; then
+            files+=(target/perf-baseline-build/release/qpxd)
+          fi
+          tar -czf target/perf-binaries.tar.gz "${files[@]}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: qpx-performance-binaries
+          path: target/perf-binaries.tar.gz
+          if-no-files-found: error
+
+  perf_audit_proxy:
+    name: perf audit (proxy, run ${{ matrix.repetition }})
+    runs-on: ubuntu-24.04
+    needs: perf_audit_build
+    strategy:
+      fail-fast: false
+      matrix:
+        repetition: ${{ fromJSON(inputs.repeat_perf && '[1,2,3]' || '[1]') }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/download-artifact@v8
+        with:
+          name: qpx-performance-binaries
+          path: target
+      - name: restore verified measurement binaries
+        id: build_baseline
+        run: |
+          tar -xzf target/perf-binaries.tar.gz
+          python3 scripts/verify-perf-binaries.py >>"$GITHUB_OUTPUT"
+      - name: verify perf runner capacity
+        env:
+          QPX_PERF_RUNNER_JSON: ${{ github.workspace }}/target/perf/runner.jsonl
+        run: |
+          mkdir -p target/perf
+          scripts/check-perf-runner.sh
+      - name: install proxy comparison packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
       - name: external proxy comparison bench
         id: external_proxy_comparison_bench
         continue-on-error: true
@@ -549,7 +605,6 @@ jobs:
           QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV: "MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728"
         run: |
           python3 scripts/perf-evaluate.py "external proxy comparison bench" -- bash -euo pipefail <<'PERF_STEP'
-          cargo build -p qpxd --release --locked --features http3-backend-qpx
           if [ "$QPX_PERF_COMPARE_BASELINE" = true ]; then
             bash scripts/perf-audit-revision-compare.sh
           else
@@ -609,16 +664,23 @@ jobs:
   perf_audit_http2:
     name: perf audit (http2, run ${{ matrix.repetition }})
     runs-on: ubuntu-24.04
+    needs: perf_audit_build
     strategy:
       fail-fast: false
       matrix:
         repetition: ${{ fromJSON(inputs.repeat_perf && '[1,2,3]' || '[1]') }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/download-artifact@v8
         with:
-          shared-key: perf-audit-http2
+          name: qpx-performance-binaries
+          path: target
+      - name: restore verified measurement binaries
+        id: build_baseline
+        run: |
+          tar -xzf target/perf-binaries.tar.gz
+          python3 scripts/verify-perf-binaries.py >>"$GITHUB_OUTPUT"
       - name: verify perf runner capacity
         env:
           QPX_PERF_RUNNER_JSON: ${{ github.workspace }}/target/perf/runner.jsonl
@@ -629,10 +691,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
-      - name: build measurement binary
-        env:
-          RUSTFLAGS: "-D warnings"
-        run: cargo build -p qpxd --release --locked --features http3-backend-qpx
       - name: external http2 comparison bench
         id: external_http2_comparison_bench
         continue-on-error: true
@@ -685,16 +743,23 @@ jobs:
   perf_audit_streaming:
     name: perf audit (streaming, run ${{ matrix.repetition }})
     runs-on: ubuntu-24.04
+    needs: perf_audit_build
     strategy:
       fail-fast: false
       matrix:
         repetition: ${{ fromJSON(inputs.repeat_perf && '[1,2,3]' || '[1]') }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/download-artifact@v8
         with:
-          shared-key: perf-audit-streaming
+          name: qpx-performance-binaries
+          path: target
+      - name: restore verified measurement binaries
+        id: build_baseline
+        run: |
+          tar -xzf target/perf-binaries.tar.gz
+          python3 scripts/verify-perf-binaries.py >>"$GITHUB_OUTPUT"
       - name: verify perf runner capacity
         env:
           QPX_PERF_RUNNER_JSON: ${{ github.workspace }}/target/perf/runner.jsonl
@@ -705,10 +770,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
-      - name: build measurement binary
-        env:
-          RUSTFLAGS: "-D warnings"
-        run: cargo build -p qpxd --release --locked --features http3-backend-qpx
       - name: external long streaming comparison bench
         id: external_long_streaming_comparison_bench
         continue-on-error: true
@@ -832,12 +893,19 @@ jobs:
   perf_audit_netem:
     name: perf audit (netem)
     runs-on: ubuntu-24.04
+    needs: perf_audit_build
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/download-artifact@v8
         with:
-          shared-key: perf-audit-netem
+          name: qpx-performance-binaries
+          path: target
+      - name: restore verified measurement binaries
+        id: build_baseline
+        run: |
+          tar -xzf target/perf-binaries.tar.gz
+          python3 scripts/verify-perf-binaries.py >>"$GITHUB_OUTPUT"
       - name: verify perf runner capacity
         env:
           QPX_PERF_RUNNER_JSON: ${{ github.workspace }}/target/perf/runner.jsonl
@@ -848,10 +916,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
-      - name: build measurement binary
-        env:
-          RUSTFLAGS: "-D warnings"
-        run: cargo build -p qpxd --release --locked --features http3-backend-qpx
       - name: netem proxy comparison bench
         id: netem_proxy_comparison_bench
         continue-on-error: true
@@ -912,10 +976,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
-      - name: build measurement binary
-        env:
-          RUSTFLAGS: "-D warnings"
-        run: cargo build -p qpxd --release --locked --features http3-backend-qpx
       - name: http3 interop matrix
         id: http3_interop_matrix
         continue-on-error: true
