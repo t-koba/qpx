@@ -90,12 +90,16 @@ proc_status_value_kb() {
 proc_io_counter() {
   local pid="$1"
   local key="$2"
-  local io="/proc/${pid}/io"
-  if [ ! -r "$io" ]; then
-    echo 0
-    return
-  fi
-  awk -v key="$key" '$1 == key ":" { print $2; found = 1; exit } END { if (!found) print 0 }' "$io"
+  perf_proc_python - "$pid" "$key" <<'PY_IO'
+from pathlib import Path
+import sys
+path = Path("/proc") / sys.argv[1] / "io"
+try:
+    fields = dict(line.split(":", 1) for line in path.read_text().splitlines())
+except FileNotFoundError:
+    raise SystemExit("measured process disappeared before I/O snapshot")
+print(int(fields[sys.argv[2]]))
+PY_IO
 }
 
 process_tree_io_counter() {
@@ -154,25 +158,44 @@ process_tree_status_kb() {
   echo "$total"
 }
 
+# Reference servers may make their processes non-dumpable even with the same UID.
+# Use the same privileged reader for both sides; unreadable data is never zero.
+perf_proc_python() {
+  if [ "$(id -u)" -eq 0 ]; then
+    python3 "$@"
+  else
+    sudo -n python3 "$@"
+  fi
+}
+
 process_tree_fd_count() {
   local root="$1"
-  local fd pid total
   if [ -z "$root" ] || [ ! -d /proc ]; then
     echo 0
     return
   fi
-  total=0
-  for pid in $(process_tree_pids "$root"); do
-    if [ ! -d "/proc/${pid}/fd" ]; then
-      continue
-    fi
-    for fd in "/proc/${pid}/fd"/*; do
-      if [ -e "$fd" ]; then
-        total=$((total + 1))
-      fi
-    done
-  done
-  echo "$total"
+  perf_proc_python - "$root" <<'PY_FD_COUNT'
+from pathlib import Path
+import sys
+pending = [sys.argv[1]]
+seen = set()
+total = 0
+while pending:
+    pid = pending.pop()
+    if pid in seen:
+        continue
+    seen.add(pid)
+    base = Path("/proc") / pid
+    try:
+        for task in (base / "task").iterdir():
+            pending.extend((task / "children").read_text().split())
+        total += sum(1 for _ in (base / "fd").iterdir())
+    except FileNotFoundError:
+        continue
+if not total:
+    raise SystemExit("process descriptor count is empty")
+print(total)
+PY_FD_COUNT
 }
 
 process_tree_scheduler_run_delay_ns() {
@@ -259,7 +282,7 @@ snapshot_process_tree_fds() {
   if [ ! -d /proc ]; then
     return
   fi
-  python3 - "$root" "$output" <<'PY_FDS'
+  perf_proc_python - "$root" "$output" <<'PY_FDS'
 import json
 import os
 from pathlib import Path
