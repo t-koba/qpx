@@ -30,6 +30,7 @@ PROXY_FILTER="${QPX_PROXY_COMPARE_PROXY_FILTER:-}"
 PROFILE_PROXY="${QPX_PROXY_COMPARE_PROFILE_PROXY:-}"
 PROFILE_SECONDS="${QPX_PROXY_COMPARE_PROFILE_SECONDS:-0}"
 THREAD_DIAGNOSTICS="${QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS:-0}"
+CALLGRIND_DIAGNOSTICS="${QPX_PROXY_COMPARE_CALLGRIND_DIAGNOSTICS:-0}"
 ARTIFACT_LOG_HEAD_LINES="${QPX_PROXY_COMPARE_ARTIFACT_LOG_HEAD_LINES:-3}"
 ARTIFACT_LOG_TAIL_LINES="${QPX_PROXY_COMPARE_ARTIFACT_LOG_TAIL_LINES:-100}"
 
@@ -1365,9 +1366,17 @@ LUA
       scripts/lib/perf-thread-sampler.sh "$resource_pid" "$DURATION_SECONDS" "$out.threads.csv" >"$out.threads.log" 2>&1 &
       thread_sampler_pid=$!
     fi
+    if [ "$CALLGRIND_DIAGNOSTICS" = 1 ] && [ "$proxy" = qpxd-feature-rich ]; then
+      callgrind_control -z "$resource_pid" >/dev/null
+      callgrind_control -i on "$resource_pid" >/dev/null
+    fi
     wrk_succeeded=true
     if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "sample-${artifact_name}-${attempt}" >"$out" 2>&1; then
       wrk_succeeded=false
+    fi
+    if [ "$CALLGRIND_DIAGNOSTICS" = 1 ] && [ "$proxy" = qpxd-feature-rich ]; then
+      callgrind_control -i off "$resource_pid" >/dev/null
+      callgrind_control -d "$resource_pid" >/dev/null
     fi
     if [ -n "$thread_sampler_pid" ]; then
       wait "$thread_sampler_pid"
@@ -1621,6 +1630,18 @@ case "$THREAD_DIAGNOSTICS" in
     fi
     ;;
   *) echo "QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS must be 0 or 1" >&2; exit 1 ;;
+esac
+
+case "$CALLGRIND_DIAGNOSTICS" in
+  0) ;;
+  1)
+    if [ "$THREAD_DIAGNOSTICS" != 1 ]; then
+      echo "callgrind records must be marked as diagnostic measurements" >&2
+      exit 1
+    fi
+    command -v callgrind_control >/dev/null
+    ;;
+  *) echo "QPX_PROXY_COMPARE_CALLGRIND_DIAGNOSTICS must be 0 or 1" >&2; exit 1 ;;
 esac
 
 case "$PROFILE_SECONDS" in

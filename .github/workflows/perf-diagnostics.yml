@@ -13,7 +13,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, http2]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, http2]
         default: streaming
 
 permissions:
@@ -40,10 +40,16 @@ jobs:
       - name: install comparison dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid wrk jq
+          sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
       - name: build before measurement
-        run: cargo build -p qpxd --release --locked --features http3-backend-qpx
+        run: |
+          if [ "$CATEGORY" = feature-callgrind ]; then
+            cargo build -p qpxd --profile callgrind --locked --features http3-backend-qpx
+          else
+            cargo build -p qpxd --release --locked --features http3-backend-qpx
+          fi
         env:
+          CATEGORY: ${{ inputs.category || 'streaming' }}
           RUSTFLAGS: "-D warnings"
       - name: diagnostic comparison
         env:
@@ -63,6 +69,9 @@ jobs:
                 QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
                 python3 scripts/perf-evaluate.py "phase diagnostics" -- bash scripts/perf-audit-proxy-compare.sh
               python3 scripts/summarize-perf-phases.py target/perf/proxy-compare-logs target/perf/phase-summary.json
+              ;;
+            feature-callgrind)
+              python3 scripts/perf-evaluate.py "feature-rich callgrind diagnostics" -- bash scripts/perf-diagnose-feature-rich-callgrind.sh
               ;;
             http2)
               python3 scripts/perf-evaluate.py "http2 diagnostics" -- bash scripts/perf-audit-http2-compare.sh
