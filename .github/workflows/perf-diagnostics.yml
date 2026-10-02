@@ -115,10 +115,10 @@ jobs:
               QPX_CALLGRIND_WORKLOAD=cache-miss python3 scripts/perf-evaluate.py "cache miss callgrind diagnostics" -- bash scripts/perf-diagnose-proxy-callgrind.sh
               ;;
             proxy-native)
-              python3 scripts/perf-evaluate.py "native CPU diagnostics" -- bash scripts/perf-diagnose-proxy-native.sh
+              python3 scripts/perf-evaluate.py "native CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
               ;;
             http2-native)
-              QPX_NATIVE_WORKLOAD=http2 python3 scripts/perf-evaluate.py "native HTTP/2 CPU diagnostics" -- bash scripts/perf-diagnose-proxy-native.sh
+              QPX_NATIVE_WORKLOAD=http2 python3 scripts/perf-evaluate.py "native HTTP/2 CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
               ;;
             http2)
               python3 scripts/perf-evaluate.py "http2 diagnostics" -- bash scripts/perf-audit-http2-compare.sh

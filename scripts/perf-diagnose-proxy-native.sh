@@ -3,8 +3,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workload="${QPX_NATIVE_WORKLOAD:-proxy}"
 export QPXD_REAL_BIN="${QPXD_BIN:-$ROOT_DIR/target/callgrind/qpxd}"
-export QPX_NATIVE_PROFILE_DIR="$ROOT_DIR/target/perf/profiles/native"
+mkdir -p "$ROOT_DIR/target/perf/profiles"
+export QPX_NATIVE_PROFILE_DIR
+QPX_NATIVE_PROFILE_DIR="$(mktemp -d "$ROOT_DIR/target/perf/profiles/native.XXXXXX")"
 export QPX_NATIVE_PERF_BIN="${QPX_NATIVE_PERF_BIN:?native perf executable is required}"
+export QPX_NATIVE_WRAPPER_SOURCE="$ROOT_DIR/scripts/lib/perf-native-process.py"
 [ -x "$QPXD_REAL_BIN" ]
 [ -x "$QPX_NATIVE_PERF_BIN" ]
 mkdir -p "$QPX_NATIVE_PROFILE_DIR"
@@ -13,46 +16,22 @@ wrapper="$QPX_NATIVE_PROFILE_DIR/qpxd-perf"
 cat >"$wrapper" <<'WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "$1" != run ]; then
-  exec "$QPXD_REAL_BIN" "$@"
-fi
-role=""
-previous=""
-for argument in "$@"; do
-  if [ "$previous" = --config ]; then
-    role="${argument##*/}"
-    role="${role%.yaml}"
-  fi
-  previous="$argument"
-done
-[ -n "$role" ]
-setsid "$QPX_NATIVE_PERF_BIN" record -e cpu-clock -F 199 --clockid CLOCK_MONOTONIC \
-  --call-graph dwarf,16384 -o "$QPX_NATIVE_PROFILE_DIR/$role.data" \
-  -- "$QPXD_REAL_BIN" "$@" &
-profile_pid=$!
-cleanup() {
-  trap - EXIT TERM INT
-  if kill -0 "$profile_pid" 2>/dev/null; then
-    kill -TERM -- "-$profile_pid"
-  fi
-  wait "$profile_pid" 2>/dev/null || true
-}
-trap cleanup EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
-wait "$profile_pid"
+exec python3 "$QPX_NATIVE_WRAPPER_SOURCE" "$@"
 WRAPPER
 chmod 755 "$wrapper"
+bash "$ROOT_DIR/scripts/check-perf-native-process.sh" "$wrapper"
+echo "Native CPU workload started: $workload"
 case "$workload" in
   proxy)
     QPXD_BIN="$wrapper" QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+      QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS=5 \
       QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-cache,nginx-cache,qpxd-feature-rich,nginx-feature-rich \
       QPX_PROXY_COMPARE_BODY_SIZES=1024 \
       bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh"
     roles="qpxd-cache qpxd-feature-rich"
     log_directory="$ROOT_DIR/target/perf/proxy-compare-logs"
     expected_profiles=2
-    minimum_reports=9
+    minimum_reports=11
     ;;
   http2)
     QPXD_BIN="$wrapper" QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 \
@@ -67,10 +46,26 @@ case "$workload" in
 esac
 
 # Harness shutdown also closes perf's output before report generation.
+echo "Native CPU workload finished: $workload"
+python3 - "$QPX_NATIVE_PROFILE_DIR" "$roles" <<'PY'
+import json
+from pathlib import Path
+import sys
+paths = list(Path(sys.argv[1]).glob("*.lifecycle.json"))
+expected = set(sys.argv[2].split())
+if {path.name.removesuffix(".lifecycle.json") for path in paths} != expected:
+    raise SystemExit("native profiler lifecycle records are incomplete")
+for path in paths:
+    record = json.load(path.open())
+    if (record.get("forced_shutdown") is not False or record.get("requested_signal") != 15
+            or record.get("exit_status") not in (0, -15, 143)):
+        raise SystemExit(f"native profiler shutdown was not complete: {path}")
+PY
 profiles=0
 for profile in "$QPX_NATIVE_PROFILE_DIR"/*.data; do
   [ -f "$profile" ] || continue
-  "$QPX_NATIVE_PERF_BIN" report --stdio --header --no-children \
+  echo "Native CPU report started: $profile"
+  timeout --signal=TERM --kill-after=10s 180s "$QPX_NATIVE_PERF_BIN" report --stdio --header --no-children --call-graph none \
     --sort symbol --percent-limit 0.5 -i "$profile" >"$profile.report.txt"
   if ! rg -q '^# Samples: [1-9]' "$profile.report.txt"; then
     echo "native CPU profile contains no samples: $profile" >&2
@@ -104,7 +99,8 @@ def timestamp(value):
 print(f"{timestamp(first)},{timestamp(last)}")
 PY
 )"
-    "$QPX_NATIVE_PERF_BIN" report --stdio --header --no-children \
+    echo "Native CPU workload report started: $sample"
+    timeout --signal=TERM --kill-after=10s 180s "$QPX_NATIVE_PERF_BIN" report --stdio --header --no-children --call-graph none \
       --sort symbol --percent-limit 0.5 --time "$window" \
       -i "$QPX_NATIVE_PROFILE_DIR/$role.data" >"$sample.cpu-report.txt"
     if ! rg -q '^# Samples: [1-9]' "$sample.cpu-report.txt"; then

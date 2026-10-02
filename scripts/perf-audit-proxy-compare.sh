@@ -219,6 +219,8 @@ cleanup() {
   return "$exit_status"
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 compact_feature_rich_access_log() {
   local proxy="$1"

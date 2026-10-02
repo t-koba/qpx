@@ -93,6 +93,8 @@ cleanup() {
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 first_body_size() {
   for size in $BODY_SIZES; do

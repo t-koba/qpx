@@ -92,6 +92,12 @@ with DWARF call stacks, including kernel CPU work. It preserves raw profiles
 and symbol reports for the cache and feature-rich roles. Its isolated process
 group owns both the profiler and server and waits for their shutdown. These
 instrumented records cannot satisfy normal performance acceptance gates.
+Before measurement, a real qpxd local-response server verifies that terminating
+the wrapper closes the complete profiler/server process group. Lifecycle records
+retain the owner, timestamps, exit status, and any forced shutdown; incomplete
+shutdown is a diagnostic failure. CPU diagnostics have a 20-minute deadline,
+and individual symbol reports have a three-minute deadline. Self-CPU reports omit
+rendered call graphs while raw DWARF stacks remain available for further analysis.
 The `http2-native` variant records the 1 KiB, 100-stream workload in the same
 way. HTTP/2 schema 8 requires explicit instrumentation provenance; native
 diagnostic rows and rows missing that provenance are rejected by the required
