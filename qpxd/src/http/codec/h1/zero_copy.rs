@@ -178,11 +178,13 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
 fn socket_send_queue(stream: &TcpStream) -> io::Result<(u32, u32)> {
     let mut queued: libc::c_int = 0;
     let mut unsent: libc::c_int = 0;
-    // Both Linux requests write a single integer while the borrowed stream
+    // SAFETY: TIOCOUTQ writes one initialized integer and the borrowed stream
     // keeps the descriptor alive for the entire operation.
     if unsafe { libc::ioctl(stream.as_raw_fd(), libc::TIOCOUTQ, &mut queued) } < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: SIOCOUTQNSD writes one initialized integer and the borrowed stream
+    // keeps the descriptor alive for the entire operation.
     if unsafe { libc::ioctl(stream.as_raw_fd(), libc::SIOCOUTQNSD as _, &mut unsent) } < 0 {
         return Err(io::Error::last_os_error());
     }
