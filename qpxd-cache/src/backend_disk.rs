@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, Write};
+use std::io::{IoSlice, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -782,10 +782,6 @@ impl DiskCacheBackend {
         options: BodyStreamWriteOptions,
         metadata: Option<(String, MetadataEncoder)>,
     ) -> Result<u64> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| anyhow!("disk cache path missing parent: {}", path.display()))?;
-        ensure_private_dir(parent)?;
         // The collector already enforces size and read deadlines. Passing the
         // source through another bounded channel duplicates tasks and checks
         // on every miss without changing the storage boundary.
@@ -900,7 +896,6 @@ impl DiskCacheBackend {
         .await;
         if streamed.is_err() {
             let _ = fs::remove_file(&tmp_path);
-            invalidate_ensured_dir(parent);
         }
         let total_len = streamed?;
         self.remember_write(path.to_path_buf(), total_len, expires_at_ms)
@@ -1581,14 +1576,6 @@ fn read_metadata_trailer_sync(path: &Path) -> Result<Option<Bytes>> {
     Ok(Some(Bytes::from(meta)))
 }
 
-fn write_header(file: &mut File, header: &DiskCacheHeader) -> Result<u64> {
-    let raw = serde_json::to_vec(header)?;
-    file.write_all(DISK_CACHE_MAGIC)?;
-    file.write_all(&(raw.len() as u32).to_be_bytes())?;
-    file.write_all(&raw)?;
-    Ok(DISK_CACHE_MAGIC.len() as u64 + 4 + raw.len() as u64)
-}
-
 fn write_cached_bytes_sync(
     path: &Path,
     value: Bytes,
@@ -1620,12 +1607,42 @@ fn write_cached_object_sync(
     let tmp_path = temp_path(parent);
     let result = (|| {
         let mut file = create_secure_new_file(&tmp_path)?;
-        let body_offset = write_header(&mut file, &header)?;
-        file.write_all(value.as_ref())?;
-        if let Some(meta) = metadata.as_ref() {
-            file.write_all(&(meta.len() as u32).to_be_bytes())?;
-            file.write_all(meta.as_ref())?;
+        let raw_header = serde_json::to_vec(&header)?;
+        let header_length = u32::try_from(raw_header.len())
+            .context("disk cache header exceeds framing limit")?
+            .to_be_bytes();
+        let metadata_length = u32::try_from(metadata.as_ref().map_or(0, |meta| meta.len()))
+            .context("disk cache metadata exceeds framing limit")?
+            .to_be_bytes();
+        let metadata_prefix = if metadata.is_some() {
+            metadata_length.as_slice()
+        } else {
+            &[]
+        };
+        let mut buffers = [
+            IoSlice::new(DISK_CACHE_MAGIC),
+            IoSlice::new(&header_length),
+            IoSlice::new(&raw_header),
+            IoSlice::new(&value),
+            IoSlice::new(metadata_prefix),
+            IoSlice::new(metadata.as_deref().unwrap_or(&[])),
+        ];
+        let mut remaining = buffers.as_mut_slice();
+        while !remaining.is_empty() {
+            match file.write_vectored(remaining) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "disk cache object write made no progress",
+                    )
+                    .into());
+                }
+                Ok(written) => IoSlice::advance_slices(&mut remaining, written),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
         }
+        let body_offset = DISK_CACHE_MAGIC.len() as u64 + 4 + raw_header.len() as u64;
         // Durability note: cache objects are re-fetchable from the origin, so
         // writes are committed to the page cache and published atomically via
         // rename without an fsync. This matches the behavior of other HTTP
@@ -1642,9 +1659,6 @@ fn write_cached_object_sync(
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp_path);
-        if let Some(parent) = path.parent() {
-            invalidate_ensured_dir(parent);
-        }
     }
     result.map(|write| (write, value, metadata))
 }
@@ -1696,20 +1710,26 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
             path.display()
         ));
     }
-    // Cache-miss writebacks rebuild the directory chain on every store; a
-    // process-wide memo of verified parents keeps repeat writes off the
-    // mkdir/stat path. The walk itself is the security boundary (symlink and
-    // type checks), so only full successful walks are memoized.
-    if let Some(ensured) = ENSURED_PRIVATE_DIRS.get()
-        && ensured.lock().expect("ensured dir lock").contains(path)
-    {
-        return Ok(());
-    }
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
         if matches!(component, Component::Prefix(_) | Component::RootDir) {
             continue;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                validate_directory_metadata(&current, metadata)?;
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect disk cache directory {}",
+                        current.display()
+                    )
+                });
+            }
         }
         match fs::create_dir(&current) {
             Ok(()) => {
@@ -1720,19 +1740,7 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let meta = fs::symlink_metadata(&current)?;
-                if meta.file_type().is_symlink() {
-                    return Err(anyhow!(
-                        "refusing symlinked disk cache path component {}",
-                        current.display()
-                    ));
-                }
-                if !meta.is_dir() {
-                    return Err(anyhow!(
-                        "disk cache path component is not a directory: {}",
-                        current.display()
-                    ));
-                }
+                validate_directory_metadata(&current, fs::symlink_metadata(&current)?)?;
             }
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -1744,30 +1752,23 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
             }
         }
     }
-    if let Some(ensured) = ENSURED_PRIVATE_DIRS.get()
-        && let Ok(mut set) = ensured.lock()
-        && set.len() < ENSURED_PRIVATE_DIR_LIMIT
-    {
-        set.insert(path.to_path_buf());
-    }
     Ok(())
 }
 
-/// Verified private disk-cache parents. The guard walks directories afresh on
-/// first use, so entries are trusted for the lifetime of the process only.
-static ENSURED_PRIVATE_DIRS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
-> = std::sync::OnceLock::new();
-const ENSURED_PRIVATE_DIR_LIMIT: usize = 4096;
-
-/// Drops the memoized entry for `dir` so the next write re-runs the directory
-/// guard. Write paths call this when the parent stops accepting files.
-fn invalidate_ensured_dir(dir: &Path) {
-    if let Some(ensured) = ENSURED_PRIVATE_DIRS.get()
-        && let Ok(mut set) = ensured.lock()
-    {
-        set.remove(dir);
+fn validate_directory_metadata(path: &Path, metadata: fs::Metadata) -> Result<()> {
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "refusing symlinked disk cache path component {}",
+            path.display()
+        ));
     }
+    if !metadata.is_dir() {
+        return Err(anyhow!(
+            "disk cache path component is not a directory: {}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn reject_symlink(path: &Path) -> Result<()> {
@@ -1865,11 +1866,36 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_guard_rechecks_replaced_parents() {
+        let root = temp_dir("replaced-directory-parent");
+        let outside = temp_dir("outside-directory-parent");
+        let parent = root.join("objects");
+        let target = parent.join("ab");
+        ensure_private_dir(&target).expect("create private object directory");
+        fs::rename(&parent, root.join("saved-objects")).expect("replace verified parent");
+        std::os::unix::fs::symlink(&outside, &parent).expect("install replacement symlink");
+        let error = ensure_private_dir(&target).expect_err("reject replaced symlink parent");
+        assert!(
+            error
+                .to_string()
+                .contains("symlinked disk cache path component")
+        );
+        assert!(!outside.join("ab").exists());
+        fs::remove_dir_all(root).expect("remove cache fixture");
+        fs::remove_dir_all(outside).expect("remove outside fixture");
+    }
+
     #[tokio::test]
     async fn disk_backend_reads_after_restart() {
         let dir = temp_dir("restart");
         let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
         backend.put("ns", "key", b"value", 60).await.expect("put");
+        backend
+            .put("ns", "empty", b"", 60)
+            .await
+            .expect("put empty object");
         drop(backend);
 
         let restarted = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("restart");
@@ -1879,6 +1905,14 @@ mod tests {
             .expect("get")
             .expect("value");
         assert_eq!(value.as_ref(), b"value");
+        assert!(
+            restarted
+                .get("ns", "empty")
+                .await
+                .expect("read empty object")
+                .expect("persisted empty object")
+                .is_empty()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

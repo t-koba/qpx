@@ -94,6 +94,19 @@ on the local ARM64 debug build; cache hits do not allocate those branches.
 Separating the general route state and allocating provider resolution only when
 needed reduces this further to 6,472 bytes in the same compiler diagnostic.
 The future-size regression uses a real compiled route and an 8 KiB budget.
+The Linux native CPU diagnostic on revision `203f44a` attributed 11.76% of
+feature-rich CPU samples in its second timed window to memory copies. Further
+state-size inspection found that every head-only HTTP guard carried 3,776 bytes
+of inactive body-evaluation state. Immediate guard results now use a ready
+future; only body evaluation allocates its pending state. The same local ARM64
+build measures 240 bytes for this guard. Reverse access control allocates the
+provider future only when a provider is configured and borrows audit context
+until rejection or body inspection requires ownership. Its size regression has
+a 4 KiB budget. Request-collapse leaders also return a ready result; only
+followers allocate the waiting and repeated-lookup state. QUERY body hashing
+is allocated only for QUERY requests. These changes preserve guard, provider,
+rate-limit, collapse, and body-inspection behavior; native profile shares and
+state sizes are diagnostic evidence, not proof of passing performance ratios.
 The `cache-miss-callgrind` diagnostic profiles the actual persistent cache
 workload, including warm hits and unique misses, with the same instrumentation
 boundaries and raw profiles as `feature-callgrind`.
@@ -279,6 +292,16 @@ giving either implementation a fixed first position.
   then refreshes the bounded evidence, truncates the file, and waits 0.75
   seconds before allowing another sample. This keeps asynchronous log work and
 filesystem reclamation from leaking into the next independent sample. It
+
+Persistent in-memory object writes use vectored I/O for framing, body, and
+metadata rather than issuing a separate write for each buffer. Short writes
+advance the remaining buffers; interrupted writes retry and zero-progress or
+other failures propagate. The atomic rename and capacity accounting remain
+unchanged. Directory validation runs at the actual write boundary, checks
+existing components before attempting creation, and never memoizes verified
+paths. Replacing a previously checked parent with a symlink is rejected on the
+next write. Real-filesystem tests cover concurrent directory creation, parent
+replacement, complete object sizes, restart reads, and empty objects.
   verifies output from both implementations and removes all temporary files on
   normal and abnormal exit. This preserves the production formatting, buffering, and
   filesystem-write cost without accumulating hundreds of megabytes per CI run.
