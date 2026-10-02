@@ -74,14 +74,11 @@ pub(crate) async fn lookup_with_revalidation(
         LookupOutcome::Hit(hit) => Ok((CacheLookupDecision::Hit(hit), None)),
         LookupOutcome::StaleWhileRevalidate(hit, state) => {
             cache::attach_revalidation_headers(req.headers_mut(), &state);
-            Ok((
-                CacheLookupDecision::StaleWhileRevalidate(hit, Box::new(state)),
-                None,
-            ))
+            Ok((CacheLookupDecision::StaleWhileRevalidate(hit, state), None))
         }
         LookupOutcome::Revalidate(state) => {
             cache::attach_revalidation_headers(req.headers_mut(), &state);
-            Ok((CacheLookupDecision::Miss, Some(Box::new(state))))
+            Ok((CacheLookupDecision::Miss, Some(state)))
         }
         LookupOutcome::OnlyIfCachedMiss => Ok((
             CacheLookupDecision::OnlyIfCachedMiss(cache::build_only_if_cached_miss_response(
@@ -135,7 +132,7 @@ pub(crate) async fn lookup_with_deferred_snapshot(
             let request_headers_snapshot = req.headers().clone();
             cache::attach_revalidation_headers(req.headers_mut(), &state);
             DeferredSnapshotCacheLookup {
-                decision: CacheLookupDecision::StaleWhileRevalidate(hit, Box::new(state)),
+                decision: CacheLookupDecision::StaleWhileRevalidate(hit, state),
                 revalidation_state: None,
                 request_headers_snapshot: Some(request_headers_snapshot),
             }
@@ -145,7 +142,7 @@ pub(crate) async fn lookup_with_deferred_snapshot(
             cache::attach_revalidation_headers(req.headers_mut(), &state);
             DeferredSnapshotCacheLookup {
                 decision: CacheLookupDecision::Miss,
-                revalidation_state: Some(Box::new(state)),
+                revalidation_state: Some(state),
                 request_headers_snapshot: Some(request_headers_snapshot),
             }
         }

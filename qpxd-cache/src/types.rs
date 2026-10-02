@@ -281,11 +281,15 @@ pub struct CacheRequestKey {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "hot cache hits stay inline to avoid a per-request allocation; cold revalidation state is boxed"
+)]
 pub enum LookupOutcome {
     Hit(Response<Body>),
-    StaleWhileRevalidate(Box<Response<Body>>, RevalidationState),
+    StaleWhileRevalidate(Box<Response<Body>>, Box<RevalidationState>),
     Miss,
-    Revalidate(RevalidationState),
+    Revalidate(Box<RevalidationState>),
     OnlyIfCachedMiss,
 }
 

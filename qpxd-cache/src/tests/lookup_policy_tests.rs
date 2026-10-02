@@ -290,7 +290,7 @@ async fn stale_no_cache_entry_revalidates_and_updates() {
         req.headers(),
         &policy(),
         not_modified,
-        state,
+        *state,
         0,
         &backends,
     )

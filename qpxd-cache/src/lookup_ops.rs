@@ -111,7 +111,7 @@ async fn lookup_from_storage(
     }
 
     let now = now_millis();
-    let mut revalidation: Option<RevalidationState> = None;
+    let mut revalidation: Option<Box<RevalidationState>> = None;
     for (variant_key, envelope) in variant_index.variants.iter().zip(metadata) {
         let Some(envelope) = envelope else {
             continue;
@@ -159,7 +159,7 @@ async fn lookup_from_storage(
             }
             CacheEntryDisposition::ServeStaleWhileRevalidate => {
                 let stale_if_error_secs = envelope.response_directives().stale_if_error;
-                let state = RevalidationState {
+                let state = Box::new(RevalidationState {
                     backend: backend.clone(),
                     namespace: namespace.to_string(),
                     variant_key: variant_key.clone(),
@@ -168,7 +168,7 @@ async fn lookup_from_storage(
                     stale_if_error_secs,
                     envelope: (*envelope).clone(),
                     revalidations: revalidations.clone(),
-                };
+                });
                 if precondition_failed(&req, &state.envelope) {
                     return Ok(LookupOutcome::Hit(precondition_failed_response("HIT")?));
                 }
@@ -215,7 +215,7 @@ async fn lookup_from_storage(
             }
             CacheEntryDisposition::RequiresRevalidation => {
                 let stale_if_error_secs = envelope.response_directives().stale_if_error;
-                revalidation = Some(RevalidationState {
+                revalidation = Some(Box::new(RevalidationState {
                     backend: backend.clone(),
                     namespace: namespace.to_string(),
                     variant_key: variant_key.clone(),
@@ -224,7 +224,7 @@ async fn lookup_from_storage(
                     envelope: (*envelope).clone(),
                     stale_if_error_secs,
                     revalidations: revalidations.clone(),
-                });
+                }));
             }
         }
     }
@@ -534,6 +534,16 @@ pub fn classify_for_request(
 
 #[cfg(test)]
 mod future_layout_tests {
+    #[test]
+    fn hot_lookup_result_does_not_embed_revalidation_storage() {
+        let response_bytes = std::mem::size_of::<hyper::Response<qpx_http::body::Body>>();
+        let outcome_bytes = std::mem::size_of::<super::LookupOutcome>();
+        assert!(
+            outcome_bytes <= response_bytes + 2 * std::mem::size_of::<usize>(),
+            "cache lookup result exceeded its hot response size budget: {outcome_bytes} bytes (response {response_bytes} bytes)"
+        );
+    }
+
     #[test]
     fn hot_lookup_does_not_embed_storage_lookup_state() {
         fn future_size<I, O>(_: impl FnOnce(I) -> O) -> usize {
