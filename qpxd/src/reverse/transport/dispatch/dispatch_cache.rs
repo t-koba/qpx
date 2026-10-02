@@ -136,7 +136,7 @@ pub(super) async fn prepare_reverse_cache(
         DispatchCacheCollapseOutcome::Continue {
             revalidation_state,
             guard,
-        } => (revalidation_state.map(|state| *state), guard),
+        } => (revalidation_state, guard),
     };
     Ok(ReverseCacheOutcome::Continue(ReverseCacheState {
         req,
@@ -211,7 +211,7 @@ enum ReverseCacheLookupOutcome {
 }
 
 struct ReverseCacheContinuation {
-    revalidation_state: Option<qpxd_cache::RevalidationState>,
+    revalidation_state: Option<Box<qpxd_cache::RevalidationState>>,
     request_headers_snapshot: http::HeaderMap,
 }
 
@@ -412,7 +412,7 @@ fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidat
                 cache_lookup_key: Some(&lookup_key),
                 cache_policy: Some(&policy),
                 request_headers_snapshot: &snapshot,
-                revalidation_state: Some(state),
+                revalidation_state: Some(Box::new(state)),
                 request_collapse_guard: None,
                 body_read_timeout: Duration::from_millis(
                     runtime_state
@@ -443,7 +443,7 @@ struct ReverseCacheCollapseInput<'a> {
     route_timeout: Duration,
     http_modules: &'a mut crate::http::modules::HttpModuleExecution,
     audit_ctx: &'a DispatchAuditContext,
-    revalidation_state: Option<qpxd_cache::RevalidationState>,
+    revalidation_state: Option<Box<qpxd_cache::RevalidationState>>,
 }
 
 fn reverse_cache_collapse<'a>(

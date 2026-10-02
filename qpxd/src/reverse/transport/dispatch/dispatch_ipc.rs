@@ -228,7 +228,7 @@ pub(super) async fn dispatch_reverse_ipc_route(
         }
     }
     if let Some(stale) = finalize_dispatch_stale_if_error_response(
-        revalidation_state.as_ref(),
+        revalidation_state.as_deref(),
         &route.plan,
         request_method,
         proxy_name,
@@ -326,7 +326,7 @@ async fn handle_reverse_ipc_success(
         };
     if resp.status().is_server_error()
         && let Some(stale) = finalize_dispatch_stale_if_error_response(
-            revalidation_state.as_ref(),
+            revalidation_state.as_deref(),
             &route.plan,
             request_method,
             proxy_name,

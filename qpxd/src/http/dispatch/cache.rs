@@ -26,11 +26,11 @@ pub(crate) enum DispatchCacheCollapseOutcome {
 }
 
 pub(crate) fn dispatch_cache_collapse_continue(
-    revalidation_state: Option<qpxd_cache::RevalidationState>,
+    revalidation_state: Option<Box<qpxd_cache::RevalidationState>>,
     guard: Option<qpxd_cache::RequestCollapseGuard>,
 ) -> DispatchCacheCollapseOutcome {
     DispatchCacheCollapseOutcome::Continue {
-        revalidation_state: revalidation_state.map(Box::new),
+        revalidation_state,
         guard,
     }
 }
@@ -78,7 +78,7 @@ pub(crate) struct DispatchCacheWriteInput<'a> {
     pub(crate) request_headers_snapshot: Option<&'a http::HeaderMap>,
     pub(crate) cache_target_key: Option<&'a CacheRequestKey>,
     pub(crate) cache_lookup_key: Option<&'a CacheRequestKey>,
-    pub(crate) revalidation_state: Option<qpxd_cache::RevalidationState>,
+    pub(crate) revalidation_state: Option<Box<qpxd_cache::RevalidationState>>,
     pub(crate) request_collapse_guard: Option<qpxd_cache::RequestCollapseGuard>,
     pub(crate) request_method: &'a Method,
     pub(crate) response_delay_secs: u64,

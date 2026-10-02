@@ -36,7 +36,7 @@ pub(super) struct ForwardUpstreamInput<'a> {
     pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
     pub(super) cache_target_key: Option<&'a CacheRequestKey>,
-    pub(super) revalidation_state: Option<qpxd_cache::RevalidationState>,
+    pub(super) revalidation_state: Option<Box<qpxd_cache::RevalidationState>>,
     pub(super) cache_collapse_guard: Option<qpxd_cache::RequestCollapseGuard>,
     pub(super) response_engine:
         Option<&'a crate::http::policy::response_policy::HttpResponseRuleEngine>,
@@ -302,7 +302,7 @@ async fn apply_forward_response_policy(
 }
 
 async fn finalize_forward_stale_if_error(
-    revalidation_state: &Option<qpxd_cache::RevalidationState>,
+    revalidation_state: &Option<Box<qpxd_cache::RevalidationState>>,
     selected_plan: &crate::runtime::ExecutionPlan,
     http_modules: &mut crate::http::modules::HttpModuleExecution,
     request_method: &Method,
@@ -311,7 +311,7 @@ async fn finalize_forward_stale_if_error(
     audit: &DispatchAuditContext,
 ) -> Result<Option<Response<Body>>> {
     finalize_dispatch_stale_if_error_response(
-        revalidation_state.as_ref(),
+        revalidation_state.as_deref(),
         selected_plan,
         request_method,
         proxy_name,

@@ -23,9 +23,11 @@ pub enum CacheLookupDecision {
     Miss,
 }
 
+// Revalidation ownership stays boxed across dispatch stages. Fresh hits keep
+// no allocation or inactive envelope storage for the cold revalidation path.
 pub(crate) struct DeferredSnapshotCacheLookup {
     pub(crate) decision: CacheLookupDecision,
-    pub(crate) revalidation_state: Option<RevalidationState>,
+    pub(crate) revalidation_state: Option<Box<RevalidationState>>,
     pub(crate) request_headers_snapshot: Option<http::HeaderMap>,
 }
 
@@ -36,7 +38,7 @@ pub struct CacheWritebackContext<'a> {
     pub cache_lookup_key: Option<&'a CacheRequestKey>,
     pub cache_policy: Option<&'a CachePolicyConfig>,
     pub request_headers_snapshot: &'a http::HeaderMap,
-    pub revalidation_state: Option<RevalidationState>,
+    pub revalidation_state: Option<Box<RevalidationState>>,
     pub request_collapse_guard: Option<cache::RequestCollapseGuard>,
     pub body_read_timeout: Duration,
     pub writeback_admission: &'a cache::CacheWritebackAdmission,
@@ -51,7 +53,7 @@ pub(crate) async fn lookup_with_revalidation(
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
     background_revalidations: &Arc<cache::InFlightRevalidations>,
     cache_miss_message: &str,
-) -> Result<(CacheLookupDecision, Option<RevalidationState>)> {
+) -> Result<(CacheLookupDecision, Option<Box<RevalidationState>>)> {
     let Some(policy) = cache_policy else {
         return Ok((CacheLookupDecision::Miss, None));
     };
@@ -79,7 +81,7 @@ pub(crate) async fn lookup_with_revalidation(
         }
         LookupOutcome::Revalidate(state) => {
             cache::attach_revalidation_headers(req.headers_mut(), &state);
-            Ok((CacheLookupDecision::Miss, Some(state)))
+            Ok((CacheLookupDecision::Miss, Some(Box::new(state))))
         }
         LookupOutcome::OnlyIfCachedMiss => Ok((
             CacheLookupDecision::OnlyIfCachedMiss(cache::build_only_if_cached_miss_response(
@@ -143,7 +145,7 @@ pub(crate) async fn lookup_with_deferred_snapshot(
             cache::attach_revalidation_headers(req.headers_mut(), &state);
             DeferredSnapshotCacheLookup {
                 decision: CacheLookupDecision::Miss,
-                revalidation_state: Some(state),
+                revalidation_state: Some(Box::new(state)),
                 request_headers_snapshot: Some(request_headers_snapshot),
             }
         }
@@ -200,7 +202,7 @@ pub(crate) async fn process_upstream_response_for_cache(
             request_headers_snapshot,
             policy,
             response,
-            revalidation,
+            *revalidation,
             response_delay_secs,
             backends,
         )

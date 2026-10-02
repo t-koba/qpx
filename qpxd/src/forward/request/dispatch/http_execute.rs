@@ -87,7 +87,7 @@ pub(super) async fn execute_forward_http_after_prepare(
                 .await,
             );
         }
-        DispatchCacheLookupOutcome::Continue(state) => revalidation_state = state.map(|s| *s),
+        DispatchCacheLookupOutcome::Continue(state) => revalidation_state = state,
     }
     let cache_collapse_guard = match try_forward_cache_collapse(ForwardCacheCollapseInput {
         req: &mut req,
@@ -122,7 +122,7 @@ pub(super) async fn execute_forward_http_after_prepare(
             revalidation_state: state,
             guard,
         } => {
-            revalidation_state = state.map(|state| *state);
+            revalidation_state = state;
             guard
         }
     };

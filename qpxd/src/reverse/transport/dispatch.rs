@@ -1552,6 +1552,28 @@ async fn proxy_reverse_http_attempt(
 }
 
 #[cfg(test)]
+mod state_layout_tests {
+    use super::*;
+
+    #[test]
+    fn cached_response_state_excludes_inactive_revalidation_storage() {
+        fn future_size<I, O>(_: impl FnOnce(I) -> O) -> usize {
+            std::mem::size_of::<O>()
+        }
+        let cache_bytes = future_size(prepare_reverse_cache);
+        assert!(
+            cache_bytes <= 4 * 1024,
+            "cache preparation inline state exceeded its size budget: {cache_bytes} bytes"
+        );
+        let dispatch_bytes = future_size(complete_reverse_after_modules);
+        assert!(
+            dispatch_bytes <= 8 * 1024,
+            "cached response dispatcher inline state exceeded its size budget: {dispatch_bytes} bytes"
+        );
+    }
+}
+
+#[cfg(test)]
 mod browser_report_tests {
     use super::*;
 

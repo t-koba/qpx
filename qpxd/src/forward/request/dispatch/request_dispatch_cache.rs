@@ -76,7 +76,7 @@ pub(super) async fn try_forward_cache_lookup(
         CacheLookupDecision::Miss => {
             record_cache_lookup_result(input.audit.kind, "miss");
             return Ok(DispatchCacheLookupOutcome::Continue(
-                lookup_revalidation_state.map(Box::new),
+                lookup_revalidation_state,
             ));
         }
     }
@@ -95,7 +95,7 @@ pub(super) async fn try_forward_cache_lookup(
     .await?;
     Ok(match response {
         Some(response) => DispatchCacheLookupOutcome::Response(Box::new(response)),
-        None => DispatchCacheLookupOutcome::Continue(lookup_revalidation_state.map(Box::new)),
+        None => DispatchCacheLookupOutcome::Continue(lookup_revalidation_state),
     })
 }
 
@@ -158,7 +158,7 @@ fn maybe_spawn_forward_background_revalidation(
                 cache_lookup_key: Some(&lookup_key),
                 cache_policy: Some(&policy),
                 request_headers_snapshot: &snapshot,
-                revalidation_state: Some(state),
+                revalidation_state: Some(Box::new(state)),
                 request_collapse_guard: None,
                 body_read_timeout: std::time::Duration::from_millis(
                     runtime_state
@@ -190,7 +190,7 @@ pub(super) struct ForwardCacheCollapseInput<'a> {
     pub(super) http_modules: &'a mut crate::http::modules::HttpModuleExecution,
     pub(super) upstream_timeout: Duration,
     pub(super) audit: &'a DispatchAuditContext,
-    pub(super) revalidation_state: Option<qpxd_cache::RevalidationState>,
+    pub(super) revalidation_state: Option<Box<qpxd_cache::RevalidationState>>,
 }
 
 pub(super) async fn try_forward_cache_collapse(
