@@ -87,7 +87,7 @@ jobs:
               QPX_CALLGRIND_WORKLOAD=cache-miss python3 scripts/perf-evaluate.py "cache miss callgrind diagnostics" -- bash scripts/perf-diagnose-proxy-callgrind.sh
               ;;
             proxy-native)
-              sudo apt-get install -y linux-tools-generic
+              sudo apt-get install -y linux-tools-generic ripgrep
               sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
               mapfile -t perf_tools < <(rg --files /usr/lib/linux-tools | rg '/perf$' | sort -V)
               if [ "${#perf_tools[@]}" -eq 0 ]; then
