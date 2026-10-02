@@ -497,7 +497,7 @@ jobs:
             target/perf/streaming-compare-logs/**
             target/perf/profiles/**
             target/perf/evaluations/**
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   perf_audit_build:
     name: perf audit build
@@ -661,7 +661,7 @@ jobs:
             target/perf/streaming-compare-logs/**
             target/perf/profiles/**
             target/perf/evaluations/**
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   perf_audit_http2:
     name: perf audit (http2, run ${{ matrix.repetition }})
@@ -749,7 +749,7 @@ jobs:
             target/perf/profiles/**
             target/perf/evaluations/**
             target/perf/baseline-http2-compare-logs/**
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   perf_audit_streaming:
     name: perf audit (streaming, run ${{ matrix.repetition }})
@@ -837,7 +837,7 @@ jobs:
             target/perf/profiles/**
             target/perf/evaluations/**
             target/perf/baseline-streaming-compare-logs/**
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   perf_audit_allocation:
     name: perf audit (allocation)
@@ -908,7 +908,7 @@ jobs:
             target/perf/streaming-compare-logs/**
             target/perf/profiles/**
             target/perf/evaluations/**
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   perf_audit_netem:
     name: perf audit (netem)
@@ -975,7 +975,7 @@ jobs:
             target/perf/streaming-compare-logs/**
             target/perf/profiles/**
             target/perf/evaluations/**
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   perf_audit_interop:
     name: perf audit (interop)
@@ -1034,7 +1034,7 @@ jobs:
             target/perf/streaming-compare-logs/**
             target/perf/profiles/**
             target/perf/evaluations/**
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   perf_audit_callgrind:
     name: perf audit (callgrind)
@@ -1095,7 +1095,7 @@ jobs:
             target/perf/streaming-compare-logs/**
             target/perf/profiles/**
             target/perf/evaluations/**
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   perf_audit:
     name: perf audit (aggregate)
@@ -1111,26 +1111,28 @@ jobs:
       - perf_audit_callgrind
     runs-on: ubuntu-24.04
     steps:
-      - name: require every perf audit category
+      - uses: actions/checkout@v5
+      - name: collect every category artifact
+        id: audit_artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: qpx-perf-audit-jsonl-*
+          path: target/perf/audit-artifacts
+          merge-multiple: false
+      - name: require complete performance measurements
+        if: always()
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PYTHON'
-          import json
-          import os
-          import sys
-          results = json.loads(os.environ["NEEDS_JSON"])
-          failed = False
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-              summary.write("## Performance audit categories\n\n| Category | Result |\n|---|---|\n")
-              for name, result in sorted(results.items()):
-                  outcome = result["result"]
-                  summary.write(f"| {name} | {outcome} |\n")
-                  if outcome != "success":
-                      print(f"{name} failed or was skipped: {outcome}", file=sys.stderr)
-                      failed = True
-          sys.exit(1 if failed else 0)
-          PYTHON
+          DOWNLOAD_OUTCOME: ${{ steps.audit_artifacts.outcome }}
+          REPETITIONS: ${{ inputs.repeat_perf && '3' || '1' }}
+        run: python3 scripts/summarize-perf-audit.py target/perf/audit-artifacts target/perf/audit-summary --commit "$GITHUB_SHA" --repetitions "$REPETITIONS"
+      - name: preserve aggregate report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qpx-perf-audit-summary
+          path: target/perf/audit-summary/*
+          if-no-files-found: error
 
   config_samples:
     name: config samples

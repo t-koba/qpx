@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import time
+from lib.perf_audit_catalog import evaluation_name
 
 
 def main():
@@ -16,7 +17,7 @@ def main():
     label = sys.argv[1]
     directory = Path(os.environ.get("QPX_PERF_EVALUATION_DIR", "target/perf/evaluations"))
     directory.mkdir(parents=True, exist_ok=True)
-    name = re.sub(r"[^a-zA-Z0-9_-]", "-", label)
+    name = evaluation_name(label)
     log_path = directory / f"{name}.log"
     started = time.monotonic()
     evaluations = []

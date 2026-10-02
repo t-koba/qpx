@@ -23,6 +23,16 @@ uploads those files even on failure. Origin/cache and HTTP/2 results also list
 the actual ratio, limit, direction, and violation percentage in the Actions
 summary. Invalid sample diagnostics remain in the full log and summary.
 
+The aggregate job downloads all eight category artifacts and checks every
+required evaluation's commit, label, exit status, and log. Missing artifacts,
+missing objective checks, invalid numeric values, and failed or skipped jobs
+fail the aggregate gate. `qpx-perf-audit-summary` preserves both JSON and Markdown
+reports, including absolute measurements, ratios, runner environments, and
+the minimum, mean, maximum, and population standard deviation across independent
+runs. Every individual run must pass; an average cannot hide a failed run.
+The aggregate Actions summary includes the thresholds, violations, and diagnostic
+log tails from all categories.
+
 For three independent Linux comparisons, dispatch CI on the implementation
 branch with `repeat_perf=true` and an explicit `baseline_ref` commit. HTTP/1,
 HTTP/2, and streaming each run on three separate Ubuntu 24.04 runners. A shared build job builds the baseline and candidate before any comparison,
