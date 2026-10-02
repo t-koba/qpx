@@ -9,6 +9,11 @@ pub(crate) struct PhaseTimer {
 }
 
 impl PhaseTimer {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_sampled(&self) -> bool {
+        self.started.is_some()
+    }
+
     pub(crate) fn begin(phase: &'static str, samples: &AtomicU64) -> Self {
         let sampled = tracing::enabled!(target: "qpx_perf_phase", tracing::Level::DEBUG)
             && samples

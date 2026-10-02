@@ -148,6 +148,20 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        if _phase.is_sampled() {
+            match socket_send_queue(stream) {
+                Ok((queued_bytes, unsent_bytes)) => {
+                    tracing::debug!(target: "qpx_perf_phase", queued_bytes, unsent_bytes,
+                        body_bytes = region.len(), sample_interval = 1024,
+                        "file socket queue sampled");
+                }
+                Err(error) => {
+                    tracing::error!(target: "qpx_perf_phase", error = %error,
+                        "file socket queue sampling failed");
+                }
+            }
+        }
         Ok(())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -158,6 +172,24 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
             "sendfile is unavailable on this platform",
         ))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn socket_send_queue(stream: &TcpStream) -> io::Result<(u32, u32)> {
+    let mut queued: libc::c_int = 0;
+    let mut unsent: libc::c_int = 0;
+    // Both Linux requests write a single integer while the borrowed stream
+    // keeps the descriptor alive for the entire operation.
+    if unsafe { libc::ioctl(stream.as_raw_fd(), libc::TIOCOUTQ, &mut queued) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::ioctl(stream.as_raw_fd(), libc::SIOCOUTQNSD as _, &mut unsent) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((
+        queued.try_into().map_err(io::Error::other)?,
+        unsent.try_into().map_err(io::Error::other)?,
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -645,6 +677,8 @@ mod tests {
             matching_descriptors, 1,
             "file transfer duplicated its socket descriptor"
         );
+        let (queued, unsent) = socket_send_queue(&server).expect("read real TCP send queue");
+        assert!(unsent <= queued, "unsent bytes exceed the total send queue");
         drop(transfer);
         drop(server);
         drop(client);

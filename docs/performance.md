@@ -53,6 +53,10 @@ and file-backed sending. Timings are elapsed wall time, include scheduling and
 can overlap; they must not be added together or interpreted as CPU time. The
 phase summary retains the source log, sample count, interval, median, p99 and
 maximum. Raw logs and thread samples remain diagnostic artifacts.
+Sampled Linux file sends also record the TCP send queue and its unsent subset
+after handing the body to the kernel. `socket-queue-summary.json` preserves
+their byte distributions by source and body size. Sampling failures invalidate
+the diagnostic summary; these measurements never run in ordinary gates.
 
 The `feature-callgrind` diagnostic profiles the actual 1 KiB feature-rich
 configuration after warmup, with collection enabled only during the timed
