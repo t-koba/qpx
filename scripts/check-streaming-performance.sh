@@ -306,7 +306,8 @@ evaluations = {"fast": [], "slow": []}
 def record_check(mode, metric, current, limit, direction):
     deviation = (limit - current) / limit if direction == "min" else (current - limit) / limit
     evaluations[mode].append({"metric": metric, "actual": current, "limit": limit,
-                              "direction": direction, "passed": deviation <= 1e-12,
+                              "direction": direction,
+                              "passed": current + 1e-12 >= limit if direction == "min" else current <= limit + 1e-12,
                               "violation_percent": max(0.0, deviation * 100)})
 
 stability_objectives = objectives.get("stability", {})

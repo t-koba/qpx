@@ -363,7 +363,8 @@ for body_bytes, max_streams in sorted(required_lanes):
         objective = lane_limit(field, (body_bytes, max_streams))
         deviation = (objective - current) / objective if direction == "min" else (current - objective) / objective
         evaluations.append({"metric": field, "actual": current, "limit": objective,
-                            "direction": direction, "passed": deviation <= 1e-12,
+                            "direction": direction,
+                            "passed": current + 1e-12 >= objective if direction == "min" else current <= objective + 1e-12,
                             "violation_percent": max(0.0, deviation * 100)})
         if direction == "min" and current + 1e-12 < objective:
             failures.append(
@@ -401,7 +402,7 @@ for body_bytes, max_streams in sorted(required_lanes):
                                        ("cpu_sample_spread", cpu_spread, cpu_limit)):
             deviation = (current - limit) / limit
             evaluations.append({"metric": f"{proxy}.{metric}", "actual": current, "limit": limit,
-                                "direction": "max", "passed": deviation <= 1e-12,
+                                "direction": "max", "passed": current <= limit + 1e-12,
                                 "violation_percent": max(0.0, deviation * 100)})
         if throughput_spread > throughput_limit + 1e-12:
             failures.append(

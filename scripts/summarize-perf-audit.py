@@ -96,11 +96,12 @@ def summarize(root, destination, commit, repetitions, needs, download_outcome):
                                             ("bench", "body_bytes", "max_concurrent_streams", "read_mode"))
                         for check in evaluation["checks"]:
                             actual, limit = check["actual"], check["limit"]
+                            tolerance = 1e-12 if category in ("http2", "streaming") else 0.0
                             if (not all(isinstance(value, (int, float)) and math.isfinite(value)
                                         for value in (actual, limit, check["violation_percent"]))
                                     or check["direction"] not in ("min", "max")
                                     or type(check["passed"]) is not bool
-                                    or check["passed"] != (actual >= limit if check["direction"] == "min" else actual <= limit)):
+                                    or check["passed"] != (actual + tolerance >= limit if check["direction"] == "min" else actual <= limit + tolerance)):
                                 raise ValueError("invalid measurement check")
                             relation = ">=" if check["direction"] == "min" else "<="
                             lines.append(f"| {workload} | {check['metric']} | {actual:.6f} | {relation} {limit:.6f} | {check['violation_percent']:.2f}% | {check['passed']} |")
