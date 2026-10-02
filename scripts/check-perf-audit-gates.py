@@ -63,6 +63,13 @@ for category in ("proxy", "http2", "streaming"):
             f"{category} depends on the revision comparison executable bit")
 
 aggregate = jobs.get("perf_audit", "")
+revision_comparison = Path("scripts/perf-audit-revision-compare.sh").read_text(encoding="utf-8")
+require('if [ "$revision" = baseline ]; then' in revision_comparison,
+        "baseline measurements lack unconditional quality validation")
+require('"$ROOT_DIR/perf/$objectives" measurement-quality' in revision_comparison,
+        "baseline measurements do not enforce quality objectives")
+require('echo "baseline $CATEGORY measurement quality failed"' in revision_comparison,
+        "baseline quality failures are not propagated")
 require("if: always()" in aggregate, "aggregate may skip failed categories")
 for category in CATEGORIES:
     require(f"      - perf_audit_{category}\n" in aggregate,

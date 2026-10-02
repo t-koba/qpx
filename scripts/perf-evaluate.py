@@ -65,6 +65,8 @@ def main():
                     workload = f"{evaluation['bench']}/{evaluation['body_bytes']}"
                     if "max_concurrent_streams" in evaluation:
                         workload += f" m={evaluation['max_concurrent_streams']}"
+                    if "read_mode" in evaluation:
+                        workload += f" {evaluation['read_mode']}"
                     for check in evaluation["checks"]:
                         relation = ">=" if check["direction"] == "min" else "<="
                         outcome = "success" if check["passed"] else "failure"

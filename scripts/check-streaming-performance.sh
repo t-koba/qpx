@@ -10,12 +10,19 @@ if [ -z "$JSONL" ]; then
   exit 2
 fi
 
-python3 - "$JSONL" "$OBJECTIVES" <<'PY'
+MODE="${3:-acceptance}"
+case "$MODE" in
+  acceptance|measurement-quality) ;;
+  *) echo "performance evaluation mode must be acceptance or measurement-quality" >&2; exit 2 ;;
+esac
+python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
 import json
 import math
 import sys
 
 JSONL_PATH, OBJECTIVES_PATH = sys.argv[1:3]
+MODE = sys.argv[3]
+QUALITY_ONLY = MODE == "measurement-quality"
 BENCH = "proxy_compare_http1_streaming_reverse"
 
 
@@ -294,6 +301,14 @@ fast_checks = (
 )
 
 failures = []
+evaluations = {"fast": [], "slow": []}
+
+def record_check(mode, metric, current, limit, direction):
+    deviation = (limit - current) / limit if direction == "min" else (current - limit) / limit
+    evaluations[mode].append({"metric": metric, "actual": current, "limit": limit,
+                              "direction": direction, "passed": deviation <= 1e-12,
+                              "violation_percent": max(0.0, deviation * 100)})
+
 stability_objectives = objectives.get("stability", {})
 frontier_ratio = ratio_limit(stability_objectives, "competitive_frontier_total_ratio")
 stability_records = {
@@ -319,12 +334,17 @@ for key in sorted(stability_records):
             stability_objectives, "max_reference_total_sample_spread_ratio"
         )
     total_spread = nested_number(record, "sample_spread", "total_ms_ratio")
+    record_check(key[0], f"{key[1]}.total_time_sample_spread", total_spread,
+                 max_total_sample_spread_ratio, "max")
     if total_spread > max_total_sample_spread_ratio + 1e-12:
         failures.append(
             f"streaming {key} total-time sample spread {total_spread:.6f} "
             f"> objective {max_total_sample_spread_ratio:.6f}"
         )
 for name, current, objective, direction in fast_checks:
+    if QUALITY_ONLY:
+        continue
+    record_check("fast", name, current, objective, direction)
     if direction == "min" and current + 1e-12 < objective:
         failures.append(f"fast streaming {name} {current:.6f} < objective {objective:.6f}")
     if direction == "max" and current > objective + 1e-12:
@@ -352,7 +372,10 @@ slow_ratios = {
 }
 slow_objectives = objectives.get("slow", {})
 for field, current in slow_ratios.items():
+    if QUALITY_ONLY:
+        continue
     objective = ratio_limit(slow_objectives, field)
+    record_check("slow", field, current, objective, "max")
     if current > objective + 1e-12:
         failures.append(f"slow streaming {field} {current:.6f} > objective {objective:.6f}")
 
@@ -371,6 +394,10 @@ print(
     f"resource-leader={slow_resource_leader_name}, "
     + ", ".join(f"{name}={value:.3f}" for name, value in slow_ratios.items())
 )
+
+for mode in ("fast", "slow"):
+    print(json.dumps({"bench": BENCH, "body_bytes": records[(mode, "qpxd")]["stream_bytes"],
+                      "read_mode": mode, "scope": MODE, "checks": evaluations[mode]}))
 
 if failures:
     for failure in failures:

@@ -50,7 +50,13 @@ jobs:
           sudo apt-get install -y linux-tools-generic ripgrep
           sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
           mkdir -p target/perf
-          dpkg-query -L 'linux-tools-*' > target/perf/native-perf-package-files.txt
+          dpkg-query -W -f='${binary:Package}\t${db:Status-Status}\n' 'linux-tools-*' > target/perf/native-perf-packages.txt
+          mapfile -t perf_packages < <(awk '$2 == "installed" { print $1 }' target/perf/native-perf-packages.txt)
+          if [ "${#perf_packages[@]}" -eq 0 ]; then
+            echo "native perf packages are missing" >&2
+            exit 1
+          fi
+          dpkg-query -L "${perf_packages[@]}" > target/perf/native-perf-package-files.txt
           mapfile -t perf_tools < <(rg '^/usr/lib/.*/perf$' target/perf/native-perf-package-files.txt | sort -V)
           if [ "${#perf_tools[@]}" -eq 0 ]; then
             echo "native perf executable is missing" >&2

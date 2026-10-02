@@ -32,8 +32,12 @@ and netem use the same artifact binaries built with Rust 1.98.1; every runner
 verifies the revision, compiler, executable permissions, and SHA-256 checksum
 before measuring. This avoids redundant builds and prevents compiler updates
 from changing the before/after comparison. Baseline
-results and logs are separate artifacts; baseline failures remain failures of
-the comparison step. Other benchmarks never run concurrently on that runner.
+results and logs are separate artifacts. The baseline is checked in explicit
+`measurement-quality` mode: complete samples, process accounting, and finite
+stability limits are required, while product performance objectives apply to
+the candidate in the default `acceptance` mode. An unstable or incomplete
+baseline fails the comparison step. Other benchmarks never run concurrently
+on that runner.
 
 The runner manifest records CPU model, memory, kernel, runner image, compiler,
 and revision. HTTP/1 records retain ready-process RSS (after one successful

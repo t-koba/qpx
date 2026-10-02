@@ -10,12 +10,19 @@ if [ -z "$JSONL" ]; then
   exit 2
 fi
 
-python3 - "$JSONL" "$OBJECTIVES" <<'PY'
+MODE="${3:-acceptance}"
+case "$MODE" in
+  acceptance|measurement-quality) ;;
+  *) echo "performance evaluation mode must be acceptance or measurement-quality" >&2; exit 2 ;;
+esac
+python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
 import json
 import math
 import sys
 
 JSONL_PATH, OBJECTIVES_PATH = sys.argv[1:3]
+MODE = sys.argv[3]
+QUALITY_ONLY = MODE == "measurement-quality"
 BENCH = "proxy_compare_http2_reverse"
 PROXIES = ("direct-backend", "qpxd", "nginx")
 
@@ -351,6 +358,8 @@ for body_bytes, max_streams in sorted(required_lanes):
     )
     evaluations = []
     for label, current, field, direction in checks:
+        if QUALITY_ONLY:
+            continue
         objective = lane_limit(field, (body_bytes, max_streams))
         deviation = (objective - current) / objective if direction == "min" else (current - objective) / objective
         evaluations.append({"metric": field, "actual": current, "limit": objective,
@@ -388,6 +397,12 @@ for body_bytes, max_streams in sorted(required_lanes):
         cpu_spread = nested_number(
             record, "sample_spread", "requests_per_total_cpu_second_ratio", proxy
         )
+        for metric, current, limit in (("throughput_sample_spread", throughput_spread, throughput_limit),
+                                       ("cpu_sample_spread", cpu_spread, cpu_limit)):
+            deviation = (current - limit) / limit
+            evaluations.append({"metric": f"{proxy}.{metric}", "actual": current, "limit": limit,
+                                "direction": "max", "passed": deviation <= 1e-12,
+                                "violation_percent": max(0.0, deviation * 100)})
         if throughput_spread > throughput_limit + 1e-12:
             failures.append(
                 f"HTTP/2 {body_bytes}-byte m={max_streams} {proxy} throughput sample spread "
@@ -401,7 +416,7 @@ for body_bytes, max_streams in sorted(required_lanes):
 
     print(json.dumps({
         "bench": BENCH, "body_bytes": body_bytes, "max_concurrent_streams": max_streams,
-        "checks": evaluations,
+        "checks": evaluations, "scope": MODE,
         "measurements": {
             proxy: {field: sample[field] for field in (
                 "requests_per_sec", "requests_per_total_cpu_second", "latency_p99_ms",
@@ -426,7 +441,7 @@ aggregate_objective = positive_number(
     limits, "min_aggregate_dominance_score", "HTTP/2 objectives"
 )
 print(f"HTTP/2 aggregate dominance={aggregate_score:.3f}")
-if aggregate_score + 1e-12 < aggregate_objective:
+if not QUALITY_ONLY and aggregate_score + 1e-12 < aggregate_objective:
     failures.append(
         f"HTTP/2 aggregate dominance score {aggregate_score:.6f} "
         f"< objective {aggregate_objective:.6f}"

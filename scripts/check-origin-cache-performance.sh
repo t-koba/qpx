@@ -10,12 +10,19 @@ if [ -z "$JSONL" ]; then
   exit 2
 fi
 
-python3 - "$JSONL" "$OBJECTIVES" <<'PY'
+MODE="${3:-acceptance}"
+case "$MODE" in
+  acceptance|measurement-quality) ;;
+  *) echo "performance evaluation mode must be acceptance or measurement-quality" >&2; exit 2 ;;
+esac
+python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
 import json
 import math
 import sys
 
 JSONL_PATH, OBJECTIVES_PATH = sys.argv[1:3]
+MODE = sys.argv[3]
+QUALITY_ONLY = MODE == "measurement-quality"
 
 
 def fail(message):
@@ -389,6 +396,8 @@ for lane in lanes:
         ("FD peak ratio", fd_peak_ratio, "max_fd_peak_ratio", "max"),
         ("scheduler queue-delay ratio", scheduler_queue_delay_ratio, "max_scheduler_queue_delay_ratio", "max"),
     ):
+        if QUALITY_ONLY:
+            continue
         limit = objective(field)
         passed = current >= limit if direction == "min" else current <= limit
         deviation = (limit - current) / limit if direction == "min" else (current - limit) / limit
@@ -401,6 +410,16 @@ for lane in lanes:
     qpx_spread = qpx["sample_spread"]
     reference_spread = reference["sample_spread"]
     for field in ("requests_per_sec_ratio", "requests_per_cpu_second_ratio"):
+        for owner, spread, context, limit_field in (
+            ("qpx", qpx_spread, qpx_context, "max_qpx_sample_spread_ratio"),
+            ("reference", reference_spread, reference_context, "max_reference_sample_spread_ratio"),
+        ):
+            current = number(spread, field, context)
+            limit = objective(limit_field)
+            deviation = (current - limit) / limit
+            checks.append({"metric": f"{owner}.{field}", "actual": current, "limit": limit,
+                           "direction": "max", "passed": current <= limit,
+                           "violation_percent": max(0.0, deviation * 100)})
         if number(qpx_spread, field, qpx_context) > objective("max_qpx_sample_spread_ratio"):
             failures.append(f"qpx {field} is unstable: {number(qpx_spread, field, qpx_context):.6f} > objective {objective("max_qpx_sample_spread_ratio"):.6f}")
         if number(reference_spread, field, reference_context) > objective(
@@ -410,7 +429,7 @@ for lane in lanes:
     result = {
         "bench": bench,
         "body_bytes": body_bytes,
-        "checks": checks,
+        "checks": checks, "scope": MODE,
         "failures": failures,
         "measurements": {
             owner: {field: sample[field] for field in (

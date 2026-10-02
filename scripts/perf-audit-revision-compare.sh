@@ -11,14 +11,20 @@ case "$CATEGORY" in
   proxy)
     harness="perf-audit-proxy-matrix.sh"
     log_variable="QPX_PROXY_MATRIX_LOG_DIR"
+    checker="check-origin-cache-performance.sh"
+    objectives="origin-cache-performance-objectives.json"
     ;;
   http2)
     harness="perf-audit-http2-compare.sh"
     log_variable="QPX_HTTP2_COMPARE_LOG_DIR"
+    checker="check-http2-performance.sh"
+    objectives="http2-performance-objectives.json"
     ;;
   streaming)
     harness="perf-audit-streaming-compare.sh"
     log_variable="QPX_STREAMING_COMPARE_LOG_DIR"
+    checker="check-streaming-performance.sh"
+    objectives="streaming-performance-objectives.json"
     ;;
   *) echo "unsupported comparison category: $CATEGORY" >&2; exit 2 ;;
 esac
@@ -58,6 +64,13 @@ for revision in $revisions; do
       bash "$ROOT_DIR/scripts/$harness" "$output"; then
     echo "$revision $CATEGORY comparison failed" >&2
     failed=1
+  fi
+  if [ "$revision" = baseline ]; then
+    if ! python3 "$ROOT_DIR/scripts/perf-evaluate.py" "baseline $CATEGORY measurement quality" -- \
+      bash "$ROOT_DIR/scripts/$checker" "$output" "$ROOT_DIR/perf/$objectives" measurement-quality; then
+      echo "baseline $CATEGORY measurement quality failed" >&2
+      failed=1
+    fi
   fi
 done
 exit "$failed"
