@@ -174,28 +174,7 @@ process_tree_fd_count() {
     echo 0
     return
   fi
-  perf_proc_python - "$root" <<'PY_FD_COUNT'
-from pathlib import Path
-import sys
-pending = [sys.argv[1]]
-seen = set()
-total = 0
-while pending:
-    pid = pending.pop()
-    if pid in seen:
-        continue
-    seen.add(pid)
-    base = Path("/proc") / pid
-    try:
-        for task in (base / "task").iterdir():
-            pending.extend((task / "children").read_text().split())
-        total += sum(1 for _ in (base / "fd").iterdir())
-    except FileNotFoundError:
-        continue
-if not total:
-    raise SystemExit("process descriptor count is empty")
-print(total)
-PY_FD_COUNT
+  perf_proc_python "$(dirname "${BASH_SOURCE[0]}")/perf-process-fds.py" count "$root"
 }
 
 process_tree_scheduler_run_delay_ns() {
@@ -246,23 +225,38 @@ monitor_process_tree_fd_peak() {
   local root="$1"
   local output="$2"
   local initial="${3:-}"
-  local current peak stopping
+  local stop="${output}.stop"
+  local reader status=0
   if [ -z "$initial" ]; then
     initial="$(process_tree_fd_count "$root")"
   fi
-  peak="$initial"
-  stopping=0
-  trap 'stopping=1' TERM INT
-  printf '%s\n' "$peak" >"$output"
-  while [ "$stopping" -eq 0 ] && kill -0 "$root" >/dev/null 2>&1; do
-    current="$(process_tree_fd_count "$root")"
-    if [ "$current" -gt "$peak" ]; then
-      peak="$current"
-      printf '%s\n' "$peak" >"$output"
+  rm -f "$stop" "${output}.error"
+  # Keep one reader alive across samples so privilege setup and interpreter
+  # startup do not compete with the load generator every 50 milliseconds.
+  perf_proc_python "$(dirname "${BASH_SOURCE[0]}")/perf-process-fds.py" \
+    monitor "$root" "$output" "$stop" "$initial" &
+  reader=$!
+  trap 'touch "$stop"' TERM INT
+  if wait "$reader"; then
+    status=0
+  else
+    status=$?
+    if [ -f "$stop" ]; then
+      wait "$reader" || status=$?
     fi
-    sleep 0.05
-  done
+  fi
   trap - TERM INT
+  rm -f "$stop"
+  return "$status"
+}
+
+read_process_peak_file() {
+  local output="$1"
+  if [ -f "${output}.error" ]; then
+    cat "${output}.error" >&2
+    return 1
+  fi
+  cat "$output"
 }
 
 peak_growth() {
@@ -282,34 +276,5 @@ snapshot_process_tree_fds() {
   if [ ! -d /proc ]; then
     return
   fi
-  perf_proc_python - "$root" "$output" <<'PY_FDS'
-import json
-import os
-from pathlib import Path
-import sys
-
-root, output = sys.argv[1:]
-seen = set()
-pending = [root]
-records = []
-while pending:
-    pid = pending.pop()
-    if pid in seen:
-        continue
-    seen.add(pid)
-    base = Path("/proc") / pid
-    try:
-        for task in (base / "task").iterdir():
-            pending.extend((task / "children").read_text().split())
-        for fd in (base / "fd").iterdir():
-            try:
-                records.append({"pid": int(pid), "fd": int(fd.name), "target": os.readlink(fd)})
-            except FileNotFoundError:
-                continue
-    except FileNotFoundError:
-        continue
-if not records:
-    raise SystemExit("process descriptor snapshot is empty")
-Path(output).write_text(json.dumps(records, sort_keys=True) + "\n")
-PY_FDS
+  perf_proc_python "$(dirname "${BASH_SOURCE[0]}")/perf-process-fds.py" snapshot "$root" "$output"
 }

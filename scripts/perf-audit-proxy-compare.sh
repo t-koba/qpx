@@ -1373,7 +1373,7 @@ LUA
     if [ -n "$fd_peak_monitor_pid" ]; then
       kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
       wait "$fd_peak_monitor_pid" 2>/dev/null || true
-      fd_peak="$(cat "$fd_peak_file" 2>/dev/null || echo 0)"
+      fd_peak="$(read_process_peak_file "$fd_peak_file")"
       fd_growth="$(peak_growth "$fd_baseline" "$fd_peak")"
     fi
     if [ -n "$rss_peak_monitor_pid" ]; then

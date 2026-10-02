@@ -647,13 +647,13 @@ run_one() {
     if [ -n "$fd_peak_monitor_pid" ]; then
       kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
       wait "$fd_peak_monitor_pid" 2>/dev/null || true
-      fd_peak="$(cat "$fd_peak_file" 2>/dev/null || echo 0)"
+      fd_peak="$(read_process_peak_file "$fd_peak_file")"
       fd_growth="$(peak_growth "$fd_baseline" "$fd_peak")"
     fi
     if [ -n "$backend_fd_peak_monitor_pid" ]; then
       kill "$backend_fd_peak_monitor_pid" >/dev/null 2>&1 || true
       wait "$backend_fd_peak_monitor_pid" 2>/dev/null || true
-      backend_fd_peak="$(cat "$backend_fd_peak_file" 2>/dev/null || echo 0)"
+      backend_fd_peak="$(read_process_peak_file "$backend_fd_peak_file")"
       backend_fd_growth="$(peak_growth "$backend_fd_baseline" "$backend_fd_peak")"
     fi
     if [ -n "$rss_peak_monitor_pid" ]; then
