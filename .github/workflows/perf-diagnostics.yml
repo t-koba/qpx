@@ -16,7 +16,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, origin-cache, http2, http2-windows]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, webdav-sockets, origin-cache, http2, http2-windows]
         default: streaming
 
 permissions:
@@ -108,6 +108,14 @@ jobs:
                 QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
                 python3 scripts/perf-evaluate.py "phase diagnostics" -- bash scripts/perf-audit-proxy-compare.sh
               python3 scripts/summarize-perf-phases.py target/perf/proxy-compare-logs target/perf/phase-summary.json
+              ;;
+            webdav-sockets)
+              QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 QPX_PERF_WEBDAV_SOCKET_DIAGNOSTICS=1 \
+                QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-webdav,apache-webdav \
+                QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
+                QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV="MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728" \
+                python3 scripts/perf-evaluate.py "WebDAV socket diagnostics" -- bash scripts/perf-audit-proxy-compare.sh
+              python3 scripts/summarize-perf-sockets.py target/perf/proxy-compare-logs target/perf/webdav-socket-summary.json
               ;;
             feature-callgrind)
               python3 scripts/perf-evaluate.py "feature-rich callgrind diagnostics" -- bash scripts/perf-diagnose-proxy-callgrind.sh

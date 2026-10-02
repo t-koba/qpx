@@ -537,3 +537,10 @@ Each condition still enforces the existing finite 1.25 reference and 1.1 candida
 throughput/CPU spread limits and requires complete clean samples. A failed first
 condition does not suppress evidence from the second condition. This diagnoses
 reference stalls without changing the required workload or its objectives.
+
+The `webdav-sockets` diagnostic samples Linux TCP information for both real
+WebDAV servers alongside thread counters. It preserves raw `ss` output, process
+identity, timestamps, TCP MSS, and observed bytes per data segment for every
+workload round. This instrumented run is excluded from acceptance. Its segment
+density describes observed active connections rather than a total packet count;
+missing traffic attribution or workload rounds fail the diagnostic.

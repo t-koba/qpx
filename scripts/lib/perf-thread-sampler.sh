@@ -17,9 +17,15 @@ if [ -z "$root" ] || [ ! -d /proc ]; then
 fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/perf-process-metrics.sh"
-perf_proc_python - "$root" "$duration" "$output" <<'PY'
+perf_proc_python - "$root" "$duration" "$output" \
+  "${QPX_PERF_WEBDAV_SOCKET_DIAGNOSTICS:-0}" \
+  "${QPX_PROXY_COMPARE_QPX_WEBDAV_PORT:-18092}" \
+  "${QPX_PROXY_COMPARE_APACHE_PORT:-18083}" <<'PY'
 import csv
+import contextlib
+import json
 import os
+import subprocess
 import sys
 import time
 
@@ -28,6 +34,13 @@ duration = float(sys.argv[2])
 output = sys.argv[3]
 
 INTERVAL = 0.01
+socket_diagnostics = sys.argv[4]
+if socket_diagnostics not in ("0", "1"):
+    raise SystemExit("WebDAV socket diagnostics must be 0 or 1")
+qpx_port, reference_port = map(int, sys.argv[5:7])
+if not all(0 < port < 65536 for port in (qpx_port, reference_port)):
+    raise SystemExit("WebDAV socket diagnostic ports are invalid")
+socket_filter = f"( sport = :{qpx_port} or sport = :{reference_port} )"
 
 
 def all_pids():
@@ -94,7 +107,11 @@ if not os.path.isdir(f"/proc/{root}"):
     raise SystemExit("thread diagnostic root process does not exist")
 
 deadline = time.monotonic() + duration
-with open(output, "w", newline="") as out:
+with contextlib.ExitStack() as stack:
+    out = stack.enter_context(open(output, "w", newline=""))
+    sockets = (stack.enter_context(open(output + ".sockets.jsonl", "w"))
+               if socket_diagnostics == "1" else None)
+    next_socket_sample = time.monotonic()
     writer = csv.writer(out)
     writer.writerow(("epoch_ms", "monotonic_ns", "pid", "tid", "state", "wchan",
                      "utime", "stime", "comm", "run_ns", "queue_delay_ns",
@@ -102,9 +119,20 @@ with open(output, "w", newline="") as out:
     while time.monotonic() < deadline:
         stamp = int(time.time() * 1000)
         monotonic = time.monotonic_ns()
-        for pid in all_pids():
+        pids = all_pids()
+        for pid in pids:
             for row in sample_threads(pid):
                 writer.writerow((stamp, monotonic, *row))
         out.flush()
+        if sockets is not None and time.monotonic() >= next_socket_sample:
+            started = time.monotonic_ns()
+            result = subprocess.run(["ss", "-tinpH", "state", "established", socket_filter],
+                                    check=True, capture_output=True, text=True, timeout=5)
+            sockets.write(json.dumps({"monotonic_ns": started,
+                                      "finished_monotonic_ns": time.monotonic_ns(),
+                                      "root_pid": int(root), "process_ids": pids,
+                                      "filter": socket_filter, "raw": result.stdout}) + "\n")
+            sockets.flush()
+            next_socket_sample = time.monotonic() + 0.5
         time.sleep(INTERVAL)
 PY
