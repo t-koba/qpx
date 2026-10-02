@@ -492,3 +492,21 @@ Key cost signals:
 - `qpx_tunnel_*`
 
 Use `qpxd explain --format json` before rollout to identify routes that can buffer and why.
+
+HTTP/2 completion processing now drives the connection after at most eight
+ready completions, after an admission poll, or immediately after the final
+outstanding stream completes. The native 1 KiB/100-stream profile attributed
+2.19% of its second timed window to the connection driver itself; the change
+avoids flushing each already-ready completion separately while preserving
+flow-control progress. Real TCP regressions cover 128 responses and concurrent
+slow readers with bodies larger than the connection flow-control window.
+This is a candidate optimization until normal Linux comparisons pass.
+
+Closed-idle origin tests synchronize with TCP EOF on the pooled client socket,
+rather than treating a server-side close notification as proof that the client
+has received FIN. Every pooled raw HTTP/1 connection is probed on reuse; the
+previous five-second probe exemption is removed. No new request retry is added.
+The native proxy diagnostic also preserves bounded memory-copy caller reports
+for each second timed window, with absolute sample percentages. These reports
+identify the remaining copy paths without treating instruction counts or
+instrumented timings as acceptance measurements.
