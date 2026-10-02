@@ -542,7 +542,10 @@ run_one() {
       total_fd_peak="$fd_peak"
       total_fd_growth="$fd_growth"
     fi
-    total_scheduler_run_delay_ns="$(awk -v resource_before="$scheduler_before_ns" -v resource_after="$scheduler_after_ns" -v backend_before="$backend_scheduler_before_ns" -v backend_after="$backend_scheduler_after_ns" 'BEGIN { delta = (resource_after - resource_before) + (backend_after - backend_before); if (delta < 0) { print "scheduler queue delay decreased" > "/dev/stderr"; exit 1 }; printf "%.0f", delta }')"
+    local resource_scheduler_delta backend_scheduler_delta
+    resource_scheduler_delta="$(monotonic_counter_delta "scheduler delay nanoseconds" "$scheduler_before_ns" "$scheduler_after_ns")"
+    backend_scheduler_delta="$(monotonic_counter_delta "backend scheduler delay nanoseconds" "$backend_scheduler_before_ns" "$backend_scheduler_after_ns")"
+    total_scheduler_run_delay_ns=$((resource_scheduler_delta + backend_scheduler_delta))
     valid="$(python3 - "$metrics" <<'PY'
 import json
 import sys

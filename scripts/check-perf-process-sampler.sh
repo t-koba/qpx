@@ -125,6 +125,11 @@ for record in (before, after):
     assert all(0 < row['resolution_ns'] <= 1_000_000 for row in record['processes'])
     assert record['finished_monotonic_ns'] >= record['started_monotonic_ns']
 PY_CPU
+monotonic_counter_delta "real process CPU milliseconds" "$cpu_before" "$cpu_after" >"$work/monotonic-cpu-delta"
+if monotonic_counter_delta "reversed real process CPU milliseconds" "$cpu_after" "$cpu_before" >"$work/reversed-cpu-delta" 2>"$work/reversed-cpu-error"; then
+  echo "Reversed real CPU observations produced a valid counter delta" >&2
+  exit 1
+fi
 kill "$root"
 wait "$root" || true
 if process_tree_fd_count "$root" >"$work/terminated-count" 2>"$work/terminated-error"; then

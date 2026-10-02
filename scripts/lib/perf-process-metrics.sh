@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
 
+monotonic_counter_delta() {
+  local metric="$1" before="$2" after="$3"
+  awk -v metric="$metric" -v before="$before" -v after="$after" 'BEGIN {
+    delta = after - before
+    if (delta < 0) {
+      printf "Invalid measurement: %s decreased from %s to %s (delta %.0f; minimum 0)\n", metric, before, after, delta > "/dev/stderr"
+      exit 1
+    }
+    printf "%.0f", delta
+  }'
+}
+
 clock_ticks() {
   getconf CLK_TCK 2>/dev/null || echo 100
 }

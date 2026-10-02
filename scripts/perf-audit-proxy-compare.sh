@@ -1401,7 +1401,7 @@ LUA
     if [ "$kernel_resource_metrics" = true ]; then
       scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
     fi
-    scheduler_run_delay_ns="$(awk -v before="$scheduler_before_ns" -v after="$scheduler_after_ns" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    scheduler_run_delay_ns="$(monotonic_counter_delta "scheduler delay nanoseconds" "$scheduler_before_ns" "$scheduler_after_ns")"
     if [ "$wrk_succeeded" != true ]; then
       echo "wrk failed for ${proxy} attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       cat "$out" >&2 || true
@@ -1422,14 +1422,16 @@ LUA
     if [ -d /proc ]; then
       io_syscr_delta=$(( $(process_tree_io_counter "$resource_pid" "syscr") - io_syscr_before ))
       io_syscw_delta=$(( $(process_tree_io_counter "$resource_pid" "syscw") - io_syscw_before ))
-      [ "$io_syscr_delta" -lt 0 ] 2>/dev/null && io_syscr_delta=0
-      [ "$io_syscw_delta" -lt 0 ] 2>/dev/null && io_syscw_delta=0
+      if [ "$io_syscr_delta" -lt 0 ] || [ "$io_syscw_delta" -lt 0 ]; then
+        echo "Invalid measurement: process-tree I/O counters decreased (syscr delta $io_syscr_delta; syscw delta $io_syscw_delta; minimum 0)" >&2
+        exit 1
+      fi
       {
         echo "qpx_proc_io_syscr_delta $io_syscr_delta"
         echo "qpx_proc_io_syscw_delta $io_syscw_delta"
       } >>"$out"
     fi
-    cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    cpu_ms="$(monotonic_counter_delta "process-tree CPU milliseconds" "$cpu_before_ms" "$cpu_after_ms")"
     rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
     if [ "$mode" = "forward" ]; then
       status_after="$(safe_probe_forward_status "$port" "$probe_path")"

@@ -710,8 +710,8 @@ PY_DURATION
     else
       backend_cpu_after_ms="$(process_tree_cpu_ms "$backend_pid")"
     fi
-    cpu_ms="$(awk -v before="$cpu_before_ms" -v after="$cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
-    backend_cpu_ms="$(awk -v before="$backend_cpu_before_ms" -v after="$backend_cpu_after_ms" 'BEGIN { delta = after - before; if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    cpu_ms="$(monotonic_counter_delta "process-tree CPU milliseconds" "$cpu_before_ms" "$cpu_after_ms")"
+    backend_cpu_ms="$(monotonic_counter_delta "backend CPU milliseconds" "$backend_cpu_before_ms" "$backend_cpu_after_ms")"
     if [ "$resource_pid" = "$backend_pid" ]; then
       total_cpu_ms="$cpu_ms"
     else
@@ -740,7 +740,10 @@ PY_DURATION
       total_fd_peak="$fd_peak"
       total_fd_growth="$fd_growth"
     fi
-    total_scheduler_run_delay_ns="$(awk -v resource_before="$scheduler_before_ns" -v resource_after="$scheduler_after_ns" -v backend_before="$backend_scheduler_before_ns" -v backend_after="$backend_scheduler_after_ns" 'BEGIN { delta = (resource_after - resource_before) + (backend_after - backend_before); if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    local resource_scheduler_delta backend_scheduler_delta
+    resource_scheduler_delta="$(monotonic_counter_delta "scheduler delay nanoseconds" "$scheduler_before_ns" "$scheduler_after_ns")"
+    backend_scheduler_delta="$(monotonic_counter_delta "backend scheduler delay nanoseconds" "$backend_scheduler_before_ns" "$backend_scheduler_after_ns")"
+    total_scheduler_run_delay_ns=$((resource_scheduler_delta + backend_scheduler_delta))
     if [ -n "$profile_pid" ]; then
       wait "$profile_pid" || true
     fi

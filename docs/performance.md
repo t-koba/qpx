@@ -555,3 +555,10 @@ valid; failed samples cannot be discarded to obtain a passing majority. The
 gate verifies the minimum and maximum durations across all samples. Invalid
 samples retain their actual metrics, limits, and reasons in JSONL artifacts,
 and the raw per-request latency logs are retained for valid and invalid runs.
+
+CPU, scheduler-delay, and process-tree I/O counters must not decrease between
+observations. A decrease invalidates the measurement with the counter name,
+before/after values, delta, and zero lower bound; it is never clamped to zero.
+Proxy and backend scheduler counters are checked separately before summing so
+one process cannot hide a missing observation from another. The real process
+sampler check also verifies rejection of reversed real CPU observations.
