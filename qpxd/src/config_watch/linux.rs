@@ -46,13 +46,12 @@ impl ConfigFileWatcher {
             .ok_or_else(|| anyhow!("configuration path is not watched: {}", path.display()))?;
         // Different source paths can name the same inode. Keep its watch while
         // another source still owns the descriptor.
-        if !self.watches.values().any(|other| *other == descriptor) {
-            if let Err(error) = self.inotify.rm_watch(descriptor) {
-                // Atomic replacement can already have removed the inode watch.
-                if error.raw_os_error() != Some(libc::EINVAL) {
-                    return Err(error.into());
-                }
-            }
+        if !self.watches.values().any(|other| *other == descriptor)
+            && let Err(error) = self.inotify.rm_watch(descriptor)
+            && error.raw_os_error() != Some(libc::EINVAL)
+        {
+            // Atomic replacement can already have removed the inode watch.
+            return Err(error.into());
         }
         Ok(())
     }
