@@ -162,7 +162,7 @@ pub(super) async fn try_dispatch_unconditional_plain_reverse_request(
     Ok(Ok((interim, response)))
 }
 
-async fn execute_reverse_dispatch(
+pub(super) async fn execute_reverse_dispatch(
     req: Request<Body>,
     base: BaseRequestFields,
     reverse: &ReloadableReverse,
@@ -1136,7 +1136,7 @@ async fn complete_reverse_after_modules(
     })
     .await?;
     if override_upstream.is_none() && route.ipc.is_some() {
-        return dispatch_reverse_ipc_route(ReverseIpcDispatchInput {
+        return Box::pin(dispatch_reverse_ipc_route(ReverseIpcDispatchInput {
             base,
             state,
             conn,
@@ -1165,10 +1165,12 @@ async fn complete_reverse_after_modules(
             request_limits,
             request_limit_ctx,
             audit_ctx,
-        })
+        }))
         .await;
     }
-    dispatch_reverse_http_route(ReverseHttpDispatchInput {
+    // Cache hits return above without allocating either upstream dispatcher.
+    // Keep their larger retry and transport futures out of the cache-hit state.
+    Box::pin(dispatch_reverse_http_route(ReverseHttpDispatchInput {
         base,
         state,
         conn,
@@ -1202,7 +1204,7 @@ async fn complete_reverse_after_modules(
         request_limit_ctx,
         audit_ctx,
         connection_pool,
-    })
+    }))
     .await
 }
 

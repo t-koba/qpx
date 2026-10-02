@@ -1853,7 +1853,7 @@ done
 if proxy_selected qpxd-cache || proxy_selected nginx-cache; then
   body_bytes=1024
   round=1
-  while [ "$round" -le "$REQUESTED_SAMPLE_ATTEMPTS" ]; do
+  while [ "$round" -le "$REQUESTED_MISS_SAMPLE_ATTEMPTS" ]; do
     CURRENT_SAMPLE_ROUND="$round"
     if [ $((round % 2)) -eq 1 ]; then
       run_one "proxy_cache_miss_http1" "qpxd-cache" "$QPX_CACHE_PORT" "reverse" "/bench-${body_bytes}" "$HOST_HEADER" "$body_bytes" "$QPX_CACHE_PID" "cache-status" "miss"

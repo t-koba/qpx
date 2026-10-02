@@ -272,3 +272,29 @@ async fn cors_is_applied_to_generated_upstream_failure_response() {
         "true"
     );
 }
+
+#[tokio::test]
+async fn reverse_dispatch_future_keeps_cold_transports_out_of_inline_state() {
+    let reverse = build_cors_reverse();
+    let conn = connection();
+    let request = preflight_request(Version::HTTP_11, ALLOWED_ORIGIN);
+    let base = crate::http::protocol::base_fields::extract_base_request_fields(
+        &request,
+        Default::default(),
+    );
+    let state = reverse.runtime.state();
+    let future = super::super::dispatch::execute_reverse_dispatch(
+        request,
+        base,
+        &reverse,
+        &reverse.runtime,
+        &conn,
+        state,
+        None,
+    );
+    let bytes = std::mem::size_of_val(&future);
+    assert!(
+        bytes <= 24 * 1024,
+        "reverse dispatcher inline state exceeded its size budget: {bytes} bytes"
+    );
+}

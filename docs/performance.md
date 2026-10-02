@@ -62,8 +62,13 @@ sample; the outer reverse dispatcher contributed 36.76% through copies into
 its heap allocation. The dispatcher now constructs the pinned future in a
 separate function and boxes only the selected span variant. This preserves
 request-span behavior and avoids moving both inactive variants on the hot path.
-These diagnostic percentages are not throughput improvements; acceptance still
-requires three independent normal comparisons. The `origin-cache` diagnostic
+A second instruction profile still placed about 50% of its instructions in
+memory copies, now in that constructor. Boxing only the cold IPC/HTTP dispatch
+branches after a cache miss reduces the outer future from 30,488 to 20,544 bytes
+on the local ARM64 debug build; cache hits do not allocate those branches.
+The future-size regression uses a real compiled route and a 24 KiB budget.
+These diagnostic percentages and type sizes are not throughput improvements;
+acceptance still requires three independent normal comparisons. The `origin-cache` diagnostic
 runs the normal origin/cache workload and its unchanged objectives separately
 from instrumentation, to obtain focused feedback before the complete CI matrix.
 
