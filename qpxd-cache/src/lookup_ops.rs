@@ -71,6 +71,29 @@ pub async fn lookup(
             ));
         }
     }
+    // Keep asynchronous storage and revalidation state out of hot hits.
+    // The cold allocation is created only after the compound lookup misses.
+    Box::pin(lookup_from_storage(
+        request_method,
+        request_headers,
+        key,
+        req,
+        backend,
+        namespace,
+        revalidations,
+    ))
+    .await
+}
+
+async fn lookup_from_storage(
+    request_method: &Method,
+    request_headers: &http::HeaderMap,
+    key: &CacheRequestKey,
+    req: RequestDirectives,
+    backend: &Arc<dyn CacheBackend>,
+    namespace: &str,
+    revalidations: &Arc<crate::InFlightRevalidations>,
+) -> Result<LookupOutcome> {
     let variant_index =
         load_candidate_variant_keys(backend.as_ref(), namespace, key, request_method).await?;
     if variant_index.variants.is_empty() {
@@ -507,4 +530,21 @@ pub fn classify_for_request(
     }
 
     CacheEntryDisposition::RequiresRevalidation
+}
+
+#[cfg(test)]
+mod future_layout_tests {
+    #[test]
+    fn hot_lookup_does_not_embed_storage_lookup_state() {
+        fn future_size<I, O>(_: impl FnOnce(I) -> O) -> usize {
+            std::mem::size_of::<O>()
+        }
+        let bytes = future_size(|(method, headers, key, policy, backends, revalidations)| {
+            super::lookup(method, headers, key, policy, backends, revalidations)
+        });
+        assert!(
+            bytes <= 1024,
+            "hot cache lookup inline state exceeded its size budget: {bytes} bytes"
+        );
+    }
 }
