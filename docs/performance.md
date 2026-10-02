@@ -528,3 +528,12 @@ The `webdav-native` diagnostic profiles the normal 1 KiB and 1 MiB WebDAV
 workloads against Apache, retaining per-thread waiting snapshots and six timed
 CPU reports. It preserves the normal allocator environment and does not replace
 any required performance gate.
+
+The `http2-windows` experiment compares h2load's 30-bit default stream/connection
+windows against 24-bit windows, sequentially on the same runner with the same
+binary, 1 MiB bodies, and 100 streams. It records the wrapper and exact client
+settings and keeps all records explicitly diagnostic; required gates reject them.
+Each condition still enforces the existing finite 1.25 reference and 1.1 candidate
+throughput/CPU spread limits and requires complete clean samples. A failed first
+condition does not suppress evidence from the second condition. This diagnoses
+reference stalls without changing the required workload or its objectives.

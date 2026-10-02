@@ -16,7 +16,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, origin-cache, http2]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, origin-cache, http2, http2-windows]
         default: streaming
 
 permissions:
@@ -126,6 +126,9 @@ jobs:
               ;;
             streaming-native)
               QPX_NATIVE_WORKLOAD=streaming python3 scripts/perf-evaluate.py "native streaming CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
+              ;;
+            http2-windows)
+              python3 scripts/perf-evaluate.py "HTTP/2 client window diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-window.sh
               ;;
             http2)
               python3 scripts/perf-evaluate.py "http2 diagnostics" -- bash scripts/perf-audit-http2-compare.sh
