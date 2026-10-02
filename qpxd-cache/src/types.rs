@@ -346,6 +346,8 @@ pub struct CachedResponseEnvelope {
     /// Parsed response cache directives derived from `header_map`. They are immutable
     /// for the lifetime of an envelope, so repeated hot-cache lookups reuse one parse.
     pub response_directives: OnceLock<ResponseDirectives>,
+    /// Immutable response headers with per-hit fields removed once.
+    pub(crate) response_base_headers: OnceLock<Box<http::HeaderMap>>,
     /// Last rendered age-dependent response fields. Cache age advances in whole
     /// seconds, so all hits within the same second can share immutable values.
     pub(crate) response_header_values: OnceLock<Arc<ArcSwapOption<CachedResponseHeaderValues>>>,
@@ -366,6 +368,16 @@ impl CachedResponseEnvelope {
     pub fn header_map(&self) -> &http::HeaderMap {
         self.header_map
             .get_or_init(|| Box::new(super::entry::header_map_from_vec(&self.headers)))
+    }
+
+    pub(crate) fn response_base_headers(&self) -> &http::HeaderMap {
+        self.response_base_headers.get_or_init(|| {
+            let mut headers = self.header_map().clone();
+            headers.remove(http::header::AGE);
+            headers.remove(http::header::CONTENT_LENGTH);
+            headers.remove(http::header::CONTENT_RANGE);
+            Box::new(headers)
+        })
     }
 
     /// First case-insensitive value for `name` from the hydrated headers.
@@ -483,6 +495,7 @@ pub fn decode_cached_response_metadata(raw: Bytes) -> Result<CachedResponseEnvel
         vary_values: metadata.vary_values,
         header_map: OnceLock::new(),
         response_directives: OnceLock::new(),
+        response_base_headers: Default::default(),
         response_header_values: OnceLock::new(),
     })
 }
@@ -697,6 +710,7 @@ mod cache_status_tests {
             vary_values: Vec::new(),
             header_map: OnceLock::new(),
             response_directives: OnceLock::new(),
+            response_base_headers: Default::default(),
             response_header_values: OnceLock::new(),
         };
 

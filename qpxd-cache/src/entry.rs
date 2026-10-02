@@ -257,12 +257,9 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
     *response.status_mut() = status;
     const CACHE_RESPONSE_ADDITIONAL_HEADERS: usize = 5;
     *response.headers_mut() = qpx_http::header_pool::clone_map_with_additional_capacity(
-        params.envelope.header_map(),
+        params.envelope.response_base_headers(),
         CACHE_RESPONSE_ADDITIONAL_HEADERS,
     );
-    response.headers_mut().remove(AGE);
-    response.headers_mut().remove(CONTENT_LENGTH);
-    response.headers_mut().remove(CONTENT_RANGE);
     let current_age = current_age_secs(params.envelope, params.now_ms);
     let ttl = (params.cache_state == "HIT").then(|| {
         params

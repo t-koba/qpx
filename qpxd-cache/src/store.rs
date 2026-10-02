@@ -224,6 +224,7 @@ impl CacheWriteback {
                     vary_values,
                     header_map: std::sync::OnceLock::new(),
                     response_directives: std::sync::OnceLock::new(),
+                    response_base_headers: Default::default(),
                     response_header_values: std::sync::OnceLock::new(),
                 };
                 encode_cached_response_metadata(&envelope)
@@ -368,6 +369,7 @@ pub async fn revalidate_not_modified(
             ),
             header_map: std::sync::OnceLock::new(),
             response_directives: std::sync::OnceLock::new(),
+            response_base_headers: Default::default(),
             response_header_values: std::sync::OnceLock::new(),
         };
         return super::entry::response_from_envelope_for_request(
@@ -397,6 +399,7 @@ pub async fn revalidate_not_modified(
         ),
         header_map: std::sync::OnceLock::new(),
         response_directives: std::sync::OnceLock::new(),
+        response_base_headers: Default::default(),
         response_header_values: std::sync::OnceLock::new(),
     };
 
