@@ -12,9 +12,6 @@ use tokio::time::{Duration, sleep};
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use tokio::io::Interest;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use tokio::io::unix::AsyncFd;
-
 #[cfg(target_os = "linux")]
 const LOW_CONTENTION_ZERO_COPY_QUANTUM: u64 = 8 * 1024 * 1024;
 #[cfg(target_os = "linux")]
@@ -87,111 +84,79 @@ fn zero_copy_scheduling_quantum_for(
     }
 }
 
-pub(super) struct ZeroCopySocket {
+pub(super) type FileRegionSender<W> =
+    for<'a> fn(&'a mut W, &'a FileRegion) -> futures_util::future::BoxFuture<'a, io::Result<()>>;
+
+pub(super) fn tcp_file_region_sender() -> Option<FileRegionSender<TcpStream>> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    source_fd: RawFd,
+    return Some(|stream, region| Box::pin(send_file(stream, region)));
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    None
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-struct OwnedSocketFd(RawFd);
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-impl AsRawFd for OwnedSocketFd {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-impl Drop for OwnedSocketFd {
-    fn drop(&mut self) {
-        // SAFETY: this type exclusively owns the descriptor returned by dup.
-        unsafe {
-            libc::close(self.0);
-        }
-    }
-}
-
-impl ZeroCopySocket {
-    pub(super) fn for_tcp(stream: &TcpStream) -> Option<Self> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            Some(Self {
-                source_fd: stream.as_raw_fd(),
-            })
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            let _ = stream;
-            None
-        }
-    }
-
+pub(super) fn split_tcp_file_region_sender()
+-> Option<FileRegionSender<tokio::net::tcp::OwnedWriteHalf>> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn registered_socket(&self) -> io::Result<AsyncFd<OwnedSocketFd>> {
-        // SAFETY: source_fd belongs to the live TcpStream for this connection.
-        let fd = unsafe { libc::dup(self.source_fd) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        AsyncFd::new(OwnedSocketFd(fd))
-    }
+    return Some(|writer, region| {
+        Box::pin(async move { send_file(writer.as_ref(), region).await })
+    });
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    None
+}
 
-    pub(super) async fn send_file(&self, region: &FileRegion) -> io::Result<()> {
-        let _phase = crate::perf_diagnostics::phase_timer!("file_body_send");
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            let _transfer = ZeroCopyTransferGuard::begin();
-            let file_fd = region.file().as_raw_fd();
-            let mut offset = region.offset();
-            let end = offset
-                .checked_add(region.len())
-                .ok_or_else(|| io::Error::other("file region overflow"))?;
-            // The duplicate is needed because the TcpStream already owns a reactor
-            // registration for the original descriptor. Scope it to this transfer so
-            // idle keep-alive connections do not retain an additional descriptor.
-            let socket = self.registered_socket()?;
-            let mut bytes_since_yield = 0_u64;
-            while offset < end {
-                let scheduling_quantum = zero_copy_scheduling_quantum(ZeroCopyTransferKind::File);
-                let remaining = (end - offset).min(scheduling_quantum);
-                let written = socket
-                    .async_io(Interest::WRITABLE, |_| {
-                        sendfile_once(file_fd, socket.get_ref().as_raw_fd(), offset, remaining)
-                    })
-                    .await?;
-                if written == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "sendfile made no progress",
-                    ));
-                }
-                offset = offset.saturating_add(written as u64);
-                bytes_since_yield = bytes_since_yield.saturating_add(written as u64);
-                if offset < end && bytes_since_yield >= scheduling_quantum {
-                    bytes_since_yield = 0;
-                    if ACTIVE_ZERO_COPY_TRANSFERS.load(Ordering::Acquire)
-                        > CONTENDED_FILE_TRANSFER_THRESHOLD
-                    {
-                        // Cooperative budget accounting alone can defer the
-                        // handoff for many quanta. Enforce the file quantum
-                        // while peers are actively competing for the worker.
-                        tokio::task::yield_now().await;
-                    } else {
-                        tokio::task::consume_budget().await;
-                    }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Result<()> {
+    let _phase = crate::perf_diagnostics::phase_timer!("file_body_send");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _transfer = ZeroCopyTransferGuard::begin();
+        let file_fd = region.file().as_raw_fd();
+        let mut offset = region.offset();
+        let end = offset
+            .checked_add(region.len())
+            .ok_or_else(|| io::Error::other("file region overflow"))?;
+        // Reuse the writer's reactor registration instead of duplicating
+        // and registering its descriptor for every file response.
+        let mut bytes_since_yield = 0_u64;
+        while offset < end {
+            let scheduling_quantum = zero_copy_scheduling_quantum(ZeroCopyTransferKind::File);
+            let remaining = (end - offset).min(scheduling_quantum);
+            let written = stream
+                .async_io(Interest::WRITABLE, || {
+                    sendfile_once(file_fd, stream.as_raw_fd(), offset, remaining)
+                })
+                .await?;
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "sendfile made no progress",
+                ));
+            }
+            offset = offset.saturating_add(written as u64);
+            bytes_since_yield = bytes_since_yield.saturating_add(written as u64);
+            if offset < end && bytes_since_yield >= scheduling_quantum {
+                bytes_since_yield = 0;
+                if ACTIVE_ZERO_COPY_TRANSFERS.load(Ordering::Acquire)
+                    > CONTENDED_FILE_TRANSFER_THRESHOLD
+                {
+                    // Cooperative budget accounting alone can defer the
+                    // handoff for many quanta. Enforce the file quantum
+                    // while peers are actively competing for the worker.
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::task::consume_budget().await;
                 }
             }
-            Ok(())
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            let _ = region;
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "sendfile is unavailable on this platform",
-            ))
-        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (stream, region);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "sendfile is unavailable on this platform",
+        ))
     }
 }
 
@@ -576,8 +541,7 @@ mod tests {
         let address = listener.local_addr().expect("address");
         let client = TcpStream::connect(address).await.expect("connect");
         let (server, _) = listener.accept().await.expect("accept");
-        let zero_copy = ZeroCopySocket::for_tcp(&server).expect("zero-copy socket");
-        zero_copy.send_file(&region).await.expect("send file");
+        send_file(&server, &region).await.expect("send file");
 
         let mut received = [0_u8; 7];
         let mut client = client;
@@ -612,7 +576,7 @@ mod tests {
         let address = listener.local_addr().expect("address");
         let mut client = TcpStream::connect(address).await.expect("connect");
         let (mut server, _) = listener.accept().await.expect("accept");
-        let zero_copy = ZeroCopySocket::for_tcp(&server).expect("zero-copy socket");
+        let zero_copy = tcp_file_region_sender().expect("zero-copy sender");
         let mut head = BytesMut::new();
         super::super::response::send_http1_response_with_interim_zero_copy(
             &mut server,
@@ -623,7 +587,7 @@ mod tests {
             false,
             std::time::Duration::from_secs(1),
             &mut head,
-            Some(&zero_copy),
+            Some(zero_copy),
         )
         .await
         .expect("send response");
@@ -640,5 +604,49 @@ mod tests {
         );
         assert!(!received.ends_with(b"ignored"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn file_transfer_reuses_original_socket_descriptor_under_backpressure() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let file = tempfile::tempfile().expect("create transfer file");
+        file.set_len(4 * 1024 * 1024).expect("extend transfer file");
+        let mut body =
+            Body::empty().with_file_region_for_zero_copy(Arc::new(file), 0, 4 * 1024 * 1024);
+        let region = body
+            .take_file_region_without_trailers()
+            .expect("file region");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let client = TcpStream::connect(listener.local_addr().expect("listener address"))
+            .await
+            .expect("connect client");
+        let (server, _) = listener.accept().await.expect("accept client");
+        socket2::SockRef::from(&server)
+            .set_send_buffer_size(4096)
+            .expect("bound server send buffer");
+        let socket_target = std::fs::read_link(format!("/proc/self/fd/{}", server.as_raw_fd()))
+            .expect("socket descriptor identity");
+        let mut transfer = Box::pin(send_file(&server, &region));
+        assert!(
+            poll_fn(|cx| Poll::Ready(matches!(transfer.as_mut().poll(cx), Poll::Pending))).await,
+            "file transfer must wait for the slow client's receive window"
+        );
+        let matching_descriptors = std::fs::read_dir("/proc/self/fd")
+            .expect("process descriptors")
+            .map(|entry| entry.expect("descriptor entry").path())
+            .filter(|path| std::fs::read_link(path).is_ok_and(|target| target == socket_target))
+            .count();
+        assert_eq!(
+            matching_descriptors, 1,
+            "file transfer duplicated its socket descriptor"
+        );
+        drop(transfer);
+        drop(server);
+        drop(client);
     }
 }

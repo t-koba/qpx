@@ -27,7 +27,7 @@ pub(crate) use self::response::{
     send_http1_response_with_interim, send_raw_http1_response_relay_with_interim,
     send_static_http1_response,
 };
-use self::zero_copy::ZeroCopySocket;
+use self::zero_copy::{FileRegionSender, split_tcp_file_region_sender, tcp_file_region_sender};
 const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Sends a response on a plain TCP HTTP/1.1 connection, retaining the file-region
@@ -46,7 +46,7 @@ pub(crate) async fn send_http1_response_with_interim_tcp(
     body_read_timeout: Duration,
     head_buf: &mut BytesMut,
 ) -> Result<bool> {
-    let zero_copy = ZeroCopySocket::for_tcp(writer);
+    let zero_copy = tcp_file_region_sender();
     response::send_http1_response_with_interim_zero_copy(
         writer,
         request_version,
@@ -56,7 +56,7 @@ pub(crate) async fn send_http1_response_with_interim_tcp(
         request_keep_alive,
         body_read_timeout,
         head_buf,
-        zero_copy.as_ref(),
+        zero_copy,
     )
     .await
 }
@@ -91,10 +91,10 @@ where
     Spawned(JoinHandle<BodyReadResult<R>>),
 }
 
-struct ServeHttp1PartsOptions<U> {
+struct ServeHttp1PartsOptions<W, U> {
     header_read_timeout: Duration,
     body_channel_capacity: usize,
-    zero_copy: Option<ZeroCopySocket>,
+    zero_copy: Option<FileRegionSender<W>>,
     reunite: U,
 }
 
@@ -158,7 +158,7 @@ where
         + Sync
         + 'static,
 {
-    let zero_copy = ZeroCopySocket::for_tcp(&io);
+    let zero_copy = split_tcp_file_region_sender();
     let read_buf = prefix
         .try_into_mut()
         .unwrap_or_else(|prefix| BytesMut::from(prefix.as_ref()));
@@ -188,7 +188,7 @@ async fn serve_http1_parts<R, W, S, U, I>(
     mut write_half: W,
     mut read_buf: BytesMut,
     service: S,
-    options: ServeHttp1PartsOptions<U>,
+    options: ServeHttp1PartsOptions<W, U>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -327,7 +327,7 @@ where
             parsed.keep_alive,
             header_read_timeout,
             &mut response_head_buf,
-            zero_copy.as_ref(),
+            zero_copy,
         )
         .await?;
 

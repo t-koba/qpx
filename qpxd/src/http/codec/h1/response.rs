@@ -1,4 +1,4 @@
-use super::zero_copy::ZeroCopySocket;
+use super::zero_copy::FileRegionSender;
 use super::{RESPONSE_WRITE_TIMEOUT, has_chunked_transfer_encoding, parse_declared_content_length};
 use crate::http::codec::h1_common::serialize_headers;
 use crate::http::codec::lazy_timeout::timeout_after_pending;
@@ -161,7 +161,7 @@ pub(super) async fn send_http1_response_with_interim_zero_copy<W>(
     request_keep_alive: bool,
     body_read_timeout: Duration,
     head_buf: &mut BytesMut,
-    zero_copy: Option<&ZeroCopySocket>,
+    zero_copy: Option<FileRegionSender<W>>,
 ) -> Result<bool>
 where
     W: AsyncWrite + Unpin,
@@ -355,7 +355,7 @@ where
             if let Some(region) = file_region {
                 write_all_with_timeout(writer, head).await?;
                 let socket = zero_copy.ok_or_else(|| anyhow!("zero-copy socket is unavailable"))?;
-                timeout_after_pending(RESPONSE_WRITE_TIMEOUT, socket.send_file(&region))
+                timeout_after_pending(RESPONSE_WRITE_TIMEOUT, socket(writer, &region))
                     .await
                     .map_err(|_| anyhow!("HTTP/1 zero-copy response write timed out"))??;
                 return Ok(keep_alive);
