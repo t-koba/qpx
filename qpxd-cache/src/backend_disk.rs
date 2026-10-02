@@ -206,6 +206,7 @@ impl DiskCacheHeader {
 }
 
 struct DiskCacheRead {
+    file: File,
     path: PathBuf,
     header: DiskCacheHeader,
     body_offset: u64,
@@ -385,7 +386,8 @@ impl DiskCacheBackend {
         self.ensure_indexed().await?;
         let read = match read_disk_cache_header_sync(&path) {
             Ok(read) => read,
-            Err(_) => return Ok(None),
+            Err(error) if cache_file_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error),
         };
         if read.header.expires_at_ms <= now_ms() {
             self.delete_path(&path).await;
@@ -902,9 +904,7 @@ impl CacheBackend for DiskCacheBackend {
         let Some(read) = self.open_valid(path).await? else {
             return Ok(None);
         };
-        let mut file = TokioFile::open(&read.path).await?;
-        file.seek(std::io::SeekFrom::Start(read.body_offset))
-            .await?;
+        let file = TokioFile::from_std(read.file);
         let mut out = Vec::with_capacity(read.header.body_len.min(usize::MAX as u64) as usize);
         file.take(read.header.body_len)
             .read_to_end(&mut out)
@@ -1097,9 +1097,7 @@ impl CacheBackend for DiskCacheBackend {
             return Ok(None);
         }
         if read.header.body_len <= self.hot_max_object_bytes {
-            let mut file = TokioFile::open(&read.path).await?;
-            file.seek(std::io::SeekFrom::Start(read.body_offset))
-                .await?;
+            let file = TokioFile::from_std(read.file);
             let mut out = Vec::with_capacity(read.header.body_len as usize);
             file.take(read.header.body_len)
                 .read_to_end(&mut out)
@@ -1134,8 +1132,10 @@ impl CacheBackend for DiskCacheBackend {
         let (mut sender, body) = Body::channel_with_capacity(16);
         tokio::spawn(async move {
             let result = async {
-                let mut file = TokioFile::open(&read.path).await?;
-                file.seek(std::io::SeekFrom::Start(start_offset)).await?;
+                let mut file = TokioFile::from_std(read.file);
+                if start_offset != read.body_offset {
+                    file.seek(std::io::SeekFrom::Start(start_offset)).await?;
+                }
                 let mut remaining = body_len;
                 let mut buf = BytesMut::with_capacity(DISK_CACHE_CHUNK_BYTES);
                 while remaining > 0 {
@@ -1461,11 +1461,29 @@ fn collect_cache_files_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn cache_file_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
 fn read_disk_cache_header_sync(path: &Path) -> Result<DiskCacheRead> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Validate and open the same object; a separate lstat both duplicates
+        // miss I/O and leaves a symlink replacement window before open.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(not(unix))]
     reject_symlink(path)?;
-    let mut file = File::open(path)?;
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to open disk cache object {}", path.display()))?;
     let meta = file.metadata()?;
-    let mut magic = vec![0; DISK_CACHE_MAGIC.len()];
+    let mut magic = [0; DISK_CACHE_MAGIC.len()];
     file.read_exact(&mut magic)?;
     if magic != DISK_CACHE_MAGIC {
         return Err(anyhow!("invalid disk cache object magic"));
@@ -1493,6 +1511,7 @@ fn read_disk_cache_header_sync(path: &Path) -> Result<DiskCacheRead> {
         ));
     }
     Ok(DiskCacheRead {
+        file,
         path: path.to_path_buf(),
         header,
         body_offset,
@@ -1501,10 +1520,10 @@ fn read_disk_cache_header_sync(path: &Path) -> Result<DiskCacheRead> {
 }
 
 fn read_metadata_trailer_sync(path: &Path) -> Result<Option<Bytes>> {
-    // Same semantics as open_valid: an unreadable object is a miss, not a
-    // lookup failure; the entry is re-fetchable from the origin.
-    let Ok(read) = read_disk_cache_header_sync(path) else {
-        return Ok(None);
+    let read = match read_disk_cache_header_sync(path) {
+        Ok(read) => read,
+        Err(error) if cache_file_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error),
     };
     if read.header.meta_len == 0 {
         return Ok(None);
@@ -1512,7 +1531,7 @@ fn read_metadata_trailer_sync(path: &Path) -> Result<Option<Bytes>> {
     if read.header.expires_at_ms <= now_ms() {
         return Ok(None);
     }
-    let mut file = File::open(path)?;
+    let mut file = read.file;
     let trailer_start = read.total_len - 4 - read.header.meta_len;
     file.seek(std::io::SeekFrom::Start(trailer_start))?;
     let mut len = [0u8; 4];
@@ -2342,6 +2361,69 @@ mod tests {
             "unexpected error: {err}"
         );
         let _ = fs::remove_file(link);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_backend_preserves_validated_file_snapshot_after_replacement() {
+        let dir = temp_dir("validated-file-snapshot");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend
+            .put("ns", "key", b"original", 60)
+            .await
+            .expect("put original");
+        let path = backend.path_for("ns", "key");
+        let mut read = read_disk_cache_header_sync(&path).expect("validated original file");
+        write_cached_bytes_sync(&path, Bytes::from_static(b"replaced"), 60)
+            .expect("replace object atomically");
+        let mut snapshot = Vec::new();
+        read.file
+            .read_to_end(&mut snapshot)
+            .expect("read validated descriptor");
+        assert_eq!(snapshot, b"original");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_backend_reports_read_errors_instead_of_cache_misses() {
+        let dir = temp_dir("read-error-propagation");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend
+            .ensure_indexed()
+            .await
+            .expect("initialize cache index");
+        assert!(
+            backend
+                .get("ns", "absent")
+                .await
+                .expect("absent object")
+                .is_none()
+        );
+        let path = backend.path_for("ns", "directory");
+        ensure_private_dir(path.parent().expect("object parent")).expect("create object parent");
+        fs::create_dir(&path).expect("create invalid object directory");
+        assert!(backend.get("ns", "directory").await.is_err());
+        assert!(read_metadata_trailer_sync(&path).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disk_backend_rejects_symlinked_object_reads() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("symlinked-object-read");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend
+            .put("ns", "source", b"protected", 60)
+            .await
+            .expect("put source");
+        let source = backend.path_for("ns", "source");
+        let path = backend.path_for("ns", "link");
+        ensure_private_dir(path.parent().expect("object parent")).expect("create object parent");
+        symlink(&source, &path).expect("create object symlink");
+        assert!(backend.get("ns", "link").await.is_err());
+        assert!(read_metadata_trailer_sync(&path).is_err());
         let _ = fs::remove_dir_all(dir);
     }
 }
