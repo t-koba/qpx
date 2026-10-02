@@ -26,7 +26,7 @@ summary. Invalid sample diagnostics remain in the full log and summary.
 For three independent Linux comparisons, dispatch CI on the implementation
 branch with `repeat_perf=true` and an explicit `baseline_ref` commit. HTTP/1,
 HTTP/2, and streaming each run on three separate Ubuntu 24.04 runners. A shared build job builds the baseline and candidate before any comparison,
-and every HTTP/1 runner runs both revisions sequentially with the candidate's
+and every HTTP/1, HTTP/2, and streaming runner runs both revisions sequentially with the candidate's
 measurement harness. Run 2 reverses revision order. HTTP/1, HTTP/2, streaming,
 and netem use the same artifact binaries built with Rust 1.98.1; every runner
 verifies the revision, compiler, executable permissions, and SHA-256 checksum

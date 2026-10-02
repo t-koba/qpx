@@ -5,7 +5,23 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASELINE_BIN="${QPX_PERF_BASELINE_BIN:?QPX_PERF_BASELINE_BIN is required}"
 CURRENT_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
 REPETITION="${QPX_PERF_REPETITION:?QPX_PERF_REPETITION is required}"
-OUT_JSON="${QPX_PROXY_COMPARE_JSON:?QPX_PROXY_COMPARE_JSON is required}"
+CATEGORY="${1:-proxy}"
+OUT_JSON="${2:-${QPX_PROXY_COMPARE_JSON:?comparison output is required}}"
+case "$CATEGORY" in
+  proxy)
+    harness="perf-audit-proxy-matrix.sh"
+    log_variable="QPX_PROXY_MATRIX_LOG_DIR"
+    ;;
+  http2)
+    harness="perf-audit-http2-compare.sh"
+    log_variable="QPX_HTTP2_COMPARE_LOG_DIR"
+    ;;
+  streaming)
+    harness="perf-audit-streaming-compare.sh"
+    log_variable="QPX_STREAMING_COMPARE_LOG_DIR"
+    ;;
+  *) echo "unsupported comparison category: $CATEGORY" >&2; exit 2 ;;
+esac
 
 case "$REPETITION" in
   1|2|3) ;;
@@ -29,18 +45,18 @@ failed=0
 for revision in $revisions; do
   binary="$CURRENT_BIN"
   output="$OUT_JSON"
-  logs="$ROOT_DIR/target/perf/proxy-compare-logs"
+  logs="$ROOT_DIR/target/perf/${CATEGORY}-compare-logs"
   revision_sha="${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
   if [ "$revision" = baseline ]; then
     binary="$BASELINE_BIN"
     revision_sha="${QPX_PERF_BASELINE_SHA:?QPX_PERF_BASELINE_SHA is required}"
-    output="$ROOT_DIR/target/perf/perf-audit-baseline-proxy-compare.jsonl"
-    logs="$ROOT_DIR/target/perf/baseline-proxy-compare-logs"
+    output="$ROOT_DIR/target/perf/perf-audit-baseline-${CATEGORY}-compare.jsonl"
+    logs="$ROOT_DIR/target/perf/baseline-${CATEGORY}-compare-logs"
   fi
-  if ! GITHUB_SHA="$revision_sha" QPXD_BIN="$binary" QPX_PROXY_MATRIX_LOG_DIR="$logs" \
-    python3 "$ROOT_DIR/scripts/perf-evaluate.py" "$revision proxy comparison" -- \
-      bash "$ROOT_DIR/scripts/perf-audit-proxy-matrix.sh" "$output"; then
-    echo "$revision proxy comparison failed" >&2
+  if ! env GITHUB_SHA="$revision_sha" QPXD_BIN="$binary" "$log_variable=$logs" \
+    python3 "$ROOT_DIR/scripts/perf-evaluate.py" "$revision $CATEGORY comparison" -- \
+      bash "$ROOT_DIR/scripts/$harness" "$output"; then
+    echo "$revision $CATEGORY comparison failed" >&2
     failed=1
   fi
 done

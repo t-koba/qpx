@@ -696,9 +696,17 @@ jobs:
         continue-on-error: true
         env:
           QPX_HTTP2_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-http2-compare.jsonl
+          QPX_PERF_REPEAT: ${{ inputs.repeat_perf && '1' || '0' }}
+          QPX_PERF_REPETITION: ${{ matrix.repetition }}
+          QPX_PERF_BASELINE_SHA: ${{ steps.build_baseline.outputs.sha }}
+          QPX_PERF_BASELINE_BIN: ${{ github.workspace }}/target/perf-baseline-build/release/qpxd
         run: |
           python3 scripts/perf-evaluate.py "external http2 comparison bench" -- bash -euo pipefail <<'PERF_STEP'
-          scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
+          if [ "$QPX_PERF_REPEAT" = 1 ]; then
+            scripts/perf-audit-revision-compare.sh http2 "$QPX_HTTP2_COMPARE_JSON"
+          else
+            scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
+          fi
           PERF_STEP
       - name: enforce http2 performance objectives
         id: enforce_http2_performance_objectives
@@ -738,6 +746,7 @@ jobs:
             target/perf/streaming-compare-logs/**
             target/perf/profiles/**
             target/perf/evaluations/**
+            target/perf/baseline-http2-compare-logs/**
           if-no-files-found: ignore
 
   perf_audit_streaming:
@@ -775,9 +784,17 @@ jobs:
         continue-on-error: true
         env:
           QPX_STREAMING_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-streaming-compare.jsonl
+          QPX_PERF_REPEAT: ${{ inputs.repeat_perf && '1' || '0' }}
+          QPX_PERF_REPETITION: ${{ matrix.repetition }}
+          QPX_PERF_BASELINE_SHA: ${{ steps.build_baseline.outputs.sha }}
+          QPX_PERF_BASELINE_BIN: ${{ github.workspace }}/target/perf-baseline-build/release/qpxd
         run: |
           python3 scripts/perf-evaluate.py "external long streaming comparison bench" -- bash -euo pipefail <<'PERF_STEP'
-          scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"
+          if [ "$QPX_PERF_REPEAT" = 1 ]; then
+            scripts/perf-audit-revision-compare.sh streaming "$QPX_STREAMING_COMPARE_JSON"
+          else
+            scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"
+          fi
           PERF_STEP
       - name: enforce streaming performance objectives
         id: enforce_streaming_performance_objectives
@@ -817,6 +834,7 @@ jobs:
             target/perf/streaming-compare-logs/**
             target/perf/profiles/**
             target/perf/evaluations/**
+            target/perf/baseline-streaming-compare-logs/**
           if-no-files-found: ignore
 
   perf_audit_allocation:
