@@ -204,7 +204,4 @@ PY_NAMESPACE
     status=1
   fi
 done
-if [ "$1" = --inside-full-client ]; then
-  python3 "$ROOT_DIR/scripts/summarize-perf-client.py" "$QPX_NATIVE_PROFILE_DIR" "$QPX_NATIVE_PERF_BIN" || status=1
-fi
 exit "$status"

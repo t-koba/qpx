@@ -227,6 +227,15 @@ jobs:
               ;;
             *) echo "unsupported diagnostic category: $CATEGORY" >&2; exit 2 ;;
           esac
+      - name: summarize retained load-generator CPU profiles
+        if: always() && inputs.category == 'http2-client'
+        run: |
+          profiles=(target/perf/profiles/http2-mtu.*/client-profiles)
+          if [ "${#profiles[@]}" -ne 1 ] || [ ! -d "${profiles[0]}" ]; then
+            echo "load-generator CPU profile directory is missing or ambiguous" >&2
+            exit 1
+          fi
+          python3 scripts/summarize-perf-client.py "${profiles[0]}" "$QPX_NATIVE_PERF_BIN"
       - name: upload diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v7
