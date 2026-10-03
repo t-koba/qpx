@@ -3,12 +3,32 @@ use super::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reverse_combined_log_preserves_downstream_headers_on_reused_generic_requests() -> Result<()>
 {
+    verify_reused_generic_request_combined_log(false).await?;
+    if cfg!(unix) {
+        verify_reused_generic_request_combined_log(true).await?;
+    }
+    Ok(())
+}
+
+async fn verify_reused_generic_request_combined_log(use_file_log: bool) -> Result<()> {
     let dir = fs::canonicalize(temp_dir("qpxd-reverse-combined-log-e2e")?)?;
     let cfg = dir.join("reverse.yaml");
     let access_path = dir.join("access.log");
+    let process_log_path = dir.join("qpxd.log");
+    // File logging requires the Unix directory-protection implementation.
+    // Other platforms exercise the same combined writer through stdout.
+    let access_path_config = if use_file_log {
+        format!("    path: {}\n", yaml_quote_path(&access_path))
+    } else {
+        String::new()
+    };
+    let captured_access_path = if use_file_log {
+        &access_path
+    } else {
+        &process_log_path
+    };
     let (origin_addr, origin_hits) = start_text_backend("OK", Vec::new()).await?;
-    let (port, qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("qpxd.log"), |port| {
-        let access_path = yaml_quote_path(&access_path);
+    let (port, qpxd) = spawn_qpxd_on_random_port(&cfg, process_log_path.clone(), |port| {
         format!(
             r#"runtime:
   acceptor_tasks_per_listener: 1
@@ -17,8 +37,7 @@ telemetry:
   access_log:
     enabled: true
     format: combined
-    path: {access_path}
-    rotation: never
+{access_path_config}    rotation: never
     redact:
       query_keys: [token]
 upstreams:
@@ -68,7 +87,14 @@ edges:
     .context("response timeout")??;
     let log = timeout(Duration::from_secs(5), async {
         loop {
-            let log = fs::read_to_string(&access_path)?;
+            let log = fs::read_to_string(captured_access_path)?;
+            let log = log
+                .lines()
+                .filter(|line| {
+                    line.contains("\"GET /asset?token=") || line.contains("\"GET /other?token=")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             if log.lines().count() >= 3 {
                 return Ok::<_, anyhow::Error>(log);
             }

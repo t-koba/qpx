@@ -1438,3 +1438,13 @@ paths. All 1,309 workspace tests across 47 suites pass, along with all-feature
 Clippy, formatting, structure, and unchanged required-gate checks. Native
 profiles and normal HTTP/2 measurements must still verify instruction copies,
 tail latency, throughput, and RSS before this trial can be adopted.
+
+Normal CI `37159560609` exposes an invalid assumption in the new combined-log
+regression: Windows file logging intentionally refuses operation without the
+required private-ACL/reparse-point protection. The regression now always
+exercises the existing stdout sink and additionally exercises the file sink on
+Unix. Both use a real qpxd child and TCP origin, verify exactly three original
+downstream records, and reject rewritten headers and unredacted secrets.
+The two real sink paths pass the focused macOS test; Windows CI must still
+verify its stdout path. Production logging and platform security remain
+unchanged.
