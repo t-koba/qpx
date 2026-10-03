@@ -89,19 +89,17 @@ pub(super) fn dispatch_reverse_request<'a>(
             host = %base.host().unwrap_or(""),
             method = %base.method,
         );
-        return Box::pin(
+        let storage = Box::new_uninit();
+        return Box::into_pin(Box::write(
+            storage,
             execute_reverse_dispatch(req, base, reverse, runtime, conn, state, connection_pool)
                 .instrument(span),
-        );
+        ));
     }
-    Box::pin(execute_reverse_dispatch(
-        req,
-        base,
-        reverse,
-        runtime,
-        conn,
-        state,
-        connection_pool,
+    let storage = Box::new_uninit();
+    Box::into_pin(Box::write(
+        storage,
+        execute_reverse_dispatch(req, base, reverse, runtime, conn, state, connection_pool),
     ))
 }
 
@@ -440,7 +438,10 @@ fn execute_reverse_request<'a>(
     conn: &'a ReverseConnInfo,
     connection_pool: Option<&'a PreparedPlainHttp1ConnectionAffinity>,
 ) -> futures_util::future::BoxFuture<'a, Result<(InterimList, Response<Body>)>> {
-    Box::pin(async move {
+    // Allocate before constructing the state machine so initialization can
+    // target its final storage without copying the inactive future state.
+    let storage = Box::new_uninit();
+    Box::into_pin(Box::write(storage, async move {
         let PreparedReverseRequest {
             mut req,
             context,
@@ -667,7 +668,7 @@ fn execute_reverse_request<'a>(
         })
         .await?;
         Ok(attach_streaming_limits(result, streaming, request_version))
-    })
+    }))
 }
 
 async fn collect_browser_reports(
