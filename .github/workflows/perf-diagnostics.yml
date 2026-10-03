@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, webdav-sockets, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, scheduler-accounting]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, webdav-sockets, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for the same-runner WebDAV comparison
@@ -235,6 +235,9 @@ jobs:
               ;;
             http2-affinity)
               python3 scripts/perf-evaluate.py "HTTP/2 CPU partition quality diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-mtu.sh --full-affinity
+              ;;
+            http2-balanced-affinity)
+              python3 scripts/perf-evaluate.py "HTTP/2 balanced CPU partition diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-mtu.sh --balanced-affinity
               ;;
             http2-client)
               python3 scripts/perf-evaluate.py "HTTP/2 load-generator CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-mtu.sh --full-client

@@ -141,6 +141,7 @@ if DIAGNOSTIC:
         manifest = json.load(handle)
     if (manifest.get("measurement") not in ("http2_isolated_mtu_v3", "http2_isolated_full_quality_v1",
                                                 "http2_isolated_full_affinity_quality_v1",
+                                                "http2_isolated_balanced_affinity_quality_v1",
                                                 "http2_client_cpu_profile_v1")
             or manifest.get("diagnostic_instrumentation") is not True
             or manifest.get("replaces_required_gate") is not False
@@ -150,12 +151,14 @@ if DIAGNOSTIC:
         fail("unsupported or unisolated HTTP/2 diagnostic manifest")
     diagnostic_full_matrix = manifest["measurement"] in (
         "http2_isolated_full_quality_v1", "http2_isolated_full_affinity_quality_v1",
+        "http2_isolated_balanced_affinity_quality_v1",
         "http2_client_cpu_profile_v1")
     if manifest["measurement"] == "http2_client_cpu_profile_v1":
         if (manifest.get("client_usage_includes_profiler") is not True
                 or manifest.get("client_cpu_profiler") != "perf cpu-clock at 199 Hz without call graphs"):
             fail("HTTP/2 client CPU diagnostic lacks profiler provenance")
-    if manifest["measurement"] == "http2_isolated_full_affinity_quality_v1":
+    if manifest["measurement"] in ("http2_isolated_full_affinity_quality_v1",
+                                   "http2_isolated_balanced_affinity_quality_v1"):
         cpu_sets = []
         for field in ("available_cpus", "client_cpus", "server_cpus"):
             values = manifest.get(field)
@@ -165,7 +168,9 @@ if DIAGNOSTIC:
                 fail(f"invalid HTTP/2 diagnostic CPU set: {field}")
             cpu_sets.append(set(values))
         available, client, server = cpu_sets
-        if len(client) != 1 or client & server or client | server != available:
+        balanced = manifest["measurement"] == "http2_isolated_balanced_affinity_quality_v1"
+        if (len(client) != (2 if balanced else 1) or len(server) < (2 if balanced else 1)
+                or client & server or client | server != available):
             fail("HTTP/2 diagnostic CPU sets must form a disjoint available-CPU partition")
     if diagnostic_full_matrix:
         if (set(positive_int_list(manifest, "required_body_bytes")) != set(required_body_bytes)

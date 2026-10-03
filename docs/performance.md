@@ -984,3 +984,31 @@ MITM, and transparent callers use the same internal interface; obsolete owned
 helper signatures are removed. Existing real shared-memory capture tests and
 the full workspace validate the behavior. Refreshed profiles and normal
 comparisons must establish the performance effect of this trial.
+
+The first client CPU diagnostic (`37138641272`) preserved 161 raw profiles,
+but its initial report step ran as root against files owned by the invoking
+runner and its new manifest was missing from the diagnostic quality checker.
+Report generation now runs as the owning runner in an always-run workflow step;
+the checker validates the diagnostic's explicit profiler provenance using the
+unchanged full matrix limits. Run `37140288891` reanalyzed the original data
+without sending any new requests and retained the source and analysis run IDs.
+All four lanes passed measurement quality in that single instrumented run.
+148 CPU profiles were valid with no lost samples; 13 short warmups had no CPU
+samples and kept the overall profile result failed. Future captures sample
+every logged calibration and measurement, while short connection warmups run
+the same real h2load without CPU sampling. Empty or lost sampled windows still
+fail. Valid second-round profiles emphasize socket reads, copying into user
+buffers, syscall entry, and task/network synchronization; the data does not
+establish per-request log writes as the dominant cause. One instrumented
+quality success does not establish normal measurement stability.
+
+The balanced-affinity diagnostic reserves two available CPUs for real h2load
+and the remaining CPUs for servers and resource observers, requiring at least
+two server CPUs. The preceding one-client-CPU trial cannot provide headroom
+for the observed average client demand of up to 1.70 cores. The new partition
+is recorded and checked as disjoint; insufficient CPUs fail explicitly. It
+retains all body/stream lanes, interleaved sampling, logged 8-second minimum
+calibration, completion accounting, and finite spread/duration bounds. Three
+independent Linux runs must establish quality before considering these
+conditions for a normal required measurement. CPU profiling remains disabled
+in this experiment; ordinary required gates remain unchanged.

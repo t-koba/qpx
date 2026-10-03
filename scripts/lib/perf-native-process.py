@@ -18,6 +18,10 @@ def main():
         raise SystemExit("unsupported native profiler mode")
     if not arguments or (mode == "cpu" and arguments[0] != "run") or arguments in (["-v"], ["-V"], ["--version"]):
         os.execv(server, [server, *arguments])
+    if mode == "client-cpu" and not any(argument.startswith("--log-file=") for argument in arguments):
+        # Short warmups validate real connections but cannot provide a CPU
+        # sample window. Profile every logged calibration and measurement.
+        os.execv(server, [server, *arguments])
     if "--config" in arguments:
         role = Path(arguments[arguments.index("--config") + 1]).stem
     elif mode == "syscalls" and Path(server).name == "nginx" and "-c" in arguments:

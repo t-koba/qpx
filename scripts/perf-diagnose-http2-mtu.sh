@@ -20,7 +20,10 @@ fi
 if [ "$#" -eq 1 ] && [ "$1" = --full-client ]; then
   exec sudo --preserve-env=QPX_NATIVE_PERF_BIN unshare --net bash "$ROOT_DIR/scripts/perf-diagnose-http2-mtu.sh" --inside-full-client
 fi
-if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-observer && "$1" != --inside-full && "$1" != --inside-full-affinity && "$1" != --inside-full-client ]] || [ "$(id -u)" -ne 0 ]; then
+if [ "$#" -eq 1 ] && [ "$1" = --balanced-affinity ]; then
+  exec sudo unshare --net bash "$ROOT_DIR/scripts/perf-diagnose-http2-mtu.sh" --inside-balanced-affinity
+fi
+if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-observer && "$1" != --inside-full && "$1" != --inside-full-affinity && "$1" != --inside-full-client && "$1" != --inside-balanced-affinity ]] || [ "$(id -u)" -ne 0 ]; then
   echo "unsupported HTTP/2 MTU diagnostic invocation" >&2
   exit 2
 fi
@@ -59,26 +62,33 @@ body_sizes=1048576
 stream_counts=100
 if [ "$1" = --inside-observer ]; then
   phases=(1500-sampled 1500-unobserved)
-elif [[ "$1" = --inside-full || "$1" = --inside-full-affinity || "$1" = --inside-full-client ]]; then
+elif [[ "$1" = --inside-full || "$1" = --inside-full-affinity || "$1" = --inside-full-client || "$1" = --inside-balanced-affinity ]]; then
   phases=(1500-full)
   body_sizes="1024 1048576"
   stream_counts="1 100"
 fi
 affinity_command=()
 client_path="$PATH"
-if [ "$1" = --inside-full-affinity ]; then
+if [[ "$1" = --inside-full-affinity || "$1" = --inside-balanced-affinity ]]; then
   command -v taskset >/dev/null
   h2load_binary="$(command -v h2load)"
-  read -r client_cpu server_cpus < <(python3 - <<'PY_AFFINITY'
+  client_count=1
+  if [ "$1" = --inside-balanced-affinity ]; then
+    client_count=2
+  fi
+  read -r client_cpus server_cpus < <(python3 - "$client_count" <<'PY_AFFINITY'
 import os
+import sys
 cpus = sorted(os.sched_getaffinity(0))
-if len(cpus) < 2:
-    raise SystemExit("HTTP/2 affinity diagnostic requires at least two available CPUs")
-print(cpus[0], ",".join(str(cpu) for cpu in cpus[1:]))
+client_count = int(sys.argv[1])
+minimum_servers = 2 if client_count == 2 else 1
+if len(cpus) < client_count + minimum_servers:
+    raise SystemExit("HTTP/2 affinity diagnostic lacks CPUs for the declared partition")
+print(",".join(map(str, cpus[:client_count])), ",".join(map(str, cpus[client_count:])))
 PY_AFFINITY
   )
   mkdir "$profile_dir/client-bin"
-  python3 - "$profile_dir/client-bin/h2load" "$client_cpu" "$h2load_binary" <<'PY_CLIENT'
+  python3 - "$profile_dir/client-bin/h2load" "$client_cpus" "$h2load_binary" <<'PY_CLIENT'
 from pathlib import Path
 import shlex
 import sys
@@ -137,7 +147,7 @@ manifest = {
     "calibration_min_duration_ms": 8000,
     "tcp_sampling": sys.argv[5] == "true",
 }
-if sys.argv[6] in ("--inside-full", "--inside-full-affinity", "--inside-full-client"):
+if sys.argv[6] in ("--inside-full", "--inside-full-affinity", "--inside-full-client", "--inside-balanced-affinity"):
     manifest.update({
         "measurement": "http2_isolated_full_quality_v1",
         "required_body_bytes": [1024, 1048576],
@@ -146,15 +156,19 @@ if sys.argv[6] in ("--inside-full", "--inside-full-affinity", "--inside-full-cli
         "strict_default_spread_limits": True,
     })
     del manifest["body_bytes"], manifest["max_concurrent_streams"]
-if sys.argv[6] == "--inside-full-affinity":
+if sys.argv[6] in ("--inside-full-affinity", "--inside-balanced-affinity"):
     import os
     available = sorted(os.sched_getaffinity(0))
-    manifest.update({"measurement": "http2_isolated_full_affinity_quality_v1",
-                     "available_cpus": available, "client_cpus": available[:1],
-                     "server_cpus": available[1:]})
+    client_count = 2 if sys.argv[6] == "--inside-balanced-affinity" else 1
+    measurement = ("http2_isolated_balanced_affinity_quality_v1" if client_count == 2
+                   else "http2_isolated_full_affinity_quality_v1")
+    manifest.update({"measurement": measurement,
+                     "available_cpus": available, "client_cpus": available[:client_count],
+                     "server_cpus": available[client_count:]})
 if sys.argv[6] == "--inside-full-client":
     manifest.update({"measurement": "http2_client_cpu_profile_v1",
                      "client_cpu_profiler": "perf cpu-clock at 199 Hz without call graphs",
+                     "client_profile_scope": "calibration_and_measurement",
                      "client_usage_includes_profiler": True})
 (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 PY_NAMESPACE
