@@ -732,9 +732,12 @@ HTTP, IPC, and WebSocket constructors now allocate before creating their state
 behind non-inlined constructors. They keep the same existing allocations and
 protocol behavior while preventing concrete cold futures from becoming caller
 stack temporaries. The unconditional plain HTTP path remains inline. The
-resulting frame size and product performance require verification with a new
-Linux ELF and normal paired measurements; source restructuring alone is not a
-performance pass.
+retained Linux diagnostic at `1156c56` verifies a 15,048-byte (`0x3ac8`)
+request-executor poll frame, down from 25,256 bytes (`0x62a8`), with three
+page probes instead of six. The large cold-future copies are absent from that
+frame. This is a 40.4% frame reduction in the exact profiled ELF; it does not
+establish throughput, CPU-efficiency, or latency acceptance. Normal paired
+measurements and independent repetitions remain required.
 
 The decoded feature-rich cache-hit sample also identifies 90 memory-copy samples
 at 47 callsites within the request executor, including 352-byte request moves
@@ -744,3 +747,12 @@ Exclusive borrowing preserves the existing Send requirement for bodies that
 are not Sync. The obsolete module-result wrapper is removed. Evaluation order,
 header rewrites, module responses, and request ownership on upstream dispatch
 remain unchanged; the performance effect must be measured independently.
+
+The optional `http2-affinity` diagnostic runs the complete HTTP/2 matrix in an
+isolated network namespace with a 1,500-byte loopback MTU. It reserves one
+available CPU for the real h2load process and the remaining CPUs for servers
+and resource observers, retaining the disjoint partition in its manifest.
+The eight-second calibration and all three samples per role use that same
+partition. Every lane retains the default finite measurement-spread limits.
+This experiment tests CPU competition as a cause of calibration instability;
+it neither replaces normal acceptance gates nor establishes causality alone.

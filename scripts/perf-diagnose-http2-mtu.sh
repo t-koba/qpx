@@ -14,7 +14,10 @@ fi
 if [ "$#" -eq 1 ] && [ "$1" = --full ]; then
   exec sudo unshare --net bash "$ROOT_DIR/scripts/perf-diagnose-http2-mtu.sh" --inside-full
 fi
-if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-observer && "$1" != --inside-full ]] || [ "$(id -u)" -ne 0 ]; then
+if [ "$#" -eq 1 ] && [ "$1" = --full-affinity ]; then
+  exec sudo unshare --net bash "$ROOT_DIR/scripts/perf-diagnose-http2-mtu.sh" --inside-full-affinity
+fi
+if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-observer && "$1" != --inside-full && "$1" != --inside-full-affinity ]] || [ "$(id -u)" -ne 0 ]; then
   echo "unsupported HTTP/2 MTU diagnostic invocation" >&2
   exit 2
 fi
@@ -53,10 +56,36 @@ body_sizes=1048576
 stream_counts=100
 if [ "$1" = --inside-observer ]; then
   phases=(1500-sampled 1500-unobserved)
-elif [ "$1" = --inside-full ]; then
+elif [[ "$1" = --inside-full || "$1" = --inside-full-affinity ]]; then
   phases=(1500-full)
   body_sizes="1024 1048576"
   stream_counts="1 100"
+fi
+affinity_command=()
+client_path="$PATH"
+if [ "$1" = --inside-full-affinity ]; then
+  command -v taskset >/dev/null
+  h2load_binary="$(command -v h2load)"
+  read -r client_cpu server_cpus < <(python3 - <<'PY_AFFINITY'
+import os
+cpus = sorted(os.sched_getaffinity(0))
+if len(cpus) < 2:
+    raise SystemExit("HTTP/2 affinity diagnostic requires at least two available CPUs")
+print(cpus[0], ",".join(str(cpu) for cpu in cpus[1:]))
+PY_AFFINITY
+  )
+  mkdir "$profile_dir/client-bin"
+  python3 - "$profile_dir/client-bin/h2load" "$client_cpu" "$h2load_binary" <<'PY_CLIENT'
+from pathlib import Path
+import shlex
+import sys
+path = Path(sys.argv[1])
+path.write_text("#!/usr/bin/env bash\nset -euo pipefail\nexec taskset -c "
+                + shlex.quote(sys.argv[2]) + " " + shlex.quote(sys.argv[3]) + ' "$@"\n')
+path.chmod(0o755)
+PY_CLIENT
+  affinity_command=(taskset -c "$server_cpus")
+  client_path="$profile_dir/client-bin:$PATH"
 fi
 for phase in "${phases[@]}"; do
   mtu="${phase%%-*}"
@@ -87,7 +116,7 @@ manifest = {
     "calibration_min_duration_ms": 8000,
     "tcp_sampling": sys.argv[5] == "true",
 }
-if sys.argv[6] == "--inside-full":
+if sys.argv[6] in ("--inside-full", "--inside-full-affinity"):
     manifest.update({
         "measurement": "http2_isolated_full_quality_v1",
         "required_body_bytes": [1024, 1048576],
@@ -96,6 +125,12 @@ if sys.argv[6] == "--inside-full":
         "strict_default_spread_limits": True,
     })
     del manifest["body_bytes"], manifest["max_concurrent_streams"]
+if sys.argv[6] == "--inside-full-affinity":
+    import os
+    available = sorted(os.sched_getaffinity(0))
+    manifest.update({"measurement": "http2_isolated_full_affinity_quality_v1",
+                     "available_cpus": available, "client_cpus": available[:1],
+                     "server_cpus": available[1:]})
 (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 PY_NAMESPACE
   chown -R "$SUDO_UID:$SUDO_GID" "$profile_dir"
@@ -109,8 +144,8 @@ PY_NAMESPACE
     sampler_pid=$!
   fi
   phase_status=0
-  setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups env \
-    QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES="$body_sizes" \
+  "${affinity_command[@]}" setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups env \
+    PATH="$client_path" QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES="$body_sizes" \
     QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES="$stream_counts" \
     QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS=8000 \
     QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS=3 QPX_HTTP2_COMPARE_LOG_DIR="$phase_dir/logs" \

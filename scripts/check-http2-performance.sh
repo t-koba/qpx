@@ -139,14 +139,28 @@ diagnostic_full_matrix = False
 if DIAGNOSTIC:
     with open(sys.argv[4], encoding="utf-8") as handle:
         manifest = json.load(handle)
-    if (manifest.get("measurement") not in ("http2_isolated_mtu_v3", "http2_isolated_full_quality_v1")
+    if (manifest.get("measurement") not in ("http2_isolated_mtu_v3", "http2_isolated_full_quality_v1",
+                                                "http2_isolated_full_affinity_quality_v1")
             or manifest.get("diagnostic_instrumentation") is not True
             or manifest.get("replaces_required_gate") is not False
             or not manifest.get("network_namespace")
             or not manifest.get("host_network_namespace")
             or manifest.get("network_namespace") == manifest.get("host_network_namespace")):
         fail("unsupported or unisolated HTTP/2 diagnostic manifest")
-    diagnostic_full_matrix = manifest["measurement"] == "http2_isolated_full_quality_v1"
+    diagnostic_full_matrix = manifest["measurement"] in (
+        "http2_isolated_full_quality_v1", "http2_isolated_full_affinity_quality_v1")
+    if manifest["measurement"] == "http2_isolated_full_affinity_quality_v1":
+        cpu_sets = []
+        for field in ("available_cpus", "client_cpus", "server_cpus"):
+            values = manifest.get(field)
+            if (not isinstance(values, list) or not values
+                    or any(type(cpu) is not int or cpu < 0 for cpu in values)
+                    or len(set(values)) != len(values)):
+                fail(f"invalid HTTP/2 diagnostic CPU set: {field}")
+            cpu_sets.append(set(values))
+        available, client, server = cpu_sets
+        if len(client) != 1 or client & server or client | server != available:
+            fail("HTTP/2 diagnostic CPU sets must form a disjoint available-CPU partition")
     if diagnostic_full_matrix:
         if (set(positive_int_list(manifest, "required_body_bytes")) != set(required_body_bytes)
                 or set(positive_int_list(manifest, "required_max_concurrent_streams")) != set(required_streams)
