@@ -622,11 +622,13 @@ PY
       attempt=$((attempt + 1))
       continue
     fi
-    python3 - "$metrics" "$proxy" "$read_mode" <<'PY_INVALID'
+    python3 - "$metrics" "$proxy" "$read_mode" "$STREAM_BYTES" <<'PY_INVALID'
 import json
 import sys
 record = json.loads(sys.argv[1])
-record.update({"proxy": sys.argv[2], "read_mode": sys.argv[3], "valid": False})
+record.update({"proxy": sys.argv[2], "read_mode": sys.argv[3], "valid": False,
+               "reason": "response byte count does not match planned transfers",
+               "expected_bytes": int(sys.argv[4]) * record["transfers"]})
 print(json.dumps(record, sort_keys=True))
 PY_INVALID
     attempt=$((attempt + 1))
