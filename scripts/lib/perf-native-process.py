@@ -53,7 +53,7 @@ def main():
     else:
         # Observe waits and socket ownership without recording payload buffers.
         syscalls = "epoll_wait,epoll_pwait,epoll_pwait2,epoll_ctl,poll,ppoll,select,pselect6,futex,connect,setsockopt,getsockopt,shutdown,close"
-        command = [observer, "--seccomp-bpf", "-ff", "-qq", "-ttt", "-T", "-yy", "-s", "0",
+        command = [observer, "--seccomp-bpf", "-ff", "-qq", "-ttt", "-T", "-yy", "-v", "-s", "0",
                    "-e", f"trace={syscalls}", "-o", str(directory / f"{role}.syscalls"),
                    "--", server, *arguments]
         lifecycle["syscalls"] = syscalls.split(",")
