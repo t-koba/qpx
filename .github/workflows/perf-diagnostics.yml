@@ -7,6 +7,8 @@ on:
       - .github/workflows/perf-diagnostics.yml
       - scripts/lib/perf-process-metrics.sh
       - scripts/lib/perf-process-fds.py
+      - scripts/lib/perf-process-scheduler.py
+      - scripts/check-perf-scheduler-accounting.sh
       - scripts/lib/perf-thread-sampler.sh
       - scripts/check-perf-process-sampler.sh
       - scripts/perf-audit-streaming-compare.sh
@@ -16,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, webdav-sockets, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, webdav-sockets, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, scheduler-accounting]
         default: streaming
 
 permissions:
@@ -41,6 +43,7 @@ jobs:
       - name: record environment
         run: bash scripts/check-perf-runner.sh
       - name: install comparison dependencies
+        if: inputs.category != 'scheduler-accounting'
         run: |
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid strace valgrind wrk jq
@@ -97,6 +100,7 @@ jobs:
           fi
           echo "QPX_NATIVE_PERF_BIN=$perf_binary" >> "$GITHUB_ENV"
       - name: build before measurement
+        if: inputs.category != 'scheduler-accounting'
         run: |
           if [[ "$CATEGORY" = *-callgrind || "$CATEGORY" = *-native ]]; then
             cargo build -p qpxd --profile callgrind --locked --features http3-backend-qpx
@@ -111,6 +115,11 @@ jobs:
           CATEGORY: ${{ inputs.category || 'streaming' }}
         run: |
           case "$CATEGORY" in
+            scheduler-accounting)
+              python3 scripts/perf-evaluate.py "completed thread scheduler accounting" -- bash scripts/check-perf-scheduler-accounting.sh
+              cp target/perf/scheduler-accounting-probe.json target/perf/scheduler-accounting-host-probe.json
+              python3 scripts/perf-evaluate.py "isolated network scheduler accounting" -- sudo -n unshare --net bash scripts/check-perf-scheduler-accounting.sh
+              ;;
             streaming)
               python3 scripts/perf-evaluate.py "streaming diagnostics" -- bash scripts/perf-audit-streaming-compare.sh
               python3 scripts/perf-evaluate.py "streaming diagnostic objectives" -- bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl

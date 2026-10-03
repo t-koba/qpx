@@ -695,3 +695,14 @@ every lane, including the 1 MiB/one-stream lane with wider temporary normal
 overrides. Missing lanes or failed samples invalidate the diagnostic. Normal
 measurement conditions remain unchanged until independent complete-matrix
 diagnostics establish reproducibility.
+
+The `scheduler-accounting` diagnostic validates Linux taskstats TGID CPU delay
+accounting with real competing processes on one CPU. It enables
+`kernel.task_delayacct` before starting the probe, observes a busy thread while
+alive and after joining it, and requires both its scheduler delay and event
+count to remain accumulated. The probe runs on the host and inside an owned
+network namespace, retaining both JSON snapshots. Missing kernel support,
+privilege failures, unavailable accounting, or decreasing counters fail the
+diagnostic. This validates a replacement for live-TID schedstat sums, which can
+decrease when request threads exit; comparison harnesses are not switched until
+the replacement has passed the real Linux probe.
