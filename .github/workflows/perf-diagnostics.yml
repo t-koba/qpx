@@ -18,8 +18,12 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, webdav-sockets, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, scheduler-accounting]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, webdav-revision, webdav-sockets, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, scheduler-accounting]
         default: streaming
+      baseline_ref:
+        description: Baseline commit for the same-runner WebDAV comparison
+        type: string
+        default: "9500bb1d764e8cee9b0b24bd9bea96ba512418fc"
 
 permissions:
   contents: read
@@ -34,6 +38,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
@@ -110,8 +116,22 @@ jobs:
         env:
           CATEGORY: ${{ inputs.category || 'streaming' }}
           RUSTFLAGS: "-D warnings"
+      - name: build WebDAV baseline before measurement
+        id: baseline
+        if: inputs.category == 'webdav-revision'
+        env:
+          BASELINE_REF: ${{ inputs.baseline_ref }}
+          RUSTFLAGS: "-D warnings"
+        run: |
+          baseline_sha="$(git rev-parse --verify --end-of-options "${BASELINE_REF}^{commit}")"
+          echo "sha=$baseline_sha" >> "$GITHUB_OUTPUT"
+          git worktree add --detach target/perf-baseline "$baseline_sha"
+          cd target/perf-baseline
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/perf-baseline-build" cargo build -p qpxd --release --locked --features http3-backend-qpx
       - name: diagnostic comparison
         env:
+          QPX_PERF_BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
+          QPX_PERF_BASELINE_BIN: ${{ github.workspace }}/target/perf-baseline-build/release/qpxd
           CATEGORY: ${{ inputs.category || 'streaming' }}
         run: |
           case "$CATEGORY" in
@@ -141,6 +161,9 @@ jobs:
                 QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
                 python3 scripts/perf-evaluate.py "phase diagnostics" -- bash scripts/perf-audit-proxy-compare.sh
               python3 scripts/summarize-perf-phases.py target/perf/proxy-compare-logs target/perf/phase-summary.json
+              ;;
+            webdav-revision)
+              python3 scripts/perf-evaluate.py "WebDAV same-runner revision objectives" -- bash scripts/perf-diagnose-webdav-revision.sh
               ;;
             webdav-sockets)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 QPX_PERF_WEBDAV_SOCKET_DIAGNOSTICS=1 \

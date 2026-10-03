@@ -807,3 +807,13 @@ cancelled. File response streaming does not retain admission. This preserves
 service ACL, lock, conditional-request, and secure-file operations. Its throughput,
 CPU-efficiency, tail-latency, and concurrent-update effects still require normal
 paired measurements before adoption can be considered successful.
+
+The optional `webdav-revision` diagnostic builds its requested baseline and
+candidate before measuring either on one Linux runner. It retains exact commit
+identities and binary hashes, three interleaved samples per competitor, raw
+resource snapshots, and both 1 KiB and 1 MiB workloads. Baseline measurement
+quality, candidate measurement quality, unchanged existing acceptance, and the
+1 MiB p99 goal are separate retained evaluations. The focused objectives copy
+only the existing WebDAV lanes without weakening any limit; the additional
+p99 objective can only tighten its current bound to 1.0. The diagnostic cannot
+replace the complete required performance matrix.
