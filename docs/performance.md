@@ -1378,3 +1378,24 @@ but outside the stronger goals. Feature-rich throughput/CPU efficiency are
 1.359520, still below its existing 1.5 limit. These separate-runner results
 cannot establish a causal effect of the tee change; paired revision measurements
 are necessary before retaining or rejecting the experiment.
+
+The completed prepared-storage miss profile (`37157765844`) records
+273 direct malloc calls from `store_prepared_request` in each measured window:
+0.057/0.064/0.063 calls per completed request, compared with 2.019 in the
+preceding round-2 profile. Total miss instructions stay approximately unchanged
+(223,230/225,761/225,230), and feature-rich instructions are
+46,171/46,127/46,166. Allocation removal is verified; the normal throughput,
+CPU-efficiency, and queue objectives still require paired measurements.
+
+Native feature-rich samples attribute memory copies to the general request
+state machine. Local ARM64 layout measurements identify a 2,568-byte guarded
+body-buffering future that is constructed even when buffering is unnecessary.
+Guard preparation now returns the synchronous streaming-limit result as a
+ready future, allocating the buffering future only when observation actually
+consumes the request body. Guard checks, observed-body reuse, size limits,
+read deadlines, and error responses keep their existing behavior. Its common
+future shrinks to 240 bytes; cache/dispatch futures remain 3,216/4,336 bytes.
+All 1,309 workspace tests across 47 suites pass. The added 512-byte layout
+budget passes separately, as do final all-feature Clippy, formatting, structure,
+and the unchanged eight-category / sixteen-evaluation gate checks. Linux
+profiles and normal measurements remain necessary before adopting this trial.

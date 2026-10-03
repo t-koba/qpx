@@ -1609,8 +1609,15 @@ mod state_layout_tests {
             "cache preparation inline state exceeded its size budget: {cache_bytes} bytes"
         );
         let dispatch_bytes = future_size(complete_reverse_after_modules);
+        let guard_bytes = future_size(|(req, guard, max, timeout, method, version, name)| {
+            buffer_reverse_guarded_request(req, guard, max, timeout, method, version, name)
+        });
+        assert!(
+            guard_bytes <= 512,
+            "request guard inline state exceeded its size budget: {guard_bytes} bytes"
+        );
         println!(
-            "reverse cache state sizes: request={}, post_module_input={}, cache_future={cache_bytes}, dispatch_future={dispatch_bytes}",
+            "reverse cache state sizes: request={}, post_module_input={}, cache_future={cache_bytes}, dispatch_future={dispatch_bytes}, guard_future={guard_bytes}",
             std::mem::size_of::<Request<Body>>(),
             std::mem::size_of::<ReversePostModuleInput<'_>>(),
         );

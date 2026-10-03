@@ -62,7 +62,42 @@ pub(super) fn attach_streaming_limits(
     result
 }
 
-pub(super) async fn buffer_reverse_guarded_request(
+pub(super) fn buffer_reverse_guarded_request<'a>(
+    req: &'a mut Request<Body>,
+    route_http_guard: Option<&'a crate::http::policy::guard::CompiledHttpGuardProfile>,
+    max_observed_request_body_bytes: usize,
+    read_timeout: Duration,
+    request_method: &'a Method,
+    request_version: http::Version,
+    proxy_name: &'a str,
+) -> impl Future<Output = Result<Option<Response<Body>>>> + Send + 'a {
+    use futures_util::future::{Either, ready};
+
+    if route_http_guard.is_some_and(|profile| profile.requires_request_body_buffering(req))
+        && !crate::http::body::size::has_observed_request_bytes(req)
+    {
+        // Keep the buffering state out of requests that need no body observation.
+        Either::Right(Box::pin(buffer_reverse_guarded_request_body(
+            req,
+            route_http_guard,
+            max_observed_request_body_bytes,
+            read_timeout,
+            request_method,
+            request_version,
+            proxy_name,
+        )))
+    } else {
+        Either::Left(ready(limit_reverse_guarded_request_body(
+            req,
+            route_http_guard,
+            request_method,
+            request_version,
+            proxy_name,
+        )))
+    }
+}
+
+async fn buffer_reverse_guarded_request_body(
     req: &mut Request<Body>,
     route_http_guard: Option<&crate::http::policy::guard::CompiledHttpGuardProfile>,
     max_observed_request_body_bytes: usize,
@@ -71,35 +106,53 @@ pub(super) async fn buffer_reverse_guarded_request(
     request_version: http::Version,
     proxy_name: &str,
 ) -> Result<Option<Response<Body>>> {
-    let limit_response = || -> Result<Response<Body>> {
-        request_body_too_large_response(request_method, request_version, proxy_name, None)
-    };
-    if route_http_guard.is_some_and(|profile| profile.requires_request_body_buffering(req))
-        && !crate::http::body::size::has_observed_request_bytes(req)
+    let owned = std::mem::replace(req, Request::new(Body::empty()));
+    *req = match crate::http::body::size::buffer_request_body_with_reason(
+        owned,
+        max_observed_request_body_bytes,
+        read_timeout,
+        "http_guard.body",
+    )
+    .await
     {
-        // Move the request only when body observation actually consumes it.
-        let owned = std::mem::replace(req, Request::new(Body::empty()));
-        *req = match crate::http::body::size::buffer_request_body_with_reason(
-            owned,
-            max_observed_request_body_bytes,
-            read_timeout,
-            "http_guard.body",
-        )
-        .await
-        {
-            Ok(req) => req,
-            Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
-                return Ok(Some(limit_response()?));
-            }
-            Err(err) => return Err(err),
-        };
-    }
+        Ok(req) => req,
+        Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
+            return Ok(Some(request_body_too_large_response(
+                request_method,
+                request_version,
+                proxy_name,
+                None,
+            )?));
+        }
+        Err(err) => return Err(err),
+    };
+    limit_reverse_guarded_request_body(
+        req,
+        route_http_guard,
+        request_method,
+        request_version,
+        proxy_name,
+    )
+}
+
+fn limit_reverse_guarded_request_body(
+    req: &mut Request<Body>,
+    route_http_guard: Option<&crate::http::policy::guard::CompiledHttpGuardProfile>,
+    request_method: &Method,
+    request_version: http::Version,
+    proxy_name: &str,
+) -> Result<Option<Response<Body>>> {
     if let Some(limit) = route_http_guard.and_then(|profile| profile.request_body_streaming_limit())
     {
         match crate::http::body::size::limit_request_body(req, limit) {
             Ok(()) => (),
             Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
-                return Ok(Some(limit_response()?));
+                return Ok(Some(request_body_too_large_response(
+                    request_method,
+                    request_version,
+                    proxy_name,
+                    None,
+                )?));
             }
             Err(err) => return Err(err),
         };
