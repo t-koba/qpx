@@ -1505,3 +1505,11 @@ The completed path-parsing profile (`37160802885`) reports
 219,908/222,470/221,934 instructions per miss, versus
 223,446/225,789/224,872 before: reductions of 1.6%/1.5%/1.3% across its three
 instrumented windows. Normal throughput and tail-latency goals remain unproven.
+
+The `http2-revision` diagnostic uses the existing required CI revision harness
+and isolated HTTP/2 workload for two exact binaries built before measurement.
+Revision order is explicit. Baseline quality and current acceptance retain all
+four 1 KiB/1 MiB, multiplexing 1/100 lanes and their existing finite spread
+limits. Both versions' raw logs and evaluations are always uploaded. This
+diagnostic supplements the eight required CI categories and does not replace
+them. YAML, embedded Bash syntax, structure, and required-gate checks pass.
