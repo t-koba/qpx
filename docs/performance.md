@@ -1078,3 +1078,25 @@ old 1 MiB/single-stream reference-spread exceptions (5.2 for throughput and
 1.6 for CPU efficiency). Every normal reference lane now uses the existing
 1.25 spread ceilings; qpxd keeps its existing 1.10 ceilings. This tightens
 measurement quality and does not relax any product objective.
+
+The refreshed `42c4157` feature-rich profile (`37144416673`) reduces total
+instructions per completed frontend request in all three windows, from
+47,228/47,278/47,488 to 46,792/46,712/46,886 against `fdb7c03`. This confirms a
+small consistent instruction reduction; it does not establish the required
+throughput or CPU-efficiency ratios. Normal run `37143289872` on `0b28482`
+still fails streaming: run 1's slow queue-delay ratio is 8.9549 against 1.5,
+run 2's fast total-CPU efficiency is 1.2322 against 1.25, and run 3's slow
+queue-delay ratio is 1.5505 against 1.5. These failures remain enforced.
+
+The cache-writeback diagnostic enables the existing local metrics recorder
+and retains real Prometheus snapshots around each workload. It reports body
+bytes collected and admission rejections using the unchanged bounded product
+writeback controller, plus raw frontend completion counts and capture times.
+An uninitialized rejection counter explicitly means no rejection has yet
+registered it; the body counter must exist after warmup. Missing pairs, missing
+workloads, invalid/decreasing counters, and incomplete evidence fail the
+diagnostic. Collection is before metadata encoding and persistence, so its
+counter is never presented as durable completion. Window edges may include
+in-flight work and metric scrapes. Every diagnostic sample remains marked
+intrusive and cannot satisfy normal acceptance; full raw snapshots are saved
+even if comparison or summary generation fails.

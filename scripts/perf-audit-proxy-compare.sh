@@ -30,6 +30,7 @@ PROXY_FILTER="${QPX_PROXY_COMPARE_PROXY_FILTER:-}"
 PROFILE_PROXY="${QPX_PROXY_COMPARE_PROFILE_PROXY:-}"
 PROFILE_SECONDS="${QPX_PROXY_COMPARE_PROFILE_SECONDS:-0}"
 THREAD_DIAGNOSTICS="${QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS:-0}"
+WRITEBACK_DIAGNOSTICS="${QPX_PROXY_COMPARE_WRITEBACK_DIAGNOSTICS:-0}"
 CALLGRIND_DIAGNOSTICS="${QPX_PROXY_COMPARE_CALLGRIND_DIAGNOSTICS:-0}"
 CALLGRIND_PROXY="${QPX_PROXY_COMPARE_CALLGRIND_PROXY:-qpxd-feature-rich}"
 ARTIFACT_LOG_HEAD_LINES="${QPX_PROXY_COMPARE_ARTIFACT_LOG_HEAD_LINES:-3}"
@@ -598,6 +599,13 @@ start_qpxd_cache() {
   local headers=""
   local http_policy=""
   local http_modules=""
+  local metrics=""
+  if [ "$WRITEBACK_DIAGNOSTICS" = 1 ] && [ "$name" = qpxd-cache ]; then
+    metrics="
+  metrics:
+    listen: 127.0.0.1:$((port + 1000))
+    path: /metrics"
+  fi
   local workers="$CACHE_WORKERS"
   if [ "$rich" = true ]; then
     workers="$FEATURE_RICH_WORKERS"
@@ -681,7 +689,7 @@ state_dir: "$STATE_DIR"
 telemetry:
   system_log:
     level: warn
-    format: json${access_log}${guard}
+    format: json${metrics}${access_log}${guard}
 caches:
   - name: ${name}-disk
     kind: disk
@@ -1328,6 +1336,10 @@ LUA
   failed_sample=""
   while [ "$attempt" -le "$SAMPLE_ATTEMPTS" ]; do
     out="$TMP_DIR/${artifact_name}.attempt-${attempt}.wrk"
+    if [ "$WRITEBACK_DIAGNOSTICS" = 1 ] && [ "$proxy" = qpxd-cache ]; then
+      curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$((port + 1000))/metrics" \
+        > "$LOG_DIR/${artifact_name}.attempt-${attempt}.writeback.before.prom"
+    fi
     profile_pid=""
     if [ "$proxy" = "$PROFILE_PROXY" ] && [ "$PROFILE_SECONDS" -gt 0 ]; then
       /usr/bin/sample "$resource_pid" "$PROFILE_SECONDS" 1 \
@@ -1378,6 +1390,10 @@ LUA
     wrk_succeeded=true
     if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "sample-${artifact_name}-${attempt}" >"$out" 2>&1; then
       wrk_succeeded=false
+    fi
+    if [ "$WRITEBACK_DIAGNOSTICS" = 1 ] && [ "$proxy" = qpxd-cache ]; then
+      curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$((port + 1000))/metrics" \
+        > "$LOG_DIR/${artifact_name}.attempt-${attempt}.writeback.after.prom"
     fi
     if [ "$CALLGRIND_DIAGNOSTICS" = 1 ] && [ "$proxy" = "$CALLGRIND_PROXY" ]; then
       callgrind_control -i off "$resource_pid" >/dev/null
@@ -1640,6 +1656,17 @@ case "$THREAD_DIAGNOSTICS" in
     fi
     ;;
   *) echo "QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS must be 0 or 1" >&2; exit 1 ;;
+esac
+
+case "$WRITEBACK_DIAGNOSTICS" in
+  0) ;;
+  1)
+    if [ "$THREAD_DIAGNOSTICS" != 1 ]; then
+      echo "writeback counter captures must be marked as diagnostic measurements" >&2
+      exit 1
+    fi
+    ;;
+  *) echo "QPX_PROXY_COMPARE_WRITEBACK_DIAGNOSTICS must be 0 or 1" >&2; exit 1 ;;
 esac
 
 case "$CALLGRIND_DIAGNOSTICS" in
