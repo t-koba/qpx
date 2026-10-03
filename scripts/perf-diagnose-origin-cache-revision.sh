@@ -12,8 +12,8 @@ CURRENT_SHA="${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
 revision_order="${QPX_PERF_REVISION_ORDER:-baseline-current}"
 workload="${QPX_PERF_REVISION_WORKLOAD:-webdav}"
 case "$workload" in
-  webdav) proxies=qpxd-webdav,apache-webdav; body_sizes="1024 1048576" ;;
-  cache) proxies=qpxd-cache,nginx-cache,qpxd-feature-rich,nginx-feature-rich; body_sizes=1024 ;;
+  webdav) groups=(webdav) ;;
+  cache) groups=(persistent feature-rich) ;;
   *) echo "unsupported origin/cache revision workload: $workload" >&2; exit 2 ;;
 esac
 case "$revision_order" in
@@ -42,8 +42,9 @@ if any(re.fullmatch(r"[0-9a-f]{40}", value) is None for value in (baseline_sha, 
 objectives = json.loads((Path(root) / "perf/origin-cache-performance-objectives.json").read_text())
 required = ({("origin_webdav_http1", 1024), ("origin_webdav_http1", 1048576)}
             if workload == "webdav" else
-            {("proxy_cache_hit_http1", 1024), ("proxy_cache_miss_http1", 1024),
-             ("feature_rich_cache_hit_http1", 1024)})
+            {("proxy_cache_hit_http1", 1024), ("proxy_cache_hit_http1", 1048576),
+             ("proxy_cache_miss_http1", 1024), ("feature_rich_cache_hit_http1", 1024),
+             ("feature_rich_cache_hit_http1", 1048576)})
 objectives["lanes"] = [lane for lane in objectives["lanes"]
                        if (lane["bench"], lane["body_bytes"]) in required]
 if len(objectives["lanes"]) != len(required) or {(lane["bench"], lane["body_bytes"]) for lane in objectives["lanes"]} != required:
@@ -53,7 +54,7 @@ for lane in objectives["lanes"]:
     if workload == "webdav" and lane["body_bytes"] == 1048576:
         lane["max_p99_latency_ratio"] = min(
             lane.get("max_p99_latency_ratio", objectives["defaults"]["max_p99_latency_ratio"]), 1.0)
-    elif workload == "cache" and lane["bench"] != "proxy_cache_hit_http1":
+    elif workload == "cache" and lane["body_bytes"] == 1024 and lane["bench"] != "proxy_cache_hit_http1":
         for metric in ("min_throughput_ratio", "min_cpu_efficiency_ratio"):
             lane[metric] = max(lane.get(metric, objectives["defaults"][metric]), 1.0)
         for metric in ("max_p99_latency_ratio", "max_scheduler_queue_delay_ratio"):
@@ -64,7 +65,11 @@ manifest = {
     "workload": workload,
     "replaces_required_gate": False, "sampling_order": order.split("-"),
     "required_lanes": [{"bench": bench, "body_bytes": size} for bench, size in sorted(required)],
-    "required_body_bytes": sorted({size for _, size in required}), "required_samples_per_role": 3,
+    "required_body_bytes": sorted({size for _, size in required}),
+    "samples_per_lane": [{"bench": bench, "body_bytes": size,
+                          "attempts": 5 if bench == "proxy_cache_miss_http1" else 3,
+                          "minimum_valid": 3 if bench == "proxy_cache_miss_http1" else 2}
+                         for bench, size in sorted(required)],
     "diagnostic_instrumentation": False,
     "binaries": {name: {"path": path, "commit": commit,
                          "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
@@ -83,19 +88,40 @@ for revision in "${revisions[@]}"; do
   fi
   directory="$profile_dir/$revision"
   mkdir "$directory"
-  if ! env GITHUB_SHA="$sha" QPXD_BIN="$binary" \
-    QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=0 \
-    QPX_PROXY_COMPARE_PROXY_FILTER="$proxies" \
-    QPX_PROXY_COMPARE_BODY_SIZES="$body_sizes" \
-    QPX_PROXY_COMPARE_DURATION_SECONDS=10 QPX_PROXY_COMPARE_CONCURRENCY=64 \
-    QPX_PROXY_COMPARE_THREADS=2 QPX_PROXY_COMPARE_WRK_TIMEOUT=30s \
-    QPX_PROXY_COMPARE_CALLGRIND_DIAGNOSTICS=0 \
-    QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS=3 QPX_PROXY_COMPARE_LOG_DIR="$directory/logs" \
-    QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV="MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728" \
-    python3 "$ROOT_DIR/scripts/perf-evaluate.py" "$revision $workload revision comparison" -- \
-    bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh" "$directory/comparison.jsonl"; then
-    failed=1
-  fi
+  : >"$directory/comparison.jsonl"
+  # Match the normal matrix's process ownership and sampling. A cache loader
+  # can exit during another pair's workload if unrelated cache roles share a run.
+  for group in "${groups[@]}"; do
+    role_environment=()
+    case "$group" in
+      webdav)
+        proxies=qpxd-webdav,apache-webdav
+        role_environment=("QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV=MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728")
+        ;;
+      persistent) proxies=qpxd-cache,nginx-cache ;;
+      feature-rich) proxies=qpxd-feature-rich,nginx-feature-rich ;;
+      *) echo "unsupported revision comparison group: $group" >&2; exit 2 ;;
+    esac
+    if ! env "${role_environment[@]}" GITHUB_SHA="$sha" QPXD_BIN="$binary" \
+      QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=0 \
+      QPX_PROXY_COMPARE_PROXY_FILTER="$proxies" \
+      QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
+      QPX_PROXY_COMPARE_DURATION_SECONDS=10 QPX_PROXY_COMPARE_CONCURRENCY=64 \
+      QPX_PROXY_COMPARE_THREADS=2 QPX_PROXY_COMPARE_WRK_TIMEOUT=30s \
+      QPX_PROXY_COMPARE_CALLGRIND_DIAGNOSTICS=0 \
+      QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS=3 QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS=5 \
+      QPX_PROXY_COMPARE_LOG_DIR="$directory/logs/$group" \
+      python3 "$ROOT_DIR/scripts/perf-evaluate.py" "$revision $group revision comparison" -- \
+      bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh" "$directory/$group.jsonl"; then
+      failed=1
+    fi
+    if [ -f "$directory/$group.jsonl" ]; then
+      cat "$directory/$group.jsonl" >>"$directory/comparison.jsonl"
+    else
+      echo "$revision $group comparison output is missing" >&2
+      failed=1
+    fi
+  done
   if ! python3 "$ROOT_DIR/scripts/perf-evaluate.py" "$revision $workload measurement quality" -- \
     bash "$ROOT_DIR/scripts/check-origin-cache-performance.sh" "$directory/comparison.jsonl" \
     "$profile_dir/objectives.json" measurement-quality; then

@@ -1359,10 +1359,11 @@ must still quantify allocation removal and normal performance effects.
 
 The existing same-runner WebDAV revision harness is generalized as
 `scripts/perf-diagnose-origin-cache-revision.sh`. The diagnostic workflow's
-`cache-revision` workload compares 1 KiB persistent hits, persistent misses,
-and feature-rich hits for two exact revisions on the same runner. Both
+`cache-revision` workload compares 1 KiB/1 MiB persistent and feature-rich hits
+and 1 KiB persistent misses for two exact revisions on the same runner. Both
 release binaries are built before any measurement; version order is explicit,
-and each version retains three alternating qpx/reference samples. Manifests
+and each version retains the normal matrix's three alternating hit samples
+and five alternating miss samples. Manifests
 record commits, binary hashes, required lanes, and sample counts. Both versions
 must pass measurement-quality checks, while the current version also checks
 existing acceptance and the stronger throughput/CPU/queue goals without
@@ -1399,3 +1400,18 @@ All 1,309 workspace tests across 47 suites pass. The added 512-byte layout
 budget passes separately, as do final all-feature Clippy, formatting, structure,
 and the unchanged eight-category / sixteen-evaluation gate checks. Linux
 profiles and normal measurements remain necessary before adopting this trial.
+
+The initial combined cache-revision diagnostic on `960793b` produces no valid
+aggregate comparison. In run `37158134449`, both revisions fail on nginx-cache
+round 2 because the normal cache-loader child exits between resource snapshots;
+the nginx master and request workers remain alive. Before/after snapshots
+identify exited children 10133 (current) and 11739 (baseline). Starting the
+feature-rich pair alongside the persistent pair shifted this sample over the
+loader's normal lifecycle. The diagnostic now uses separate persistent and
+feature-rich invocations, matching normal CI's process ownership, body sizes,
+and five-sample miss workload. It retains both groups' logs and combines their
+records before quality/acceptance/goal checks. Missing or failed group output
+still fails the comparison. Existing real normal records pass the generated
+five-lane quality objectives; structure and shell syntax checks pass. No child
+exit is ignored, no ratio threshold changes, and the failed original runs
+remain invalid evidence rather than performance comparisons.
