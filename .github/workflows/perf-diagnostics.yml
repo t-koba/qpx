@@ -57,7 +57,7 @@ jobs:
         if: inputs.category != 'scheduler-accounting'
         run: |
           sudo apt-get update
-          sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid strace valgrind wrk jq
+          sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid strace time valgrind wrk jq
       - name: verify native CPU profiler before build
         if: inputs.category == 'proxy-native' || inputs.category == 'http2-native' || inputs.category == 'streaming-native' || inputs.category == 'webdav-native' || inputs.category == 'http2-events'
         run: |

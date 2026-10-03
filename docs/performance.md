@@ -865,15 +865,17 @@ dominate the observed hot symbols; the second window attributes 6.53% of sampled
 events to `_raw_spin_unlock_irqrestore`. This identifies further investigation
 areas but does not justify a product change or prove a normal gate improvement.
 
-A subsequent WebDAV trial increases the contended file-send scheduling quantum
-from 64 KiB to 128 KiB. Native callsites at `147ad23` identify file-splice,
-TCP-send, and task-wakeup work in the 1 MiB window; the trial tests whether fewer
-explicit handoffs and larger syscall batches reduce that work. The Linux
-`TCP_NOTSENT_LOWAT` remains a separate 64 KiB constant, preserving client-progress
-backpressure and restoration on completion, failure, and cancellation. Active
-transfer thresholds and low-contention quanta remain unchanged. This trial
-requires same-runner comparisons with reversed version order and all existing
-acceptance/quality checks; it is not yet a demonstrated performance improvement.
+A subsequent WebDAV trial at `dd688ef` increased the contended file-send quantum
+from 64 KiB to 128 KiB while retaining the 64 KiB Linux `TCP_NOTSENT_LOWAT`.
+Native callsites at `147ad23` identified file-splice, TCP-send, and task-wakeup
+work, but three same-runner comparisons rejected larger batches. Runs
+`37134112087`, `37134113984` (reversed version order), and `37134115967` all
+passed baseline/candidate measurement quality. Candidate 1 MiB CPU efficiency
+fell by 5.0%, 12.1%, and 1.0%, and throughput fell by 2.5%, 4.2%, and 0.7%.
+p99 changed from 100.248 to 113.376 ms, 67.399 to 60.817 ms, and 45.766 to
+91.433 ms. All three failed the p99 goal. The trial was removed; active-transfer
+thresholds, send-queue management, and scheduling quanta retain their previous
+behavior. Raw comparisons and failure evaluations remain diagnostic evidence.
 
 The refreshed feature-rich callgrind diagnostic at `d0cd523`, Actions run
 `37133652146`, records 40,126 requests in its second window. Direct edges from
@@ -883,3 +885,32 @@ initializes the final structure once, preserving every field and existing
 observability condition. The single-use constructor and setters are removed.
 This introduces no allocation and changes no audit/access-log semantics;
 instruction profiles and normal comparisons must verify its performance effect.
+The refreshed profile at `3eea4ef`, run `37134615410`, confirms direct
+audit-builder copy calls fell from six per request (240,756 calls for 40,126
+requests) to one (21,427 calls for 21,427 requests). Copy instructions at that
+builder fell from approximately 486 to 65 per request. These normalized counts
+verify removal of the targeted copies; they do not substitute for normal
+throughput or CPU-efficiency acceptance.
+
+The cache-miss callgrind diagnostic at `d0cd523`, Actions run `37133654237`,
+retains separate hit dumps (parts 1-3) and persistent-miss dumps (parts 4-6).
+Its second miss dump records repeated path-component parsing and `Path::hash`
+work from the in-memory LRU. The LRU now uses the existing canonical 32-byte
+disk file identity instead of owning and hashing a `PathBuf` for each object.
+Disk filenames, SHA-256 identity generation, durable data, eviction order,
+capacity accounting, and expiry handling are unchanged. Removal reuses the
+validated identity for both hot and persistent indexes; noncanonical paths fail
+before filesystem deletion. A real-file regression test verifies that rejection
+preserves an unrelated file. Normal comparisons and a refreshed instruction
+profile must still establish the performance effect.
+
+The matched-observation HTTP/2 quality runs `37133211649`, `37133213817`, and
+`37133215946` all failed. Recorded invalid durations include direct-backend
+7.86/6.93 s, direct-backend 7.53 s, and direct-backend 6.66 s, respectively;
+run 1 also records nginx 15.31 s and run 3 a direct-backend calibration of
+13.87 s. All duration and completion criteria remain enforced. Linux diagnostic
+runs now retain GNU time records for each calibration and measured h2load
+process, including user/system CPU, context switches, peak RSS, and exit status.
+The same wrapper observes calibration and measurement, while ordinary required
+runs continue to execute h2load directly. These client observations supplement
+server resource records and cannot satisfy the normal gate.

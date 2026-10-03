@@ -74,6 +74,7 @@ collect_artifacts() {
   find "$TMP_DIR" -name '*.conf' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.h2load' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.latency.tsv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
+  find "$TMP_DIR" -name '*.client-usage.txt' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.sample.txt' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.valid-samples.jsonl' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.invalid-samples.jsonl' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
@@ -522,6 +523,22 @@ print(done, max(1, round(duration)))
 PY
 }
 
+run_h2load_with_client_usage() {
+  local output="$1"
+  shift
+  if [ "$QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS" = 1 ] && [ -d /proc ]; then
+    if [ ! -x /usr/bin/time ]; then
+      echo "HTTP/2 client diagnostics require GNU time" >&2
+      return 2
+    fi
+    /usr/bin/time -o "${output}.client-usage.txt" \
+      -f 'elapsed_seconds=%e user_cpu_seconds=%U system_cpu_seconds=%S max_rss_kb=%M voluntary_switches=%w involuntary_switches=%c exit_status=%x' \
+      h2load "$@" >"$output" 2>&1
+  else
+    h2load "$@" >"$output" 2>&1
+  fi
+}
+
 run_h2load_calibration() {
   local requests="$1" clients="$2" threads="$3" port="$4"
   local resource_pid="$5" backend_pid="$6" body_bytes="$7" output="$8"
@@ -546,9 +563,9 @@ run_h2load_calibration() {
       peaks+=("$peak")
     done
   fi
-  h2load -n "$requests" -c "$clients" -t "$threads" -m "$MAX_CONCURRENT_STREAMS" \
+  run_h2load_with_client_usage "$output" -n "$requests" -c "$clients" -t "$threads" -m "$MAX_CONCURRENT_STREAMS" \
     --log-file="${output%.h2load}.latency.tsv" --connect-to "127.0.0.1:${port}" \
-    "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$output" 2>&1 || status=$?
+    "https://${TLS_HOST}:${port}/bench-${body_bytes}" || status=$?
   for pid in "${CALIBRATION_MONITOR_PIDS[@]:-}"; do
     if [ -n "$pid" ]; then
       kill "$pid" >/dev/null 2>&1 || true
@@ -719,7 +736,7 @@ PY_DURATION
       fi
     fi
     h2load_succeeded=true
-    if ! h2load -n "$benchmark_requests" -c "$load_concurrency" -t "$load_client_threads" -m "$MAX_CONCURRENT_STREAMS" --log-file="$latency_file" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1; then
+    if ! run_h2load_with_client_usage "$out" -n "$benchmark_requests" -c "$load_concurrency" -t "$load_client_threads" -m "$MAX_CONCURRENT_STREAMS" --log-file="$latency_file" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}"; then
       h2load_succeeded=false
     fi
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
