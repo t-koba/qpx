@@ -793,3 +793,17 @@ instead of eight, preserving one active client, fresh connections, and all
 response-completion checks. Normal required streaming measurements remain at
 eight transfers. Extended native records remain instrumented diagnostic data
 and cannot satisfy the normal performance gate.
+
+The WebDAV callsite diagnostic at `147ad23` records blocking-pool condition
+variables among the mutex callers, with 53 task-wakeup and 30 futex-wait CPU
+samples in the second 1 MiB window. Thread snapshots retain two main runtime
+workers and roughly 20 additional blocking workers. The proposed runtime-owned
+WebDAV admission semaphore bounds active filesystem handlers by the lesser of
+the existing worker and blocking-thread counts. It is allocated only when a
+WebDAV origin is configured and shared across reloads after activation when
+those runtime limits remain unchanged. Acquisition is asynchronous; the
+blocking closure owns the permit through completion even if the caller is
+cancelled. File response streaming does not retain admission. This preserves
+service ACL, lock, conditional-request, and secure-file operations. Its throughput,
+CPU-efficiency, tail-latency, and concurrent-update effects still require normal
+paired measurements before adoption can be considered successful.

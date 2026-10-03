@@ -284,6 +284,7 @@ pub(super) async fn execute_reverse_dispatch(
                 let mut response = execute_webdav_service(
                     req,
                     service,
+                    &state,
                     &identity,
                     route.plan.streaming.max_request_body_bytes,
                     request_version == http::Version::HTTP_11 && !conn.tls_terminated,
@@ -1076,6 +1077,7 @@ async fn complete_reverse_after_modules(
         let response = dispatch_reverse_webdav(ReverseWebDavDispatch {
             req,
             service: webdav.clone(),
+            state,
             identity,
             request_method,
             request_version,
@@ -1244,6 +1246,7 @@ async fn complete_reverse_after_modules(
 struct ReverseWebDavDispatch<'a> {
     req: Request<Body>,
     service: Arc<crate::reverse::router::WebDavOriginService>,
+    state: &'a crate::runtime::RuntimeState,
     identity: &'a crate::policy_context::ResolvedIdentity,
     request_method: &'a http::Method,
     request_version: http::Version,
@@ -1258,6 +1261,7 @@ async fn dispatch_reverse_webdav(input: ReverseWebDavDispatch<'_>) -> Result<Res
     let ReverseWebDavDispatch {
         req,
         service,
+        state,
         identity,
         request_method,
         request_version,
@@ -1270,6 +1274,7 @@ async fn dispatch_reverse_webdav(input: ReverseWebDavDispatch<'_>) -> Result<Res
     let response = execute_webdav_service(
         req,
         service,
+        state,
         identity,
         max_request_body_bytes,
         allow_file_backed,
@@ -1291,6 +1296,7 @@ async fn dispatch_reverse_webdav(input: ReverseWebDavDispatch<'_>) -> Result<Res
 async fn execute_webdav_service(
     req: Request<Body>,
     service: Arc<crate::reverse::router::WebDavOriginService>,
+    state: &crate::runtime::RuntimeState,
     identity: &crate::policy_context::ResolvedIdentity,
     max_request_body_bytes: usize,
     allow_file_backed: bool,
@@ -1326,7 +1332,18 @@ async fn execute_webdav_service(
         assurance: identity.auth_strength.clone(),
     };
     let blocking_phase = crate::perf_diagnostics::phase_timer!("webdav_blocking_dispatch");
+    let permit = state
+        .webdav_blocking_slots
+        .as_ref()
+        .ok_or_else(|| anyhow!("WebDAV blocking admission is unavailable"))?
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| anyhow!("WebDAV blocking admission failed: {error}"))?;
     let response = tokio::task::spawn_blocking(move || {
+        // A cancelled caller must not release admission while its filesystem
+        // operation is still running. Response streaming does not retain it.
+        let _permit = permit;
         let _phase = crate::perf_diagnostics::phase_timer!("webdav_service");
         if allow_file_backed {
             service.handle_bytes_for_resource_file_backed(request, &context, request_resource)
@@ -1674,3 +1691,7 @@ mod browser_report_tests {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }
+
+#[cfg(test)]
+#[path = "dispatch/webdav_tests.rs"]
+mod webdav_tests;
