@@ -1283,3 +1283,18 @@ and p99 0.311183. WebDAV 1 MiB p99 is 1.331352 and CPU efficiency is
 and queue-delay checks also fail. The constructor removal is verified but
 does not complete the normal performance objectives; no stronger objective
 is enabled or existing limit weakened on the strength of these profiles.
+
+The next miss-path experiment removes the tee relay only for a complete
+single-frame in-memory body without trailers, a close signal, or a file
+extent, and only when every mirror's size limit accepts the frame. The raw
+origin reader already builds such bodies when its response-head buffer
+contains the complete Content-Length payload. Instead of two channels and
+a relay task, the lossy tee shares the immutable bytes with its mirrors and
+returns the original primary body, retaining its transport flags and resource
+ownership. Streaming, oversized, trailer-bearing, and file-backed bodies keep
+the existing bounded relay and abort/drop accounting. Cache admission and
+disk persistence remain unchanged. Native allocation samples include body
+channel construction, but Linux profiles and normal measurements must still
+quantify this experiment's actual effect. The three resource/limit/trailer
+regressions pass with all 1,308 workspace tests across 47 suites, all-feature
+Clippy, and the eight-category / sixteen-evaluation gate checks.
