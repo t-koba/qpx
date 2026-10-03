@@ -1072,3 +1072,9 @@ streaming errors, and response handling retain their existing behavior. The
 existing streaming-limit test now also verifies request context survives
 wrapping. This is a separate optimization trial requiring fresh profiles and
 normal comparisons; it does not change public APIs or configuration.
+
+The three complete balanced-affinity quality runs also support removing the
+old 1 MiB/single-stream reference-spread exceptions (5.2 for throughput and
+1.6 for CPU efficiency). Every normal reference lane now uses the existing
+1.25 spread ceilings; qpxd keeps its existing 1.10 ceilings. This tightens
+measurement quality and does not relax any product objective.

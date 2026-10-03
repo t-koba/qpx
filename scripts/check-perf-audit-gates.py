@@ -2,6 +2,8 @@
 """Verify that every performance measurement remains a required CI gate."""
 
 from pathlib import Path
+import json
+import math
 import re
 from lib.perf_audit_catalog import CATEGORIES
 
@@ -78,4 +80,21 @@ for category in ("http2", "streaming"):
             f"{category} may accept instrumented diagnostic measurements")
 require('record.get("cpu_measurement") != "linux_process_cpu_clock_ns_v1"' in checker,
         "streaming may accept coarse CPU tick measurements")
+http2_objectives = json.loads(Path("perf/http2-performance-objectives.json").read_text(encoding="utf-8"))
+spread_ceilings = {
+    "max_reference_cpu_sample_spread_ratio": 1.25,
+    "max_reference_throughput_sample_spread_ratio": 1.25,
+    "max_qpx_cpu_sample_spread_ratio": 1.10,
+    "max_qpx_throughput_sample_spread_ratio": 1.10,
+}
+defaults = http2_objectives["defaults"]
+for field in spread_ceilings:
+    require(field in defaults, f"HTTP/2 defaults lack {field}")
+for limits in [defaults, *http2_objectives["lanes"]]:
+    for field, ceiling in spread_ceilings.items():
+        if field not in limits:
+            continue
+        value = limits[field]
+        require(type(value) in (int, float) and math.isfinite(value) and 0 < value <= ceiling,
+                f"HTTP/2 {field} exceeds its verified measurement-quality ceiling")
 print("performance acceptance gates complete: 8 categories, 16 evaluations")
