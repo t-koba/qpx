@@ -14,7 +14,7 @@ def main():
     arguments = sys.argv[1:]
     server = os.environ["QPXD_REAL_BIN"]
     mode = os.environ.get("QPX_NATIVE_PROFILE_MODE", "cpu")
-    if mode not in ("cpu", "syscalls"):
+    if mode not in ("cpu", "client-cpu", "syscalls"):
         raise SystemExit("unsupported native profiler mode")
     if not arguments or (mode == "cpu" and arguments[0] != "run") or arguments in (["-v"], ["-V"], ["--version"]):
         os.execv(server, [server, *arguments])
@@ -23,7 +23,7 @@ def main():
     elif mode == "syscalls" and Path(server).name == "nginx" and "-c" in arguments:
         config = Path(arguments[arguments.index("-c") + 1])
         role = f"{config.parent.name}-{config.stem}"
-    elif mode == "syscalls":
+    elif mode in ("syscalls", "client-cpu"):
         role = f"{Path(server).name}-{os.getpid()}"
     else:
         raise SystemExit("native CPU profiler requires a server config")
@@ -32,6 +32,8 @@ def main():
     lifecycle_path = directory / f"{role}.lifecycle.json"
     lifecycle = {"role": role, "mode": mode, "executable": server,
                  "started_monotonic_ns": time.monotonic_ns(), "started_unix_ns": time.time_ns()}
+    if mode == "client-cpu":
+        lifecycle["arguments"] = arguments
     requested_signal = None
 
     def save_lifecycle():
@@ -46,11 +48,13 @@ def main():
     signal.signal(signal.SIGTERM, request_shutdown)
     signal.signal(signal.SIGINT, request_shutdown)
     observer = os.environ["QPX_NATIVE_PERF_BIN"]
-    if mode == "cpu":
+    if mode in ("cpu", "client-cpu"):
         lifecycle["ring_buffer_bytes"] = 8 * 1024 * 1024
         command = [observer, "record", "-m", "8M", "-e", "cpu-clock", "-F", "199",
-                   "--clockid", "CLOCK_MONOTONIC", "--call-graph", "dwarf,16384",
-                   "-o", str(directory / f"{role}.data"), "--", server, *arguments]
+                   "--clockid", "CLOCK_MONOTONIC"]
+        if mode == "cpu":
+            command.extend(["--call-graph", "dwarf,16384"])
+        command.extend(["-o", str(directory / f"{role}.data"), "--", server, *arguments])
     else:
         # Observe waits and socket ownership without recording payload buffers.
         syscalls = "epoll_wait,epoll_pwait,epoll_pwait2,epoll_ctl,poll,ppoll,select,pselect6,futex,connect,setsockopt,getsockopt,shutdown,close"

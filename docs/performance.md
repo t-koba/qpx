@@ -928,3 +928,21 @@ bodies still retain eligible metadata; an over-capacity combined object leaves
 no unaccounted recent views. The existing eviction fixture now budgets the
 actual 16-byte combined object and still verifies invalidation of both views.
 Disk schema, filenames, writeback admission, and durable publication are unchanged.
+
+Client usage evidence from `ad7b8d4`, Actions run `37135785415`, records average
+h2load CPU use from 0.54 to 1.70 cores across the complete HTTP/2 matrix.
+System CPU accounts for approximately 37-63% of its CPU time. Invalid measured
+durations include direct-backend 7.94/14.14 s and nginx 13.21/6.95 s. These
+observations do not distinguish networking from per-request log writes and
+do not justify changing the load generator or the duration limits.
+
+The `http2-client` diagnostic samples the actual packaged h2load with perf
+CPU-clock at 199 Hz, without call graphs. It retains each process's complete
+arguments and monotonic lifecycle timestamps, raw CPU data, symbol report,
+and lost-sample validation, enabling alignment with calibration and measured
+request logs. All four body/stream lanes run in an isolated MTU-1500 namespace
+with the existing full quality settings. Profiling processes share owned
+process groups with their real clients; interrupted, missing, empty, or lost
+profiles fail explicitly. GNU time in this experiment includes the profiler,
+as stated in its manifest; these values cannot substitute for direct client
+CPU records or normal required performance results.

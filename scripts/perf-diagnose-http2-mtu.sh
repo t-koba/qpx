@@ -17,7 +17,10 @@ fi
 if [ "$#" -eq 1 ] && [ "$1" = --full-affinity ]; then
   exec sudo unshare --net bash "$ROOT_DIR/scripts/perf-diagnose-http2-mtu.sh" --inside-full-affinity
 fi
-if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-observer && "$1" != --inside-full && "$1" != --inside-full-affinity ]] || [ "$(id -u)" -ne 0 ]; then
+if [ "$#" -eq 1 ] && [ "$1" = --full-client ]; then
+  exec sudo --preserve-env=QPX_NATIVE_PERF_BIN unshare --net bash "$ROOT_DIR/scripts/perf-diagnose-http2-mtu.sh" --inside-full-client
+fi
+if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-observer && "$1" != --inside-full && "$1" != --inside-full-affinity && "$1" != --inside-full-client ]] || [ "$(id -u)" -ne 0 ]; then
   echo "unsupported HTTP/2 MTU diagnostic invocation" >&2
   exit 2
 fi
@@ -56,7 +59,7 @@ body_sizes=1048576
 stream_counts=100
 if [ "$1" = --inside-observer ]; then
   phases=(1500-sampled 1500-unobserved)
-elif [[ "$1" = --inside-full || "$1" = --inside-full-affinity ]]; then
+elif [[ "$1" = --inside-full || "$1" = --inside-full-affinity || "$1" = --inside-full-client ]]; then
   phases=(1500-full)
   body_sizes="1024 1048576"
   stream_counts="1 100"
@@ -85,6 +88,24 @@ path.write_text("#!/usr/bin/env bash\nset -euo pipefail\nexec taskset -c "
 path.chmod(0o755)
 PY_CLIENT
   affinity_command=(taskset -c "$server_cpus")
+  client_path="$profile_dir/client-bin:$PATH"
+fi
+if [ "$1" = --inside-full-client ]; then
+  : "${QPX_NATIVE_PERF_BIN:?native perf executable is required}"
+  [ -x "$QPX_NATIVE_PERF_BIN" ]
+  export QPX_REAL_H2LOAD
+  QPX_REAL_H2LOAD="$(command -v h2load)"
+  export QPX_NATIVE_PROFILE_MODE=client-cpu
+  export QPX_NATIVE_PROFILE_DIR="$profile_dir/client-profiles"
+  export QPX_NATIVE_WRAPPER_SOURCE="$ROOT_DIR/scripts/lib/perf-native-process.py"
+  mkdir "$profile_dir/client-bin" "$QPX_NATIVE_PROFILE_DIR"
+  cat >"$profile_dir/client-bin/h2load" <<'CLIENT_PROFILE'
+#!/usr/bin/env bash
+set -euo pipefail
+export QPXD_REAL_BIN="$QPX_REAL_H2LOAD"
+exec python3 "$QPX_NATIVE_WRAPPER_SOURCE" "$@"
+CLIENT_PROFILE
+  chmod 755 "$profile_dir/client-bin/h2load"
   client_path="$profile_dir/client-bin:$PATH"
 fi
 for phase in "${phases[@]}"; do
@@ -116,7 +137,7 @@ manifest = {
     "calibration_min_duration_ms": 8000,
     "tcp_sampling": sys.argv[5] == "true",
 }
-if sys.argv[6] in ("--inside-full", "--inside-full-affinity"):
+if sys.argv[6] in ("--inside-full", "--inside-full-affinity", "--inside-full-client"):
     manifest.update({
         "measurement": "http2_isolated_full_quality_v1",
         "required_body_bytes": [1024, 1048576],
@@ -131,6 +152,10 @@ if sys.argv[6] == "--inside-full-affinity":
     manifest.update({"measurement": "http2_isolated_full_affinity_quality_v1",
                      "available_cpus": available, "client_cpus": available[:1],
                      "server_cpus": available[1:]})
+if sys.argv[6] == "--inside-full-client":
+    manifest.update({"measurement": "http2_client_cpu_profile_v1",
+                     "client_cpu_profiler": "perf cpu-clock at 199 Hz without call graphs",
+                     "client_usage_includes_profiler": True})
 (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 PY_NAMESPACE
   chown -R "$SUDO_UID:$SUDO_GID" "$profile_dir"
@@ -145,6 +170,11 @@ PY_NAMESPACE
   fi
   phase_status=0
   "${affinity_command[@]}" setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups env \
+    QPX_NATIVE_PERF_BIN="${QPX_NATIVE_PERF_BIN:-}" \
+    QPX_REAL_H2LOAD="${QPX_REAL_H2LOAD:-}" \
+    QPX_NATIVE_PROFILE_MODE="${QPX_NATIVE_PROFILE_MODE:-cpu}" \
+    QPX_NATIVE_PROFILE_DIR="${QPX_NATIVE_PROFILE_DIR:-}" \
+    QPX_NATIVE_WRAPPER_SOURCE="${QPX_NATIVE_WRAPPER_SOURCE:-}" \
     PATH="$client_path" QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES="$body_sizes" \
     QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES="$stream_counts" \
     QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS=8000 \
@@ -174,4 +204,7 @@ PY_NAMESPACE
     status=1
   fi
 done
+if [ "$1" = --inside-full-client ]; then
+  python3 "$ROOT_DIR/scripts/summarize-perf-client.py" "$QPX_NATIVE_PROFILE_DIR" "$QPX_NATIVE_PERF_BIN" || status=1
+fi
 exit "$status"
