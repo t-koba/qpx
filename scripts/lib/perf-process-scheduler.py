@@ -73,15 +73,17 @@ class Taskstats:
                     raise RuntimeError(f'unexpected taskstats message type: {kind}')
                 offset += (size + 3) & ~3
 
-    def read(self, pid):
-        reply = self.request(self.family, 1, attribute(2, struct.pack('=I', pid)))
+    def read(self, pid, *, thread=False):
+        identity_kind = 1 if thread else 2
+        aggregate_kind = 4 if thread else 5
+        reply = self.request(self.family, 1, attribute(identity_kind, struct.pack('=I', pid)))
         if reply[0] != 2:
             raise RuntimeError('unexpected TASKSTATS response command')
-        aggregates = [value for kind, value in attributes(reply[4:]) if kind == 5]
+        aggregates = [value for kind, value in attributes(reply[4:]) if kind == aggregate_kind]
         if len(aggregates) != 1:
             raise RuntimeError('TASKSTATS TGID aggregate is missing or duplicated')
         fields = list(attributes(aggregates[0]))
-        identities = [value for kind, value in fields if kind == 2]
+        identities = [value for kind, value in fields if kind == identity_kind]
         statistics = [value for kind, value in fields if kind == 3]
         if (len(identities) != 1 or identities[0] != struct.pack('=I', pid)
                 or len(statistics) != 1 or len(statistics[0]) < 32):

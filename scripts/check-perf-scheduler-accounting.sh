@@ -46,19 +46,25 @@ try:
     if not started.wait(2):
         raise RuntimeError('scheduler probe worker did not start')
     time.sleep(0.4)
+    active_thread = reader.read(worker.native_id, thread=True)
     active = reader.read(os.getpid())
     finish.set()
     worker.join(timeout=2)
     if worker.is_alive():
         raise RuntimeError('scheduler probe worker did not finish')
     retired = reader.read(os.getpid())
+    if not (active_thread['cpu_delay_total_ns'] > 0
+            and retired['cpu_delay_total_ns'] - before['cpu_delay_total_ns']
+            >= active_thread['cpu_delay_total_ns']):
+        raise RuntimeError('retired TGID accounting omitted the observed worker delay')
     if not (before['cpu_delay_total_ns'] < active['cpu_delay_total_ns']
             <= retired['cpu_delay_total_ns']):
         raise RuntimeError('completed thread scheduler delay was not retained')
     if not (before['cpu_count'] < active['cpu_count'] <= retired['cpu_count']):
         raise RuntimeError('completed thread scheduler event count was not retained')
     record = module.snapshot(os.getpid())
-    record['retired_thread_probe'] = {'before': before, 'active': active, 'retired': retired}
+    record['retired_thread_probe'] = {'before': before, 'active_thread': active_thread,
+                                    'active': active, 'retired': retired}
     (root / 'target/perf/scheduler-accounting-probe.json').write_text(
         json.dumps(record, sort_keys=True) + '\n')
     print('Real completed-thread scheduler accounting verified')
