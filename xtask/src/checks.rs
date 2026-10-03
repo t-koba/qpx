@@ -2972,7 +2972,7 @@ fn ci_acceptance_violations(
         "scripts/perf-audit-proxy-matrix.sh \"$QPX_PROXY_COMPARE_JSON\"",
         "target/perf/perf-audit-proxy-compare.jsonl",
         "scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl perf/origin-cache-performance-objectives.json",
-        "scripts/perf-audit-http2-compare.sh \"$QPX_HTTP2_COMPARE_JSON\"",
+        "scripts/perf-audit-http2-isolated.sh \"$QPX_HTTP2_COMPARE_JSON\"",
         "target/perf/perf-audit-http2-compare.jsonl",
         "target/perf/http2-compare-logs/**",
         "scripts/perf-audit-streaming-compare.sh \"$QPX_STREAMING_COMPARE_JSON\"",
@@ -5294,7 +5294,7 @@ mod tests {
             scripts/perf-audit-proxy-matrix.sh "$QPX_PROXY_COMPARE_JSON"
             target/perf/perf-audit-proxy-compare.jsonl
             scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl perf/origin-cache-performance-objectives.json
-            scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
+            scripts/perf-audit-http2-isolated.sh "$QPX_HTTP2_COMPARE_JSON"
             target/perf/perf-audit-http2-compare.jsonl
             target/perf/http2-compare-logs/**
             scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"
@@ -5371,6 +5371,24 @@ mod tests {
         assert!(
             ci_acceptance_violations(ci, security, codeql, structure, release, about, public_api)
                 .is_empty()
+        );
+        let unisolated_ci = ci.replace(
+            "scripts/perf-audit-http2-isolated.sh \"$QPX_HTTP2_COMPARE_JSON\"",
+            "scripts/perf-audit-http2-compare.sh \"$QPX_HTTP2_COMPARE_JSON\"",
+        );
+        assert_eq!(
+            ci_acceptance_violations(
+                &unisolated_ci,
+                security,
+                codeql,
+                structure,
+                release,
+                about,
+                public_api,
+            ),
+            [
+                "ci.yml missing required job or command: scripts/perf-audit-http2-isolated.sh \"$QPX_HTTP2_COMPARE_JSON\""
+            ],
         );
 
         assert_eq!(
