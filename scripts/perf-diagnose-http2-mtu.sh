@@ -57,11 +57,12 @@ interfaces = json.loads((root / "interfaces.json").read_text())
 if len(interfaces) != 1 or interfaces[0]["ifname"] != "lo" or interfaces[0]["mtu"] != mtu:
     raise SystemExit("isolated HTTP/2 loopback MTU was not applied")
 (root / "manifest.json").write_text(json.dumps({
-    "measurement": "http2_isolated_mtu_v2", "diagnostic_instrumentation": True,
+    "measurement": "http2_isolated_mtu_v3", "diagnostic_instrumentation": True,
     "network_namespace": sys.argv[2], "host_network_namespace": sys.argv[3],
     "loopback_mtu": mtu, "body_bytes": 1048576, "max_concurrent_streams": 100,
     "required_samples_per_role": 3, "replaces_required_gate": False,
     "sampling_order": "default_mtu_then_ethernet_mtu_same_runner",
+    "calibration_min_duration_ms": 8000,
 }, indent=2) + "\n")
 PY_NAMESPACE
   chown -R "$SUDO_UID:$SUDO_GID" "$profile_dir"
@@ -76,6 +77,7 @@ PY_NAMESPACE
   setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups env \
     QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES=1048576 \
     QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
+    QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS=8000 \
     QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS=3 QPX_HTTP2_COMPARE_LOG_DIR="$phase_dir/logs" \
     bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" "$phase_dir/comparison.jsonl" \
     || phase_status=$?

@@ -640,7 +640,11 @@ owned Linux network namespace, sequentially comparing loopback MTU 65536 and
 required measurements. Both results, logs, and exit statuses are retained; a
 failed phase makes the diagnostic fail after both phases finish. Both phases
 use the same 100 ms SOCK_DIAG sampler, retaining negotiated MSS, queues, receive
-windows, and ACK progress without capturing payloads. The namespace
+windows, and ACK progress without capturing payloads. Sampler metadata includes
+its process CPU time, elapsed time, and fraction of one CPU core, so observer
+overhead can be assessed rather than assumed negligible. Calibration lasts at
+least eight seconds in this diagnostic only; normal comparisons retain their
+existing calibration setting. The namespace
 identity and interface MTU are recorded before starting servers; all three samples still
 require complete responses within the existing duration budget. Its rows are
 marked diagnostic and cannot satisfy required acceptance gates. This experiment

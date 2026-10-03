@@ -138,6 +138,8 @@ def main():
     interval = 0.1
     maximum_gap = 0
     previous = None
+    sampler_start = time.monotonic_ns()
+    cpu_start = time.process_time_ns()
     with open_diag() as diag, gzip.open(args.output, "xt", encoding="utf8") as output:
         while not args.stop_file.exists():
             start = time.monotonic_ns()
@@ -149,12 +151,16 @@ def main():
             count += 1
             socket_samples += len(rows)
             time.sleep(max(0, interval - (time.monotonic_ns() - start) / 1e9))
+    elapsed_ns = time.monotonic_ns() - sampler_start
+    cpu_ns = time.process_time_ns() - cpu_start
     if not count or not socket_samples:
         raise RuntimeError("TCP diagnostic captured no real benchmark sockets")
     args.output.with_suffix(".sampling.json").write_text(json.dumps({
         "clock": "CLOCK_MONOTONIC", "payload_capture": False, "sampler_pid": os.getpid(),
         "samples": count, "socket_samples": socket_samples,
         "interval_seconds": interval, "maximum_gap_seconds": maximum_gap / 1e9,
+        "elapsed_ns": elapsed_ns, "cpu_time_ns": cpu_ns,
+        "cpu_fraction_of_one_core": cpu_ns / elapsed_ns,
         "listener_ports": args.ports,
     }) + "\n")
 
