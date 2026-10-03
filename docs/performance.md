@@ -629,3 +629,13 @@ fail the diagnostic. Raw perf data and the decoded event stream are retained.
 Payload buffers are not captured, and instrumented measurements remain excluded
 from acceptance. This diagnostic is intended for stalls that disappear under
 strace; kernel recording still requires checking its effect on the workload.
+
+The `http2-mtu` diagnostic runs the real 1 MiB, 100-stream comparison in an
+owned Linux network namespace with loopback MTU 1500. It does not modify the
+host interface or replace required measurements. The namespace identity and
+interface MTU are recorded before starting servers; all three samples still
+require complete responses within the existing duration budget. Its rows are
+marked diagnostic and cannot satisfy required acceptance gates. This experiment
+investigates transport stalls seen with queued output and advertised receive
+windows below the ordinary loopback MSS; it is not evidence of a resolved cause
+until independently reproduced comparisons establish the effect.
