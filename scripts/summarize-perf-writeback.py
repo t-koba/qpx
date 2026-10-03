@@ -44,9 +44,17 @@ for before in before_paths:
     match = re.search(r"^qpx_complete_requests (\d+)$", wrk.read_text(), re.MULTILINE)
     if not match or int(match[1]) == 0:
         raise SystemExit(f"Missing completed frontend requests: {wrk}")
+    captures = []
+    for edge in ("before", "after"):
+        timestamp = root / f"{prefix}.writeback.{edge}.timestamp"
+        if not timestamp.is_file() or not re.fullmatch(r"[1-9][0-9]*\n", timestamp.read_text()):
+            raise SystemExit(f"Missing or invalid capture timestamp: {timestamp}")
+        captures.append(int(timestamp.read_text()))
+    if captures[1] <= captures[0]:
+        raise SystemExit(f"Writeback capture times are not ordered: {prefix}")
     record = {"sample": prefix, "completed_frontend_requests": int(match[1]),
-              "before_capture_finished_unix_ns": before.stat().st_mtime_ns,
-              "after_capture_finished_unix_ns": after.stat().st_mtime_ns}
+              "before_capture_finished_unix_ns": captures[0],
+              "after_capture_finished_unix_ns": captures[1]}
     for metric, required in (("qpx_cache_writeback_body_bytes_total", True),
                              ("qpx_cache_writeback_admission_rejections_total", False)):
         initial, initial_present = counter(before, metric, required)

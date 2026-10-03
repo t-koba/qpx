@@ -9,7 +9,7 @@ pub(crate) struct PhaseTimer {
 }
 
 impl PhaseTimer {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn is_sampled(&self) -> bool {
         self.started.is_some()
     }

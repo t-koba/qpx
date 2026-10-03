@@ -1100,3 +1100,22 @@ counter is never presented as durable completion. Window edges may include
 in-flight work and metric scrapes. Every diagnostic sample remains marked
 intrusive and cannot satisfy normal acceptance; full raw snapshots are saved
 even if comparison or summary generation fails.
+
+The first real writeback diagnostic (`37146028231`, `76e98d8`) reports
+64,396/78,955/75,787 admission rejections for 105,991/118,214/111,144
+completed miss requests. Collected body-byte deltas are
+42,637,312/40,241,152/36,270,080. These intrusive windows show substantial
+pressure on the unchanged admission controller; they do not measure durable
+completion or prove normal throughput. Its original file-mtime capture times
+were rewritten during artifact handling and are invalid. Capture timestamps
+are now explicit sidecar contents, must be present and strictly ordered, and
+survive archival independently of file metadata. Historical counter deltas
+remain usable, but historical timestamps must not be used for rates.
+
+The WebDAV scheduling diagnostic uses real 1 MiB file transfers and records
+I/O-pending poll counts and explicit cooperative yields alongside sampled
+Linux socket queues. Only transfers selected by the existing phase sampler
+wrap the I/O future to count polls. Unsampled transfers retain their original
+I/O path, and scheduling quanta, admission, and socket thresholds are
+unchanged. This observation must precede any attempt to eliminate redundant
+handoffs; neither the diagnostic nor its counters can satisfy normal gates.

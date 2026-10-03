@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, webdav-sockets, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for the same-runner WebDAV comparison
@@ -201,6 +201,14 @@ jobs:
             webdav-revision)
               QPX_PERF_REVISION_ORDER="${{ inputs.revision_order }}" \
                 python3 scripts/perf-evaluate.py "WebDAV same-runner revision objectives" -- bash scripts/perf-diagnose-webdav-revision.sh
+              ;;
+            webdav-scheduling)
+              RUST_LOG=warn,qpx_perf_phase=debug QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+                QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-webdav,apache-webdav \
+                QPX_PROXY_COMPARE_BODY_SIZES=1048576 \
+                QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS=3 \
+                python3 scripts/perf-evaluate.py "WebDAV file-body scheduling diagnostics" -- bash scripts/perf-audit-proxy-compare.sh
+              python3 scripts/summarize-perf-phases.py target/perf/proxy-compare-logs target/perf/phase-summary.json
               ;;
             webdav-sockets)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 QPX_PERF_WEBDAV_SOCKET_DIAGNOSTICS=1 \

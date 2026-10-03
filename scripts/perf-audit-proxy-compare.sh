@@ -1339,6 +1339,8 @@ LUA
     if [ "$WRITEBACK_DIAGNOSTICS" = 1 ] && [ "$proxy" = qpxd-cache ]; then
       curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$((port + 1000))/metrics" \
         > "$LOG_DIR/${artifact_name}.attempt-${attempt}.writeback.before.prom"
+      python3 -c 'import time; print(time.time_ns())' \
+        > "$LOG_DIR/${artifact_name}.attempt-${attempt}.writeback.before.timestamp"
     fi
     profile_pid=""
     if [ "$proxy" = "$PROFILE_PROXY" ] && [ "$PROFILE_SECONDS" -gt 0 ]; then
@@ -1394,6 +1396,8 @@ LUA
     if [ "$WRITEBACK_DIAGNOSTICS" = 1 ] && [ "$proxy" = qpxd-cache ]; then
       curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$((port + 1000))/metrics" \
         > "$LOG_DIR/${artifact_name}.attempt-${attempt}.writeback.after.prom"
+      python3 -c 'import time; print(time.time_ns())' \
+        > "$LOG_DIR/${artifact_name}.attempt-${attempt}.writeback.after.timestamp"
     fi
     if [ "$CALLGRIND_DIAGNOSTICS" = 1 ] && [ "$proxy" = "$CALLGRIND_PROXY" ]; then
       callgrind_control -i off "$resource_pid" >/dev/null

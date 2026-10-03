@@ -111,6 +111,8 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
     let mut send_queue = FileSendQueueGuard::begin(stream)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
+        use std::future::{Future, poll_fn};
+
         let _transfer = ZeroCopyTransferGuard::begin();
         let file_fd = region.file().as_raw_fd();
         let mut offset = region.offset();
@@ -120,14 +122,32 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
         // Reuse the writer's reactor registration instead of duplicating
         // and registering its descriptor for every file response.
         let mut bytes_since_yield = 0_u64;
+        let sampled_scheduling = _phase.is_sampled();
+        let mut io_pending_polls = 0_u64;
+        let mut explicit_yields = 0_u64;
         while offset < end {
             let scheduling_quantum = zero_copy_scheduling_quantum(ZeroCopyTransferKind::File);
             let remaining = (end - offset).min(scheduling_quantum);
-            let written = stream
-                .async_io(Interest::WRITABLE, || {
+            let written = if sampled_scheduling {
+                let transfer = stream.async_io(Interest::WRITABLE, || {
                     sendfile_once(file_fd, stream.as_raw_fd(), offset, remaining)
+                });
+                tokio::pin!(transfer);
+                poll_fn(|cx| {
+                    let result = transfer.as_mut().poll(cx);
+                    if result.is_pending() {
+                        io_pending_polls += 1;
+                    }
+                    result
                 })
-                .await?;
+                .await?
+            } else {
+                stream
+                    .async_io(Interest::WRITABLE, || {
+                        sendfile_once(file_fd, stream.as_raw_fd(), offset, remaining)
+                    })
+                    .await?
+            };
             if written == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
@@ -144,18 +164,28 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
                     // Cooperative budget accounting alone can defer the
                     // handoff for many quanta. Enforce the file quantum
                     // while peers are actively competing for the worker.
+                    if sampled_scheduling {
+                        explicit_yields += 1;
+                    }
                     tokio::task::yield_now().await;
                 } else {
                     tokio::task::consume_budget().await;
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        if sampled_scheduling {
+            tracing::debug!(target: "qpx_perf_phase", io_pending_polls, explicit_yields,
+                body_bytes = region.len(), sample_interval = 1024,
+                "file body scheduling sampled");
+        }
         #[cfg(target_os = "linux")]
-        if _phase.is_sampled() {
+        if sampled_scheduling {
             match socket_send_queue(stream) {
                 Ok((queued_bytes, unsent_bytes)) => {
                     tracing::debug!(target: "qpx_perf_phase", queued_bytes, unsent_bytes,
                         body_bytes = region.len(), sample_interval = 1024,
+                        io_pending_polls, explicit_yields,
                         "file socket queue sampled");
                 }
                 Err(error) => {

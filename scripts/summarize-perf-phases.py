@@ -27,7 +27,10 @@ for path in sorted(root.rglob("*.log")):
             if not all(isinstance(value, int) and value >= 0 for value in (queued, unsent)) or unsent > queued:
                 raise SystemExit(f"invalid TCP send queue measurement in {path}")
             key = (str(path.relative_to(root)), fields["body_bytes"], fields["sample_interval"])
-            socket_samples[key].append((queued, unsent))
+            pending, yields = fields["io_pending_polls"], fields["explicit_yields"]
+            if not all(type(value) is int and value >= 0 for value in (pending, yields)):
+                raise SystemExit(f"invalid file-body scheduling measurement in {path}")
+            socket_samples[key].append((queued, unsent, pending, yields))
             continue
         if fields.get("message") != "performance phase completed":
             continue
@@ -50,7 +53,7 @@ output.write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
 socket_records = []
 for (source, body_bytes, interval), values in sorted(socket_samples.items()):
     record = {"source": source, "body_bytes": body_bytes, "sample_interval": interval, "samples": len(values)}
-    for index, metric in enumerate(("queued_bytes", "unsent_bytes")):
+    for index, metric in enumerate(("queued_bytes", "unsent_bytes", "io_pending_polls", "explicit_yields")):
         measurements = sorted(value[index] for value in values)
         record[metric] = {"median": statistics.median(measurements),
                           "p99": measurements[min(len(measurements) - 1, (99 * len(measurements)) // 100)],
