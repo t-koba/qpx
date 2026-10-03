@@ -707,7 +707,7 @@ jobs:
           if [ "$QPX_PERF_REPEAT" = 1 ]; then
             bash scripts/perf-audit-revision-compare.sh http2 "$QPX_HTTP2_COMPARE_JSON"
           else
-            scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
+            bash scripts/perf-audit-http2-isolated.sh "$QPX_HTTP2_COMPARE_JSON"
           fi
           PERF_STEP
       - name: enforce http2 performance objectives

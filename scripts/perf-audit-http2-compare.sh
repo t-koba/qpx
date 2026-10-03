@@ -926,6 +926,11 @@ import sys
 ) = sys.argv[1:31]
 record = json.loads(metrics)
 record["diagnostic_instrumentation"] = os.environ["QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS"] == "1"
+if environment_path := os.environ.get("QPX_HTTP2_COMPARE_ENVIRONMENT_JSON"):
+    with open(environment_path, encoding="utf-8") as handle:
+        record["measurement_environment"] = json.load(handle)
+    if sorted(os.sched_getaffinity(0)) != record["measurement_environment"]["server_cpus"]:
+        raise SystemExit("HTTP/2 measured server affinity differs from its declared partition")
 record["cpu_ms"] = int(cpu_ms)
 record["backend_cpu_ms"] = int(backend_cpu_ms)
 record["total_cpu_ms"] = int(total_cpu_ms)

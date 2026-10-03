@@ -206,6 +206,7 @@ def lane_limit(field, key):
     return positive_number(limits, field, "HTTP/2 objectives")
 
 records = {}
+normal_environment = None
 with open(JSONL_PATH, "r", encoding="utf-8") as handle:
     for line_number, line in enumerate(handle, start=1):
         stripped = line.strip()
@@ -255,8 +256,36 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
         if DIAGNOSTIC:
             if record.get("diagnostic_instrumentation") is not True:
                 fail(f"{owner} lacks diagnostic instrumentation provenance")
-        elif record.get("diagnostic_instrumentation") is not False:
-            fail(f"{owner} is instrumented or lacks measurement provenance")
+        else:
+            if record.get("diagnostic_instrumentation") is not False:
+                fail(f"{owner} is instrumented or lacks measurement provenance")
+            environment = record.get("measurement_environment")
+            if (not isinstance(environment, dict)
+                    or environment.get("measurement") != "http2_isolated_balanced_v1"
+                    or environment.get("diagnostic_instrumentation") is not False
+                    or environment.get("loopback_mtu") != 1500
+                    or environment.get("calibration_min_duration_ms") != 8000
+                    or not environment.get("network_namespace")
+                    or not environment.get("host_network_namespace")
+                    or environment["network_namespace"] == environment["host_network_namespace"]):
+                fail(f"{owner} lacks the verified isolated HTTP/2 measurement environment")
+            cpu_sets = []
+            for field in ("available_cpus", "client_cpus", "server_cpus"):
+                values = environment.get(field)
+                if (not isinstance(values, list) or not values
+                        or any(type(cpu) is not int or cpu < 0 for cpu in values)
+                        or len(set(values)) != len(values)):
+                    fail(f"{owner} has an invalid CPU set: {field}")
+                cpu_sets.append(set(values))
+            available, client, server = cpu_sets
+            if len(client) != 2 or len(server) < 2 or client & server or client | server != available:
+                fail(f"{owner} CPU sets do not form the required disjoint partition")
+            if normal_environment is None:
+                normal_environment = environment
+            elif environment != normal_environment:
+                fail(f"{owner} was measured in a different environment from its comparison peers")
+            if attempts != 3 or positive_number(record, "calibration_duration_ms", owner) < 8000:
+                fail(f"{owner} lacks three samples calibrated for at least eight seconds")
         if record.get("resource_measurement") != "sampled_workload_peak_v1":
             fail(f"{owner} uses an unsupported resource measurement")
         if record.get("kernel_resource_metrics") is not True:

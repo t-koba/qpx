@@ -15,7 +15,7 @@ case "$CATEGORY" in
     objectives="origin-cache-performance-objectives.json"
     ;;
   http2)
-    harness="perf-audit-http2-compare.sh"
+    harness="perf-audit-http2-isolated.sh"
     log_variable="QPX_HTTP2_COMPARE_LOG_DIR"
     checker="check-http2-performance.sh"
     objectives="http2-performance-objectives.json"

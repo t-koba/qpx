@@ -1029,3 +1029,22 @@ allocation paths. A 9 KiB state budget guards against reintroducing inactive
 protocol state. Workspace tests pass, but refreshed Linux instruction profiles
 and normal performance measurements must establish the actual benefit and
 check the cost of the additional HTTPS-only allocation.
+
+Balanced-affinity diagnostic runs `37141272853`, `37141275017`, and
+`37141277021` all pass the unchanged complete-matrix quality checker on
+`21ed941`. Each records client CPUs `[0, 1]`, server CPUs `[2, 3]`, an isolated
+1500-byte loopback MTU, three interleaved samples per role, and matching
+requested/completed counts in all four lanes. Across all runs, measured sample
+durations are 9.06–11.04 seconds; maximum qpxd throughput spread is 1.0923 and
+maximum reference throughput spread is 1.1382, below the existing 1.10/1.25
+limits. Complete raw logs remain in each Actions artifact. These results
+establish measurement quality, not product performance acceptance.
+
+Normal CI now invokes the isolated balanced measurement wrapper for both
+baseline and current binaries. It verifies the namespace, MTU, and actual CPU
+affinities, runs the real uninstrumented h2load, and embeds the environment in
+each sample and aggregate. The normal checker rejects missing or inconsistent
+environments, diagnostic data, insufficient CPUs, incomplete counts, and
+unstable samples. Every existing performance threshold remains unchanged.
+The normal three-run comparison must independently verify these conditions
+and product acceptance; diagnostic results are never relabeled as normal data.
