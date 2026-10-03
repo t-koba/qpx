@@ -112,7 +112,9 @@ workload, including warm hits and unique misses, with the same instrumentation
 boundaries and raw profiles as `feature-callgrind`.
 The `proxy-native` diagnostic uses Linux perf's software CPU clock at 199 Hz
 with DWARF call stacks, including kernel CPU work. It preserves raw profiles
-and symbol reports for the cache and feature-rich roles. Its isolated process
+and symbol reports for the cache and feature-rich roles. The exact ELF executable
+is preserved as gzip with its SHA-256 and uncompressed size before measurement,
+so raw addresses and DWARF stacks can be resolved after the runner is removed. Its isolated process
 group owns both the profiler and server and waits for their shutdown. These
 instrumented records cannot satisfy normal performance acceptance gates.
 Before measurement, a real qpxd local-response server verifies that terminating

@@ -12,6 +12,37 @@ export QPX_NATIVE_WRAPPER_SOURCE="$ROOT_DIR/scripts/lib/perf-native-process.py"
 [ -x "$QPX_NATIVE_PERF_BIN" ]
 mkdir -p "$QPX_NATIVE_PROFILE_DIR"
 "$QPX_NATIVE_PERF_BIN" --version
+# Preserve the exact ELF image needed to resolve raw profile addresses offline.
+python3 - "$QPXD_REAL_BIN" "$QPX_NATIVE_PROFILE_DIR" <<'PY_BINARY'
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import sys
+binary, destination = map(Path, sys.argv[1:])
+def identity_of(path):
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+identity = identity_of(binary)
+digest = hashlib.sha256()
+size = 0
+with binary.open("rb") as source, (destination / "qpxd.elf.gz").open("xb") as archive:
+    if source.read(4) != b"\x7fELF":
+        raise SystemExit("native CPU profiling requires an ELF executable")
+    source.seek(0)
+    with gzip.GzipFile(filename="", fileobj=archive, mode="wb", mtime=0) as output:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+            output.write(chunk)
+if identity_of(binary) != identity or size != identity[2]:
+    raise SystemExit("native CPU executable changed while preserving profile evidence")
+(destination / "binary.json").write_text(json.dumps({
+    "artifact": "qpxd.elf.gz", "sha256": digest.hexdigest(), "uncompressed_bytes": size,
+    "source": str(binary.resolve()), "format": "ELF", "compression": "gzip",
+}, indent=2) + "\n")
+print("Native CPU executable preserved with SHA-256")
+PY_BINARY
 wrapper="$QPX_NATIVE_PROFILE_DIR/qpxd-perf"
 cat >"$wrapper" <<'WRAPPER'
 #!/usr/bin/env bash
