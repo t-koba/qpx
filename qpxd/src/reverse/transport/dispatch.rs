@@ -618,11 +618,8 @@ fn execute_reverse_request<'a>(
             }
             ReverseModuleOutcome::Continue(dispatch) => dispatch,
         };
-        let ReverseModuleDispatch {
-            req,
-            http_modules,
-            request_cache_policy,
-        } = module_dispatch;
+        let ReverseModuleDispatch { req, http_modules } = module_dispatch;
+        let request_cache_policy = route.plan.cache.as_ref().filter(|_| !cache_bypass);
         if let Some(collector) = route.plan.reporting_collector.as_ref() {
             let response = collect_browser_reports(
                 req,
@@ -1097,7 +1094,7 @@ async fn complete_reverse_after_modules(
         request_version,
         proxy_name,
         route_headers: route_headers.as_deref(),
-        request_cache_policy: request_cache_policy.as_ref(),
+        request_cache_policy,
         override_upstream,
         seed,
         sticky_seed,
@@ -1128,7 +1125,7 @@ async fn complete_reverse_after_modules(
         revalidation_state,
         cache_collapse_guard,
     } = cache_state;
-    let cache_policy = request_cache_policy.as_ref();
+    let cache_policy = request_cache_policy;
     let ReverseRetryDispatch {
         attempts,
         first_request,

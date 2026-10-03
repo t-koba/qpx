@@ -31,7 +31,7 @@ pub(super) async fn prepare_reverse_modules(
         apply_path_rewrite(&mut req, rewrite);
     }
     apply_request_header_control_in_place(&mut req, route_headers);
-    let request_cache_policy = route.plan.cache.as_ref().filter(|_| !cache_bypass).cloned();
+    let request_cache_policy = route.plan.cache.as_ref().filter(|_| !cache_bypass);
     let mut http_modules = route.plan.modules.start_for_request(state, &req, || {
         crate::http::modules::HttpModuleSessionInit {
             proxy_kind: ProxyKind::Reverse,
@@ -41,7 +41,7 @@ pub(super) async fn prepare_reverse_modules(
             remote_ip: conn.remote_addr.ip(),
             sni: conn.tls_sni.as_deref(),
             identity_user: identity.user.as_deref(),
-            cache_policy: request_cache_policy.clone(),
+            cache_policy: request_cache_policy.cloned(),
             cache_default_scheme: Some(if conn.tls_terminated { "https" } else { "http" }),
         }
     });
@@ -49,7 +49,6 @@ pub(super) async fn prepare_reverse_modules(
         return Ok(ReverseModuleOutcome::Continue(ReverseModuleDispatch {
             req,
             http_modules,
-            request_cache_policy,
         }));
     }
     match http_modules.on_request_headers(&mut req).await? {
@@ -57,7 +56,6 @@ pub(super) async fn prepare_reverse_modules(
             Ok(ReverseModuleOutcome::Continue(ReverseModuleDispatch {
                 req,
                 http_modules,
-                request_cache_policy,
             }))
         }
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {

@@ -148,7 +148,6 @@ pub(super) type ReverseModuleOutcome = ReverseStageOutcome<ReverseModuleDispatch
 pub(super) struct ReverseModuleDispatch {
     pub(super) req: Request<Body>,
     pub(super) http_modules: crate::http::modules::HttpModuleExecution,
-    pub(super) request_cache_policy: Option<qpx_core::config::CachePolicyConfig>,
 }
 
 pub(super) struct ReverseModuleInput<'a> {
@@ -288,7 +287,7 @@ pub(super) struct ReverseIpcDispatchInput<'a> {
 pub(super) struct ReversePostModuleInput<'a> {
     pub(super) req: Request<Body>,
     pub(super) http_modules: crate::http::modules::HttpModuleExecution,
-    pub(super) request_cache_policy: Option<qpx_core::config::CachePolicyConfig>,
+    pub(super) request_cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     pub(super) base: &'a BaseRequestFields,
     pub(super) runtime: &'a Runtime,
     pub(super) state: &'a Arc<runtime::RuntimeState>,
