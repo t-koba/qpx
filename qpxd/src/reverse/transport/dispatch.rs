@@ -635,7 +635,7 @@ fn execute_reverse_request<'a>(
             ));
         }
         let result = complete_reverse_after_modules(ReversePostModuleInput {
-            req,
+            req: &mut req,
             http_modules,
             request_cache_policy,
             base: &base,
@@ -1041,7 +1041,7 @@ async fn complete_reverse_after_modules(
     input: ReversePostModuleInput<'_>,
 ) -> Result<(InterimList, Response<Body>)> {
     let ReversePostModuleInput {
-        mut req,
+        req,
         mut http_modules,
         request_cache_policy,
         base,
@@ -1073,7 +1073,7 @@ async fn complete_reverse_after_modules(
         && let Some(webdav) = route.webdav.as_ref()
     {
         let response = dispatch_reverse_webdav(ReverseWebDavDispatch {
-            req,
+            req: std::mem::replace(req, Request::new(Body::empty())),
             service: webdav.clone(),
             identity,
             request_method,
@@ -1090,7 +1090,7 @@ async fn complete_reverse_after_modules(
     if is_websocket_upgrade(req.method(), req.headers())? {
         // Cache hits do not retain or allocate the WebSocket upgrade state.
         return handle_reverse_websocket_upgrade(ReverseWebsocketDispatch {
-            req,
+            req: std::mem::replace(req, Request::new(Body::empty())),
             state,
             route,
             conn,
@@ -1109,7 +1109,7 @@ async fn complete_reverse_after_modules(
         .await;
     }
     let cache_state = match prepare_reverse_cache(ReverseCacheInput {
-        req: &mut req,
+        req,
         runtime,
         state,
         route,
@@ -1156,7 +1156,7 @@ async fn complete_reverse_after_modules(
         replay_recorder,
         mirror_upstreams,
     } = prepare_reverse_retry_dispatch(ReverseRetryPrepareInput {
-        req,
+        req: std::mem::replace(req, Request::new(Body::empty())),
         route,
         state,
         request_method,
@@ -1609,6 +1609,11 @@ mod state_layout_tests {
             "cache preparation inline state exceeded its size budget: {cache_bytes} bytes"
         );
         let dispatch_bytes = future_size(complete_reverse_after_modules);
+        println!(
+            "reverse cache state sizes: request={}, post_module_input={}, cache_future={cache_bytes}, dispatch_future={dispatch_bytes}",
+            std::mem::size_of::<Request<Body>>(),
+            std::mem::size_of::<ReversePostModuleInput<'_>>(),
+        );
         assert!(
             dispatch_bytes <= 13 * 512,
             "cached response dispatcher inline state exceeded its size budget: {dispatch_bytes} bytes"

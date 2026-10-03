@@ -1298,3 +1298,18 @@ channel construction, but Linux profiles and normal measurements must still
 quantify this experiment's actual effect. The three resource/limit/trailer
 regressions pass with all 1,308 workspace tests across 47 suites, all-feature
 Clippy, and the eight-category / sixteen-evaluation gate checks.
+
+The feature-rich state-copy experiment borrows the request in
+`ReversePostModuleInput`; only WebDAV, WebSocket, and uncached upstream
+dispatch transfer its ownership. Cache hits retain it in the existing parent
+allocation instead of moving it through another input and future. Local
+ARM64 measurements change the input from 608 to 264 bytes and the dispatcher
+future from 5,032 to 4,336 bytes; the request itself stays 352 bytes and cache
+preparation stays 3,216 bytes. All 1,308 workspace tests across 47 suites and
+all-feature Clippy pass, including real-server authentication, cache,
+WebDAV, WebSocket, retry, and mirror scenarios. Linux instruction profiles
+and normal throughput/CPU measurements must still establish the effect.
+The tee experiment's feature-rich run `37155863069` attempt 1 fails before
+measurement because crates.io DNS cannot resolve; its original failure log
+is retained and attempt 2 reruns the same revision. No measurement from
+attempt 1 is counted as valid.

@@ -280,7 +280,9 @@ pub(super) struct ReverseIpcDispatchInput<'a> {
 }
 
 pub(super) struct ReversePostModuleInput<'a> {
-    pub(super) req: Request<Body>,
+    // Cache hits borrow the request; dispatchers take ownership only on miss,
+    // WebDAV, or WebSocket paths that must consume its body.
+    pub(super) req: &'a mut Request<Body>,
     pub(super) http_modules: crate::http::modules::HttpModuleExecution,
     pub(super) request_cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     pub(super) base: &'a BaseRequestFields,
