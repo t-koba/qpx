@@ -1257,3 +1257,29 @@ trace guard already provides this protection; no additional production
 condition is added. The additional regression test passes with all 1,303
 workspace tests across 47 suites, all-feature Clippy, and the unchanged
 eight-category / sixteen-evaluation performance-gate presence checks.
+
+CI run `37152861672` exposes a shared-ring notification race in coverage:
+`body_without_content_length_reaches_handler` receives HTTP 408 for its SHM
+body. The producer previously decided whether to signal from the ring's
+empty state before copying a frame. A consumer can drain the prior frame
+and register its wait during that copy, leaving a newly published frame
+without a doorbell signal. A deterministic test stages this ordering in a
+real mapped ring with a real named semaphore; the previous publication
+logic times out after two seconds, while the corrected logic completes.
+Publication now checks the current wait flag, and both data and space
+publication/registration/recheck operations share a sequential atomic order
+so the waiter observes the published index or the publisher observes the
+registered waiter. No timer, retry, ring layout, public API, or setting changes.
+The real CGI/SHM IPC regression suite passes in 20 independent processes
+(100 test executions), and the workspace passes 1,305 tests across 47 suites.
+
+Normal proxy run `37152861672` on `73ae6f0` still fails required gates.
+Local 1 KiB RSS is 1.003055 of nginx and feature-rich 1 KiB queue delay is
+0.935621, within their existing limits. Feature-rich throughput/CPU efficiency
+remain 0.886464/0.929788. Miss 1 KiB throughput/CPU efficiency are
+0.957192/0.846100, with queue delay 2.885400 (above the existing 2.6 limit)
+and p99 0.311183. WebDAV 1 MiB p99 is 1.331352 and CPU efficiency is
+1.412388 (below the existing 1.5 limit). Reverse-proxy static-baseline CPU
+and queue-delay checks also fail. The constructor removal is verified but
+does not complete the normal performance objectives; no stronger objective
+is enabled or existing limit weakened on the strength of these profiles.

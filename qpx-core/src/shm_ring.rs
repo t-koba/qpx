@@ -207,7 +207,6 @@ impl ShmRingBuffer {
 
         let r = self.read_idx().load(Ordering::Acquire);
         let mut w = self.write_idx().load(Ordering::Acquire);
-        let was_empty = r == w;
 
         let available_space = available_space(self.capacity, r, w);
 
@@ -226,14 +225,25 @@ impl ShmRingBuffer {
             w = (w + part.len()) % self.capacity;
         }
 
-        // Publish the new write index
-        self.write_idx().store(w, Ordering::Release);
+        self.publish_write_index(w)?;
 
-        if was_empty && self.consumer_waiting().swap(0, Ordering::AcqRel) == 1 {
+        Ok(true)
+    }
+
+    fn publish_write_index(&self, w: usize) -> Result<()> {
+        // Publication and waiter registration share one sequential order.
+        // Either the waiter's recheck sees this index or we see its flag.
+        self.write_idx().store(w, Ordering::SeqCst);
+
+        // The consumer can drain the old contents while we copy this frame.
+        // Its current wait flag, not the earlier ring state, decides the wake.
+        if self.consumer_waiting().load(Ordering::SeqCst) != 0
+            && self.consumer_waiting().swap(0, Ordering::SeqCst) == 1
+        {
             self.data_doorbell.signal()?;
         }
 
-        Ok(true)
+        Ok(())
     }
 
     /// Try to read a message from the ring buffer. Returns Ok(Some(data)) if successful, Ok(None) if empty.
@@ -299,14 +309,15 @@ impl ShmRingBuffer {
         self.read_bytes_at(new_r, out);
         new_r = (new_r + msg_len) % self.capacity;
 
-        // Publish the new read index
-        self.read_idx().store(new_r, Ordering::Release);
+        // Keep space publication and producer registration in the same
+        // sequential order as the data/consumer handshake above.
+        self.read_idx().store(new_r, Ordering::SeqCst);
 
-        if self.producer_waiting().load(Ordering::Acquire) != 0 {
+        if self.producer_waiting().load(Ordering::SeqCst) != 0 {
             let w2 = self.write_idx().load(Ordering::Acquire);
             let available_space = available_space(self.capacity, new_r, w2);
             let need = self.producer_need_bytes().load(Ordering::Acquire);
-            if available_space >= need && self.producer_waiting().swap(0, Ordering::AcqRel) == 1 {
+            if available_space >= need && self.producer_waiting().swap(0, Ordering::SeqCst) == 1 {
                 self.space_doorbell.signal()?;
             }
         }
@@ -324,10 +335,10 @@ impl ShmRingBuffer {
                 return Ok(());
             }
 
-            self.consumer_waiting().store(1, Ordering::Release);
+            self.consumer_waiting().store(1, Ordering::SeqCst);
 
             let r2 = self.read_idx().load(Ordering::Acquire);
-            let w2 = self.write_idx().load(Ordering::Acquire);
+            let w2 = self.write_idx().load(Ordering::SeqCst);
             if r2 != w2 {
                 self.consumer_waiting().store(0, Ordering::Release);
                 return Ok(());
@@ -365,9 +376,9 @@ impl ShmRingBuffer {
 
             self.producer_need_bytes()
                 .store(required_space, Ordering::Release);
-            self.producer_waiting().store(1, Ordering::Release);
+            self.producer_waiting().store(1, Ordering::SeqCst);
 
-            let r2 = self.read_idx().load(Ordering::Acquire);
+            let r2 = self.read_idx().load(Ordering::SeqCst);
             let w2 = self.write_idx().load(Ordering::Acquire);
             if available_space(self.capacity, r2, w2) >= required_space {
                 self.producer_waiting().store(0, Ordering::Release);
@@ -1060,6 +1071,91 @@ fn ensure_not_symlink_under_default_dir(path: &Path, label: &str) -> Result<()> 
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn published_message_wakes_consumer_after_concurrent_drain() -> anyhow::Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut producer = ShmRingBuffer::create_or_open(file.path(), 1024)?;
+        let mut consumer = ShmRingBuffer::create_or_open(file.path(), 1024)?;
+        assert!(
+            producer.data_doorbell.sem.is_some(),
+            "real doorbell required"
+        );
+        assert!(producer.try_push(b"first")?);
+
+        // Stage the second real frame without publishing it yet, exactly as
+        // the producer does after observing an initially nonempty ring.
+        let read = producer.read_idx().load(Ordering::Acquire);
+        let write = producer.write_idx().load(Ordering::Acquire);
+        assert_ne!(read, write);
+        producer.write_bytes_at(write, &0u32.to_le_bytes());
+        let next_write = (write + 4) % producer.capacity;
+        assert_eq!(consumer.try_pop()?.as_deref(), Some(b"first".as_slice()));
+
+        let waiting = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(2), consumer.wait_for_data()).await??;
+            assert_eq!(consumer.try_pop()?.as_deref(), Some(b"".as_slice()));
+            Ok::<_, anyhow::Error>(())
+        });
+        let registered = tokio::time::timeout(Duration::from_secs(2), async {
+            while producer.consumer_waiting().load(Ordering::Acquire) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        if let Err(error) = registered {
+            waiting.abort();
+            producer.unlink_doorbells()?;
+            return Err(error.into());
+        }
+        producer.publish_write_index(next_write)?;
+        let result = waiting.await;
+        producer.unlink_doorbells()?;
+        result?
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn drained_message_wakes_registered_producer() -> anyhow::Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut producer = ShmRingBuffer::create_or_open(file.path(), HEADER_SIZE + 20)?;
+        let mut consumer = ShmRingBuffer::create_or_open(file.path(), HEADER_SIZE + 20)?;
+        assert!(
+            producer.space_doorbell.sem.is_some(),
+            "real doorbell required"
+        );
+        assert!(producer.try_push(b"0123456789")?);
+        assert!(!producer.try_push(b"ABCDEFGHIJ")?);
+        let waiting = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(2), producer.wait_for_space(10)).await??;
+            assert!(producer.try_push(b"ABCDEFGHIJ")?);
+            Ok::<_, anyhow::Error>(())
+        });
+        let registered = tokio::time::timeout(Duration::from_secs(2), async {
+            while consumer.producer_waiting().load(Ordering::Acquire) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        if let Err(error) = registered {
+            waiting.abort();
+            consumer.unlink_doorbells()?;
+            return Err(error.into());
+        }
+        assert_eq!(
+            consumer.try_pop()?.as_deref(),
+            Some(b"0123456789".as_slice())
+        );
+        let result = waiting.await;
+        consumer.unlink_doorbells()?;
+        result??;
+        assert_eq!(
+            consumer.try_pop()?.as_deref(),
+            Some(b"ABCDEFGHIJ".as_slice())
+        );
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
