@@ -13,14 +13,25 @@ import time
 def main():
     arguments = sys.argv[1:]
     server = os.environ["QPXD_REAL_BIN"]
-    if not arguments or arguments[0] != "run":
+    mode = os.environ.get("QPX_NATIVE_PROFILE_MODE", "cpu")
+    if mode not in ("cpu", "syscalls"):
+        raise SystemExit("unsupported native profiler mode")
+    if not arguments or (mode == "cpu" and arguments[0] != "run") or arguments in (["-v"], ["-V"], ["--version"]):
         os.execv(server, [server, *arguments])
-    config_index = arguments.index("--config") + 1
-    role = Path(arguments[config_index]).stem
+    if "--config" in arguments:
+        role = Path(arguments[arguments.index("--config") + 1]).stem
+    elif mode == "syscalls" and Path(server).name == "nginx" and "-c" in arguments:
+        config = Path(arguments[arguments.index("-c") + 1])
+        role = f"{config.parent.name}-{config.stem}"
+    elif mode == "syscalls":
+        role = f"{Path(server).name}-{os.getpid()}"
+    else:
+        raise SystemExit("native CPU profiler requires a server config")
     directory = Path(os.environ["QPX_NATIVE_PROFILE_DIR"])
     directory.mkdir(parents=True, exist_ok=True)
     lifecycle_path = directory / f"{role}.lifecycle.json"
-    lifecycle = {"role": role, "started_monotonic_ns": time.monotonic_ns()}
+    lifecycle = {"role": role, "mode": mode, "executable": server,
+                 "started_monotonic_ns": time.monotonic_ns(), "started_unix_ns": time.time_ns()}
     requested_signal = None
 
     def request_shutdown(signum, _frame):
@@ -29,17 +40,25 @@ def main():
 
     signal.signal(signal.SIGTERM, request_shutdown)
     signal.signal(signal.SIGINT, request_shutdown)
-    process = subprocess.Popen([
-        os.environ["QPX_NATIVE_PERF_BIN"], "record", "-e", "cpu-clock", "-F", "199",
-        "--clockid", "CLOCK_MONOTONIC", "--call-graph", "dwarf,16384",
-        "-o", str(directory / f"{role}.data"), "--", server, *arguments,
-    ], start_new_session=True)
+    observer = os.environ["QPX_NATIVE_PERF_BIN"]
+    if mode == "cpu":
+        command = [observer, "record", "-e", "cpu-clock", "-F", "199",
+                   "--clockid", "CLOCK_MONOTONIC", "--call-graph", "dwarf,16384",
+                   "-o", str(directory / f"{role}.data"), "--", server, *arguments]
+    else:
+        # Observe waits and socket ownership without recording payload buffers.
+        syscalls = "epoll_wait,epoll_pwait,epoll_pwait2,epoll_ctl,poll,ppoll,select,pselect6,futex,connect,setsockopt,getsockopt,shutdown,close"
+        command = [observer, "-ff", "-qq", "-ttt", "-T", "-yy", "-s", "0",
+                   "-e", f"trace={syscalls}", "-o", str(directory / f"{role}.syscalls"),
+                   "--", server, *arguments]
+        lifecycle["syscalls"] = syscalls.split(",")
+    process = subprocess.Popen(command, start_new_session=True)
     lifecycle.update({"profiler_pid": process.pid, "process_group": process.pid})
     forced = False
     status = None
     try:
         lifecycle_path.write_text(json.dumps(lifecycle) + "\n")
-        print(f"Native CPU process started: role={role} group={process.pid}", flush=True)
+        print(f"Native profiler process started: mode={mode} role={role} group={process.pid}", flush=True)
         while requested_signal is None:
             try:
                 status = process.wait(timeout=0.5)
@@ -56,7 +75,7 @@ def main():
             status = process.wait(timeout=30)
         except subprocess.TimeoutExpired:
             forced = True
-            print(f"Native CPU process shutdown timed out: role={role}", file=sys.stderr)
+            print(f"Native profiler process shutdown timed out: role={role}", file=sys.stderr)
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -68,7 +87,7 @@ def main():
             "forced_shutdown": forced,
         })
         lifecycle_path.write_text(json.dumps(lifecycle) + "\n")
-        print(f"Native CPU process stopped: role={role} status={status} forced={forced}", flush=True)
+        print(f"Native profiler process stopped: role={role} status={status} forced={forced}", flush=True)
     if forced:
         return 1
     if requested_signal is not None:

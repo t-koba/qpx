@@ -16,7 +16,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, webdav-sockets, origin-cache, http2, http2-windows]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, webdav-sockets, origin-cache, http2, http2-windows, http2-io]
         default: streaming
 
 permissions:
@@ -43,7 +43,7 @@ jobs:
       - name: install comparison dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
+          sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid strace valgrind wrk jq
       - name: verify native CPU profiler before build
         if: inputs.category == 'proxy-native' || inputs.category == 'http2-native' || inputs.category == 'streaming-native' || inputs.category == 'webdav-native'
         run: |
@@ -134,6 +134,9 @@ jobs:
               ;;
             streaming-native)
               QPX_NATIVE_WORKLOAD=streaming python3 scripts/perf-evaluate.py "native streaming CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
+              ;;
+            http2-io)
+              python3 scripts/perf-evaluate.py "HTTP/2 syscall wait diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-io.sh
               ;;
             http2-windows)
               python3 scripts/perf-evaluate.py "HTTP/2 client window diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-window.sh

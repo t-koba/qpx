@@ -562,3 +562,13 @@ before/after values, delta, and zero lower bound; it is never clamped to zero.
 Proxy and backend scheduler counters are checked separately before summing so
 one process cannot hide a missing observation from another. The real process
 sampler check also verifies rejection of reversed real CPU observations.
+
+The `http2-io` diagnostic traces the real h2load client, both reverse proxies,
+and their real nginx origins for the 1 MiB / 100-stream workload. It records
+epoll/poll waits, futex waits, socket options, connection/close operations,
+and descriptor ownership with per-process timestamps and syscall durations.
+Payload read/write buffers are excluded. Each tracer and its actual program
+share an owned process group with bounded termination, verified first using
+a real qpxd local-response server. Traced measurements carry diagnostic
+provenance and cannot satisfy required performance gates. Long waits and
+process lifecycle records are retained even when measurement quality fails.
