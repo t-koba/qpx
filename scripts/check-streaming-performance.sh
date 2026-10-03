@@ -120,13 +120,13 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"streaming performance record for {key} is marked invalid")
         attempts = nonnegative_int(record, "sample_attempts")
         valid_samples = nonnegative_int(record, "valid_samples")
-        if attempts == 0 or valid_samples > attempts or valid_samples < attempts // 2 + 1:
-            fail(f"streaming performance record for {key} lacks a majority of valid samples")
+        if attempts == 0 or valid_samples != attempts:
+            fail(f"streaming performance record for {key} does not contain every scheduled sample")
         if record.get("aggregation") != "conservative_median_per_metric":
             fail(f"streaming performance record for {key} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"streaming performance record for {key} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version") != 7:
+        if nonnegative_int(record, "benchmark_schema_version") != 8:
             fail(f"streaming performance record for {key} uses an unsupported benchmark schema")
         if record.get("cpu_measurement") != "linux_process_cpu_clock_ns_v1":
             fail(f"streaming performance record for {key} lacks high-resolution process CPU measurement")

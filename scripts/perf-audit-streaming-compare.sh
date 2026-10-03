@@ -16,7 +16,6 @@ CHUNK_BYTES="${QPX_STREAMING_COMPARE_CHUNK_BYTES:-65536}"
 SLOW_READ_DELAY_MS="${QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS:-1}"
 FAST_TRANSFERS="${QPX_STREAMING_COMPARE_FAST_TRANSFERS:-8}"
 SAMPLE_ATTEMPTS="${QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS:-3}"
-MIN_VALID_SAMPLES="${QPX_STREAMING_COMPARE_MIN_VALID_SAMPLES:-}"
 BACKEND_PORT="${QPX_STREAMING_COMPARE_BACKEND_PORT:-18380}"
 QPX_PORT="${QPX_STREAMING_COMPARE_QPX_PORT:-18381}"
 NGINX_PORT="${QPX_STREAMING_COMPARE_NGINX_PORT:-18382}"
@@ -31,7 +30,6 @@ mkdir -p "$LOG_DIR" "$STATE_DIR" "$(dirname "$OUT_JSON")"
 
 PIDS=()
 ARTIFACTS_COLLECTED=0
-INVALID_SAMPLES=0
 BACKEND_PID=""
 QPXD_PID=""
 NGINX_PID=""
@@ -624,13 +622,18 @@ PY
       attempt=$((attempt + 1))
       continue
     fi
-    echo "${proxy} produced an invalid streaming sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}: ${metrics}" >&2
+    python3 - "$metrics" "$proxy" "$read_mode" <<'PY_INVALID'
+import json
+import sys
+record = json.loads(sys.argv[1])
+record.update({"proxy": sys.argv[2], "read_mode": sys.argv[3], "valid": False})
+print(json.dumps(record, sort_keys=True))
+PY_INVALID
     attempt=$((attempt + 1))
   done
   valid_sample_count="$(wc -l <"$samples_file" | tr -d '[:space:]')"
-  if [ "$valid_sample_count" -lt "$MIN_VALID_SAMPLES" ]; then
-    echo "${proxy} produced ${valid_sample_count}/${SAMPLE_ATTEMPTS} valid streaming samples; ${MIN_VALID_SAMPLES} required" >&2
-    INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
+  if [ "$valid_sample_count" -ne "$SAMPLE_ATTEMPTS" ]; then
+    echo "${proxy} produced ${valid_sample_count}/${SAMPLE_ATTEMPTS} valid streaming samples; all required" >&2
     return
   fi
   selected_sample="$(python3 - "$samples_file" <<'PY'
@@ -689,19 +692,6 @@ if [ "$FAST_TRANSFERS" -eq 0 ]; then
   echo "QPX_STREAMING_COMPARE_FAST_TRANSFERS must be a positive integer" >&2
   exit 1
 fi
-if [ -z "$MIN_VALID_SAMPLES" ]; then
-  MIN_VALID_SAMPLES=$((SAMPLE_ATTEMPTS / 2 + 1))
-fi
-case "$MIN_VALID_SAMPLES" in
-  ''|*[!0-9]*)
-    echo "QPX_STREAMING_COMPARE_MIN_VALID_SAMPLES must be a positive integer no greater than sample attempts" >&2
-    exit 1
-    ;;
-esac
-if [ "$MIN_VALID_SAMPLES" -eq 0 ] || [ "$MIN_VALID_SAMPLES" -gt "$SAMPLE_ATTEMPTS" ]; then
-  echo "QPX_STREAMING_COMPARE_MIN_VALID_SAMPLES must be a positive integer no greater than sample attempts" >&2
-  exit 1
-fi
 
 if [ -z "$APACHE_BIN" ]; then
   if command -v apache2 >/dev/null 2>&1; then
@@ -729,10 +719,8 @@ start_lighttpd
 FINAL_OUT_JSON="$OUT_JSON"
 RAW_OUT_JSON="$TMP_DIR/interleaved-raw.jsonl"
 REQUESTED_SAMPLE_ATTEMPTS="$SAMPLE_ATTEMPTS"
-REQUESTED_MIN_VALID_SAMPLES="$MIN_VALID_SAMPLES"
 OUT_JSON="$RAW_OUT_JSON"
 SAMPLE_ATTEMPTS=1
-MIN_VALID_SAMPLES=1
 : >"$OUT_JSON"
 
 run_streaming_proxy_by_index() {
@@ -767,17 +755,15 @@ for read_mode in fast slow; do
   done
 done
 
-python3 - "$RAW_OUT_JSON" "$FINAL_OUT_JSON" "$REQUESTED_SAMPLE_ATTEMPTS" \
-  "$REQUESTED_MIN_VALID_SAMPLES" <<'PY'
+python3 - "$RAW_OUT_JSON" "$FINAL_OUT_JSON" "$REQUESTED_SAMPLE_ATTEMPTS" <<'PY'
 import json
 import math
 import os
 import sys
 from collections import defaultdict
 
-raw_path, out_path, attempts, minimum = sys.argv[1:5]
+raw_path, out_path, attempts = sys.argv[1:4]
 attempts = int(attempts)
-minimum = int(minimum)
 proxies = ("direct-backend", "qpxd", "nginx", "apache", "lighttpd")
 expected = {(read_mode, proxy) for read_mode in ("fast", "slow") for proxy in proxies}
 
@@ -816,10 +802,10 @@ def spread(records, field):
 aggregated = []
 for key in sorted(expected):
     records = groups.get(key, [])
-    if len(records) < minimum:
+    if len(records) != attempts:
         raise SystemExit(
             f"{key[1]} produced {len(records)}/{attempts} valid {key[0]} streaming samples; "
-            f"{minimum} required"
+            "all required"
         )
     records.sort(key=lambda record: record["total_ms"])
     record = dict(records[len(records) // 2])
@@ -905,7 +891,7 @@ for key in sorted(expected):
             record[field] = int(record[field])
     record.update({
         "aggregation": "conservative_median_per_metric",
-        "benchmark_schema_version": 7,
+        "benchmark_schema_version": 8,
         "cpu_measurement": "linux_process_cpu_clock_ns_v1",
         "diagnostic_instrumentation": os.environ["QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS"] == "1",
         "resource_measurement": "sampled_workload_peak_v1",

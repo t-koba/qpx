@@ -424,7 +424,8 @@ the direct backend, qpx, nginx, Apache, and lighttpd. It measures fast readers
 and deliberately slow readers. Observations occur at fixed cumulative 64 KiB
 boundaries; operating-system `recv` segmentation therefore cannot favor a
 proxy that happens to emit smaller frames. The five implementations are
-interleaved across rounds. Each proxy requires a majority of valid samples and
+interleaved across three rounds. Every scheduled sample must be valid; missing
+or invalid samples fail the measurement. Each proxy
 uses independent conservative medians for total time, latency, and CPU
 efficiency. Fast mode performs eight complete transfers per sample so subsecond
 timer quantization cannot dominate CPU accounting. CPU efficiency includes both
