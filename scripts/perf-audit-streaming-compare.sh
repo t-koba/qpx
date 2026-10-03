@@ -433,7 +433,6 @@ run_one() {
       fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.fd-peak"
       monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" "$fd_baseline" &
       fd_peak_monitor_pid=$!
-      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
       if [ "$resource_pid" != "$BACKEND_PID" ]; then
         backend_rss_baseline_kb="$(process_tree_status_kb "$BACKEND_PID" "VmRSS")"
         backend_rss_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-rss-peak"
@@ -443,7 +442,6 @@ run_one() {
         backend_fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-fd-peak"
         monitor_process_tree_fd_peak "$BACKEND_PID" "$backend_fd_peak_file" "$backend_fd_baseline" &
         backend_fd_peak_monitor_pid=$!
-        backend_scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$BACKEND_PID")"
       else
         backend_rss_baseline_kb="$rss_baseline_kb"
         backend_fd_baseline="$fd_baseline"
@@ -452,6 +450,12 @@ run_one() {
     process_tree_cpu_clock_ms "$resource_pid" "$TMP_DIR/${artifact}.attempt-${attempt}.cpu-before.json" >/dev/null
     if [ "$resource_pid" != "$BACKEND_PID" ]; then
       process_tree_cpu_clock_ms "$BACKEND_PID" "$TMP_DIR/${artifact}.attempt-${attempt}.backend-cpu-before.json" >/dev/null
+    fi
+    if [ "$kernel_resource_metrics" = true ]; then
+      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      if [ "$resource_pid" != "$BACKEND_PID" ]; then
+        backend_scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$BACKEND_PID")"
+      fi
     fi
     if ! metrics="$(run_client "$proxy" "$port" "$read_mode" "$delay_ms")"; then
       if [ -n "$fd_peak_monitor_pid" ]; then
@@ -473,6 +477,19 @@ run_one() {
       echo "${proxy} streaming client failed on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       attempt=$((attempt + 1))
       continue
+    fi
+    # Bracket workload counters before stopping samplers or processing reports.
+    scheduler_after_ns="$scheduler_before_ns"
+    backend_scheduler_after_ns="$backend_scheduler_before_ns"
+    if [ "$kernel_resource_metrics" = true ]; then
+      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      if [ "$resource_pid" != "$BACKEND_PID" ]; then
+        backend_scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$BACKEND_PID")"
+      fi
+    fi
+    process_tree_cpu_clock_ms "$resource_pid" "$TMP_DIR/${artifact}.attempt-${attempt}.cpu-after.json" >/dev/null
+    if [ "$resource_pid" != "$BACKEND_PID" ]; then
+      process_tree_cpu_clock_ms "$BACKEND_PID" "$TMP_DIR/${artifact}.attempt-${attempt}.backend-cpu-after.json" >/dev/null
     fi
     if [ -n "$fd_peak_monitor_pid" ]; then
       kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
@@ -498,10 +515,6 @@ run_one() {
       backend_rss_peak_kb="$(read_process_peak_file "$backend_rss_peak_file")"
       backend_rss_growth_kb="$(peak_growth "$backend_rss_baseline_kb" "$backend_rss_peak_kb")"
     fi
-    process_tree_cpu_clock_ms "$resource_pid" "$TMP_DIR/${artifact}.attempt-${attempt}.cpu-after.json" >/dev/null
-    if [ "$resource_pid" != "$BACKEND_PID" ]; then
-      process_tree_cpu_clock_ms "$BACKEND_PID" "$TMP_DIR/${artifact}.attempt-${attempt}.backend-cpu-after.json" >/dev/null
-    fi
     cpu_ms="$(python3 "$ROOT_DIR/scripts/lib/perf-process-cpu.py" delta \
       "$TMP_DIR/${artifact}.attempt-${attempt}.cpu-before.json" \
       "$TMP_DIR/${artifact}.attempt-${attempt}.cpu-after.json")"
@@ -518,14 +531,6 @@ run_one() {
       total_cpu_ms="$(awk -v proxy="$cpu_ms" -v backend="$backend_cpu_ms" 'BEGIN { printf "%.6f", proxy + backend }')"
     fi
     rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
-    scheduler_after_ns="$scheduler_before_ns"
-    backend_scheduler_after_ns="$backend_scheduler_before_ns"
-    if [ "$kernel_resource_metrics" = true ]; then
-      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
-      if [ "$resource_pid" != "$BACKEND_PID" ]; then
-        backend_scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$BACKEND_PID")"
-      fi
-    fi
     total_rss_peak_kb=$((rss_peak_kb + backend_rss_peak_kb))
     total_rss_growth_kb=$((rss_growth_kb + backend_rss_growth_kb))
     total_fd_peak=$((fd_peak + backend_fd_peak))
@@ -893,7 +898,8 @@ for key in sorted(expected):
             record[field] = int(record[field])
     record.update({
         "aggregation": "conservative_median_per_metric",
-        "benchmark_schema_version": 8,
+        "benchmark_schema_version": 9,
+        "resource_counter_window": "workload_before_sampler_shutdown_v1",
         "cpu_measurement": "linux_process_cpu_clock_ns_v1",
         "diagnostic_instrumentation": os.environ["QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS"] == "1",
         "resource_measurement": "sampled_workload_peak_v1",

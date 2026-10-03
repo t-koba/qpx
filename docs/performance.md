@@ -516,7 +516,11 @@ Streaming CPU efficiency uses Linux process CPU clocks, not `/proc/stat` tick
 counts. The previous 100 Hz accounting quantized subsecond fast-transfer CPU
 measurements to 10 ms. Schema 7 requires nanosecond process-clock provenance;
 raw before/after snapshots preserve per-process CPU values and clock resolution.
-Completed thread CPU time remains included in its process clock. Workload sizes,
+Completed thread CPU time remains included in its process clock. Schema 9 brackets
+CPU and scheduler counters immediately around the client workload, before sampler
+shutdown and report processing. Resource peaks still use the complete sampled
+workload; this counter boundary correction does not change any performance limit.
+Workload sizes,
 reference pairing, sample aggregation, and all acceptance thresholds are unchanged.
 A disappearing measured process, inadequate clock resolution, or decreasing CPU
 counter invalidates the measurement instead of becoming zero CPU consumption.
