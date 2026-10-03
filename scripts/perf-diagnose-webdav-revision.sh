@@ -9,6 +9,12 @@ BASELINE_BIN="${QPX_PERF_BASELINE_BIN:?baseline binary is required}"
 BASELINE_SHA="${QPX_PERF_BASELINE_SHA:?baseline commit is required}"
 CURRENT_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
 CURRENT_SHA="${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
+revision_order="${QPX_PERF_REVISION_ORDER:-baseline-current}"
+case "$revision_order" in
+  baseline-current) revisions=(baseline current) ;;
+  current-baseline) revisions=(current baseline) ;;
+  *) echo "unsupported WebDAV revision order: $revision_order" >&2; exit 2 ;;
+esac
 for binary in "$BASELINE_BIN" "$CURRENT_BIN"; do
   if [ ! -x "$binary" ]; then
     echo "WebDAV revision comparison binary is not executable: $binary" >&2
@@ -17,13 +23,13 @@ for binary in "$BASELINE_BIN" "$CURRENT_BIN"; do
 done
 mkdir -p "$ROOT_DIR/target/perf/profiles"
 profile_dir="$(mktemp -d "$ROOT_DIR/target/perf/profiles/webdav-pair.XXXXXX")"
-python3 - "$ROOT_DIR" "$profile_dir" "$BASELINE_BIN" "$BASELINE_SHA" "$CURRENT_BIN" "$CURRENT_SHA" <<'PY_MANIFEST'
+python3 - "$ROOT_DIR" "$profile_dir" "$BASELINE_BIN" "$BASELINE_SHA" "$CURRENT_BIN" "$CURRENT_SHA" "$revision_order" <<'PY_MANIFEST'
 import hashlib
 import json
 from pathlib import Path
 import re
 import sys
-root, output, baseline, baseline_sha, current, current_sha = sys.argv[1:]
+root, output, baseline, baseline_sha, current, current_sha, order = sys.argv[1:]
 output = Path(output)
 if any(re.fullmatch(r"[0-9a-f]{40}", value) is None for value in (baseline_sha, current_sha)):
     raise SystemExit("WebDAV revision comparison requires exact commit identities")
@@ -38,8 +44,8 @@ for lane in objectives["lanes"]:
             lane.get("max_p99_latency_ratio", objectives["defaults"]["max_p99_latency_ratio"]), 1.0)
 (output / "goal-objectives.json").write_text(json.dumps(objectives, indent=2) + "\n")
 manifest = {
-    "measurement": "webdav_same_runner_revision_comparison_v1",
-    "replaces_required_gate": False, "sampling_order": "baseline_then_current",
+    "measurement": "webdav_same_runner_revision_comparison_v2",
+    "replaces_required_gate": False, "sampling_order": order.split("-"),
     "required_body_bytes": [1024, 1048576], "required_samples_per_role": 3,
     "diagnostic_instrumentation": False,
     "binaries": {name: {"path": path, "commit": commit,
@@ -50,7 +56,7 @@ manifest = {
 (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 PY_MANIFEST
 failed=0
-for revision in baseline current; do
+for revision in "${revisions[@]}"; do
   binary="$BASELINE_BIN"
   sha="$BASELINE_SHA"
   if [ "$revision" = current ]; then

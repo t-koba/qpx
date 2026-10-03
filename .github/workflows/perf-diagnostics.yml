@@ -24,6 +24,11 @@ on:
         description: Baseline commit for the same-runner WebDAV comparison
         type: string
         default: "9500bb1d764e8cee9b0b24bd9bea96ba512418fc"
+      revision_order:
+        description: Version order for the same-runner WebDAV comparison
+        type: choice
+        options: [baseline-current, current-baseline]
+        default: baseline-current
 
 permissions:
   contents: read
@@ -163,7 +168,8 @@ jobs:
               python3 scripts/summarize-perf-phases.py target/perf/proxy-compare-logs target/perf/phase-summary.json
               ;;
             webdav-revision)
-              python3 scripts/perf-evaluate.py "WebDAV same-runner revision objectives" -- bash scripts/perf-diagnose-webdav-revision.sh
+              QPX_PERF_REVISION_ORDER="${{ inputs.revision_order }}" \
+                python3 scripts/perf-evaluate.py "WebDAV same-runner revision objectives" -- bash scripts/perf-diagnose-webdav-revision.sh
               ;;
             webdav-sockets)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 QPX_PERF_WEBDAV_SOCKET_DIAGNOSTICS=1 \
