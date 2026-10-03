@@ -24,13 +24,15 @@ spec = importlib.util.spec_from_file_location('scheduler', root / 'scripts/lib/p
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 original_affinity = os.sched_getaffinity(0)
-os.sched_setaffinity(0, {min(original_affinity)})
-competitor = subprocess.Popen([sys.executable, '-c', 'while True: pass'])
-reader = module.Taskstats()
+competitor = None
+reader = None
 started = threading.Event()
 finish = threading.Event()
 worker = None
 try:
+    os.sched_setaffinity(0, {min(original_affinity)})
+    competitor = subprocess.Popen([sys.executable, '-c', 'while True: pass'])
+    reader = module.Taskstats()
     before = reader.read(os.getpid())
     def compete():
         started.set()
@@ -68,12 +70,14 @@ finally:
     finish.set()
     if worker is not None:
         worker.join(timeout=2)
-    competitor.terminate()
-    try:
-        competitor.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        competitor.kill()
-        competitor.wait()
-    reader.socket.close()
+    if competitor is not None:
+        competitor.terminate()
+        try:
+            competitor.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            competitor.kill()
+            competitor.wait()
+    if reader is not None:
+        reader.socket.close()
     os.sched_setaffinity(0, original_affinity)
 PY_PROBE

@@ -89,6 +89,7 @@ rss_monitor=""
 python3 - "$work" <<'PY_RESULTS'
 import csv
 import json
+import math
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
@@ -97,6 +98,9 @@ for kind in ('fd', 'rss'):
     rows = list(csv.DictReader((root / (kind + '.samples.csv')).open()))
     assert metadata['samples'] == len(rows) and len(rows) > 0
     assert all(int(row['value']) > 0 for row in rows)
+    assert metadata['elapsed_ns'] > 0 and metadata['cpu_time_ns'] > 0
+    assert math.isfinite(metadata['cpu_fraction_of_one_core'])
+    assert metadata['cpu_fraction_of_one_core'] == metadata['cpu_time_ns'] / metadata['elapsed_ns']
 assert json.loads((root / 'descriptors.json').read_text())
 PY_RESULTS
 cpu_before="$(process_tree_cpu_clock_ms "$root" "$work/cpu-before.json")"

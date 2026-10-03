@@ -719,3 +719,8 @@ retained with the profile. These records distinguish hot copies within a large
 async state machine from copies on cold branches; function-level percentages
 alone cannot identify which copy should be changed. Decoding occurs after all
 workload measurements and fails if no samples are produced.
+
+RSS and descriptor sampler metadata retain their own CPU time, elapsed time,
+and fraction of one CPU core. This measures observer cost directly without
+subtracting it from server measurements or assuming calibration and measured
+workloads see identical competition.

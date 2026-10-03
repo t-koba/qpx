@@ -83,6 +83,8 @@ elif mode in ('monitor', 'rss-monitor'):
     interval = 0.01 if mode == 'rss-monitor' else 0.05
     snapshot = (lambda: rss(root)) if mode == 'rss-monitor' else (lambda: len(descriptors(root)))
     started = time.monotonic()
+    started_ns = time.monotonic_ns()
+    started_cpu_ns = time.process_time_ns()
     count = 0
     maximum_gap = 0.0
     previous = started
@@ -104,10 +106,14 @@ elif mode in ('monitor', 'rss-monitor'):
                 time.sleep(max(0.0, interval - (time.monotonic() - now)))
         if not count:
             raise RuntimeError('process peak sampler collected no observations')
+        elapsed_ns = time.monotonic_ns() - started_ns
+        cpu_time_ns = time.process_time_ns() - started_cpu_ns
         Path(str(output) + '.sampling.json').write_text(json.dumps({
             'mode': mode, 'pid': int(root), 'samples': count,
             'interval_seconds': interval, 'elapsed_seconds': time.monotonic() - started,
             'maximum_gap_seconds': maximum_gap,
+            'elapsed_ns': elapsed_ns, 'cpu_time_ns': cpu_time_ns,
+            'cpu_fraction_of_one_core': cpu_time_ns / elapsed_ns,
         }, sort_keys=True) + '\n')
     except Exception as error:
         Path(str(output) + '.error').write_text(str(error) + '\n')

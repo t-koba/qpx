@@ -32,14 +32,18 @@ def attribute(kind, payload):
 class Taskstats:
     def __init__(self):
         self.socket = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 16)
-        self.socket.settimeout(2)
-        self.socket.bind((0, 0))
-        self.sequence = 0
-        reply = self.request(16, 3, attribute(2, b'TASKSTATS\0'))
-        family = [value for kind, value in attributes(reply[4:]) if kind == 1]
-        if len(family) != 1 or len(family[0]) != 2:
-            raise RuntimeError('TASKSTATS family resolution failed')
-        self.family = struct.unpack('=H', family[0])[0]
+        try:
+            self.socket.settimeout(2)
+            self.socket.bind((0, 0))
+            self.sequence = 0
+            reply = self.request(16, 3, attribute(2, b'TASKSTATS\0'))
+            family = [value for kind, value in attributes(reply[4:]) if kind == 1]
+            if len(family) != 1 or len(family[0]) != 2:
+                raise RuntimeError('TASKSTATS family resolution failed')
+            self.family = struct.unpack('=H', family[0])[0]
+        except BaseException:
+            self.socket.close()
+            raise
 
     def request(self, family, command, payload):
         self.sequence += 1
