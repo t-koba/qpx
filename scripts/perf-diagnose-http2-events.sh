@@ -9,7 +9,7 @@ fi
 mkdir -p "$ROOT_DIR/target/perf/profiles"
 PROFILE_DIR="$(mktemp -d "$ROOT_DIR/target/perf/profiles/http2-events.XXXXXX")"
 EVENTS=""
-for syscall in epoll_wait epoll_pwait futex connect; do
+for syscall in epoll_wait epoll_pwait connect; do
   for phase in enter exit; do
     event="sys_${phase}_${syscall}"
     if [ ! -r "/sys/kernel/tracing/events/syscalls/$event/id" ]; then
@@ -19,12 +19,25 @@ for syscall in epoll_wait epoll_pwait futex connect; do
     EVENTS="${EVENTS:+$EVENTS,}syscalls:$event"
   done
 done
+TCP_EVENTS="tcp:tcp_probe,tcp:tcp_retransmit_skb"
+for event in tcp_probe tcp_retransmit_skb; do
+  if [ ! -r "/sys/kernel/tracing/events/tcp/$event/id" ]; then
+    echo "required kernel TCP tracepoint is unavailable: $event" >&2
+    exit 1
+  fi
+done
 # Exercise the same kernel event recorder with a real socket before measurement.
-"$PERF_BIN" record -v --no-buildid --clockid CLOCK_MONOTONIC -e "$EVENTS" \
+"$PERF_BIN" record -v --no-buildid --clockid CLOCK_MONOTONIC -e "$EVENTS,$TCP_EVENTS" \
   -o "$PROFILE_DIR/probe.data" -- python3 - <<'PY_PROBE'
 import selectors
 import socket
-reader, writer = socket.socketpair()
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.bind(("127.0.0.1", 0))
+listener.listen(1)
+listener.settimeout(1)
+writer = socket.create_connection(listener.getsockname(), timeout=1)
+reader, _ = listener.accept()
+reader.settimeout(1)
 try:
     with selectors.DefaultSelector() as selector:
         selector.register(reader, selectors.EVENT_READ)
@@ -33,11 +46,19 @@ try:
         writer.sendall(b"kernel-wait-probe")
         if not selector.select(1):
             raise SystemExit("real socket probe did not become readable")
-        if reader.recv(64) != b"kernel-wait-probe":
+        expected = b"kernel-wait-probe"
+        received = b""
+        while len(received) < len(expected):
+            chunk = reader.recv(len(expected) - len(received))
+            if not chunk:
+                raise SystemExit("real TCP probe ended before the response")
+            received += chunk
+        if received != expected:
             raise SystemExit("real socket probe response mismatch")
 finally:
     reader.close()
     writer.close()
+    listener.close()
 PY_PROBE
 "$PERF_BIN" script -v --ns -F trace:comm,pid,tid,time,event,trace -i "$PROFILE_DIR/probe.data" \
   > "$PROFILE_DIR/probe.events.txt"
@@ -45,14 +66,31 @@ if ! rg -q 'syscalls:sys_exit_epoll_wait' "$PROFILE_DIR/probe.events.txt"; then
   echo "real socket probe produced no kernel wait events" >&2
   exit 1
 fi
+if ! rg -q 'tcp:tcp_probe.*snd_nxt=.*snd_una=.*snd_wnd=.*rcv_wnd=' "$PROFILE_DIR/probe.events.txt"; then
+  echo "real TCP probe produced no transport progress events" >&2
+  exit 1
+fi
 if [ "${1:-}" = --probe-only ]; then
   echo "Real kernel wait recorder and decoder probe passed"
   exit 0
 fi
 status=0
+# Limit transport recording to the five owned benchmark listeners.
+TCP_FILTER=""
+for port in "${QPX_HTTP2_COMPARE_BACKEND_PORT:-18280}" \
+  "${QPX_HTTP2_COMPARE_QPX_PORT:-18281}" "${QPX_HTTP2_COMPARE_NGINX_PORT:-18282}" \
+  "${QPX_HTTP2_COMPARE_BACKEND_H2_PORT:-18283}" "${QPX_HTTP2_COMPARE_NGINX_BACKEND_PORT:-18284}"; do
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    echo "invalid TCP diagnostic listener port: $port" >&2
+    exit 2
+  fi
+  TCP_FILTER="${TCP_FILTER:+$TCP_FILTER || }sport == $port || dport == $port"
+done
 QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES=1048576 \
   QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
   "$PERF_BIN" record --no-buildid --clockid CLOCK_MONOTONIC -a -m 8M -e "$EVENTS" \
+    -e tcp:tcp_probe --filter "$TCP_FILTER" \
+    -e tcp:tcp_retransmit_skb --filter "$TCP_FILTER" \
     -o "$PROFILE_DIR/measurement.data" -- bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" \
     || status=$?
 "$PERF_BIN" script --ns --show-lost-events -F trace:comm,pid,tid,time,event,trace \
@@ -67,15 +105,20 @@ for process in qpxd nginx h2load; do
     exit 1
   fi
 done
-python3 - "$PROFILE_DIR" "$status" "$EVENTS" <<'PY_MANIFEST'
+if ! rg -q 'tcp:tcp_probe' "$PROFILE_DIR/measurement.events.txt"; then
+  echo "kernel recording lacks actual TCP progress events" >&2
+  exit 1
+fi
+python3 - "$PROFILE_DIR" "$status" "$EVENTS,$TCP_EVENTS" "$TCP_FILTER" <<'PY_MANIFEST'
 import json
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
 (root / "manifest.json").write_text(json.dumps({
-    "measurement": "http2_kernel_wait_events_v1", "clock": "CLOCK_MONOTONIC",
+    "measurement": "http2_kernel_wait_events_v2", "clock": "CLOCK_MONOTONIC",
     "diagnostic_instrumentation": True, "payload_capture": False,
     "events": sys.argv[3].split(","), "benchmark_exit_status": int(sys.argv[2]),
+    "tcp_filter": sys.argv[4],
     "required_processes": ["qpxd", "nginx", "h2load"],
     "event_stream": "measurement.events.txt",
 }, indent=2) + "\n")

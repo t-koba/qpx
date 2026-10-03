@@ -601,9 +601,13 @@ proxy at 30.13 minutes; HTTP/2 took 12.25 minutes and netem 17.73 minutes.
 Repeat this accounting after all required measurements pass at the final commit.
 
 The `http2-events` diagnostic records kernel syscall tracepoints without ptrace.
-It observes enter/exit events for epoll waits, futex waits, and connect calls with
+It observes enter/exit events for epoll waits and connect calls with
 `CLOCK_MONOTONIC`, retaining process and thread IDs for alignment with resource
-sample windows. A real socket readiness probe verifies the recorder before the
+sample windows. TCP progress events retain sequence numbers, acknowledgment
+progress, send/receive windows, and retransmissions for the five benchmark
+listener ports. System-wide futex events are excluded because idle workers
+dominated the first recording without identifying the stalled connection.
+A real TCP readiness and transport event probe verifies the recorder before the
 comparison. Missing tracepoints, missing comparison processes, or lost events
 fail the diagnostic. Raw perf data and the decoded event stream are retained.
 Payload buffers are not captured, and instrumented measurements remain excluded
