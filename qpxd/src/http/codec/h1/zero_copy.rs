@@ -125,12 +125,10 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
         let sampled_scheduling = _phase.is_sampled();
         let mut io_pending_polls = 0_u64;
         let mut explicit_yields = 0_u64;
-        let mut avoided_yields = 0_u64;
         while offset < end {
             let scheduling_quantum = zero_copy_scheduling_quantum(ZeroCopyTransferKind::File);
             let remaining = (end - offset).min(scheduling_quantum);
-            let mut waited_for_io = false;
-            let written = {
+            let written = if sampled_scheduling {
                 let transfer = stream.async_io(Interest::WRITABLE, || {
                     sendfile_once(file_fd, stream.as_raw_fd(), offset, remaining)
                 });
@@ -138,14 +136,17 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
                 poll_fn(|cx| {
                     let result = transfer.as_mut().poll(cx);
                     if result.is_pending() {
-                        waited_for_io = true;
-                        if sampled_scheduling {
-                            io_pending_polls += 1;
-                        }
+                        io_pending_polls += 1;
                     }
                     result
                 })
                 .await?
+            } else {
+                stream
+                    .async_io(Interest::WRITABLE, || {
+                        sendfile_once(file_fd, stream.as_raw_fd(), offset, remaining)
+                    })
+                    .await?
             };
             if written == 0 {
                 return Err(io::Error::new(
@@ -157,13 +158,7 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
             bytes_since_yield = bytes_since_yield.saturating_add(written as u64);
             if offset < end && bytes_since_yield >= scheduling_quantum {
                 bytes_since_yield = 0;
-                if waited_for_io {
-                    // A pending I/O poll already handed execution back to the
-                    // runtime. Do not immediately schedule another handoff.
-                    if sampled_scheduling {
-                        avoided_yields += 1;
-                    }
-                } else if ACTIVE_ZERO_COPY_TRANSFERS.load(Ordering::Acquire)
+                if ACTIVE_ZERO_COPY_TRANSFERS.load(Ordering::Acquire)
                     > CONTENDED_FILE_TRANSFER_THRESHOLD
                 {
                     // Cooperative budget accounting alone can defer the
@@ -180,7 +175,7 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
         }
         #[cfg(target_os = "macos")]
         if sampled_scheduling {
-            tracing::debug!(target: "qpx_perf_phase", io_pending_polls, explicit_yields, avoided_yields,
+            tracing::debug!(target: "qpx_perf_phase", io_pending_polls, explicit_yields,
                 body_bytes = region.len(), sample_interval = 1024,
                 "file body scheduling sampled");
         }
@@ -190,7 +185,7 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
                 Ok((queued_bytes, unsent_bytes)) => {
                     tracing::debug!(target: "qpx_perf_phase", queued_bytes, unsent_bytes,
                         body_bytes = region.len(), sample_interval = 1024,
-                        io_pending_polls, explicit_yields, avoided_yields,
+                        io_pending_polls, explicit_yields,
                         "file socket queue sampled");
                 }
                 Err(error) => {

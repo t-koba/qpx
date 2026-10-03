@@ -1165,3 +1165,18 @@ primary-key sharing semantics. Public methods, digest inputs, storage-key
 formats, and writeback admission are unchanged. Existing cross-thread and
 storage-key identity tests verify these invariants; fresh profiles and normal
 comparisons must establish the performance effect.
+
+The file-handoff trial `19acf14` is rejected and its product change is
+reverted. Same-runner pairs `37148326780`, `37148328724`, and `37148330817`
+compare against `8cdbd46`, reversing version order in the middle pair. Large
+file CPU-efficiency ratios change from 1.4306/1.3606/1.4003 to
+1.1996/1.3733/1.3331, and p99 ratios from 1.6125/1.0956/1.2875 to
+1.7308/2.0963/1.5701. Pair 1's current CPU-efficiency spread is 1.1658,
+exceeding 1.15, so its measurement quality fails and it cannot establish a
+performance comparison. Pairs 2 and 3 pass quality for both versions but
+their current p99 ratios worsen; current CPU ratios also miss the existing
+1.5 objective. The intrusive scheduling
+run `37148332829` confirms the trial avoids up to 12 handoffs per sampled
+transfer, but reducing that counter is insufficient evidence of benefit.
+The original handoff behavior is restored; all raw trial evidence remains in
+Actions artifacts. The independent derived-cache-key trial is retained.
