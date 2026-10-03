@@ -142,6 +142,7 @@ struct RecentHotCache {
 #[derive(Clone)]
 struct RecentHotCacheShard {
     entries: Vec<Option<std::sync::Arc<RecentHotCacheEntry>>>,
+    file_filter: u64,
 }
 
 impl Default for RecentHotCache {
@@ -151,6 +152,7 @@ impl Default for RecentHotCache {
                 .map(|_| {
                     std::sync::Arc::new(RecentHotCacheShard {
                         entries: vec![None; DISK_CACHE_RECENT_ENTRIES_PER_SHARD],
+                        file_filter: 0,
                     })
                 })
                 .collect(),
@@ -689,11 +691,21 @@ impl DiskCacheBackend {
         self.hot_recent.rcu(|current| {
             let mut shards = current.shards.clone();
             if !removed.is_empty() {
-                for slot in 0..DISK_CACHE_RECENT_ENTRIES {
-                    if recent_hot_entry_at(current, slot)
-                        .is_some_and(|candidate| removed.contains(&candidate.file_id))
-                    {
-                        *recent_hot_entry_mut(&mut shards, slot) = None;
+                let filter = removed
+                    .iter()
+                    .fold(0, |bits, id| bits | recent_file_bit(*id));
+                for (index, shard) in current.shards.iter().enumerate() {
+                    if shard.file_filter & filter == 0 {
+                        continue;
+                    }
+                    for (offset, entry) in shard.entries.iter().enumerate() {
+                        if entry
+                            .as_ref()
+                            .is_some_and(|entry| removed.contains(&entry.file_id))
+                        {
+                            let slot = index * DISK_CACHE_RECENT_ENTRIES_PER_SHARD + offset;
+                            *recent_hot_entry_mut(&mut shards, slot) = None;
+                        }
                     }
                 }
             }
@@ -701,6 +713,7 @@ impl DiskCacheBackend {
                 let slot = hot_slot(entry.namespace.as_ref(), entry.key.as_ref());
                 *recent_hot_entry_mut(&mut shards, slot) = Some(entry.clone());
             }
+            refresh_recent_file_filters(current, &mut shards);
             RecentHotCache { shards }
         });
     }
@@ -711,6 +724,7 @@ impl DiskCacheBackend {
             .load()
             .shards
             .iter()
+            .filter(|shard| shard.file_filter & recent_file_bit(file_id) != 0)
             .flat_map(|shard| shard.entries.iter().flatten())
             .any(|entry| entry.file_id == file_id)
         {
@@ -720,12 +734,18 @@ impl DiskCacheBackend {
             HotRecentUpdateGuard::acquire(&self.hot_recent_update, &self.hot_recent_generation);
         self.hot_recent.rcu(|current| {
             let mut shards = current.shards.clone();
-            for slot in 0..DISK_CACHE_RECENT_ENTRIES {
-                if recent_hot_entry_at(current, slot).is_some_and(|entry| entry.file_id == file_id)
-                {
-                    *recent_hot_entry_mut(&mut shards, slot) = None;
+            for (index, shard) in current.shards.iter().enumerate() {
+                if shard.file_filter & recent_file_bit(file_id) == 0 {
+                    continue;
+                }
+                for (offset, entry) in shard.entries.iter().enumerate() {
+                    if entry.as_ref().is_some_and(|entry| entry.file_id == file_id) {
+                        let slot = index * DISK_CACHE_RECENT_ENTRIES_PER_SHARD + offset;
+                        *recent_hot_entry_mut(&mut shards, slot) = None;
+                    }
                 }
             }
+            refresh_recent_file_filters(current, &mut shards);
             RecentHotCache { shards }
         });
     }
@@ -1386,6 +1406,29 @@ fn recent_hot_entry_at(recent: &RecentHotCache, slot: usize) -> Option<&RecentHo
         .entries
         .get(slot % DISK_CACHE_RECENT_ENTRIES_PER_SHARD)?
         .as_deref()
+}
+
+fn recent_file_bit(id: DiskCacheFileId) -> u64 {
+    1_u64 << (id.0[0] & 63)
+}
+
+fn refresh_recent_file_filters(
+    previous: &RecentHotCache,
+    shards: &mut [std::sync::Arc<RecentHotCacheShard>],
+) {
+    for (previous, shard) in previous.shards.iter().zip(shards) {
+        if std::sync::Arc::ptr_eq(previous, shard) {
+            continue;
+        }
+        let shard = std::sync::Arc::make_mut(shard);
+        // The filter only skips impossible matches; removal still compares
+        // complete file identities, including when filter bits collide.
+        shard.file_filter = shard
+            .entries
+            .iter()
+            .flatten()
+            .fold(0, |bits, entry| bits | recent_file_bit(entry.file_id));
+    }
 }
 
 fn recent_hot_entry_mut(
@@ -2332,6 +2375,53 @@ mod tests {
                 .is_none()
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn recent_file_filter_collision_preserves_unrelated_cache_objects() {
+        let dir = temp_dir("recent-file-filter-collision");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let first = "first";
+        let first_id = cache_file_id("ns", first);
+        let second = (0..10_000)
+            .map(|index| format!("second-{index}"))
+            .find(|key| {
+                let id = cache_file_id("ns", key);
+                id != first_id
+                    && recent_file_bit(id) == recent_file_bit(first_id)
+                    && hot_slot("ns", key) != hot_slot("ns", first)
+            })
+            .expect("find distinct real keys sharing a filter bit");
+        backend
+            .put("ns", first, b"original", 60)
+            .await
+            .expect("put first");
+        backend
+            .put("ns", &second, b"unrelated", 60)
+            .await
+            .expect("put second");
+        backend
+            .put("ns", first, b"replacement", 60)
+            .await
+            .expect("replace first");
+        backend.delete("ns", first).await.expect("delete first");
+        assert!(backend.hot_recent_lookup("ns", first, now_ms()).is_none());
+        assert!(matches!(
+            backend.hot_recent_lookup("ns", &second, now_ms()),
+            Some(HotCacheLookup::Hit { value, .. }) if value == b"unrelated"[..]
+        ));
+        assert_eq!(
+            backend.get("ns", &second).await.expect("read unrelated"),
+            Some(Bytes::from_static(b"unrelated"))
+        );
+        assert!(
+            backend
+                .get("ns", first)
+                .await
+                .expect("read deleted")
+                .is_none()
+        );
+        fs::remove_dir_all(dir).expect("remove cache directory");
     }
 
     #[tokio::test]

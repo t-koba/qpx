@@ -946,3 +946,24 @@ process groups with their real clients; interrupted, missing, empty, or lost
 profiles fail explicitly. GNU time in this experiment includes the profiler,
 as stated in its manifest; these values cannot substitute for direct client
 CPU records or normal required performance results.
+
+Normalized persistent-miss callgrind windows retain all three measurements
+instead of comparing raw instruction totals with different request counts:
+
+| Profile revision | Miss window 1 Ir/request | Miss window 2 Ir/request | Miss window 3 Ir/request |
+| --- | ---: | ---: | ---: |
+| `d0cd523` before file-identity LRU | 245,967 | 249,745 | 254,515 |
+| `ad7b8d4` with file-identity LRU | 235,470 | 241,372 | 244,818 |
+| `086e86a` with combined body/metadata | 234,242 | 237,359 | 238,173 |
+
+The refreshed `086e86a` profile, Actions run `37138034288`, still attributes
+14,006,016 instructions in its second miss window to full file-identity
+comparisons while invalidating recent views. Recent-cache shards now retain
+a 64-bit membership filter derived from their file identities. Invalidation
+skips shards that cannot contain a removed file and still compares full
+identities in every candidate shard. Changed shards rebuild the filter before
+publishing the immutable snapshot. Filter collisions therefore affect only
+the amount of work, never eviction decisions. A real-file regression test
+replaces and deletes one of two distinct objects sharing a filter bit and
+verifies the other remains available in the recent cache. A refreshed profile
+and normal comparisons must establish the performance effect of this trial.
