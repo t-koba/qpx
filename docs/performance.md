@@ -1119,3 +1119,32 @@ wrap the I/O future to count polls. Unsampled transfers retain their original
 I/O path, and scheduling quanta, admission, and socket thresholds are
 unchanged. This observation must precede any attempt to eliminate redundant
 handoffs; neither the diagnostic nor its counters can satisfy normal gates.
+
+The scheduling observation (`37147472978`, `8cdbd46`) retains 125 sampled
+1 MiB transfers. Fourteen have both pending I/O polls and explicit yields
+(including two with 14 pending polls and 15 explicit yields). Sampled file
+send time has median 221 microseconds and p99 16.24 milliseconds, compared
+with 2.97 milliseconds p99 for blocking dispatch and 97 microseconds for
+file reading. These diagnostic timings locate a tail in the send path but
+do not prove a causal relationship between individual handoffs and latency.
+
+A separate trial now counts actual pending I/O polls for every file transfer
+and skips the immediately following cooperative handoff when I/O already
+returned execution to the runtime. Transfers making uninterrupted progress
+still enforce the existing quantum; socket queue limits, file ownership,
+errors, and cancellation behavior remain unchanged. Sampled avoided-handoff
+counts verify that the trial reaches the intended branch. Real-file tests
+and same-runner revision comparisons must establish correctness and benefit
+before this trial is accepted as a performance improvement.
+
+Normal independent run `37143289872` on `0b28482` now has complete proxy
+results. All three local 1 KiB RSS ratios (1.0183/1.0472/1.0270) meet 1.06,
+and all three feature-rich 1 KiB queue-delay ratios
+(0.9710/0.9445/0.8921) meet 1.0. The stronger goals remain unmet:
+feature-rich throughput ratios are 0.8662/0.8904/0.8999 and CPU-efficiency
+ratios 0.9010/0.9301/1.0194; miss throughput is 0.9248/0.8721/1.3922,
+CPU efficiency 0.8501/0.7186/0.9327, and queue delay 2.1840/3.1854/2.5068.
+Large WebDAV p99 ratios are 1.1167/1.7713/1.8621, with existing CPU-efficiency
+acceptance failing in runs 1 and 3. The normal proxy jobs also fail the
+existing reverse-proxy queue-delay and 1 MiB CPU-baseline checks. These
+results do not constitute CI normalization or final performance acceptance.
