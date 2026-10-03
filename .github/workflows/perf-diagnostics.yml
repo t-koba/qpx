@@ -61,24 +61,21 @@ jobs:
             exit 1
           fi
           dpkg-query -L "${perf_packages[@]}" > target/perf/native-perf-package-files.txt
-          mapfile -t perf_tools < <(rg '^/usr/lib/linux-tools[^[:space:]]*/perf$' target/perf/native-perf-package-files.txt | sort -V)
-          if [ "${#perf_tools[@]}" -eq 0 ]; then
-            echo "native perf executable is missing" >&2
-            exit 1
-          fi
-          perf_binary="${perf_tools[-1]}"
           if [ "${{ inputs.category }}" = http2-events ]; then
             kernel_release="$(uname -r)"
-            perf_binary=""
-            for candidate in "${perf_tools[@]}"; do
-              if [ "$(basename "$(dirname "$candidate")")" = "$kernel_release" ]; then
-                perf_binary="$candidate"
-              fi
-            done
-            if [ -z "$perf_binary" ]; then
-              echo "kernel-matched perf executable is missing: $kernel_release" >&2
+            kernel_tools_dir="/usr/lib/linux-tools/$kernel_release"
+            if ! rg -F -x -q "$kernel_tools_dir" target/perf/native-perf-package-files.txt; then
+              echo "kernel-matched tools directory is not owned by an installed package" >&2
               exit 1
             fi
+            perf_binary="$kernel_tools_dir/perf"
+          else
+            mapfile -t perf_tools < <(rg '^/usr/lib/linux-tools[^[:space:]]*/perf$' target/perf/native-perf-package-files.txt | sort -V)
+            if [ "${#perf_tools[@]}" -eq 0 ]; then
+              echo "native perf executable is missing" >&2
+              exit 1
+            fi
+            perf_binary="${perf_tools[-1]}"
           fi
           if [ ! -f "$perf_binary" ] || [ ! -x "$perf_binary" ]; then
             echo "native perf path is not an executable file: $perf_binary" >&2
