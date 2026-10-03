@@ -20,7 +20,7 @@ for syscall in epoll_wait epoll_pwait futex connect; do
   done
 done
 # Exercise the same kernel event recorder with a real socket before measurement.
-"$PERF_BIN" record --no-buildid --clockid CLOCK_MONOTONIC -e "$EVENTS" \
+"$PERF_BIN" record -v --no-buildid --clockid CLOCK_MONOTONIC -e "$EVENTS" \
   -o "$PROFILE_DIR/probe.data" -- python3 - <<'PY_PROBE'
 import selectors
 import socket

@@ -90,8 +90,9 @@ jobs:
               sudo mount -t tracefs tracefs /sys/kernel/tracing
             fi
             sudo chmod a+rx /sys/kernel/tracing /sys/kernel/tracing/events
-            sudo chmod -R a+rX /sys/kernel/tracing/events/syscalls
-            sudo chmod a+r /sys/kernel/tracing/events/header_page /sys/kernel/tracing/events/header_event
+            sudo chmod -R a+rX /sys/kernel/tracing/events/syscalls /sys/kernel/tracing/events/ftrace
+            sudo chmod a+r /sys/kernel/tracing/events/header_page /sys/kernel/tracing/events/header_event \
+              /sys/kernel/tracing/printk_formats /sys/kernel/tracing/saved_cmdlines
             QPX_NATIVE_PERF_BIN="$perf_binary" bash scripts/perf-diagnose-http2-events.sh --probe-only
           fi
           echo "QPX_NATIVE_PERF_BIN=$perf_binary" >> "$GITHUB_ENV"
