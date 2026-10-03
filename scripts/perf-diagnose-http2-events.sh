@@ -99,7 +99,30 @@ if rg -q 'PERF_RECORD_LOST|LOST [1-9]' "$PROFILE_DIR/measurement.events.txt"; th
   echo "kernel wait recording lost events" >&2
   exit 1
 fi
-for process in qpxd nginx h2load; do
+python3 - "$ROOT_DIR/target/perf/http2-compare-logs" "$PROFILE_DIR/measurement.events.txt" <<'PY_PROCESS'
+import json
+from pathlib import Path
+import re
+import sys
+root = Path(sys.argv[1])
+pids = set()
+for sample in root.glob("http2.qpxd.*.rss-peak.sampling.json"):
+    pid = json.loads(sample.read_text())["pid"]
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        raise SystemExit("qpxd resource sampling has an invalid process ID")
+    pids.add(pid)
+if not pids:
+    raise SystemExit("kernel recording lacks real qpxd resource sample windows")
+pattern = re.compile(r"^\s*.*?\s+(\d+)/(\d+)\s+\d+\.\d+:\s+syscalls:")
+with Path(sys.argv[2]).open() as events:
+    for line in events:
+        match = pattern.match(line)
+        if match and int(match[1]) in pids:
+            break
+    else:
+        raise SystemExit("kernel recording lacks the sampled qpxd process")
+PY_PROCESS
+for process in nginx h2load; do
   if ! rg -q "^[[:space:]]*${process}[[:space:]]" "$PROFILE_DIR/measurement.events.txt"; then
     echo "kernel wait recording lacks an actual comparison process: $process" >&2
     exit 1
