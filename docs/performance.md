@@ -864,3 +864,13 @@ samples. Its fast windows contain 376, 429, and 369 CPU samples, compared with
 dominate the observed hot symbols; the second window attributes 6.53% of sampled
 events to `_raw_spin_unlock_irqrestore`. This identifies further investigation
 areas but does not justify a product change or prove a normal gate improvement.
+
+A subsequent WebDAV trial increases the contended file-send scheduling quantum
+from 64 KiB to 128 KiB. Native callsites at `147ad23` identify file-splice,
+TCP-send, and task-wakeup work in the 1 MiB window; the trial tests whether fewer
+explicit handoffs and larger syscall batches reduce that work. The Linux
+`TCP_NOTSENT_LOWAT` remains a separate 64 KiB constant, preserving client-progress
+backpressure and restoration on completion, failure, and cancellation. Active
+transfer thresholds and low-contention quanta remain unchanged. This trial
+requires same-runner comparisons with reversed version order and all existing
+acceptance/quality checks; it is not yet a demonstrated performance improvement.

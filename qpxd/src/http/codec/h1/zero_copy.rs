@@ -22,7 +22,9 @@ const BALANCED_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
+const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 128 * 1024;
+#[cfg(target_os = "linux")]
+const FILE_NOTSENT_LOWAT: u32 = 64 * 1024;
 
 // Buffered body relays move up to one read buffer per readiness event. The
 // same fairness rule as the zero-copy path applies under concurrent transfer
@@ -193,7 +195,7 @@ impl<'a> FileSendQueueGuard<'a> {
         // Bound data waiting for transmission, not the socket's total buffer.
         // This makes readiness reflect client progress before a complete large
         // response can sit in the kernel behind the other active transfers.
-        socket.set_tcp_notsent_lowat(CONTENDED_FILE_ZERO_COPY_QUANTUM as u32)?;
+        socket.set_tcp_notsent_lowat(FILE_NOTSENT_LOWAT)?;
         Ok(Self {
             stream,
             original,
