@@ -47,7 +47,8 @@ def main():
     signal.signal(signal.SIGINT, request_shutdown)
     observer = os.environ["QPX_NATIVE_PERF_BIN"]
     if mode == "cpu":
-        command = [observer, "record", "-e", "cpu-clock", "-F", "199",
+        lifecycle["ring_buffer_bytes"] = 8 * 1024 * 1024
+        command = [observer, "record", "-m", "8M", "-e", "cpu-clock", "-F", "199",
                    "--clockid", "CLOCK_MONOTONIC", "--call-graph", "dwarf,16384",
                    "-o", str(directory / f"{role}.data"), "--", server, *arguments]
     else:

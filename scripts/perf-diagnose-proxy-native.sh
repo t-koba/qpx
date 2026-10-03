@@ -171,5 +171,31 @@ if [ "$reports" -lt "$minimum_reports" ]; then
   echo "native CPU profiling lacks complete workload windows: observed $reports" >&2
   exit 1
 fi
+# Retain every report before rejecting incomplete sampling evidence.
+python3 - "$QPX_NATIVE_PROFILE_DIR" <<'PY_QUALITY'
+import json
+from pathlib import Path
+import re
+import sys
+root = Path(sys.argv[1])
+profiles = []
+for report in sorted(root.glob("*.data.report.txt")):
+    counts = re.findall(r"^# Total Lost Samples:\s+(\d+)\s*$", report.read_text(), re.MULTILINE)
+    if len(counts) != 1:
+        raise SystemExit(f"native CPU report lacks an unambiguous lost-sample count: {report}")
+    profiles.append({"report": report.name, "lost_samples": int(counts[0])})
+if not profiles:
+    raise SystemExit("native CPU sampling quality lacks real profile reports")
+valid = all(profile["lost_samples"] == 0 for profile in profiles)
+(root / "sampling-quality.json").write_text(json.dumps({
+    "measurement": "native_cpu_sampling_quality_v1", "valid": valid,
+    "maximum_lost_samples": 0, "profiles": profiles,
+    "reason": None if valid else "native CPU recording lost samples",
+}, indent=2) + "\n")
+if not valid:
+    print("Invalid measurement: native CPU recording lost samples", file=sys.stderr)
+    raise SystemExit(1)
+print("Native CPU sampling quality passed without lost samples")
+PY_QUALITY
 echo "Native CPU profiles: $profiles"
 echo "Native workload CPU reports: $reports"

@@ -114,7 +114,11 @@ The `proxy-native` diagnostic uses Linux perf's software CPU clock at 199 Hz
 with DWARF call stacks, including kernel CPU work. It preserves raw profiles
 and symbol reports for the cache and feature-rich roles. The exact ELF executable
 is preserved as gzip with its SHA-256 and uncompressed size before measurement,
-so raw addresses and DWARF stacks can be resolved after the runner is removed. Its isolated process
+so raw addresses and DWARF stacks can be resolved after the runner is removed. All reports
+are retained before sampling-quality validation; any lost samples fail the
+diagnostic and are recorded explicitly in `sampling-quality.json`. Each perf
+ring uses 8 MiB to retain DWARF samples during report-consumer scheduling delays;
+the lifecycle record preserves that diagnostic buffer capacity. Its isolated process
 group owns both the profiler and server and waits for their shutdown. These
 instrumented records cannot satisfy normal performance acceptance gates.
 Before measurement, a real qpxd local-response server verifies that terminating
