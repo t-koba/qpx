@@ -65,7 +65,7 @@ def tcp_snapshot(diag, ports, sequence):
                     "cookie": struct.unpack_from("=Q", payload, 44)[0],
                     "receive_queue": struct.unpack_from("=I", payload, 56)[0],
                     "write_queue": struct.unpack_from("=I", payload, 60)[0],
-                    "unacked": u32(24), "rto_us": u32(8), "total_retrans": u32(100),
+                    "unacked": u32(24), "retransmission_timeout_us": u32(8), "total_retrans": u32(100),
                     "last_data_sent_ms": u32(44), "last_data_received_ms": u32(52),
                     "last_ack_received_ms": u32(56), "rtt_us": u32(68),
                     "send_window": u32(228), "receive_window": u32(232),
