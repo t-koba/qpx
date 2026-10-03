@@ -1496,6 +1496,27 @@ struct ReverseHttpAttemptTransport<'a> {
     connection_pool: Option<&'a PreparedPlainHttp1ConnectionAffinity>,
 }
 
+// Keep the non-interim version branch out of the common HTTP attempt state.
+#[inline(never)]
+fn proxy_reverse_http_without_interim<'a>(
+    pools: &'a crate::pool::PoolRegistry,
+    request: Request<Body>,
+    origin: &'a OriginEndpoint,
+    proxy_name: &'a str,
+    route: &'a HttpRoute,
+) -> futures_util::future::BoxFuture<'a, Result<Response<Body>>> {
+    Box::into_pin(Box::write(
+        Box::new_uninit(),
+        proxy_http(
+            pools,
+            request,
+            origin,
+            proxy_name,
+            route.upstream_trust.as_deref(),
+        ),
+    ))
+}
+
 async fn proxy_reverse_http_attempt(
     pools: &crate::pool::PoolRegistry,
     req_for_upstream: Request<Body>,
@@ -1560,12 +1581,12 @@ async fn proxy_reverse_http_attempt(
         }
         Ok((
             Vec::new(),
-            proxy_http(
+            proxy_reverse_http_without_interim(
                 pools,
                 req_for_upstream,
                 upstream_origin,
                 proxy_name,
-                route.upstream_trust.as_deref(),
+                route,
             )
             .await?,
             None,
@@ -1592,6 +1613,22 @@ mod state_layout_tests {
         assert!(
             dispatch_bytes <= 13 * 512,
             "cached response dispatcher inline state exceeded its size budget: {dispatch_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn reverse_http_attempt_keeps_inactive_protocol_states_out_of_line() {
+        fn future_size<I, O>(_: impl FnOnce(I) -> O) -> usize {
+            std::mem::size_of::<O>()
+        }
+        let bytes = future_size(
+            |(pools, request, origin, version, name, route, transport)| {
+                proxy_reverse_http_attempt(pools, request, origin, version, name, route, transport)
+            },
+        );
+        assert!(
+            bytes <= 9 * 1024,
+            "reverse HTTP attempt inline state exceeded its size budget: {bytes} bytes"
         );
     }
 }

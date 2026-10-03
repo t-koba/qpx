@@ -1012,3 +1012,20 @@ calibration, completion accounting, and finite spread/duration bounds. Three
 independent Linux runs must establish quality before considering these
 conditions for a normal required measurement. CPU profiling remains disabled
 in this experiment; ordinary required gates remain unchanged.
+
+The `086e86a` persistent-miss callgrind profile attributes approximately
+3.05 million instructions each to copying the HTTP attempt into its await
+state and constructing the attempt itself, plus 3.00 million instructions to
+its timeout construction, across 4,353 requests. Compiler state probes show
+11,880 bytes for the attempt, including an inactive 9,184-byte HTTPS future;
+the plain HTTP future itself is 4,744 bytes. HTTPS now constructs its future
+in separately allocated storage only when that branch is selected. Its
+handshake, certificate verification, connection pool, and HTTP/3 behavior
+remain inside the same future body. The uncommon non-interim version branch
+also constructs its state outside the common attempt. Together these changes
+reduce the attempt to 8,728 bytes on the local ARM64 compiler, versus 9,544
+bytes with only HTTPS separated. Plain HTTP and IPC retain their existing
+allocation paths. A 9 KiB state budget guards against reintroducing inactive
+protocol state. Workspace tests pass, but refreshed Linux instruction profiles
+and normal performance measurements must establish the actual benefit and
+check the cost of the additional HTTPS-only allocation.

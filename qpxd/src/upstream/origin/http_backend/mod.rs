@@ -660,7 +660,32 @@ async fn take_reusable_plain_http_stream_from_target(
     }
 }
 
-async fn proxy_https_with_options(
+// Keep HTTPS-only handshake state out of plaintext origin futures.
+#[inline(never)]
+fn proxy_https_with_options<'a>(
+    pools: &'a crate::pool::PoolRegistry,
+    req: Request<Body>,
+    origin: &'a OriginEndpoint,
+    proxy_name: &'a str,
+    trust: Option<&'a CompiledUpstreamTlsTrust>,
+    verify_upstream_cert: bool,
+    timeout_dur: std::time::Duration,
+) -> futures_util::future::BoxFuture<'a, Result<Http1ResponseWithInterim>> {
+    Box::into_pin(Box::write(
+        Box::new_uninit(),
+        execute_proxy_https_with_options(
+            pools,
+            req,
+            origin,
+            proxy_name,
+            trust,
+            verify_upstream_cert,
+            timeout_dur,
+        ),
+    ))
+}
+
+async fn execute_proxy_https_with_options(
     pools: &crate::pool::PoolRegistry,
     req: Request<Body>,
     origin: &OriginEndpoint,
