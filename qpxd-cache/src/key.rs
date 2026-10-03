@@ -18,6 +18,7 @@ struct CachedRequestKey {
 
 thread_local! {
     static CACHED_REQUEST_KEY: RefCell<Option<CachedRequestKey>> = const { RefCell::new(None) };
+    static CACHED_NORMALIZED_REQUEST_KEY: RefCell<Option<CacheRequestKey>> = const { RefCell::new(None) };
 }
 
 impl CacheRequestKey {
@@ -77,11 +78,29 @@ impl CacheRequestKey {
         let path_and_query = req
             .uri()
             .path_and_query()
-            .map(|pq| pq.as_str().to_string())
-            .unwrap_or_else(|| "/".to_string());
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+        let method = cache_method_group(req.method());
+
+        // A raw cache probe may have computed the same key before handing
+        // the request to the generic service. Reuse only after independently
+        // normalizing and comparing every component of its primary identity.
+        if let Some(key) = CACHED_NORMALIZED_REQUEST_KEY.with_borrow(|cached| {
+            cached
+                .as_ref()
+                .filter(|key| {
+                    key.method.as_ref() == method
+                        && key.scheme.as_ref() == scheme
+                        && key.authority.as_ref() == authority
+                        && key.path_and_query.as_ref() == path_and_query
+                })
+                .cloned()
+        }) {
+            return Ok(Some(key));
+        }
 
         Ok(Some(Self::from_parts(
-            Arc::from(cache_method_group(req.method())),
+            Arc::from(method),
             Arc::from(scheme),
             Arc::from(authority),
             Arc::from(path_and_query),
@@ -99,12 +118,16 @@ impl CacheRequestKey {
         authority: String,
         path_and_query: String,
     ) -> Self {
-        Self::from_parts(
+        let key = Self::from_parts(
             std::sync::Arc::from(method),
             std::sync::Arc::from(scheme),
             std::sync::Arc::from(authority),
             std::sync::Arc::from(path_and_query),
-        )
+        );
+        CACHED_NORMALIZED_REQUEST_KEY.with_borrow_mut(|cached| {
+            *cached = Some(key.clone());
+        });
+        key
     }
 
     pub fn primary_hash(&self) -> String {
@@ -286,6 +309,86 @@ pub fn normalize_url_authority(url: &Url) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_probe_and_generic_lookup_share_only_the_same_normalized_identity() {
+        let raw = CacheRequestKey::from_normalized_parts(
+            "GET",
+            "https",
+            "example.com".to_string(),
+            "/raw-generic-identity?sequence=1".to_string(),
+        );
+        let index = raw.primary_index_storage_key();
+        let variant = raw.primary_default_variant_storage_key();
+        let request = Request::builder()
+            .uri("/raw-generic-identity?sequence=1")
+            .header(HOST, "Example.COM:443")
+            .body(Body::empty())
+            .unwrap();
+        let generic = CacheRequestKey::for_lookup(&request, "https")
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&raw.derived, &generic.derived));
+        assert!(Arc::ptr_eq(&index, &generic.primary_index_storage_key()));
+        assert!(Arc::ptr_eq(
+            &variant,
+            &generic.primary_default_variant_storage_key()
+        ));
+
+        for (method, uri, host, scheme) in [
+            (
+                "HEAD",
+                "/raw-generic-identity?sequence=1",
+                "example.com",
+                "https",
+            ),
+            (
+                "GET",
+                "/raw-generic-identity?sequence=2",
+                "example.com",
+                "https",
+            ),
+            (
+                "GET",
+                "/raw-generic-identity?sequence=1",
+                "other.example",
+                "https",
+            ),
+            (
+                "GET",
+                "/raw-generic-identity?sequence=1",
+                "example.com",
+                "http",
+            ),
+            (
+                "GET",
+                "/raw-generic-identity?sequence=1",
+                "example.com:8443",
+                "https",
+            ),
+        ] {
+            let other = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(HOST, host)
+                .body(Body::empty())
+                .unwrap();
+            let key = CacheRequestKey::for_lookup(&other, scheme)
+                .unwrap()
+                .unwrap();
+            assert!(!Arc::ptr_eq(&raw.derived, &key.derived));
+            assert_ne!(raw.primary_hash(), key.primary_hash());
+        }
+        let no_authority = Request::builder()
+            .uri("/raw-generic-identity?sequence=1")
+            .body(Body::empty())
+            .unwrap();
+        assert!(
+            CacheRequestKey::for_lookup(&no_authority, "https")
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn primary_digest_is_shared_across_worker_migration_and_reset_for_a_new_method() {

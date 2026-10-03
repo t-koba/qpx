@@ -1218,3 +1218,23 @@ path with request collapse, revalidation, body limits, and bounded writeback.
 The existing real-server differential test now also uses that production
 generic path to fill its real disk cache before comparing hot-hit responses.
 Fresh profiles must quantify the cleanup's performance effect.
+
+The next allocation experiment shares the already derived primary key from
+the raw cache probe with the generic cache lookup on the same worker. The
+generic lookup still normalizes the request independently and compares all
+four identity components (method group, scheme, authority, path-and-query)
+before reuse. The memo contains one key per worker, no cache response or
+admission decision; namespace, policy, revalidation, and persistence checks
+remain in their existing paths. A different component or a missing authority
+cannot reuse it. The generic lookup also borrows the URI path-and-query
+instead of allocating a temporary string before creating its shared key.
+Profiles and normal measurements must establish whether the saved key
+allocation and duplicate digest work outweigh the additional memo ownership.
+
+Feature-rich Callgrind run `37152238504` on cleanup revision `1cd6a36`
+succeeds, with 46,635/46,699/46,711 instructions per completed request.
+Compared with `92f1cc7` (46,219/46,565/46,623), this provides no evidence
+of a feature-rich instruction improvement from the unused miss cleanup.
+The new key-sharing experiment passes 1,302 workspace tests across 47
+suites and all-feature Clippy. An all-feature local test attempt stops at
+linking because of disk exhaustion; it is not counted as a test pass.
