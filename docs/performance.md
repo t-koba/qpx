@@ -785,3 +785,11 @@ All requests in those samples completed successfully. CPU partitioning alone
 therefore did not establish reliable calibration and is not adopted by normal
 acceptance gates. The failed experiment's manifest, client logs, and raw
 resource snapshots remain retained in its diagnostic artifact.
+
+The fast streaming diagnostic at `dc969d0` retained only 47 CPU samples in
+the second workload window. That is insufficient for precise hot-spot ranking.
+Native streaming diagnostics therefore use 64 sequential 100 MiB transfers
+instead of eight, preserving one active client, fresh connections, and all
+response-completion checks. Normal required streaming measurements remain at
+eight transfers. Extended native records remain instrumented diagnostic data
+and cannot satisfy the normal performance gate.

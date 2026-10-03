@@ -86,6 +86,7 @@ case "$workload" in
     ;;
   streaming)
     QPXD_BIN="$wrapper" QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS=1 \
+      QPX_STREAMING_COMPARE_FAST_TRANSFERS=64 \
       bash "$ROOT_DIR/scripts/perf-audit-streaming-compare.sh"
     roles="qpxd-streaming"
     log_directory="$ROOT_DIR/target/perf/streaming-compare-logs"
