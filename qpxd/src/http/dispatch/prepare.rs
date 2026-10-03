@@ -69,7 +69,7 @@ pub(crate) async fn prepare_dispatch_request(
             None,
         )
     };
-    let req = match observation_plan
+    let mut req = match observation_plan
         .observe_request(
             input.req,
             input.max_observed_request_body_bytes,
@@ -83,20 +83,18 @@ pub(crate) async fn prepare_dispatch_request(
         }
         Err(err) => return Err(err),
     };
-    let req = if let Some(limit) = input
+    if let Some(limit) = input
         .http_guard
         .and_then(|profile| profile.request_body_streaming_limit())
     {
-        match limit_request_body(req, limit) {
-            Ok(req) => req,
+        match limit_request_body(&mut req, limit) {
+            Ok(()) => (),
             Err(err) if is_observed_body_limit_exceeded(&err) => {
                 return Ok(Err(too_large_response()?));
             }
             Err(err) => return Err(err),
         }
-    } else {
-        req
-    };
+    }
     let mut sanitized_headers = req.headers().clone();
     sanitize_headers_for_policy(
         input.state,

@@ -161,8 +161,8 @@ pub(super) async fn complete_transparent_request(
     if needs_rpc {
         request_rpc = Some(crate::http::rpc::inspect_request(&req).await);
     }
-    req = match limit_request_body(req, selected_plan.streaming.max_request_body_bytes) {
-        Ok(req) => req,
+    match limit_request_body(&mut req, selected_plan.streaming.max_request_body_bytes) {
+        Ok(()) => (),
         Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
             return body_too_large_response(
                 &request_method,

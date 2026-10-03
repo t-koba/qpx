@@ -552,8 +552,8 @@ async fn complete_forward_request(
         return Ok(response);
     }
 
-    req = match limit_request_body(req, selected_plan.streaming.max_request_body_bytes) {
-        Ok(req) => req,
+    match limit_request_body(&mut req, selected_plan.streaming.max_request_body_bytes) {
+        Ok(()) => (),
         Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
             return forward_payload_too_large_response(&base, client_version, proxy_name, &audit);
         }

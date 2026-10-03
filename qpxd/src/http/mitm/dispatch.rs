@@ -508,11 +508,11 @@ async fn execute_mitm_request(
     if needs_rpc {
         request_rpc = Some(crate::http::rpc::inspect_request(&req).await);
     }
-    req = match crate::http::body::size::limit_request_body(
-        req,
+    match crate::http::body::size::limit_request_body(
+        &mut req,
         selected_plan.streaming.max_request_body_bytes,
     ) {
-        Ok(req) => req,
+        Ok(()) => (),
         Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
             let response = request_body_too_large_response(
                 &base.method,

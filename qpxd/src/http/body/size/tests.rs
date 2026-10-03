@@ -58,9 +58,20 @@ async fn observe_request_body_size_uses_content_length_without_buffering() {
 #[tokio::test]
 async fn limit_request_body_streams_unknown_length_without_prebuffering() {
     let (mut sender, body) = Body::channel();
-    let req = Request::builder().body(body).expect("request");
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/limited?part=1")
+        .header("x-request-context", "preserved")
+        .body(body)
+        .expect("request");
+    req.extensions_mut().insert(42_u64);
     let mut body = timeout(Duration::from_millis(25), async {
-        limit_request_body(req, 4).map(Request::into_body)
+        limit_request_body(&mut req, 4)?;
+        assert_eq!(req.method(), http::Method::POST);
+        assert_eq!(req.uri(), "/limited?part=1");
+        assert_eq!(req.headers()["x-request-context"], "preserved");
+        assert_eq!(req.extensions().get::<u64>(), Some(&42));
+        anyhow::Ok(req.into_body())
     })
     .await
     .expect("limit setup must not wait for body")
@@ -92,9 +103,9 @@ async fn limit_request_body_streams_unknown_length_without_prebuffering() {
 
 #[test]
 fn limit_request_body_keeps_empty_body_at_end_of_stream() {
-    let req = Request::builder().body(Body::empty()).expect("request");
+    let mut req = Request::builder().body(Body::empty()).expect("request");
 
-    let req = limit_request_body(req, 4).expect("limit body");
+    limit_request_body(&mut req, 4).expect("limit body");
 
     assert!(http_body::Body::is_end_stream(req.body()));
     assert_eq!(http_body::Body::size_hint(req.body()).exact(), Some(0));

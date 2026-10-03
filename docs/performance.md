@@ -1048,3 +1048,27 @@ environments, diagnostic data, insufficient CPUs, incomplete counts, and
 unstable samples. Every existing performance threshold remains unchanged.
 The normal three-run comparison must independently verify these conditions
 and product acceptance; diagnostic results are never relabeled as normal data.
+
+The refreshed `fdb7c03` profiles completed in Actions runs `37143171706`
+(persistent miss) and `37143173866` (feature-rich hit). In the second miss
+window, the three targeted attempt/await/timeout copy sites decrease from
+approximately 701/701/689 to 605/605/593 instructions per call against
+`9c2041f`, confirming removal of the intended copying. Whole-program miss
+instructions per completed frontend request decrease in each of the three
+windows, but writeback completion counts vary within those windows; this
+normalization is not a precise measure of persistence cost or CPU efficiency.
+Feature-rich hit instructions remain similar, as expected when no HTTPS
+upstream attempt is made. Normal throughput, CPU efficiency, tail latency,
+and queue-delay acceptance still require independent normal measurements.
+
+The `9c2041f` feature-rich profile also attributes 3,117,750 copy instructions
+to construction of the guarded-request future at `dispatch.rs:505`, and
+3,242,460 to its earlier request-limit boundary at `prepare.rs:552`. Body
+limiting now borrows the request and replaces only the body. Every reverse,
+forward, MITM, transparent, and common dispatch caller uses the same internal
+interface. Guard buffering moves the owned request only when observation
+actually consumes its body. Limits, observed-size rejection, body deadlines,
+streaming errors, and response handling retain their existing behavior. The
+existing streaming-limit test now also verifies request context survives
+wrapping. This is a separate optimization trial requiring fresh profiles and
+normal comparisons; it does not change public APIs or configuration.

@@ -130,29 +130,24 @@ pub(crate) fn set_observed_request_size(req: &mut Request<Body>, size: u64) {
     req.extensions_mut().insert(ObservedBodySize(size));
 }
 
-pub(crate) fn limit_request_body(
-    req: Request<Body>,
-    max_body_bytes: usize,
-) -> Result<Request<Body>> {
-    if let Some(size) = observed_request_size(&req) {
+pub(crate) fn limit_request_body(req: &mut Request<Body>, max_body_bytes: usize) -> Result<()> {
+    if let Some(size) = observed_request_size(req) {
         ensure_observed_size_within_limit(size, max_body_bytes)?;
     }
-    if has_observed_request_bytes(&req) {
-        return Ok(req);
+    if has_observed_request_bytes(req) {
+        return Ok(());
     }
     if req.body().is_end_stream() {
-        return Ok(req);
+        return Ok(());
     }
-    let (parts, body) = req.into_parts();
-    Ok(Request::from_parts(
-        parts,
-        Body::wrap(LimitedBody {
-            inner: body,
-            seen: 0,
-            limit: max_body_bytes,
-            exceeded: false,
-        }),
-    ))
+    let body = std::mem::replace(req.body_mut(), Body::empty());
+    *req.body_mut() = Body::wrap(LimitedBody {
+        inner: body,
+        seen: 0,
+        limit: max_body_bytes,
+        exceeded: false,
+    });
+    Ok(())
 }
 
 #[derive(Debug)]

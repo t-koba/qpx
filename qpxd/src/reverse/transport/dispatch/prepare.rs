@@ -63,25 +63,24 @@ pub(super) fn attach_streaming_limits(
 }
 
 pub(super) async fn buffer_reverse_guarded_request(
-    req: Request<Body>,
+    req: &mut Request<Body>,
     route_http_guard: Option<&crate::http::policy::guard::CompiledHttpGuardProfile>,
     max_observed_request_body_bytes: usize,
     read_timeout: Duration,
     request_method: &Method,
     request_version: http::Version,
     proxy_name: &str,
-) -> Result<std::result::Result<Request<Body>, Response<Body>>> {
+) -> Result<Option<Response<Body>>> {
     let limit_response = || -> Result<Response<Body>> {
         request_body_too_large_response(request_method, request_version, proxy_name, None)
     };
-    let mut req = if !route_http_guard
-        .is_some_and(|profile| profile.requires_request_body_buffering(&req))
-        || crate::http::body::size::has_observed_request_bytes(&req)
+    if route_http_guard.is_some_and(|profile| profile.requires_request_body_buffering(req))
+        && !crate::http::body::size::has_observed_request_bytes(req)
     {
-        req
-    } else {
-        match crate::http::body::size::buffer_request_body_with_reason(
-            req,
+        // Move the request only when body observation actually consumes it.
+        let owned = std::mem::replace(req, Request::new(Body::empty()));
+        *req = match crate::http::body::size::buffer_request_body_with_reason(
+            owned,
             max_observed_request_body_bytes,
             read_timeout,
             "http_guard.body",
@@ -90,22 +89,22 @@ pub(super) async fn buffer_reverse_guarded_request(
         {
             Ok(req) => req,
             Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
-                return Ok(Err(limit_response()?));
-            }
-            Err(err) => return Err(err),
-        }
-    };
-    if let Some(limit) = route_http_guard.and_then(|profile| profile.request_body_streaming_limit())
-    {
-        req = match crate::http::body::size::limit_request_body(req, limit) {
-            Ok(req) => req,
-            Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
-                return Ok(Err(limit_response()?));
+                return Ok(Some(limit_response()?));
             }
             Err(err) => return Err(err),
         };
     }
-    Ok(Ok(req))
+    if let Some(limit) = route_http_guard.and_then(|profile| profile.request_body_streaming_limit())
+    {
+        match crate::http::body::size::limit_request_body(req, limit) {
+            Ok(()) => (),
+            Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
+                return Ok(Some(limit_response()?));
+            }
+            Err(err) => return Err(err),
+        };
+    }
+    Ok(None)
 }
 
 pub(super) async fn prepare_reverse_retry_dispatch(
@@ -549,8 +548,8 @@ pub(super) fn enforce_selected_reverse_route_constraints(
         )
         .map(empty_interim_response)?));
     }
-    req = match limit_request_body(req, max_request_body_bytes) {
-        Ok(req) => req,
+    match limit_request_body(&mut req, max_request_body_bytes) {
+        Ok(()) => (),
         Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
             return Ok(Err(request_body_too_large_response(
                 request_method,

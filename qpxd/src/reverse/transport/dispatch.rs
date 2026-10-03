@@ -502,8 +502,8 @@ fn execute_reverse_request<'a>(
         let request_destination = request_destination_cache
             .get(override_key)
             .ok_or_else(|| anyhow!("selected route destination context was not prepared"))?;
-        req = match buffer_reverse_guarded_request(
-            req,
+        if let Some(response) = buffer_reverse_guarded_request(
+            &mut req,
             route_http_guard,
             route_max_observed_request_body_bytes,
             Duration::from_millis(streaming.body_read_timeout_ms),
@@ -513,9 +513,8 @@ fn execute_reverse_request<'a>(
         )
         .await?
         {
-            Ok(req) => req,
-            Err(response) => return Ok(empty_interim_response(response)),
-        };
+            return Ok(empty_interim_response(response));
+        }
         let (seed, sticky_seed) = if route.selection_is_seed_independent() {
             (0, 0)
         } else {
