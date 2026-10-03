@@ -55,11 +55,12 @@ if [ -z "$JSONL" ] || [ -z "$BASELINE" ]; then
   exit 2
 fi
 
-python3 - "$MODE" "$JSONL" "$BASELINE" "$OBJECTIVES" "$THRESHOLD" <<'PY'
+PYTHONPATH="$ROOT_DIR/scripts/lib" python3 - "$MODE" "$JSONL" "$BASELINE" "$OBJECTIVES" "$THRESHOLD" <<'PY'
 import json
 import math
 import os
 import sys
+from perf_ratio import lower_is_better_ratio
 from collections import defaultdict
 
 MODE, JSONL_PATH, BASELINE_PATH, OBJECTIVES_PATH, THRESHOLD_ARG = sys.argv[1:6]
@@ -118,12 +119,6 @@ def nonnegative_number(record, field):
     if not math.isfinite(value) or value < 0:
         fail(f"{field} must be a non-negative finite number")
     return value
-
-
-def lower_is_better_ratio(current, reference):
-    if reference == 0:
-        return 1.0 if current == 0 else sys.float_info.max
-    return current / reference
 
 
 def nonnegative_int(record, field):
@@ -326,14 +321,18 @@ def collect_ratios(records, target_keys=None):
         # measured against nginx while every other resource stays
         # best-of-breed.
         nginx_rss_peak_kb = nonnegative_number(proxies["nginx"], "rss_peak_kb")
-        rss_peak_ratio = lower_is_better_ratio(qpxd_rss_peak_kb, nginx_rss_peak_kb)
+        rss_peak_ratio = lower_is_better_ratio(
+            qpxd_rss_peak_kb, nginx_rss_peak_kb, proxies["qpxd"], "rss_peak_kb"
+        )
         qpxd_fd_peak = nonnegative_number(proxies["qpxd"], "fd_peak")
         external_fd_peak = {
             proxy: nonnegative_number(proxies[proxy], "fd_peak")
             for proxy in EXTERNAL_PROXIES
         }
         external_best_fd_peak = min(external_fd_peak.values())
-        fd_peak_ratio = lower_is_better_ratio(qpxd_fd_peak, external_best_fd_peak)
+        fd_peak_ratio = lower_is_better_ratio(
+            qpxd_fd_peak, external_best_fd_peak, proxies["qpxd"], "fd_peak"
+        )
         qpxd_scheduler_queue_delay = nonnegative_number(
             proxies["qpxd"], "scheduler_queue_delay_us_per_request"
         )
@@ -345,7 +344,8 @@ def collect_ratios(records, target_keys=None):
             external_scheduler_queue_delay.values()
         )
         scheduler_queue_delay_ratio = lower_is_better_ratio(
-            qpxd_scheduler_queue_delay, external_best_scheduler_queue_delay
+            qpxd_scheduler_queue_delay, external_best_scheduler_queue_delay,
+            proxies["qpxd"], "scheduler_queue_delay_us_per_request",
         )
         dominance_score = (
             throughput_ratio * cpu_efficiency_ratio / p99_latency_ratio

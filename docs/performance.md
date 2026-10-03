@@ -524,6 +524,11 @@ Workload sizes,
 reference pairing, sample aggregation, and all acceptance thresholds are unchanged.
 A disappearing measured process, inadequate clock resolution, or decreasing CPU
 counter invalidates the measurement instead of becoming zero CPU consumption.
+Resource ratios use the same validation across proxy, origin/cache, HTTP/2, and
+streaming gates. Equal measured zero costs mean parity. A positive measured cost
+against a zero reference has no finite ratio: it fails with the workload, metric,
+both absolute values, and a null ratio. Maximum floating-point sentinels and
+non-finite violation percentages are not used for this case.
 
 Native copy-call reports disable perf's inline source expansion: the runner's
 addr2line resolver failed to read its cached ELF and retried each address until

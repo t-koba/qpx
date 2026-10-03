@@ -15,10 +15,11 @@ case "$MODE" in
   acceptance|measurement-quality) ;;
   *) echo "performance evaluation mode must be acceptance or measurement-quality" >&2; exit 2 ;;
 esac
-python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
+PYTHONPATH="$ROOT_DIR/scripts/lib" python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
 import json
 import math
 import sys
+from perf_ratio import lower_is_better_ratio
 
 JSONL_PATH, OBJECTIVES_PATH = sys.argv[1:3]
 MODE = sys.argv[3]
@@ -49,12 +50,6 @@ def nonnegative_number(record, field):
     if not math.isfinite(value) or value < 0:
         fail(f"{field} must be a non-negative finite number")
     return value
-
-
-def lower_is_better_ratio(current, reference):
-    if reference == 0:
-        return 1.0 if current == 0 else sys.float_info.max
-    return current / reference
 
 
 def nonnegative_int(record, field):
@@ -279,14 +274,17 @@ max_gap_ratio = positive_number(qpx_fast, "max_chunk_gap_ms") / positive_number(
 total_rss_peak_ratio = lower_is_better_ratio(
     nonnegative_number(qpx_fast, "total_rss_peak_kb"),
     nonnegative_number(leader, "total_rss_peak_kb"),
+    qpx_fast, "total_rss_peak_kb",
 )
 total_fd_peak_ratio = lower_is_better_ratio(
     nonnegative_number(qpx_fast, "total_fd_peak"),
     nonnegative_number(leader, "total_fd_peak"),
+    qpx_fast, "total_fd_peak",
 )
 scheduler_queue_delay_ratio = lower_is_better_ratio(
     nonnegative_number(qpx_fast, "scheduler_queue_delay_us_per_transfer"),
     nonnegative_number(leader, "scheduler_queue_delay_us_per_transfer"),
+    qpx_fast, "scheduler_queue_delay_us_per_transfer",
 )
 dominance_score = (
     throughput_ratio * total_cpu_efficiency_ratio / first_byte_ratio / p99_gap_ratio
@@ -367,14 +365,17 @@ slow_ratios = {
     "max_total_rss_peak_ratio": lower_is_better_ratio(
         nonnegative_number(qpx_slow, "total_rss_peak_kb"),
         nonnegative_number(slow_resource_leader, "total_rss_peak_kb"),
+        qpx_slow, "total_rss_peak_kb",
     ),
     "max_total_fd_peak_ratio": lower_is_better_ratio(
         nonnegative_number(qpx_slow, "total_fd_peak"),
         nonnegative_number(slow_resource_leader, "total_fd_peak"),
+        qpx_slow, "total_fd_peak",
     ),
     "max_scheduler_queue_delay_ratio": lower_is_better_ratio(
         nonnegative_number(qpx_slow, "scheduler_queue_delay_us_per_transfer"),
         nonnegative_number(slow_resource_leader, "scheduler_queue_delay_us_per_transfer"),
+        qpx_slow, "scheduler_queue_delay_us_per_transfer",
     ),
 }
 slow_objectives = objectives.get("slow", {})

@@ -662,6 +662,11 @@ require scripts/perf-audit-streaming-compare.sh 'requests_per_total_cpu_second'
 require scripts/perf-audit-streaming-compare.sh 'backend_cpu_ms'
 require scripts/perf-audit-streaming-compare.sh '"benchmark_schema_version": 9'
 require scripts/check-streaming-performance.sh 'workload_before_sampler_shutdown_v1'
+for checker in check-streaming-performance.sh check-http2-performance.sh check-origin-cache-performance.sh compare-proxy-baseline.sh; do
+  require "scripts/$checker" 'from perf_ratio import lower_is_better_ratio'
+done
+require scripts/lib/perf_ratio.py '"valid": False, "stage": "resource_ratio"'
+require scripts/lib/perf_ratio.py 'allow_nan=False'
 require scripts/perf-audit-streaming-compare.sh 'linux_process_cpu_clock_ns_v1'
 require scripts/check-streaming-performance.sh 'linux_process_cpu_clock_ns_v1'
 require scripts/summarize-perf-audit.py 'missing required workload'

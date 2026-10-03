@@ -15,10 +15,11 @@ case "$MODE" in
   acceptance|measurement-quality) ;;
   *) echo "performance evaluation mode must be acceptance or measurement-quality" >&2; exit 2 ;;
 esac
-python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
+PYTHONPATH="$ROOT_DIR/scripts/lib" python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
 import json
 import math
 import sys
+from perf_ratio import lower_is_better_ratio
 
 JSONL_PATH, OBJECTIVES_PATH = sys.argv[1:3]
 MODE = sys.argv[3]
@@ -72,12 +73,6 @@ def nonnegative_number(container, field, context):
     if not math.isfinite(value) or value < 0:
         fail(f"{context} has invalid {field}: {value}")
     return value
-
-
-def lower_is_better_ratio(current, reference):
-    if reference == 0:
-        return 1.0 if current == 0 else sys.float_info.max
-    return current / reference
 
 
 def nonnegative_integer(container, field, context):
@@ -278,16 +273,19 @@ for lane in lanes:
     rss_peak_ratio = lower_is_better_ratio(
         nonnegative_number(qpx, "rss_peak_kb", qpx_context),
         nonnegative_number(reference, "rss_peak_kb", reference_context),
+        qpx, "rss_peak_kb",
     )
     fd_peak_ratio = lower_is_better_ratio(
         nonnegative_number(qpx, "fd_peak", qpx_context),
         nonnegative_number(reference, "fd_peak", reference_context),
+        qpx, "fd_peak",
     )
     scheduler_queue_delay_ratio = lower_is_better_ratio(
         nonnegative_number(qpx, "scheduler_queue_delay_us_per_request", qpx_context),
         nonnegative_number(
             reference, "scheduler_queue_delay_us_per_request", reference_context
         ),
+        qpx, "scheduler_queue_delay_us_per_request",
     )
     dominance = (throughput_ratio * cpu_ratio / p99_ratio) ** (1.0 / 3.0)
 

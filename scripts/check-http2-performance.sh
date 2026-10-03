@@ -15,10 +15,11 @@ case "$MODE" in
   acceptance|measurement-quality) ;;
   *) echo "performance evaluation mode must be acceptance or measurement-quality" >&2; exit 2 ;;
 esac
-python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
+PYTHONPATH="$ROOT_DIR/scripts/lib" python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
 import json
 import math
 import sys
+from perf_ratio import lower_is_better_ratio
 
 JSONL_PATH, OBJECTIVES_PATH = sys.argv[1:3]
 MODE = sys.argv[3]
@@ -50,12 +51,6 @@ def nonnegative_number(record, field, owner="record"):
     if not math.isfinite(value) or value < 0:
         fail(f"{owner} field {field} must be a non-negative finite number")
     return value
-
-
-def lower_is_better_ratio(current, reference):
-    if reference == 0:
-        return 1.0 if current == 0 else sys.float_info.max
-    return current / reference
 
 
 def nonnegative_int(record, field, owner="record"):
@@ -343,6 +338,7 @@ for body_bytes, max_streams in sorted(required_lanes):
     scheduler_queue_delay_ratio = lower_is_better_ratio(
         nonnegative_number(qpx, "scheduler_queue_delay_us_per_request"),
         nonnegative_number(nginx, "scheduler_queue_delay_us_per_request"),
+        qpx, "scheduler_queue_delay_us_per_request",
     )
     lane_score = (
         throughput_ratio
