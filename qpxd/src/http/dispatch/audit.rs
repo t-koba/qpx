@@ -13,7 +13,7 @@ use super::{DispatchOutcome, ProxyKind};
 
 #[derive(Clone)]
 pub(crate) struct DispatchAuditContext {
-    state: Option<Arc<RuntimeState>>,
+    pub(super) state: Option<Arc<RuntimeState>>,
     pub(crate) kind: ProxyKind,
     pub(crate) scope_name: Option<Arc<str>>,
     pub(crate) remote_addr: SocketAddr,
@@ -25,61 +25,6 @@ pub(crate) struct DispatchAuditContext {
     pub(crate) matched_route: Option<String>,
     pub(crate) decision_service_policy_id: Option<String>,
     pub(crate) log_context: RequestLogContext,
-}
-
-impl DispatchAuditContext {
-    pub(crate) fn new(
-        state: Option<Arc<RuntimeState>>,
-        kind: ProxyKind,
-        scope_name: Option<Arc<str>>,
-        remote_addr: SocketAddr,
-        request_method: Method,
-        path: Option<String>,
-        log_context: RequestLogContext,
-    ) -> Self {
-        Self {
-            state,
-            kind,
-            scope_name,
-            remote_addr,
-            host: None,
-            sni: None,
-            request_method,
-            path,
-            matched_rule: None,
-            matched_route: None,
-            decision_service_policy_id: None,
-            log_context,
-        }
-    }
-
-    pub(crate) fn with_host(mut self, host: Option<String>) -> Self {
-        self.host = host;
-        self
-    }
-
-    pub(crate) fn with_sni(mut self, sni: Option<String>) -> Self {
-        self.sni = sni;
-        self
-    }
-
-    pub(crate) fn with_matched_rule(mut self, matched_rule: Option<String>) -> Self {
-        self.matched_rule = matched_rule;
-        self
-    }
-
-    pub(crate) fn with_matched_route(mut self, matched_route: Option<String>) -> Self {
-        self.matched_route = matched_route;
-        self
-    }
-
-    pub(crate) fn with_decision_service_policy_id(
-        mut self,
-        decision_service_policy_id: Option<String>,
-    ) -> Self {
-        self.decision_service_policy_id = decision_service_policy_id;
-        self
-    }
 }
 
 pub(crate) fn annotate_dispatch_response(

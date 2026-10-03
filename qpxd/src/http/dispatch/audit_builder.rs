@@ -48,18 +48,18 @@ pub(crate) fn build_dispatch_audit_context(input: DispatchAuditInput<'_>) -> Dis
             .map(|decision| decision.policy_tags().to_vec())
             .unwrap_or_default();
     }
-    DispatchAuditContext::new(
-        observability_enabled.then(|| input.state.clone()),
-        input.kind,
+    DispatchAuditContext {
+        state: observability_enabled.then(|| input.state.clone()),
+        kind: input.kind,
         scope_name,
-        input.remote_addr,
-        input.request_method,
-        owned(input.path),
+        remote_addr: input.remote_addr,
+        request_method: input.request_method,
+        path: owned(input.path),
         log_context,
-    )
-    .with_host(owned(input.host))
-    .with_sni(owned(input.sni))
-    .with_matched_rule(owned(input.matched_rule))
-    .with_matched_route(owned(input.matched_route))
-    .with_decision_service_policy_id(decision_service_policy_id)
+        host: owned(input.host),
+        sni: owned(input.sni),
+        matched_rule: owned(input.matched_rule),
+        matched_route: owned(input.matched_route),
+        decision_service_policy_id,
+    }
 }

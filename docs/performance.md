@@ -874,3 +874,12 @@ backpressure and restoration on completion, failure, and cancellation. Active
 transfer thresholds and low-contention quanta remain unchanged. This trial
 requires same-runner comparisons with reversed version order and all existing
 acceptance/quality checks; it is not yet a demonstrated performance improvement.
+
+The refreshed feature-rich callgrind diagnostic at `d0cd523`, Actions run
+`37133652146`, records 40,126 requests in its second window. Direct edges from
+the audit-context builder attribute 16,893,042 copy instructions to its
+by-value setters in `audit.rs`, with five calls per request. The builder now
+initializes the final structure once, preserving every field and existing
+observability condition. The single-use constructor and setters are removed.
+This introduces no allocation and changes no audit/access-log semantics;
+instruction profiles and normal comparisons must verify its performance effect.
