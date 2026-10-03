@@ -1513,3 +1513,25 @@ four 1 KiB/1 MiB, multiplexing 1/100 lanes and their existing finite spread
 limits. Both versions' raw logs and evaluations are always uploaded. This
 diagnostic supplements the eight required CI categories and does not replace
 them. YAML, embedded Bash syntax, structure, and required-gate checks pass.
+
+Windows CI `37161600927` confirms both real regressions pass:
+`retained_config_watch_survives_absence_during_replacement` and
+`reverse_combined_log_preserves_downstream_headers_on_reused_generic_requests`.
+Its Windows build/test and control-plane e2e jobs succeed. Performance goals
+are still outstanding: the same run's streaming audit fails, so this is not
+an overall CI success.
+
+Paired quality evaluation headers now identify the measured revision instead
+of inheriting the workflow checkout's SHA for the baseline. The raw records
+and original manifests already identify both revisions correctly; numerical
+results do not change. Re-evaluation of actual `db32e60` baseline records from
+`37159642181` passes all five quality lanes and records the baseline SHA.
+Shell syntax, structure, and required-gate checks pass.
+
+At `c6bf124`, independent tee-removal comparisons use `8ad14b5` as baseline:
+`37161958522`, `37161962580`, `37161966457`. Independent isolated HTTP/2
+comparisons use `586307c` as baseline: `37161971483`, `37161976051`,
+`37161980002`. Version order alternates baseline/current, current/baseline,
+baseline/current. These are diagnostic comparisons, not the final three-run
+required-gate acceptance. Their queued/running state establishes no performance
+result; no stronger mandatory threshold is adopted before the goals pass.

@@ -66,7 +66,7 @@ for revision in $revisions; do
     failed=1
   fi
   if [ "$revision" = baseline ]; then
-    if ! python3 "$ROOT_DIR/scripts/perf-evaluate.py" "baseline $CATEGORY measurement quality" -- \
+    if ! env GITHUB_SHA="$revision_sha" python3 "$ROOT_DIR/scripts/perf-evaluate.py" "baseline $CATEGORY measurement quality" -- \
       bash "$ROOT_DIR/scripts/$checker" "$output" "$ROOT_DIR/perf/$objectives" measurement-quality; then
       echo "baseline $CATEGORY measurement quality failed" >&2
       failed=1

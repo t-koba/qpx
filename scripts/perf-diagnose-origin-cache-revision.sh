@@ -122,7 +122,7 @@ for revision in "${revisions[@]}"; do
       failed=1
     fi
   done
-  if ! python3 "$ROOT_DIR/scripts/perf-evaluate.py" "$revision $workload measurement quality" -- \
+  if ! env GITHUB_SHA="$sha" python3 "$ROOT_DIR/scripts/perf-evaluate.py" "$revision $workload measurement quality" -- \
     bash "$ROOT_DIR/scripts/check-origin-cache-performance.sh" "$directory/comparison.jsonl" \
     "$profile_dir/objectives.json" measurement-quality; then
     failed=1
