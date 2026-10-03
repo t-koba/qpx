@@ -777,3 +777,11 @@ for WebDAV and streaming as well as proxy workloads. Kernel and user-space
 callers retain instruction addresses and symbol offsets. This lets task-switch
 and mutex hot spots be attributed to file sending or metadata processing after
 measurement, without running report generation during the benchmark.
+
+The first complete CPU-partition diagnostic, run `37124959646` at `18e0fbe`,
+failed measurement quality. Completed samples included 6.81, 12.70, and
+16.83 seconds against the unchanged 8.0-to-12.5-second measurement window.
+All requests in those samples completed successfully. CPU partitioning alone
+therefore did not establish reliable calibration and is not adopted by normal
+acceptance gates. The failed experiment's manifest, client logs, and raw
+resource snapshots remain retained in its diagnostic artifact.
