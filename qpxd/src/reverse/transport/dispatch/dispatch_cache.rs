@@ -29,7 +29,7 @@ pub(super) async fn prepare_reverse_cache(
     input: ReverseCacheInput<'_>,
 ) -> Result<ReverseCacheOutcome> {
     let ReverseCacheInput {
-        mut req,
+        req,
         runtime,
         state,
         route,
@@ -48,7 +48,6 @@ pub(super) async fn prepare_reverse_cache(
     } = input;
     if request_cache_policy.is_none() {
         return Ok(ReverseCacheOutcome::Continue(ReverseCacheState {
-            req,
             request_headers_snapshot: None,
             cache_lookup_key: None,
             cache_target_key: None,
@@ -57,19 +56,18 @@ pub(super) async fn prepare_reverse_cache(
         }));
     }
     let query_digest = if request_cache_policy.is_some() && request_method.as_str() == "QUERY" {
-        let (buffered, digest) = Box::pin(buffer_query_for_cache_key(
+        let digest = Box::pin(buffer_query_for_cache_key(
             req,
             route.plan.streaming.max_request_body_bytes,
         ))
         .await?;
-        req = buffered;
         Some(digest)
     } else {
         None
     };
     let cache_default_scheme = if conn.tls_terminated { "https" } else { "http" };
     let (mut cache_lookup_key, mut cache_target_key) =
-        prepare_dispatch_cache_key_pair(&req, request_cache_policy, cache_default_scheme)?;
+        prepare_dispatch_cache_key_pair(req, request_cache_policy, cache_default_scheme)?;
     if let Some(digest) = query_digest {
         cache_lookup_key = cache_lookup_key.map(|key| key.with_content_digest(digest.clone()));
         cache_target_key = cache_target_key.map(|key| key.with_content_digest(digest));
@@ -78,7 +76,7 @@ pub(super) async fn prepare_reverse_cache(
     let mut revalidation_state = None;
     if let (Some(_), Some(policy)) = (cache_lookup_key.as_ref(), request_cache_policy) {
         let outcome = reverse_cache_lookup(
-            &mut req,
+            req,
             ReverseCacheLookupInput {
                 runtime,
                 state,
@@ -111,7 +109,7 @@ pub(super) async fn prepare_reverse_cache(
         }
     }
     let collapse = reverse_cache_collapse(
-        &mut req,
+        req,
         ReverseCacheCollapseInput {
             state,
             request_method,
@@ -139,7 +137,6 @@ pub(super) async fn prepare_reverse_cache(
         } => (revalidation_state, guard),
     };
     Ok(ReverseCacheOutcome::Continue(ReverseCacheState {
-        req,
         request_headers_snapshot,
         cache_lookup_key,
         cache_target_key,
@@ -149,12 +146,11 @@ pub(super) async fn prepare_reverse_cache(
 }
 
 async fn buffer_query_for_cache_key(
-    req: Request<Body>,
+    req: &mut Request<Body>,
     max_body_bytes: usize,
-) -> Result<(Request<Body>, String)> {
-    let (parts, mut body) = req.into_parts();
+) -> Result<String> {
     let mut content = Vec::new();
-    while let Some(chunk) = body.data().await {
+    while let Some(chunk) = req.body_mut().data().await {
         let chunk = chunk?;
         let next = content
             .len()
@@ -173,7 +169,7 @@ async fn buffer_query_for_cache_key(
     for name in [CONTENT_TYPE, CONTENT_ENCODING, CONTENT_LANGUAGE] {
         hasher.update(name.as_str().as_bytes());
         hasher.update([0]);
-        for value in parts.headers.get_all(&name) {
+        for value in req.headers().get_all(&name) {
             hasher.update((value.as_bytes().len() as u64).to_be_bytes());
             hasher.update(value.as_bytes());
         }
@@ -182,7 +178,8 @@ async fn buffer_query_for_cache_key(
     hasher.update((content.len() as u64).to_be_bytes());
     hasher.update(&content);
     let digest = format!("sha-256:{:x}", hasher.finalize());
-    Ok((Request::from_parts(parts, Body::from(content)), digest))
+    *req.body_mut() = Body::from(content);
+    Ok(digest)
 }
 
 struct ReverseCacheLookupInput<'a> {
@@ -569,13 +566,28 @@ mod query_cache_tests {
     }
 
     async fn digest(content_type: &str, body: &'static str) -> String {
-        let request = Request::builder()
+        let mut request = Request::builder()
             .method("QUERY")
             .uri("https://example.com/search")
             .header(CONTENT_TYPE, content_type)
             .body(Body::from(body))
             .unwrap();
-        buffer_query_for_cache_key(request, 1024).await.unwrap().1
+        let digest = buffer_query_for_cache_key(&mut request, 1024)
+            .await
+            .expect("buffer QUERY body");
+        assert_eq!(request.headers()[CONTENT_TYPE], content_type);
+        assert_eq!(request.method().as_str(), "QUERY");
+        assert_eq!(
+            request
+                .body_mut()
+                .data()
+                .await
+                .expect("replay body")
+                .expect("read replay body"),
+            body.as_bytes()
+        );
+        assert!(request.body_mut().data().await.is_none());
+        digest
     }
 
     #[tokio::test]

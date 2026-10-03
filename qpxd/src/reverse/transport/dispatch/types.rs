@@ -167,7 +167,6 @@ pub(super) struct ReverseModuleInput<'a> {
 pub(super) type ReverseCacheOutcome = ReverseStageOutcome<ReverseCacheState>;
 
 pub(super) struct ReverseCacheState {
-    pub(super) req: Request<Body>,
     pub(super) request_headers_snapshot: Option<http::HeaderMap>,
     pub(super) cache_lookup_key: Option<CacheRequestKey>,
     pub(super) cache_target_key: Option<CacheRequestKey>,
@@ -176,7 +175,7 @@ pub(super) struct ReverseCacheState {
 }
 
 pub(super) struct ReverseCacheInput<'a> {
-    pub(super) req: Request<Body>,
+    pub(super) req: &'a mut Request<Body>,
     pub(super) runtime: &'a Runtime,
     pub(super) state: &'a Arc<runtime::RuntimeState>,
     pub(super) route: &'a HttpRoute,

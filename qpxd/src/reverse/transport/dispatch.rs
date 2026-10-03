@@ -1018,7 +1018,7 @@ async fn complete_reverse_after_modules(
     input: ReversePostModuleInput<'_>,
 ) -> Result<(InterimList, Response<Body>)> {
     let ReversePostModuleInput {
-        req,
+        mut req,
         mut http_modules,
         request_cache_policy,
         base,
@@ -1086,7 +1086,7 @@ async fn complete_reverse_after_modules(
         .await;
     }
     let cache_state = match prepare_reverse_cache(ReverseCacheInput {
-        req,
+        req: &mut req,
         runtime,
         state,
         route,
@@ -1119,7 +1119,6 @@ async fn complete_reverse_after_modules(
         ReverseCacheOutcome::Continue(state) => state,
     };
     let ReverseCacheState {
-        req,
         request_headers_snapshot,
         cache_lookup_key,
         cache_target_key,
