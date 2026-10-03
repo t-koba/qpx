@@ -34,6 +34,11 @@ def main():
                  "started_monotonic_ns": time.monotonic_ns(), "started_unix_ns": time.time_ns()}
     requested_signal = None
 
+    def save_lifecycle():
+        temporary = lifecycle_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(lifecycle) + "\n")
+        temporary.replace(lifecycle_path)
+
     def request_shutdown(signum, _frame):
         nonlocal requested_signal
         requested_signal = signum
@@ -58,7 +63,7 @@ def main():
     forced = False
     status = None
     try:
-        lifecycle_path.write_text(json.dumps(lifecycle) + "\n")
+        save_lifecycle()
         print(f"Native profiler process started: mode={mode} role={role} group={process.pid}", flush=True)
         while requested_signal is None:
             if mode == "syscalls" and not lifecycle["seccomp_filter_observed"]:
@@ -76,7 +81,7 @@ def main():
                     if fields.get("Name", "").strip() == Path(server).name[:15] and fields.get("Seccomp", "").strip() == "2":
                         lifecycle["seccomp_filter_observed"] = True
                         lifecycle["tracee_pid"] = int(child_id)
-                        lifecycle_path.write_text(json.dumps(lifecycle) + "\n")
+                        save_lifecycle()
             try:
                 status = process.wait(timeout=0.01 if mode == "syscalls" and not lifecycle["seccomp_filter_observed"] else 0.5)
                 break
@@ -103,7 +108,7 @@ def main():
             "requested_signal": requested_signal, "exit_status": status,
             "forced_shutdown": forced,
         })
-        lifecycle_path.write_text(json.dumps(lifecycle) + "\n")
+        save_lifecycle()
         print(f"Native profiler process stopped: role={role} status={status} forced={forced}", flush=True)
     if forced:
         return 1
