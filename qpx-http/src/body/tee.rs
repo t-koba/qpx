@@ -67,34 +67,6 @@ fn tee_body_inner(
         return (std::mem::take(source), Vec::new());
     }
 
-    if matches!(backpressure, MirrorBackpressure::DropOnFull)
-        && source.file_region.is_none()
-        && source.close_signal.is_none()
-        && source.pending_trailers.is_none()
-        && !source.stream_finished
-        && let super::BodyInner::Once {
-            bytes: Some(bytes),
-            trailers: None,
-        } = &source.inner
-        && mirror_limits
-            .iter()
-            .all(|limit| limit.is_none_or(|limit| bytes.len() <= limit))
-    {
-        // A complete immutable frame needs neither a relay task nor channels.
-        // Return the original primary body to preserve its resource ownership
-        // and transport flags. Oversized and streamed bodies keep the bounded
-        // relay, including its abort and drop-accounting behavior.
-        let mirrors = mirror_limits
-            .iter()
-            .map(|_| {
-                Body::from(bytes.clone())
-                    .mark_trailers_sanitized()
-                    .mark_read_timeout_enforced()
-            })
-            .collect();
-        return (std::mem::take(source), mirrors);
-    }
-
     let (primary_sender, primary_body) = Body::channel_with_capacity(capacity.max(1));
     let mut mirror_senders = Vec::with_capacity(mirror_count);
     let mut mirror_bodies = Vec::with_capacity(mirror_count);
@@ -254,69 +226,6 @@ mod tests {
     use crate::body::tee::*;
     use crate::body::to_bytes;
     use tokio::time::{Duration, timeout};
-
-    #[tokio::test]
-    async fn buffered_lossy_tee_retains_primary_resource_and_transport_flags() {
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
-        let mut source = Body::from("abcdef")
-            .mark_read_timeout_enforced()
-            .mark_trailers_sanitized();
-        source.retain_semaphore_permit(semaphore.clone().try_acquire_owned().expect("permit"));
-        let (primary, mirrors) = tee_body_lossy(source, vec![Some(6), None], 1);
-        assert!(primary.is_materialized());
-        assert!(primary.read_timeout_is_enforced());
-        assert!(primary.trailers_are_sanitized());
-        assert_eq!(semaphore.available_permits(), 0);
-        for mirror in mirrors {
-            assert!(mirror.is_materialized());
-            assert_eq!(to_bytes(mirror).await.expect("mirror").as_ref(), b"abcdef");
-        }
-        assert_eq!(semaphore.available_permits(), 0);
-        assert_eq!(
-            to_bytes(primary).await.expect("primary").as_ref(),
-            b"abcdef"
-        );
-        assert_eq!(semaphore.available_permits(), 1);
-    }
-
-    #[tokio::test]
-    async fn buffered_lossy_tee_keeps_oversized_mirror_abort() {
-        let (primary, mut mirrors) = tee_body_lossy(Body::from("abcdef"), vec![Some(5)], 1);
-        assert!(!primary.is_materialized());
-        assert_eq!(
-            to_bytes(primary).await.expect("primary").as_ref(),
-            b"abcdef"
-        );
-        assert!(to_bytes(mirrors.pop().expect("mirror")).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn trailer_bearing_lossy_tee_keeps_streaming_trailers() {
-        let mut trailers = http::HeaderMap::new();
-        trailers.insert("x-checksum", http::HeaderValue::from_static("verified"));
-        let source = Body::replay(Bytes::from_static(b"abcdef"), Some(trailers.clone()));
-        let (mut primary, mut mirrors) = tee_body_lossy(source, vec![Some(6)], 2);
-        assert!(!primary.is_materialized());
-        assert_eq!(
-            primary
-                .data()
-                .await
-                .expect("data")
-                .expect("primary")
-                .as_ref(),
-            b"abcdef"
-        );
-        assert_eq!(
-            primary.trailers().await.expect("trailers"),
-            Some(trailers.clone())
-        );
-        let mut mirror = mirrors.pop().expect("mirror");
-        assert_eq!(
-            mirror.data().await.expect("data").expect("mirror").as_ref(),
-            b"abcdef"
-        );
-        assert_eq!(mirror.trailers().await.expect("trailers"), Some(trailers));
-    }
 
     #[tokio::test]
     async fn mirror_streaming_tee_body_replays_source_to_primary_and_mirror() {

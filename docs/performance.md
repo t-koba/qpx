@@ -1491,3 +1491,17 @@ error is ignored and no retry is added. Local all-feature Clippy, formatting,
 structure, and required-gate checks pass; the Windows regression and control-plane
 CI still need to execute. The preceding cache-path revision passes all 1,309
 workspace tests across 47 suites.
+
+The immutable-buffer lossy tee fast path is removed for a separate causal
+comparison after the three paired miss regressions. Its original bounded relay,
+backpressure, abort behavior, and drop metrics are restored. The three tests
+introduced with that fast-path experiment are removed with it; the existing
+streaming/limit/backpressure tests remain. All 1,306 workspace tests across
+47 suites and all-feature Clippy pass after restoration. The next same-runner
+comparison uses `8ad14b5` (tee fast path present) as its exact baseline so the
+removal can be evaluated independently of the earlier combined changes.
+
+The completed path-parsing profile (`37160802885`) reports
+219,908/222,470/221,934 instructions per miss, versus
+223,446/225,789/224,872 before: reductions of 1.6%/1.5%/1.3% across its three
+instrumented windows. Normal throughput and tail-latency goals remain unproven.
