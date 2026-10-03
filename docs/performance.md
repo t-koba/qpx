@@ -712,3 +712,10 @@ versions, event counts, and delay totals; process disappearance, identity change
 or decreasing counters invalidate the measurement. Required checkers reject
 records without the new accounting provenance. Performance thresholds remain
 unchanged.
+
+Native proxy diagnostics also decode the second sample's real call chains with
+instruction addresses and symbol offsets. The exact ELF and its checksum remain
+retained with the profile. These records distinguish hot copies within a large
+async state machine from copies on cold branches; function-level percentages
+alone cannot identify which copy should be changed. Decoding occurs after all
+workload measurements and fails if no samples are produced.

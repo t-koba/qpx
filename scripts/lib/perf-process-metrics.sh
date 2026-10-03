@@ -202,7 +202,11 @@ process_tree_fd_count() {
 process_tree_scheduler_run_delay_ns() {
   local root="$1"
   local output="${2:-}"
-  if [ -z "$root" ] || [ ! -d /proc ]; then
+  if [ -z "$root" ]; then
+    echo "Invalid measurement: scheduler process identity is missing" >&2
+    return 1
+  fi
+  if [ ! -d /proc ]; then
     echo 0
     return
   fi
