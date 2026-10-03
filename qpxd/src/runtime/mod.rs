@@ -77,7 +77,6 @@ pub struct RuntimeState {
     pub ftp_semaphore: Arc<Semaphore>,
     pub connection_semaphore: Arc<Semaphore>,
     pub h3_request_body_drain_semaphore: Arc<Semaphore>,
-    pub(crate) webdav_blocking_slots: Option<Arc<Semaphore>>,
     pub upstreams: HashMap<String, String>,
     pub security: SecurityRuntime,
     pub policy: PolicyRuntime,
@@ -120,18 +119,7 @@ impl Runtime {
     pub fn swap(&self, mut new_state: RuntimeState) {
         // Connection pools are process-lived caches: carry the existing registry across
         // the reload so pooled connections survive, but adopt the new config's limits.
-        let current = self.state();
-        let carried = current.pools.clone();
-        let previous_runtime = &current.resources.operational.runtime;
-        let next_runtime = &new_state.resources.operational.runtime;
-        if previous_runtime.worker_threads == next_runtime.worker_threads
-            && previous_runtime.max_blocking_threads == next_runtime.max_blocking_threads
-            && current.webdav_blocking_slots.is_some()
-        {
-            // Keep admission shared with filesystem operations started before
-            // reload, including temporary removal of every WebDAV origin.
-            new_state.webdav_blocking_slots = current.webdav_blocking_slots.clone();
-        }
+        let carried = self.state().pools.clone();
         carried.copy_limits_from(&new_state.pools);
         new_state.pools = carried;
         self.state.store(Arc::new(new_state));
@@ -174,14 +162,6 @@ impl RuntimeState {
         let policy = PolicyRuntime::build(&resources)?;
         let cache = CacheRuntime::build(&resources)?;
         let observability = ObsRuntime::build(&resources)?;
-        let webdav_blocking_slots = if resources.operational.http.origins.webdav.is_empty() {
-            None
-        } else {
-            let runtime = &resources.operational.runtime;
-            let slots = crate::tcp_bindings::net::worker_threads(runtime)
-                .min(crate::tcp_bindings::net::max_blocking_threads(runtime));
-            Some(Arc::new(Semaphore::new(slots)))
-        };
         let pools = Arc::new(crate::pool::PoolRegistry::new());
         pools.apply_limits(crate::pool::PoolLimits {
             upstream_proxy_max_concurrent_per_endpoint: resources
@@ -224,7 +204,6 @@ impl RuntimeState {
                     .max_concurrent
                     .max(1),
             )),
-            webdav_blocking_slots,
             upstreams: resources.upstreams.clone(),
             resources,
             security,

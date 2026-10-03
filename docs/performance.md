@@ -797,16 +797,17 @@ and cannot satisfy the normal performance gate.
 The WebDAV callsite diagnostic at `147ad23` records blocking-pool condition
 variables among the mutex callers, with 53 task-wakeup and 30 futex-wait CPU
 samples in the second 1 MiB window. Thread snapshots retain two main runtime
-workers and roughly 20 additional blocking workers. The proposed runtime-owned
-WebDAV admission semaphore bounds active filesystem handlers by the lesser of
-the existing worker and blocking-thread counts. It is allocated only when a
-WebDAV origin is configured and shared across reloads after activation when
-those runtime limits remain unchanged. Acquisition is asynchronous; the
-blocking closure owns the permit through completion even if the caller is
-cancelled. File response streaming does not retain admission. This preserves
-service ACL, lock, conditional-request, and secure-file operations. Its throughput,
-CPU-efficiency, tail-latency, and concurrent-update effects still require normal
-paired measurements before adoption can be considered successful.
+workers and roughly 20 additional blocking workers. A runtime-owned WebDAV
+admission semaphore was evaluated at `44f25c2`, limiting active filesystem
+handlers to the lesser of the configured worker and blocking-thread counts.
+The same-runner comparison in Actions run `37130078125` rejected this change:
+1 MiB qpx throughput fell from 5921.87 to 5692.24 requests/s, CPU efficiency
+fell from 5792.12 to 4930.05 requests/CPU-second, and p99 rose from 78.141 to
+147.939 ms. Candidate CPU-efficiency spread was 1.1534, exceeding the unchanged
+1.15 quality limit, so this run also fails measurement quality and cannot prove
+a precise regression magnitude. The trial was removed; the profile alone did
+not justify adopting blocking admission. Raw records and the comparison
+diagnostic remain available for subsequent investigation.
 
 The optional `webdav-revision` diagnostic builds its requested baseline and
 candidate before measuring either on one Linux runner. It retains exact commit
