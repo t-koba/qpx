@@ -578,3 +578,24 @@ The HTTP/2 syscall diagnostic uses strace seccomp filtering to avoid ptrace
 stops for unobserved payload I/O. Its real-server ownership probe and every
 server lifecycle must confirm kernel seccomp filter mode in `/proc`; an
 unavailable filter cannot silently fall back to a valid diagnostic run.
+
+## Observed CI timing after category separation
+
+Job timestamps from the original [CI run 35880330277](https://github.com/t-koba/qpx/actions/runs/35880330277)
+and [CI run 37077837510](https://github.com/t-koba/qpx/actions/runs/37077837510)
+provide the following observations. Performance wall time spans the first
+performance job start through the last performance job completion. Runner time
+sums elapsed time for performance jobs, including the shared build and aggregate.
+Queue time is excluded.
+
+| Observation | Original audit | Separated categories |
+|---|---:|---:|
+| Performance wall time | 95.55 min | 34.37 min |
+| Performance runner time | 95.55 min | 91.55 min |
+| Entire CI wall time | 95.83 min | 34.47 min |
+
+Both executions failed their performance gate. They used different product
+commits and measurement validation rules, so this single pair does not establish
+a reproducible runner-cost improvement. The separated run's longest lane was
+proxy at 30.13 minutes; HTTP/2 took 12.25 minutes and netem 17.73 minutes.
+Repeat this accounting after all required measurements pass at the final commit.
