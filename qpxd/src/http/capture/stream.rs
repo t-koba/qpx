@@ -6,15 +6,15 @@ use qpx_http::body::{Body, Sender};
 use tokio::time::{Duration, timeout};
 
 pub(crate) fn sample_request_body_for_export(
-    req: Request<Body>,
+    req: &mut Request<Body>,
     sample_bytes: usize,
     channel_capacity: usize,
     read_timeout: Duration,
     session: ExportSession,
     client_to_server: bool,
-) -> Request<Body> {
+) {
     let sample_bytes = sample_bytes.max(1);
-    let (parts, mut source) = req.into_parts();
+    let mut source = std::mem::replace(req.body_mut(), Body::empty());
     let (mut sender, body) = Body::channel_with_capacity(channel_capacity.max(1));
     tokio::spawn(async move {
         copy_body_with_sample(
@@ -27,19 +27,19 @@ pub(crate) fn sample_request_body_for_export(
         )
         .await;
     });
-    Request::from_parts(parts, body)
+    *req.body_mut() = body;
 }
 
 pub(crate) fn capture_request_body_for_export(
-    req: Request<Body>,
+    req: &mut Request<Body>,
     max_capture_bytes: usize,
     channel_capacity: usize,
     read_timeout: Duration,
     session: ExportSession,
     client_to_server: bool,
-) -> Request<Body> {
+) {
     let max_capture_bytes = max_capture_bytes.max(1);
-    let (parts, mut source) = req.into_parts();
+    let mut source = std::mem::replace(req.body_mut(), Body::empty());
     let (mut sender, body) = Body::channel_with_capacity(channel_capacity.max(1));
     tokio::spawn(async move {
         copy_body_with_full_capture(
@@ -52,24 +52,24 @@ pub(crate) fn capture_request_body_for_export(
         )
         .await;
     });
-    Request::from_parts(parts, body)
+    *req.body_mut() = body;
 }
 
 pub(crate) async fn emit_request_for_export(
-    mut request: Request<Body>,
+    request: &mut Request<Body>,
     plan: &ExecutionPlan,
     session: Option<&ExportSession>,
     client_to_server: bool,
-) -> Request<Body> {
+) {
     let Some(session) = session else {
-        return request;
+        return;
     };
-    let preview = crate::exporter::serialize_request_preview_async(&request).await;
+    let preview = crate::exporter::serialize_request_preview_async(request).await;
     session.emit_plaintext(client_to_server, &preview);
     let capacity = plan.streaming.body_channel_capacity;
     let timeout = Duration::from_millis(plan.streaming.body_read_timeout_ms);
     if let Some(sample_bytes) = plan.capture_stream_sample_bytes() {
-        request = sample_request_body_for_export(
+        sample_request_body_for_export(
             request,
             sample_bytes,
             capacity,
@@ -78,7 +78,7 @@ pub(crate) async fn emit_request_for_export(
             client_to_server,
         );
     } else if let Some(max_capture_bytes) = plan.capture_full_body_bytes() {
-        request = capture_request_body_for_export(
+        capture_request_body_for_export(
             request,
             max_capture_bytes,
             capacity,
@@ -87,7 +87,6 @@ pub(crate) async fn emit_request_for_export(
             client_to_server,
         );
     }
-    request
 }
 
 pub(crate) fn sample_response_body_for_export(
@@ -352,13 +351,12 @@ mod tests {
         };
         let sink = ExporterSink::from_config(&config).expect("sink");
         let session = sink.session("client", "server");
-        let req = Request::builder()
+        let mut req = Request::builder()
             .uri("http://example.test/upload")
             .body(Body::from("abcdef"))
             .expect("request");
 
-        let mut req =
-            sample_request_body_for_export(req, 3, 1, Duration::from_secs(1), session, true);
+        sample_request_body_for_export(&mut req, 3, 1, Duration::from_secs(1), session, true);
 
         let body = qpx_http::body::to_bytes(req.body_mut())
             .await
@@ -420,13 +418,12 @@ mod tests {
         };
         let sink = ExporterSink::from_config(&config).expect("sink");
         let session = sink.session("client", "server");
-        let req = Request::builder()
+        let mut req = Request::builder()
             .uri("http://example.test/upload")
             .body(Body::from("abcdef"))
             .expect("request");
 
-        let mut req =
-            capture_request_body_for_export(req, 4, 1, Duration::from_secs(1), session, true);
+        capture_request_body_for_export(&mut req, 4, 1, Duration::from_secs(1), session, true);
 
         let body = qpx_http::body::to_bytes(req.body_mut())
             .await

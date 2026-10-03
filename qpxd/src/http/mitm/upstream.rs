@@ -144,8 +144,7 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
         .unwrap_or_else(|| ms(timeouts.upstream_http_timeout_ms));
     let upstream_started = std::time::Instant::now();
     http_modules.on_upstream_request(&mut input.req).await?;
-    input.req =
-        emit_request_for_export(input.req, selected_plan, export_session.as_ref(), true).await;
+    emit_request_for_export(&mut input.req, selected_plan, export_session.as_ref(), true).await;
     let websocket_expectation = input
         .websocket
         .then(|| {

@@ -334,8 +334,8 @@ pub(super) async fn proxy_transparent_http1(
 ) -> Result<hyper::Response<Body>> {
     let upstream_started = std::time::Instant::now();
     http_modules.on_upstream_request(&mut req).await?;
-    req = crate::http::capture::stream::emit_request_for_export(
-        req,
+    crate::http::capture::stream::emit_request_for_export(
+        &mut req,
         input.selected_plan,
         export_session,
         true,

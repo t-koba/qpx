@@ -955,6 +955,7 @@ instead of comparing raw instruction totals with different request counts:
 | `d0cd523` before file-identity LRU | 245,967 | 249,745 | 254,515 |
 | `ad7b8d4` with file-identity LRU | 235,470 | 241,372 | 244,818 |
 | `086e86a` with combined body/metadata | 234,242 | 237,359 | 238,173 |
+| `c595b3e` with recent shard filters | 230,020 | 233,026 | 234,602 |
 
 The refreshed `086e86a` profile, Actions run `37138034288`, still attributes
 14,006,016 instructions in its second miss window to full file-identity
@@ -967,3 +968,19 @@ the amount of work, never eviction decisions. A real-file regression test
 replaces and deletes one of two distinct objects sharing a filter bit and
 verifies the other remains available in the recent cache. A refreshed profile
 and normal comparisons must establish the performance effect of this trial.
+The refreshed `c595b3e` profile, Actions run `37139269244`, completed successfully.
+Its second miss window reduces recent-update self instructions from approximately
+11,229 to 5,496 per completed request, while total instructions decline in all
+three miss windows. This verifies removal of the targeted scan work, not normal
+throughput, latency, or CPU-efficiency acceptance.
+
+Copy callsites in the `086e86a` persistent-miss profile include the request-export
+call at `dispatch_http.rs:140` (847,737 instructions and 13,059 copy calls).
+Request export now borrows the owned request exclusively rather than returning
+it through an async state machine. Sample/full capture replace only its body,
+preserving the method, URI, version, headers, extensions, preview serialization,
+channel limits, deadlines, and exporter behavior. Reverse HTTP/IPC, forward,
+MITM, and transparent callers use the same internal interface; obsolete owned
+helper signatures are removed. Existing real shared-memory capture tests and
+the full workspace validate the behavior. Refreshed profiles and normal
+comparisons must establish the performance effect of this trial.

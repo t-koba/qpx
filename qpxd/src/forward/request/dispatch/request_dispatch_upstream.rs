@@ -84,8 +84,8 @@ pub(super) async fn execute_forward_upstream(
     } = input;
     let upstream_started = std::time::Instant::now();
     http_modules.on_upstream_request(&mut req).await?;
-    req = crate::http::capture::stream::emit_request_for_export(
-        req,
+    crate::http::capture::stream::emit_request_for_export(
+        &mut req,
         selected_plan,
         export_session,
         true,

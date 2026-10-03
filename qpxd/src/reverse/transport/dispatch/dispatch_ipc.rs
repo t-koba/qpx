@@ -131,8 +131,8 @@ async fn execute_reverse_ipc_route(
             .await?;
         let export_session =
             state.export_session_for_plan(&route.plan, conn.remote_addr, ipc.endpoint_label());
-        req_for_upstream = crate::http::capture::stream::emit_request_for_export(
-            req_for_upstream,
+        crate::http::capture::stream::emit_request_for_export(
+            &mut req_for_upstream,
             &route.plan,
             export_session.as_ref(),
             true,

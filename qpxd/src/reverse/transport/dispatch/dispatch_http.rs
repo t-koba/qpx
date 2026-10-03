@@ -137,8 +137,8 @@ async fn execute_reverse_http_route(
         http_modules
             .on_upstream_request(&mut req_for_upstream)
             .await?;
-        req_for_upstream = crate::http::capture::stream::emit_request_for_export(
-            req_for_upstream,
+        crate::http::capture::stream::emit_request_for_export(
+            &mut req_for_upstream,
             &route.plan,
             export_session.as_ref(),
             true,
