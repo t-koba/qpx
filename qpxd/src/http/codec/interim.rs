@@ -26,8 +26,8 @@ const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
 // postpone admission until every previously admitted stream has finished.
 const H2_COMPLETION_BURST: usize = 8;
 
-enum H2ConnectionEvent {
-    ConcurrentStreamCompleted,
+enum H2ConnectionEvent<'a> {
+    ConcurrentStreamCompleted(ReusableBoxFuture<'a, ()>),
     PrimaryStreamCompleted,
     Accepted,
     IdleTimeout,
@@ -103,6 +103,7 @@ where
     let mut conn = timeout(idle_timeout, builder.handshake(io)).await??;
     let active_streams = AtomicUsize::new(0);
     let mut reusable_primary_stream: Option<ReusableBoxFuture<'_, ()>> = None;
+    let mut reusable_concurrent_streams: Vec<ReusableBoxFuture<'_, ()>> = Vec::new();
     let mut primary_stream = None;
     let mut concurrent_streams = FuturesUnordered::new();
     let mut accepting_streams = true;
@@ -149,8 +150,8 @@ where
                     let () = completed;
                     H2ConnectionEvent::PrimaryStreamCompleted
                 }
-                Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
-                    H2ConnectionEvent::ConcurrentStreamCompleted
+                Some(stream) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                    H2ConnectionEvent::ConcurrentStreamCompleted(stream)
                 }
                 () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
             }
@@ -161,8 +162,8 @@ where
                     let () = completed;
                     H2ConnectionEvent::PrimaryStreamCompleted
                 }
-                Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
-                    H2ConnectionEvent::ConcurrentStreamCompleted
+                Some(stream) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                    H2ConnectionEvent::ConcurrentStreamCompleted(stream)
                 }
                 accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
                     accepted_stream = Some(accepted);
@@ -172,7 +173,13 @@ where
             }
         };
         match event {
-            H2ConnectionEvent::ConcurrentStreamCompleted => {
+            H2ConnectionEvent::ConcurrentStreamCompleted(stream) => {
+                // Reuse completed stream storage within this connection, bounded by
+                // the existing admission limit. The completion queue holds only
+                // pointers instead of copying each large request state into a node.
+                if reusable_concurrent_streams.len() < H2_ACCEPT_BACKLOG {
+                    reusable_concurrent_streams.push(stream);
+                }
                 completions_since_admission = completions_since_admission.saturating_add(1);
                 completions_since_drive += 1;
                 if completions_since_drive >= H2_COMPLETION_BURST
@@ -245,7 +252,13 @@ where
                     };
                     primary_stream = Some(reusable);
                 } else {
-                    concurrent_streams.push(stream);
+                    let reusable = if let Some(mut reusable) = reusable_concurrent_streams.pop() {
+                        reusable.set(stream);
+                        reusable
+                    } else {
+                        ReusableBoxFuture::new(stream)
+                    };
+                    concurrent_streams.push(complete_reusable_h2_stream(reusable));
                 }
             }
             H2ConnectionEvent::IdleTimeout => {
@@ -261,8 +274,16 @@ where
     drop(reusable_primary_stream);
     drop(primary_stream);
     drop(concurrent_streams);
+    drop(reusable_concurrent_streams);
     poll_fn(|cx| conn.poll_closed(cx)).await?;
     Ok(())
+}
+
+async fn complete_reusable_h2_stream<'a>(
+    mut stream: ReusableBoxFuture<'a, ()>,
+) -> ReusableBoxFuture<'a, ()> {
+    stream.get_pin().await;
+    stream
 }
 
 async fn poll_optional_h2_stream<T>(stream: &mut Option<ReusableBoxFuture<'_, T>>) -> T {

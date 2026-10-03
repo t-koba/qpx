@@ -1401,8 +1401,8 @@ budget passes separately, as do final all-feature Clippy, formatting, structure,
 and the unchanged eight-category / sixteen-evaluation gate checks. Linux
 profiles and normal measurements remain necessary before adopting this trial.
 
-The initial combined cache-revision diagnostic on `960793b` produces no valid
-aggregate comparison. In run `37158134449`, both revisions fail on nginx-cache
+The second initial combined cache-revision diagnostic on `960793b` produces no
+valid aggregate comparison. In run `37158134449`, both revisions fail on nginx-cache
 round 2 because the normal cache-loader child exits between resource snapshots;
 the nginx master and request workers remain alive. Before/after snapshots
 identify exited children 10133 (current) and 11739 (baseline). Starting the
@@ -1413,5 +1413,28 @@ and five-sample miss workload. It retains both groups' logs and combines their
 records before quality/acceptance/goal checks. Missing or failed group output
 still fails the comparison. Existing real normal records pass the generated
 five-lane quality objectives; structure and shell syntax checks pass. No child
-exit is ignored, no ratio threshold changes, and the failed original runs
-remain invalid evidence rather than performance comparisons.
+exit is ignored and no ratio threshold changes. The invalid second run remains
+excluded. Runs `37158132351` and `37158136723` pass both revisions' quality checks:
+feature-rich throughput improves by 3.1%/2.5% and CPU efficiency by 3.5%/4.3%,
+but miss p99 worsens by 62.0%/28.7% and queue delay by 14.8%/20.1%. These combined
+change comparisons cannot attribute the differences to an individual change,
+and their process grouping differs from normal CI. The corrected three-run
+diagnostic is therefore still required before retaining the cache trials.
+
+The body-guard callgrind runs (`37159136381` and `37159138655`) complete with
+46,370/46,646/46,396 instructions per feature-rich request and
+223,446/225,789/224,872 per miss. Compared with prepared-storage profiles, the
+whole-request instruction count does not improve consistently. The smaller
+guard future alone does not establish a throughput or tail-latency improvement.
+
+The measured HTTP/2 native profile (`37157596127`, round 2, 1 KiB, multiplexing
+100) contains 1,913 callchain samples, including 80 in `memmove`; 16 of those
+have a concurrent-stream `FuturesUnordered` caller. A trial extends the primary
+stream's existing reusable future storage to concurrent streams. Completed
+storage is retained only within the connection, bounded by the existing
+256-stream admission limit; the completion queue holds a small wrapper.
+Reset, timeout, completion fairness, and connection shutdown keep their existing
+paths. All 1,309 workspace tests across 47 suites pass, along with all-feature
+Clippy, formatting, structure, and unchanged required-gate checks. Native
+profiles and normal HTTP/2 measurements must still verify instruction copies,
+tail latency, throughput, and RSS before this trial can be adopted.
