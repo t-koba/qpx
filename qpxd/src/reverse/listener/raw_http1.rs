@@ -108,8 +108,9 @@ pub(super) async fn serve_raw_or_fallback(
                     Ok(response)
                 } else if let Some(generic) = request.generic_request() {
                     let direct_generic_started = direct_combined_access.then(Instant::now);
-                    let direct_generic_log =
-                        direct_combined_access.then(|| direct_combined_log_request(&generic));
+                    // Logging configuration is immutable across hot reloads, and the
+                    // prepared snapshot retains the original downstream request.
+                    let direct_generic_log = request.direct_combined_log_request();
                     let mut response = if let Some(service) = access_service.as_ref()
                         && !direct_combined_access
                     {
@@ -125,7 +126,7 @@ pub(super) async fn serve_raw_or_fallback(
                     };
                     if let (Some(service), Some(log_request), Some(started)) = (
                         access_service.as_ref(),
-                        direct_generic_log.as_ref(),
+                        direct_generic_log,
                         direct_generic_started,
                     ) {
                         let bytes_out = response
@@ -316,21 +317,6 @@ pub(super) async fn serve_raw_or_fallback(
             }
         }
     }
-}
-
-fn direct_combined_log_request(request: &http::Request<Body>) -> http::Request<()> {
-    let mut log_request = http::Request::new(());
-    *log_request.method_mut() = request.method().clone();
-    *log_request.uri_mut() = request.uri().clone();
-    *log_request.version_mut() = request.version();
-    for name in [http::header::REFERER, http::header::USER_AGENT] {
-        for value in request.headers().get_all(&name) {
-            log_request
-                .headers_mut()
-                .append(name.clone(), value.clone());
-        }
-    }
-    log_request
 }
 
 fn try_prepare_request<'a>(

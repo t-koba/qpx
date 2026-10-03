@@ -1313,3 +1313,31 @@ The tee experiment's feature-rich run `37155863069` attempt 1 fails before
 measurement because crates.io DNS cannot resolve; its original failure log
 is retained and attempt 2 reruns the same revision. No measurement from
 attempt 1 is counted as valid.
+
+Completed tee profiles (`37155856786` and `37155863069` attempt 2) remove
+the relay task and body-channel calls from the sampled miss path. Total
+miss instructions per request are 222,051/223,993/221,410, compared with
+212,915/213,016/211,798 before the experiment. Background persistence work
+varies, so removal of those calls does not establish an overall improvement.
+Feature-rich instructions remain 46,573/46,860/46,814. The subsequent request
+borrow profiles (`37156450764`, `37156454915`) report feature-rich
+46,026/46,422/46,597 and miss 222,600/225,530/223,899. Only the feature-rich
+samples consistently decrease relative to the immediately preceding revision;
+normal measurements still decide whether either experiment is retained.
+
+Prepared generic HTTP/1 requests now borrow their existing downstream
+combined-log snapshot rather than constructing another request and cloning
+its URI and logging headers on every dispatch. Access-log configuration
+changes require restart, and the cached preparation validates runtime identity.
+A real qpxd process, TCP origin, persistent downstream connection, and log
+file verify exactly one record per request, changed request metadata after
+reuse, downstream headers before route rewriting, and query-key redaction.
+All 1,309 workspace tests across 47 suites and all-feature Clippy pass.
+
+Normal pre-tee run `37155205831` still fails performance gates: local 1 KiB
+RSS is 1.013392 and feature-rich queue delay is 0.880215, while feature-rich
+throughput is 0.918226. Miss throughput/CPU efficiency are 1.409982/0.995412
+and queue delay is 3.072445 (above the existing 2.6 limit). WebDAV 1 MiB CPU
+efficiency is 1.465196 (below 1.5) and p99 is 2.685720. Coverage passes after
+the shared-ring notification fix, but these results do not satisfy the final
+performance objectives or the three-independent-run requirement.
