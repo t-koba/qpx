@@ -88,6 +88,14 @@ PY_NAMESPACE
     echo "HTTP/2 MTU $mtu TCP sampler failed: $sampler_status" >&2
     status=1
   fi
+  if [ "$phase_status" -eq 0 ]; then
+    bash "$ROOT_DIR/scripts/check-http2-performance.sh" "$phase_dir/comparison.jsonl" \
+      "$ROOT_DIR/perf/http2-performance-objectives.json" diagnostic-quality "$phase_dir/manifest.json" \
+      > "$phase_dir/measurement-quality.log" 2>&1 || phase_status=$?
+    if [ "$phase_status" -ne 0 ]; then
+      cat "$phase_dir/measurement-quality.log" >&2
+    fi
+  fi
   printf '%s\n' "$phase_status" > "$phase_dir/exit-status.txt"
   if [ "$phase_status" -ne 0 ]; then
     echo "HTTP/2 MTU $mtu comparison failed: $phase_status" >&2

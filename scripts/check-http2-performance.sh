@@ -11,11 +11,20 @@ if [ -z "$JSONL" ]; then
 fi
 
 MODE="${3:-acceptance}"
+DIAGNOSTIC_MANIFEST="${4:-}"
 case "$MODE" in
-  acceptance|measurement-quality) ;;
-  *) echo "performance evaluation mode must be acceptance or measurement-quality" >&2; exit 2 ;;
+  acceptance|measurement-quality|diagnostic-quality) ;;
+  *) echo "unsupported performance evaluation mode" >&2; exit 2 ;;
 esac
-PYTHONPATH="$ROOT_DIR/scripts/lib" python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
+if [ "$MODE" = diagnostic-quality ] && [ ! -f "$DIAGNOSTIC_MANIFEST" ]; then
+  echo "diagnostic quality requires an explicit workload manifest" >&2
+  exit 2
+fi
+if [ "$MODE" != diagnostic-quality ] && [ -n "$DIAGNOSTIC_MANIFEST" ]; then
+  echo "normal performance checks do not accept a diagnostic manifest" >&2
+  exit 2
+fi
+PYTHONPATH="$ROOT_DIR/scripts/lib" python3 - "$JSONL" "$OBJECTIVES" "$MODE" "$DIAGNOSTIC_MANIFEST" <<'PY'
 import json
 import math
 import sys
@@ -23,7 +32,8 @@ from perf_ratio import lower_is_better_ratio
 
 JSONL_PATH, OBJECTIVES_PATH = sys.argv[1:3]
 MODE = sys.argv[3]
-QUALITY_ONLY = MODE == "measurement-quality"
+QUALITY_ONLY = MODE != "acceptance"
+DIAGNOSTIC = MODE == "diagnostic-quality"
 BENCH = "proxy_compare_http2_reverse"
 PROXIES = ("direct-backend", "qpxd", "nginx")
 
@@ -124,6 +134,25 @@ required_lanes = {
     for body_bytes in required_body_bytes
     for max_streams in required_streams
 }
+diagnostic_samples = None
+if DIAGNOSTIC:
+    with open(sys.argv[4], encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    if (manifest.get("measurement") != "http2_isolated_mtu_v3"
+            or manifest.get("diagnostic_instrumentation") is not True
+            or manifest.get("replaces_required_gate") is not False
+            or not manifest.get("network_namespace")
+            or not manifest.get("host_network_namespace")
+            or manifest.get("network_namespace") == manifest.get("host_network_namespace")):
+        fail("unsupported or unisolated HTTP/2 diagnostic manifest")
+    lane = (positive_int(manifest, "body_bytes", "diagnostic manifest"),
+            positive_int(manifest, "max_concurrent_streams", "diagnostic manifest"))
+    if lane not in required_lanes:
+        fail("HTTP/2 diagnostic lane has no existing measurement-quality objectives")
+    diagnostic_samples = positive_int(manifest, "required_samples_per_role", "diagnostic manifest")
+    if diagnostic_samples < 3:
+        fail("HTTP/2 diagnostic quality requires at least three samples per role")
+    required_lanes = {lane}
 
 # Per-lane objective overrides; lanes without an entry use the defaults.
 lane_overrides = {}
@@ -167,6 +196,8 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
         valid_samples = nonnegative_int(record, "valid_samples", owner)
         if attempts == 0 or valid_samples != attempts:
             fail(f"{owner} does not have valid measurements for every sample")
+        if DIAGNOSTIC and ((body_bytes, max_streams) not in required_lanes or attempts != diagnostic_samples):
+            fail(f"{owner} does not match the diagnostic workload manifest")
         if record.get("aggregation") != "conservative_median_per_metric":
             fail(f"{owner} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
@@ -183,7 +214,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
         maximum_duration = positive_number(duration_range, "max", owner)
         if not target_duration / 1.25 <= minimum_duration <= maximum_duration <= target_duration * 1.25:
             fail(f"{owner} measurement duration range {minimum_duration}..{maximum_duration}s is outside {target_duration / 1.25}..{target_duration * 1.25}s")
-        if record.get("diagnostic_instrumentation") is not False:
+        if DIAGNOSTIC:
+            if record.get("diagnostic_instrumentation") is not True:
+                fail(f"{owner} lacks diagnostic instrumentation provenance")
+        elif record.get("diagnostic_instrumentation") is not False:
             fail(f"{owner} is instrumented or lacks measurement provenance")
         if record.get("resource_measurement") != "sampled_workload_peak_v1":
             fail(f"{owner} uses an unsupported resource measurement")

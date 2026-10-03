@@ -33,6 +33,20 @@ runs. Every individual run must pass; an average cannot hide a failed run.
 The aggregate Actions summary includes the thresholds, violations, and diagnostic
 log tails from all categories.
 
+An initial cost comparison from GitHub job timestamps is retained below. Wall
+time spans the audit jobs from their first start to final completion; runner
+time sums their individual durations, including the shared build and aggregate
+jobs after splitting. It excludes workflow queue time and unrelated CI jobs.
+
+| Run | Audit wall time | Audit runner time | Result |
+| --- | ---: | ---: | --- |
+| [Original audit, `9500bb1`](https://github.com/t-koba/qpx/actions/runs/35880330277) | 95.55 min | 95.55 min | Failed |
+| [Split audit, `fccf507`](https://github.com/t-koba/qpx/actions/runs/37100811495) | 35.57 min | 84.10 min | Failed |
+
+These are observed failed runs, not a controlled performance comparison or proof
+of completion. Repeat this accounting for the final revision's three successful
+independent comparisons before claiming the final CI cost.
+
 For three independent Linux comparisons, dispatch CI on the implementation
 branch with `repeat_perf=true` and an explicit `baseline_ref` commit. HTTP/1,
 HTTP/2, and streaming each run on three separate Ubuntu 24.04 runners. A shared build job builds the baseline and candidate before any comparison,
@@ -107,6 +121,15 @@ followers allocate the waiting and repeated-lookup state. QUERY body hashing
 is allocated only for QUERY requests. These changes preserve guard, provider,
 rate-limit, collapse, and body-inspection behavior; native profile shares and
 state sizes are diagnostic evidence, not proof of passing performance ratios.
+The exact Linux ELF from diagnostic revision `ec1e2ed` still copied 14,288 bytes
+into the reverse-request allocation and 6,456 bytes into the uninstrumented
+dispatcher allocation. Allocating with `Box::new_uninit` before constructing
+the future and completing it with safe `Box::write` removes those whole-state
+copies. The ELF from revision `2cd69fe` retains only initialized captures
+(a 1,624-byte request-state block and a 656-byte dispatcher block), while the
+allocation count and pinning boundary remain unchanged. Both native profiles
+have zero lost samples and preserve the ELF digest. This proves the generated
+copy removal; it does not establish passing normal performance objectives.
 The `cache-miss-callgrind` diagnostic profiles the actual persistent cache
 workload, including warm hits and unique misses, with the same instrumentation
 boundaries and raw profiles as `feature-callgrind`.
@@ -648,6 +671,12 @@ existing calibration setting. The namespace
 identity and interface MTU are recorded before starting servers; all three samples still
 require complete responses within the existing duration budget. Its rows are
 marked diagnostic and cannot satisfy required acceptance gates. This experiment
+also runs the existing HTTP/2 checker in `diagnostic-quality` mode with its
+explicit namespace/workload manifest. This mode requires all declared samples
+and all three roles, preserves the existing finite spread limits, and skips
+product objectives. Ordinary acceptance and measurement-quality modes still
+reject all instrumented rows. A duration-valid but unstable phase fails rather
+than being reported as a successful diagnostic comparison. The experiment
 investigates transport stalls seen with queued output and advertised receive
 windows below the ordinary loopback MSS; it is not evidence of a resolved cause
 until independently reproduced comparisons establish the effect.
