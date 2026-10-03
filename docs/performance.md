@@ -122,12 +122,14 @@ shutdown is a diagnostic failure. CPU diagnostics have a 20-minute deadline,
 and individual symbol reports have a three-minute deadline. Self-CPU reports omit
 rendered call graphs while raw DWARF stacks remain available for further analysis.
 The `http2-native` variant records the 1 KiB, 100-stream workload in the same
-way. HTTP/2 schema 9 requires explicit instrumentation provenance; native
+way. HTTP/2 schema 10 requires explicit instrumentation provenance and workload-only
+CPU and scheduler counter windows. Counter snapshots surround the completed
+client workload before stopping samplers or processing their output. Native
 diagnostic rows and rows missing that provenance are rejected by the required
 gate. Reports are restricted to the workload windows recorded by the real RSS
 sampler's monotonic timestamps, separating warmup and the individual samples.
 The `streaming-native` variant records the fast and slow 100 MiB transfers with
-the same owned profiler group and workload-window reports. Streaming schema 7
+the same owned profiler group and workload-window reports. Streaming schema 9
 also requires explicit instrumentation provenance and rejects native diagnostic
 records in the required gate. CPU profiles are diagnostic evidence only; the
 uninstrumented streaming comparison remains mandatory.

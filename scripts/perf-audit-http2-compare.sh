@@ -644,7 +644,6 @@ PY_DURATION
       fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.fd-peak"
       monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" "$fd_baseline" &
       fd_peak_monitor_pid=$!
-      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
       if [ "$resource_pid" != "$backend_pid" ]; then
         backend_rss_baseline_kb="$(process_tree_status_kb "$backend_pid" "VmRSS")"
         backend_rss_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-rss-peak"
@@ -654,7 +653,6 @@ PY_DURATION
         backend_fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-fd-peak"
         monitor_process_tree_fd_peak "$backend_pid" "$backend_fd_peak_file" "$backend_fd_baseline" &
         backend_fd_peak_monitor_pid=$!
-        backend_scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$backend_pid")"
       else
         backend_rss_baseline_kb="$rss_baseline_kb"
         backend_fd_baseline="$fd_baseline"
@@ -666,9 +664,29 @@ PY_DURATION
     else
       backend_cpu_before_ms="$(process_tree_cpu_ms "$backend_pid")"
     fi
+    if [ "$kernel_resource_metrics" = true ]; then
+      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      if [ "$resource_pid" != "$backend_pid" ]; then
+        backend_scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$backend_pid")"
+      fi
+    fi
     h2load_succeeded=true
     if ! h2load -n "$benchmark_requests" -c "$load_concurrency" -t "$load_client_threads" -m "$MAX_CONCURRENT_STREAMS" --log-file="$latency_file" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$out" 2>&1; then
       h2load_succeeded=false
+    fi
+    cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
+    if [ "$resource_pid" = "$backend_pid" ]; then
+      backend_cpu_after_ms="$cpu_after_ms"
+    else
+      backend_cpu_after_ms="$(process_tree_cpu_ms "$backend_pid")"
+    fi
+    scheduler_after_ns="$scheduler_before_ns"
+    backend_scheduler_after_ns="$backend_scheduler_before_ns"
+    if [ "$kernel_resource_metrics" = true ]; then
+      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      if [ "$resource_pid" != "$backend_pid" ]; then
+        backend_scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$backend_pid")"
+      fi
     fi
     if [ -n "$fd_peak_monitor_pid" ]; then
       kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
@@ -704,12 +722,6 @@ PY_DURATION
       attempt=$((attempt + 1))
       continue
     fi
-    cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
-    if [ "$resource_pid" = "$backend_pid" ]; then
-      backend_cpu_after_ms="$cpu_after_ms"
-    else
-      backend_cpu_after_ms="$(process_tree_cpu_ms "$backend_pid")"
-    fi
     cpu_ms="$(monotonic_counter_delta "process-tree CPU milliseconds" "$cpu_before_ms" "$cpu_after_ms")"
     backend_cpu_ms="$(monotonic_counter_delta "backend CPU milliseconds" "$backend_cpu_before_ms" "$backend_cpu_after_ms")"
     if [ "$resource_pid" = "$backend_pid" ]; then
@@ -718,14 +730,6 @@ PY_DURATION
       total_cpu_ms=$((cpu_ms + backend_cpu_ms))
     fi
     rss_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
-    scheduler_after_ns="$scheduler_before_ns"
-    backend_scheduler_after_ns="$backend_scheduler_before_ns"
-    if [ "$kernel_resource_metrics" = true ]; then
-      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
-      if [ "$resource_pid" != "$backend_pid" ]; then
-        backend_scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$backend_pid")"
-      fi
-    fi
     total_rss_peak_kb=$((rss_peak_kb + backend_rss_peak_kb))
     total_rss_growth_kb=$((rss_growth_kb + backend_rss_growth_kb))
     total_fd_peak=$((fd_peak + backend_fd_peak))
@@ -1277,7 +1281,8 @@ for key in sorted(expected):
     record.update({
         "aggregation": "conservative_median_per_metric",
         "target_duration_seconds": target_duration,
-        "benchmark_schema_version": 9,
+        "benchmark_schema_version": 10,
+        "resource_counter_window": "workload_before_sampler_shutdown_v1",
         "sample_duration_seconds": {
             "min": min(item["duration_seconds"] for item in records),
             "max": max(item["duration_seconds"] for item in records),

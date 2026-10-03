@@ -72,6 +72,8 @@ require("      - perf_audit\n" in jobs.get("http_rfc_compliance", ""),
         "release gate does not require performance audit")
 for category in ("http2", "streaming"):
     checker = Path(f"scripts/check-{category}-performance.sh").read_text(encoding="utf-8")
+    require("workload_before_sampler_shutdown_v1" in checker,
+            f"{category} may accept resource counters including sampler shutdown")
     require('record.get("diagnostic_instrumentation") is not False' in checker,
             f"{category} may accept instrumented diagnostic measurements")
 require('record.get("cpu_measurement") != "linux_process_cpu_clock_ns_v1"' in checker,

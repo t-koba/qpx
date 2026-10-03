@@ -171,8 +171,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"{owner} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"{owner} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version", owner) != 9:
+        if nonnegative_int(record, "benchmark_schema_version", owner) != 10:
             fail(f"{owner} uses an unsupported benchmark schema")
+        if record.get("resource_counter_window") != "workload_before_sampler_shutdown_v1":
+            fail(f"{owner} uses an unsupported resource counter window")
         target_duration = positive_number(record, "target_duration_seconds", owner)
         duration_range = record.get("sample_duration_seconds")
         if not isinstance(duration_range, dict) or target_duration <= 0:
@@ -310,6 +312,7 @@ for body_bytes, max_streams in sorted(required_lanes):
         "aggregation",
         "benchmark_schema_version",
         "resource_measurement",
+        "resource_counter_window",
     ):
         if len({direct.get(field), qpx.get(field), nginx.get(field)}) != 1:
             fail(f"HTTP/2 records for {body_bytes} bytes and m={max_streams} disagree on {field}")
