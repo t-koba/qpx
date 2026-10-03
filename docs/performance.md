@@ -828,3 +828,39 @@ the condition mismatch without changing duration budgets, completion checks,
 sample counts, or stability limits. It does not establish that observer cost
 caused the previously observed HTTP/2 stalls; full-matrix independent quality
 runs are still required.
+
+Independent baseline comparisons at `5390482` against `9500bb1` completed in
+[Actions run 37126374419](https://github.com/t-koba/qpx/actions/runs/37126374419).
+Each Linux runner built both versions before measuring; run 2 reversed version
+order. Non-performance workspace/OS, feature-matrix, preflight, and external
+interoperability jobs passed. All three proxy and HTTP/2 gates failed; only
+streaming run 2 passed. These runs do not establish performance completion.
+The following candidate ratios retain each independent result rather than
+averaging away failures:
+
+| Workload and metric | Run 1 | Run 2 | Run 3 | Requested bound |
+| --- | ---: | ---: | ---: | ---: |
+| Local 1 KiB RSS | 0.997 | 0.991 | 1.014 | <= 1.06 |
+| Feature-rich 1 KiB throughput | 0.904 | 1.050 | 0.802 | >= 1.0 |
+| Feature-rich 1 KiB CPU efficiency | 0.997 | 1.242 | 0.834 | >= 1.0 |
+| Feature-rich 1 KiB scheduler delay | 0.911 | 1.179 | 0.860 | <= 1.0 |
+| Cache miss 1 KiB throughput | 0.964 | 2.073 | 1.659 | >= 1.0 |
+| Cache miss 1 KiB CPU efficiency | 0.896 | 1.142 | 0.768 | >= 1.0 |
+| Cache miss 1 KiB p99 | 0.472 | 0.341 | 0.450 | <= 1.0 |
+| Cache miss 1 KiB scheduler delay | 2.926 | 2.154 | 1.646 | <= 1.0 |
+| WebDAV 1 MiB CPU efficiency | 1.413 | 1.380 | 2.042 | >= 1.5 |
+| WebDAV 1 MiB p99 | 1.489 | 0.761 | 3.211 | <= 1.0 |
+
+Candidate WebDAV throughput improved in all three same-runner baseline pairs,
+but its absolute CPU efficiency declined in all three. Cache-miss p99 improved
+in all three pairs, while its scheduler delay increased. The separate raw and
+aggregated baseline/candidate JSONL, process snapshots, environment records,
+and retained evaluations are in the per-category artifacts. Existing limits
+remain unchanged; unmet stronger goals have not been declared passing.
+
+The extended streaming native diagnostic at `b874d77` completed without lost
+samples. Its fast windows contain 376, 429, and 369 CPU samples, compared with
+47 in the prior second window. Kernel networking, packet handling, and locking
+dominate the observed hot symbols; the second window attributes 6.53% of sampled
+events to `_raw_spin_unlock_irqrestore`. This identifies further investigation
+areas but does not justify a product change or prove a normal gate improvement.
