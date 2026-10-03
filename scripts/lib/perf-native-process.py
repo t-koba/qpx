@@ -70,11 +70,10 @@ def main():
                 for child_id in child_ids:
                     child_root = Path(f"/proc/{child_id}")
                     try:
-                        executable = child_root.joinpath("exe").resolve(strict=True)
                         fields = dict(line.split(":", 1) for line in child_root.joinpath("status").read_text().splitlines() if ":" in line)
                     except FileNotFoundError:
                         continue
-                    if executable == Path(server).resolve() and fields.get("Seccomp", "").strip() == "2":
+                    if fields.get("Name", "").strip() == Path(server).name[:15] and fields.get("Seccomp", "").strip() == "2":
                         lifecycle["seccomp_filter_observed"] = True
                         lifecycle["tracee_pid"] = int(child_id)
                         lifecycle_path.write_text(json.dumps(lifecycle) + "\n")
