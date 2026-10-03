@@ -1180,3 +1180,19 @@ run `37148332829` confirms the trial avoids up to 12 handoffs per sampled
 transfer, but reducing that counter is insufficient evidence of benefit.
 The original handoff behavior is restored; all raw trial evidence remains in
 Actions artifacts. The independent derived-cache-key trial is retained.
+
+Review of the raw cache path finds that its conditional/directive exclusion
+matched only lowercase and conventional title-case header names. The
+existing real-server fixture now reproduces a failure with mixed-case
+`iF-nOnE-mAtCh` before the fix. Header names are compared case-insensitively,
+and the existing exclusion test also exercises mixed-case Range,
+Cache-Control, and Pragma. This preserves generic conditional/cache-directive
+handling for every legal casing and is a correctness fix, not a relaxation
+of feature semantics or performance criteria.
+
+Feature-rich Callgrind run `37149351082` on `92f1cc7` succeeds. Against
+`42c4157`, whole-program instructions per completed request decrease in all
+three windows from 46,792/46,712/46,886 to 46,219/46,565/46,623. This is a
+small instruction reduction; normal throughput and CPU-efficiency goals
+remain unproven. The file-handoff trial present in `92f1cc7` is not exercised
+by this 1 KiB in-memory cache workload and has since been reverted.

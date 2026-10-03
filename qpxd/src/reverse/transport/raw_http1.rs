@@ -413,25 +413,18 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
 /// full lookup chain; the fast path only serves plain unconditional GETs.
 fn raw_cache_hit_headers_eligible(headers: &[httparse::Header<'_>]) -> bool {
     headers.iter().all(|header| {
-        !matches!(
-            header.name,
-            "if-match"
-                | "If-Match"
-                | "if-none-match"
-                | "If-None-Match"
-                | "if-modified-since"
-                | "If-Modified-Since"
-                | "if-unmodified-since"
-                | "If-Unmodified-Since"
-                | "if-range"
-                | "If-Range"
-                | "range"
-                | "Range"
-                | "cache-control"
-                | "Cache-Control"
-                | "pragma"
-                | "Pragma"
-        )
+        ![
+            "if-match",
+            "if-none-match",
+            "if-modified-since",
+            "if-unmodified-since",
+            "if-range",
+            "range",
+            "cache-control",
+            "pragma",
+        ]
+        .iter()
+        .any(|name| header.name.eq_ignore_ascii_case(name))
     })
 }
 
@@ -1092,6 +1085,10 @@ mod tests {
             "if-modified-since",
             "if-unmodified-since",
             "If-Range",
+            "iF-nOnE-mAtCh",
+            "rAnGe",
+            "cAcHe-CoNtRoL",
+            "pRaGmA",
         ] {
             let headers = [
                 httparse::Header {
@@ -1411,12 +1408,12 @@ mod tests {
                 value: b"bench.local",
             },
             httparse::Header {
-                name: "If-None-Match",
+                name: "iF-nOnE-mAtCh",
                 value: b"\"x\"",
             },
         ];
         let conditional_raw: &[u8] =
-            b"GET /bench-1 HTTP/1.1\r\nHost: bench.local\r\nIf-None-Match: \"x\"\r\n\r\n";
+            b"GET /bench-1 HTTP/1.1\r\nHost: bench.local\r\niF-nOnE-mAtCh: \"x\"\r\n\r\n";
         let conditional_view = RawHttp1RequestView {
             raw_head: conditional_raw,
             method: "GET",
