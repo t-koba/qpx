@@ -66,6 +66,7 @@ def tcp_snapshot(diag, ports, sequence):
                     "receive_queue": struct.unpack_from("=I", payload, 56)[0],
                     "write_queue": struct.unpack_from("=I", payload, 60)[0],
                     "unacked": u32(24), "retransmission_timeout_us": u32(8), "total_retrans": u32(100),
+                    "send_mss": u32(16), "receive_mss": u32(20),
                     "last_data_sent_ms": u32(44), "last_data_received_ms": u32(52),
                     "last_ack_received_ms": u32(56), "rtt_us": u32(68),
                     "send_window": u32(228), "receive_window": u32(232),
@@ -110,6 +111,8 @@ def probe():
                 incoming = [r for r in rows if r["source_port"] == port]
                 if len(rows) != 2 or len(incoming) != 1 or incoming[0]["bytes_received"] < len(body):
                     raise RuntimeError("TCP diagnostic probe did not observe both real transport endpoints")
+                if any(row["send_mss"] <= 0 or row["receive_mss"] <= 0 for row in rows):
+                    raise RuntimeError("TCP diagnostic probe lacks real negotiated segment sizes")
                 if len({r["cookie"] for r in rows}) != 2:
                     raise RuntimeError("TCP diagnostic probe did not distinguish real sockets")
     print("Real TCP_INFO netlink probe passed")
