@@ -72,7 +72,7 @@ struct DiskCacheState {
     total_bytes: u64,
     entries: HashMap<DiskCacheFileId, DiskCacheIndexEntry>,
     hot_bytes: u64,
-    hot_entries: LruCache<PathBuf, HotCacheEntry>,
+    hot_entries: LruCache<DiskCacheFileId, HotCacheEntry>,
 }
 
 impl Default for DiskCacheState {
@@ -95,7 +95,6 @@ struct DiskCacheIndexEntry {
 }
 
 struct HotCacheEntry {
-    file_id: DiskCacheFileId,
     value: Bytes,
     expires_at_ms: u64,
     body_offset: u64,
@@ -416,8 +415,10 @@ impl DiskCacheBackend {
             }
             return result;
         }
-        let path = self.path_for(namespace, key);
-        self.hot_get_from_lru(namespace, key, path, now).await
+        let file_id = cache_file_id(namespace, key);
+        let path = self.path_for_id(file_id);
+        self.hot_get_from_lru(namespace, key, file_id, path, now)
+            .await
     }
 
     fn hot_recent_lookup(&self, namespace: &str, key: &str, now: u64) -> Option<HotCacheLookup> {
@@ -440,30 +441,27 @@ impl DiskCacheBackend {
         &self,
         namespace: &str,
         key: &str,
+        file_id: DiskCacheFileId,
         path: PathBuf,
         now: u64,
     ) -> HotCacheLookup {
         let mut state = self.state.lock().await;
         let expired = state
             .hot_entries
-            .peek(&path)
+            .peek(&file_id)
             .is_some_and(|entry| entry.expires_at_ms <= now);
         if expired {
-            if let Some(entry) = state.hot_entries.pop(&path) {
+            if let Some(entry) = state.hot_entries.pop(&file_id) {
                 state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
             }
             return HotCacheLookup::Miss(path);
         }
-        let value = state.hot_entries.get(&path).map(|entry| {
-            (
-                entry.file_id,
-                entry.value.clone(),
-                entry.expires_at_ms,
-                entry.body_offset,
-            )
-        });
+        let value = state
+            .hot_entries
+            .get(&file_id)
+            .map(|entry| (entry.value.clone(), entry.expires_at_ms, entry.body_offset));
         drop(state);
-        if let Some((file_id, value, expires_at_ms, body_offset)) = value {
+        if let Some((value, expires_at_ms, body_offset)) = value {
             let file = open_zero_copy_source(key, &path, value.len() as u64);
             self.hot_recent_upsert(
                 RecentHotCacheEntry {
@@ -555,25 +553,25 @@ impl DiskCacheBackend {
         }
         let file_id = cache_file_id_from_path(&self.root, &path)
             .expect("hot cache entry must reference a canonical disk object");
+        let file = open_zero_copy_source(key, &path, value_len);
         let recent = RecentHotCacheEntry {
             file_id,
             namespace: std::sync::Arc::from(namespace),
             key: std::sync::Arc::from(key),
-            path: path.clone(),
+            path,
             value: value.clone(),
             expires_at_ms,
             body_offset,
-            file: open_zero_copy_source(key, &path, value_len),
+            file,
         };
         let mut state = self.state.lock().await;
-        if let Some(previous) = state.hot_entries.pop(&path) {
+        if let Some(previous) = state.hot_entries.pop(&file_id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(previous.value.len() as u64);
         }
         state.hot_bytes = state.hot_bytes.saturating_add(value_len);
         state.hot_entries.put(
-            path,
+            file_id,
             HotCacheEntry {
-                file_id,
                 value,
                 expires_at_ms,
                 body_offset,
@@ -583,11 +581,11 @@ impl DiskCacheBackend {
         while state.hot_bytes > self.hot_max_bytes
             || state.hot_entries.len() > DISK_CACHE_HOT_MAX_ENTRIES
         {
-            let Some((_evicted_path, evicted)) = state.hot_entries.pop_lru() else {
+            let Some((evicted_id, evicted)) = state.hot_entries.pop_lru() else {
                 state.hot_bytes = 0;
                 break;
             };
-            evicted_ids.push(evicted.file_id);
+            evicted_ids.push(evicted_id);
             state.hot_bytes = state.hot_bytes.saturating_sub(evicted.value.len() as u64);
         }
         drop(state);
@@ -595,14 +593,18 @@ impl DiskCacheBackend {
     }
 
     async fn hot_remove(&self, path: &Path) {
-        self.hot_recent_remove(path);
+        let file_id = cache_file_id_from_path(&self.root, path)
+            .expect("hot cache removal must reference a canonical disk object");
+        self.hot_recent_remove(file_id);
         let mut state = self.state.lock().await;
-        if let Some(entry) = state.hot_entries.pop(path) {
+        if let Some(entry) = state.hot_entries.pop(&file_id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
         }
     }
 
     async fn delete_path(&self, path: &Path) -> Result<()> {
+        let file_id = cache_file_id_from_path(&self.root, path)
+            .ok_or_else(|| anyhow!("invalid disk cache object path: {}", path.display()))?;
         match tokio::fs::remove_file(path).await {
             Ok(()) => (),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
@@ -612,14 +614,12 @@ impl DiskCacheBackend {
                 });
             }
         }
-        self.hot_recent_remove(path);
+        self.hot_recent_remove(file_id);
         let mut state = self.state.lock().await;
-        if let Some(entry) = state.hot_entries.pop(path) {
+        if let Some(entry) = state.hot_entries.pop(&file_id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
         }
-        if let Some(id) = cache_file_id_from_path(&self.root, path)
-            && let Some(entry) = state.entries.remove(&id)
-        {
+        if let Some(entry) = state.entries.remove(&file_id) {
             state.total_bytes = state.total_bytes.saturating_sub(entry.total_len);
         }
         Ok(())
@@ -648,9 +648,7 @@ impl DiskCacheBackend {
         });
     }
 
-    fn hot_recent_remove(&self, path: &Path) {
-        let file_id = cache_file_id_from_path(&self.root, path)
-            .expect("hot cache removal must reference a canonical disk object");
+    fn hot_recent_remove(&self, file_id: DiskCacheFileId) {
         if !self
             .hot_recent
             .load()
@@ -2394,6 +2392,25 @@ mod tests {
             None
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_cache_delete_rejects_noncanonical_paths_before_io() {
+        let dir = temp_dir("delete-path-validation");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let path = dir.join("unrelated-file");
+        fs::write(&path, b"preserved").expect("write unrelated file");
+
+        let error = backend
+            .delete_path(&path)
+            .await
+            .expect_err("noncanonical object path must be rejected");
+        assert!(error.to_string().contains("invalid disk cache object path"));
+        assert_eq!(
+            fs::read(&path).expect("read preserved unrelated file"),
+            b"preserved"
+        );
+        fs::remove_dir_all(dir).expect("remove test directory");
     }
 
     #[tokio::test]
