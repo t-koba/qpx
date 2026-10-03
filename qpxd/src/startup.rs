@@ -526,13 +526,22 @@ pub(crate) fn refresh_watches(
 ) -> Result<()> {
     let next: std::collections::HashSet<PathBuf> = sources.into_iter().collect();
 
-    // Config files are commonly updated via atomic replace. Some notify backends
-    // bind file watches to the old inode/handle, so refresh every retained path
-    // after a successful reload instead of only adding/removing set differences.
-    for stale in watched.iter() {
+    // Windows notify watches the parent directory and filters by filename, so
+    // retained watches survive replacement. Re-registering them can race the
+    // next replacement's temporary absence after the new runtime is published.
+    #[cfg(windows)]
+    let stale_paths = watched.difference(&next);
+    #[cfg(windows)]
+    let new_paths = next.difference(watched);
+    // Inode-bound backends need refreshed watches after atomic replacement.
+    #[cfg(not(windows))]
+    let stale_paths = watched.iter();
+    #[cfg(not(windows))]
+    let new_paths = next.iter();
+    for stale in stale_paths {
         watcher.unwatch(stale)?;
     }
-    for source in &next {
+    for source in new_paths {
         watcher.watch(source)?;
     }
 
@@ -563,5 +572,62 @@ mod runtime_builder_tests {
             runtime.handle().runtime_flavor(),
             RuntimeFlavor::MultiThread
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_config_watch_tests {
+    use super::refresh_watches;
+    use crate::config_watch::ConfigFileWatcher;
+    use std::collections::HashSet;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn retained_config_watch_survives_absence_during_replacement() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "qpx-config-watch-replacement-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("create configuration directory");
+        let directory =
+            std::fs::canonicalize(directory).expect("canonical configuration directory");
+        let path = directory.join("config.yaml");
+        let previous = directory.join("previous.yaml");
+        std::fs::write(&path, "revision: 1").expect("write initial configuration");
+        let mut watcher = ConfigFileWatcher::new().expect("create real configuration watcher");
+        let mut watched = HashSet::new();
+        refresh_watches(&mut watcher, &mut watched, vec![path.clone()])
+            .expect("watch initial configuration");
+
+        std::fs::rename(&path, &previous).expect("move old configuration");
+        assert!(!path.exists());
+        refresh_watches(&mut watcher, &mut watched, vec![path.clone()])
+            .expect("retain directory-backed watch while configuration is absent");
+        std::fs::rename(&previous, &path).expect("publish replacement configuration");
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(50), watcher.next_event()).await
+        {
+            event.expect("replacement event");
+        }
+
+        std::fs::write(&path, "revision: 2").expect("update replacement configuration");
+        let event = tokio::time::timeout(Duration::from_secs(5), watcher.next_event())
+            .await
+            .expect("replacement configuration event timeout")
+            .expect("configuration event stream")
+            .expect("replacement configuration event");
+        assert!(
+            event.paths.contains(&path),
+            "unexpected configuration event: {event:?}"
+        );
+        refresh_watches(&mut watcher, &mut watched, Vec::new())
+            .expect("remove configuration watch");
+        assert!(watched.is_empty());
+        drop(watcher);
+        std::fs::remove_dir_all(directory).expect("remove configuration directory");
     }
 }

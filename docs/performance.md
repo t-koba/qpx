@@ -713,17 +713,6 @@ or decreasing counters invalidate the measurement. Required checkers reject
 records without the new accounting provenance. Performance thresholds remain
 unchanged.
 
-The `341205a` miss callgrind round-2 profile records 17.7 million instructions
-in path-component backward parsing, with additional path-component traversal
-and prefix checks. Canonical disk-object ID parsing now obtains the digest and
-exact extension from the already extracted final component instead of walking
-the full path twice more for `extension` and `file_stem`. Root-prefix, shard,
-component-count, filename, lowercase-hex, and digest-length checks remain.
-All 30 real disk-backend tests pass, including restart reads, capacity accounting,
-concurrent directory creation, symlink rejection, and malformed-extension cases.
-All-feature Clippy, formatting, structure, and required-gate checks pass.
-Linux profiles and paired measurements still determine the performance effect.
-
 Native proxy diagnostics also decode the second sample's real call chains with
 instruction addresses and symbol offsets. The exact ELF and its checksum remain
 retained with the profile. These records distinguish hot copies within a large
@@ -1459,3 +1448,46 @@ downstream records, and reject rewritten headers and unredacted secrets.
 The two real sink paths pass the focused macOS test; Windows CI must still
 verify its stdout path. Production logging and platform security remain
 unchanged.
+
+The `341205a` miss callgrind round-2 profile records 17.7 million instructions
+in path-component backward parsing, with additional path-component traversal
+and prefix checks. Canonical disk-object ID parsing now obtains the digest and
+exact extension from the already extracted final component instead of walking
+the full path twice more for `extension` and `file_stem`. Root-prefix, shard,
+component-count, filename, lowercase-hex, and digest-length checks remain.
+All 30 real disk-backend tests pass, including restart reads, capacity accounting,
+concurrent directory creation, symlink rejection, and malformed-extension cases.
+All-feature Clippy, formatting, structure, and required-gate checks pass.
+Linux profiles and paired measurements still determine the performance effect.
+
+The corrected `586307c` cache revision comparisons (`37159642181`,
+`37159644192`, `37159645698`) pass measurement quality for both exact revisions
+in all three runs. Current miss throughput relative to nginx is
+0.929060/0.939709/0.850242, CPU efficiency 0.871654/0.873912/0.864012, and queue
+delay 2.541861/2.710273/3.376531. Feature-rich throughput is
+0.914341/0.902040/0.888997 and CPU efficiency 0.973989/0.949297/0.935330; its
+queue ratio stays below one. The stronger goals fail in every run.
+Against the same-runner `db32e60` qpxd baseline, current miss throughput falls
+3.3%/0.8%/3.3%, while queue delay rises 25.9%/6.1%/22.2% and p99 rises
+0.4%/10.9%/12.4%. Feature-rich throughput improves only 0.4%/1.1%/0.2%.
+The combined changes cannot identify an individual cause; the immutable-body
+tee task-removal trial requires a separate removal comparison.
+
+HTTP/2 reusable-storage profile `37160201700` contains 2,103 measured round-2
+samples: 69 memmove samples and none with the concurrent FuturesUnordered
+caller, versus 16 of 80 among 1,913 samples before. This verifies removal of
+that sampled copy path, without establishing a performance objective result.
+Diagnostic `37160208155` has invalid nginx/direct-backend samples and is not
+performance acceptance evidence. Normal isolated HTTP/2 CI remains required.
+
+Windows control-plane CI on `632b27a` exits when retained file watches are
+re-registered during the next configuration replacement. Notify's Windows
+backend actually holds a parent-directory handle and filters by filename, so
+those watches survive replacement. Windows refresh now applies only source-set
+additions/removals; inode-bound platforms retain full refresh. A Windows-only
+real watcher regression moves the configured file away, refreshes while it is
+absent, publishes it again, and verifies a subsequent update event. No watch
+error is ignored and no retry is added. Local all-feature Clippy, formatting,
+structure, and required-gate checks pass; the Windows regression and control-plane
+CI still need to execute. The preceding cache-path revision passes all 1,309
+workspace tests across 47 suites.
