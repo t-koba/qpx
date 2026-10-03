@@ -687,3 +687,11 @@ existing spread limits. The unobserved phase is still explicitly diagnostic;
 it cannot replace any normal gate. This isolates TCP sampler overhead from
 transport and calibration settings instead of assuming its measured CPU share
 has no effect on workload stability.
+The `http2-quality` variant runs all four required body/stream lanes without the
+TCP sampler, keeping MTU 1500 and eight-second calibration in its own network
+namespace. Its manifest must declare the complete normal matrix. Diagnostic
+quality applies the default 1.1 candidate and 1.25 reference spread limits to
+every lane, including the 1 MiB/one-stream lane with wider temporary normal
+overrides. Missing lanes or failed samples invalidate the diagnostic. Normal
+measurement conditions remain unchanged until independent complete-matrix
+diagnostics establish reproducibility.

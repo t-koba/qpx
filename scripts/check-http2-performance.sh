@@ -135,24 +135,33 @@ required_lanes = {
     for max_streams in required_streams
 }
 diagnostic_samples = None
+diagnostic_full_matrix = False
 if DIAGNOSTIC:
     with open(sys.argv[4], encoding="utf-8") as handle:
         manifest = json.load(handle)
-    if (manifest.get("measurement") != "http2_isolated_mtu_v3"
+    if (manifest.get("measurement") not in ("http2_isolated_mtu_v3", "http2_isolated_full_quality_v1")
             or manifest.get("diagnostic_instrumentation") is not True
             or manifest.get("replaces_required_gate") is not False
             or not manifest.get("network_namespace")
             or not manifest.get("host_network_namespace")
             or manifest.get("network_namespace") == manifest.get("host_network_namespace")):
         fail("unsupported or unisolated HTTP/2 diagnostic manifest")
-    lane = (positive_int(manifest, "body_bytes", "diagnostic manifest"),
-            positive_int(manifest, "max_concurrent_streams", "diagnostic manifest"))
-    if lane not in required_lanes:
-        fail("HTTP/2 diagnostic lane has no existing measurement-quality objectives")
+    diagnostic_full_matrix = manifest["measurement"] == "http2_isolated_full_quality_v1"
+    if diagnostic_full_matrix:
+        if (set(positive_int_list(manifest, "required_body_bytes")) != set(required_body_bytes)
+                or set(positive_int_list(manifest, "required_max_concurrent_streams")) != set(required_streams)
+                or manifest.get("strict_default_spread_limits") is not True
+                or manifest.get("tcp_sampling") is not False):
+            fail("HTTP/2 full diagnostic must declare every normal lane without TCP sampling")
+    else:
+        lane = (positive_int(manifest, "body_bytes", "diagnostic manifest"),
+                positive_int(manifest, "max_concurrent_streams", "diagnostic manifest"))
+        if lane not in required_lanes:
+            fail("HTTP/2 diagnostic lane has no existing measurement-quality objectives")
+        required_lanes = {lane}
     diagnostic_samples = positive_int(manifest, "required_samples_per_role", "diagnostic manifest")
     if diagnostic_samples < 3:
         fail("HTTP/2 diagnostic quality requires at least three samples per role")
-    required_lanes = {lane}
 
 # Per-lane objective overrides; lanes without an entry use the defaults.
 lane_overrides = {}
@@ -164,6 +173,8 @@ for lane in objectives.get("lanes", []):
 
 
 def lane_limit(field, key):
+    if diagnostic_full_matrix and field.endswith("sample_spread_ratio"):
+        return positive_number(limits, field, "HTTP/2 objectives")
     overrides = lane_overrides.get(key)
     if overrides is not None and field in overrides:
         return overrides[field]

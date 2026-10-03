@@ -11,7 +11,10 @@ fi
 if [ "$#" -eq 1 ] && [ "$1" = --observer ]; then
   exec sudo unshare --net bash "$ROOT_DIR/scripts/perf-diagnose-http2-mtu.sh" --inside-observer
 fi
-if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-observer ]] || [ "$(id -u)" -ne 0 ]; then
+if [ "$#" -eq 1 ] && [ "$1" = --full ]; then
+  exec sudo unshare --net bash "$ROOT_DIR/scripts/perf-diagnose-http2-mtu.sh" --inside-full
+fi
+if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-observer && "$1" != --inside-full ]] || [ "$(id -u)" -ne 0 ]; then
   echo "unsupported HTTP/2 MTU diagnostic invocation" >&2
   exit 2
 fi
@@ -46,13 +49,19 @@ cleanup_sampler() {
 trap cleanup_sampler EXIT
 status=0
 phases=(65536 1500)
+body_sizes=1048576
+stream_counts=100
 if [ "$1" = --inside-observer ]; then
   phases=(1500-sampled 1500-unobserved)
+elif [ "$1" = --inside-full ]; then
+  phases=(1500-full)
+  body_sizes="1024 1048576"
+  stream_counts="1 100"
 fi
 for phase in "${phases[@]}"; do
   mtu="${phase%%-*}"
   sampled=true
-  if [ "$phase" = 1500-unobserved ]; then
+  if [[ "$phase" = 1500-unobserved || "$phase" = 1500-full ]]; then
     sampled=false
   fi
   phase_dir="$profile_dir/mtu-$phase"
@@ -68,7 +77,7 @@ mtu = int(sys.argv[4])
 interfaces = json.loads((root / "interfaces.json").read_text())
 if len(interfaces) != 1 or interfaces[0]["ifname"] != "lo" or interfaces[0]["mtu"] != mtu:
     raise SystemExit("isolated HTTP/2 loopback MTU was not applied")
-(root / "manifest.json").write_text(json.dumps({
+manifest = {
     "measurement": "http2_isolated_mtu_v3", "diagnostic_instrumentation": True,
     "network_namespace": sys.argv[2], "host_network_namespace": sys.argv[3],
     "loopback_mtu": mtu, "body_bytes": 1048576, "max_concurrent_streams": 100,
@@ -77,7 +86,17 @@ if len(interfaces) != 1 or interfaces[0]["ifname"] != "lo" or interfaces[0]["mtu
                        else "default_mtu_then_ethernet_mtu_same_runner"),
     "calibration_min_duration_ms": 8000,
     "tcp_sampling": sys.argv[5] == "true",
-}, indent=2) + "\n")
+}
+if sys.argv[6] == "--inside-full":
+    manifest.update({
+        "measurement": "http2_isolated_full_quality_v1",
+        "required_body_bytes": [1024, 1048576],
+        "required_max_concurrent_streams": [1, 100],
+        "sampling_order": "round_robin_interleaved",
+        "strict_default_spread_limits": True,
+    })
+    del manifest["body_bytes"], manifest["max_concurrent_streams"]
+(root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 PY_NAMESPACE
   chown -R "$SUDO_UID:$SUDO_GID" "$profile_dir"
   # Preserve both experiments, including failed default-MTU measurements.
@@ -91,8 +110,8 @@ PY_NAMESPACE
   fi
   phase_status=0
   setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups env \
-    QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES=1048576 \
-    QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
+    QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES="$body_sizes" \
+    QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES="$stream_counts" \
     QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS=8000 \
     QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS=3 QPX_HTTP2_COMPARE_LOG_DIR="$phase_dir/logs" \
     bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" "$phase_dir/comparison.jsonl" \
