@@ -603,11 +603,14 @@ Repeat this accounting after all required measurements pass at the final commit.
 The `http2-events` diagnostic records kernel syscall tracepoints without ptrace.
 It observes enter/exit events for epoll waits and connect calls with
 `CLOCK_MONOTONIC`, retaining process and thread IDs for alignment with resource
-sample windows. TCP progress events retain sequence numbers, acknowledgment
-progress, send/receive windows, and retransmissions for the five benchmark
-listener ports. System-wide futex events are excluded because idle workers
-dominated the first recording without identifying the stalled connection.
-A real TCP readiness and transport event probe verifies the recorder before the
+sample windows. Linux SOCK_DIAG snapshots retain acknowledged, sent, received,
+and unsent bytes, send/receive windows, queue depths, and retransmission counters
+every 100 ms for the five IPv4 benchmark listener ports. Socket cookies identify
+connections across port reuse. Kernel tracepoints record retransmissions.
+System-wide futex events and per-packet TCP probe events are excluded: idle waits
+dominated the first recording, and per-packet recording produced 5.7 GB of data
+without reproducing the long stall. A real TCP readiness and SOCK_DIAG counter
+probe verifies both recorders before the
 comparison. Missing tracepoints, missing comparison processes, or lost events
 fail the diagnostic. Raw perf data and the decoded event stream are retained.
 Payload buffers are not captured, and instrumented measurements remain excluded

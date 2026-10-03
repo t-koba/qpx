@@ -19,13 +19,11 @@ for syscall in epoll_wait epoll_pwait connect; do
     EVENTS="${EVENTS:+$EVENTS,}syscalls:$event"
   done
 done
-TCP_EVENTS="tcp:tcp_probe,tcp:tcp_retransmit_skb"
-for event in tcp_probe tcp_retransmit_skb; do
-  if [ ! -r "/sys/kernel/tracing/events/tcp/$event/id" ]; then
-    echo "required kernel TCP tracepoint is unavailable: $event" >&2
-    exit 1
-  fi
-done
+TCP_EVENTS="tcp:tcp_retransmit_skb"
+if [ ! -r /sys/kernel/tracing/events/tcp/tcp_retransmit_skb/id ]; then
+  echo "required kernel TCP retransmission tracepoint is unavailable" >&2
+  exit 1
+fi
 # Exercise the same kernel event recorder with a real socket before measurement.
 "$PERF_BIN" record -v --no-buildid --clockid CLOCK_MONOTONIC -e "$EVENTS,$TCP_EVENTS" \
   -o "$PROFILE_DIR/probe.data" -- python3 - <<'PY_PROBE'
@@ -66,10 +64,7 @@ if ! rg -q 'syscalls:sys_exit_epoll_wait' "$PROFILE_DIR/probe.events.txt"; then
   echo "real socket probe produced no kernel wait events" >&2
   exit 1
 fi
-if ! rg -q 'tcp:tcp_probe.*snd_nxt=.*snd_una=.*snd_wnd=.*rcv_wnd=' "$PROFILE_DIR/probe.events.txt"; then
-  echo "real TCP probe produced no transport progress events" >&2
-  exit 1
-fi
+python3 "$ROOT_DIR/scripts/lib/perf-tcp-sampler.py" --probe-only
 if [ "${1:-}" = --probe-only ]; then
   echo "Real kernel wait recorder and decoder probe passed"
   exit 0
@@ -77,6 +72,7 @@ fi
 status=0
 # Limit transport recording to the five owned benchmark listeners.
 TCP_FILTER=""
+TCP_PORTS=()
 for port in "${QPX_HTTP2_COMPARE_BACKEND_PORT:-18280}" \
   "${QPX_HTTP2_COMPARE_QPX_PORT:-18281}" "${QPX_HTTP2_COMPARE_NGINX_PORT:-18282}" \
   "${QPX_HTTP2_COMPARE_BACKEND_H2_PORT:-18283}" "${QPX_HTTP2_COMPARE_NGINX_BACKEND_PORT:-18284}"; do
@@ -85,14 +81,31 @@ for port in "${QPX_HTTP2_COMPARE_BACKEND_PORT:-18280}" \
     exit 2
   fi
   TCP_FILTER="${TCP_FILTER:+$TCP_FILTER || }sport == $port || dport == $port"
+  TCP_PORTS+=("$port")
 done
+STOP_FILE="$PROFILE_DIR/tcp-sampler.stop"
+python3 "$ROOT_DIR/scripts/lib/perf-tcp-sampler.py" \
+  --output "$PROFILE_DIR/tcp-state.jsonl.gz" --stop-file "$STOP_FILE" \
+  --ports "${TCP_PORTS[@]}" > "$PROFILE_DIR/tcp-sampler.log" 2>&1 &
+sampler_pid=$!
+# Invoked by the EXIT trap when recording or validation fails.
+# shellcheck disable=SC2329
+cleanup_sampler() {
+  touch "$STOP_FILE"
+  if ! wait "$sampler_pid"; then
+    echo "TCP state sampler did not finish successfully" >&2
+  fi
+}
+trap cleanup_sampler EXIT
 QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES=1048576 \
   QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
   "$PERF_BIN" record --no-buildid --clockid CLOCK_MONOTONIC -a -m 8M -e "$EVENTS" \
-    -e tcp:tcp_probe --filter "$TCP_FILTER" \
     -e tcp:tcp_retransmit_skb --filter "$TCP_FILTER" \
     -o "$PROFILE_DIR/measurement.data" -- bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" \
     || status=$?
+touch "$STOP_FILE"
+wait "$sampler_pid"
+trap - EXIT
 "$PERF_BIN" script --ns --show-lost-events -F trace:comm,pid,tid,time,event,trace \
   -i "$PROFILE_DIR/measurement.data" > "$PROFILE_DIR/measurement.events.txt"
 if rg -q 'PERF_RECORD_LOST|LOST [1-9]' "$PROFILE_DIR/measurement.events.txt"; then
@@ -128,20 +141,17 @@ for process in nginx h2load; do
     exit 1
   fi
 done
-if ! rg -q 'tcp:tcp_probe' "$PROFILE_DIR/measurement.events.txt"; then
-  echo "kernel recording lacks actual TCP progress events" >&2
-  exit 1
-fi
 python3 - "$PROFILE_DIR" "$status" "$EVENTS,$TCP_EVENTS" "$TCP_FILTER" <<'PY_MANIFEST'
 import json
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
 (root / "manifest.json").write_text(json.dumps({
-    "measurement": "http2_kernel_wait_events_v2", "clock": "CLOCK_MONOTONIC",
+    "measurement": "http2_kernel_wait_events_v3", "clock": "CLOCK_MONOTONIC",
     "diagnostic_instrumentation": True, "payload_capture": False,
     "events": sys.argv[3].split(","), "benchmark_exit_status": int(sys.argv[2]),
     "tcp_filter": sys.argv[4],
+    "tcp_state": "tcp-state.jsonl.gz", "tcp_sampling_interval_seconds": 0.1,
     "required_processes": ["qpxd", "nginx", "h2load"],
     "event_stream": "measurement.events.txt",
 }, indent=2) + "\n")
