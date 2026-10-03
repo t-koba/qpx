@@ -26,7 +26,16 @@ use qpx_http::body::Body;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, Instant};
 
-pub(super) async fn dispatch_reverse_http_route(
+// Construct cold transport state in its existing allocation, outside the caller.
+#[inline(never)]
+pub(super) fn dispatch_reverse_http_route<'a>(
+    input: ReverseHttpDispatchInput<'a>,
+) -> futures_util::future::BoxFuture<'a, Result<(InterimList, Response<Body>)>> {
+    let storage = Box::new_uninit();
+    Box::into_pin(Box::write(storage, execute_reverse_http_route(input)))
+}
+
+async fn execute_reverse_http_route(
     input: ReverseHttpDispatchInput<'_>,
 ) -> Result<(InterimList, Response<Body>)> {
     let ReverseHttpDispatchInput {

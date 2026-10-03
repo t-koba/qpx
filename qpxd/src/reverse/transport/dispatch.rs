@@ -210,7 +210,7 @@ pub(super) async fn execute_reverse_dispatch(
         match prepare_single_plain_reverse_request(req, &base, conn, &state, &compiled)? {
             Ok(Some(req)) => {
                 let secure_transport = conn.tls_terminated;
-                let (interim, mut response) = Box::pin(dispatch_plain_reverse_http(
+                let (interim, mut response) = dispatch_plain_reverse_http_boxed(
                     req,
                     &state,
                     route,
@@ -218,7 +218,7 @@ pub(super) async fn execute_reverse_dispatch(
                     request_version,
                     state.plan.identity.proxy_name.as_ref(),
                     connection_pool,
-                ))
+                )
                 .await?;
                 apply_reverse_route_metadata(route, secure_transport, &mut response)?;
                 return Ok((interim, response));
@@ -481,7 +481,7 @@ fn execute_reverse_request<'a>(
             && !req.headers().contains_key(http::header::UPGRADE)
         {
             // This protocol-only branch must not enlarge feature-rich cache futures.
-            return Box::pin(dispatch_plain_reverse_http(
+            return dispatch_plain_reverse_http_boxed(
                 req,
                 &state,
                 route,
@@ -489,7 +489,7 @@ fn execute_reverse_request<'a>(
                 request_version,
                 proxy_name,
                 connection_pool,
-            ))
+            )
             .await;
         }
         let resolution_override = route.plan.destination_resolution.as_ref();
@@ -919,6 +919,32 @@ fn reporting_problem_response(
         .body(Body::from(body))?)
 }
 
+// This branch must not reserve its large concrete future on cache-hit stacks.
+#[inline(never)]
+fn dispatch_plain_reverse_http_boxed<'a>(
+    req: Request<Body>,
+    state: &'a crate::runtime::RuntimeState,
+    route: &'a HttpRoute,
+    request_method: &'a http::Method,
+    request_version: http::Version,
+    proxy_name: &'a str,
+    connection_pool: Option<&'a PreparedPlainHttp1ConnectionAffinity>,
+) -> futures_util::future::BoxFuture<'a, Result<(InterimList, Response<Body>)>> {
+    let storage = Box::new_uninit();
+    Box::into_pin(Box::write(
+        storage,
+        dispatch_plain_reverse_http(
+            req,
+            state,
+            route,
+            request_method,
+            request_version,
+            proxy_name,
+            connection_pool,
+        ),
+    ))
+}
+
 async fn dispatch_plain_reverse_http(
     req: Request<Body>,
     state: &crate::runtime::RuntimeState,
@@ -1066,7 +1092,7 @@ async fn complete_reverse_after_modules(
     }
     if is_websocket_upgrade(req.method(), req.headers())? {
         // Cache hits do not retain or allocate the WebSocket upgrade state.
-        return Box::pin(handle_reverse_websocket_upgrade(ReverseWebsocketDispatch {
+        return handle_reverse_websocket_upgrade(ReverseWebsocketDispatch {
             req,
             state,
             route,
@@ -1082,7 +1108,7 @@ async fn complete_reverse_after_modules(
             request_method,
             http_modules: &mut http_modules,
             audit_ctx,
-        }))
+        })
         .await;
     }
     let cache_state = match prepare_reverse_cache(ReverseCacheInput {
@@ -1145,7 +1171,7 @@ async fn complete_reverse_after_modules(
     })
     .await?;
     if override_upstream.is_none() && route.ipc.is_some() {
-        return Box::pin(dispatch_reverse_ipc_route(ReverseIpcDispatchInput {
+        return dispatch_reverse_ipc_route(ReverseIpcDispatchInput {
             base,
             state,
             conn,
@@ -1174,12 +1200,12 @@ async fn complete_reverse_after_modules(
             request_limits,
             request_limit_ctx,
             audit_ctx,
-        }))
+        })
         .await;
     }
     // Cache hits return above without allocating either upstream dispatcher.
     // Keep their larger retry and transport futures out of the cache-hit state.
-    Box::pin(dispatch_reverse_http_route(ReverseHttpDispatchInput {
+    dispatch_reverse_http_route(ReverseHttpDispatchInput {
         base,
         state,
         conn,
@@ -1213,7 +1239,7 @@ async fn complete_reverse_after_modules(
         request_limit_ctx,
         audit_ctx,
         connection_pool,
-    }))
+    })
     .await
 }
 

@@ -724,3 +724,14 @@ RSS and descriptor sampler metadata retain their own CPU time, elapsed time,
 and fraction of one CPU core. This measures observer cost directly without
 subtracting it from server measurements or assuming calibration and measured
 workloads see identical competition.
+
+The retained Linux ELF from the cache-request borrowing diagnostic still reserves
+`0x62a8` bytes on every poll of the request executor, with six page probes and
+cold boxed transport futures copied through that stack. The plain HTTP, retrying
+HTTP, IPC, and WebSocket constructors now allocate before creating their state
+behind non-inlined constructors. They keep the same existing allocations and
+protocol behavior while preventing concrete cold futures from becoming caller
+stack temporaries. The unconditional plain HTTP path remains inline. The
+resulting frame size and product performance require verification with a new
+Linux ELF and normal paired measurements; source restructuring alone is not a
+performance pass.

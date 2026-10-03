@@ -27,7 +27,16 @@ use qpx_http::body::Body;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, Instant, timeout};
 
-pub(super) async fn dispatch_reverse_ipc_route(
+// Construct cold transport state in its existing allocation, outside the caller.
+#[inline(never)]
+pub(super) fn dispatch_reverse_ipc_route<'a>(
+    input: ReverseIpcDispatchInput<'a>,
+) -> futures_util::future::BoxFuture<'a, Result<(InterimList, Response<Body>)>> {
+    let storage = Box::new_uninit();
+    Box::into_pin(Box::write(storage, execute_reverse_ipc_route(input)))
+}
+
+async fn execute_reverse_ipc_route(
     input: ReverseIpcDispatchInput<'_>,
 ) -> Result<(InterimList, Response<Body>)> {
     let ReverseIpcDispatchInput {
@@ -414,7 +423,16 @@ async fn handle_reverse_ipc_success(
     )))
 }
 
-pub(super) async fn handle_reverse_websocket_upgrade(
+// Construct cold transport state in its existing allocation, outside the caller.
+#[inline(never)]
+pub(super) fn handle_reverse_websocket_upgrade<'a>(
+    ctx: ReverseWebsocketDispatch<'a>,
+) -> futures_util::future::BoxFuture<'a, Result<(InterimList, Response<Body>)>> {
+    let storage = Box::new_uninit();
+    Box::into_pin(Box::write(storage, execute_reverse_websocket_upgrade(ctx)))
+}
+
+async fn execute_reverse_websocket_upgrade(
     ctx: ReverseWebsocketDispatch<'_>,
 ) -> Result<(InterimList, Response<Body>)> {
     let ReverseWebsocketDispatch {
