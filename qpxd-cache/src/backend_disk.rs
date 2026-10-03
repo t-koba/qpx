@@ -1040,27 +1040,25 @@ impl CacheBackend for DiskCacheBackend {
             Some(index_entry) => {
                 let variants =
                     self.decode_variant_index(namespace, index_key, index_entry.value.clone())?;
-                match variants.variants.first() {
-                    Some(only) if variants.variants.len() == 1 => {
-                        Some((only.clone(), index_entry.expires_at_ms))
-                    }
-                    _ => None,
+                if variants.variants.len() == 1 {
+                    Some((variants, index_entry.expires_at_ms))
+                } else {
+                    None
                 }
             }
             None => None,
         };
-        let (variant_key, index_expires_at_ms) =
-            resolved.unwrap_or((default_variant_key.to_string(), u64::MAX));
-        let Some(metadata_entry) = recent_hot_entry(&recent, namespace, variant_key.as_str(), now)
-        else {
+        // Neither an absent object nor a decoded variant needs an owned key copy.
+        let (variant_key, index_expires_at_ms) = match &resolved {
+            Some((variants, expires_at_ms)) => (variants.variants[0].as_str(), *expires_at_ms),
+            None => (default_variant_key, u64::MAX),
+        };
+        let Some(metadata_entry) = recent_hot_entry(&recent, namespace, variant_key, now) else {
             return Ok(None);
         };
-        let envelope = self.decode_response_metadata(
-            namespace,
-            variant_key.as_str(),
-            metadata_entry.value.clone(),
-        )?;
-        let body_key = cache_body_storage_key(variant_key.as_str());
+        let envelope =
+            self.decode_response_metadata(namespace, variant_key, metadata_entry.value.clone())?;
+        let body_key = cache_body_storage_key(variant_key);
         let Some(body_entry) = recent_hot_entry(&recent, namespace, body_key.as_str(), now) else {
             return Ok(None);
         };
