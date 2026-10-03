@@ -2,6 +2,10 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PERF_BIN="${QPX_NATIVE_PERF_BIN:?native perf executable is required}"
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --probe-only ]; }; then
+  echo "unsupported kernel wait diagnostic argument" >&2
+  exit 2
+fi
 mkdir -p "$ROOT_DIR/target/perf/profiles"
 PROFILE_DIR="$(mktemp -d "$ROOT_DIR/target/perf/profiles/http2-events.XXXXXX")"
 EVENTS=""
@@ -35,11 +39,15 @@ finally:
     reader.close()
     writer.close()
 PY_PROBE
-"$PERF_BIN" script --ns -F comm,pid,tid,time,event,trace -i "$PROFILE_DIR/probe.data" \
+"$PERF_BIN" script -v --ns -F trace:comm,pid,tid,time,event,trace -i "$PROFILE_DIR/probe.data" \
   > "$PROFILE_DIR/probe.events.txt"
 if ! rg -q 'syscalls:sys_exit_epoll_wait' "$PROFILE_DIR/probe.events.txt"; then
   echo "real socket probe produced no kernel wait events" >&2
   exit 1
+fi
+if [ "${1:-}" = --probe-only ]; then
+  echo "Real kernel wait recorder and decoder probe passed"
+  exit 0
 fi
 status=0
 QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES=1048576 \
@@ -47,7 +55,7 @@ QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES=1048576 \
   "$PERF_BIN" record --no-buildid --clockid CLOCK_MONOTONIC -a -m 8M -e "$EVENTS" \
     -o "$PROFILE_DIR/measurement.data" -- bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" \
     || status=$?
-"$PERF_BIN" script --ns --show-lost-events -F comm,pid,tid,time,event,trace \
+"$PERF_BIN" script --ns --show-lost-events -F trace:comm,pid,tid,time,event,trace \
   -i "$PROFILE_DIR/measurement.data" > "$PROFILE_DIR/measurement.events.txt"
 if rg -q 'PERF_RECORD_LOST|LOST [1-9]' "$PROFILE_DIR/measurement.events.txt"; then
   echo "kernel wait recording lost events" >&2

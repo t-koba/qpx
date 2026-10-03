@@ -47,7 +47,11 @@ jobs:
       - name: verify native CPU profiler before build
         if: inputs.category == 'proxy-native' || inputs.category == 'http2-native' || inputs.category == 'streaming-native' || inputs.category == 'webdav-native' || inputs.category == 'http2-events'
         run: |
-          sudo apt-get install -y linux-tools-generic ripgrep
+          if [ "${{ inputs.category }}" = http2-events ]; then
+            sudo apt-get install -y "linux-tools-$(uname -r)" ripgrep
+          else
+            sudo apt-get install -y linux-tools-generic ripgrep
+          fi
           sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
           mkdir -p target/perf
           dpkg-query -W -f='${binary:Package}\t${db:Status-Status}\n' 'linux-tools-*' > target/perf/native-perf-packages.txt
@@ -63,6 +67,19 @@ jobs:
             exit 1
           fi
           perf_binary="${perf_tools[-1]}"
+          if [ "${{ inputs.category }}" = http2-events ]; then
+            kernel_release="$(uname -r)"
+            perf_binary=""
+            for candidate in "${perf_tools[@]}"; do
+              if [ "$(basename "$(dirname "$candidate")")" = "$kernel_release" ]; then
+                perf_binary="$candidate"
+              fi
+            done
+            if [ -z "$perf_binary" ]; then
+              echo "kernel-matched perf executable is missing: $kernel_release" >&2
+              exit 1
+            fi
+          fi
           if [ ! -f "$perf_binary" ] || [ ! -x "$perf_binary" ]; then
             echo "native perf path is not an executable file: $perf_binary" >&2
             exit 1
@@ -77,6 +94,8 @@ jobs:
             fi
             sudo chmod a+rx /sys/kernel/tracing /sys/kernel/tracing/events
             sudo chmod -R a+rX /sys/kernel/tracing/events/syscalls
+            sudo chmod a+r /sys/kernel/tracing/events/header_page /sys/kernel/tracing/events/header_event
+            QPX_NATIVE_PERF_BIN="$perf_binary" bash scripts/perf-diagnose-http2-events.sh --probe-only
           fi
           echo "QPX_NATIVE_PERF_BIN=$perf_binary" >> "$GITHUB_ENV"
       - name: build before measurement
