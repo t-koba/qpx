@@ -680,3 +680,10 @@ than being reported as a successful diagnostic comparison. The experiment
 investigates transport stalls seen with queued output and advertised receive
 windows below the ordinary loopback MSS; it is not evidence of a resolved cause
 until independently reproduced comparisons establish the effect.
+The `http2-observer` variant fixes MTU at 1500 and calibration at eight seconds,
+then runs sampled and unobserved phases sequentially on the same runner. Both
+retain three samples per role and use the same diagnostic-quality checker and
+existing spread limits. The unobserved phase is still explicitly diagnostic;
+it cannot replace any normal gate. This isolates TCP sampler overhead from
+transport and calibration settings instead of assuming its measured CPU share
+has no effect on workload stability.

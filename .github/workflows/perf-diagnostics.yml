@@ -16,7 +16,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, webdav-sockets, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu]
+        options: [streaming, proxy-threads, proxy-phases, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, streaming-native, webdav-native, webdav-sockets, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer]
         default: streaming
 
 permissions:
@@ -164,6 +164,9 @@ jobs:
               ;;
             http2-mtu)
               python3 scripts/perf-evaluate.py "HTTP/2 isolated MTU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-mtu.sh
+              ;;
+            http2-observer)
+              python3 scripts/perf-evaluate.py "HTTP/2 observer effect diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-mtu.sh --observer
               ;;
             http2-io)
               python3 scripts/perf-evaluate.py "HTTP/2 syscall wait diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-io.sh
