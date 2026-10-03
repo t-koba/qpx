@@ -151,14 +151,14 @@ shutdown is a diagnostic failure. CPU diagnostics have a 20-minute deadline,
 and individual symbol reports have a three-minute deadline. Self-CPU reports omit
 rendered call graphs while raw DWARF stacks remain available for further analysis.
 The `http2-native` variant records the 1 KiB, 100-stream workload in the same
-way. HTTP/2 schema 10 requires explicit instrumentation provenance and workload-only
+way. HTTP/2 schema 11 requires explicit instrumentation provenance and workload-only
 CPU and scheduler counter windows. Counter snapshots surround the completed
 client workload before stopping samplers or processing their output. Native
 diagnostic rows and rows missing that provenance are rejected by the required
 gate. Reports are restricted to the workload windows recorded by the real RSS
 sampler's monotonic timestamps, separating warmup and the individual samples.
 The `streaming-native` variant records the fast and slow 100 MiB transfers with
-the same owned profiler group and workload-window reports. Streaming schema 9
+the same owned profiler group and workload-window reports. Streaming schema 10
 also requires explicit instrumentation provenance and rejects native diagnostic
 records in the required gate. CPU profiles are diagnostic evidence only; the
 uninstrumented streaming comparison remains mandatory.
@@ -703,6 +703,12 @@ alive and after joining it, and requires both its scheduler delay and event
 count to remain accumulated. The probe runs on the host and inside an owned
 network namespace, retaining both JSON snapshots. Missing kernel support,
 privilege failures, unavailable accounting, or decreasing counters fail the
-diagnostic. This validates a replacement for live-TID schedstat sums, which can
-decrease when request threads exit; comparison harnesses are not switched until
-the replacement has passed the real Linux probe.
+diagnostic. The host and namespace probes passed with an observed positive
+worker delay retained after thread exit. HTTP/1 schema 5, HTTP/2 schema 11, and
+streaming schema 10 therefore use TGID accounting instead of live-TID schedstat
+sums, which can decrease when request threads exit. Accounting is enabled before
+server startup. Both boundary snapshots retain process identities, taskstats
+versions, event counts, and delay totals; process disappearance, identity changes,
+or decreasing counters invalidate the measurement. Required checkers reject
+records without the new accounting provenance. Performance thresholds remain
+unchanged.

@@ -6,11 +6,7 @@ if [ "$(uname -s)" != Linux ]; then
   echo "Scheduler accounting verification requires Linux" >&2
   exit 1
 fi
-if [ "$(id -u)" -eq 0 ]; then
-  sysctl -w kernel.task_delayacct=1
-else
-  sudo -n sysctl -w kernel.task_delayacct=1
-fi
+prepare_process_scheduler_accounting
 mkdir -p "$ROOT_DIR/target/perf"
 # Start a new process after enabling accounting so every measured thread has it.
 perf_proc_python - "$ROOT_DIR" <<'PY_PROBE'

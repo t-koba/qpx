@@ -64,6 +64,8 @@ if Path("/proc/cpuinfo").exists():
     record["cpu_models"] = sorted({line.split(":", 1)[1].strip()
                                    for line in Path("/proc/cpuinfo").read_text().splitlines()
                                    if line.startswith("model name")})
+if platform.system() == "Linux":
+    record["kernel_task_delayacct"] = int(Path("/proc/sys/kernel/task_delayacct").read_text().strip())
 Path(out).write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
 PY
 

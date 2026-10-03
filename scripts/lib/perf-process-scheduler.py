@@ -139,13 +139,41 @@ def snapshot(root):
             'total_cpu_delay_ns': sum(row['cpu_delay_total_ns'] for row in records)}
 
 
+def delta(before_path, after_path):
+    before = json.loads(Path(before_path).read_text())
+    after = json.loads(Path(after_path).read_text())
+    if (before['measurement'] != 'linux_taskstats_tgid_cpu_delay_ns_v1'
+            or after['measurement'] != before['measurement']
+            or before['root_pid'] != after['root_pid']
+            or before['finished_monotonic_ns'] > after['started_monotonic_ns']
+            or before['task_delayacct'] is not True or after['task_delayacct'] is not True):
+        raise RuntimeError('scheduler snapshots do not describe the same measurement')
+    previous = {row['pid']: row for row in before['processes']}
+    current = {row['pid']: row for row in after['processes']}
+    if not previous.keys() <= current.keys():
+        raise RuntimeError('measured process exited before its final scheduler snapshot')
+    for pid, row in previous.items():
+        if (current[pid]['start_ticks'] != row['start_ticks']
+                or current[pid]['taskstats_version'] != row['taskstats_version']
+                or current[pid]['cpu_delay_total_ns'] < row['cpu_delay_total_ns']
+                or current[pid]['cpu_count'] < row['cpu_count']):
+            raise RuntimeError(f'measured process identity or scheduler counter changed: {pid}')
+    for record in (before, after):
+        if record['total_cpu_delay_ns'] != sum(row['cpu_delay_total_ns'] for row in record['processes']):
+            raise RuntimeError('scheduler snapshot total is inconsistent')
+    return after['total_cpu_delay_ns'] - before['total_cpu_delay_ns']
+
+
 if __name__ == '__main__':
     try:
         if sys.platform != 'linux':
             raise RuntimeError('process scheduler accounting requires Linux')
-        record = snapshot(int(sys.argv[1]))
-        if len(sys.argv) > 2:
-            Path(sys.argv[2]).write_text(json.dumps(record, sort_keys=True) + '\n')
-        print(record['total_cpu_delay_ns'])
+        if sys.argv[1] == 'delta':
+            print(delta(sys.argv[2], sys.argv[3]))
+        else:
+            record = snapshot(int(sys.argv[1]))
+            if len(sys.argv) > 2:
+                Path(sys.argv[2]).write_text(json.dumps(record, sort_keys=True) + '\n')
+            print(record['total_cpu_delay_ns'])
     except (OSError, RuntimeError, ValueError) as error:
         raise SystemExit(f'Invalid measurement: {error}') from error

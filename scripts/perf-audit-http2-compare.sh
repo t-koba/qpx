@@ -79,6 +79,7 @@ collect_artifacts() {
   find "$TMP_DIR" -name '*.samples.csv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.sampling.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.error' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
+  find "$TMP_DIR" -name '*scheduler-*.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
 }
 
 cleanup() {
@@ -114,6 +115,7 @@ body_profile() {
 }
 
 source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"
+prepare_process_scheduler_accounting
 
 wait_https() {
   local name="$1"
@@ -665,9 +667,9 @@ PY_DURATION
       backend_cpu_before_ms="$(process_tree_cpu_ms "$backend_pid")"
     fi
     if [ "$kernel_resource_metrics" = true ]; then
-      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid" "$TMP_DIR/${artifact}.attempt-${attempt}.scheduler-before.json")"
       if [ "$resource_pid" != "$backend_pid" ]; then
-        backend_scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$backend_pid")"
+        backend_scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$backend_pid" "$TMP_DIR/${artifact}.attempt-${attempt}.backend-scheduler-before.json")"
       fi
     fi
     h2load_succeeded=true
@@ -683,9 +685,9 @@ PY_DURATION
     scheduler_after_ns="$scheduler_before_ns"
     backend_scheduler_after_ns="$backend_scheduler_before_ns"
     if [ "$kernel_resource_metrics" = true ]; then
-      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid" "$TMP_DIR/${artifact}.attempt-${attempt}.scheduler-after.json")"
       if [ "$resource_pid" != "$backend_pid" ]; then
-        backend_scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$backend_pid")"
+        backend_scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$backend_pid" "$TMP_DIR/${artifact}.attempt-${attempt}.backend-scheduler-after.json")"
       fi
     fi
     if [ -n "$fd_peak_monitor_pid" ]; then
@@ -747,6 +749,12 @@ PY_DURATION
     local resource_scheduler_delta backend_scheduler_delta
     resource_scheduler_delta="$(monotonic_counter_delta "scheduler delay nanoseconds" "$scheduler_before_ns" "$scheduler_after_ns")"
     backend_scheduler_delta="$(monotonic_counter_delta "backend scheduler delay nanoseconds" "$backend_scheduler_before_ns" "$backend_scheduler_after_ns")"
+    if [ "$kernel_resource_metrics" = true ]; then
+      [ "$(process_tree_scheduler_delta_ns "$TMP_DIR/${artifact}.attempt-${attempt}.scheduler-before.json" "$TMP_DIR/${artifact}.attempt-${attempt}.scheduler-after.json")" = "$resource_scheduler_delta" ]
+      if [ "$resource_pid" != "$backend_pid" ]; then
+        [ "$(process_tree_scheduler_delta_ns "$TMP_DIR/${artifact}.attempt-${attempt}.backend-scheduler-before.json" "$TMP_DIR/${artifact}.attempt-${attempt}.backend-scheduler-after.json")" = "$backend_scheduler_delta" ]
+      fi
+    fi
     total_scheduler_run_delay_ns=$((resource_scheduler_delta + backend_scheduler_delta))
     if [ -n "$profile_pid" ]; then
       wait "$profile_pid" || true
@@ -1281,7 +1289,8 @@ for key in sorted(expected):
     record.update({
         "aggregation": "conservative_median_per_metric",
         "target_duration_seconds": target_duration,
-        "benchmark_schema_version": 10,
+        "benchmark_schema_version": 11,
+        "scheduler_accounting": "linux_taskstats_tgid_cpu_delay_ns_v1",
         "resource_counter_window": "workload_before_sampler_shutdown_v1",
         "sample_duration_seconds": {
             "min": min(item["duration_seconds"] for item in records),

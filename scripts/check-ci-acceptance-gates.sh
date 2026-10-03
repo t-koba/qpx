@@ -613,7 +613,7 @@ require scripts/perf-audit-http2-compare.sh '"nginx"'
 require scripts/perf-audit-http2-compare.sh 'requests_per_cpu_second'
 require scripts/perf-audit-http2-compare.sh 'requests_per_total_cpu_second'
 require scripts/perf-audit-http2-compare.sh 'backend_cpu_ms'
-require scripts/perf-audit-http2-compare.sh '"benchmark_schema_version": 10'
+require scripts/perf-audit-http2-compare.sh '"benchmark_schema_version": 11'
 require scripts/perf-audit-http2-compare.sh '"resource_counter_window": "workload_before_sampler_shutdown_v1"'
 require scripts/check-http2-performance.sh 'record.get("resource_counter_window") != "workload_before_sampler_shutdown_v1"'
 require scripts/check-http2-performance.sh 'record.get("diagnostic_instrumentation") is not False'
@@ -662,7 +662,7 @@ require scripts/perf-audit-streaming-compare.sh 'read_mode'
 require scripts/perf-audit-streaming-compare.sh 'requests_per_cpu_second'
 require scripts/perf-audit-streaming-compare.sh 'requests_per_total_cpu_second'
 require scripts/perf-audit-streaming-compare.sh 'backend_cpu_ms'
-require scripts/perf-audit-streaming-compare.sh '"benchmark_schema_version": 9'
+require scripts/perf-audit-streaming-compare.sh '"benchmark_schema_version": 10'
 require scripts/check-streaming-performance.sh 'workload_before_sampler_shutdown_v1'
 for checker in check-streaming-performance.sh check-http2-performance.sh check-origin-cache-performance.sh compare-proxy-baseline.sh; do
   require "scripts/$checker" 'from perf_ratio import lower_is_better_ratio'
@@ -848,3 +848,8 @@ require scripts/check-public-api.sh 'check_crate qpx-h3'
 require scripts/check-public-api.sh 'check_crate qpx-acme'
 require scripts/check-public-api.sh 'check_crate qpx-observability'
 check_deny_skip_baseline
+
+for category in proxy http2 streaming; do
+  require "scripts/perf-audit-${category}-compare.sh" 'prepare_process_scheduler_accounting'
+  require "scripts/perf-audit-${category}-compare.sh" 'linux_taskstats_tgid_cpu_delay_ns_v1'
+done

@@ -202,6 +202,7 @@ collect_artifacts() {
   find "$TMP_DIR" -name '*.samples.csv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.sampling.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.error' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
+  find "$TMP_DIR" -name '*scheduler-*.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
 }
 
 cleanup() {
@@ -285,6 +286,7 @@ register_pid() {
 }
 
 source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"
+prepare_process_scheduler_accounting
 
 record_ready_rss() {
   local pid="$1"
@@ -1353,7 +1355,7 @@ LUA
       rss_peak_monitor_pid=$!
       monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" "$fd_baseline" &
       fd_peak_monitor_pid=$!
-      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid" "$TMP_DIR/${artifact_name}.attempt-${attempt}.scheduler-before.json")"
     fi
     cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
     io_syscr_before=0
@@ -1399,9 +1401,12 @@ LUA
     fi
     scheduler_after_ns="$scheduler_before_ns"
     if [ "$kernel_resource_metrics" = true ]; then
-      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid" "$TMP_DIR/${artifact_name}.attempt-${attempt}.scheduler-after.json")"
     fi
     scheduler_run_delay_ns="$(monotonic_counter_delta "scheduler delay nanoseconds" "$scheduler_before_ns" "$scheduler_after_ns")"
+    if [ "$kernel_resource_metrics" = true ]; then
+      [ "$(process_tree_scheduler_delta_ns "$TMP_DIR/${artifact_name}.attempt-${attempt}.scheduler-before.json" "$TMP_DIR/${artifact_name}.attempt-${attempt}.scheduler-after.json")" = "$scheduler_run_delay_ns" ]
+    fi
     if [ "$wrk_succeeded" != true ]; then
       echo "wrk failed for ${proxy} attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       cat "$out" >&2 || true
@@ -1979,7 +1984,8 @@ jq -cs \
         | .valid_samples = ($valid | length)
         | .sampling_order = "round_robin_interleaved"
         | .sample_spread_basis = "tightest_valid_majority"
-        | .benchmark_schema_version = 4
+        | .benchmark_schema_version = 5
+        | .scheduler_accounting = "linux_taskstats_tgid_cpu_delay_ns_v1"
         | .resource_measurement = "sampled_workload_peak_v1"
         | .backend_workers = $backend_workers
         | .role_workers = (if .proxy == "qpxd-webdav" then $webdav_workers elif (.proxy == "apache" or .proxy == "apache-webdav") then $apache_request_workers elif (.proxy | endswith("feature-rich")) then $feature_rich_workers elif (.proxy == "qpxd-cache" or .proxy == "nginx-cache") then $cache_workers elif .proxy == "qpxd-local" then $local_origin_workers elif (.proxy == "direct-backend" or .proxy == "nginx-static") then $backend_workers elif (.proxy | startswith("qpxd-workers-")) then (.proxy | ltrimstr("qpxd-workers-") | tonumber) else 1 end)
@@ -2024,7 +2030,8 @@ jq -cs \
         | .valid_samples = ($valid | length)
         | .sampling_order = "round_robin_interleaved"
         | .sample_spread_basis = "tightest_valid_majority"
-        | .benchmark_schema_version = 4
+        | .benchmark_schema_version = 5
+        | .scheduler_accounting = "linux_taskstats_tgid_cpu_delay_ns_v1"
         | .resource_measurement = "sampled_workload_peak_v1"
         | .backend_workers = $backend_workers
         | .role_workers = (if .proxy == "qpxd-webdav" then $webdav_workers elif (.proxy == "apache" or .proxy == "apache-webdav") then $apache_request_workers elif (.proxy | endswith("feature-rich")) then $feature_rich_workers elif (.proxy == "qpxd-cache" or .proxy == "nginx-cache") then $cache_workers elif .proxy == "qpxd-local" then $local_origin_workers elif (.proxy == "direct-backend" or .proxy == "nginx-static") then $backend_workers elif (.proxy | startswith("qpxd-workers-")) then (.proxy | ltrimstr("qpxd-workers-") | tonumber) else 1 end)

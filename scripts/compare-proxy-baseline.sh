@@ -166,8 +166,10 @@ def require_valid_sample(record):
         fail(f"proxy comparison record for {proxy} uses an unsupported aggregation")
     if record.get("sampling_order") != "round_robin_interleaved":
         fail(f"proxy comparison record for {proxy} uses an unsupported sampling order")
-    if positive_int(record, "benchmark_schema_version") != 4:
+    if positive_int(record, "benchmark_schema_version") != 5:
         fail(f"proxy comparison record for {proxy} uses an unsupported benchmark schema")
+    if record.get("scheduler_accounting") != "linux_taskstats_tgid_cpu_delay_ns_v1":
+        fail(f"proxy comparison record for {proxy} lacks completed-thread scheduler accounting")
     if record.get("resource_measurement") != "sampled_workload_peak_v1":
         fail(f"proxy comparison record for {proxy} uses an unsupported resource measurement")
     positive_int(record, "backend_workers")

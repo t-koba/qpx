@@ -90,8 +90,10 @@ def require_record(record, context):
         fail(f"{context} contains intrusive diagnostic sampling")
     if record.get("valid") is not True:
         fail(f"{context} is marked invalid")
-    if record.get("benchmark_schema_version") != 4:
+    if record.get("benchmark_schema_version") != 5:
         fail(f"{context} uses unsupported benchmark schema")
+    if record.get("scheduler_accounting") != "linux_taskstats_tgid_cpu_delay_ns_v1":
+        fail(f"{context} lacks completed-thread scheduler accounting")
     if record.get("resource_measurement") != "sampled_workload_peak_v1":
         fail(f"{context} uses unsupported resource measurement")
     if record.get("aggregation") != "conservative_median_per_metric":

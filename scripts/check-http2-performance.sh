@@ -213,8 +213,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"{owner} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"{owner} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version", owner) != 10:
+        if nonnegative_int(record, "benchmark_schema_version", owner) != 11:
             fail(f"{owner} uses an unsupported benchmark schema")
+        if record.get("scheduler_accounting") != "linux_taskstats_tgid_cpu_delay_ns_v1":
+            fail(f"{owner} lacks completed-thread scheduler accounting")
         if record.get("resource_counter_window") != "workload_before_sampler_shutdown_v1":
             fail(f"{owner} uses an unsupported resource counter window")
         target_duration = positive_number(record, "target_duration_seconds", owner)

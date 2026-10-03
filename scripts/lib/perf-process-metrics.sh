@@ -201,23 +201,35 @@ process_tree_fd_count() {
 
 process_tree_scheduler_run_delay_ns() {
   local root="$1"
-  local pid schedstat task total value
+  local output="${2:-}"
   if [ -z "$root" ] || [ ! -d /proc ]; then
     echo 0
     return
   fi
-  total=0
-  for pid in $(process_tree_pids "$root"); do
-    for task in "/proc/${pid}/task"/*; do
-      schedstat="${task}/schedstat"
-      if [ ! -r "$schedstat" ]; then
-        continue
-      fi
-      value="$(awk '{ print $2 }' "$schedstat")"
-      total=$((total + value))
-    done
-  done
-  echo "$total"
+  local arguments=("$root")
+  if [ -n "$output" ]; then
+    arguments+=("$output")
+  fi
+  perf_proc_python "$(dirname "${BASH_SOURCE[0]}")/perf-process-scheduler.py" "${arguments[@]}"
+}
+
+prepare_process_scheduler_accounting() {
+  if [ ! -d /proc ]; then
+    return
+  fi
+  if [ "$(id -u)" -eq 0 ]; then
+    sysctl -w kernel.task_delayacct=1 >&2
+  else
+    sudo -n sysctl -w kernel.task_delayacct=1 >&2
+  fi
+  if [ "$(cat /proc/sys/kernel/task_delayacct)" != 1 ]; then
+    echo "Invalid measurement: scheduler accounting is not enabled" >&2
+    return 1
+  fi
+}
+
+process_tree_scheduler_delta_ns() {
+  python3 "$(dirname "${BASH_SOURCE[0]}")/perf-process-scheduler.py" delta "$1" "$2"
 }
 
 monitor_process_tree_rss_peak() {

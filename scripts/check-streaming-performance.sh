@@ -121,8 +121,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"streaming performance record for {key} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"streaming performance record for {key} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version") != 9:
+        if nonnegative_int(record, "benchmark_schema_version") != 10:
             fail(f"streaming performance record for {key} uses an unsupported benchmark schema")
+        if record.get("scheduler_accounting") != "linux_taskstats_tgid_cpu_delay_ns_v1":
+            fail(f"{key} lacks completed-thread scheduler accounting")
         if record.get("resource_counter_window") != "workload_before_sampler_shutdown_v1":
             fail(f"streaming performance record for {key} includes unsupported counter boundaries")
         if record.get("cpu_measurement") != "linux_process_cpu_clock_ns_v1":
