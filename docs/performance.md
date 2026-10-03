@@ -1196,3 +1196,25 @@ three windows from 46,792/46,712/46,886 to 46,219/46,565/46,623. This is a
 small instruction reduction; normal throughput and CPU-efficiency goals
 remain unproven. The file-handoff trial present in `92f1cc7` is not exercised
 by this 1 KiB in-memory cache workload and has since been reverted.
+
+Miss Callgrind run `37149349025` on `92f1cc7` also succeeds. In its second
+miss window, `CacheRequestKey::from_parts` calls the allocator once per
+constructor (10,054/10,054), compared with three times on `42c4157`
+(25,659/8,553). This confirms the intended two-allocation removal independently
+of frontend normalization. Whole-program instructions per completed miss
+request decrease from 229,389/225,949/231,319 to 228,474/225,230/230,126;
+in-window writeback variation still prevents interpreting these totals as a
+precise persistence-cost reduction.
+
+The native allocation review also exposes unused cache-miss preparation.
+The production listener dispatches generic targets before calling the raw
+origin dispatcher, so its prepared raw cache-miss descriptor cannot serve a
+production cache miss. It nevertheless serializes an origin head, clones
+route/cache policy, prepares an origin, and parses a second header map for
+each new eligible request head. That unused descriptor, its unreachable
+dispatcher branch, and its private duplicate response-limit helper are now
+removed. The raw hot-hit path remains; misses retain the production generic
+path with request collapse, revalidation, body limits, and bounded writeback.
+The existing real-server differential test now also uses that production
+generic path to fill its real disk cache before comparing hot-hit responses.
+Fresh profiles must quantify the cleanup's performance effect.
