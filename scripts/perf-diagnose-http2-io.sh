@@ -48,6 +48,8 @@ for row in lifecycle:
     if row['role'].startswith('h2load-'):
         if row['requested_signal'] is not None or row['exit_status'] != 0:
             raise SystemExit('real h2load syscall trace did not complete cleanly')
+    elif row.get('seccomp_filter_observed') is not True:
+        raise SystemExit('real server syscall trace lacks the required kernel filter')
     elif row['requested_signal'] != 15 or row['exit_status'] not in (0, -15, 143):
         raise SystemExit('real server syscall trace did not stop cleanly')
 waits = []

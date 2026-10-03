@@ -573,3 +573,8 @@ share an owned process group with bounded termination, verified first using
 a real qpxd local-response server. Traced measurements carry diagnostic
 provenance and cannot satisfy required performance gates. Long waits and
 process lifecycle records are retained even when measurement quality fails.
+
+The HTTP/2 syscall diagnostic uses strace seccomp filtering to avoid ptrace
+stops for unobserved payload I/O. Its real-server ownership probe and every
+server lifecycle must confirm kernel seccomp filter mode in `/proc`; an
+unavailable filter cannot silently fall back to a valid diagnostic run.

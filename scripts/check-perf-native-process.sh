@@ -51,6 +51,21 @@ for _ in $(seq 1 100); do
 done
 [ "$ready" -eq 1 ]
 [ "$(cat "$probe_dir/response.txt")" = native-profiler-probe ]
+if [ "${QPX_NATIVE_PROFILE_MODE:-cpu}" = syscalls ]; then
+  python3 - "$probe_dir/qpxd-native-probe.lifecycle.json" <<'PY_FILTER'
+import json
+from pathlib import Path
+import sys
+import time
+path = Path(sys.argv[1])
+for _ in range(100):
+    if json.loads(path.read_text()).get("seccomp_filter_observed") is True:
+        break
+    time.sleep(0.01)
+else:
+    raise SystemExit("real syscall tracer did not install the required kernel filter")
+PY_FILTER
+fi
 kill -TERM "$probe_pid"
 status=0
 wait "$probe_pid" || status=$?
@@ -67,6 +82,8 @@ record = json.load(open(sys.argv[1]))
 if (record.get("forced_shutdown") is not False or record.get("requested_signal") != 15
         or record.get("exit_status") not in (0, -15, 143)):
     raise SystemExit("native profiler probe did not stop gracefully")
+if record.get("mode") == "syscalls" and record.get("seccomp_filter_observed") is not True:
+    raise SystemExit("real syscall trace lacks the required kernel filter")
 try:
     os.killpg(record["process_group"], 0)
 except ProcessLookupError:

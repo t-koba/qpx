@@ -48,10 +48,11 @@ def main():
     else:
         # Observe waits and socket ownership without recording payload buffers.
         syscalls = "epoll_wait,epoll_pwait,epoll_pwait2,epoll_ctl,poll,ppoll,select,pselect6,futex,connect,setsockopt,getsockopt,shutdown,close"
-        command = [observer, "-ff", "-qq", "-ttt", "-T", "-yy", "-s", "0",
+        command = [observer, "--seccomp-bpf", "-ff", "-qq", "-ttt", "-T", "-yy", "-s", "0",
                    "-e", f"trace={syscalls}", "-o", str(directory / f"{role}.syscalls"),
                    "--", server, *arguments]
         lifecycle["syscalls"] = syscalls.split(",")
+        lifecycle["seccomp_filter_observed"] = False
     process = subprocess.Popen(command, start_new_session=True)
     lifecycle.update({"profiler_pid": process.pid, "process_group": process.pid})
     forced = False
@@ -60,8 +61,25 @@ def main():
         lifecycle_path.write_text(json.dumps(lifecycle) + "\n")
         print(f"Native profiler process started: mode={mode} role={role} group={process.pid}", flush=True)
         while requested_signal is None:
+            if mode == "syscalls" and not lifecycle["seccomp_filter_observed"]:
+                children = Path(f"/proc/{process.pid}/task/{process.pid}/children")
+                try:
+                    child_ids = children.read_text().split()
+                except FileNotFoundError:
+                    child_ids = []
+                for child_id in child_ids:
+                    child_root = Path(f"/proc/{child_id}")
+                    try:
+                        executable = child_root.joinpath("exe").resolve(strict=True)
+                        fields = dict(line.split(":", 1) for line in child_root.joinpath("status").read_text().splitlines() if ":" in line)
+                    except FileNotFoundError:
+                        continue
+                    if executable == Path(server).resolve() and fields.get("Seccomp", "").strip() == "2":
+                        lifecycle["seccomp_filter_observed"] = True
+                        lifecycle["tracee_pid"] = int(child_id)
+                        lifecycle_path.write_text(json.dumps(lifecycle) + "\n")
             try:
-                status = process.wait(timeout=0.5)
+                status = process.wait(timeout=0.01 if mode == "syscalls" and not lifecycle["seccomp_filter_observed"] else 0.5)
                 break
             except subprocess.TimeoutExpired:
                 continue
