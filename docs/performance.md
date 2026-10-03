@@ -713,6 +713,17 @@ or decreasing counters invalidate the measurement. Required checkers reject
 records without the new accounting provenance. Performance thresholds remain
 unchanged.
 
+The `341205a` miss callgrind round-2 profile records 17.7 million instructions
+in path-component backward parsing, with additional path-component traversal
+and prefix checks. Canonical disk-object ID parsing now obtains the digest and
+exact extension from the already extracted final component instead of walking
+the full path twice more for `extension` and `file_stem`. Root-prefix, shard,
+component-count, filename, lowercase-hex, and digest-length checks remain.
+All 30 real disk-backend tests pass, including restart reads, capacity accounting,
+concurrent directory creation, symlink rejection, and malformed-extension cases.
+All-feature Clippy, formatting, structure, and required-gate checks pass.
+Linux profiles and paired measurements still determine the performance effect.
+
 Native proxy diagnostics also decode the second sample's real call chains with
 instruction addresses and symbol offsets. The exact ELF and its checksum remain
 retained with the profile. These records distinguish hot copies within a large

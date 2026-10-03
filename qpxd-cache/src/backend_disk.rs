@@ -1511,10 +1511,12 @@ fn cache_file_id_from_path(root: &Path, path: &Path) -> Option<DiskCacheFileId> 
     if components.next().is_some() || path.file_name()? != filename {
         return None;
     }
-    if path.extension().and_then(|extension| extension.to_str()) != Some(DISK_CACHE_FILE_EXT) {
-        return None;
-    }
-    let encoded = path.file_stem()?.to_str()?;
+    // The final component is already available; avoid traversing the full
+    // path again for its extension and stem.
+    let encoded = filename
+        .to_str()?
+        .strip_suffix(DISK_CACHE_FILE_EXT)?
+        .strip_suffix('.')?;
     if encoded.len() != 64 {
         return None;
     }
@@ -2513,6 +2515,13 @@ mod tests {
         assert_eq!(cache_file_id_from_path(&dir, &path), Some(id));
 
         let encoded = cache_file_id_hex(id);
+        for suffix in ["QPXC", "qpxc.extra", "qpxc.", "qpxc.qpxc"] {
+            let invalid = dir
+                .join(&encoded[0..2])
+                .join(&encoded[2..4])
+                .join(format!("{encoded}.{suffix}"));
+            assert_eq!(cache_file_id_from_path(&dir, &invalid), None);
+        }
         let misplaced = dir
             .join("ff")
             .join(&encoded[2..4])
