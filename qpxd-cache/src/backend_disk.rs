@@ -95,9 +95,31 @@ struct DiskCacheIndexEntry {
 }
 
 struct HotCacheEntry {
-    value: Bytes,
+    value: Option<Bytes>,
+    metadata: Option<Bytes>,
     expires_at_ms: u64,
     body_offset: u64,
+}
+
+impl HotCacheEntry {
+    fn memory_len(&self) -> u64 {
+        self.value.as_ref().map_or(0, |value| value.len() as u64)
+            + self.metadata.as_ref().map_or(0, |value| value.len() as u64)
+    }
+}
+
+struct HotCacheValue {
+    body: Bytes,
+    metadata: Option<(String, Bytes)>,
+}
+
+impl From<Bytes> for HotCacheValue {
+    fn from(body: Bytes) -> Self {
+        Self {
+            body,
+            metadata: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -452,28 +474,33 @@ impl DiskCacheBackend {
             .is_some_and(|entry| entry.expires_at_ms <= now);
         if expired {
             if let Some(entry) = state.hot_entries.pop(&file_id) {
-                state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
+                state.hot_bytes = state.hot_bytes.saturating_sub(entry.memory_len());
             }
             return HotCacheLookup::Miss(path);
         }
-        let value = state
-            .hot_entries
-            .get(&file_id)
-            .map(|entry| (entry.value.clone(), entry.expires_at_ms, entry.body_offset));
+        let value = state.hot_entries.get(&file_id).and_then(|entry| {
+            entry
+                .value
+                .as_ref()
+                .map(|value| (value.clone(), entry.expires_at_ms, entry.body_offset))
+        });
         drop(state);
         if let Some((value, expires_at_ms, body_offset)) = value {
             let file = open_zero_copy_source(key, &path, value.len() as u64);
             self.hot_recent_upsert(
-                RecentHotCacheEntry {
-                    file_id,
-                    namespace: std::sync::Arc::from(namespace),
-                    key: std::sync::Arc::from(key),
-                    path,
-                    value: value.clone(),
-                    expires_at_ms,
-                    body_offset,
-                    file: file.clone(),
-                },
+                [
+                    Some(RecentHotCacheEntry {
+                        file_id,
+                        namespace: std::sync::Arc::from(namespace),
+                        key: std::sync::Arc::from(key),
+                        path,
+                        value: value.clone(),
+                        expires_at_ms,
+                        body_offset,
+                        file: file.clone(),
+                    }),
+                    None,
+                ],
                 &[],
             );
             return HotCacheLookup::Hit {
@@ -539,44 +566,57 @@ impl DiskCacheBackend {
         namespace: &str,
         key: &str,
         path: PathBuf,
-        value: Bytes,
+        value: HotCacheValue,
         expires_at_ms: u64,
         body_offset: u64,
     ) {
-        let value_len = value.len() as u64;
-        if self.hot_max_bytes == 0
-            || value_len > self.hot_max_object_bytes
-            || value_len > self.hot_max_bytes
-            || expires_at_ms <= now_ms()
-        {
+        if self.hot_max_bytes == 0 || expires_at_ms <= now_ms() {
+            return;
+        }
+        let eligible = |bytes: &Bytes| {
+            bytes.len() as u64 <= self.hot_max_object_bytes
+                && bytes.len() as u64 <= self.hot_max_bytes
+        };
+        let body = eligible(&value.body).then_some(value.body);
+        let metadata = value.metadata.filter(|(_, bytes)| eligible(bytes));
+        if body.is_none() && metadata.is_none() {
             return;
         }
         let file_id = cache_file_id_from_path(&self.root, &path)
             .expect("hot cache entry must reference a canonical disk object");
-        let file = open_zero_copy_source(key, &path, value_len);
-        let recent = RecentHotCacheEntry {
+        let namespace = std::sync::Arc::<str>::from(namespace);
+        let body_recent = body.as_ref().map(|value| RecentHotCacheEntry {
             file_id,
-            namespace: std::sync::Arc::from(namespace),
+            namespace: namespace.clone(),
             key: std::sync::Arc::from(key),
+            path: path.clone(),
+            value: value.clone(),
+            expires_at_ms,
+            body_offset,
+            file: open_zero_copy_source(key, &path, value.len() as u64),
+        });
+        let metadata_recent = metadata.as_ref().map(|(key, value)| RecentHotCacheEntry {
+            file_id,
+            namespace: namespace.clone(),
+            key: std::sync::Arc::from(key.as_str()),
             path,
             value: value.clone(),
             expires_at_ms,
             body_offset,
-            file,
+            file: None,
+        });
+        let entry = HotCacheEntry {
+            value: body,
+            metadata: metadata.map(|(_, bytes)| bytes),
+            expires_at_ms,
+            body_offset,
         };
         let mut state = self.state.lock().await;
         if let Some(previous) = state.hot_entries.pop(&file_id) {
-            state.hot_bytes = state.hot_bytes.saturating_sub(previous.value.len() as u64);
+            state.hot_bytes = state.hot_bytes.saturating_sub(previous.memory_len());
         }
-        state.hot_bytes = state.hot_bytes.saturating_add(value_len);
-        state.hot_entries.put(
-            file_id,
-            HotCacheEntry {
-                value,
-                expires_at_ms,
-                body_offset,
-            },
-        );
+        state.hot_bytes = state.hot_bytes.saturating_add(entry.memory_len());
+        state.hot_entries.put(file_id, entry);
         let mut evicted_ids = Vec::new();
         while state.hot_bytes > self.hot_max_bytes
             || state.hot_entries.len() > DISK_CACHE_HOT_MAX_ENTRIES
@@ -586,10 +626,21 @@ impl DiskCacheBackend {
                 break;
             };
             evicted_ids.push(evicted_id);
-            state.hot_bytes = state.hot_bytes.saturating_sub(evicted.value.len() as u64);
+            state.hot_bytes = state.hot_bytes.saturating_sub(evicted.memory_len());
         }
         drop(state);
-        self.hot_recent_upsert(recent, &evicted_ids);
+        let retained = !evicted_ids.contains(&file_id);
+        // Publish the completed file's eligible views together and remove
+        // obsolete views from this publication snapshot.
+        evicted_ids.push(file_id);
+        self.hot_recent_upsert(
+            if retained {
+                [body_recent, metadata_recent]
+            } else {
+                [None, None]
+            },
+            &evicted_ids,
+        );
     }
 
     async fn hot_remove(&self, path: &Path) {
@@ -598,7 +649,7 @@ impl DiskCacheBackend {
         self.hot_recent_remove(file_id);
         let mut state = self.state.lock().await;
         if let Some(entry) = state.hot_entries.pop(&file_id) {
-            state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
+            state.hot_bytes = state.hot_bytes.saturating_sub(entry.memory_len());
         }
     }
 
@@ -617,7 +668,7 @@ impl DiskCacheBackend {
         self.hot_recent_remove(file_id);
         let mut state = self.state.lock().await;
         if let Some(entry) = state.hot_entries.pop(&file_id) {
-            state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
+            state.hot_bytes = state.hot_bytes.saturating_sub(entry.memory_len());
         }
         if let Some(entry) = state.entries.remove(&file_id) {
             state.total_bytes = state.total_bytes.saturating_sub(entry.total_len);
@@ -625,10 +676,14 @@ impl DiskCacheBackend {
         Ok(())
     }
 
-    fn hot_recent_upsert(&self, entry: RecentHotCacheEntry, removed: &[DiskCacheFileId]) {
+    fn hot_recent_upsert(
+        &self,
+        entries: [Option<RecentHotCacheEntry>; 2],
+        removed: &[DiskCacheFileId],
+    ) {
         // Snapshot updates share immutable records instead of copying every
         // retained path, payload handle, and key in the affected shard.
-        let entry = std::sync::Arc::new(entry);
+        let entries = entries.map(|entry| entry.map(std::sync::Arc::new));
         let _update =
             HotRecentUpdateGuard::acquire(&self.hot_recent_update, &self.hot_recent_generation);
         self.hot_recent.rcu(|current| {
@@ -642,8 +697,10 @@ impl DiskCacheBackend {
                     }
                 }
             }
-            let slot = hot_slot(entry.namespace.as_ref(), entry.key.as_ref());
-            *recent_hot_entry_mut(&mut shards, slot) = Some(entry.clone());
+            for entry in entries.iter().flatten() {
+                let slot = hot_slot(entry.namespace.as_ref(), entry.key.as_ref());
+                *recent_hot_entry_mut(&mut shards, slot) = Some(entry.clone());
+            }
             RecentHotCache { shards }
         });
     }
@@ -763,7 +820,7 @@ impl DiskCacheBackend {
             namespace,
             key,
             path.to_path_buf(),
-            value,
+            value.into(),
             write.expires_at_ms,
             write.body_offset,
         )
@@ -824,8 +881,7 @@ impl DiskCacheBackend {
         if let CachedBody::Memory(value) = body {
             let write_path = path.to_path_buf();
             let value = value.clone();
-            let meta_key = metadata.as_ref().map(|(meta_key, _)| meta_key.clone());
-            let meta_bytes = metadata.as_ref().map(|(_, meta)| meta.clone());
+            let (meta_key, meta_bytes) = metadata.unzip();
             let (write, value, written_meta) = tokio::task::spawn_blocking(move || {
                 write_cached_object_sync(write_path.as_path(), value, meta_bytes, ttl_secs)
             })
@@ -837,22 +893,14 @@ impl DiskCacheBackend {
                 namespace,
                 key,
                 path.to_path_buf(),
-                value,
+                HotCacheValue {
+                    body: value,
+                    metadata: meta_key.zip(written_meta),
+                },
                 write.expires_at_ms,
                 write.body_offset,
             )
             .await;
-            if let (Some(meta_key), Some(meta)) = (meta_key, written_meta) {
-                self.hot_insert(
-                    namespace,
-                    meta_key.as_str(),
-                    path.to_path_buf(),
-                    meta,
-                    write.expires_at_ms,
-                    write.body_offset,
-                )
-                .await;
-            }
             return Ok(());
         }
 
@@ -939,7 +987,7 @@ impl CacheBackend for DiskCacheBackend {
             namespace,
             key,
             read.path,
-            value.clone(),
+            value.clone().into(),
             read.header.expires_at_ms,
             read.body_offset,
         )
@@ -1133,7 +1181,7 @@ impl CacheBackend for DiskCacheBackend {
                 namespace,
                 key,
                 read.path.clone(),
-                value.clone(),
+                value.clone().into(),
                 read.header.expires_at_ms,
                 read.body_offset,
             )
@@ -2414,10 +2462,179 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inline_metadata_does_not_replace_lru_body_after_recent_collision() {
+        let dir = temp_dir("inline-metadata-lru-collision");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let metadata_key = "obj:collision:default";
+        let body_key = cache_body_storage_key(metadata_key);
+        let path = backend.path_for("ns", &body_key);
+        backend
+            .put_object_path(
+                "ns",
+                &body_key,
+                &path,
+                &CachedBody::from_bytes(Bytes::from_static(b"original")),
+                Some((metadata_key.to_string(), Bytes::from_static(b"metadata"))),
+                60,
+            )
+            .await
+            .expect("persist body and inline metadata");
+        let collision = (0..10_000)
+            .map(|index| format!("collision-{index}"))
+            .find(|key| hot_slot("ns", key) == hot_slot("ns", &body_key))
+            .expect("find a real recent-cache slot collision");
+        backend
+            .put("ns", &collision, b"x", 60)
+            .await
+            .expect("put collision");
+        assert!(
+            backend
+                .hot_recent_lookup("ns", &body_key, now_ms())
+                .is_none()
+        );
+        assert_eq!(
+            backend
+                .get("ns", &body_key)
+                .await
+                .expect("read body through LRU"),
+            Some(Bytes::from_static(b"original"))
+        );
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn inline_metadata_and_body_both_count_toward_hot_capacity() {
+        let dir = temp_dir("inline-metadata-hot-capacity");
+        let mut backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend.hot_max_bytes = 16;
+        let metadata_key = "obj:capacity:default";
+        let body_key = cache_body_storage_key(metadata_key);
+        let path = backend.path_for("ns", &body_key);
+        backend
+            .put_object_path(
+                "ns",
+                &body_key,
+                &path,
+                &CachedBody::from_bytes(Bytes::from_static(b"original")),
+                Some((metadata_key.to_string(), Bytes::from_static(b"metadata"))),
+                60,
+            )
+            .await
+            .expect("persist body and metadata within hot capacity");
+        assert_eq!(backend.state.lock().await.hot_bytes, 16);
+        backend
+            .put("ns", "other", b"replaced", 60)
+            .await
+            .expect("evict combined object");
+        assert!(
+            backend
+                .hot_recent_lookup("ns", &body_key, now_ms())
+                .is_none()
+        );
+        assert!(
+            backend
+                .hot_recent_lookup("ns", metadata_key, now_ms())
+                .is_none()
+        );
+        assert!(backend.state.lock().await.hot_bytes <= 16);
+        assert_eq!(
+            backend
+                .get("ns", &body_key)
+                .await
+                .expect("read persistent body"),
+            Some(Bytes::from_static(b"original"))
+        );
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn inline_metadata_remains_hot_when_body_exceeds_object_limit() {
+        let dir = temp_dir("inline-metadata-large-body");
+        let mut backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend.hot_max_object_bytes = 8;
+        let metadata_key = "obj:large-body:default";
+        let body_key = cache_body_storage_key(metadata_key);
+        let path = backend.path_for("ns", &body_key);
+        backend
+            .put_object_path(
+                "ns",
+                &body_key,
+                &path,
+                &CachedBody::from_bytes(Bytes::from_static(b"large-body")),
+                Some((metadata_key.to_string(), Bytes::from_static(b"metadata"))),
+                60,
+            )
+            .await
+            .expect("persist large body and small metadata");
+        assert!(
+            backend
+                .hot_recent_lookup("ns", &body_key, now_ms())
+                .is_none()
+        );
+        assert!(matches!(
+            backend.hot_recent_lookup("ns", metadata_key, now_ms()),
+            Some(HotCacheLookup::Hit { .. })
+        ));
+        assert_eq!(backend.state.lock().await.hot_bytes, 8);
+        assert_eq!(
+            backend
+                .get("ns", &body_key)
+                .await
+                .expect("read large disk body"),
+            Some(Bytes::from_static(b"large-body"))
+        );
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn combined_hot_file_over_capacity_leaves_no_recent_views() {
+        let dir = temp_dir("inline-metadata-combined-capacity");
+        let mut backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend.hot_max_bytes = 8;
+        let metadata_key = "obj:combined-capacity:default";
+        let body_key = cache_body_storage_key(metadata_key);
+        let path = backend.path_for("ns", &body_key);
+        backend
+            .put_object_path(
+                "ns",
+                &body_key,
+                &path,
+                &CachedBody::from_bytes(Bytes::from_static(b"original")),
+                Some((metadata_key.to_string(), Bytes::from_static(b"metadata"))),
+                60,
+            )
+            .await
+            .expect("persist object exceeding combined hot capacity");
+        assert_eq!(backend.state.lock().await.hot_bytes, 0);
+        assert!(
+            backend
+                .hot_recent_lookup("ns", &body_key, now_ms())
+                .is_none()
+        );
+        assert!(
+            backend
+                .hot_recent_lookup("ns", metadata_key, now_ms())
+                .is_none()
+        );
+        assert_eq!(
+            backend
+                .read_response_metadata("ns", metadata_key)
+                .await
+                .expect("read disk metadata"),
+            Some(Bytes::from_static(b"metadata"))
+        );
+        assert_eq!(
+            backend.get("ns", &body_key).await.expect("read disk body"),
+            Some(Bytes::from_static(b"original"))
+        );
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[tokio::test]
     async fn disk_hot_eviction_invalidates_body_and_metadata_by_file_identity() {
         let dir = temp_dir("hot-file-identity-eviction");
         let mut backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
-        backend.hot_max_bytes = 8;
+        backend.hot_max_bytes = 16;
         let body_key = cache_body_storage_key("obj:eviction:default");
         let metadata_key = "obj:eviction:default";
         assert_ne!(hot_slot("ns", &body_key), hot_slot("ns", metadata_key));
@@ -2442,7 +2659,7 @@ mod tests {
             Some(HotCacheLookup::Hit { .. })
         ));
         backend
-            .put("ns", "other", b"replaced", 60)
+            .put("ns", "other", b"replaced-content", 60)
             .await
             .expect("evict source hot entry");
         assert!(

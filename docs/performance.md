@@ -914,3 +914,17 @@ process, including user/system CPU, context switches, peak RSS, and exit status.
 The same wrapper observes calibration and measurement, while ordinary required
 runs continue to execute h2load directly. These client observations supplement
 server resource records and cannot satisfy the normal gate.
+
+Review of the file-identity LRU exposed an existing inline-metadata defect:
+body and metadata inserts used the same physical-file key and replaced each
+other's LRU value. Real-file regression tests reproduced returning `metadata`
+instead of `original` after a recent-cache slot collision, and accounting for
+only 8 bytes when an 8-byte body and 8-byte metadata were both retained.
+Hot entries now own the body's optional bytes and inline metadata separately
+under one physical identity and account for their combined length. A completed
+file write publishes both eligible recent views in one snapshot, removing old
+views and avoiding a second LRU update and snapshot publication. Oversized
+bodies still retain eligible metadata; an over-capacity combined object leaves
+no unaccounted recent views. The existing eviction fixture now budgets the
+actual 16-byte combined object and still verifies invalidation of both views.
+Disk schema, filenames, writeback admission, and durable publication are unchanged.
