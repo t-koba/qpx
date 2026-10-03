@@ -756,3 +756,18 @@ The eight-second calibration and all three samples per role use that same
 partition. Every lane retains the default finite measurement-spread limits.
 This experiment tests CPU competition as a cause of calibration instability;
 it neither replaces normal acceptance gates nor establishes causality alone.
+
+The retained native ELF at `2760716` verifies a further request-executor poll
+frame reduction from 15,048 bytes to 12,216 bytes (`0x2fb8`), with two page
+probes. Source-line decoding maps a remaining 352-byte copy to the owned
+request entering `ReversePostModuleInput`; the observed access-result copy
+is now 944 bytes. Sample counts alone are not a paired CPU-efficiency result.
+
+GitHub job start/end timestamps provide an initial CI scheduling comparison:
+run `35880330277` spent 95.55 minutes in the single performance audit; run
+`37121209517` spanned 35.15 minutes from the performance build start through
+aggregation, with 92.60 summed runner minutes across the build, eight categories,
+and aggregate gate. These figures exclude queue time and other workflow jobs.
+The commits, resource accounting, and cache state differ, so this is an observed
+operational result rather than a controlled estimate of split-only savings.
+Both runs failed acceptance; reduced waiting time does not establish completion.
