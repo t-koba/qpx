@@ -1238,3 +1238,22 @@ of a feature-rich instruction improvement from the unused miss cleanup.
 The new key-sharing experiment passes 1,302 workspace tests across 47
 suites and all-feature Clippy. An all-feature local test attempt stops at
 linking because of disk exhaustion; it is not counted as a test pass.
+
+Cache-miss Callgrind run `37152892350` on `73ae6f0` confirms removal of
+the duplicate constructor: the second miss window falls from 10,136
+constructors / 5,028 frontend requests on `1cd6a36` to 8,015 / 7,959.
+The earlier profile has two constructor callers (raw probe and generic
+lookup); the new profile has only the raw probe caller. Both revisions
+allocate once per constructor. Whole-program instructions per completed
+miss request change from 227,152/225,808/224,040 to
+212,915/213,016/211,798. Background persistence work still varies with
+admission and sampling windows, so normal CPU-efficiency and throughput
+measurements remain necessary. Feature-rich instructions stay approximately
+unchanged (46,573/46,892/46,718); that path does not perform the raw probe.
+
+A real-server/disk-cache fixture now verifies that structured JSON access
+logging prevents raw request preparation entirely. The existing destination
+trace guard already provides this protection; no additional production
+condition is added. The additional regression test passes with all 1,303
+workspace tests across 47 suites, all-feature Clippy, and the unchanged
+eight-category / sixteen-evaluation performance-gate presence checks.

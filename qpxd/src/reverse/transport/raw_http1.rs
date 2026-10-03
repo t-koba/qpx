@@ -884,11 +884,12 @@ mod tests {
     fn build_cache_hit_reverse_fixture(
         upstream_addr: std::net::SocketAddr,
         cache_dir: &std::path::Path,
+        access_log: qpx_core::config::AccessLogConfig,
     ) -> crate::reverse::ReloadableReverse {
         use qpx_core::config::{
-            AccessLogConfig, AuditLogConfig, CacheBackendConfig, CachePolicyConfig, Config,
-            IdentityConfig, MessagesConfig, ReverseEdgeConfig, ReverseRouteConfig,
-            ReverseRouteTargetConfig, RuntimeConfig, SystemLogConfig, UpstreamConfig,
+            AuditLogConfig, CacheBackendConfig, CachePolicyConfig, Config, IdentityConfig,
+            MessagesConfig, ReverseEdgeConfig, ReverseRouteConfig, ReverseRouteTargetConfig,
+            RuntimeConfig, SystemLogConfig, UpstreamConfig,
         };
 
         let route = ReverseRouteConfig {
@@ -960,7 +961,7 @@ mod tests {
             runtime: RuntimeConfig::default(),
             telemetry: qpx_core::config::TelemetryConfig {
                 system_log: SystemLogConfig::default(),
-                access_log: AccessLogConfig::default(),
+                access_log,
                 audit_log: AuditLogConfig::default(),
                 metrics: None,
                 otel: None,
@@ -1045,7 +1046,11 @@ mod tests {
         // On macOS /var is a symlink to /private/var and the disk backend
         // refuses symlinked path components, so resolve the real path first.
         let cache_path = std::fs::canonicalize(cache_dir.path()).expect("canonicalize cache dir");
-        let reverse = build_cache_hit_reverse_fixture(upstream_addr, &cache_path);
+        let reverse = build_cache_hit_reverse_fixture(
+            upstream_addr,
+            &cache_path,
+            qpx_core::config::AccessLogConfig::default(),
+        );
 
         let conn =
             ReverseConnInfo::plain(std::net::SocketAddr::from(([127, 0, 0, 1], 4242)), 18080);
@@ -1162,6 +1167,43 @@ mod tests {
         assert_eq!(hit_body.as_ref(), BODY.as_bytes());
     }
 
+    #[tokio::test]
+    async fn raw_cache_hits_keep_structured_access_log_processing() {
+        let upstream_addr = crate::test_util::spawn_static_http_server(
+            "200 OK",
+            vec![("Cache-Control", "max-age=600".to_string())],
+            "payload".to_string(),
+            1,
+        )
+        .await;
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        let cache_path = std::fs::canonicalize(cache_dir.path()).expect("canonicalize cache dir");
+        let mut access_log = qpx_core::config::AccessLogConfig::default();
+        access_log.output.enabled = true;
+        access_log.output.format = "json".to_string();
+        access_log.output.path = Some(cache_path.join("access.jsonl").to_string_lossy().into());
+        let reverse = build_cache_hit_reverse_fixture(upstream_addr, &cache_path, access_log);
+        let conn =
+            ReverseConnInfo::plain(std::net::SocketAddr::from(([127, 0, 0, 1], 4242)), 18080);
+        let mut connection_cache = RawHttp1ConnectionCache::default();
+        assert!(reverse.runtime.state().destination_trace_enabled());
+        let headers = [httparse::Header {
+            name: "Host",
+            value: b"bench.local",
+        }];
+        let view = RawHttp1RequestView {
+            raw_head: b"GET /bench-1 HTTP/1.1\r\nHost: bench.local\r\n\r\n",
+            method: "GET",
+            target: "/bench-1",
+            version: 1,
+            headers: &headers,
+        };
+        assert!(
+            prepare_raw_http1_request(&reverse, &conn, view, &mut connection_cache).is_none(),
+            "structured access logs require the full service for cache hits"
+        );
+    }
+
     /// Conditional and HEAD requests must keep using the generic chain.
     #[tokio::test]
     async fn raw_cache_hit_fast_path_skips_conditional_and_head_requests() {
@@ -1174,7 +1216,11 @@ mod tests {
         .await;
         let cache_dir = tempfile::tempdir().expect("cache dir");
         let cache_path = std::fs::canonicalize(cache_dir.path()).expect("canonicalize cache dir");
-        let reverse = build_cache_hit_reverse_fixture(upstream_addr, &cache_path);
+        let reverse = build_cache_hit_reverse_fixture(
+            upstream_addr,
+            &cache_path,
+            qpx_core::config::AccessLogConfig::default(),
+        );
         let conn =
             ReverseConnInfo::plain(std::net::SocketAddr::from(([127, 0, 0, 1], 4242)), 18080);
 
