@@ -1148,3 +1148,20 @@ Large WebDAV p99 ratios are 1.1167/1.7713/1.8621, with existing CPU-efficiency
 acceptance failing in runs 1 and 3. The normal proxy jobs also fail the
 existing reverse-proxy queue-delay and 1 MiB CPU-baseline checks. These
 results do not constitute CI normalization or final performance acceptance.
+
+Native proxy diagnostic `37147538478` on `8cdbd46` succeeds with zero lost
+samples for both real server profiles. Its second miss window contains
+4,447 callchain samples, including 626 sampled inside allocator functions
+and 128 containing directory validation. Allocator callers include request
+preparation, upstream dispatch, and cache-key construction. Directory checks
+are therefore not the only cost and must not be removed speculatively.
+
+Cache keys previously allocated three separate shared `OnceLock` owners for
+the primary digest and two derived storage keys. A separate trial groups
+those locks in one shared owner, removing two allocations per newly created
+key and two reference-count updates per clone. Method-group changes still
+create fresh derived state; content-digest changes retain the original
+primary-key sharing semantics. Public methods, digest inputs, storage-key
+formats, and writeback admission are unchanged. Existing cross-thread and
+storage-key identity tests verify these invariants; fresh profiles and normal
+comparisons must establish the performance effect.

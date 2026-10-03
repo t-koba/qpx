@@ -1,4 +1,4 @@
-use super::types::CacheRequestKey;
+use super::types::{CacheRequestKey, DerivedCacheRequestKeys};
 use anyhow::Result;
 use http::header::HOST;
 use hyper::{Method, Request};
@@ -129,9 +129,7 @@ impl CacheRequestKey {
             authority: self.authority.clone(),
             path_and_query: self.path_and_query.clone(),
             content_digest: self.content_digest.clone(),
-            primary_hash: Arc::new(std::sync::OnceLock::new()),
-            primary_index_storage_key: Arc::new(std::sync::OnceLock::new()),
-            primary_default_variant_storage_key: Arc::new(std::sync::OnceLock::new()),
+            derived: Arc::new(DerivedCacheRequestKeys::default()),
         }
     }
 
@@ -153,22 +151,22 @@ impl CacheRequestKey {
             authority,
             path_and_query,
             content_digest: None,
-            primary_hash: Arc::new(std::sync::OnceLock::new()),
-            primary_index_storage_key: Arc::new(std::sync::OnceLock::new()),
-            primary_default_variant_storage_key: Arc::new(std::sync::OnceLock::new()),
+            derived: Arc::new(DerivedCacheRequestKeys::default()),
         }
     }
 
     pub(crate) fn primary_hash_arc(&self) -> Arc<str> {
         // A request can move between runtime workers before writeback. Keep
         // its digest with the key so every clone shares the same computation.
-        self.primary_hash
+        self.derived
+            .primary_hash
             .get_or_init(|| Arc::from(self.compute_primary_hash()))
             .clone()
     }
 
     pub(crate) fn primary_index_storage_key_arc(&self) -> Arc<str> {
-        self.primary_index_storage_key
+        self.derived
+            .primary_index_storage_key
             .get_or_init(|| {
                 Arc::from(super::vary::index_storage_key(
                     self.primary_hash_arc().as_ref(),
@@ -185,7 +183,8 @@ impl CacheRequestKey {
     /// Storage key of the canonical Vary-less variant. Vary-less responses
     /// publish no variant index, so lookups probe this deterministic key.
     pub fn primary_default_variant_storage_key(&self) -> Arc<str> {
-        self.primary_default_variant_storage_key
+        self.derived
+            .primary_default_variant_storage_key
             .get_or_init(|| {
                 Arc::from(super::vary::variant_storage_key(
                     self.primary_hash_arc().as_ref(),

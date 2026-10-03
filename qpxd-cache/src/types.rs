@@ -275,9 +275,14 @@ pub struct CacheRequestKey {
     pub(crate) authority: std::sync::Arc<str>,
     pub(crate) path_and_query: std::sync::Arc<str>,
     pub(crate) content_digest: Option<std::sync::Arc<str>>,
-    pub(crate) primary_hash: std::sync::Arc<OnceLock<std::sync::Arc<str>>>,
-    pub(crate) primary_index_storage_key: std::sync::Arc<OnceLock<std::sync::Arc<str>>>,
-    pub(crate) primary_default_variant_storage_key: std::sync::Arc<OnceLock<std::sync::Arc<str>>>,
+    pub(crate) derived: std::sync::Arc<DerivedCacheRequestKeys>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DerivedCacheRequestKeys {
+    pub(crate) primary_hash: OnceLock<std::sync::Arc<str>>,
+    pub(crate) primary_index_storage_key: OnceLock<std::sync::Arc<str>>,
+    pub(crate) primary_default_variant_storage_key: OnceLock<std::sync::Arc<str>>,
 }
 
 #[derive(Debug)]
