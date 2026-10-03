@@ -114,7 +114,6 @@ pub(super) enum ReverseStageOutcome<T> {
 pub(super) type ReverseAccessOutcome = ReverseStageOutcome<ReverseAccessControl>;
 
 pub(super) struct ReverseAccessControl {
-    pub(super) req: Request<Body>,
     pub(super) audit_ctx: DispatchAuditContext,
     pub(super) route_headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) override_upstream: Option<String>,
@@ -135,7 +134,8 @@ pub(super) struct ReverseAccessInput<'a> {
     pub(super) request_method: &'a Method,
     pub(super) path: Option<&'a str>,
     pub(super) request_uri: &'a str,
-    pub(super) req: Request<Body>,
+    // Exclusive borrowing preserves Send for bodies that are not Sync.
+    pub(super) req: &'a mut Request<Body>,
     pub(super) route: &'a HttpRoute,
     pub(super) selected_policy: &'a EffectivePolicyContext,
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
@@ -143,15 +143,11 @@ pub(super) struct ReverseAccessInput<'a> {
     pub(super) request_destination: &'a crate::destination::DestinationMetadata,
 }
 
-pub(super) type ReverseModuleOutcome = ReverseStageOutcome<ReverseModuleDispatch>;
-
-pub(super) struct ReverseModuleDispatch {
-    pub(super) req: Request<Body>,
-    pub(super) http_modules: crate::http::modules::HttpModuleExecution,
-}
+pub(super) type ReverseModuleOutcome =
+    ReverseStageOutcome<crate::http::modules::HttpModuleExecution>;
 
 pub(super) struct ReverseModuleInput<'a> {
-    pub(super) req: Request<Body>,
+    pub(super) req: &'a mut Request<Body>,
     pub(super) state: &'a Arc<runtime::RuntimeState>,
     pub(super) selected_policy: &'a EffectivePolicyContext,
     pub(super) conn: &'a ReverseConnInfo,

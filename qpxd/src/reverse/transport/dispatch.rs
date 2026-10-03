@@ -533,7 +533,7 @@ fn execute_reverse_request<'a>(
             request_method,
             path,
             request_uri,
-            req,
+            req: &mut req,
             route,
             selected_policy: &selected_policy,
             identity: &identity,
@@ -552,7 +552,6 @@ fn execute_reverse_request<'a>(
             ReverseAccessOutcome::Continue(access) => access,
         };
         let ReverseAccessControl {
-            mut req,
             audit_ctx,
             route_headers,
             override_upstream,
@@ -591,8 +590,8 @@ fn execute_reverse_request<'a>(
             ));
         }
 
-        let module_dispatch = match prepare_reverse_modules(ReverseModuleInput {
-            req,
+        let http_modules = match prepare_reverse_modules(ReverseModuleInput {
+            req: &mut req,
             state: &state,
             selected_policy: &selected_policy,
             conn,
@@ -619,7 +618,6 @@ fn execute_reverse_request<'a>(
             }
             ReverseModuleOutcome::Continue(dispatch) => dispatch,
         };
-        let ReverseModuleDispatch { req, http_modules } = module_dispatch;
         let request_cache_policy = route.plan.cache.as_ref().filter(|_| !cache_bypass);
         if let Some(collector) = route.plan.reporting_collector.as_ref() {
             let response = collect_browser_reports(

@@ -1,4 +1,4 @@
-use super::{ReverseModuleDispatch, ReverseModuleInput, ReverseModuleOutcome};
+use super::{ReverseModuleInput, ReverseModuleOutcome};
 use crate::http::dispatch::{ProxyKind, prepare_http_module_local_response};
 use crate::http::protocol::l7::apply_request_header_control_in_place;
 use crate::policy_context::strip_untrusted_identity_headers;
@@ -9,7 +9,7 @@ pub(super) async fn prepare_reverse_modules(
     input: ReverseModuleInput<'_>,
 ) -> Result<ReverseModuleOutcome> {
     let ReverseModuleInput {
-        mut req,
+        req,
         state,
         selected_policy,
         conn,
@@ -28,11 +28,11 @@ pub(super) async fn prepare_reverse_modules(
         req.headers_mut(),
     )?;
     if let Some(rewrite) = route.path_rewrite.as_ref() {
-        apply_path_rewrite(&mut req, rewrite);
+        apply_path_rewrite(req, rewrite);
     }
-    apply_request_header_control_in_place(&mut req, route_headers);
+    apply_request_header_control_in_place(req, route_headers);
     let request_cache_policy = route.plan.cache.as_ref().filter(|_| !cache_bypass);
-    let mut http_modules = route.plan.modules.start_for_request(state, &req, || {
+    let mut http_modules = route.plan.modules.start_for_request(state, req, || {
         crate::http::modules::HttpModuleSessionInit {
             proxy_kind: ProxyKind::Reverse,
             proxy_name,
@@ -46,17 +46,11 @@ pub(super) async fn prepare_reverse_modules(
         }
     });
     if http_modules.is_empty() {
-        return Ok(ReverseModuleOutcome::Continue(ReverseModuleDispatch {
-            req,
-            http_modules,
-        }));
+        return Ok(ReverseModuleOutcome::Continue(http_modules));
     }
-    match http_modules.on_request_headers(&mut req).await? {
+    match http_modules.on_request_headers(req).await? {
         crate::http::modules::RequestHeadersOutcome::Continue => {
-            Ok(ReverseModuleOutcome::Continue(ReverseModuleDispatch {
-                req,
-                http_modules,
-            }))
+            Ok(ReverseModuleOutcome::Continue(http_modules))
         }
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
             let response = prepare_http_module_local_response(

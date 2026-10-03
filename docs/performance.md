@@ -735,3 +735,12 @@ stack temporaries. The unconditional plain HTTP path remains inline. The
 resulting frame size and product performance require verification with a new
 Linux ELF and normal paired measurements; source restructuring alone is not a
 performance pass.
+
+The decoded feature-rich cache-hit sample also identifies 90 memory-copy samples
+at 47 callsites within the request executor, including 352-byte request moves
+and 1,296-byte stage results. Access-control and module preparation now borrow
+the request kept by their caller rather than returning it in stage results.
+Exclusive borrowing preserves the existing Send requirement for bodies that
+are not Sync. The obsolete module-result wrapper is removed. Evaluation order,
+header rewrites, module responses, and request ownership on upstream dispatch
+remain unchanged; the performance effect must be measured independently.

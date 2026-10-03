@@ -51,7 +51,7 @@ pub(super) async fn enforce_reverse_access_control(
         if let Some(profile) = route.plan.guard.as_deref()
             && let Some(response) = evaluate_http_guard(DispatchGuardInput {
                 profile: Some(profile),
-                req: &req,
+                req,
                 destination: request_destination,
                 proxy_name,
                 audit: std::borrow::Cow::Borrowed(&audit_ctx),
@@ -115,7 +115,6 @@ pub(super) async fn enforce_reverse_access_control(
             return Ok(ReverseAccessOutcome::Response(Box::new(response)));
         }
         return Ok(ReverseAccessOutcome::Continue(ReverseAccessControl {
-            req,
             audit_ctx,
             route_headers: route.headers.clone(),
             override_upstream: None,
@@ -169,7 +168,7 @@ pub(super) async fn enforce_reverse_access_control(
     if let Some(profile) = route.plan.guard.as_deref()
         && let Some(response) = evaluate_http_guard(DispatchGuardInput {
             profile: Some(profile),
-            req: &req,
+            req,
             destination: request_destination,
             proxy_name,
             audit: std::borrow::Cow::Borrowed(&audit_ctx),
@@ -263,7 +262,6 @@ pub(super) async fn enforce_reverse_access_control(
     let authorization_decision =
         (!authorization_decision.is_empty()).then_some(authorization_decision);
     Ok(ReverseAccessOutcome::Continue(ReverseAccessControl {
-        req,
         audit_ctx,
         route_headers: allowed.headers,
         override_upstream: allowed.override_upstream,
