@@ -18,14 +18,14 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
-        description: Baseline commit for the same-runner WebDAV comparison
+        description: Baseline commit for the same-runner origin/cache comparison
         type: string
         default: "9500bb1d764e8cee9b0b24bd9bea96ba512418fc"
       revision_order:
-        description: Version order for the same-runner WebDAV comparison
+        description: Version order for the same-runner origin/cache comparison
         type: choice
         options: [baseline-current, current-baseline]
         default: baseline-current
@@ -126,9 +126,9 @@ jobs:
         env:
           CATEGORY: ${{ inputs.category || 'streaming' }}
           RUSTFLAGS: "-D warnings"
-      - name: build WebDAV baseline before measurement
+      - name: build origin/cache baseline before measurement
         id: baseline
-        if: inputs.category == 'webdav-revision'
+        if: inputs.category == 'webdav-revision' || inputs.category == 'cache-revision'
         env:
           BASELINE_REF: ${{ inputs.baseline_ref }}
           RUSTFLAGS: "-D warnings"
@@ -200,7 +200,11 @@ jobs:
               ;;
             webdav-revision)
               QPX_PERF_REVISION_ORDER="${{ inputs.revision_order }}" \
-                python3 scripts/perf-evaluate.py "WebDAV same-runner revision objectives" -- bash scripts/perf-diagnose-webdav-revision.sh
+                python3 scripts/perf-evaluate.py "WebDAV same-runner revision objectives" -- bash scripts/perf-diagnose-origin-cache-revision.sh
+              ;;
+            cache-revision)
+              QPX_PERF_REVISION_WORKLOAD=cache QPX_PERF_REVISION_ORDER="${{ inputs.revision_order }}" \
+                python3 scripts/perf-evaluate.py "cache same-runner revision objectives" -- bash scripts/perf-diagnose-origin-cache-revision.sh
               ;;
             webdav-scheduling)
               RUST_LOG=warn,qpx_perf_phase=debug QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \

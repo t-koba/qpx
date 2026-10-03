@@ -1356,3 +1356,25 @@ different values of equal length and checks that all metadata updates.
 All 1,309 workspace tests across 47 suites, all-feature Clippy, formatting,
 and the eight-category / sixteen-evaluation gate checks pass. Linux profiles
 must still quantify allocation removal and normal performance effects.
+
+The existing same-runner WebDAV revision harness is generalized as
+`scripts/perf-diagnose-origin-cache-revision.sh`. The diagnostic workflow's
+`cache-revision` workload compares 1 KiB persistent hits, persistent misses,
+and feature-rich hits for two exact revisions on the same runner. Both
+release binaries are built before any measurement; version order is explicit,
+and each version retains three alternating qpx/reference samples. Manifests
+record commits, binary hashes, required lanes, and sample counts. Both versions
+must pass measurement-quality checks, while the current version also checks
+existing acceptance and the stronger throughput/CPU/queue goals without
+weakening stricter existing limits. Logs and results remain diagnostic artifacts
+and do not replace any of the eight required CI categories. The real normal
+`fa473e2` data passes the generated quality objectives and fails the stronger
+goals as expected; shell syntax and repository structure checks pass.
+
+Normal tee run `37155826620` reports miss throughput/CPU efficiency
+0.925525/0.833296 and queue delay 2.486278, within the old 2.6 queue limit
+but outside the stronger goals. Feature-rich throughput/CPU efficiency are
+0.874028/0.907004. WebDAV 1 MiB p99 is 0.876709, while CPU efficiency is
+1.359520, still below its existing 1.5 limit. These separate-runner results
+cannot establish a causal effect of the tee change; paired revision measurements
+are necessary before retaining or rejecting the experiment.
