@@ -1341,3 +1341,18 @@ and queue delay is 3.072445 (above the existing 2.6 limit). WebDAV 1 MiB CPU
 efficiency is 1.465196 (below 1.5) and p99 is 2.685720. Coverage passes after
 the shared-ring notification fix, but these results do not satisfy the final
 performance objectives or the three-independent-run requirement.
+
+Native miss samples attribute 52 allocator samples to
+`RawHttp1ConnectionCache::store_prepared_request`. Callgrind round 2 records
+8,712 direct malloc calls from that function for 4,315 completed miss requests
+on `84efde0`: both the prepared request and serialized header are allocated
+on each replacement. The connection now reuses its existing prepared-request
+box, and copies a changed header into its existing box only when its length
+is identical. Different lengths replace the header box, preserving exact
+storage size rather than retaining spare capacity. The mutable cache borrow
+excludes readers during replacement, and runtime-generation validation is
+unchanged. The real downstream-log test changes URI and logging headers to
+different values of equal length and checks that all metadata updates.
+All 1,309 workspace tests across 47 suites, all-feature Clippy, formatting,
+and the eight-category / sixteen-evaluation gate checks pass. Linux profiles
+must still quantify allocation removal and normal performance effects.

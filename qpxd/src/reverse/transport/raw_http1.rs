@@ -230,11 +230,21 @@ impl RawHttp1ConnectionCache {
         downstream_head: &[u8],
         prepared: PreparedRawHttp1Request,
     ) -> Option<&PreparedRawHttp1Request> {
-        let prepared = Box::new(prepared);
-        self.serialized = Some(CachedSerializedRequest {
-            downstream_head: downstream_head.into(),
-            prepared,
-        });
+        if let Some(cached) = self.serialized.as_mut() {
+            // The mutable cache borrow excludes readers of the prior request.
+            // Reuse its fixed-size allocations without retaining excess capacity.
+            if cached.downstream_head.len() == downstream_head.len() {
+                cached.downstream_head.copy_from_slice(downstream_head);
+            } else {
+                cached.downstream_head = downstream_head.into();
+            }
+            *cached.prepared = prepared;
+        } else {
+            self.serialized = Some(CachedSerializedRequest {
+                downstream_head: downstream_head.into(),
+                prepared: Box::new(prepared),
+            });
+        }
         self.serialized
             .as_ref()
             .map(|serialized| serialized.prepared.as_ref())

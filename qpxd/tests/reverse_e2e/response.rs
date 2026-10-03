@@ -46,7 +46,7 @@ edges:
         .write_all(concat!(
             "GET /asset?token=first HTTP/1.1\r\nHost: reverse.test\r\nUser-Agent: downstream-one\r\nReferer: https://client.example/one?token=secret-one\r\n\r\n",
             "GET /asset?token=first HTTP/1.1\r\nHost: reverse.test\r\nUser-Agent: downstream-one\r\nReferer: https://client.example/one?token=secret-one\r\n\r\n",
-            "GET /other?token=second HTTP/1.1\r\nHost: reverse.test\r\nUser-Agent: downstream-two\r\nReferer: https://client.example/two?token=secret-two\r\n\r\n",
+            "GET /other?token=other HTTP/1.1\r\nHost: reverse.test\r\nUser-Agent: downstream-two\r\nReferer: https://client.example/two?token=secret-two\r\n\r\n",
         ).as_bytes())
         .await?;
     timeout(Duration::from_secs(5), async {
