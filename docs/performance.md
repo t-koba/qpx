@@ -771,3 +771,9 @@ and aggregate gate. These figures exclude queue time and other workflow jobs.
 The commits, resource accounting, and cache state differ, so this is an observed
 operational result rather than a controlled estimate of split-only savings.
 Both runs failed acceptance; reduced waiting time does not establish completion.
+
+Native diagnostics decode the second workload sample's complete call chains
+for WebDAV and streaming as well as proxy workloads. Kernel and user-space
+callers retain instruction addresses and symbol offsets. This lets task-switch
+and mutex hot spots be attributed to file sending or metadata processing after
+measurement, without running report generation during the benchmark.

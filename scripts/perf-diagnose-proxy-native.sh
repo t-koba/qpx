@@ -163,6 +163,8 @@ PY
         --no-inline --call-graph flat,0.5,32,caller --symbol-filter memmove --percentage absolute \
         --sort symbol --show-nr-samples --time "$window" \
         -i "$QPX_NATIVE_PROFILE_DIR/$role.data" >"$sample.memmove-callers.txt"
+    fi
+    if [[ "$sample" = *.round-2.* ]]; then
       echo "Native workload callsite decoding started: $sample"
       timeout --signal=TERM --kill-after=10s 180s "$QPX_NATIVE_PERF_BIN" script --no-inline \
         --fields comm,pid,tid,time,ip,sym,symoff,dso --time "$window" \
