@@ -818,3 +818,13 @@ quality, candidate measurement quality, unchanged existing acceptance, and the
 only the existing WebDAV lanes without weakening any limit; the additional
 p99 objective can only tighten its current bound to 1.0. The diagnostic cannot
 replace the complete required performance matrix.
+
+HTTP/2 request-count calibration now enables the same h2load latency log and
+Linux process-tree RSS/FD observers used during measurement. Previously those
+observers and the per-request log were absent during calibration, so its rate
+estimate described a different client and runner load. Every calibration round
+retains its own h2load output, latency log, and observer metadata. This corrects
+the condition mismatch without changing duration budgets, completion checks,
+sample counts, or stability limits. It does not establish that observer cost
+caused the previously observed HTTP/2 stalls; full-matrix independent quality
+runs are still required.

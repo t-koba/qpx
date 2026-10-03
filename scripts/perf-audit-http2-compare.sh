@@ -42,6 +42,7 @@ STATE_DIR="$TMP_DIR/state"
 mkdir -p "$LOG_DIR" "$STATE_DIR" "$(dirname "$OUT_JSON")"
 
 PIDS=()
+CALIBRATION_MONITOR_PIDS=()
 ARTIFACTS_COLLECTED=0
 INVALID_SAMPLES=0
 DIRECT_BACKEND_PID=""
@@ -84,7 +85,7 @@ collect_artifacts() {
 
 cleanup() {
   local pid
-  for pid in "${PIDS[@]:-}"; do
+  for pid in "${CALIBRATION_MONITOR_PIDS[@]:-}" "${PIDS[@]:-}"; do
     if kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" >/dev/null 2>&1 || true
       wait "$pid" >/dev/null 2>&1 || true
@@ -521,6 +522,48 @@ print(done, max(1, round(duration)))
 PY
 }
 
+run_h2load_calibration() {
+  local requests="$1" clients="$2" threads="$3" port="$4"
+  local resource_pid="$5" backend_pid="$6" body_bytes="$7" output="$8"
+  local root initial peak pid status=0
+  local roots=("$resource_pid") peaks=()
+  if [ "$resource_pid" != "$backend_pid" ]; then
+    roots+=("$backend_pid")
+  fi
+  # Calibration must include the same latency logging and resource observers
+  # as measurement; otherwise its request budget describes a different load.
+  if [ -d /proc ]; then
+    for root in "${roots[@]}"; do
+      initial="$(process_tree_status_kb "$root" VmRSS)" || return 1
+      peak="${output}.${root}.rss-peak"
+      monitor_process_tree_rss_peak "$root" "$peak" "$initial" &
+      CALIBRATION_MONITOR_PIDS+=("$!")
+      peaks+=("$peak")
+      initial="$(process_tree_fd_count "$root")" || return 1
+      peak="${output}.${root}.fd-peak"
+      monitor_process_tree_fd_peak "$root" "$peak" "$initial" &
+      CALIBRATION_MONITOR_PIDS+=("$!")
+      peaks+=("$peak")
+    done
+  fi
+  h2load -n "$requests" -c "$clients" -t "$threads" -m "$MAX_CONCURRENT_STREAMS" \
+    --log-file="${output%.h2load}.latency.tsv" --connect-to "127.0.0.1:${port}" \
+    "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$output" 2>&1 || status=$?
+  for pid in "${CALIBRATION_MONITOR_PIDS[@]:-}"; do
+    if [ -n "$pid" ]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  CALIBRATION_MONITOR_PIDS=()
+  for peak in "${peaks[@]:-}"; do
+    if [ -n "$peak" ]; then
+      read_process_peak_file "$peak" >/dev/null || return 1
+    fi
+  done
+  return "$status"
+}
+
 run_one() {
   local proxy="$1"
   local port="$2"
@@ -539,7 +582,7 @@ run_one() {
   local scheduler_before_ns scheduler_after_ns backend_scheduler_before_ns backend_scheduler_after_ns total_scheduler_run_delay_ns scheduler_queue_delay_us_per_request kernel_resource_metrics h2load_succeeded
   local requests_per_cpu_second requests_per_total_cpu_second
   local attempt failed_sample samples_file valid_sample_count selected_sample profile_pid
-  local load_concurrency load_client_threads calibration_request_count calibration_requests calibration_duration_us calibration_min_duration_us minimum_requests benchmark_requests
+  local load_concurrency load_client_threads calibration_request_count calibration_requests calibration_duration_us calibration_min_duration_us minimum_requests benchmark_requests calibration_round
   body_kind="$(body_profile "$body_bytes")"
   load_concurrency="$CONCURRENCY"
   load_client_threads="$CLIENT_THREADS"
@@ -565,8 +608,9 @@ run_one() {
   if [ "$calibration_request_count" -lt "$minimum_requests" ]; then
     calibration_request_count="$minimum_requests"
   fi
-  calibration_out="$TMP_DIR/${artifact}.calibration.h2load"
-  h2load -n "$calibration_request_count" -c "$load_concurrency" -t "$load_client_threads" -m "$MAX_CONCURRENT_STREAMS" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$calibration_out" 2>&1 || {
+  calibration_round=1
+  calibration_out="$TMP_DIR/${artifact}.calibration-${calibration_round}.h2load"
+  run_h2load_calibration "$calibration_request_count" "$load_concurrency" "$load_client_threads" "$port" "$resource_pid" "$backend_pid" "$body_bytes" "$calibration_out" || {
     echo "h2load calibration failed for ${proxy}" >&2
     cat "$calibration_out" >&2 || true
     exit 1
@@ -578,7 +622,9 @@ run_one() {
     if [ "$calibration_request_count" -lt "$minimum_requests" ]; then
       calibration_request_count="$minimum_requests"
     fi
-    h2load -n "$calibration_request_count" -c "$load_concurrency" -t "$load_client_threads" -m "$MAX_CONCURRENT_STREAMS" --connect-to "127.0.0.1:${port}" "https://${TLS_HOST}:${port}/bench-${body_bytes}" >"$calibration_out" 2>&1 || {
+    calibration_round=$((calibration_round + 1))
+    calibration_out="$TMP_DIR/${artifact}.calibration-${calibration_round}.h2load"
+    run_h2load_calibration "$calibration_request_count" "$load_concurrency" "$load_client_threads" "$port" "$resource_pid" "$backend_pid" "$body_bytes" "$calibration_out" || {
       echo "h2load stabilized calibration failed for ${proxy}" >&2
       cat "$calibration_out" >&2 || true
       exit 1
