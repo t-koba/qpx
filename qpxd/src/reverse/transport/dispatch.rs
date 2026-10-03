@@ -479,7 +479,8 @@ fn execute_reverse_request<'a>(
             )
             && !req.headers().contains_key(http::header::UPGRADE)
         {
-            return dispatch_plain_reverse_http(
+            // This protocol-only branch must not enlarge feature-rich cache futures.
+            return Box::pin(dispatch_plain_reverse_http(
                 req,
                 &state,
                 route,
@@ -487,7 +488,7 @@ fn execute_reverse_request<'a>(
                 request_version,
                 proxy_name,
                 connection_pool,
-            )
+            ))
             .await;
         }
         let resolution_override = route.plan.destination_resolution.as_ref();
@@ -1066,7 +1067,8 @@ async fn complete_reverse_after_modules(
         return Ok(empty_interim_response(response));
     }
     if is_websocket_upgrade(req.method(), req.headers())? {
-        return handle_reverse_websocket_upgrade(ReverseWebsocketDispatch {
+        // Cache hits do not retain or allocate the WebSocket upgrade state.
+        return Box::pin(handle_reverse_websocket_upgrade(ReverseWebsocketDispatch {
             req,
             state,
             route,
@@ -1082,7 +1084,7 @@ async fn complete_reverse_after_modules(
             request_method,
             http_modules: &mut http_modules,
             audit_ctx,
-        })
+        }))
         .await;
     }
     let cache_state = match prepare_reverse_cache(ReverseCacheInput {
@@ -1567,7 +1569,7 @@ mod state_layout_tests {
         );
         let dispatch_bytes = future_size(complete_reverse_after_modules);
         assert!(
-            dispatch_bytes <= 8 * 1024,
+            dispatch_bytes <= 13 * 512,
             "cached response dispatcher inline state exceeded its size budget: {dispatch_bytes} bytes"
         );
     }
