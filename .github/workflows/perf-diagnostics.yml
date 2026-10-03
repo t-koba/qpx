@@ -29,9 +29,14 @@ on:
         type: choice
         options: [baseline-current, current-baseline]
         default: baseline-current
+      profile_source_run:
+        description: Existing http2-client run to reanalyze without repeating requests
+        type: string
+        default: ""
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_INCREMENTAL: "0"
@@ -111,7 +116,7 @@ jobs:
           fi
           echo "QPX_NATIVE_PERF_BIN=$perf_binary" >> "$GITHUB_ENV"
       - name: build before measurement
-        if: inputs.category != 'scheduler-accounting'
+        if: inputs.category != 'scheduler-accounting' && inputs.profile_source_run == ''
         run: |
           if [[ "$CATEGORY" = *-callgrind || "$CATEGORY" = *-native ]]; then
             cargo build -p qpxd --profile callgrind --locked --features http3-backend-qpx
@@ -133,7 +138,26 @@ jobs:
           git worktree add --detach target/perf-baseline "$baseline_sha"
           cd target/perf-baseline
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/perf-baseline-build" cargo build -p qpxd --release --locked --features http3-backend-qpx
+      - name: validate existing profile source
+        if: inputs.profile_source_run != ''
+        env:
+          SOURCE_RUN: ${{ inputs.profile_source_run }}
+          CATEGORY: ${{ inputs.category }}
+        run: |
+          if [ "$CATEGORY" != http2-client ] || [[ ! "$SOURCE_RUN" =~ ^[0-9]+$ ]]; then
+            echo "existing profile analysis requires http2-client and a numeric run ID" >&2
+            exit 1
+          fi
+      - name: download existing client CPU profiles
+        if: inputs.profile_source_run != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: performance-diagnostics-http2-client
+          path: target/perf
+          run-id: ${{ inputs.profile_source_run }}
+          github-token: ${{ github.token }}
       - name: diagnostic comparison
+        if: inputs.profile_source_run == ''
         env:
           QPX_PERF_BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
           QPX_PERF_BASELINE_BIN: ${{ github.workspace }}/target/perf-baseline-build/release/qpxd
@@ -229,13 +253,33 @@ jobs:
           esac
       - name: summarize retained load-generator CPU profiles
         if: always() && inputs.category == 'http2-client'
+        env:
+          SOURCE_RUN: ${{ inputs.profile_source_run }}
         run: |
           profiles=(target/perf/profiles/http2-mtu.*/client-profiles)
           if [ "${#profiles[@]}" -ne 1 ] || [ ! -d "${profiles[0]}" ]; then
             echo "load-generator CPU profile directory is missing or ambiguous" >&2
             exit 1
           fi
-          python3 scripts/summarize-perf-client.py "${profiles[0]}" "$QPX_NATIVE_PERF_BIN"
+          status=0
+          python3 scripts/summarize-perf-client.py "${profiles[0]}" "$QPX_NATIVE_PERF_BIN" || status=1
+          phase="${profiles[0]%/client-profiles}/mtu-1500-full"
+          bash scripts/check-http2-performance.sh "$phase/comparison.jsonl" \
+            perf/http2-performance-objectives.json diagnostic-quality "$phase/manifest.json" \
+            > "$phase/client-profile-quality.log" 2>&1 || status=1
+          cat "$phase/client-profile-quality.log"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          Path("target/perf/client-profile-analysis.json").write_text(json.dumps({
+              "source_run": os.environ["SOURCE_RUN"] or os.environ["GITHUB_RUN_ID"],
+              "analysis_commit": os.environ["GITHUB_SHA"],
+              "analysis_run": os.environ["GITHUB_RUN_ID"],
+              "replaces_required_gate": False,
+          }, indent=2) + "\n")
+          PY
+          exit "$status"
       - name: upload diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v7
