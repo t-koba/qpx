@@ -1533,5 +1533,42 @@ At `c6bf124`, independent tee-removal comparisons use `8ad14b5` as baseline:
 comparisons use `586307c` as baseline: `37161971483`, `37161976051`,
 `37161980002`. Version order alternates baseline/current, current/baseline,
 baseline/current. These are diagnostic comparisons, not the final three-run
-required-gate acceptance. Their queued/running state establishes no performance
-result; no stronger mandatory threshold is adopted before the goals pass.
+required-gate acceptance. All six runs have now completed with valid paired
+measurements, but their current-revision performance objectives fail.
+
+Tee removal changes miss throughput by -1.5%/+2.3%/+6.5% and miss CPU
+efficiency by -0.9%/+1.4%/+1.5% against the same runner's baseline. Miss p99
+changes by +1.6%/-5.2%/-13.5%, and queue delay by +0.9%/-16.4%/-5.6%.
+Feature-rich throughput changes by -0.2%/+0.3%/-2.0%. This supports retaining
+the original bounded relay instead of restoring the unsupported fast path;
+it does not establish the stronger goals. Against nginx, current miss
+throughput is 0.918/0.923/0.922 and CPU efficiency 0.871/0.893/0.858, while
+queue delay is 2.780/2.590/2.523. Feature-rich throughput is
+0.904/0.896/0.871 and CPU efficiency 0.945/0.951/0.905; its queue ratios
+0.938/0.945/0.978 satisfy the planned queue goal in these three runs.
+
+Reusable HTTP/2 storage changes multiplexing-100 1 KiB throughput by
+-0.5%/+1.1%/+2.4%, CPU efficiency by -1.0%/+1.4%/+2.3%, and p99 by
++0.3%/-2.4%/-3.3%. These small, mixed gains do not constitute acceptance.
+Current p99 ratios against nginx are 1.258/1.242/1.223, exceeding the
+unchanged 1.1 limit in all three runs. The first run also exceeds the 1 MiB
+RSS limit, and the second exceeds the 1 KiB queue limit. Storage reuse remains
+an experiment with native copy evidence and incomplete performance goals.
+
+Normal `f78d063` CI (`37162196834`) fails proxy and HTTP/2 audits. WebDAV
+1 MiB CPU efficiency is 1.382 against its unchanged 1.5 limit. Its p99 is
+124.604 ms versus Apache's 39.296 ms, a ratio of 3.171 against the planned
+1.0 goal. HTTP/2 fails measurement quality: nginx's 1 MiB, multiplexing-1
+sample lasts 7.99 seconds, below the required 8.0 seconds, leaving only two
+of three valid samples. That audit cannot establish performance acceptance.
+All other category jobs, structure, security QA, and the non-performance
+validation jobs succeed. Aggregate and release gates correctly fail.
+
+Native proxy profiling now measures persistent-cache and feature-rich pairs
+in separate harness invocations, matching normal CI process ownership. The
+previous mixed invocation could leave an unrelated nginx cache loader alive
+through another pair's workload. Each pair retains its own raw records and
+logs inside the profile directory. Both profiled processes must shut down
+cleanly, both CPU profiles must exist, the same eleven workload windows remain
+required, and lost samples still invalidate the profile. This diagnostic
+change leaves mandatory performance thresholds and measurement counts intact.

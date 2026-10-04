@@ -54,13 +54,22 @@ bash "$ROOT_DIR/scripts/check-perf-native-process.sh" "$wrapper"
 echo "Native CPU workload started: $workload"
 case "$workload" in
   proxy)
-    QPXD_BIN="$wrapper" QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
-      QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS=5 \
-      QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-cache,nginx-cache,qpxd-feature-rich,nginx-feature-rich \
-      QPX_PROXY_COMPARE_BODY_SIZES=1024 \
-      bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh"
     roles="qpxd-cache qpxd-feature-rich"
-    log_directory="$ROOT_DIR/target/perf/proxy-compare-logs"
+    log_directory="$QPX_NATIVE_PROFILE_DIR/workloads"
+    # Keep unrelated cache loaders out of each pair's measurement lifetime,
+    # matching the normal matrix and same-runner revision comparisons.
+    for role in $roles; do
+      case "$role" in
+        qpxd-cache) proxies=qpxd-cache,nginx-cache ;;
+        qpxd-feature-rich) proxies=qpxd-feature-rich,nginx-feature-rich ;;
+      esac
+      QPXD_BIN="$wrapper" QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+        QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS=5 \
+        QPX_PROXY_COMPARE_PROXY_FILTER="$proxies" \
+        QPX_PROXY_COMPARE_BODY_SIZES=1024 \
+        QPX_PROXY_COMPARE_LOG_DIR="$log_directory/$role" \
+        bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh" "$QPX_NATIVE_PROFILE_DIR/$role.jsonl"
+    done
     expected_profiles=2
     minimum_reports=11
     ;;
@@ -131,10 +140,14 @@ fi
 reports=0
 for role in $roles; do
   sample_role="$role"
+  role_log_directory="$log_directory"
+  if [ "$workload" = proxy ]; then
+    role_log_directory="$log_directory/$role"
+  fi
   if [ "$workload" = http2 ] || [ "$workload" = streaming ]; then
     sample_role=qpxd
   fi
-  for sample in "$log_directory"/*."$sample_role".*.rss-peak.samples.csv; do
+  for sample in "$role_log_directory"/*."$sample_role".*.rss-peak.samples.csv; do
     [ -f "$sample" ] || continue
     window="$(python3 - "$sample" <<'PY'
 import csv
