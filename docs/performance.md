@@ -1691,3 +1691,16 @@ preserves qpxd's bind-failure log. All eight reverse e2e cases pass locally.
 The corrected readiness passes 20 independent parallel runs of all eight real-
 server reverse e2e cases (160 executions) and 1,309 workspace tests across
 47 suites. The pre-fix failed run is retained rather than discarded.
+
+Native `1f482bc` proxy profiling (`37191647145`) succeeds with both required
+roles and zero lost samples. Feature-rich round 2 has 244 memmove samples out
+of 3,973 (6.14%), versus 332 of 4,045 (8.21%) before; miss has 109 of 3,800
+(2.87%), versus 156 of 4,224 (3.69%). These diagnostic samples show a smaller
+copy share but do not override the mixed normal revision comparisons.
+A separate prepared-destination trial borrows the request-owned inline cache
+instead of moving its 336-byte storage into another local. Exact before ELF
+instruction mapping identified that move in the native dispatcher. No new
+allocation or policy evaluation is introduced; the prepared request owns the
+cache until all consumers finish. All 1,309 workspace tests and all-target/
+all-feature Clippy pass with this change. Linux comparisons must determine
+whether the reduced move improves the workloads; acceptance is not claimed.
