@@ -1805,7 +1805,7 @@ stalls from scheduling without treating instrumented timings as acceptance.
 The successful sender diagnostic (`37222500543`, artifact `11311017094`)
 records qpxd gaps of 202.017 and 206.232 ms. Their matching sender sockets
 retain 2,357,388 unsent bytes, one 65,483-byte retransmission and a 201 ms
-RTO. Receive-window-limited time accounts for 98.2% and 97.7% of busy time.
+retransmission timeout. Receive-window-limited time accounts for 98.2% and 97.7% of busy time.
 The earlier receiver-only diagnostic (`37221928121`) has no qpxd CPU samples
 inside a 202.882 ms gap, despite samples immediately before and after it.
 These observations identify a TCP/backpressure stall rather than continuous
