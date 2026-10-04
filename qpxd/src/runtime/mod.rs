@@ -77,7 +77,6 @@ pub struct RuntimeState {
     pub ftp_semaphore: Arc<Semaphore>,
     pub connection_semaphore: Arc<Semaphore>,
     pub h3_request_body_drain_semaphore: Arc<Semaphore>,
-    pub(crate) webdav_read_semaphore: Option<Arc<Semaphore>>,
     pub upstreams: HashMap<String, String>,
     pub security: SecurityRuntime,
     pub policy: PolicyRuntime,
@@ -120,16 +119,9 @@ impl Runtime {
     pub fn swap(&self, mut new_state: RuntimeState) {
         // Connection pools are process-lived caches: carry the existing registry across
         // the reload so pooled connections survive, but adopt the new config's limits.
-        let previous = self.state();
-        let carried = previous.pools.clone();
+        let carried = self.state().pools.clone();
         carried.copy_limits_from(&new_state.pools);
         new_state.pools = carried;
-        // Old request snapshots and new routes share the same read budget.
-        if new_state.webdav_read_semaphore.is_some()
-            && let Some(admission) = previous.webdav_read_semaphore.as_ref()
-        {
-            new_state.webdav_read_semaphore = Some(admission.clone());
-        }
         self.state.store(Arc::new(new_state));
     }
 }
@@ -170,16 +162,6 @@ impl RuntimeState {
         let policy = PolicyRuntime::build(&resources)?;
         let cache = CacheRuntime::build(&resources)?;
         let observability = ObsRuntime::build(&resources)?;
-        let webdav_read_semaphore = if resources.operational.http.origins.webdav.is_empty() {
-            None
-        } else {
-            let workers = match resources.operational.runtime.worker_threads {
-                Some(workers) => workers,
-                None => std::thread::available_parallelism()?.get(),
-            };
-            anyhow::ensure!(workers > 0, "WebDAV read worker budget must be positive");
-            Some(Arc::new(Semaphore::new(workers)))
-        };
         let pools = Arc::new(crate::pool::PoolRegistry::new());
         pools.apply_limits(crate::pool::PoolLimits {
             upstream_proxy_max_concurrent_per_endpoint: resources
@@ -222,7 +204,6 @@ impl RuntimeState {
                     .max_concurrent
                     .max(1),
             )),
-            webdav_read_semaphore,
             upstreams: resources.upstreams.clone(),
             resources,
             security,

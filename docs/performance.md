@@ -1609,3 +1609,13 @@ on an existing connection. Its initial attempt fails because the test uses
 the wrong configuration nesting; the corrected root-level `origins` setup
 passes. Reload testing verifies old and new snapshots share occupied slots.
 Formatting, structure, and the eight-category/sixteen-evaluation checks pass.
+
+The admission trial is rejected after three independent same-runner comparisons
+against `fda7f55` (`37190085747`, `37190087606`, `37190089057`). Both revisions
+pass measurement quality in all three runs. Current/baseline 1 MiB p99 ratios
+are 1.351, 5.278, and 1.743; CPU efficiency ratios are 0.992, 0.990, and 1.000.
+The 1 KiB throughput ratios are 0.997, 0.948, and 0.965. Reduced scheduler queue
+delay does not justify these regressions. Read admission and its runtime budget
+are removed; the independent slow-client/parallel-update server regression is
+retained. Apache-relative 1 MiB p99 remains 4.341, 4.580, and 3.685, so the
+planned latency goal remains unmet. Existing thresholds are unchanged.
