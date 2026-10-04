@@ -33,6 +33,8 @@ mod modules;
 mod outcome;
 mod prepare;
 mod types;
+#[cfg(test)]
+mod webdav_tests;
 
 /// Cache key for per-request destination classification, keyed by the
 /// identity of the route's compiled `destination_resolution` override. The
@@ -288,6 +290,7 @@ pub(super) async fn execute_reverse_dispatch(
                     route.plan.streaming.max_request_body_bytes,
                     request_version == http::Version::HTTP_11 && !conn.tls_terminated,
                     Some(request_resource),
+                    state.webdav_read_semaphore.as_ref(),
                 )
                 .await?;
                 crate::http::protocol::l7::finalize_response_with_headers_in_place(
@@ -1075,6 +1078,7 @@ async fn complete_reverse_after_modules(
         let response = dispatch_reverse_webdav(ReverseWebDavDispatch {
             req: std::mem::replace(req, Request::new(Body::empty())),
             service: webdav.clone(),
+            read_admission: state.webdav_read_semaphore.as_ref(),
             identity,
             request_method,
             request_version,
@@ -1243,6 +1247,7 @@ async fn complete_reverse_after_modules(
 struct ReverseWebDavDispatch<'a> {
     req: Request<Body>,
     service: Arc<crate::reverse::router::WebDavOriginService>,
+    read_admission: Option<&'a Arc<tokio::sync::Semaphore>>,
     identity: &'a crate::policy_context::ResolvedIdentity,
     request_method: &'a http::Method,
     request_version: http::Version,
@@ -1257,6 +1262,7 @@ async fn dispatch_reverse_webdav(input: ReverseWebDavDispatch<'_>) -> Result<Res
     let ReverseWebDavDispatch {
         req,
         service,
+        read_admission,
         identity,
         request_method,
         request_version,
@@ -1273,6 +1279,7 @@ async fn dispatch_reverse_webdav(input: ReverseWebDavDispatch<'_>) -> Result<Res
         max_request_body_bytes,
         allow_file_backed,
         None,
+        read_admission,
     )
     .await?;
     let mut response = http_modules.on_upstream_response(response).await?;
@@ -1294,6 +1301,7 @@ async fn execute_webdav_service(
     max_request_body_bytes: usize,
     allow_file_backed: bool,
     request_resource: Option<qpx_webdav::ResourceId>,
+    read_admission: Option<&Arc<tokio::sync::Semaphore>>,
 ) -> Result<Response<Body>> {
     let request_resource = match request_resource {
         Some(resource) => resource,
@@ -1325,7 +1333,23 @@ async fn execute_webdav_service(
         assurance: identity.auth_strength.clone(),
     };
     let blocking_phase = crate::perf_diagnostics::phase_timer!("webdav_blocking_dispatch");
+    // Short filesystem reads must not wake an unbounded set of blocking
+    // workers. Release admission before sending the file-backed response;
+    // retain it inside the blocking task even if its caller is cancelled.
+    let read_permit = if matches!(*request.method(), http::Method::GET | http::Method::HEAD) {
+        Some(
+            read_admission
+                .ok_or_else(|| anyhow!("WebDAV read admission is missing"))?
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|error| anyhow!("WebDAV read admission failed: {error}"))?,
+        )
+    } else {
+        None
+    };
     let response = tokio::task::spawn_blocking(move || {
+        let _read_permit = read_permit;
         let _phase = crate::perf_diagnostics::phase_timer!("webdav_service");
         if allow_file_backed {
             service.handle_bytes_for_resource_file_backed(request, &context, request_resource)

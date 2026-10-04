@@ -1572,3 +1572,40 @@ logs inside the profile directory. Both profiled processes must shut down
 cleanly, both CPU profiles must exist, the same eleven workload windows remain
 required, and lost samples still invalidate the profile. This diagnostic
 change leaves mandatory performance thresholds and measurement counts intact.
+
+The separated native cache diagnostic (`37176474082`) completes successfully
+with both profiled processes and no lost samples. Measured feature-rich
+round 2 contains 4,045 CPU samples, including 332 memmove samples; 82 of those
+have `execute_reverse_request` as the immediate caller. Miss round 2 contains
+4,224 samples, including 156 memmove samples. These identify remaining state
+copy costs without establishing normal throughput acceptance.
+
+Latest normal CI (`37176447712`, `fda7f55`) completes with 41 successful and
+four failed jobs. Direct failures are WebDAV 1 MiB CPU efficiency (1.374,
+minimum 1.5), miss 1 KiB queue delay (2.837, maximum 2.6), and HTTP/2
+multiplexing-100 1 KiB p99 (1.250, maximum 1.1), maximum latency (1.211,
+maximum 1.1), dominance (0.909, minimum 0.95), and queue delay (2.007,
+maximum 2.0). HTTP/2 measurement quality succeeds this time. Aggregate and
+release failures follow these audits; structure and security QA succeed.
+
+Fresh WebDAV native run `37176341812` completes with no lost samples. Its
+three 1 MiB windows observe 26/30/34 process threads with two I/O workers.
+In the second window, 81 of 1,753 decoded CPU samples show spin-unlock through
+the blocking pool, and 57 show task switching through that pool. Most observed
+thread wait states are futex waits. This motivates an independent admission
+experiment for short GET/HEAD filesystem work: only as many operations as I/O
+workers enter the blocking pool concurrently. Other methods retain their
+existing execution path. The permit lives in the blocking closure, so caller
+cancellation cannot release a running operation's admission early; file-body
+transmission begins after admission is released. Runtime snapshots retain a
+shared budget across reloads, and configurations without WebDAV allocate none.
+This remains a trial until same-runner measurements establish its effect.
+All 1,310 workspace tests across 47 suites and all-feature/all-target Clippy
+pass. New real-filesystem tests cover concurrent reads with unconsumed file
+bodies, cancellation while awaiting admission, and mutations while read slots
+are occupied. A real qpxd regression holds four slow TCP clients open while
+PUT and a fresh GET complete, then verifies the old file's complete snapshot
+on an existing connection. Its initial attempt fails because the test uses
+the wrong configuration nesting; the corrected root-level `origins` setup
+passes. Reload testing verifies old and new snapshots share occupied slots.
+Formatting, structure, and the eight-category/sixteen-evaluation checks pass.

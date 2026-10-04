@@ -14,6 +14,7 @@ mod test_client_support;
 mod resilience;
 mod response;
 mod routing;
+mod webdav;
 
 use anyhow::{Context, Result};
 use base64::Engine;
