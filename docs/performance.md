@@ -1704,3 +1704,26 @@ allocation or policy evaluation is introduced; the prepared request owns the
 cache until all consumers finish. All 1,309 workspace tests and all-target/
 all-feature Clippy pass with this change. Linux comparisons must determine
 whether the reduced move improves the workloads; acceptance is not claimed.
+
+Normal `4d42162` CI (`37195686658`) fails proxy, HTTP/2, streaming, aggregate,
+and release gates. WebDAV CPU efficiency is 1.388 (minimum 1.5), miss queue
+ratio is 2.735 (maximum 2.6), protocol 1 KiB queue ratio is 3.006 (maximum 2.5),
+protocol 1 MiB CPU ratio is 4.554 (required 5.268), and its queue ratio is
+55.856 (maximum 14). HTTP/2 1 KiB multiplexing-100 throughput is 0.926,
+p99 1.420, maximum latency 1.325, and dominance 0.838; multiplexing-1 maximum
+latency also exceeds its 1.3 limit. Streaming direct-backend spread is 1.792
+against 1.5, so that comparison is not stable enough to establish acceptance.
+All non-performance jobs, including three OS tests, structure and security QA,
+succeed. The readiness regression does not recur in these completed OS jobs.
+
+The prepared-destination borrow is rejected after three valid independent
+comparisons (`37195715447`, `37195719959`, `37195724590`). Miss throughput
+current/baseline ratios are 0.974, 0.973, and 0.986; queue ratios are 1.015,
+1.090, and 1.107. Feature-rich throughput improves in two runs but not the
+third (1.025, 1.017, 0.996). A smaller field move does not justify retaining
+this mixed and miss-regressing optimization. The original ownership is
+restored without removing the separately verified readiness fix.
+The restored destination ownership passes all 1,309 workspace tests across
+47 suites. The first local rebuild fails because linking exhausts disk space;
+only locally generated qpxd/qpxf build outputs are cleaned before the passing
+rerun. Existing untracked files remain untouched.

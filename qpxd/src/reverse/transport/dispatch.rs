@@ -461,7 +461,7 @@ fn execute_reverse_request<'a>(
         let selected_policy = prepared_route.selected_policy;
         let identity = prepared_route.identity;
         let sanitized_headers = prepared_route.sanitized_headers;
-        let request_destination_cache = &prepared_route.request_destination_cache;
+        let request_destination_cache = prepared_route.request_destination_cache;
         let max_observed_request_body_bytes = prepared_route.max_observed_request_body_bytes;
         let request_rpc = observation.request_rpc;
         let route = Some(route_idx)
