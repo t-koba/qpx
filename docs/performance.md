@@ -1727,3 +1727,20 @@ The restored destination ownership passes all 1,309 workspace tests across
 47 suites. The first local rebuild fails because linking exhausts disk space;
 only locally generated qpxd/qpxf build outputs are cleaned before the passing
 rerun. Existing untracked files remain untouched.
+
+A dedicated HTTP/1 native diagnostic now profiles the unchanged protocol
+workload at both 1 KiB and 1 MiB, including direct, qpxd, nginx, Apache and
+lighttpd in their existing interleaved order. It requires the qpxd lifecycle,
+six workload reports, and zero lost samples, using the same reporting pipeline
+as the cache, WebDAV, HTTP/2 and streaming native diagnostics. Mandatory CI
+categories and acceptance thresholds are unchanged.
+
+The unstable streaming run's raw direct samples take 269.573, 279.179 and
+483.124 ms for eight 100 MiB transfers. The aggregated qpxd fast window is
+246.001 ms, with 1.996 total-time and 1.596 CPU-efficiency spread. These very
+short windows motivate an independent duration diagnostic: 512 fast transfers
+for every role, retaining all three interleaved samples and the unchanged
+slow-client workload. It runs the existing quality and acceptance checks
+separately and preserves any failures. No mandatory workload is changed until
+three independent measurements demonstrate stable conditions; a longer window
+alone does not establish product performance acceptance.

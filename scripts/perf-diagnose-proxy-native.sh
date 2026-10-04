@@ -53,6 +53,16 @@ chmod 755 "$wrapper"
 bash "$ROOT_DIR/scripts/check-perf-native-process.sh" "$wrapper"
 echo "Native CPU workload started: $workload"
 case "$workload" in
+  http1)
+    QPXD_BIN="$wrapper" QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+      QPX_PROXY_COMPARE_PROXY_FILTER=direct-backend,qpxd,nginx,apache,lighttpd \
+      QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
+      bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh"
+    roles="qpxd"
+    log_directory="$ROOT_DIR/target/perf/proxy-compare-logs"
+    expected_profiles=1
+    minimum_reports=6
+    ;;
   proxy)
     roles="qpxd-cache qpxd-feature-rich"
     log_directory="$QPX_NATIVE_PROFILE_DIR/workloads"

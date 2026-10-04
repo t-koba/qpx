@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-duration, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -64,7 +64,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid strace time valgrind wrk jq
       - name: verify native CPU profiler before build
-        if: inputs.category == 'proxy-native' || inputs.category == 'http2-native' || inputs.category == 'http2-client' || inputs.category == 'streaming-native' || inputs.category == 'webdav-native' || inputs.category == 'http2-events'
+        if: inputs.category == 'proxy-native' || inputs.category == 'http1-native' || inputs.category == 'http2-native' || inputs.category == 'http2-client' || inputs.category == 'streaming-native' || inputs.category == 'webdav-native' || inputs.category == 'http2-events'
         run: |
           if [ "${{ inputs.category }}" = http2-events ]; then
             sudo apt-get install -y "linux-tools-$(uname -r)" ripgrep
@@ -181,6 +181,16 @@ jobs:
                 python3 scripts/perf-evaluate.py "origin and cache comparison" -- bash scripts/perf-audit-proxy-compare.sh
               python3 scripts/perf-evaluate.py "origin and cache objectives" -- bash scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl
               ;;
+            streaming-duration)
+              QPX_STREAMING_COMPARE_FAST_TRANSFERS=512 \
+                python3 scripts/perf-evaluate.py "extended streaming measurement" -- bash scripts/perf-audit-streaming-compare.sh
+              failed=0
+              python3 scripts/perf-evaluate.py "extended streaming measurement quality" -- \
+                bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json measurement-quality || failed=1
+              python3 scripts/perf-evaluate.py "extended streaming existing acceptance" -- \
+                bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json || failed=1
+              exit "$failed"
+              ;;
             proxy-threads)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 python3 scripts/perf-evaluate.py "thread diagnostics" -- bash scripts/perf-audit-proxy-matrix.sh
               ;;
@@ -240,6 +250,9 @@ jobs:
               ;;
             proxy-native)
               python3 scripts/perf-evaluate.py "native CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
+              ;;
+            http1-native)
+              QPX_NATIVE_WORKLOAD=http1 python3 scripts/perf-evaluate.py "native HTTP/1 CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
               ;;
             webdav-native)
               QPX_NATIVE_WORKLOAD=webdav python3 scripts/perf-evaluate.py "native WebDAV CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
