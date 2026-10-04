@@ -1675,3 +1675,19 @@ normal workload, measurement counts, timeout, or required thresholds. The
 actual streaming backend verifies fast/slow clients with diagnostics both on
 and off; Python parsing and Bash syntax checks pass. Running the full harness
 locally is blocked by unavailable privileged scheduler accounting.
+
+A new complete workspace test run reproduces the planned retry/mirror reset
+before any performance acceptance claim. The retained child log reports
+`bind failed` and `Address already in use`, but startup had already returned
+success after connecting to that port. TCP connectivity alone can therefore
+mistake another test's listener for the newly spawned qpxd. Readiness now
+requires the actual child to own the listening socket before connecting.
+Linux matches listener inodes to the child's descriptors; macOS queries the
+child's listening descriptors with lsof; Windows queries the owning process
+with Get-NetTCPConnection. Query errors propagate. Existing bind-attempt counts
+are unchanged, and a failed child remains reaped by its handle. A real foreign
+HTTP listener regression verifies that startup rejects the occupied port and
+preserves qpxd's bind-failure log. All eight reverse e2e cases pass locally.
+The corrected readiness passes 20 independent parallel runs of all eight real-
+server reverse e2e cases (160 executions) and 1,309 workspace tests across
+47 suites. The pre-fix failed run is retained rather than discarded.

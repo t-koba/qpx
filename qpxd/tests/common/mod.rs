@@ -193,7 +193,9 @@ fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<
                 log_excerpt(log_path)
             ));
         }
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
+        if child_owns_tcp_listener(child.id(), ready_port)?
+            && std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok()
+        {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -205,6 +207,94 @@ fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<
         log_path.display(),
         log_excerpt(log_path)
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn child_owns_tcp_listener(pid: u32, port: u16) -> Result<bool> {
+    let root = PathBuf::from(format!("/proc/{pid}"));
+    let mut inodes = std::collections::HashSet::new();
+    for protocol in ["tcp", "tcp6"] {
+        let contents = match fs::read_to_string(root.join("net").join(protocol)) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error).context("read child TCP listener table"),
+        };
+        for row in contents.lines().skip(1) {
+            let fields = row.split_whitespace().collect::<Vec<_>>();
+            anyhow::ensure!(fields.len() >= 10, "invalid child TCP listener table row");
+            if fields[3] != "0A" {
+                continue;
+            }
+            let local_port = fields[1].rsplit(':').next().context("missing TCP port")?;
+            if u16::from_str_radix(local_port, 16).context("parse TCP listener port")? == port {
+                inodes.insert(format!("socket:[{}]", fields[9]));
+            }
+        }
+    }
+    let descriptors = match fs::read_dir(root.join("fd")) {
+        Ok(descriptors) => descriptors,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("read child socket descriptors"),
+    };
+    for descriptor in descriptors {
+        match fs::read_link(descriptor.context("read child descriptor entry")?.path()) {
+            Ok(target) if inodes.contains(target.to_string_lossy().as_ref()) => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("read child socket ownership"),
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn child_owns_tcp_listener(pid: u32, port: u16) -> Result<bool> {
+    let output = Command::new("/usr/sbin/lsof")
+        .args([
+            "-nP",
+            "-a",
+            "-p",
+            &pid.to_string(),
+            "-i",
+            &format!("TCP:{port}"),
+            "-sTCP:LISTEN",
+            "-Fp",
+        ])
+        .output()
+        .context("inspect child TCP listener ownership")?;
+    if output.status.success() {
+        return Ok(String::from_utf8(output.stdout)
+            .context("decode child TCP ownership")?
+            .lines()
+            .any(|line| line == format!("p{pid}")));
+    }
+    if output.status.code() == Some(1) && output.stderr.is_empty() {
+        return Ok(false);
+    }
+    Err(anyhow!(
+        "child TCP ownership query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn child_owns_tcp_listener(pid: u32, port: u16) -> Result<bool> {
+    let script = format!(
+        "$ErrorActionPreference='Stop'; $owned=@(Get-NetTCPConnection -State Listen | Where-Object {{ $_.OwningProcess -eq {pid} -and $_.LocalPort -eq {port} }}); if ($owned.Count -gt 0) {{ 'owned' }}"
+    );
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .context("inspect child TCP listener ownership")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "child TCP ownership query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)
+        .context("decode child TCP ownership")?
+        .trim()
+        == "owned")
 }
 
 fn log_excerpt(log_path: &Path) -> String {

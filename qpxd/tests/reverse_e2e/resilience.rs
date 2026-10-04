@@ -1,5 +1,31 @@
 use super::*;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreign_listener_cannot_satisfy_qpxd_readiness() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let directory = fs::canonicalize(directory.path())?;
+    let config = directory.join("occupied.yaml");
+    let log = directory.join("occupied.log");
+    let (foreign, _) = start_text_backend("FOREIGN", vec![]).await?;
+    fs::write(
+        &config,
+        format!(
+            "runtime:\n  reuse_port: false\nedges:\n- kind: reverse\n  name: occupied\n  listen: {foreign}\n  routes:\n  - name: occupied\n    match: {{}}\n    target:\n      type: upstream\n      upstreams: [http://{foreign}]\n"
+        ),
+    )?;
+    let outcome = reverse_support::common::spawn_qpxd(&config, foreign.port(), log.clone());
+    assert!(
+        outcome.is_err(),
+        "foreign listener satisfied child readiness"
+    );
+    let log = fs::read_to_string(log)?;
+    assert!(
+        log.contains("bind failed"),
+        "child did not report its bind failure: {log}"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reverse_route_retries_and_mirrors() -> Result<()> {
     let dir = temp_dir("qpxd-reverse-route-e2e")?;
