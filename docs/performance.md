@@ -1619,3 +1619,31 @@ delay does not justify these regressions. Read admission and its runtime budget
 are removed; the independent slow-client/parallel-update server regression is
 retained. Apache-relative 1 MiB p99 remains 4.341, 4.580, and 3.685, so the
 planned latency goal remains unmet. Existing thresholds are unchanged.
+
+The next independent cache-state trial follows native instruction mapping.
+The `f78d063` and `fda7f55` native executables have the same SHA-256
+(`e1590d2abd206879370c80c00fcd108326e9a84c4b3a67c7ca8cd59f07e12c73`).
+Disassembly maps a 944-byte memmove in `execute_reverse_request` to access
+control result storage. Its audit context embeds unused structured-log fields
+even when the compiled response-observability flag is false, as with combined
+logging. Optional observability fields now live behind one boxed context;
+proxy kind, remote address, and method remain inline for all requests. The
+existing compiled flag and OpenTelemetry enablement retain their meaning.
+JSON access and audit output still retain route, destination, identity, and
+policy information. A real-server regression verifies successful and guard-
+rejected requests produce both structured logs with their original fields.
+This trial must demonstrate a benefit under independent Linux comparisons;
+reduced inline storage alone does not establish throughput acceptance.
+Local validation for the optional audit-context trial passes 1,308 tests across
+47 workspace suites, including both real-server logging regressions and the
+retained WebDAV slow-client/update regression. No public configuration or API
+is added. Existing untracked files remain untouched.
+
+Normal `d883c3d` CI also identifies unchanged HTTP/2 1 KiB multiplexing-100
+p99 (1.225, maximum 1.1), maximum latency (1.187, maximum 1.1), lane dominance
+(0.914, minimum 0.95), and aggregate dominance (1.405, minimum 1.5) failures.
+Fast streaming total CPU efficiency is 1.235 against its 1.25 minimum; slow
+streaming checks pass. These measured failures remain failures, including
+when a separate product optimization is under evaluation.
+All-target/all-feature Clippy, formatting, structure checks, and the required
+eight-category/sixteen-evaluation inventory also pass locally.

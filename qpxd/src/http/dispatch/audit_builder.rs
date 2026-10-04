@@ -1,3 +1,4 @@
+use super::audit::DispatchObservabilityContext;
 use super::{DispatchAuditContext, ProxyKind};
 use crate::destination::DestinationMetadata;
 use crate::http::policy::rule_context::attach_destination_trace;
@@ -26,40 +27,36 @@ pub(crate) struct DispatchAuditInput<'a> {
 pub(crate) fn build_dispatch_audit_context(input: DispatchAuditInput<'_>) -> DispatchAuditContext {
     let observability_enabled =
         input.state.plan.response_observability_required || qpx_observability::otel_enabled();
-    let owned = |value: Option<&str>| value.filter(|_| observability_enabled).map(str::to_owned);
-    let scope_name = observability_enabled.then(|| Arc::<str>::from(input.scope_name));
-    let decision_service_policy_id = input
-        .decision_service
-        .filter(|_| observability_enabled)
-        .and_then(|decision| decision.policy_id().map(str::to_owned));
-    let mut log_context = if observability_enabled {
-        input.identity.to_log_context(
+    let observability = observability_enabled.then(|| {
+        let decision_service_policy_id = input
+            .decision_service
+            .and_then(|decision| decision.policy_id().map(str::to_owned));
+        let mut log_context = input.identity.to_log_context(
             input.matched_rule,
             input.matched_route,
             decision_service_policy_id.as_deref(),
-        )
-    } else {
-        Default::default()
-    };
-    if observability_enabled {
+        );
         attach_destination_trace(&mut log_context, input.destination);
         log_context.policy_tags = input
             .decision_service
             .map(|decision| decision.policy_tags().to_vec())
             .unwrap_or_default();
-    }
+        Box::new(DispatchObservabilityContext {
+            state: input.state.clone(),
+            scope_name: Arc::<str>::from(input.scope_name),
+            path: input.path.map(str::to_owned),
+            log_context,
+            host: input.host.map(str::to_owned),
+            sni: input.sni.map(str::to_owned),
+            matched_rule: input.matched_rule.map(str::to_owned),
+            matched_route: input.matched_route.map(str::to_owned),
+            decision_service_policy_id,
+        })
+    });
     DispatchAuditContext {
-        state: observability_enabled.then(|| input.state.clone()),
         kind: input.kind,
-        scope_name,
         remote_addr: input.remote_addr,
         request_method: input.request_method,
-        path: owned(input.path),
-        log_context,
-        host: owned(input.host),
-        sni: owned(input.sni),
-        matched_rule: owned(input.matched_rule),
-        matched_route: owned(input.matched_route),
-        decision_service_policy_id,
+        observability,
     }
 }

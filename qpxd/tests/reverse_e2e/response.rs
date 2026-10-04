@@ -1,6 +1,129 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reverse_structured_access_and_audit_fields_survive_guard_rejection() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let directory = fs::canonicalize(directory.path())?;
+    let config = directory.join("reverse.yaml");
+    let log_path = directory.join("qpxd.log");
+    let (origin, _) = start_text_backend("OK", Vec::new()).await?;
+    let (port, qpxd) = spawn_qpxd_on_random_port(&config, log_path.clone(), |port| {
+        format!(
+            r#"runtime:
+  acceptor_tasks_per_listener: 1
+  reuse_port: false
+telemetry:
+  access_log:
+    enabled: true
+    format: json
+    rotation: never
+  audit_log:
+    enabled: true
+    format: json
+    rotation: never
+    include: [matched_route]
+http:
+  guard_profiles:
+  - name: limited
+    limits:
+      path_bytes: 16
+upstreams:
+- name: origin
+  url: http://{origin}
+edges:
+- kind: reverse
+  name: observed-reverse
+  listen: 127.0.0.1:{port}
+  routes:
+  - name: observed-route
+    match: {{}}
+    http_guard_profile: limited
+    target:
+      type: upstream
+      upstreams: [origin]
+"#
+        )
+    })?;
+    let client = test_client();
+    for (path, status) in [
+        ("/asset", StatusCode::OK),
+        (
+            "/path-that-exceeds-the-limit",
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+    ] {
+        let response = timeout(
+            Duration::from_secs(5),
+            client.request(
+                Request::builder()
+                    .uri(format!("http://127.0.0.1:{port}{path}"))
+                    .body(empty_body())?,
+            ),
+        )
+        .await
+        .context("observed response timeout")??;
+        assert_eq!(response.status(), status);
+        let _ = collect_body(response.into_body()).await?;
+    }
+    let (log, records) = timeout(Duration::from_secs(5), async {
+        loop {
+            let log = fs::read_to_string(&log_path)?;
+            let records = log
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .collect::<Vec<_>>();
+            let complete = [("/asset", 200), ("/path-that-exceeds-the-limit", 413)]
+                .iter()
+                .all(|(path, status)| {
+                    ["audit_log", "access_log"].iter().all(|target| {
+                        records.iter().any(|record| {
+                            record["target"] == *target
+                                && record["fields"]["status"] == *status
+                                && (record["fields"]["path"] == *path
+                                    || record["fields"]["uri"]
+                                        .as_str()
+                                        .is_some_and(|uri| uri.ends_with(path)))
+                        })
+                    })
+                });
+            if complete {
+                return Ok::<_, anyhow::Error>((log, records));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("structured log completion timeout: {}", qpxd.log_tail()))??;
+    for (path, status) in [("/asset", 200), ("/path-that-exceeds-the-limit", 413)] {
+        let audit = records
+            .iter()
+            .find(|record| {
+                record["target"] == "audit_log"
+                    && record["fields"]["path"] == path
+                    && record["fields"]["status"] == status
+            })
+            .with_context(|| format!("missing audit record for {path}: {log}"))?;
+        assert_eq!(audit["fields"]["name"], "observed-reverse");
+        assert_eq!(audit["fields"]["kind"], "reverse");
+        assert_eq!(audit["fields"]["method"], "GET");
+        assert_eq!(audit["fields"]["host"], "127.0.0.1");
+        assert_eq!(audit["fields"]["matched_route"], "observed-route");
+        let access = records
+            .iter()
+            .find(|record| {
+                record["target"] == "access_log"
+                    && record["fields"]["status"] == status
+                    && record["fields"]["uri"]
+                        .as_str()
+                        .is_some_and(|uri| uri.ends_with(path))
+            })
+            .with_context(|| format!("missing structured access record for {path}: {log}"))?;
+        assert_eq!(access["fields"]["matched_route"], "observed-route");
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reverse_combined_log_preserves_downstream_headers_on_reused_generic_requests() -> Result<()>
 {
     verify_reused_generic_request_combined_log(false).await?;

@@ -1,7 +1,6 @@
 use super::{DispatchAuditContext, DispatchOutcome, annotate_dispatch_response};
 use crate::destination::DestinationMetadata;
 use crate::http::policy::guard::{CompiledHttpGuardProfile, HttpGuardReject};
-use crate::http::policy::rule_context::attach_destination_trace;
 use crate::http::protocol::l7::finalize_response_for_request;
 use anyhow::Result;
 use hyper::{Request, Response};
@@ -26,7 +25,7 @@ pub(crate) fn evaluate_http_guard(
             Err(error) => (Err(error), None),
             Ok(Some(reject)) => {
                 let mut audit = input.audit.into_owned();
-                attach_destination_trace(&mut audit.log_context, input.destination);
+                audit.attach_destination_trace(input.destination);
                 (
                     build_guard_rejection(
                         input.req.method(),
@@ -46,7 +45,7 @@ pub(crate) fn evaluate_http_guard(
                 let version = input.req.version();
                 let proxy_name = input.proxy_name.to_string();
                 let mut audit = input.audit.into_owned();
-                attach_destination_trace(&mut audit.log_context, input.destination);
+                audit.attach_destination_trace(input.destination);
                 (
                     Ok(None),
                     Some((evaluation, method, version, proxy_name, audit)),

@@ -13,18 +13,37 @@ use super::{DispatchOutcome, ProxyKind};
 
 #[derive(Clone)]
 pub(crate) struct DispatchAuditContext {
-    pub(super) state: Option<Arc<RuntimeState>>,
     pub(crate) kind: ProxyKind,
-    pub(crate) scope_name: Option<Arc<str>>,
     pub(crate) remote_addr: SocketAddr,
+    pub(crate) request_method: Method,
+    pub(super) observability: Option<Box<DispatchObservabilityContext>>,
+}
+
+#[derive(Clone)]
+pub(super) struct DispatchObservabilityContext {
+    pub(super) state: Arc<RuntimeState>,
+    pub(super) scope_name: Arc<str>,
     pub(crate) host: Option<String>,
     pub(crate) sni: Option<String>,
-    pub(crate) request_method: Method,
     pub(crate) path: Option<String>,
     pub(crate) matched_rule: Option<String>,
     pub(crate) matched_route: Option<String>,
     pub(crate) decision_service_policy_id: Option<String>,
     pub(crate) log_context: RequestLogContext,
+}
+
+impl DispatchAuditContext {
+    pub(crate) fn attach_destination_trace(
+        &mut self,
+        destination: &crate::destination::DestinationMetadata,
+    ) {
+        if let Some(context) = self.observability.as_mut() {
+            crate::http::policy::rule_context::attach_destination_trace(
+                &mut context.log_context,
+                destination,
+            );
+        }
+    }
 }
 
 pub(crate) fn annotate_dispatch_response(
@@ -34,32 +53,33 @@ pub(crate) fn annotate_dispatch_response(
     extra_policy_tags: &[String],
 ) {
     record_dispatch_outcome(ctx.kind, outcome);
+    let Some(observability) = ctx.observability.as_deref() else {
+        return;
+    };
     let annotated_context = if extra_policy_tags.is_empty() {
-        Cow::Borrowed(&ctx.log_context)
+        Cow::Borrowed(&observability.log_context)
     } else {
-        let mut annotated_context = ctx.log_context.clone();
+        let mut annotated_context = observability.log_context.clone();
         merge_policy_tags(&mut annotated_context.policy_tags, extra_policy_tags);
         Cow::Owned(annotated_context)
     };
-    let Some(state) = ctx.state.as_deref() else {
-        return;
-    };
+    let state = observability.state.as_ref();
     attach_log_context(state, response, &annotated_context);
     emit_audit_log(
         state,
         AuditRecord {
             kind: ctx.kind,
-            name: ctx.scope_name.as_deref().unwrap_or(""),
+            name: observability.scope_name.as_ref(),
             remote_ip: ctx.remote_addr.ip(),
-            host: ctx.host.as_deref(),
-            sni: ctx.sni.as_deref(),
+            host: observability.host.as_deref(),
+            sni: observability.sni.as_deref(),
             method: Some(ctx.request_method.as_str()),
-            path: ctx.path.as_deref(),
+            path: observability.path.as_deref(),
             outcome,
             status: Some(response.status().as_u16()),
-            matched_rule: ctx.matched_rule.as_deref(),
-            matched_route: ctx.matched_route.as_deref(),
-            decision_service_policy_id: ctx.decision_service_policy_id.as_deref(),
+            matched_rule: observability.matched_rule.as_deref(),
+            matched_route: observability.matched_route.as_deref(),
+            decision_service_policy_id: observability.decision_service_policy_id.as_deref(),
         },
         &annotated_context,
     );
