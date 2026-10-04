@@ -95,13 +95,12 @@ case "$workload" in
     minimum_reports=6
     ;;
   http2)
-    QPXD_BIN="$wrapper" QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 \
-      QPX_HTTP2_COMPARE_BODY_SIZES=1024 QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
-      bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh"
+    QPXD_BIN="$wrapper" bash "$ROOT_DIR/scripts/perf-audit-http2-isolated.sh" \
+      --native "$ROOT_DIR/target/perf/perf-audit-http2-compare.jsonl"
     roles="qpxd-h2"
     log_directory="$ROOT_DIR/target/perf/http2-compare-logs"
     expected_profiles=1
-    minimum_reports=3
+    minimum_reports=12
     ;;
   streaming)
     QPXD_BIN="$wrapper" QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS=1 \

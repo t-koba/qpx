@@ -1762,3 +1762,13 @@ occurred. Payload length, timeout behavior, pipe ownership and socket settings
 remain enforced. This is a provisional product change, not an accepted
 performance improvement; three same-runner baseline/current comparisons use
 the normal streaming workload and unchanged quality and acceptance checks.
+
+The successful HTTP/2 native diagnostic (`37198316279`) previously ran with
+host loopback MTU, shared client/server CPUs and a shorter calibration than
+mandatory CI. Its stacks cannot establish the cause of normal isolated-lane
+performance. Native diagnostics now use the same isolated namespace, MTU
+1500, verified two-client/remaining-server CPU partition, 8-second minimum
+calibration, all four body-size/multiplex lanes and three samples per lane.
+The manifest explicitly marks instrumentation as enabled, which mandatory
+acceptance continues to reject. Twelve qpxd workload reports and zero lost
+samples are required; the normal invocation still disables instrumentation.

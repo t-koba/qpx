@@ -7,14 +7,20 @@ if [ "$(uname -s)" != Linux ]; then
   exit 1
 fi
 if [ "${1:-}" != --inside ]; then
-  if [ "$#" -ne 1 ]; then
-    echo "usage: perf-audit-http2-isolated.sh <comparison-jsonl>" >&2
+  if [ "$#" -ne 1 ] && { [ "$#" -ne 2 ] || [ "$1" != --native ]; }; then
+    echo "usage: perf-audit-http2-isolated.sh [--native] <comparison-jsonl>" >&2
     exit 2
   fi
-  exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA,QPX_HTTP2_COMPARE_LOG_DIR \
-    unshare --net bash "$ROOT_DIR/scripts/perf-audit-http2-isolated.sh" --inside "$1"
+  exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA,QPX_HTTP2_COMPARE_LOG_DIR,QPXD_REAL_BIN,QPX_NATIVE_PROFILE_DIR,QPX_NATIVE_PERF_BIN,QPX_NATIVE_WRAPPER_SOURCE \
+    unshare --net bash "$ROOT_DIR/scripts/perf-audit-http2-isolated.sh" --inside "$@"
 fi
-if [ "$#" -ne 2 ] || [ "$(id -u)" -ne 0 ]; then
+shift
+native=0
+if [ "${1:-}" = --native ]; then
+  native=1
+  shift
+fi
+if [ "$#" -ne 1 ] || [ "$(id -u)" -ne 0 ]; then
   echo "Unsupported isolated HTTP/2 comparison invocation" >&2
   exit 2
 fi
@@ -28,14 +34,14 @@ if [[ ! "${SUDO_UID:-}" =~ ^[0-9]+$ ]] || [[ ! "${SUDO_GID:-}" =~ ^[0-9]+$ ]] ||
   echo "HTTP/2 comparison requires an unprivileged invoking user" >&2
   exit 1
 fi
-output="$2"
+output="$1"
 mkdir -p "$(dirname "$output")"
 work_dir="$(mktemp -d "$(dirname "$output")/http2-environment.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 ip link set dev lo mtu 1500 up
 ip -json link show dev lo > "$work_dir/interfaces.json"
 h2load_binary="$(command -v h2load)"
-read -r client_cpus server_cpus < <(python3 - "$work_dir" "$output.environment.json" "$namespace" "$host_namespace" "$h2load_binary" <<'PY'
+read -r client_cpus server_cpus < <(python3 - "$work_dir" "$output.environment.json" "$namespace" "$host_namespace" "$h2load_binary" "$native" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -56,7 +62,7 @@ manifest = {
     "loopback_mtu": 1500, "available_cpus": available,
     "client_cpus": client, "server_cpus": server,
     "calibration_min_duration_ms": 8000,
-    "diagnostic_instrumentation": False,
+    "diagnostic_instrumentation": sys.argv[6] == "1",
 }
 Path(sys.argv[2]).write_text(json.dumps(manifest, indent=2) + "\n")
 client_arg = ",".join(map(str, client))
@@ -79,7 +85,7 @@ done
 chown -R "$SUDO_UID:$SUDO_GID" "$work_dir" "$output.environment.json"
 taskset -c "$server_cpus" setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups env \
   PATH="$work_dir:$PATH" QPX_HTTP2_COMPARE_ENVIRONMENT_JSON="$output.environment.json" \
-  QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=0 QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS=8000 \
+  QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS="$native" QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS=8000 \
   QPX_HTTP2_COMPARE_BODY_SIZES="1024 1048576" \
   QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES="1 100" QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS=3 \
   bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" "$output"
