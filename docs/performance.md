@@ -1748,7 +1748,7 @@ alone does not establish product performance acceptance.
 The three extended streaming diagnostics (`37198321393`, `37198323329`,
 `37198324855`) all fail existing acceptance. One exceeds the slow-client
 queue-delay ratio (2.882 versus 1.5); the other two exceed the fast-client
-maximum gap (382.864 and 472.506 ms versus 250 ms). Increasing the workload
+maximum-gap ratio (382.864 and 472.506 versus 250). Increasing the workload
 duration therefore does not resolve the failures and is not adopted by CI.
 
 The successful HTTP/1 native diagnostic (`37198314594`) shows socket delivery
@@ -1772,3 +1772,20 @@ calibration, all four body-size/multiplex lanes and three samples per lane.
 The manifest explicitly marks instrumentation as enabled, which mandatory
 acceptance continues to reject. Twelve qpxd workload reports and zero lost
 samples are required; the normal invocation still disables instrumentation.
+
+Inspection of the third extended streaming run's absolute values reveals an
+additional measurement-quality defect. Nginx fast round 3 takes 10,792.480
+seconds, compared with 135.571 and 139.258 seconds in rounds 1 and 2 (79.608
+spread). The old checker omits references outside the competitive throughput
+frontier and reports this run's quality as passing. All ten role/mode records
+now receive the unchanged reference/project stability limits; the obsolete
+frontier exemption is removed. Re-evaluating that retained real run fails
+measurement quality for nginx explicitly. This stricter check does not make
+the qpxd maximum-gap failure disappear.
+
+The qpxd fast windows independently contain maximum gaps of 208.649, 208.936
+and 207.992 ms. Native streaming clients now retain socket TCP_INFO bytes,
+addresses, transfer position and both timestamps for fast gaps at least 50 ms,
+alongside existing progress logs. Socket inspection errors fail the diagnostic,
+and instrumented records remain ineligible for mandatory performance acceptance.
+Normal clients retain their existing measurement behavior.

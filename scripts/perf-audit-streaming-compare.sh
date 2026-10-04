@@ -304,6 +304,8 @@ import time
 
 proxy, port, read_mode, delay_ms, expected, chunk_bytes, fast_transfers = sys.argv[1:8]
 diagnostic = os.environ["QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS"] == "1"
+if diagnostic and not hasattr(socket, "TCP_INFO"):
+    raise SystemExit("streaming socket diagnostics require Linux TCP_INFO")
 port = int(port)
 delay = float(delay_ms) / 1000.0
 expected = int(expected)
@@ -347,7 +349,17 @@ for transfer in range(transfers):
         transfer_received += len(data)
         if transfer_received >= next_observation:
             if last_observation is not None:
-                gaps.append((now - last_observation) * 1000.0)
+                gap_ms = (now - last_observation) * 1000.0
+                gaps.append(gap_ms)
+                if diagnostic and read_mode == "fast" and gap_ms >= 50.0:
+                    print(json.dumps({
+                        "event": "streaming_client_gap", "proxy": proxy,
+                        "transfer": transfer + 1, "gap_ms": gap_ms,
+                        "monotonic_ns": time.monotonic_ns(), "epoch_ns": time.time_ns(),
+                        "received_bytes": transfer_received, "expected_bytes": expected,
+                        "local_address": sock.getsockname(), "peer_address": sock.getpeername(),
+                        "tcp_info_hex": sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 256).hex(),
+                    }), file=sys.stderr, flush=True)
             last_observation = now
             next_observation += chunk_bytes
             if read_mode == "slow":

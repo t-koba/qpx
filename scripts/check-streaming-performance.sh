@@ -317,20 +317,8 @@ def record_check(mode, metric, current, limit, direction):
                               "violation_percent": max(0.0, deviation * 100)})
 
 stability_objectives = objectives.get("stability", {})
-frontier_ratio = ratio_limit(stability_objectives, "competitive_frontier_total_ratio")
-stability_records = {
-    ("fast", "qpxd"),
-    ("slow", "qpxd"),
-    ("fast", "direct-backend"),
-    ("slow", "direct-backend"),
-    ("fast", leader_name),
-    ("slow", slow_resource_leader_name),
-}
-leader_total = positive_number(leader, "total_ms")
-for proxy in external_proxies:
-    if positive_number(fast[proxy], "total_ms") <= leader_total * frontier_ratio:
-        stability_records.add(("fast", proxy))
-for key in sorted(stability_records):
+# A slow median must not exclude an unstable reference from measurement quality.
+for key in sorted(records):
     record = records[key]
     if key[1] == "qpxd":
         max_total_sample_spread_ratio = ratio_limit(
