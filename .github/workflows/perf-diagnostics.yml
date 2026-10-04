@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-duration, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -128,7 +128,7 @@ jobs:
           RUSTFLAGS: "-D warnings"
       - name: build comparison baseline before measurement
         id: baseline
-        if: inputs.category == 'webdav-revision' || inputs.category == 'cache-revision' || inputs.category == 'http2-revision'
+        if: inputs.category == 'webdav-revision' || inputs.category == 'cache-revision' || inputs.category == 'http2-revision' || inputs.category == 'streaming-revision'
         env:
           BASELINE_REF: ${{ inputs.baseline_ref }}
           RUSTFLAGS: "-D warnings"
@@ -190,6 +190,15 @@ jobs:
               python3 scripts/perf-evaluate.py "extended streaming existing acceptance" -- \
                 bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json || failed=1
               exit "$failed"
+              ;;
+            streaming-revision)
+              case "$REVISION_ORDER" in
+                baseline-current) export QPX_PERF_REPETITION=1 ;;
+                current-baseline) export QPX_PERF_REPETITION=2 ;;
+                *) echo "unsupported streaming revision order: $REVISION_ORDER" >&2; exit 2 ;;
+              esac
+              python3 scripts/perf-evaluate.py "streaming same-runner revision comparison" -- bash scripts/perf-audit-revision-compare.sh streaming target/perf/perf-audit-streaming-compare.jsonl
+              python3 scripts/perf-evaluate.py "current streaming revision objectives" -- bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl
               ;;
             proxy-threads)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 python3 scripts/perf-evaluate.py "thread diagnostics" -- bash scripts/perf-audit-proxy-matrix.sh

@@ -1744,3 +1744,21 @@ slow-client workload. It runs the existing quality and acceptance checks
 separately and preserves any failures. No mandatory workload is changed until
 three independent measurements demonstrate stable conditions; a longer window
 alone does not establish product performance acceptance.
+
+The three extended streaming diagnostics (`37198321393`, `37198323329`,
+`37198324855`) all fail existing acceptance. One exceeds the slow-client
+queue-delay ratio (2.882 versus 1.5); the other two exceed the fast-client
+maximum gap (382.864 and 472.506 ms versus 250 ms). Increasing the workload
+duration therefore does not resolve the failures and is not adopted by CI.
+
+The successful HTTP/1 native diagnostic (`37198314594`) shows socket delivery
+and splice-related kernel work dominating the transfer windows. Inspection of
+the socket relay finds a fairness defect: entering a readiness await sets
+`waited_for_io`, even when that await completes without returning Pending.
+The subsequent cooperative budget charge can also defer a handoff for many
+byte quanta. The trial records actual Pending via the existing lazy-timeout
+callback and yields at the existing byte quantum when no real suspension has
+occurred. Payload length, timeout behavior, pipe ownership and socket settings
+remain enforced. This is a provisional product change, not an accepted
+performance improvement; three same-runner baseline/current comparisons use
+the normal streaming workload and unchanged quality and acceptance checks.

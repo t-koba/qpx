@@ -289,25 +289,28 @@ pub(super) async fn splice_tcp_exact(
         let requested = usize::try_from(remaining.min(scheduling_quantum))
             .unwrap_or(scheduling_quantum as usize);
         let moved = pending_timeout
-            .timeout_after_pending(read_timeout, async {
-                loop {
-                    match source.try_io(Interest::READABLE, || {
-                        splice_once(source.as_raw_fd(), pipe.write_fd, requested)
-                    }) {
-                        Ok(moved) => return Ok(moved),
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if bytes_since_yield > 0 {
-                                // Re-applying TCP_NODELAY explicitly pushes any partial splice
-                                // batch before an upstream pause can leave it to the TCP flush timer.
-                                destination.set_nodelay(true)?;
+            .timeout_after_pending_with(
+                read_timeout,
+                async {
+                    loop {
+                        match source.try_io(Interest::READABLE, || {
+                            splice_once(source.as_raw_fd(), pipe.write_fd, requested)
+                        }) {
+                            Ok(moved) => return Ok(moved),
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                if bytes_since_yield > 0 {
+                                    // Re-applying TCP_NODELAY explicitly pushes any partial splice
+                                    // batch before an upstream pause can leave it to the TCP flush timer.
+                                    destination.set_nodelay(true)?;
+                                }
+                                source.readable().await?;
                             }
-                            waited_for_io = true;
-                            source.readable().await?;
+                            Err(error) => return Err(error),
                         }
-                        Err(error) => return Err(error),
                     }
-                }
-            })
+                },
+                || waited_for_io = true,
+            )
             .await
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::TimedOut, "splice source read timed out")
@@ -322,20 +325,23 @@ pub(super) async fn splice_tcp_exact(
         let mut buffered = moved;
         while buffered > 0 {
             let written = pending_timeout
-                .timeout_after_pending(write_timeout, async {
-                    loop {
-                        match destination.try_io(Interest::WRITABLE, || {
-                            splice_once(pipe.read_fd, destination.as_raw_fd(), buffered)
-                        }) {
-                            Ok(written) => return Ok(written),
-                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                                waited_for_io = true;
-                                destination.writable().await?;
+                .timeout_after_pending_with(
+                    write_timeout,
+                    async {
+                        loop {
+                            match destination.try_io(Interest::WRITABLE, || {
+                                splice_once(pipe.read_fd, destination.as_raw_fd(), buffered)
+                            }) {
+                                Ok(written) => return Ok(written),
+                                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                    destination.writable().await?;
+                                }
+                                Err(error) => return Err(error),
                             }
-                            Err(error) => return Err(error),
                         }
-                    }
-                })
+                    },
+                    || waited_for_io = true,
+                )
                 .await
                 .map_err(|_| {
                     io::Error::new(
@@ -356,7 +362,11 @@ pub(super) async fn splice_tcp_exact(
         if remaining > 0 && bytes_since_yield >= scheduling_quantum {
             bytes_since_yield = 0;
             if !waited_for_io {
-                tokio::task::consume_budget().await;
+                // Readiness may complete immediately even after WouldBlock.
+                // Only a real Pending poll has handed this worker to its peers;
+                // otherwise enforce the byte quantum without deferring it for
+                // another full cooperative task budget.
+                tokio::task::yield_now().await;
             }
             waited_for_io = false;
         }
