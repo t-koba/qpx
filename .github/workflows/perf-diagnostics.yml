@@ -197,8 +197,10 @@ jobs:
                 current-baseline) export QPX_PERF_REPETITION=2 ;;
                 *) echo "unsupported streaming revision order: $REVISION_ORDER" >&2; exit 2 ;;
               esac
-              python3 scripts/perf-evaluate.py "streaming same-runner revision comparison" -- bash scripts/perf-audit-revision-compare.sh streaming target/perf/perf-audit-streaming-compare.jsonl
-              python3 scripts/perf-evaluate.py "current streaming revision objectives" -- bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl
+              failed=0
+              python3 scripts/perf-evaluate.py "streaming same-runner revision comparison" -- bash scripts/perf-audit-revision-compare.sh streaming target/perf/perf-audit-streaming-compare.jsonl || failed=1
+              python3 scripts/perf-evaluate.py "current streaming revision objectives" -- bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl || failed=1
+              exit "$failed"
               ;;
             proxy-threads)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 python3 scripts/perf-evaluate.py "thread diagnostics" -- bash scripts/perf-audit-proxy-matrix.sh
@@ -232,8 +234,10 @@ jobs:
                 current-baseline) export QPX_PERF_REPETITION=2 ;;
                 *) echo "unsupported HTTP/2 revision order: $REVISION_ORDER" >&2; exit 2 ;;
               esac
-              python3 scripts/perf-evaluate.py "HTTP/2 isolated same-runner revision comparison" -- bash scripts/perf-audit-revision-compare.sh http2 target/perf/perf-audit-http2-compare.jsonl
-              python3 scripts/perf-evaluate.py "current isolated HTTP/2 revision objectives" -- bash scripts/check-http2-performance.sh target/perf/perf-audit-http2-compare.jsonl
+              failed=0
+              python3 scripts/perf-evaluate.py "HTTP/2 isolated same-runner revision comparison" -- bash scripts/perf-audit-revision-compare.sh http2 target/perf/perf-audit-http2-compare.jsonl || failed=1
+              python3 scripts/perf-evaluate.py "current isolated HTTP/2 revision objectives" -- bash scripts/check-http2-performance.sh target/perf/perf-audit-http2-compare.jsonl || failed=1
+              exit "$failed"
               ;;
             webdav-scheduling)
               RUST_LOG=warn,qpx_perf_phase=debug QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \

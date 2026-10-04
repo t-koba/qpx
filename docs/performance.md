@@ -1841,3 +1841,10 @@ readiness pauses a relay. It tests the observed slow-transfer CPU/wakeup
 regression without relaxing any measurement or acceptance threshold.
 Three independent comparisons and Linux socket restoration tests remain
 required; the larger socket threshold is provisional.
+
+Revision diagnostics now retain current acceptance results even when baseline
+measurement quality fails. Both evaluations contribute to the final failure
+status. Rechecking the retained third 64 KiB comparison produces a baseline
+quality failure (2.594866 spread versus 2.5) and a current acceptance success,
+with both result files present and the combined command still failing. This
+prevents an invalid comparison from hiding independently available results.
