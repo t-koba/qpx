@@ -299,6 +299,7 @@ import json
 import os
 import socket
 import statistics
+import subprocess
 import sys
 import time
 
@@ -352,13 +353,22 @@ for transfer in range(transfers):
                 gap_ms = (now - last_observation) * 1000.0
                 gaps.append(gap_ms)
                 if diagnostic and read_mode == "fast" and gap_ms >= 50.0:
+                    local_address = sock.getsockname()
+                    observed_monotonic_ns = time.monotonic_ns()
+                    observed_epoch_ns = time.time_ns()
+                    tcp_info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 256)
+                    sender = subprocess.run([
+                        "ss", "-tinp",
+                        f"( sport = :{port} and dport = :{local_address[1]} )",
+                    ], capture_output=True, text=True, check=True, timeout=5)
                     print(json.dumps({
                         "event": "streaming_client_gap", "proxy": proxy,
                         "transfer": transfer + 1, "gap_ms": gap_ms,
-                        "monotonic_ns": time.monotonic_ns(), "epoch_ns": time.time_ns(),
+                        "monotonic_ns": observed_monotonic_ns, "epoch_ns": observed_epoch_ns,
                         "received_bytes": transfer_received, "expected_bytes": expected,
-                        "local_address": sock.getsockname(), "peer_address": sock.getpeername(),
-                        "tcp_info_hex": sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 256).hex(),
+                        "local_address": local_address, "peer_address": sock.getpeername(),
+                        "tcp_info_hex": tcp_info.hex(), "sender_socket_state": sender.stdout,
+                        "inspection_duration_ns": time.monotonic_ns() - observed_monotonic_ns,
                     }), file=sys.stderr, flush=True)
             last_observation = now
             next_observation += chunk_bytes

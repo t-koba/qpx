@@ -1789,3 +1789,15 @@ addresses, transfer position and both timestamps for fast gaps at least 50 ms,
 alongside existing progress logs. Socket inspection errors fail the diagnostic,
 and instrumented records remain ineligible for mandatory performance acceptance.
 Normal clients retain their existing measurement behavior.
+
+Splice fairness comparisons (`37221321802`, `37221324115`, `37221326393`)
+produce one fully successful run. The other two fail baseline measurement
+quality (zero-reference scheduler ratio and 2.918 project time spread).
+Re-evaluating current records finds two acceptance passes and one failure:
+the failing run contains a 202.024 ms maximum gap and a slow queue ratio
+10.643 versus 1.5. Fast current/baseline throughput ratios are 0.610, 1.108
+and 1.044; total CPU-efficiency ratios are 1.050, 1.163 and 1.021. This does
+not demonstrate the required three independent passes. The socket diagnostic
+also preserves the matching sender's `ss -tinp` state and inspection duration
+after a gap, so cumulative retransmission/window data can distinguish TCP
+stalls from scheduling without treating instrumented timings as acceptance.
