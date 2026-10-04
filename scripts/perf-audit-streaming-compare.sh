@@ -296,12 +296,14 @@ run_client() {
   local delay_ms="$4"
   python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" <<'PY'
 import json
+import os
 import socket
 import statistics
 import sys
 import time
 
 proxy, port, read_mode, delay_ms, expected, chunk_bytes, fast_transfers = sys.argv[1:8]
+diagnostic = os.environ["QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS"] == "1"
 port = int(port)
 delay = float(delay_ms) / 1000.0
 expected = int(expected)
@@ -312,8 +314,10 @@ first_byte_ms = []
 gaps = []
 received = 0
 
-for _ in range(transfers):
+for transfer in range(transfers):
     transfer_started = time.perf_counter()
+    if diagnostic:
+        print(f"Streaming transfer started: proxy={proxy} mode={read_mode} transfer={transfer + 1}/{transfers}", file=sys.stderr, flush=True)
     first_byte = None
     last_observation = None
     next_observation = chunk_bytes
@@ -355,6 +359,8 @@ for _ in range(transfers):
         )
     received += transfer_received
     first_byte_ms.append((first_byte - transfer_started) * 1000.0)
+    if diagnostic:
+        print(f"Streaming transfer completed: proxy={proxy} mode={read_mode} transfer={transfer + 1}/{transfers} bytes={transfer_received} elapsed_ms={(time.perf_counter() - transfer_started) * 1000.0:.3f}", file=sys.stderr, flush=True)
 finished = time.perf_counter()
 gaps_sorted = sorted(gaps)
 def percentile(p):
@@ -459,7 +465,11 @@ run_one() {
         backend_scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$BACKEND_PID" "$TMP_DIR/${artifact}.attempt-${attempt}.backend-scheduler-before.json")"
       fi
     fi
-    if ! metrics="$(run_client "$proxy" "$port" "$read_mode" "$delay_ms")"; then
+    if [ "$QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS" = 1 ]; then
+      echo "Streaming workload counters ready: ${artifact}, attempt=${attempt}" >&2
+    fi
+    if ! metrics="$(run_client "$proxy" "$port" "$read_mode" "$delay_ms" 2>"$LOG_DIR/${artifact}.attempt-${attempt}.client.log")"; then
+      cat "$LOG_DIR/${artifact}.attempt-${attempt}.client.log" >&2
       if [ -n "$fd_peak_monitor_pid" ]; then
         kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
         wait "$fd_peak_monitor_pid" 2>/dev/null || true
@@ -479,6 +489,9 @@ run_one() {
       echo "${proxy} streaming client failed on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       attempt=$((attempt + 1))
       continue
+    fi
+    if [ "$QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS" = 1 ]; then
+      echo "Streaming client completed: ${artifact}, attempt=${attempt}" >&2
     fi
     # Bracket workload counters before stopping samplers or processing reports.
     scheduler_after_ns="$scheduler_before_ns"

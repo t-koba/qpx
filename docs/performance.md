@@ -1647,3 +1647,31 @@ streaming checks pass. These measured failures remain failures, including
 when a separate product optimization is under evaluation.
 All-target/all-feature Clippy, formatting, structure checks, and the required
 eight-category/sixteen-evaluation inventory also pass locally.
+
+Normal `1f482bc` CI (`37191622743`) fails four jobs: proxy and HTTP/2 audits,
+then aggregate and release gates. WebDAV 1 MiB CPU efficiency is 1.383 against
+1.5. HTTP/2 1 KiB multiplexing-100 throughput is 0.941 against 0.95, p99 is
+1.332 against 1.1, maximum latency is 1.353 against 1.1, dominance is 0.853
+against 0.95, and queue delay is 2.032 against 2.0. The proxy baseline check
+also fails: 1 KiB queue ratio is 7.147 against 2.5, 1 MiB CPU ratio is 4.581
+against 5.268, and 1 MiB queue ratio is 174.772 against 14.0. These baseline
+failures must not be omitted when assessing the category's final outcome.
+
+All three optional-audit-context comparisons (`37191636347`, `37191639975`,
+`37191643765`) pass measurement quality but fail the planned performance
+objectives. Current/baseline cached 1 KiB throughput ratios are 1.015, 1.007,
+and 1.025. Feature-rich 1 KiB ratios are 1.011, 0.967, and 0.994; CPU ratios
+are 1.013, 0.964, and 0.987. Miss results are mixed. The intended feature-rich
+improvement has not been established, and the overall goal remains unmet.
+
+Streaming native diagnostic `37191696798` reaches its unchanged 20-minute
+timeout during the first nginx fast window, after direct and qpxd each finish
+64 complete 100 MiB transfers in 2.170 and 2.988 seconds. Profiler shutdown is
+clean; its incomplete profile is not accepted. Diagnostic-only per-transfer
+start/completion records now retain progress in each client log, with workload
+counter/client completion stages in the evaluation log. This distinguishes
+client transfer stalls from resource accounting stalls without changing the
+normal workload, measurement counts, timeout, or required thresholds. The
+actual streaming backend verifies fast/slow clients with diagnostics both on
+and off; Python parsing and Bash syntax checks pass. Running the full harness
+locally is blocked by unavailable privileged scheduler accounting.
