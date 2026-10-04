@@ -394,47 +394,6 @@ async fn proxy_direct_plain_http1_with_interim_inner(
 
 pub(crate) async fn proxy_direct_plain_http1_raw_response_with_interim(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
-    connect_authority: &str,
-    host_authority: &str,
-    request_version: http::Version,
-    proxy_name: &str,
-) -> Result<Http1ResponseWithInterim> {
-    proxy_direct_plain_http1_raw_response_with_interim_inner(
-        pools,
-        req,
-        connect_authority,
-        host_authority,
-        request_version,
-        proxy_name,
-        None,
-    )
-    .await
-}
-
-pub(crate) async fn proxy_direct_plain_http1_raw_response_with_interim_on_connection(
-    pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
-    connect_authority: &str,
-    host_authority: &str,
-    request_version: http::Version,
-    proxy_name: &str,
-    connection_pool: &PreparedPlainHttp1ConnectionAffinity,
-) -> Result<Http1ResponseWithInterim> {
-    proxy_direct_plain_http1_raw_response_with_interim_inner(
-        pools,
-        req,
-        connect_authority,
-        host_authority,
-        request_version,
-        proxy_name,
-        Some(connection_pool),
-    )
-    .await
-}
-
-async fn proxy_direct_plain_http1_raw_response_with_interim_inner(
-    pools: &crate::pool::PoolRegistry,
     mut req: Request<Body>,
     connect_authority: &str,
     host_authority: &str,

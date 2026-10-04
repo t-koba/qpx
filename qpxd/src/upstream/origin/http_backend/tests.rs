@@ -161,14 +161,14 @@ async fn connection_local_pool_keeps_reusable_origins_isolated() -> Result<()> {
             host_authority.as_ref(),
             "qpx-test",
         )?;
-        let response = proxy_direct_plain_http1_raw_response_with_interim_on_connection(
+        let response = proxy_direct_plain_http1_raw_response_with_interim(
             &pools,
             request,
             connect_authority.as_ref(),
             host_authority.as_ref(),
             http::Version::HTTP_2,
             "qpx-test",
-            connection,
+            Some(connection),
         )
         .await?;
         assert_eq!(to_bytes(response.response.into_body()).await?, "OK");
@@ -275,6 +275,7 @@ async fn bodyless_raw_response_path_discards_closed_idle_connection() -> Result<
         host_authority.as_ref(),
         http::Version::HTTP_2,
         "qpx-test",
+        None,
     )
     .await?;
     assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
@@ -302,6 +303,7 @@ async fn bodyless_raw_response_path_discards_closed_idle_connection() -> Result<
         host_authority.as_ref(),
         http::Version::HTTP_2,
         "qpx-test",
+        None,
     )
     .await?;
     assert!(second.response_finalized);

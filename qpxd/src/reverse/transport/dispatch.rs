@@ -14,8 +14,7 @@ use crate::reverse::router::HttpRoute;
 use crate::runtime::Runtime;
 use crate::upstream::origin::{
     OriginEndpoint, PreparedPlainHttp1ConnectionAffinity, prepare_proxy_http1_request,
-    proxy_direct_plain_http1_raw_response_with_interim,
-    proxy_direct_plain_http1_raw_response_with_interim_on_connection, proxy_http,
+    proxy_direct_plain_http1_raw_response_with_interim, proxy_http,
     proxy_http_with_interim_timeout, proxy_http_with_interim_timeout_on_connection,
 };
 use anyhow::{Result, anyhow};
@@ -965,30 +964,18 @@ async fn dispatch_plain_reverse_http(
         .as_ref()
         .is_some_and(|policy| policy.latency_threshold.is_some())
         .then(tokio::time::Instant::now);
-    let response = timeout_after_pending(route.policy.timeout, async {
-        if let Some(connection_pool) = connection_pool {
-            proxy_direct_plain_http1_raw_response_with_interim_on_connection(
-                &state.pools,
-                req,
-                connect_authority,
-                host_authority,
-                request_version,
-                proxy_name,
-                connection_pool,
-            )
-            .await
-        } else {
-            proxy_direct_plain_http1_raw_response_with_interim(
-                &state.pools,
-                req,
-                connect_authority,
-                host_authority,
-                request_version,
-                proxy_name,
-            )
-            .await
-        }
-    })
+    let response = timeout_after_pending(
+        route.policy.timeout,
+        proxy_direct_plain_http1_raw_response_with_interim(
+            &state.pools,
+            req,
+            connect_authority,
+            host_authority,
+            request_version,
+            proxy_name,
+            connection_pool,
+        ),
+    )
     .await;
     let (interim, response, response_finalized) = match response {
         Ok(Ok(response)) => (
@@ -1603,6 +1590,14 @@ mod state_layout_tests {
         fn future_size<I, O>(_: impl FnOnce(I) -> O) -> usize {
             std::mem::size_of::<O>()
         }
+        let plain_bytes = future_size(|(req, state, route, method, version, name, pool)| {
+            dispatch_plain_reverse_http(req, state, route, method, version, name, pool)
+        });
+        assert!(
+            plain_bytes <= 13 * 512,
+            "plain reverse dispatcher inline state exceeded its size budget: {plain_bytes} bytes"
+        );
+        println!("plain reverse dispatcher state: {plain_bytes} bytes");
         let cache_bytes = future_size(prepare_reverse_cache);
         assert!(
             cache_bytes <= 4 * 1024,

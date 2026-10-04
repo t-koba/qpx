@@ -1848,3 +1848,26 @@ status. Rechecking the retained third 64 KiB comparison produces a baseline
 quality failure (2.594866 spread versus 2.5) and a current acceptance success,
 with both result files present and the combined command still failing. This
 prevents an invalid comparison from hiding independently available results.
+
+The matched HTTP/2 native diagnostic (`37221328305`, artifact `11310437481`)
+uses the mandatory CPU partition, loopback MTU and calibration windows. Its
+1 KiB / 100-stream round-two window has 1,756 callchain samples; 87 contain
+memmove, with 13 immediate callers in `dispatch_plain_reverse_http` and
+seven in direct plain upstream response handling. The uninstrumented
+`5377abf` CI still exceeds the p99 objective (1.173595 versus 1.1).
+
+A separate internal cleanup removes duplicate async wrappers around direct
+plain HTTP response handling and the dispatch branch selecting local versus
+shared connection reuse. One function accepts the existing optional pool
+reference, and every caller is updated. Pending-only timeout behavior,
+health accounting, request preparation and response finalization remain
+unchanged. On macOS ARM64, the plain dispatcher future falls from 6,920
+to 6,056 bytes (12.5%); its state-size test prevents reintroducing the larger
+layout. This is layout evidence, not an established throughput or latency
+gain. Same-runner Linux HTTP/2 comparisons are still required.
+
+Local validation of the async cleanup passes all 1,309 workspace tests in
+47 nonempty suites, all-target Clippy with warnings denied, formatting,
+spelling, structure and the eight-category / sixteen-evaluation gate
+inventory. Linux and the three independent performance comparisons are
+pending; no acceptance thresholds change.
