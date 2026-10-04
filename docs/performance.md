@@ -1824,3 +1824,20 @@ proceed because `x86_64-linux-gnu-gcc` is absent. GitHub access resumed after
 the usage limit recovered; actual Linux CI and three independent same-runner
 comparisons are required before accepting this trial. It is not yet
 performance-accepted or CI-verified.
+
+The 64 KiB socket-splice trial (`5e15885`) is not accepted. Independent
+comparisons `37244198807`, `37244200443` and `37244201937` retain both
+versions, even where the baseline quality gate fails. The current fast
+maximum gaps are 0.231, 0.341 and 0.285 ms, but slow-transfer server CPU
+times rise from 11.135/19.455/11.910 ms to 23.440/31.755/24.378 ms.
+Slow scheduler delays also rise from 3.646/29.014/10.801 microseconds to
+296.032/454.251/65.145 microseconds. The first two current objective
+evaluations fail; the third baseline's fast sample spread is invalid.
+
+The follow-up keeps the file threshold at 64 KiB and uses the existing
+1 MiB balanced transfer quantum as the socket unsent-data bound. This
+retains bounded buffering while allowing a larger batch before socket
+readiness pauses a relay. It tests the observed slow-transfer CPU/wakeup
+regression without relaxing any measurement or acceptance threshold.
+Three independent comparisons and Linux socket restoration tests remain
+required; the larger socket threshold is provisional.

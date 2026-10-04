@@ -24,7 +24,9 @@ const LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
 #[cfg(target_os = "linux")]
-const ZERO_COPY_NOTSENT_LOWAT: u32 = 64 * 1024;
+const FILE_NOTSENT_LOWAT: u32 = 64 * 1024;
+#[cfg(target_os = "linux")]
+const SOCKET_NOTSENT_LOWAT: u32 = BALANCED_ZERO_COPY_QUANTUM as u32;
 
 // Buffered body relays move up to one read buffer per readiness event. The
 // same fairness rule as the zero-copy path applies under concurrent transfer
@@ -110,7 +112,7 @@ pub(super) fn split_tcp_file_region_sender()
 pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Result<()> {
     let _phase = crate::perf_diagnostics::phase_timer!("file_body_send");
     #[cfg(target_os = "linux")]
-    let mut send_queue = ZeroCopySendQueueGuard::begin(stream)?;
+    let mut send_queue = ZeroCopySendQueueGuard::begin(stream, FILE_NOTSENT_LOWAT)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::future::{Future, poll_fn};
@@ -219,13 +221,13 @@ struct ZeroCopySendQueueGuard<'a> {
 
 #[cfg(target_os = "linux")]
 impl<'a> ZeroCopySendQueueGuard<'a> {
-    fn begin(stream: &'a TcpStream) -> io::Result<Self> {
+    fn begin(stream: &'a TcpStream, notsent_lowat: u32) -> io::Result<Self> {
         let socket = socket2::SockRef::from(stream);
         let original = socket.tcp_notsent_lowat()?;
         // Bound data waiting for transmission, not the socket's total buffer.
         // This makes readiness reflect client progress before a complete large
         // response can sit in the kernel behind the other active transfers.
-        socket.set_tcp_notsent_lowat(ZERO_COPY_NOTSENT_LOWAT)?;
+        socket.set_tcp_notsent_lowat(notsent_lowat)?;
         Ok(Self {
             stream,
             original,
@@ -280,7 +282,7 @@ pub(super) async fn splice_tcp_exact(
     write_timeout: Duration,
 ) -> io::Result<()> {
     let _transfer = ZeroCopyTransferGuard::begin();
-    let mut send_queue = ZeroCopySendQueueGuard::begin(destination)?;
+    let mut send_queue = ZeroCopySendQueueGuard::begin(destination, SOCKET_NOTSENT_LOWAT)?;
     let pipe = SplicePipe::new()?;
     let pending_timer = sleep(Duration::ZERO);
     tokio::pin!(pending_timer);
@@ -699,7 +701,7 @@ mod tests {
                 socket
                     .tcp_notsent_lowat()
                     .expect("read active send queue limit"),
-                ZERO_COPY_NOTSENT_LOWAT,
+                SOCKET_NOTSENT_LOWAT,
             );
         }
         assert_eq!(
