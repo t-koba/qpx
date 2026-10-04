@@ -23,6 +23,8 @@ const BALANCED_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 const LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
+#[cfg(target_os = "linux")]
+const ZERO_COPY_NOTSENT_LOWAT: u32 = 64 * 1024;
 
 // Buffered body relays move up to one read buffer per readiness event. The
 // same fairness rule as the zero-copy path applies under concurrent transfer
@@ -108,7 +110,7 @@ pub(super) fn split_tcp_file_region_sender()
 pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Result<()> {
     let _phase = crate::perf_diagnostics::phase_timer!("file_body_send");
     #[cfg(target_os = "linux")]
-    let mut send_queue = FileSendQueueGuard::begin(stream)?;
+    let mut send_queue = ZeroCopySendQueueGuard::begin(stream)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::future::{Future, poll_fn};
@@ -209,21 +211,21 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
 }
 
 #[cfg(target_os = "linux")]
-struct FileSendQueueGuard<'a> {
+struct ZeroCopySendQueueGuard<'a> {
     stream: &'a TcpStream,
     original: u32,
     restored: bool,
 }
 
 #[cfg(target_os = "linux")]
-impl<'a> FileSendQueueGuard<'a> {
+impl<'a> ZeroCopySendQueueGuard<'a> {
     fn begin(stream: &'a TcpStream) -> io::Result<Self> {
         let socket = socket2::SockRef::from(stream);
         let original = socket.tcp_notsent_lowat()?;
         // Bound data waiting for transmission, not the socket's total buffer.
         // This makes readiness reflect client progress before a complete large
         // response can sit in the kernel behind the other active transfers.
-        socket.set_tcp_notsent_lowat(CONTENDED_FILE_ZERO_COPY_QUANTUM as u32)?;
+        socket.set_tcp_notsent_lowat(ZERO_COPY_NOTSENT_LOWAT)?;
         Ok(Self {
             stream,
             original,
@@ -239,12 +241,12 @@ impl<'a> FileSendQueueGuard<'a> {
 }
 
 #[cfg(target_os = "linux")]
-impl Drop for FileSendQueueGuard<'_> {
+impl Drop for ZeroCopySendQueueGuard<'_> {
     fn drop(&mut self) {
         if !self.restored
             && let Err(error) = self.restore()
         {
-            tracing::error!(error = %error, "failed to restore file transfer send queue limit");
+            tracing::error!(error = %error, "failed to restore zero-copy transfer send queue limit");
         }
     }
 }
@@ -278,6 +280,7 @@ pub(super) async fn splice_tcp_exact(
     write_timeout: Duration,
 ) -> io::Result<()> {
     let _transfer = ZeroCopyTransferGuard::begin();
+    let mut send_queue = ZeroCopySendQueueGuard::begin(destination)?;
     let pipe = SplicePipe::new()?;
     let pending_timer = sleep(Duration::ZERO);
     tokio::pin!(pending_timer);
@@ -371,6 +374,7 @@ pub(super) async fn splice_tcp_exact(
             waited_for_io = false;
         }
     }
+    send_queue.restore()?;
     Ok(())
 }
 
@@ -612,6 +616,9 @@ mod tests {
             .accept()
             .await
             .expect("accept destination");
+        socket2::SockRef::from(&destination)
+            .set_tcp_notsent_lowat(512 * 1024)
+            .expect("set original destination send queue limit");
         let payload_length = payload.len();
         let destination_task = tokio::spawn(async move {
             let mut received = vec![0; payload_length];
@@ -631,6 +638,12 @@ mod tests {
         )
         .await
         .expect("splice payload");
+        assert_eq!(
+            socket2::SockRef::from(&destination)
+                .tcp_notsent_lowat()
+                .expect("read restored destination send queue limit"),
+            512 * 1024,
+        );
         assert_eq!(destination_task.await.expect("destination task"), payload);
         let mut sentinel = [0; 4];
         source
@@ -639,6 +652,82 @@ mod tests {
             .expect("read sentinel");
         assert_eq!(&sentinel, b"NEXT");
         source_task.await.expect("source task");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn cancelled_and_failed_splice_restore_original_socket_setting() {
+        let source_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind source");
+        let source = TcpStream::connect(source_listener.local_addr().expect("source address"))
+            .await
+            .expect("connect source");
+        let (mut source_peer, _) = source_listener.accept().await.expect("accept source");
+        let destination_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind destination");
+        let destination = TcpStream::connect(
+            destination_listener
+                .local_addr()
+                .expect("destination address"),
+        )
+        .await
+        .expect("connect destination");
+        let (_destination_peer, _) = destination_listener
+            .accept()
+            .await
+            .expect("accept destination");
+        let socket = socket2::SockRef::from(&destination);
+        let original = 512 * 1024;
+        socket
+            .set_tcp_notsent_lowat(original)
+            .expect("set original send queue limit");
+        {
+            let transfer = splice_tcp_exact(
+                &source,
+                &destination,
+                1024,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            );
+            tokio::pin!(transfer);
+            tokio::select! {
+                biased;
+                result = transfer.as_mut() => panic!("empty live source completed: {result:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+            assert_eq!(
+                socket
+                    .tcp_notsent_lowat()
+                    .expect("read active send queue limit"),
+                ZERO_COPY_NOTSENT_LOWAT,
+            );
+        }
+        assert_eq!(
+            socket
+                .tcp_notsent_lowat()
+                .expect("read cancelled send queue limit"),
+            original,
+        );
+        source_peer
+            .shutdown()
+            .await
+            .expect("close source write half");
+        let error = splice_tcp_exact(
+            &source,
+            &destination,
+            1024,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("closed source must not complete the payload");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(
+            socket
+                .tcp_notsent_lowat()
+                .expect("read failed send queue limit"),
+            original,
+        );
     }
 
     #[tokio::test]

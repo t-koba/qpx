@@ -1801,3 +1801,26 @@ not demonstrate the required three independent passes. The socket diagnostic
 also preserves the matching sender's `ss -tinp` state and inspection duration
 after a gap, so cumulative retransmission/window data can distinguish TCP
 stalls from scheduling without treating instrumented timings as acceptance.
+
+The successful sender diagnostic (`37222500543`, artifact `11311017094`)
+records qpxd gaps of 202.017 and 206.232 ms. Their matching sender sockets
+retain 2,357,388 unsent bytes, one 65,483-byte retransmission and a 201 ms
+RTO. Receive-window-limited time accounts for 98.2% and 97.7% of busy time.
+The earlier receiver-only diagnostic (`37221928121`) has no qpxd CPU samples
+inside a 202.882 ms gap, despite samples immediately before and after it.
+These observations identify a TCP/backpressure stall rather than continuous
+user-space worker occupancy; they do not establish that the trial below fixes
+it.
+
+The next local trial extends the existing Linux sendfile TCP_NOTSENT_LOWAT
+guard to socket splice relays. Both paths use the existing 64 KiB threshold,
+restore the original socket setting on success and retain RAII restoration
+on failure or cancellation. The guard is renamed for both transfer kinds;
+payload boundaries, I/O timeouts and pipe ownership are preserved. Real Linux
+socket tests cover successful exact-payload/sentinel transfer and restoration
+after cancellation and premature source EOF. Execution and same-runner
+performance validation are still required. Local Linux cross-checking cannot
+proceed because `x86_64-linux-gnu-gcc` is absent. GitHub access resumed after
+the usage limit recovered; actual Linux CI and three independent same-runner
+comparisons are required before accepting this trial. It is not yet
+performance-accepted or CI-verified.
