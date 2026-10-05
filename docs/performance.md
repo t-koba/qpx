@@ -1974,7 +1974,7 @@ throughput ratio 2.1177, total CPU efficiency 1.5918, slow queue-delay ratio
 0.934321 ms. This is diagnostic evidence, not a final acceptance pass.
 
 The three paired trial runs do not establish acceptance. Run `37249774078`
-has valid baseline quality but current CPU efficiency 1.145951 below 1.25;
+has valid baseline quality but current CPU efficiency 1.145986 below 1.25;
 fast current/baseline total CPU efficiency is 0.8153 and slow 0.8584.
 Run `37249776217` passes current objectives but baseline lighttpd time
 spread is 1.562567 above 1.5; its fast CPU efficiency improves 1.1583
@@ -1991,3 +1991,12 @@ response and closes; the unmodified production measurement client correctly
 reports zero completed transfers and the exact partial bytes. This check,
 normal real HTTP fast/slow checks, YAML/shell syntax and gate inventory pass
 locally. The failure-evidence check is required with process sampling in CI.
+
+The next bounded trial raises the uncorked socket submission cap to 48 KiB.
+The 32 KiB native round-two profile attributes 5.83% to IRQ spin unlocking
+and 5.56% to queued spin-lock contention; its paired slow CPU efficiency
+regresses in both completed comparisons. The 48 KiB trial remains below
+the observed 65,483-byte MSS while reducing submissions for coalesced pipe
+batches. It tests the packet-loss / kernel-work tradeoff; all other transfer
+settings are unchanged, and both loss behavior and existing CPU objectives
+must pass before adopting it.

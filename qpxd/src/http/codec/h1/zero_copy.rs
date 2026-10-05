@@ -28,7 +28,7 @@ const FILE_NOTSENT_LOWAT: u32 = 64 * 1024;
 #[cfg(target_os = "linux")]
 const SOCKET_NOTSENT_LOWAT: u32 = BALANCED_ZERO_COPY_QUANTUM as u32;
 #[cfg(target_os = "linux")]
-const MAX_SPLICE_SOCKET_BATCH: usize = 32 * 1024;
+const MAX_SPLICE_SOCKET_BATCH: usize = 48 * 1024;
 
 // Buffered body relays move up to one read buffer per readiness event. The
 // same fairness rule as the zero-copy path applies under concurrent transfer
@@ -337,7 +337,7 @@ pub(super) async fn splice_tcp_exact(
                     async {
                         loop {
                             match destination.try_io(Interest::WRITABLE, || {
-                                // Keep each uncorked socket submission below a loopback MSS.
+                                // Keep uncorked submissions below the large loopback MSS.
                                 // Large spliced packets can exhaust the receiver's initial
                                 // memory budget and leave a dropped packet waiting
                                 // for the retransmission timer.
