@@ -355,9 +355,9 @@ pub(super) async fn splice_tcp_exact(
                 // for another source fragment while destination bytes are buffered;
                 // paused sources and full pipes must flush their current tail.
                 let requested = remaining.min(scheduling_quantum - bytes_since_yield) as usize;
-                match source.try_io(Interest::READABLE, || {
-                    splice_once(source.as_raw_fd(), pipe.write_fd, requested)
-                }) {
+                // Probe the nonblocking syscall directly: WouldBlock can mean a
+                // full pipe, so it must not clear the source socket's readiness.
+                match splice_once(source.as_raw_fd(), pipe.write_fd, requested) {
                     Ok(0) => {
                         return Err(io::Error::new(
                             io::ErrorKind::UnexpectedEof,
