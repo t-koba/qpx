@@ -131,6 +131,11 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"streaming performance record for {key} lacks high-resolution process CPU measurement")
         if record.get("diagnostic_instrumentation") is not False:
             fail(f"streaming performance record for {key} is instrumented or lacks diagnostic provenance")
+        cpu_partition = record.get("diagnostic_cpu_partition", False)
+        if type(cpu_partition) is not bool:
+            fail(f"streaming performance record for {key} has invalid CPU partition provenance")
+        if cpu_partition and MODE != "window-diagnostic":
+            fail(f"streaming performance record for {key} uses a diagnostic CPU partition")
         if record.get("resource_measurement") != "sampled_workload_peak_v1":
             fail(f"streaming performance record for {key} uses an unsupported resource measurement")
         if record.get("kernel_resource_metrics") is not True:

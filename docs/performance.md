@@ -2061,3 +2061,20 @@ response materialization. The same timed-window summarizer requires all
 five phases in all three rounds. Local real origin connection reuse and
 closed-idle-connection tests, Clippy and syntax checks pass; the older real
 phase dataset correctly fails because it lacks these new origin samples.
+
+An isolated CPU diagnostic separates streaming observers, load generation
+and measured servers onto disjoint CPU sets. All compared proxies and the
+real backend share the same server set; worker counts, loopback MTU,
+transfer bytes and objective thresholds stay unchanged. The script verifies
+actual kernel affinities, records the partition, and runs 64 fast / 8 slow
+transfers for each of three alternating rounds. Partitioned records cannot
+pass mandatory acceptance or measurement-quality evaluation. This is a
+causality probe for observer/load-generator contention, not a measurement
+condition change in the release gate.
+
+Local real TCP checks through the new launch functions verify that the
+recorded server PID is the actual server process, and that fast and slow
+clients complete eight exact 1 MiB transfers each. The real truncated-body
+failure check, workflow shell/YAML checks and the eight-category/sixteen-
+evaluation gate inventory pass. Linux positive affinity validation and
+comparisons remain pending.

@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-window, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-window, streaming-affinity, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -189,6 +189,13 @@ jobs:
               QPX_STREAMING_COMPARE_FAST_TRANSFERS=64 QPX_STREAMING_COMPARE_SLOW_TRANSFERS=8 \
                 python3 scripts/perf-evaluate.py "streaming window diagnostic measurement" -- bash scripts/perf-audit-streaming-compare.sh || failed=1
               python3 scripts/perf-evaluate.py "streaming window diagnostic objectives" -- \
+                bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json window-diagnostic || failed=1
+              exit "$failed"
+              ;;
+            streaming-affinity)
+              failed=0
+              python3 scripts/perf-evaluate.py "streaming CPU partition diagnostic measurement" -- bash scripts/perf-diagnose-streaming-affinity.sh || failed=1
+              python3 scripts/perf-evaluate.py "streaming CPU partition diagnostic objectives" -- \
                 bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json window-diagnostic || failed=1
               exit "$failed"
               ;;

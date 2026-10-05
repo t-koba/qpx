@@ -44,6 +44,21 @@ require_cmd() {
   fi
 }
 
+# Background server launches replace their shell so resource ownership remains exact.
+run_server_process() {
+  if [ -n "${QPX_STREAMING_COMPARE_SERVER_CPUS:-}" ]; then
+    exec taskset -c "$QPX_STREAMING_COMPARE_SERVER_CPUS" "$@"
+  fi
+  exec "$@"
+}
+
+run_client_process() {
+  if [ -n "${QPX_STREAMING_COMPARE_CLIENT_CPUS:-}" ]; then
+    exec taskset -c "$QPX_STREAMING_COMPARE_CLIENT_CPUS" "$@"
+  fi
+  exec "$@"
+}
+
 register_pid() {
   PIDS+=("$1")
 }
@@ -128,7 +143,7 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
 with Server(("127.0.0.1", port), Handler) as httpd:
     httpd.serve_forever()
 PY
-  python3 "$TMP_DIR/streaming_backend.py" "$BACKEND_PORT" "$STREAM_BYTES" "$CHUNK_BYTES" >"$LOG_DIR/backend.log" 2>&1 &
+  run_server_process python3 "$TMP_DIR/streaming_backend.py" "$BACKEND_PORT" "$STREAM_BYTES" "$CHUNK_BYTES" >"$LOG_DIR/backend.log" 2>&1 &
   BACKEND_PID=$!
   register_pid "$BACKEND_PID"
   wait_http "streaming-backend" "$BACKEND_PORT" "$BACKEND_PID" "$LOG_DIR/backend.log"
@@ -185,7 +200,7 @@ edges:
           type: upstream
           upstreams: [http://127.0.0.1:${BACKEND_PORT}]
 YAML
-  QPX_STATE_DIR="$STATE_DIR" "$QPXD_BIN" run --config "$config" >"$LOG_DIR/qpxd.log" 2>&1 &
+  QPX_STATE_DIR="$STATE_DIR" run_server_process "$QPXD_BIN" run --config "$config" >"$LOG_DIR/qpxd.log" 2>&1 &
   QPXD_PID=$!
   register_pid "$QPXD_PID"
   wait_http "qpxd" "$QPX_PORT" "$QPXD_PID" "$LOG_DIR/qpxd.log"
@@ -217,7 +232,7 @@ http {
   }
 }
 NGINX
-  nginx -p "$prefix" -c "$config" -g 'daemon off;' >"$LOG_DIR/nginx.log" 2>&1 &
+  run_server_process nginx -p "$prefix" -c "$config" -g 'daemon off;' >"$LOG_DIR/nginx.log" 2>&1 &
   NGINX_PID=$!
   register_pid "$NGINX_PID"
   wait_http "nginx" "$NGINX_PORT" "$NGINX_PID" "$LOG_DIR/nginx.log"
@@ -265,7 +280,7 @@ start_apache() {
     echo "  ProxyPassReverse \"/\" \"http://127.0.0.1:${BACKEND_PORT}/\""
     echo "</VirtualHost>"
   } >"$config"
-  "$APACHE_BIN" -f "$config" -DFOREGROUND >"$LOG_DIR/apache.log" 2>&1 &
+  run_server_process "$APACHE_BIN" -f "$config" -DFOREGROUND >"$LOG_DIR/apache.log" 2>&1 &
   APACHE_PID=$!
   register_pid "$APACHE_PID"
   wait_http "apache" "$APACHE_PORT" "$APACHE_PID" "$LOG_DIR/apache.log"
@@ -284,7 +299,7 @@ server.pid-file = "$root/lighttpd.pid"
 server.errorlog = "$root/logs/error.log"
 proxy.server = ( "" => ( ( "host" => "127.0.0.1", "port" => ${BACKEND_PORT} ) ) )
 LIGHTTPD
-  lighttpd -D -f "$config" >"$LOG_DIR/lighttpd.log" 2>&1 &
+  run_server_process lighttpd -D -f "$config" >"$LOG_DIR/lighttpd.log" 2>&1 &
   LIGHTTPD_PID=$!
   register_pid "$LIGHTTPD_PID"
   wait_http "lighttpd" "$LIGHTTPD_PORT" "$LIGHTTPD_PID" "$LOG_DIR/lighttpd.log"
@@ -295,7 +310,7 @@ run_client() {
   local port="$2"
   local read_mode="$3"
   local delay_ms="$4"
-  python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" "$ROOT_DIR/scripts" "$SLOW_TRANSFERS" <<'PY'
+  run_client_process python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" "$ROOT_DIR/scripts" "$SLOW_TRANSFERS" <<'PY'
 import json
 import os
 import socket
@@ -309,6 +324,7 @@ from lib.perf_deadline import measurement_deadline
 
 proxy, port, read_mode, delay_ms, expected, chunk_bytes, fast_transfers = sys.argv[1:8]
 diagnostic = os.environ["QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS"] == "1"
+cpu_partition = bool(os.environ.get("QPX_STREAMING_COMPARE_SERVER_CPUS"))
 if diagnostic and not hasattr(socket, "TCP_INFO"):
     raise SystemExit("streaming socket diagnostics require Linux TCP_INFO")
 port = int(port)
@@ -427,6 +443,7 @@ try:
             "p95_chunk_gap_ms": percentile(95),
             "p99_chunk_gap_ms": percentile(99),
             "max_chunk_gap_ms": max(gaps_sorted) if gaps_sorted else 0.0,
+            "diagnostic_cpu_partition": cpu_partition,
             "total_ms": (finished - started) * 1000.0,
             "bytes": received,
             "gap_observation_bytes": chunk_bytes,
@@ -437,6 +454,7 @@ except (OSError, RuntimeError) as error:
     print(json.dumps({"valid": False, "proxy": proxy, "read_mode": read_mode,
                       "reason": str(error), "completion_deadline_seconds": completion_seconds,
                       "planned_transfers": transfers, "completed_transfers": completed_transfers,
+                      "diagnostic_cpu_partition": cpu_partition,
                       "stage": stage, "transfer_received_bytes": transfer_received,
                       "expected_transfer_bytes": expected,
                       "last_progress_age_ms": None if last_progress is None else
@@ -758,6 +776,14 @@ require_cmd curl
 require_cmd lighttpd
 require_cmd nginx
 require_cmd python3
+
+if [ -n "${QPX_STREAMING_COMPARE_SERVER_CPUS:-}${QPX_STREAMING_COMPARE_CLIENT_CPUS:-}" ]; then
+  require_cmd taskset
+  if [ -z "${QPX_STREAMING_COMPARE_SERVER_CPUS:-}" ] || [ -z "${QPX_STREAMING_COMPARE_CLIENT_CPUS:-}" ]; then
+    echo "streaming CPU partition requires both client and server sets" >&2
+    exit 2
+  fi
+fi
 
 case "$SAMPLE_ATTEMPTS" in
   ''|*[!0-9]*)
