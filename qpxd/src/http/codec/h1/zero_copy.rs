@@ -388,7 +388,7 @@ pub(super) async fn splice_tcp_exact(
                 ));
             }
             if let Some(counters) = counters.as_mut() {
-                counters.write(written);
+                counters.write(buffered.min(MAX_SPLICE_SOCKET_BATCH), written);
             }
             buffered -= written;
         }

@@ -13,6 +13,9 @@ pub(super) struct SpliceTransferCounters {
     destination_max_batch: usize,
     source_batches_over_socket_limit: u64,
     destination_short_batches: u64,
+    destination_tail_requests: u64,
+    destination_partial_writes: u64,
+    destination_requested_bytes: u64,
     source_would_block: u64,
     destination_would_block: u64,
 }
@@ -43,6 +46,9 @@ impl SpliceTransferCounters {
             destination_max_batch: 0,
             source_batches_over_socket_limit: 0,
             destination_short_batches: 0,
+            destination_tail_requests: 0,
+            destination_partial_writes: 0,
+            destination_requested_bytes: 0,
             source_would_block: 0,
             destination_would_block: 0,
         })))
@@ -55,8 +61,11 @@ impl SpliceTransferCounters {
         self.source_batches_over_socket_limit += u64::from(bytes > self.socket_batch_limit);
     }
 
-    pub(super) fn write(&mut self, bytes: usize) {
+    pub(super) fn write(&mut self, requested: usize, bytes: usize) {
         self.destination_batches += 1;
+        self.destination_requested_bytes += requested as u64;
+        self.destination_tail_requests += u64::from(requested < self.socket_batch_limit);
+        self.destination_partial_writes += u64::from(bytes < requested);
         self.destination_bytes += bytes as u64;
         self.destination_max_batch = self.destination_max_batch.max(bytes);
         self.destination_short_batches += u64::from(bytes < self.socket_batch_limit);
@@ -87,6 +96,9 @@ impl Drop for SpliceTransferCounters {
             destination_max_batch = self.destination_max_batch,
             source_batches_over_socket_limit = self.source_batches_over_socket_limit,
             destination_short_batches = self.destination_short_batches,
+            destination_tail_requests = self.destination_tail_requests,
+            destination_partial_writes = self.destination_partial_writes,
+            destination_requested_bytes = self.destination_requested_bytes,
             source_would_block = self.source_would_block,
             destination_would_block = self.destination_would_block,
             "splice transfer counters completed");

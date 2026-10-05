@@ -2120,3 +2120,23 @@ still miss the stronger goals. WebDAV 1 MiB p99 is 1.705886 and CPU
 efficiency 1.359443. Historic HTTP/1 queue and 1 MiB CPU comparisons also
 fail. These results do not establish completion despite all functional
 lanes, structure and security QA passing.
+
+Native streaming `37256213596` validates the Linux counter implementation
+and all 195 complete transfers. The kernel pipe capacity is 1 MiB; mean
+source and destination batches are 69,545.755 and 33,296.559 bytes. Of
+614,094 destination submissions, 48.102% are below 48 KiB. The first
+counter version cannot distinguish pipe tails from partial kernel writes,
+so version two separately records requested bytes, tail requests and
+partial writes. It retains strict completion and batch-accounting checks.
+
+The service-wrapper comparisons `37254317133`, `37254319588` and
+`37254322252` all fail current HTTP/2 1 KiB / 100-stream objectives: p99
+ratios are 1.216646, 1.506730 and 1.245414, above 1.1. The wrapper cleanup
+does not establish resolution of the header-wait bottleneck.
+
+The first paired MTU diagnostic `37256215561` passes both phases, including
+all reference quality checks. Fast CPU-efficiency ratios are 1.368393
+(MTU 65536) and 1.352074 (MTU 1500); slow scheduler queue-delay ratios are
+0.105155 and 0.618923. Two further independent paired runs are required
+to assess reproducibility. This diagnostic success is excluded from
+mandatory acceptance and does not prove that MTU caused prior failures.

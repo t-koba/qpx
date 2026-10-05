@@ -19,7 +19,9 @@ for line in source.read_text().splitlines():
     fields = ("planned_bytes", "pipe_capacity", "socket_batch_limit",
               "source_batches", "destination_batches", "source_bytes", "destination_bytes",
               "source_max_batch", "destination_max_batch", "source_batches_over_socket_limit",
-              "destination_short_batches", "source_would_block", "destination_would_block")
+              "destination_short_batches", "destination_tail_requests",
+              "destination_partial_writes", "destination_requested_bytes",
+              "source_would_block", "destination_would_block")
     if any(type(record.get(field)) is not int or record[field] < 0 for field in fields):
         raise SystemExit("splice counter log has invalid integer counters")
     if record["planned_bytes"] < 104857600 - 65536:
@@ -33,7 +35,13 @@ for line in source.read_text().splitlines():
             or not 0 < record["source_max_batch"] <= record["pipe_capacity"]
             or not 0 < record["destination_max_batch"] <= record["socket_batch_limit"]
             or record["source_batches_over_socket_limit"] > record["source_batches"]
-            or record["destination_short_batches"] > record["destination_batches"]):
+            or record["destination_short_batches"] > record["destination_batches"]
+            or record["destination_tail_requests"] > record["destination_short_batches"]
+            or record["destination_partial_writes"] > record["destination_short_batches"]
+            or record["destination_short_batches"] > (record["destination_tail_requests"]
+                                                       + record["destination_partial_writes"])
+            or not record["destination_bytes"] <= record["destination_requested_bytes"]
+                   <= record["destination_batches"] * record["socket_batch_limit"]):
         raise SystemExit("native streaming splice counters violate transfer bounds")
     records.append(record)
 if len(records) != 195:
@@ -41,7 +49,7 @@ if len(records) != 195:
 source_batches = sum(record["source_batches"] for record in records)
 destination_batches = sum(record["destination_batches"] for record in records)
 summary = {
-    "measurement": "native_streaming_splice_counters_v1",
+    "measurement": "native_streaming_splice_counters_v2",
     "diagnostic_instrumentation": True,
     "completed_transfers": len(records),
     "pipe_capacities": sorted({record["pipe_capacity"] for record in records}),
@@ -52,6 +60,9 @@ summary = {
     "mean_destination_batch_bytes": sum(record["destination_bytes"] for record in records) / destination_batches,
     "source_batches_over_socket_limit": sum(record["source_batches_over_socket_limit"] for record in records),
     "destination_short_batch_fraction": sum(record["destination_short_batches"] for record in records) / destination_batches,
+    "destination_tail_request_fraction": sum(record["destination_tail_requests"] for record in records) / destination_batches,
+    "destination_partial_write_fraction": sum(record["destination_partial_writes"] for record in records) / destination_batches,
+    "mean_destination_requested_bytes": sum(record["destination_requested_bytes"] for record in records) / destination_batches,
     "source_would_block": sum(record["source_would_block"] for record in records),
     "destination_would_block": sum(record["destination_would_block"] for record in records),
 }
