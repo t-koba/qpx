@@ -2140,3 +2140,13 @@ all reference quality checks. Fast CPU-efficiency ratios are 1.368393
 0.105155 and 0.618923. Two further independent paired runs are required
 to assess reproducibility. This diagnostic success is excluded from
 mandatory acceptance and does not prove that MTU caused prior failures.
+
+The listener wrapper trial is withdrawn after all three same-runner
+comparisons fail acceptance and do not reproduce an improvement. For
+1 KiB / 100 streams, current/baseline throughput ratios are 1.003533,
+0.914772 and 0.995113; CPU-efficiency ratios are 1.002910, 0.951227 and
+0.998187; p99 ratios are 0.993956, 1.149386 and 1.010934. For 1 MiB /
+100 streams, p99 rises by 4.304% and 4.007% in the first and third runs.
+The original wrapper and pinned initialization are restored; diagnostic
+instrumentation remains. This is rejection of an unproven optimization,
+not relaxation of any objective.

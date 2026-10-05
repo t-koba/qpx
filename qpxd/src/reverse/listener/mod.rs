@@ -5,12 +5,10 @@ use super::{
 use crate::http::codec::interim::{
     H2_PREFACE, serve_h2_with_interim_and_capacity_and_tuning, sniff_h2_preface,
 };
-use crate::http::dispatcher::InterimList;
 use crate::tcp_bindings::filter::ConnectionFilterStage;
 use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use anyhow::Result;
-use futures_util::FutureExt;
 use http::{Request, Response};
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
@@ -65,13 +63,24 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
         &self,
         req: Request<Body>,
     ) -> impl Future<Output = Result<Response<Body>, Infallible>> + Send {
-        handle_request_with_interim_and_origin_pool_ref(
-            req,
-            &self.reverse,
-            &self.conn,
-            Some(&self.origin_pool),
-        )
-        .map(attach_interim_response_heads)
+        let reverse = &self.reverse;
+        let conn = &self.conn;
+        let origin_pool = &self.origin_pool;
+        // H1 awaits this state machine in place. Multiplexed transports choose
+        // their own allocation boundary rather than imposing it on every caller.
+        async move {
+            let (interim, mut response) = handle_request_with_interim_and_origin_pool_ref(
+                req,
+                reverse,
+                conn,
+                Some(origin_pool),
+            )
+            .await?;
+            if !interim.is_empty() {
+                response.extensions_mut().insert(interim);
+            }
+            Ok(response)
+        }
     }
 
     fn call_pinned<'a>(
@@ -81,21 +90,23 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
     where
         Request<Body>: 'a,
     {
-        // Construct the inner request state before allocating its stable storage.
-        // An outer coroutine would retain and move the request again on first poll.
-        Box::into_pin(Box::write(Box::new_uninit(), self.call(req)))
+        let reverse = &self.reverse;
+        let conn = &self.conn;
+        let origin_pool = &self.origin_pool;
+        Box::into_pin(Box::write(Box::new_uninit(), async move {
+            let (interim, mut response) = handle_request_with_interim_and_origin_pool_ref(
+                req,
+                reverse,
+                conn,
+                Some(origin_pool),
+            )
+            .await?;
+            if !interim.is_empty() {
+                response.extensions_mut().insert(interim);
+            }
+            Ok(response)
+        }))
     }
-}
-
-fn attach_interim_response_heads(
-    result: Result<(InterimList, Response<Body>), Infallible>,
-) -> Result<Response<Body>, Infallible> {
-    result.map(|(interim, mut response)| {
-        if !interim.is_empty() {
-            response.extensions_mut().insert(interim);
-        }
-        response
-    })
 }
 
 pub(super) async fn run_reverse_http_acceptor(
