@@ -55,7 +55,9 @@ jobs:
         with:
           shared-key: perf-audit-streaming
       - name: verify real process resource sampling
-        run: bash scripts/check-perf-process-sampler.sh
+        run: |
+          bash scripts/check-perf-process-sampler.sh
+          python3 scripts/check-perf-deadline.py
       - name: record environment
         run: bash scripts/check-perf-runner.sh
       - name: install comparison dependencies

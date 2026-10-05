@@ -294,7 +294,7 @@ run_client() {
   local port="$2"
   local read_mode="$3"
   local delay_ms="$4"
-  python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" <<'PY'
+  python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" "$ROOT_DIR/scripts" <<'PY'
 import json
 import os
 import socket
@@ -302,6 +302,9 @@ import statistics
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, sys.argv[8])
+from lib.perf_deadline import measurement_deadline
 
 proxy, port, read_mode, delay_ms, expected, chunk_bytes, fast_transfers = sys.argv[1:8]
 diagnostic = os.environ["QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS"] == "1"
@@ -312,99 +315,109 @@ delay = float(delay_ms) / 1000.0
 expected = int(expected)
 chunk_bytes = int(chunk_bytes)
 transfers = 1 if read_mode == "slow" else int(fast_transfers)
-started = time.perf_counter()
-first_byte_ms = []
-gaps = []
-received = 0
+# Allow the existing I/O timeout, one second per planned transfer and all
+# intentional pacing, while rejecting indefinitely progressing measurements.
+completion_seconds = 120.0 + transfers + delay * ((expected + chunk_bytes - 1) // chunk_bytes) * transfers
+try:
+    with measurement_deadline(completion_seconds, "streaming client"):
+        started = time.perf_counter()
+        first_byte_ms = []
+        gaps = []
+        received = 0
 
-for transfer in range(transfers):
-    transfer_started = time.perf_counter()
-    if diagnostic:
-        print(f"Streaming transfer started: proxy={proxy} mode={read_mode} transfer={transfer + 1}/{transfers}", file=sys.stderr, flush=True)
-    first_byte = None
-    last_observation = None
-    next_observation = chunk_bytes
-    transfer_received = 0
-    head = b""
-    sock = socket.create_connection(("127.0.0.1", port), timeout=10)
-    sock.settimeout(120)
-    sock.sendall(b"GET /stream HTTP/1.1\r\nHost: stream.local\r\nConnection: close\r\n\r\n")
-    while b"\r\n\r\n" not in head:
-        data = sock.recv(1)
-        if not data:
-            raise SystemExit("connection closed before headers")
-        if first_byte is None:
-            first_byte = time.perf_counter()
-        head += data
-    status_line = head.split(b"\r\n", 1)[0]
-    status = status_line.decode("ascii", "replace")
-    if not status.startswith("HTTP/1.1 200") and not status.startswith("HTTP/1.0 200"):
-        raise SystemExit(f"unexpected status: {status}")
-    while True:
-        data = sock.recv(chunk_bytes)
-        if not data:
-            break
-        now = time.perf_counter()
-        if first_byte is None:
-            first_byte = now
-        transfer_received += len(data)
-        if transfer_received >= next_observation:
-            if last_observation is not None:
-                gap_ms = (now - last_observation) * 1000.0
-                gaps.append(gap_ms)
-                if diagnostic and read_mode == "fast" and gap_ms >= 50.0:
-                    local_address = sock.getsockname()
-                    observed_monotonic_ns = time.monotonic_ns()
-                    observed_epoch_ns = time.time_ns()
-                    tcp_info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 256)
-                    sender = subprocess.run([
-                        "ss", "-tinp",
-                        f"( sport = :{port} and dport = :{local_address[1]} )",
-                    ], capture_output=True, text=True, check=True, timeout=5)
-                    print(json.dumps({
-                        "event": "streaming_client_gap", "proxy": proxy,
-                        "transfer": transfer + 1, "gap_ms": gap_ms,
-                        "monotonic_ns": observed_monotonic_ns, "epoch_ns": observed_epoch_ns,
-                        "received_bytes": transfer_received, "expected_bytes": expected,
-                        "local_address": local_address, "peer_address": sock.getpeername(),
-                        "tcp_info_hex": tcp_info.hex(), "sender_socket_state": sender.stdout,
-                        "inspection_duration_ns": time.monotonic_ns() - observed_monotonic_ns,
-                    }), file=sys.stderr, flush=True)
-            last_observation = now
-            next_observation += chunk_bytes
-            if read_mode == "slow":
-                time.sleep(delay)
-    sock.close()
-    if transfer_received != expected:
-        raise SystemExit(
-            f"incomplete streaming transfer: received {transfer_received}, expected {expected}"
-        )
-    received += transfer_received
-    first_byte_ms.append((first_byte - transfer_started) * 1000.0)
-    if diagnostic:
-        print(f"Streaming transfer completed: proxy={proxy} mode={read_mode} transfer={transfer + 1}/{transfers} bytes={transfer_received} elapsed_ms={(time.perf_counter() - transfer_started) * 1000.0:.3f}", file=sys.stderr, flush=True)
-finished = time.perf_counter()
-gaps_sorted = sorted(gaps)
-def percentile(p):
-    if not gaps_sorted:
-        return 0.0
-    index = min(len(gaps_sorted) - 1, max(0, int((len(gaps_sorted) * p + 99) // 100) - 1))
-    return gaps_sorted[index]
-print(json.dumps({
-    "proxy": proxy,
-    "read_mode": read_mode,
-    "transfers": transfers,
-    "first_byte_ms": statistics.median(first_byte_ms),
-    "p50_chunk_gap_ms": percentile(50),
-    "p95_chunk_gap_ms": percentile(95),
-    "p99_chunk_gap_ms": percentile(99),
-    "max_chunk_gap_ms": max(gaps_sorted) if gaps_sorted else 0.0,
-    "total_ms": (finished - started) * 1000.0,
-    "bytes": received,
-    "gap_observation_bytes": chunk_bytes,
-    "chunk_observations": len(gaps),
-    "valid": received == expected * transfers,
-}))
+        for transfer in range(transfers):
+            transfer_started = time.perf_counter()
+            if diagnostic:
+                print(f"Streaming transfer started: proxy={proxy} mode={read_mode} transfer={transfer + 1}/{transfers}", file=sys.stderr, flush=True)
+            first_byte = None
+            last_observation = None
+            next_observation = chunk_bytes
+            transfer_received = 0
+            head = b""
+            sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+            sock.settimeout(120)
+            sock.sendall(b"GET /stream HTTP/1.1\r\nHost: stream.local\r\nConnection: close\r\n\r\n")
+            while b"\r\n\r\n" not in head:
+                data = sock.recv(1)
+                if not data:
+                    raise SystemExit("connection closed before headers")
+                if first_byte is None:
+                    first_byte = time.perf_counter()
+                head += data
+            status_line = head.split(b"\r\n", 1)[0]
+            status = status_line.decode("ascii", "replace")
+            if not status.startswith("HTTP/1.1 200") and not status.startswith("HTTP/1.0 200"):
+                raise SystemExit(f"unexpected status: {status}")
+            while True:
+                data = sock.recv(chunk_bytes)
+                if not data:
+                    break
+                now = time.perf_counter()
+                if first_byte is None:
+                    first_byte = now
+                transfer_received += len(data)
+                if transfer_received >= next_observation:
+                    if last_observation is not None:
+                        gap_ms = (now - last_observation) * 1000.0
+                        gaps.append(gap_ms)
+                        if diagnostic and read_mode == "fast" and gap_ms >= 50.0:
+                            local_address = sock.getsockname()
+                            observed_monotonic_ns = time.monotonic_ns()
+                            observed_epoch_ns = time.time_ns()
+                            tcp_info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 256)
+                            sender = subprocess.run([
+                                "ss", "-tinp",
+                                f"( sport = :{port} and dport = :{local_address[1]} )",
+                            ], capture_output=True, text=True, check=True, timeout=5)
+                            print(json.dumps({
+                                "event": "streaming_client_gap", "proxy": proxy,
+                                "transfer": transfer + 1, "gap_ms": gap_ms,
+                                "monotonic_ns": observed_monotonic_ns, "epoch_ns": observed_epoch_ns,
+                                "received_bytes": transfer_received, "expected_bytes": expected,
+                                "local_address": local_address, "peer_address": sock.getpeername(),
+                                "tcp_info_hex": tcp_info.hex(), "sender_socket_state": sender.stdout,
+                                "inspection_duration_ns": time.monotonic_ns() - observed_monotonic_ns,
+                            }), file=sys.stderr, flush=True)
+                    last_observation = now
+                    next_observation += chunk_bytes
+                    if read_mode == "slow":
+                        time.sleep(delay)
+            sock.close()
+            if transfer_received != expected:
+                raise SystemExit(
+                    f"incomplete streaming transfer: received {transfer_received}, expected {expected}"
+                )
+            received += transfer_received
+            first_byte_ms.append((first_byte - transfer_started) * 1000.0)
+            if diagnostic:
+                print(f"Streaming transfer completed: proxy={proxy} mode={read_mode} transfer={transfer + 1}/{transfers} bytes={transfer_received} elapsed_ms={(time.perf_counter() - transfer_started) * 1000.0:.3f}", file=sys.stderr, flush=True)
+        finished = time.perf_counter()
+        gaps_sorted = sorted(gaps)
+        def percentile(p):
+            if not gaps_sorted:
+                return 0.0
+            index = min(len(gaps_sorted) - 1, max(0, int((len(gaps_sorted) * p + 99) // 100) - 1))
+            return gaps_sorted[index]
+        print(json.dumps({
+            "proxy": proxy,
+            "read_mode": read_mode,
+            "transfers": transfers,
+            "first_byte_ms": statistics.median(first_byte_ms),
+            "p50_chunk_gap_ms": percentile(50),
+            "p95_chunk_gap_ms": percentile(95),
+            "p99_chunk_gap_ms": percentile(99),
+            "max_chunk_gap_ms": max(gaps_sorted) if gaps_sorted else 0.0,
+            "total_ms": (finished - started) * 1000.0,
+            "bytes": received,
+            "gap_observation_bytes": chunk_bytes,
+            "chunk_observations": len(gaps),
+            "valid": received == expected * transfers,
+        }))
+except TimeoutError as error:
+    print(json.dumps({"valid": False, "proxy": proxy, "read_mode": read_mode,
+                      "reason": str(error), "completion_deadline_seconds": completion_seconds,
+                      "planned_transfers": transfers}), file=sys.stderr, flush=True)
+    raise
 PY
 }
 

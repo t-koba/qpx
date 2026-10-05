@@ -511,7 +511,9 @@ jobs:
         with:
           shared-key: perf-audit-streaming
       - name: verify real process resource sampling
-        run: bash scripts/check-perf-process-sampler.sh
+        run: |
+          bash scripts/check-perf-process-sampler.sh
+          python3 scripts/check-perf-deadline.py
       - name: build candidate before all measurements
         env:
           RUSTFLAGS: "-D warnings"

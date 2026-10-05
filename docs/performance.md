@@ -1871,3 +1871,19 @@ Local validation of the async cleanup passes all 1,309 workspace tests in
 spelling, structure and the eight-category / sixteen-evaluation gate
 inventory. Linux and the three independent performance comparisons are
 pending; no acceptance thresholds change.
+
+Streaming client completion now has a finite whole-measurement watchdog.
+The former 120-second timeout applied separately to every receive, allowing
+a continuously progressing transfer to exceed hours. The completion budget
+is 120 seconds plus one second per planned transfer and all intentional
+read pacing. Socket reads, payloads, transfer counts, alternating order and
+acceptance thresholds remain unchanged. An overrun emits an explicit invalid
+measurement record and fails the required sample count; it cannot pass by
+being removed from the reference frontier. The existing 512-transfer
+diagnostic gets 632 seconds rather than unlimited progress.
+
+A real TCP test verifies complete payload delivery and a paced transfer that
+keeps every individual read below its socket timeout but exceeds the whole
+transfer deadline. The production deadline helper is used directly, with
+real listeners, peer sockets and timers. Both checks pass locally and are
+required alongside process-resource sampling checks in CI and diagnostics.
