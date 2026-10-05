@@ -1917,3 +1917,12 @@ including socket-memory usage/drop counters and explicit snapshot-availability
 flags. It preserves the raw output and total inspection time rather than
 attributing loss from sender data alone. This runs only in native diagnostics;
 normal reads, socket buffers and acceptance measurements are unchanged.
+
+Required CI run `37248458499` fails callgrind before profiling: crates.io
+index DNS resolution fails immediately after apt restarts systemd-networkd
+and systemd-resolved. The callgrind binary is now built with the same
+warning flags before package installation. The profiling step uses Cargo's
+explicit offline mode with those already acquired dependencies; missing
+inputs still fail. Profiling workloads and instruction thresholds are
+unchanged. YAML, embedded shell syntax and the 8-category / 16-evaluation
+gate inventory pass locally; Linux validation remains required.

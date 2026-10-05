@@ -1053,6 +1053,10 @@ jobs:
         run: |
           mkdir -p target/perf
           scripts/check-perf-runner.sh
+      - name: build callgrind binary before package installation
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo build -p qpxd --profile callgrind --locked --bin qpxd --features http3-backend-qpx
       - name: install proxy comparison packages
         run: |
           sudo apt-get update
@@ -1062,6 +1066,7 @@ jobs:
         continue-on-error: true
         env:
           RUSTFLAGS: "-D warnings"
+          CARGO_NET_OFFLINE: "true"
           QPX_PERF_PROFILE_JSON: ${{ github.workspace }}/target/perf/perf-audit-profile-summary.jsonl
           QPX_PERF_PROFILE_EVENTS: ${{ github.workspace }}/target/perf/perf-audit-profile-events.jsonl
         run: |
