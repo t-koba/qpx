@@ -58,6 +58,7 @@ jobs:
         run: |
           bash scripts/check-perf-process-sampler.sh
           python3 scripts/check-perf-deadline.py
+          python3 scripts/check-streaming-client-failure.py
       - name: record environment
         run: bash scripts/check-perf-runner.sh
       - name: install comparison dependencies

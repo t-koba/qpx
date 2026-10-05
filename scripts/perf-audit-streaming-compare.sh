@@ -319,6 +319,10 @@ transfers = int(sys.argv[9]) if read_mode == "slow" else int(fast_transfers)
 # Allow the existing I/O timeout, one second per planned transfer and all
 # intentional pacing, while rejecting indefinitely progressing measurements.
 completion_seconds = 120.0 + transfers + delay * ((expected + chunk_bytes - 1) // chunk_bytes) * transfers
+completed_transfers = 0
+transfer_received = 0
+stage = "starting"
+last_progress = None
 try:
     with measurement_deadline(completion_seconds, "streaming client"):
         started = time.perf_counter()
@@ -335,20 +339,24 @@ try:
             next_observation = chunk_bytes
             transfer_received = 0
             head = b""
+            stage = "connecting"
             sock = socket.create_connection(("127.0.0.1", port), timeout=10)
             sock.settimeout(120)
             sock.sendall(b"GET /stream HTTP/1.1\r\nHost: stream.local\r\nConnection: close\r\n\r\n")
+            stage = "response_headers"
             while b"\r\n\r\n" not in head:
                 data = sock.recv(1)
                 if not data:
-                    raise SystemExit("connection closed before headers")
+                    raise RuntimeError("connection closed before headers")
                 if first_byte is None:
                     first_byte = time.perf_counter()
                 head += data
+                last_progress = time.perf_counter()
             status_line = head.split(b"\r\n", 1)[0]
             status = status_line.decode("ascii", "replace")
             if not status.startswith("HTTP/1.1 200") and not status.startswith("HTTP/1.0 200"):
-                raise SystemExit(f"unexpected status: {status}")
+                raise RuntimeError(f"unexpected status: {status}")
+            stage = "response_body"
             while True:
                 data = sock.recv(chunk_bytes)
                 if not data:
@@ -357,6 +365,9 @@ try:
                 if first_byte is None:
                     first_byte = now
                 transfer_received += len(data)
+                last_progress = now
+                if transfer_received == expected:
+                    stage = "connection_eof"
                 if transfer_received >= next_observation:
                     if last_observation is not None:
                         gap_ms = (now - last_observation) * 1000.0
@@ -392,10 +403,11 @@ try:
                         time.sleep(delay)
             sock.close()
             if transfer_received != expected:
-                raise SystemExit(
+                raise RuntimeError(
                     f"incomplete streaming transfer: received {transfer_received}, expected {expected}"
                 )
             received += transfer_received
+            completed_transfers += 1
             first_byte_ms.append((first_byte - transfer_started) * 1000.0)
             if diagnostic:
                 print(f"Streaming transfer completed: proxy={proxy} mode={read_mode} transfer={transfer + 1}/{transfers} bytes={transfer_received} elapsed_ms={(time.perf_counter() - transfer_started) * 1000.0:.3f}", file=sys.stderr, flush=True)
@@ -421,10 +433,14 @@ try:
             "chunk_observations": len(gaps),
             "valid": received == expected * transfers,
         }))
-except TimeoutError as error:
+except (OSError, RuntimeError) as error:
     print(json.dumps({"valid": False, "proxy": proxy, "read_mode": read_mode,
                       "reason": str(error), "completion_deadline_seconds": completion_seconds,
-                      "planned_transfers": transfers}), file=sys.stderr, flush=True)
+                      "planned_transfers": transfers, "completed_transfers": completed_transfers,
+                      "stage": stage, "transfer_received_bytes": transfer_received,
+                      "expected_transfer_bytes": expected,
+                      "last_progress_age_ms": None if last_progress is None else
+                          (time.perf_counter() - last_progress) * 1000.0}), file=sys.stderr, flush=True)
     raise
 PY
 }

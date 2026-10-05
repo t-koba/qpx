@@ -1966,3 +1966,28 @@ alongside Clippy, structure, formatting, typos and gate-inventory checks.
 A retained real native dataset is correctly rejected as instrumented.
 Linux phase logs are needed to distinguish service latency from transport
 progress before choosing the next optimization.
+
+The 32 KiB trial's first normal CI streaming gate (`37249737007`) passes:
+throughput ratio 2.1177, total CPU efficiency 1.5918, slow queue-delay ratio
+0.9402. Native run `37249771572` (artifact `11320128027`) observes no
+50 ms qpxd gaps across 192 fast transfers; aggregated maximum gap is
+0.934321 ms. This is diagnostic evidence, not a final acceptance pass.
+
+The three paired trial runs do not establish acceptance. Run `37249774078`
+has valid baseline quality but current CPU efficiency 1.145951 below 1.25;
+fast current/baseline total CPU efficiency is 0.8153 and slow 0.8584.
+Run `37249776217` passes current objectives but baseline lighttpd time
+spread is 1.562567 above 1.5; its fast CPU efficiency improves 1.1583
+while slow efficiency regresses to 0.8725. Run `37249778257` has an
+invalid zero scheduler-delay reference and an nginx client whole-transfer
+timeout. It is not a usable paired comparison. The trial remains provisional.
+
+Timeout and truncated-body evidence now retains the completed-transfer
+count, current body bytes, expected bytes, last-progress age, and whether
+connection establishment, headers, body, or EOF was pending. Network and
+truncated-body errors retain structured invalid evidence and are re-raised;
+no incomplete transfer succeeds. A real TCP server sends 4 KiB of an 8 KiB
+response and closes; the unmodified production measurement client correctly
+reports zero completed transfers and the exact partial bytes. This check,
+normal real HTTP fast/slow checks, YAML/shell syntax and gate inventory pass
+locally. The failure-evidence check is required with process sampling in CI.
