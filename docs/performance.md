@@ -2000,3 +2000,30 @@ the observed 65,483-byte MSS while reducing submissions for coalesced pipe
 batches. It tests the packet-loss / kernel-work tradeoff; all other transfer
 settings are unchanged, and both loss behavior and existing CPU objectives
 must pass before adopting it.
+
+The first HTTP/2 phase diagnostic (`37250378063`, artifact `11320199398`)
+completes but its original summary combines body sizes, stream counts,
+calibrations and timed rounds. Those combined percentiles cannot identify
+the failing 1 KiB / 100-stream lane. The diagnostic now runs only that lane,
+with the same MTU, CPU partition, calibration and three alternating rounds;
+normal and native matrix workloads are unchanged.
+
+TGID snapshots retain paired wall-clock and bracketed monotonic-clock
+readings at each boundary without changing scheduler counters. A dedicated
+HTTP/2 summarizer selects only phase completions inside each recorded timed
+window. It rejects missing bounds, sampling uncertainty or clock drift above
+1 ms, overlapping/missing rounds, and fewer than 16 samples per phase.
+Service and response-queue summaries remain separate for all three rounds.
+The Linux real completed-thread probe verifies the added clock bounds.
+Locally, syntax, YAML/shell and gate-inventory checks pass; the retained old
+real dataset is correctly rejected because it lacks clock-correlation bounds.
+Linux positive validation is pending; no fabricated timing data is used.
+
+Normal CI `37249737007` also fails WebDAV 1 MiB CPU efficiency
+(1.382233 below 1.5), cache-miss 1 KiB scheduler queue delay
+(2.772443 above 2.6), and the historic HTTP/1 1 MiB queue-delay comparison
+(90.798937 above 14). Its WebDAV p99 ratio is 0.837682 in this run, but
+three independent strong-goal passes are still absent. HTTP/2 1 KiB /
+100-stream p99 remains 1.258134 and maximum latency 1.477027, both above
+1.1. Functional success or one favorable latency run is insufficient to
+complete the full performance plan.

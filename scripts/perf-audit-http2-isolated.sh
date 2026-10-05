@@ -17,12 +17,16 @@ fi
 shift
 native=0
 phases=0
+body_sizes="1024 1048576"
+stream_values="1 100"
 case "${1:-}" in
   --native) native=1; shift ;;
   --phases) native=1; phases=1; shift ;;
 esac
 if [ "$phases" = 1 ]; then
   export RUST_LOG=warn,qpx_perf_phase=debug
+  body_sizes=1024
+  stream_values=100
 fi
 if [ "$#" -ne 1 ] || [ "$(id -u)" -ne 0 ]; then
   echo "Unsupported isolated HTTP/2 comparison invocation" >&2
@@ -90,6 +94,6 @@ chown -R "$SUDO_UID:$SUDO_GID" "$work_dir" "$output.environment.json"
 taskset -c "$server_cpus" setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups env \
   PATH="$work_dir:$PATH" QPX_HTTP2_COMPARE_ENVIRONMENT_JSON="$output.environment.json" \
   QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS="$native" QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS=8000 \
-  QPX_HTTP2_COMPARE_BODY_SIZES="1024 1048576" \
-  QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES="1 100" QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS=3 \
+  QPX_HTTP2_COMPARE_BODY_SIZES="$body_sizes" \
+  QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES="$stream_values" QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS=3 \
   bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" "$output"

@@ -61,6 +61,11 @@ try:
     if not (before['cpu_count'] < active['cpu_count'] <= retired['cpu_count']):
         raise RuntimeError('completed thread scheduler event count was not retained')
     record = module.snapshot(os.getpid())
+    for edge in ('started', 'finished'):
+        lower = record[f'{edge}_monotonic_ns']
+        upper = record[f'{edge}_clock_end_monotonic_ns']
+        if not (lower <= upper and record[f'{edge}_epoch_ns'] > 0):
+            raise RuntimeError('scheduler probe has invalid clock correlation bounds')
     record['retired_thread_probe'] = {'before': before, 'active_thread': active_thread,
                                     'active': active, 'retired': retired}
     (root / 'target/perf/scheduler-accounting-probe.json').write_text(

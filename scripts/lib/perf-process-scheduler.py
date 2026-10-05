@@ -116,6 +116,8 @@ def snapshot(root):
     seen = set()
     records = []
     started = time.monotonic_ns()
+    started_epoch = time.time_ns()
+    started_clock_end = time.monotonic_ns()
     try:
         while pending:
             pid = pending.pop()
@@ -137,9 +139,14 @@ def snapshot(root):
             records.append(record)
     finally:
         reader.socket.close()
+    finished = time.monotonic_ns()
+    finished_epoch = time.time_ns()
+    finished_clock_end = time.monotonic_ns()
     return {'measurement': 'linux_taskstats_tgid_cpu_delay_ns_v1', 'root_pid': root,
             'task_delayacct': True, 'started_monotonic_ns': started,
-            'finished_monotonic_ns': time.monotonic_ns(), 'processes': records,
+            'started_epoch_ns': started_epoch, 'started_clock_end_monotonic_ns': started_clock_end,
+            'finished_monotonic_ns': finished, 'finished_epoch_ns': finished_epoch,
+            'finished_clock_end_monotonic_ns': finished_clock_end, 'processes': records,
             'total_cpu_delay_ns': sum(row['cpu_delay_total_ns'] for row in records)}
 
 
