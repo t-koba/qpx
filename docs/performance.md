@@ -2027,3 +2027,30 @@ three independent strong-goal passes are still absent. HTTP/2 1 KiB /
 100-stream p99 remains 1.258134 and maximum latency 1.477027, both above
 1.1. Functional success or one favorable latency run is insufficient to
 complete the full performance plan.
+
+The corrected 1 KiB / 100-stream phase run `37253087588` succeeds with
+168, 162 and 168 samples in its three timed windows. Service-dispatch p99
+is 5.709, 5.727 and 5.675 ms; response-queue p99 is 16.622, 26.530 and
+28.804 microseconds. These instrumented values locate the delay in the
+service path but are not acceptance evidence. The real Linux scheduler
+clock-boundary probe `37253089584` also passes.
+
+The 48 KiB paired trials have only one successful workflow out of three.
+Run `37251831059` retains favorable fast metrics but fails the current
+slow queue-delay objective (8.042828 above 1.5); favorable individual
+metrics must not be mistaken for a successful comparison. Extended
+64-fast / 8-slow runs `37253272862`, `37253274713` and `37253276387`
+likewise have only one success. All fast objectives pass; the first two
+fail slow queue-delay ratios 2.392465 and 4.705228. Extending the counter
+window does not resolve this regression, so mandatory transfer counts
+remain unchanged.
+
+A separate service-state trial replaces the reverse listener's outer
+async wrapper with a result mapping over the already constructed request
+future. It retains the same pinned allocation boundary and interim-head
+extension behavior. The matched native HTTP/2 profile identifies request
+state moves in the service path; this trial removes one initial request
+move and duplicated wrapper state without changing origin pooling or
+stream scheduling. Real multiplexed TCP and slow-client flow-control
+tests pass locally. Performance acceptance still requires independent
+same-runner comparisons; this is not an established latency improvement.
