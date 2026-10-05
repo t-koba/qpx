@@ -2174,3 +2174,22 @@ diagnostic runs the original counts with the same paired conditions and
 unchanged objectives. Its strict `partition-diagnostic` mode requires
 CPU-partition provenance and exact 8 / 1 counts; mandatory acceptance
 continues to reject these diagnostic records.
+
+The ready-source tail-coalescing trial is rejected. Same-runner runs
+`37258489060`, `37258495213` and `37258503028` all fail; the second
+has an incomplete baseline nginx transfer at the 128-second completion
+deadline: three of eight transfers complete, and the fourth receives
+21,495,808 bytes before expiration during the body. In
+the first and third complete comparisons, fast total CPU time rises
+15.828% and 17.748%, and total duration rises 17.971% and 25.229%.
+The native profile (`37258481453`) reduces successful destination
+batches to 463,732 and tail requests to 16.080%, but those counts do
+not establish reduced CPU cost. Original splice scheduling and reads
+are restored; the paused-source real TCP regression test is retained.
+
+The mandatory-count MTU diagnostics `37258883065`, `37258889630` and
+`37258898595` have only one success. Failed phases include fast CPU
+efficiency 1.177726 and 1.221549 below 1.25, and slow queue delay
+1.700400 above 1.5. Isolation and CPU partition do not establish stable
+normal-count acceptance. Required measurement conditions and thresholds
+remain unchanged; successes are not substituted for these failures.
