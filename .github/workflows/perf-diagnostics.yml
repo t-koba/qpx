@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-window, streaming-affinity, streaming-mtu, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-window, streaming-affinity, streaming-mtu, streaming-mtu-normal, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -198,6 +198,9 @@ jobs:
               python3 scripts/perf-evaluate.py "streaming CPU partition diagnostic objectives" -- \
                 bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json window-diagnostic || failed=1
               exit "$failed"
+              ;;
+            streaming-mtu-normal)
+              python3 scripts/perf-evaluate.py "streaming normal workload same-runner MTU diagnostics" -- timeout --signal=TERM --kill-after=40s 12m bash scripts/perf-diagnose-streaming-mtu.sh --normal
               ;;
             streaming-mtu)
               python3 scripts/perf-evaluate.py "streaming same-runner MTU diagnostics" -- timeout --signal=TERM --kill-after=40s 28m bash scripts/perf-diagnose-streaming-mtu.sh

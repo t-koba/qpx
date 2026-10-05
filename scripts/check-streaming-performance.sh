@@ -12,8 +12,8 @@ fi
 
 MODE="${3:-acceptance}"
 case "$MODE" in
-  acceptance|measurement-quality|window-diagnostic) ;;
-  *) echo "performance evaluation mode must be acceptance, measurement-quality, or window-diagnostic" >&2; exit 2 ;;
+  acceptance|measurement-quality|window-diagnostic|partition-diagnostic) ;;
+  *) echo "performance evaluation mode must be acceptance, measurement-quality, window-diagnostic, or partition-diagnostic" >&2; exit 2 ;;
 esac
 PYTHONPATH="$ROOT_DIR/scripts/lib" python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
 import json
@@ -134,8 +134,10 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
         cpu_partition = record.get("diagnostic_cpu_partition", False)
         if type(cpu_partition) is not bool:
             fail(f"streaming performance record for {key} has invalid CPU partition provenance")
-        if cpu_partition and MODE != "window-diagnostic":
+        if cpu_partition and MODE not in ("window-diagnostic", "partition-diagnostic"):
             fail(f"streaming performance record for {key} uses a diagnostic CPU partition")
+        if MODE == "partition-diagnostic" and not cpu_partition:
+            fail(f"streaming partition diagnostic record for {key} lacks CPU partition provenance")
         if record.get("resource_measurement") != "sampled_workload_peak_v1":
             fail(f"streaming performance record for {key} uses an unsupported resource measurement")
         if record.get("kernel_resource_metrics") is not True:
@@ -149,6 +151,8 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
         if stream_bytes == 0 or chunk_bytes == 0 or transfers == 0:
             fail(f"streaming performance record for {key} has an empty workload")
         expected_transfers = (8 if read_mode == "slow" else 64) if MODE == "window-diagnostic" else (1 if read_mode == "slow" else None)
+        if MODE == "partition-diagnostic":
+            expected_transfers = 1 if read_mode == "slow" else 8
         if expected_transfers is not None and transfers != expected_transfers:
             fail(f"streaming performance record for {key} does not match the required transfer count")
         if received_bytes != stream_bytes * transfers:

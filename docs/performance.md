@@ -2163,3 +2163,14 @@ A real TCP test makes the source pause until its first 17 KiB fragment
 is observed at the destination, detecting accidental tail retention.
 Linux correctness, a fresh native counter profile and three independent
 same-runner comparisons are required before accepting the trial.
+
+Paired streaming MTU diagnostics `37256215561`, `37257387183` and
+`37257392460` all pass both 65536 and 1500 phases with the same CPU
+partition. Fast CPU-efficiency ratios range from 1.352074 to 1.730834;
+slow queue-delay ratios range from 0.105155 to 0.659374. These runs
+use 64 fast / 8 slow transfers, so they cannot establish the mandatory
+8 fast / 1 slow workload's reproducibility. The `streaming-mtu-normal`
+diagnostic runs the original counts with the same paired conditions and
+unchanged objectives. Its strict `partition-diagnostic` mode requires
+CPU-partition provenance and exact 8 / 1 counts; mandatory acceptance
+continues to reject these diagnostic records.

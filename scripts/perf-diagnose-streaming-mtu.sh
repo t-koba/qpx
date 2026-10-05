@@ -9,7 +9,10 @@ fi
 if [ "$#" -eq 0 ]; then
   exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA unshare --net bash "$0" --inside
 fi
-if [ "$#" -ne 1 ] || [ "$1" != --inside ] || [ "$(id -u)" -ne 0 ]; then
+if [ "$#" -eq 1 ] && [ "$1" = --normal ]; then
+  exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA unshare --net bash "$0" --inside-normal
+fi
+if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-normal ]] || [ "$(id -u)" -ne 0 ]; then
   echo "unsupported streaming MTU diagnostic invocation" >&2
   exit 2
 fi
@@ -26,6 +29,12 @@ fi
 mkdir -p "$ROOT_DIR/target/perf/profiles"
 profile_dir="$(mktemp -d "$ROOT_DIR/target/perf/profiles/streaming-mtu.XXXXXX")"
 chown "$SUDO_UID:$SUDO_GID" "$profile_dir"
+affinity_arguments=()
+evaluation_mode=window-diagnostic
+if [ "$1" = --inside-normal ]; then
+  affinity_arguments=(--normal)
+  evaluation_mode=partition-diagnostic
+fi
 failed=0
 for mtu in 65536 1500; do
   phase="$profile_dir/mtu-$mtu"
@@ -53,7 +62,7 @@ PY
   if ! setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups env \
     QPX_STREAMING_COMPARE_LOG_DIR="$phase/logs" \
     python3 "$ROOT_DIR/scripts/perf-evaluate.py" "streaming MTU $mtu diagnostic measurement" -- \
-      bash "$ROOT_DIR/scripts/perf-diagnose-streaming-affinity.sh" "$phase/comparison.jsonl"; then
+      bash "$ROOT_DIR/scripts/perf-diagnose-streaming-affinity.sh" "${affinity_arguments[@]}" "$phase/comparison.jsonl"; then
     failed=1
   fi
   ip -json link show dev lo > "$phase/interfaces-after.json"
@@ -68,7 +77,7 @@ PY
   if ! setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups \
     python3 "$ROOT_DIR/scripts/perf-evaluate.py" "streaming MTU $mtu diagnostic objectives" -- \
       bash "$ROOT_DIR/scripts/check-streaming-performance.sh" "$phase/comparison.jsonl" \
-      "$ROOT_DIR/perf/streaming-performance-objectives.json" window-diagnostic; then
+      "$ROOT_DIR/perf/streaming-performance-objectives.json" "$evaluation_mode"; then
     failed=1
   fi
 done
