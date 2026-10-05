@@ -462,6 +462,7 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
     h2_response_frame_size: usize,
 ) -> Result<Http1ResponseWithInterim> {
+    let acquire_phase = crate::perf_diagnostics::phase_timer!("plain_origin_acquire");
     let active_permit = slot.acquire_active().await?;
     let local_target = connection_pool.map(|pool| pool.target_for(&slot));
     let pooled = loop {
@@ -484,11 +485,13 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
             false,
         ),
     };
+    drop(acquire_phase);
     let recycler = local_target
         .as_ref()
         .map(|target| Http1ConnectionRecycler::from_target(Arc::clone(target)))
         .unwrap_or_else(|| Http1ConnectionRecycler::from_target(Arc::clone(&slot)));
     let request_method = serialize_bodyless_http1_request(req, &mut connection.write_buf)?;
+    let headers_phase = crate::perf_diagnostics::phase_timer!("plain_origin_headers");
     let response = send_serialized_http1_head_with_interim_reusable_raw_response(
         connection.stream,
         connection.read_buf,
@@ -521,6 +524,8 @@ async fn proxy_bodyless_plain_http1_raw_response_with_interim(
             .map_err(|error| error.into_parts().0)?
         }
     };
+    drop(headers_phase);
+    let _materialize_phase = crate::perf_diagnostics::phase_timer!("plain_origin_materialize");
     relay.active_permit = Some(active_permit);
     if request_version == http::Version::HTTP_2 {
         relay.into_materialized_http_response(h2_response_frame_size)

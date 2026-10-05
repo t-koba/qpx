@@ -2054,3 +2054,10 @@ move and duplicated wrapper state without changing origin pooling or
 stream scheduling. Real multiplexed TCP and slow-client flow-control
 tests pass locally. Performance acceptance still requires independent
 same-runner comparisons; this is not an established latency improvement.
+
+The next instrumented HTTP/2 diagnosis splits the bodyless origin path
+into connection/permit acquisition, serialized-request/header wait, and
+response materialization. The same timed-window summarizer requires all
+five phases in all three rounds. Local real origin connection reuse and
+closed-idle-connection tests, Clippy and syntax checks pass; the older real
+phase dataset correctly fails because it lacks these new origin samples.
