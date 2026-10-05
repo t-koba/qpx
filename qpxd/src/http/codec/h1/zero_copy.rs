@@ -343,8 +343,39 @@ pub(super) async fn splice_tcp_exact(
         if let Some(counters) = counters.as_mut() {
             counters.read(moved);
         }
+        remaining -= moved as u64;
+        bytes_since_yield = bytes_since_yield.saturating_add(moved as u64);
         let mut buffered = moved;
         while buffered > 0 {
+            if buffered < MAX_SPLICE_SOCKET_BATCH
+                && remaining > 0
+                && bytes_since_yield < scheduling_quantum
+            {
+                // Merge a pipe tail with already readable upstream bytes. Never wait
+                // for another source fragment while destination bytes are buffered;
+                // paused sources and full pipes must flush their current tail.
+                let requested = remaining.min(scheduling_quantum - bytes_since_yield) as usize;
+                match source.try_io(Interest::READABLE, || {
+                    splice_once(source.as_raw_fd(), pipe.write_fd, requested)
+                }) {
+                    Ok(0) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "splice source closed before content-length completed",
+                        ));
+                    }
+                    Ok(moved) => {
+                        if let Some(counters) = counters.as_mut() {
+                            counters.read(moved);
+                        }
+                        buffered += moved;
+                        remaining -= moved as u64;
+                        bytes_since_yield = bytes_since_yield.saturating_add(moved as u64);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
+                }
+            }
             let written = pending_timeout
                 .timeout_after_pending_with(
                     write_timeout,
@@ -392,8 +423,6 @@ pub(super) async fn splice_tcp_exact(
             }
             buffered -= written;
         }
-        remaining -= moved as u64;
-        bytes_since_yield = bytes_since_yield.saturating_add(moved as u64);
         if remaining > 0 && bytes_since_yield >= scheduling_quantum {
             bytes_since_yield = 0;
             if !waited_for_io {
@@ -694,6 +723,73 @@ mod tests {
             .await
             .expect("read sentinel");
         assert_eq!(&sentinel, b"NEXT");
+        source_task.await.expect("source task");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn splice_flushes_pipe_tail_before_a_paused_source_continues() {
+        let payload: Vec<u8> = (0..256 * 1024 + 31)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let first_fragment = 17 * 1024;
+        let source_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind source");
+        let source_address = source_listener.local_addr().expect("source address");
+        let destination_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind destination");
+        let destination_address = destination_listener
+            .local_addr()
+            .expect("destination address");
+        let (delivered, observed) = tokio::sync::oneshot::channel();
+        let source_payload = payload.clone();
+        let source_task = tokio::spawn(async move {
+            let (mut peer, _) = source_listener.accept().await.expect("accept source");
+            peer.write_all(&source_payload[..first_fragment])
+                .await
+                .expect("write first fragment");
+            tokio::time::timeout(Duration::from_secs(3), observed)
+                .await
+                .expect("pipe tail must arrive while source is paused")
+                .expect("observe first fragment");
+            peer.write_all(&source_payload[first_fragment..])
+                .await
+                .expect("write remaining payload");
+        });
+        let source = TcpStream::connect(source_address)
+            .await
+            .expect("connect source");
+        let mut client = TcpStream::connect(destination_address)
+            .await
+            .expect("connect destination");
+        let (destination, _) = destination_listener
+            .accept()
+            .await
+            .expect("accept destination");
+        let payload_len = payload.len();
+        let receiver = tokio::spawn(async move {
+            let mut received = vec![0; payload_len];
+            client
+                .read_exact(&mut received[..first_fragment])
+                .await
+                .expect("read first fragment");
+            delivered.send(()).expect("acknowledge delivered fragment");
+            client
+                .read_exact(&mut received[first_fragment..])
+                .await
+                .expect("read remaining payload");
+            received
+        });
+        splice_tcp_exact(
+            &source,
+            &destination,
+            payload.len() as u64,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("splice paused payload");
+        assert_eq!(receiver.await.expect("receiver task"), payload);
         source_task.await.expect("source task");
     }
 

@@ -2150,3 +2150,16 @@ comparisons fail acceptance and do not reproduce an improvement. For
 The original wrapper and pinned initialization are restored; diagnostic
 instrumentation remains. This is rejection of an unproven optimization,
 not relaxation of any objective.
+
+Native counter version two (`37257499521`) completes all 195 transfers.
+Tail requests account for 47.407% of destination calls, whereas kernel
+partial writes account for only 0.663%. Mean source/destination batches
+are 68,680.731 / 32,561.593 bytes. This supports a bounded trial that
+combines a short pipe tail with already readable source bytes before
+sending it. The trial never waits for source data with buffered destination
+bytes, retains the 48 KiB socket cap and existing scheduling quantum,
+and preserves exact length, timeout and socket-setting restoration.
+A real TCP test makes the source pause until its first 17 KiB fragment
+is observed at the destination, detecting accidental tail retention.
+Linux correctness, a fresh native counter profile and three independent
+same-runner comparisons are required before accepting the trial.
