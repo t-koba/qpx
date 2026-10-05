@@ -2202,3 +2202,36 @@ subtracting capacity under-reserves cleared maps. The pool now reserves
 the full minimum entry count. Existing repeated-field and downstream
 addition checks pass with the new growth regression. This correctness
 repair has no established performance gain in warmed benchmark windows.
+
+
+The mandatory run `37260728487` at `2f8dab6` passes the three OS test
+jobs, release preflights, streaming, and the other non-proxy/non-HTTP/2
+performance categories. Proxy and HTTP/2 fail, so aggregate and release
+acceptance correctly fail. Feature-rich 1 KiB scheduler delay is 1.107152
+against 1.0; persistent miss scheduler delay is 2.727509 against 2.6;
+WebDAV 1 MiB CPU efficiency is 1.410724 against 1.5. HTTP/2 1 KiB /
+100-stream p99 is 1.177090 against 1.1. This is not completion.
+
+A feature-rich hot-cache trial prepares immutable request head processing
+for an exactly repeated raw head under the same runtime Arc. It validates
+the head-only guard, applies Forwarded and request header controls, computes
+the resulting cache key, and requires every module to be inactive for that
+transformed request. Module inactivity is checked again for every hit because
+extension predicates may depend on mutable module state. The prepared head
+is borrowed behind a short mutex solely for that check; no IO or admission
+runs while its lock is held. Active compression, conditional/directive/range
+headers, authentication, origin request policy, capture, RPC/body matchers,
+concurrency, byte limits, and quotas keep using generic dispatch. A cold,
+negotiated, stale/revalidation, oversized, or non-memory candidate also stays
+on the generic path before request admission is acquired.
+
+Each eligible served hit still acquires its request token and applies the
+same cached-response header finalizer and route metadata as generic dispatch.
+Combined access logging records successful hits and rate rejections through
+the existing service. Native profiles attributing copies and allocations to
+`execute_reverse_request` and request preparation motivate this trial;
+no performance improvement is established yet. Real TCP origin and disk tests
+cover differential headers/body, transformed Host cache keys, single admission,
+guard rejection, active modules, transformed eligibility, runtime reload,
+persistent reads after restart, and Vary negotiation. Independent same-runner
+comparisons and all required CI gates remain necessary for adoption.

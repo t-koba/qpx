@@ -101,11 +101,13 @@ pub(super) async fn serve_raw_or_fallback(
                 // request target, and serving their unconditional GET hot
                 // hits here skips the generic chain entirely. A miss falls
                 // through to the same generic handling as before.
-                let fast_served = request.try_serving_cache_hit();
-                let fast_served_hit = fast_served.is_some();
                 let fast_log_started = direct_combined_access.then(Instant::now);
-                let dispatched = if let Some(response) = fast_served {
+                let fast_served = request.try_serving_cache_hit();
+                let fast_served_hit = !matches!(&fast_served, Ok(None));
+                let dispatched = if let Ok(Some(response)) = fast_served {
                     Ok(response)
+                } else if let Err(error) = fast_served {
+                    Err(error)
                 } else if let Some(generic) = request.generic_request() {
                     let direct_generic_started = direct_combined_access.then(Instant::now);
                     // Logging configuration is immutable across hot reloads, and the
@@ -206,15 +208,24 @@ pub(super) async fn serve_raw_or_fallback(
                         fast_log_started,
                     )
                 {
-                    let PreparedRawHttp1Response::InMemory { status, body, .. } = &response else {
-                        unreachable!("fast cache-hit responses are always in-memory");
+                    let (status, bytes_out) = match &response {
+                        PreparedRawHttp1Response::InMemory { status, body, .. } => {
+                            (*status, body.len() as u64)
+                        }
+                        PreparedRawHttp1Response::Generic(_, response) => (
+                            response.status(),
+                            response
+                                .headers()
+                                .get(http::header::CONTENT_LENGTH)
+                                .and_then(|value| value.to_str().ok())
+                                .and_then(|value| value.parse::<u64>().ok())
+                                .unwrap_or(0),
+                        ),
+                        PreparedRawHttp1Response::Direct(_) => {
+                            unreachable!("cache hits cannot return an upstream relay")
+                        }
                     };
-                    service.record_direct_combined_status(
-                        log_request,
-                        *status,
-                        body.len() as u64,
-                        started,
-                    );
+                    service.record_direct_combined_status(log_request, status, bytes_out, started);
                 }
                 let keep_alive = match response {
                     PreparedRawHttp1Response::Direct(response) => {

@@ -34,14 +34,20 @@ pub(in crate::reverse) struct PreparedRawHttp1Request {
     cache_hit: Option<CacheHitFastPath>,
 }
 
-/// Everything needed to serve an unconditional GET straight from the hot
-/// response cache. Built only for routes whose plan carries exactly a
-/// lookup+store cache policy (`supports_raw_cache_hit_dispatch`), so no other
-/// request or response feature can be bypassed by taking this path.
+/// An unconditional hot hit with request-specific head checks prepared once.
+/// Admission and response controls still execute for every served response.
 struct CacheHitFastPath {
     namespace: Arc<str>,
     backend: Arc<dyn qpxd_cache::CacheBackend>,
     key: qpxd_cache::CacheRequestKey,
+    policy: Option<Box<PreparedCacheHitPolicy>>,
+}
+
+struct PreparedCacheHitPolicy {
+    request: std::sync::Mutex<Request<Body>>,
+    rate_context: crate::rate_limit::RateLimitContext,
+    audit: crate::http::dispatch::DispatchAuditContext,
+    secure_transport: bool,
 }
 
 enum PreparedRawHttp1Target {
@@ -105,15 +111,114 @@ impl PreparedRawHttp1Request {
     /// `None` for every request the fast path cannot serve exactly as the
     /// generic chain would, so the caller falls through without behavior
     /// change.
-    pub(in crate::reverse) fn try_serving_cache_hit(&self) -> Option<PreparedRawHttp1Response> {
-        let mut response = try_raw_cache_hit_response(self.cache_hit.as_ref()?)?;
-        let body = take_in_memory_body(&[], &mut response)?;
+    pub(in crate::reverse) fn try_serving_cache_hit(
+        &self,
+    ) -> Result<Option<PreparedRawHttp1Response>> {
+        let Some(fast) = self.cache_hit.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(policy) = fast.policy.as_deref() {
+            let route = self
+                .compiled
+                .router
+                .single_cache_hit_route()
+                .ok_or_else(|| anyhow!("prepared cache route is unavailable"))?;
+            // Module predicates are extension points and may observe mutable
+            // module state. Recheck without cloning the transformed head; the
+            // lock is released before lookup, admission, or any asynchronous IO.
+            let request = policy
+                .request
+                .lock()
+                .map_err(|_| anyhow!("prepared cache request lock is poisoned"))?;
+            if !route.plan.modules.is_inactive_for_request(&request) {
+                return Ok(None);
+            }
+        }
+        let Some(mut response) = try_raw_cache_hit_response(fast) else {
+            return Ok(None);
+        };
+        // Determine eligibility before consuming a request admission token.
+        let Some(body) = take_in_memory_body(&[], &mut response) else {
+            return Ok(None);
+        };
+        if let Some(policy) = fast.policy.as_deref() {
+            let route = self
+                .compiled
+                .router
+                .single_cache_hit_route()
+                .ok_or_else(|| anyhow!("prepared cache route is unavailable"))?;
+            if body.len() > route.plan.streaming.max_response_body_bytes {
+                return Ok(None);
+            }
+            let acquired = self
+                .state
+                .policy
+                .rate_limiters
+                .collect_checked_plan_request(
+                    &route.plan.rate_limits,
+                    None,
+                    crate::rate_limit::TransportScope::Request,
+                    &policy.rate_context,
+                    1,
+                )?;
+            if let Some(retry_after) = acquired.retry_after {
+                let mut response = crate::http::dispatch::rate_limit_response_for_parts_with_limits(
+                    &self.method,
+                    Version::HTTP_11,
+                    self.state.plan.identity.proxy_name.as_ref(),
+                    Some(retry_after),
+                    &acquired.limits,
+                    policy.audit.clone(),
+                );
+                super::dispatch::apply_reverse_route_metadata(
+                    route,
+                    policy.secure_transport,
+                    &mut response,
+                )?;
+                return Ok(Some(PreparedRawHttp1Response::Generic(
+                    Vec::new(),
+                    response,
+                )));
+            }
+            *response.body_mut() = Body::from(body);
+            crate::http::dispatch::finalize_dispatch_cached_response_head(
+                &mut response,
+                &route.plan,
+                &self.method,
+                Version::HTTP_11,
+                self.state.plan.identity.proxy_name.as_ref(),
+                route.headers.as_deref(),
+            );
+            crate::http::dispatch::annotate_dispatch_response(
+                &mut response,
+                &policy.audit,
+                crate::http::dispatch::DispatchOutcome::CacheHit,
+                &[],
+            );
+            super::dispatch::apply_reverse_route_metadata(
+                route,
+                policy.secure_transport,
+                &mut response,
+            )?;
+            if let Some(body) = take_in_memory_body(&[], &mut response) {
+                let (parts, _) = response.into_parts();
+                return Ok(Some(PreparedRawHttp1Response::InMemory {
+                    status: parts.status,
+                    headers: parts.headers,
+                    body,
+                }));
+            }
+            return Ok(Some(PreparedRawHttp1Response::Generic(
+                Vec::new(),
+                response,
+            )));
+        }
         let (parts, _) = response.into_parts();
-        Some(PreparedRawHttp1Response::InMemory {
+        Ok(Some(PreparedRawHttp1Response::InMemory {
             status: parts.status,
             headers: parts.headers,
             body,
-        })
+        }))
     }
 }
 
@@ -380,6 +485,7 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
         build_raw_cache_hit_fast_path(
             &compiled,
             &state,
+            reverse.name.as_ref(),
             &route_match_context,
             request.method,
             request.target,
@@ -406,27 +512,32 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
 
 /// Conditional, negotiated, or directive-bearing requests must go through the
 /// full lookup chain; the fast path only serves plain unconditional GETs.
+fn raw_cache_hit_header_excluded(name: &str) -> bool {
+    [
+        "if-match",
+        "if-none-match",
+        "if-modified-since",
+        "if-unmodified-since",
+        "if-range",
+        "range",
+        "cache-control",
+        "pragma",
+    ]
+    .iter()
+    .any(|excluded| name.eq_ignore_ascii_case(excluded))
+}
+
 fn raw_cache_hit_headers_eligible(headers: &[httparse::Header<'_>]) -> bool {
-    headers.iter().all(|header| {
-        ![
-            "if-match",
-            "if-none-match",
-            "if-modified-since",
-            "if-unmodified-since",
-            "if-range",
-            "range",
-            "cache-control",
-            "pragma",
-        ]
+    headers
         .iter()
-        .any(|name| header.name.eq_ignore_ascii_case(name))
-    })
+        .all(|header| !raw_cache_hit_header_excluded(header.name))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_raw_cache_hit_fast_path(
     compiled: &CompiledReverse,
-    state: &crate::runtime::RuntimeState,
+    state: &Arc<crate::runtime::RuntimeState>,
+    reverse_name: &str,
     route_match_context: &RuleMatchContext<'_>,
     method: &str,
     target: &str,
@@ -448,6 +559,97 @@ fn build_raw_cache_hit_fast_path(
     if !policy.enabled {
         return None;
     }
+    let pure_cache = route.plan.flags
+        == crate::runtime::PlanFlags::CACHE_LOOKUP.union(crate::runtime::PlanFlags::CACHE_STORE)
+        && route.headers.is_none()
+        && route.plan.forwarded.is_none()
+        && route.plan.api_metadata.is_none()
+        && route.plan.hsts.is_none()
+        && route
+            .plan
+            .rate_limits
+            .is_empty_for_scope(crate::rate_limit::TransportScope::Request);
+    let mut prepared_policy = None;
+    let mut transformed_key = None;
+    if !pure_cache {
+        // The exact raw head and immutable runtime Arc are checked before every
+        // reuse. Rejections stay on the generic path, including guard errors.
+        if state.plan.response_observability_required || qpx_observability::otel_enabled() {
+            return None;
+        }
+        let mut request = Request::new(Body::empty());
+        *request.uri_mut() = target.parse().ok()?;
+        *request.headers_mut() = crate::http::codec::h1_common::parse_header_map(headers).ok()?;
+        if let Some(guard) = route.plan.guard.as_deref()
+            && guard.evaluate_request_head(&request).ok()?.is_some()
+        {
+            return None;
+        }
+        crate::http::protocol::forwarded::apply_forwarded_policy(
+            request.headers_mut(),
+            route.plan.forwarded.as_deref(),
+            conn.remote_addr.ip(),
+            if conn.tls_terminated { "https" } else { "http" },
+            Some(authority.as_ref()?.normalized_host.as_str()),
+        )
+        .ok()?;
+        crate::http::protocol::l7::apply_request_header_control_in_place(
+            &mut request,
+            route.headers.as_deref(),
+        );
+        if request.headers().contains_key(http::header::UPGRADE)
+            || request.headers().contains_key(http::header::EXPECT)
+            || request
+                .headers()
+                .contains_key(http::header::TRANSFER_ENCODING)
+            || request
+                .headers()
+                .get_all(http::header::CONTENT_LENGTH)
+                .iter()
+                .any(|value| value.as_bytes() != b"0")
+        {
+            return None;
+        }
+        if !route.plan.modules.is_inactive_for_request(&request)
+            || request
+                .headers()
+                .keys()
+                .any(|name| raw_cache_hit_header_excluded(name.as_str()))
+        {
+            return None;
+        }
+        transformed_key = qpxd_cache::CacheRequestKey::for_lookup(
+            &request,
+            if conn.tls_terminated { "https" } else { "http" },
+        )
+        .ok()?;
+        transformed_key.as_ref()?;
+        let identity = crate::policy_context::ResolvedIdentity::default();
+        let destination = crate::destination::DestinationMetadata::default();
+        let audit = crate::http::dispatch::build_dispatch_audit_context(
+            crate::http::dispatch::DispatchAuditInput {
+                state,
+                kind: crate::http::dispatch::ProxyKind::Reverse,
+                scope_name: reverse_name,
+                remote_addr: conn.remote_addr,
+                host: Some(authority.as_ref()?.normalized_host.as_str()),
+                sni: conn.tls_sni.as_deref(),
+                request_method: Method::GET,
+                path: Some(request.uri().path()),
+                matched_rule: None,
+                matched_route: route.name.as_deref(),
+                identity: &identity,
+                destination: &destination,
+                decision_service: None,
+            },
+        );
+        prepared_policy = Some(Box::new(PreparedCacheHitPolicy {
+            request: std::sync::Mutex::new(request),
+            rate_context: crate::rate_limit::RateLimitContext::from_source(conn.remote_addr.ip()),
+            audit,
+            secure_transport: conn.tls_terminated,
+        }));
+    }
     let backend = state.cache.backends.get(policy.backend.as_str())?.clone();
     let scheme = if conn.tls_terminated { "https" } else { "http" };
     let host_header = authority.as_ref()?.raw.as_str();
@@ -456,12 +658,15 @@ fn build_raw_cache_hit_fast_path(
     Some(CacheHitFastPath {
         namespace,
         backend,
-        key: qpxd_cache::CacheRequestKey::from_normalized_parts(
-            "GET",
-            scheme,
-            normalized_authority,
-            target.to_string(),
-        ),
+        policy: prepared_policy,
+        key: transformed_key.unwrap_or_else(|| {
+            qpxd_cache::CacheRequestKey::from_normalized_parts(
+                "GET",
+                scheme,
+                normalized_authority,
+                target.to_string(),
+            )
+        }),
     })
 }
 
@@ -896,6 +1101,20 @@ mod tests {
         cache_dir: &std::path::Path,
         access_log: qpx_core::config::AccessLogConfig,
     ) -> crate::reverse::ReloadableReverse {
+        build_cache_hit_reverse_fixture_with_configuration(
+            upstream_addr,
+            cache_dir,
+            access_log,
+            |_| {},
+        )
+    }
+
+    pub(super) fn build_cache_hit_reverse_fixture_with_configuration(
+        upstream_addr: std::net::SocketAddr,
+        cache_dir: &std::path::Path,
+        access_log: qpx_core::config::AccessLogConfig,
+        configure: impl FnOnce(&mut qpx_core::config::Config),
+    ) -> crate::reverse::ReloadableReverse {
         use qpx_core::config::{
             AuditLogConfig, CacheBackendConfig, CachePolicyConfig, Config, IdentityConfig,
             MessagesConfig, ReverseEdgeConfig, ReverseRouteConfig, ReverseRouteTargetConfig,
@@ -964,7 +1183,7 @@ mod tests {
             discovery: None,
             resilience: None,
         };
-        let config = Config {
+        let mut config = Config {
             state_dir: None,
             identity: IdentityConfig::default(),
             messages: MessagesConfig::default(),
@@ -994,6 +1213,10 @@ mod tests {
                 max_object_bytes: 1024 * 1024,
                 auth_header_env: None,
             }],
+        };
+        configure(&mut config);
+        let qpx_core::config::EdgeConfig::Reverse(reverse_cfg) = config.edges[0].clone() else {
+            panic!("reverse edge is required");
         };
         let runtime = crate::runtime::Runtime::new(config).expect("runtime");
         crate::reverse::ReloadableReverse::new(
@@ -1285,3 +1508,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "raw_http1/cache_policy_tests.rs"]
+mod cache_policy_tests;

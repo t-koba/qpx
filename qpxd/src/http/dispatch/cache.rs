@@ -117,6 +117,32 @@ pub(crate) async fn finalize_dispatch_cached_response(
     } else {
         http_modules.prepare_downstream_response(response).await?
     };
+    let version = response_version.unwrap_or_else(|| response.version());
+    finalize_dispatch_cached_response_head(
+        &mut response,
+        plan,
+        request_method,
+        version,
+        proxy_name,
+        headers,
+    );
+    if !modules_empty {
+        http_modules.on_logging(Some(response.status()), None).await;
+    }
+    annotate_dispatch_response(&mut response, audit, outcome, &[]);
+    Ok(crate::http::capture::stream::limit_response_body_for_plan(
+        response, plan,
+    ))
+}
+
+pub(crate) fn finalize_dispatch_cached_response_head(
+    response: &mut Response<Body>,
+    plan: &crate::runtime::ExecutionPlan,
+    request_method: &Method,
+    request_version: http::Version,
+    proxy_name: &str,
+    headers: Option<&CompiledHeaderControl>,
+) {
     let route_response_fields = headers.map_or(0, |control| {
         control
             .response_set()
@@ -138,22 +164,14 @@ pub(crate) async fn finalize_dispatch_cached_response(
                 .saturating_add(3),
         );
     }
-    let version = response_version.unwrap_or_else(|| response.version());
     finalize_response_with_headers_in_place(
         request_method,
-        version,
+        request_version,
         proxy_name,
-        &mut response,
+        response,
         headers,
         false,
     );
-    if !modules_empty {
-        http_modules.on_logging(Some(response.status()), None).await;
-    }
-    annotate_dispatch_response(&mut response, audit, outcome, &[]);
-    Ok(crate::http::capture::stream::limit_response_body_for_plan(
-        response, plan,
-    ))
 }
 
 pub(crate) async fn finalize_dispatch_stale_if_error_response(

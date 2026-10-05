@@ -171,18 +171,24 @@ impl CompiledHttpModuleChain {
         }
     }
 
+    pub(crate) fn is_inactive_for_request(
+        &self,
+        request: &hyper::Request<qpx_http::body::Body>,
+    ) -> bool {
+        self.is_empty()
+            || self
+                .session_modules
+                .iter()
+                .all(|module| module.module.is_inactive_for_request(request))
+    }
+
     pub(crate) fn start_for_request<'a>(
         self: &Arc<Self>,
         runtime: &Arc<RuntimeState>,
         request: &hyper::Request<qpx_http::body::Body>,
         init: impl FnOnce() -> HttpModuleSessionInit<'a>,
     ) -> HttpModuleExecution {
-        if self.is_empty()
-            || self
-                .session_modules
-                .iter()
-                .all(|module| module.module.is_inactive_for_request(request))
-        {
+        if self.is_inactive_for_request(request) {
             HttpModuleExecution::empty()
         } else {
             HttpModuleExecution::new(

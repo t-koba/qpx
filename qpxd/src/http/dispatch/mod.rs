@@ -23,8 +23,8 @@ pub(crate) use cache::{
     DispatchCacheCollapseOutcome, DispatchCacheLookupOutcome, DispatchCacheWriteInput,
     DispatchCachedResponseInput, dispatch_cache_collapse_continue,
     dispatch_cache_collapse_response, finalize_dispatch_cached_response,
-    finalize_dispatch_stale_if_error_response, prepare_dispatch_cache_key_pair,
-    prepare_dispatch_cache_keys, write_dispatch_cache_result,
+    finalize_dispatch_cached_response_head, finalize_dispatch_stale_if_error_response,
+    prepare_dispatch_cache_key_pair, prepare_dispatch_cache_keys, write_dispatch_cache_result,
 };
 pub(crate) use cache_decision::{
     DispatchCacheDecisionInput, DispatchCollapsedCacheDecisionInput, cache_decision_is_hit,

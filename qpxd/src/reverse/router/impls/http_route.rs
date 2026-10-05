@@ -250,25 +250,49 @@ impl HttpRoute {
     }
 
     pub(in crate::reverse) fn supports_raw_cache_hit_dispatch(&self) -> bool {
-        // Same eligibility as the plain raw HTTP/1 dispatch except the route
-        // may carry exactly a lookup+store cache policy: only unconditional
-        // GETs served from the hot response cache can take that path, and any
-        // other request shape falls back to the generic dispatch chain. The
-        // strict flag equality keeps every non-cache feature (guard, auth,
-        // forwarded, rate limits, header controls, modules, capture, ...)
-        // structurally out of scope for the fast path.
-        self.plan.flags
-            == crate::runtime::PlanFlags::CACHE_LOOKUP.union(crate::runtime::PlanFlags::CACHE_STORE)
-            && !self.matcher.requires_request_headers()
-            && !self.plan.require_precondition
-            && self.plan.api_metadata.is_none()
-            && self.plan.hsts.is_none()
-            && self.plan.forwarded.is_none()
+        // Only immutable head processing and modules proven inactive for the
+        // exact prepared request may supplement the unconditional cache hit.
+        // Authentication, active body processing, and origin policies remain
+        // outside this path. Observation flags can originate from an inactive
+        // streaming module or a request limiter; the prepared request has no
+        // body and all modules must be inactive. Admission runs for every hit.
+        let allowed = crate::runtime::PlanFlags::CACHE_LOOKUP
+            .union(crate::runtime::PlanFlags::CACHE_STORE)
+            .union(crate::runtime::PlanFlags::HTTP_GUARD)
+            .union(crate::runtime::PlanFlags::REQUEST_MODULES)
+            .union(crate::runtime::PlanFlags::RESPONSE_MODULES)
+            .union(crate::runtime::PlanFlags::REQUEST_BODY_OBSERVE)
+            .union(crate::runtime::PlanFlags::RESPONSE_BODY_OBSERVE);
+        let admission = self
+            .plan
+            .rate_limits
+            .collect(crate::rate_limit::TransportScope::Request);
+        let simple_request_admission = !admission.has_concurrency_controls()
+            && admission.byte_limiters.is_empty()
+            && admission.request_quota_limiters.is_empty()
+            && admission.byte_quota_limiters.is_empty()
+            && admission.rate_limit_policies.is_empty();
+        self.plan.flags.bits() & !allowed.bits() == 0
             && self
                 .plan
+                .flags
+                .contains(crate::runtime::PlanFlags::CACHE_LOOKUP)
+            && !self.matcher.requires_request_headers()
+            && !self.matcher.requires_response_body_observation()
+            && !self.matcher.requires_response_rpc_observation()
+            && !self.plan.require_precondition
+            && self.plan.cookies.is_none()
+            && self.plan.browser_security.is_none()
+            && self
+                .plan
+                .guard
+                .as_ref()
+                .is_none_or(|guard| !guard.may_require_request_body_buffering())
+            && !self
+                .plan
                 .rate_limits
-                .is_empty_for_scope(crate::rate_limit::TransportScope::Request)
-            && self.headers.is_none()
+                .requires_extended_context(crate::rate_limit::TransportScope::Request)
+            && simple_request_admission
             && self.local_response.is_none()
             && self.ipc.is_none()
             && self.webdav.is_none()
