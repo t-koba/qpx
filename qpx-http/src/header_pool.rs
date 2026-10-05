@@ -14,7 +14,9 @@ thread_local! {
 pub fn take(minimum_capacity: usize) -> HeaderMap {
     HEADER_MAPS.with_borrow_mut(|maps| {
         let mut map = maps.pop().unwrap_or_default();
-        map.reserve(minimum_capacity.saturating_sub(map.capacity()));
+        // HeaderMap reserves entries relative to its length, not its capacity.
+        // Recycled maps are empty, so reserve the complete required count.
+        map.reserve(minimum_capacity);
         map
     })
 }
@@ -64,6 +66,19 @@ mod tests {
         let map = take(1);
         assert!(map.is_empty());
         assert!(map.capacity() >= capacity);
+    }
+
+    #[test]
+    fn reused_map_grows_to_the_required_capacity() {
+        HEADER_MAPS.with_borrow_mut(Vec::clear);
+        let retained = HeaderMap::with_capacity(8);
+        let minimum = retained.capacity() + 1;
+        recycle(retained);
+
+        let map = take(minimum);
+
+        assert!(map.is_empty());
+        assert!(map.capacity() >= minimum);
     }
 
     #[test]

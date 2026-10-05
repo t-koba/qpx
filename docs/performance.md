@@ -2193,3 +2193,12 @@ efficiency 1.177726 and 1.221549 below 1.25, and slow queue delay
 1.700400 above 1.5. Isolation and CPU partition do not establish stable
 normal-count acceptance. Required measurement conditions and thresholds
 remain unchanged; successes are not substituted for these failures.
+
+A real HeaderMap regression test reproduces a pool capacity contract
+violation before the fix: recycling an empty map with preallocated storage
+and asking for more capacity can return the original smaller map.
+`HeaderMap::reserve` interprets its argument relative to length, so
+subtracting capacity under-reserves cleared maps. The pool now reserves
+the full minimum entry count. Existing repeated-field and downstream
+addition checks pass with the new growth regression. This correctness
+repair has no established performance gain in warmed benchmark windows.
