@@ -338,6 +338,7 @@ async fn serve_h2_stream<S>(
     let request_method = request.method().clone();
     let allow_successful_connect_body = request.extensions().get::<h2::ext::Protocol>().is_some();
 
+    let dispatch_phase = crate::perf_diagnostics::phase_timer!("h2_service_dispatch");
     let mut service_call = service.call_pinned(request);
     let mut response = tokio::select! {
         biased;
@@ -360,6 +361,8 @@ async fn serve_h2_stream<S>(
             return;
         }
     };
+    drop(dispatch_phase);
+    let _send_phase = crate::perf_diagnostics::phase_timer!("h2_response_queue");
     let interim = take_interim_response_heads(&mut response);
     if let Err(err) = send_h2_response_with_interim(
         respond,

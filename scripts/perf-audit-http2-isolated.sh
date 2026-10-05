@@ -7,8 +7,8 @@ if [ "$(uname -s)" != Linux ]; then
   exit 1
 fi
 if [ "${1:-}" != --inside ]; then
-  if [ "$#" -ne 1 ] && { [ "$#" -ne 2 ] || [ "$1" != --native ]; }; then
-    echo "usage: perf-audit-http2-isolated.sh [--native] <comparison-jsonl>" >&2
+  if [ "$#" -ne 1 ] && { [ "$#" -ne 2 ] || { [ "$1" != --native ] && [ "$1" != --phases ]; }; }; then
+    echo "usage: perf-audit-http2-isolated.sh [--native|--phases] <comparison-jsonl>" >&2
     exit 2
   fi
   exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA,QPX_HTTP2_COMPARE_LOG_DIR,QPXD_REAL_BIN,QPX_NATIVE_PROFILE_DIR,QPX_NATIVE_PERF_BIN,QPX_NATIVE_WRAPPER_SOURCE \
@@ -16,9 +16,13 @@ if [ "${1:-}" != --inside ]; then
 fi
 shift
 native=0
-if [ "${1:-}" = --native ]; then
-  native=1
-  shift
+phases=0
+case "${1:-}" in
+  --native) native=1; shift ;;
+  --phases) native=1; phases=1; shift ;;
+esac
+if [ "$phases" = 1 ]; then
+  export RUST_LOG=warn,qpx_perf_phase=debug
 fi
 if [ "$#" -ne 1 ] || [ "$(id -u)" -ne 0 ]; then
   echo "Unsupported isolated HTTP/2 comparison invocation" >&2

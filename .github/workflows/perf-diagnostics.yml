@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-window, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-window, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -279,6 +279,10 @@ jobs:
               ;;
             webdav-native)
               QPX_NATIVE_WORKLOAD=webdav python3 scripts/perf-evaluate.py "native WebDAV CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
+              ;;
+            http2-phases)
+              python3 scripts/perf-evaluate.py "isolated HTTP/2 phase diagnostics" -- bash scripts/perf-audit-http2-isolated.sh --phases target/perf/perf-audit-http2-compare.jsonl
+              python3 scripts/summarize-perf-phases.py target/perf/http2-compare-logs target/perf/http2-phase-summary.json
               ;;
             http2-native)
               QPX_NATIVE_WORKLOAD=http2 python3 scripts/perf-evaluate.py "native HTTP/2 CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh

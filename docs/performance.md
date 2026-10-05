@@ -1942,3 +1942,27 @@ This tests whether smaller submissions avoid the observed full-MSS drop
 without sacrificing required CPU efficiency. No acceptance limit or client
 socket setting changes; Linux correctness and three independent comparisons
 are required before accepting the trial.
+
+Plain-future cleanup `adb6d42` is not proven as an HTTP/2 performance fix.
+Independent paired runs `37245728723`, `37245730817`, `37245732516` all
+fail current acceptance. At 1 KiB / 100 streams, current/baseline throughput
+ratios are 0.9810/1.0673/1.0106, CPU efficiency 0.9622/1.0852/1.0113,
+and p99 1.0011/0.9305/0.9943. Other lanes include both improvements and
+regressions; reduced future size alone is insufficient acceptance evidence.
+
+The 64-fast / 8-slow measurement-window diagnostic fails all three runs
+(`37247932334`, `37247934890`, `37247937460`). Run one fails slow queue
+delay at 3.498295; run two fails fast maximum-gap ratio at 860.232513 and
+slow queue delay at 1.641866; run three fails maximum-gap ratio at
+1012.834390. Required workload counts remain unchanged.
+
+The new isolated `http2-phases` diagnostic samples service dispatch and
+response queuing separately through the existing 1-in-1024 phase logger.
+It retains the same MTU, CPU partition, calibration and lane matrix as the
+required comparison. Its records and environment explicitly mark diagnostic
+instrumentation, so they cannot satisfy mandatory acceptance. Real TCP
+128-request multiplexing and slow-reader flow-control tests pass locally,
+alongside Clippy, structure, formatting, typos and gate-inventory checks.
+A retained real native dataset is correctly rejected as instrumented.
+Linux phase logs are needed to distinguish service latency from transport
+progress before choosing the next optimization.
