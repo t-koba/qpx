@@ -1926,3 +1926,19 @@ explicit offline mode with those already acquired dependencies; missing
 inputs still fail. Profiling workloads and instruction thresholds are
 unchanged. YAML, embedded shell syntax and the 8-category / 16-evaluation
 gate inventory pass locally; Linux validation remains required.
+
+Native run `37248622455` (`bc0b850`, artifact `11320770603`) captures a
+204.343 ms qpxd gap with receiver memory usage 200,448 bytes against a
+201,408-byte budget and a socket drop counter of one. The sender records
+one 65,483-byte retransmission and a 201 ms retransmission timeout. Its
+subsequent 52.768 ms observation includes inspection overhead and is not
+an acceptance measurement. This localizes the stall to packet loss under
+receive-memory pressure rather than proving a CPU scheduling hotspot.
+
+A provisional product trial caps each uncorked pipe-to-socket splice at
+32 KiB, while preserving the source pipe capacity, scheduling quantum,
+1 MiB unsent-data limit, timeouts and exact content-length handling.
+This tests whether smaller submissions avoid the observed full-MSS drop
+without sacrificing required CPU efficiency. No acceptance limit or client
+socket setting changes; Linux correctness and three independent comparisons
+are required before accepting the trial.

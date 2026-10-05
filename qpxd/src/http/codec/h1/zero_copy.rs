@@ -27,6 +27,8 @@ const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
 const FILE_NOTSENT_LOWAT: u32 = 64 * 1024;
 #[cfg(target_os = "linux")]
 const SOCKET_NOTSENT_LOWAT: u32 = BALANCED_ZERO_COPY_QUANTUM as u32;
+#[cfg(target_os = "linux")]
+const MAX_SPLICE_SOCKET_BATCH: usize = 32 * 1024;
 
 // Buffered body relays move up to one read buffer per readiness event. The
 // same fairness rule as the zero-copy path applies under concurrent transfer
@@ -335,7 +337,15 @@ pub(super) async fn splice_tcp_exact(
                     async {
                         loop {
                             match destination.try_io(Interest::WRITABLE, || {
-                                splice_once(pipe.read_fd, destination.as_raw_fd(), buffered)
+                                // Keep each uncorked socket submission below a loopback MSS.
+                                // Large spliced packets can exhaust the receiver's initial
+                                // memory budget and leave a dropped packet waiting
+                                // for the retransmission timer.
+                                splice_once(
+                                    pipe.read_fd,
+                                    destination.as_raw_fd(),
+                                    buffered.min(MAX_SPLICE_SOCKET_BATCH),
+                                )
                             }) {
                                 Ok(written) => return Ok(written),
                                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -589,7 +599,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn splices_exact_socket_payload_without_consuming_following_bytes() {
-        let payload = vec![b'x'; 256 * 1024];
+        let payload: Vec<u8> = (0..2 * 1024 * 1024 + 17)
+            .map(|index| (index % 251) as u8)
+            .collect();
         let source_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind source");
         let source_address = source_listener.local_addr().expect("source address");
         let source_payload = payload.clone();
@@ -618,16 +630,25 @@ mod tests {
             .accept()
             .await
             .expect("accept destination");
+        destination
+            .set_nodelay(true)
+            .expect("set destination nodelay");
+        socket2::SockRef::from(&destination_client)
+            .set_recv_buffer_size(64 * 1024)
+            .expect("limit receiver memory");
         socket2::SockRef::from(&destination)
             .set_tcp_notsent_lowat(512 * 1024)
             .expect("set original destination send queue limit");
         let payload_length = payload.len();
         let destination_task = tokio::spawn(async move {
             let mut received = vec![0; payload_length];
-            destination_client
-                .read_exact(&mut received)
-                .await
-                .expect("read destination payload");
+            for chunk in received.chunks_mut(4096) {
+                destination_client
+                    .read_exact(chunk)
+                    .await
+                    .expect("read destination payload");
+                sleep(Duration::from_millis(1)).await;
+            }
             received
         });
 
