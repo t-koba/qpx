@@ -26,7 +26,13 @@ def objective_coverage(category, evaluations, scope):
         objectives = json.loads((directory / f"{filename}-performance-objectives.json").read_text())
         performance = {key for key in objectives["defaults"]
                        if "sample_spread" not in key and key != "min_aggregate_dominance_score"}
-        for lane in objectives["lanes"]:
+        # HTTP/2 lane entries override defaults; required dimensions define coverage.
+        lanes = objectives["lanes"] if category == "proxy" else (
+            {"body_bytes": body_bytes, "max_concurrent_streams": max_streams}
+            for body_bytes in objectives["required_body_bytes"]
+            for max_streams in objectives["required_max_concurrent_streams"]
+        )
+        for lane in lanes:
             if category == "proxy":
                 key = (lane["bench"], lane["body_bytes"], None, None)
                 quality = {f"{role}.{metric}" for role in ("qpx", "reference")
