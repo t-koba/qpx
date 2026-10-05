@@ -1887,3 +1887,19 @@ keeps every individual read below its socket timeout but exceeds the whole
 transfer deadline. The production deadline helper is used directly, with
 real listeners, peer sockets and timers. Both checks pass locally and are
 required alongside process-resource sampling checks in CI and diagnostics.
+
+A separate `streaming-window` diagnostic tests measurement sensitivity to
+short CPU/counter windows: 64 sequential fast transfers and eight sequential
+slow transfers, with the same three alternating role rounds. Required CI
+retains eight fast transfers and one slow transfer. The diagnostic checker
+requires exactly 64/8, uses the unchanged stability and performance limits,
+and labels judgments `window-diagnostic`; mandatory acceptance still rejects
+multi-transfer slow records. No diagnostic result substitutes for required
+CI or the final three independent acceptance runs.
+
+The production streaming backend and embedded client pass a local real HTTP
+check of normal fast counts and eight paced slow transfers, including exact
+body-byte and fixed-gap observation counts. A retained normal Linux dataset
+is correctly rejected by the diagnostic's stricter workload-shape check.
+Linux quality and resource comparisons determine whether a longer window
+actually improves reproducibility before any required workload change.

@@ -12,8 +12,8 @@ fi
 
 MODE="${3:-acceptance}"
 case "$MODE" in
-  acceptance|measurement-quality) ;;
-  *) echo "performance evaluation mode must be acceptance or measurement-quality" >&2; exit 2 ;;
+  acceptance|measurement-quality|window-diagnostic) ;;
+  *) echo "performance evaluation mode must be acceptance, measurement-quality, or window-diagnostic" >&2; exit 2 ;;
 esac
 PYTHONPATH="$ROOT_DIR/scripts/lib" python3 - "$JSONL" "$OBJECTIVES" "$MODE" <<'PY'
 import json
@@ -143,9 +143,9 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
         observations = nonnegative_int(record, "chunk_observations")
         if stream_bytes == 0 or chunk_bytes == 0 or transfers == 0:
             fail(f"streaming performance record for {key} has an empty workload")
-        expected_transfers = 1 if read_mode == "slow" else None
+        expected_transfers = (8 if read_mode == "slow" else 64) if MODE == "window-diagnostic" else (1 if read_mode == "slow" else None)
         if expected_transfers is not None and transfers != expected_transfers:
-            fail(f"streaming performance record for {key} must use one slow transfer")
+            fail(f"streaming performance record for {key} does not match the required transfer count")
         if received_bytes != stream_bytes * transfers:
             fail(f"streaming performance record for {key} did not receive the complete body")
         if observation_bytes != chunk_bytes:

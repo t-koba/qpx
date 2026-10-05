@@ -15,6 +15,7 @@ STREAM_BYTES="${QPX_STREAMING_COMPARE_BYTES:-104857600}"
 CHUNK_BYTES="${QPX_STREAMING_COMPARE_CHUNK_BYTES:-65536}"
 SLOW_READ_DELAY_MS="${QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS:-1}"
 FAST_TRANSFERS="${QPX_STREAMING_COMPARE_FAST_TRANSFERS:-8}"
+SLOW_TRANSFERS="${QPX_STREAMING_COMPARE_SLOW_TRANSFERS:-1}"
 SAMPLE_ATTEMPTS="${QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS:-3}"
 BACKEND_PORT="${QPX_STREAMING_COMPARE_BACKEND_PORT:-18380}"
 QPX_PORT="${QPX_STREAMING_COMPARE_QPX_PORT:-18381}"
@@ -294,7 +295,7 @@ run_client() {
   local port="$2"
   local read_mode="$3"
   local delay_ms="$4"
-  python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" "$ROOT_DIR/scripts" <<'PY'
+  python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" "$ROOT_DIR/scripts" "$SLOW_TRANSFERS" <<'PY'
 import json
 import os
 import socket
@@ -314,7 +315,7 @@ port = int(port)
 delay = float(delay_ms) / 1000.0
 expected = int(expected)
 chunk_bytes = int(chunk_bytes)
-transfers = 1 if read_mode == "slow" else int(fast_transfers)
+transfers = int(sys.argv[9]) if read_mode == "slow" else int(fast_transfers)
 # Allow the existing I/O timeout, one second per planned transfer and all
 # intentional pacing, while rejecting indefinitely progressing measurements.
 completion_seconds = 120.0 + transfers + delay * ((expected + chunk_bytes - 1) // chunk_bytes) * transfers
@@ -745,16 +746,18 @@ if [ "$SAMPLE_ATTEMPTS" -eq 0 ]; then
   echo "QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS must be a positive integer" >&2
   exit 1
 fi
-case "$FAST_TRANSFERS" in
-  ''|*[!0-9]*)
-    echo "QPX_STREAMING_COMPARE_FAST_TRANSFERS must be a positive integer" >&2
+for transfer_count in "$FAST_TRANSFERS" "$SLOW_TRANSFERS"; do
+  case "$transfer_count" in
+    ''|*[!0-9]*)
+      echo "streaming transfer counts must be positive integers" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$transfer_count" -eq 0 ]; then
+    echo "streaming transfer counts must be positive integers" >&2
     exit 1
-    ;;
-esac
-if [ "$FAST_TRANSFERS" -eq 0 ]; then
-  echo "QPX_STREAMING_COMPARE_FAST_TRANSFERS must be a positive integer" >&2
-  exit 1
-fi
+  fi
+done
 
 if [ -z "$APACHE_BIN" ]; then
   if command -v apache2 >/dev/null 2>&1; then
