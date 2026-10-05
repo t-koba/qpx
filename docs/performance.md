@@ -2078,3 +2078,45 @@ clients complete eight exact 1 MiB transfers each. The real truncated-body
 failure check, workflow shell/YAML checks and the eight-category/sixteen-
 evaluation gate inventory pass. Linux positive affinity validation and
 comparisons remain pending.
+
+Origin phases from `37254517399` locate HTTP/2 service delay in the
+serialized-request/header wait. In three timed 1 KiB / 100-stream windows,
+connection/permit acquisition p99 is 0.821, 2.375 and 2.104 microseconds;
+materialization is 2.004, 14.658 and 2.013 microseconds. Header-wait p99 is
+7.112, 6.990 and 7.821 ms. This does not justify optimizing connection
+lookup or materialization as the main tail-latency fix.
+
+CPU-partitioned streaming diagnostics `37254742863`, `37254745046` and
+`37254747186` have one success. The second passes every slow objective but
+fails fast total CPU efficiency (1.200735 below 1.25). The first fails
+reference measurement: nginx completes two of 64 transfers and times out
+at 184 seconds during the third body, after 30,861,206 bytes. Its last
+progress was 193.551 ms before expiration. Partitioning alone does not
+establish stable measurement conditions or acceptance.
+
+A paired streaming MTU diagnostic runs loopback MTU 65536 and 1500
+sequentially in an owned network namespace on the same runner, retaining
+the same observer/client/server CPU partition for both phases. It records
+and checks namespace identity and interface configuration before and after
+measurement, retains both phases, and fails when either phase fails. The
+host network interface and mandatory measurement conditions stay unchanged.
+Partition provenance continues to exclude both phases from mandatory gates.
+
+Native streaming additionally records per-transfer splice source and
+destination batch counts, bytes, maximum sizes, short destination batches,
+WouldBlock counts and the real pipe capacity. Allocation and pipe inspection
+occur only with the dedicated debug target enabled. The native summarizer
+requires all 192 fast and three slow transfers with complete byte accounting
+and bounded batch sizes. These counts distinguish coalesced source reads
+from unnecessarily short socket submissions before changing batching again.
+Local Clippy, structure, gate inventory, Python and workflow shell/YAML
+checks pass; positive Linux validation remains required.
+
+Normal CI `37253034718` also confirms local 1 KiB RSS ratio 1.050976 and
+feature-rich queue ratio 0.948041, but feature-rich throughput 0.883619 and
+CPU efficiency 0.931483 remain below the planned 1.0 goals. Cache-miss
+throughput is 1.003762 while CPU efficiency 0.886916 and queue delay 2.858618
+still miss the stronger goals. WebDAV 1 MiB p99 is 1.705886 and CPU
+efficiency 1.359443. Historic HTTP/1 queue and 1 MiB CPU comparisons also
+fail. These results do not establish completion despite all functional
+lanes, structure and security QA passing.

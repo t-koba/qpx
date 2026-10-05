@@ -1,4 +1,7 @@
 #[cfg(target_os = "linux")]
+mod diagnostics;
+
+#[cfg(target_os = "linux")]
 use crate::http::codec::lazy_timeout::ReusablePendingTimeout;
 use qpx_http::body::FileRegion;
 use std::io;
@@ -286,6 +289,11 @@ pub(super) async fn splice_tcp_exact(
     let _transfer = ZeroCopyTransferGuard::begin();
     let mut send_queue = ZeroCopySendQueueGuard::begin(destination, SOCKET_NOTSENT_LOWAT)?;
     let pipe = SplicePipe::new()?;
+    let mut counters = diagnostics::SpliceTransferCounters::begin(
+        pipe.read_fd,
+        remaining,
+        MAX_SPLICE_SOCKET_BATCH,
+    )?;
     let pending_timer = sleep(Duration::ZERO);
     tokio::pin!(pending_timer);
     let mut pending_timeout = ReusablePendingTimeout::new(pending_timer.as_mut());
@@ -305,6 +313,9 @@ pub(super) async fn splice_tcp_exact(
                         }) {
                             Ok(moved) => return Ok(moved),
                             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                if let Some(counters) = counters.as_mut() {
+                                    counters.source_pending();
+                                }
                                 if bytes_since_yield > 0 {
                                     // Re-applying TCP_NODELAY explicitly pushes any partial splice
                                     // batch before an upstream pause can leave it to the TCP flush timer.
@@ -329,6 +340,9 @@ pub(super) async fn splice_tcp_exact(
             ));
         }
 
+        if let Some(counters) = counters.as_mut() {
+            counters.read(moved);
+        }
         let mut buffered = moved;
         while buffered > 0 {
             let written = pending_timeout
@@ -349,6 +363,9 @@ pub(super) async fn splice_tcp_exact(
                             }) {
                                 Ok(written) => return Ok(written),
                                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                    if let Some(counters) = counters.as_mut() {
+                                        counters.destination_pending();
+                                    }
                                     destination.writable().await?;
                                 }
                                 Err(error) => return Err(error),
@@ -369,6 +386,9 @@ pub(super) async fn splice_tcp_exact(
                     io::ErrorKind::WriteZero,
                     "splice destination made no progress",
                 ));
+            }
+            if let Some(counters) = counters.as_mut() {
+                counters.write(written);
             }
             buffered -= written;
         }

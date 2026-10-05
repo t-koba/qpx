@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-window, streaming-affinity, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-window, streaming-affinity, streaming-mtu, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -199,6 +199,9 @@ jobs:
                 bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json window-diagnostic || failed=1
               exit "$failed"
               ;;
+            streaming-mtu)
+              python3 scripts/perf-evaluate.py "streaming same-runner MTU diagnostics" -- timeout --signal=TERM --kill-after=40s 28m bash scripts/perf-diagnose-streaming-mtu.sh
+              ;;
             streaming-duration)
               QPX_STREAMING_COMPARE_FAST_TRANSFERS=512 \
                 python3 scripts/perf-evaluate.py "extended streaming measurement" -- bash scripts/perf-audit-streaming-compare.sh
@@ -296,7 +299,8 @@ jobs:
               QPX_NATIVE_WORKLOAD=http2 python3 scripts/perf-evaluate.py "native HTTP/2 CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
               ;;
             streaming-native)
-              QPX_NATIVE_WORKLOAD=streaming python3 scripts/perf-evaluate.py "native streaming CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
+              QPX_NATIVE_WORKLOAD=streaming RUST_LOG=warn,qpx_perf_splice=debug python3 scripts/perf-evaluate.py "native streaming CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
+              python3 scripts/summarize-splice-batches.py target/perf/streaming-compare-logs/qpxd.log target/perf/splice-counter-summary.json
               ;;
             http2-events)
               python3 scripts/perf-evaluate.py "HTTP/2 kernel wait events" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-events.sh
