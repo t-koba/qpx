@@ -367,8 +367,12 @@ try:
                             observed_epoch_ns = time.time_ns()
                             tcp_info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 256)
                             sender = subprocess.run([
-                                "ss", "-tinp",
+                                "ss", "-tinmp",
                                 f"( sport = :{port} and dport = :{local_address[1]} )",
+                            ], capture_output=True, text=True, check=True, timeout=5)
+                            receiver = subprocess.run([
+                                "ss", "-tinmp",
+                                f"( sport = :{local_address[1]} and dport = :{port} )",
                             ], capture_output=True, text=True, check=True, timeout=5)
                             print(json.dumps({
                                 "event": "streaming_client_gap", "proxy": proxy,
@@ -377,6 +381,9 @@ try:
                                 "received_bytes": transfer_received, "expected_bytes": expected,
                                 "local_address": local_address, "peer_address": sock.getpeername(),
                                 "tcp_info_hex": tcp_info.hex(), "sender_socket_state": sender.stdout,
+                                "receiver_socket_state": receiver.stdout,
+                                "sender_snapshot_available": len(sender.stdout.splitlines()) > 1,
+                                "receiver_snapshot_available": len(receiver.stdout.splitlines()) > 1,
                                 "inspection_duration_ns": time.monotonic_ns() - observed_monotonic_ns,
                             }), file=sys.stderr, flush=True)
                     last_observation = now

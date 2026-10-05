@@ -1903,3 +1903,17 @@ body-byte and fixed-gap observation counts. A retained normal Linux dataset
 is correctly rejected by the diagnostic's stricter workload-shape check.
 Linux quality and resource comparisons determine whether a longer window
 actually improves reproducibility before any required workload change.
+
+Native streaming run `37246922729` (`b888a16`, artifact `11318989319`)
+shows that the 1 MiB queue trial does not eliminate the TCP stalls. Seven
+qpxd gaps across the 192 fast transfers remain at 202.011–208.596 ms;
+sender snapshots retain about 0.85–0.98 MiB of unsent data and one
+65,483-byte retransmission with a 201 ms retransmission timeout. The
+round-two CPU report has no sampled setsockopt callchain, so eliminating
+that syscall is not currently supported as the main CPU optimization.
+
+Follow-up instrumentation records both socket endpoints with `ss -tinmp`,
+including socket-memory usage/drop counters and explicit snapshot-availability
+flags. It preserves the raw output and total inspection time rather than
+attributing loss from sender data alone. This runs only in native diagnostics;
+normal reads, socket buffers and acceptance measurements are unchanged.
