@@ -9,6 +9,7 @@ import sys
 
 root, output = map(Path, sys.argv[1:])
 samples = collections.defaultdict(list)
+poll_samples = collections.defaultdict(list)
 socket_samples = collections.defaultdict(list)
 for path in sorted(root.rglob("*.log")):
     for line in path.open(errors="strict"):
@@ -37,18 +38,48 @@ for path in sorted(root.rglob("*.log")):
         elapsed = fields["elapsed_ns"]
         if not isinstance(elapsed, int) or elapsed < 0:
             raise SystemExit(f"invalid phase duration in {path}")
-        samples[(str(path.relative_to(root)), fields["phase"], fields["sample_interval"])].append(elapsed)
+        key = (str(path.relative_to(root)), fields["phase"], fields["sample_interval"])
+        samples[key].append(elapsed)
+        counters = {name: fields[name] for name in (
+            "polls", "pending_polls", "active_poll_ns", "max_active_poll_ns",
+            "before_notify_ns", "notified_wait_ns", "unnotified_wait_ns",
+            "notified_resumptions")}
+        if not all(type(value) is int and value >= 0 for value in counters.values()):
+            raise SystemExit(f"invalid phase poll counter in {path}")
+        if counters["polls"]:
+            if (counters["pending_polls"] >= counters["polls"]
+                    or counters["notified_resumptions"] > counters["pending_polls"]
+                    or counters["max_active_poll_ns"] > counters["active_poll_ns"]
+                    or sum(counters[name] for name in (
+                        "active_poll_ns", "before_notify_ns", "notified_wait_ns",
+                        "unnotified_wait_ns")) > elapsed):
+                raise SystemExit(f"inconsistent phase poll accounting in {path}")
+            counters["outside_poll_ns"] = elapsed - counters["active_poll_ns"]
+            poll_samples[key].append(counters)
+        elif fields["phase"] == "file_body_send":
+            raise SystemExit(f"file-body phase lacks observed future polls in {path}")
 if not samples:
     raise SystemExit("diagnostic server logs contain no sampled phase timings")
 records = []
 for (source, phase, interval), values in sorted(samples.items()):
     values.sort()
-    records.append({
+    record = {
         "source": source, "phase": phase, "sample_interval": interval,
         "samples": len(values), "median_ns": statistics.median(values),
         "p99_ns": values[min(len(values) - 1, (99 * len(values)) // 100)],
         "max_ns": values[-1],
-    })
+    }
+    observed = poll_samples[(source, phase, interval)]
+    if observed:
+        record["observed_future_samples"] = len(observed)
+        for metric in observed[0]:
+            measurements = sorted(sample[metric] for sample in observed)
+            record[metric] = {
+                "median": statistics.median(measurements),
+                "p99": measurements[min(len(measurements) - 1, (99 * len(measurements)) // 100)],
+                "max": measurements[-1],
+            }
+    records.append(record)
 output.write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
 socket_records = []
 for (source, body_bytes, interval), values in sorted(socket_samples.items()):
@@ -63,3 +94,9 @@ output.with_name("socket-queue-summary.json").write_text(json.dumps(socket_recor
 for record in records:
     print(f"{record['source']} {record['phase']}: samples={record['samples']} "
           f"median_us={record['median_ns'] / 1000:.3f} p99_us={record['p99_ns'] / 1000:.3f}")
+    if record.get("observed_future_samples"):
+        print(f"{record['source']} {record['phase']}: "
+              f"active_poll_median_us={record['active_poll_ns']['median'] / 1000:.3f} "
+              f"before_notify_median_us={record['before_notify_ns']['median'] / 1000:.3f} "
+              f"notified_wait_median_us={record['notified_wait_ns']['median'] / 1000:.3f} "
+              f"unnotified_wait_median_us={record['unnotified_wait_ns']['median'] / 1000:.3f}")

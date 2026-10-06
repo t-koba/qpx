@@ -115,7 +115,19 @@ pub(super) fn split_tcp_file_region_sender()
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Result<()> {
-    let _phase = crate::perf_diagnostics::phase_timer!("file_body_send");
+    let mut phase = crate::perf_diagnostics::phase_timer!("file_body_send");
+    let sampled = phase.is_sampled();
+    phase
+        .observe_future(send_file_inner(stream, region, sampled))
+        .await
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn send_file_inner(
+    stream: &TcpStream,
+    region: &FileRegion,
+    sampled_scheduling: bool,
+) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     let mut send_queue = ZeroCopySendQueueGuard::begin(stream, FILE_NOTSENT_LOWAT)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -131,7 +143,6 @@ pub(super) async fn send_file(stream: &TcpStream, region: &FileRegion) -> io::Re
         // Reuse the writer's reactor registration instead of duplicating
         // and registering its descriptor for every file response.
         let mut bytes_since_yield = 0_u64;
-        let sampled_scheduling = _phase.is_sampled();
         let mut io_pending_polls = 0_u64;
         let mut explicit_yields = 0_u64;
         while offset < end {
