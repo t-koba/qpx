@@ -14,7 +14,7 @@ fn build_runtime(worker_threads: usize, max_blocking_threads: usize) -> Result<R
         tokio::runtime::Builder::new_current_thread()
     } else {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(worker_threads).event_interval(1);
+        builder.worker_threads(worker_threads);
         builder
     };
     builder
