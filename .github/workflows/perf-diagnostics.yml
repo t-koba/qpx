@@ -19,7 +19,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-scheduler, streaming-window, streaming-affinity, streaming-mtu, streaming-mtu-normal, streaming-mtu-unpartitioned, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-worker-scaling, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-scheduler, streaming-window, streaming-affinity, streaming-mtu, streaming-mtu-normal, streaming-mtu-unpartitioned, streaming-mtu-window-unpartitioned, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-worker-scaling, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -220,6 +220,9 @@ jobs:
                 *) echo "unsupported streaming MTU order: $REVISION_ORDER" >&2; exit 2 ;;
               esac
               python3 scripts/perf-evaluate.py "streaming normal CPU scheduling same-runner MTU diagnostics" -- timeout --signal=TERM --kill-after=40s 12m bash scripts/perf-diagnose-streaming-mtu.sh --unpartitioned-normal
+              ;;
+            streaming-mtu-window-unpartitioned)
+              python3 scripts/perf-evaluate.py "streaming normal CPU scheduling MTU 1500 extended window diagnostics" -- timeout --signal=TERM --kill-after=40s 12m bash scripts/perf-diagnose-streaming-mtu.sh --unpartitioned-window
               ;;
             streaming-mtu)
               python3 scripts/perf-evaluate.py "streaming same-runner MTU diagnostics" -- timeout --signal=TERM --kill-after=40s 28m bash scripts/perf-diagnose-streaming-mtu.sh

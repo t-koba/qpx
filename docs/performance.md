@@ -2596,3 +2596,18 @@ execution. Missing samples, clock errors, regression and inconsistent
 accounting invalidate the diagnostic explicitly. The real TCP readiness test
 checks complete clock coverage on Linux. This investigation does not repeat
 the rejected cooperative-budget trial or change scheduling or acceptance.
+
+
+Normal-CPU reversed MTU comparison `37467736651` passes every original
+criterion at MTU 1,500, while its complete MTU 65,536 phase fails slow
+scheduler delay 18.540737 versus 1.5. Third comparison `37468869195`
+at `0ed0c2a` completes all transfers in both phases, but MTU 1,500 fails
+slow scheduler delay 1.907788 versus 1.5; its MTU 65,536 phase passes.
+Thus two of three 1,500-MTU original-window phases pass and all three
+complete, but three independent passes are absent. No required measurement
+is changed. The next diagnostic uses the established non-stalling 1,500
+MTU, unchanged normal CPU scheduling and 64 fast/8 slow transfers to
+investigate window sensitivity. It retains three samples, complete-transfer
+validation, conservative aggregation and every original performance/resource
+threshold. The extended-window mode changes only the expected transfer counts;
+it is diagnostic evidence, not a substitute for a failed required lane.

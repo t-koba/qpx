@@ -15,7 +15,10 @@ fi
 if [ "$#" -eq 1 ] && [ "$1" = --unpartitioned-normal ]; then
   exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA,QPX_STREAMING_MTU_ORDER unshare --net bash "$0" --inside-unpartitioned-normal
 fi
-if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-normal && "$1" != --inside-unpartitioned-normal ]] || [ "$(id -u)" -ne 0 ]; then
+if [ "$#" -eq 1 ] && [ "$1" = --unpartitioned-window ]; then
+  exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA unshare --net bash "$0" --inside-unpartitioned-window
+fi
+if [ "$#" -ne 1 ] || [[ "$1" != --inside && "$1" != --inside-normal && "$1" != --inside-unpartitioned-normal && "$1" != --inside-unpartitioned-window ]] || [ "$(id -u)" -ne 0 ]; then
   echo "unsupported streaming MTU diagnostic invocation" >&2
   exit 2
 fi
@@ -45,18 +48,31 @@ if [ "$1" = --inside-unpartitioned-normal ]; then
   cpu_partition=False
   measurement_script="$ROOT_DIR/scripts/perf-audit-streaming-compare.sh"
 fi
+window_arguments=()
+if [ "$1" = --inside-unpartitioned-window ]; then
+  cpu_partition=False
+  measurement_script="$ROOT_DIR/scripts/perf-audit-streaming-compare.sh"
+  window_arguments=(QPX_STREAMING_COMPARE_FAST_TRANSFERS=64 QPX_STREAMING_COMPARE_SLOW_TRANSFERS=8)
+fi
+if [ "$cpu_partition" = False ] && [ -n "${QPX_STREAMING_COMPARE_SERVER_CPUS:-}${QPX_STREAMING_COMPARE_CLIENT_CPUS:-}" ]; then
+  echo "unpartitioned streaming diagnostics must retain normal CPU scheduling" >&2
+  exit 1
+fi
 failed=0
 case "${QPX_STREAMING_MTU_ORDER:-65536-1500}" in
   65536-1500) mtus=(65536 1500) ;;
   1500-65536) mtus=(1500 65536) ;;
   *) echo "unsupported streaming MTU order" >&2; exit 2 ;;
 esac
+if [ "$1" = --inside-unpartitioned-window ]; then
+  mtus=(1500)
+fi
 for mtu in "${mtus[@]}"; do
   phase="$profile_dir/mtu-$mtu"
   mkdir "$phase"
   ip link set dev lo mtu "$mtu" up
   ip -json link show dev lo > "$phase/interfaces-before.json"
-  python3 - "$phase" "$mtu" "$namespace" "$host_namespace" "$cpu_partition" <<'PY'
+  python3 - "$phase" "$mtu" "$namespace" "$host_namespace" "$cpu_partition" "$1" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -71,10 +87,12 @@ if len(interfaces) != 1 or interfaces[0]["ifname"] != "lo" or interfaces[0]["mtu
     "network_namespace": sys.argv[3], "host_network_namespace": sys.argv[4],
     "loopback_mtu": mtu, "diagnostic_cpu_partition": sys.argv[5] == "True",
     "replaces_required_gate": False,
+    "transfer_window": "64-fast-8-slow" if sys.argv[6] in ("--inside", "--inside-unpartitioned-window") else "8-fast-1-slow",
 }, indent=2) + "\n")
 PY
   chown -R "$SUDO_UID:$SUDO_GID" "$phase"
   if ! setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups env \
+    "${window_arguments[@]}" \
     QPX_STREAMING_COMPARE_LOG_DIR="$phase/logs" \
     python3 "$ROOT_DIR/scripts/perf-evaluate.py" "streaming MTU $mtu diagnostic measurement" -- \
       bash "$measurement_script" "${affinity_arguments[@]}" "$phase/comparison.jsonl"; then
