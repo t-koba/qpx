@@ -25,8 +25,6 @@ const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
 // Release response buffers promptly without letting a continuously ready completion queue
 // postpone admission until every previously admitted stream has finished.
 const H2_COMPLETION_BURST: usize = 8;
-// Bound each connection's runnable burst independently of driver I/O operations.
-const H2_CONNECTION_EVENT_BURST: usize = H2_MAX_CONCURRENT_STREAMS;
 
 enum H2ConnectionEvent<'a> {
     ConcurrentStreamCompleted(ReusableBoxFuture<'a, ()>),
@@ -111,22 +109,17 @@ where
     let mut accepting_streams = true;
     let mut completions_since_admission = 0usize;
     let mut completions_since_drive = 0usize;
-    let mut events_since_yield = 0usize;
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     loop {
-        if events_since_yield == H2_CONNECTION_EVENT_BURST {
-            tokio::task::yield_now().await;
-            events_since_yield = 0;
-        }
         let accept_backlog_available = concurrent_streams.len() < H2_ACCEPT_BACKLOG;
         if accepting_streams && !accept_backlog_available {
-            let progress = tokio::task::unconstrained(poll_fn(|cx| {
+            let progress = poll_fn(|cx| {
                 Poll::Ready(match conn.poll_closed(cx) {
                     Poll::Ready(result) => Some(result),
                     Poll::Pending => None,
                 })
-            }))
+            })
             .await;
             completions_since_drive = 0;
             if let Some(result) = progress {
@@ -149,7 +142,7 @@ where
         let event = if prioritize_h2_admission(completions_since_admission) {
             tokio::select! {
                 biased;
-                accepted = tokio::task::unconstrained(conn.accept()), if accepting_streams && accept_backlog_available => {
+                accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
                     accepted_stream = Some(accepted);
                     H2ConnectionEvent::Accepted
                 }
@@ -172,14 +165,13 @@ where
                 Some(stream) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
                     H2ConnectionEvent::ConcurrentStreamCompleted(stream)
                 }
-                accepted = tokio::task::unconstrained(conn.accept()), if accepting_streams && accept_backlog_available => {
+                accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
                     accepted_stream = Some(accepted);
                     H2ConnectionEvent::Accepted
                 }
                 () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
             }
         };
-        events_since_yield += 1;
         match event {
             H2ConnectionEvent::ConcurrentStreamCompleted(stream) => {
                 // Reuse completed stream storage within this connection, bounded by
@@ -306,12 +298,12 @@ async fn drive_h2_connection_now<I>(conn: &mut h2::server::Connection<I, Bytes>)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    if let Some(result) = tokio::task::unconstrained(poll_fn(|cx| {
+    if let Some(result) = poll_fn(|cx| {
         Poll::Ready(match conn.poll_closed(cx) {
             Poll::Ready(result) => Some(result),
             Poll::Pending => None,
         })
-    }))
+    })
     .await
     {
         result?;
