@@ -84,15 +84,27 @@ case "$workload" in
     minimum_reports=11
     ;;
   webdav)
+    export QPX_NATIVE_APACHE_REAL_BIN
+    QPX_NATIVE_APACHE_REAL_BIN="$(command -v apache2)"
+    apache_wrapper="$QPX_NATIVE_PROFILE_DIR/apache-perf"
+    cat >"$apache_wrapper" <<'APACHE_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+export QPXD_REAL_BIN="$QPX_NATIVE_APACHE_REAL_BIN"
+export QPX_NATIVE_REFERENCE_ROLE=apache-webdav
+exec python3 "$QPX_NATIVE_WRAPPER_SOURCE" "$@"
+APACHE_WRAPPER
+    chmod 755 "$apache_wrapper"
     QPXD_BIN="$wrapper" QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+      QPX_PROXY_COMPARE_APACHE_BIN="$apache_wrapper" \
       QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-webdav,apache-webdav \
       QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
       QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV="MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728" \
       bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh"
-    roles="qpxd-webdav"
+    roles="qpxd-webdav apache-webdav"
     log_directory="$ROOT_DIR/target/perf/proxy-compare-logs"
-    expected_profiles=1
-    minimum_reports=6
+    expected_profiles=2
+    minimum_reports=12
     ;;
   http2)
     QPXD_BIN="$wrapper" bash "$ROOT_DIR/scripts/perf-audit-http2-isolated.sh" \

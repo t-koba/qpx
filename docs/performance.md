@@ -2611,3 +2611,15 @@ investigate window sensitivity. It retains three samples, complete-transfer
 validation, conservative aggregation and every original performance/resource
 threshold. The extended-window mode changes only the expected transfer counts;
 it is diagnostic evidence, not a substitute for a failed required lane.
+
+
+WebDAV native diagnostics now record both the real qpx server and Apache
+reference process trees in their existing alternating workload windows.
+The qpx-only profile identifies sendfile-kernel work but cannot explain the
+reference's CPU advantage. Both profilers use the same 199 Hz CPU event,
+8 MiB ring and DWARF stack capture; all twelve size/round reports and both
+second-round callchains are required. Reference version queries execute the
+real Apache binary directly, while only its foreground/config invocation
+enters the existing owned profiler process group. Both servers must shut
+down cleanly and both profiles must report zero lost samples. This is an
+instrumented diagnostic, not an acceptance measurement or server change.

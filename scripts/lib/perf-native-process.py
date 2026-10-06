@@ -14,15 +14,25 @@ def main():
     arguments = sys.argv[1:]
     server = os.environ["QPXD_REAL_BIN"]
     mode = os.environ.get("QPX_NATIVE_PROFILE_MODE", "cpu")
+    reference_role = os.environ.get("QPX_NATIVE_REFERENCE_ROLE")
+    if reference_role is not None and (reference_role != "apache-webdav" or mode != "cpu"):
+        raise SystemExit("unsupported native reference profile role")
     if mode not in ("cpu", "client-cpu", "syscalls"):
         raise SystemExit("unsupported native profiler mode")
-    if not arguments or (mode == "cpu" and arguments[0] != "run") or arguments in (["-v"], ["-V"], ["--version"]):
+    if not arguments or (mode == "cpu" and reference_role is None and arguments[0] != "run") or arguments in (["-v"], ["-V"], ["--version"]):
         os.execv(server, [server, *arguments])
     if mode == "client-cpu" and not any(argument.startswith("--log-file=") for argument in arguments):
         # Short warmups validate real connections but cannot provide a CPU
         # sample window. Profile every logged calibration and measurement.
         os.execv(server, [server, *arguments])
-    if "--config" in arguments:
+    if reference_role is not None:
+        if "-f" not in arguments or "-DFOREGROUND" not in arguments:
+            raise SystemExit("native Apache reference profiling requires a foreground server config")
+        config = Path(arguments[arguments.index("-f") + 1])
+        if not config.is_file():
+            raise SystemExit("native Apache reference server config is missing")
+        role = reference_role
+    elif "--config" in arguments:
         role = Path(arguments[arguments.index("--config") + 1]).stem
     elif mode == "syscalls" and Path(server).name == "nginx" and "-c" in arguments:
         config = Path(arguments[arguments.index("-c") + 1])
