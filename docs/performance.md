@@ -2367,3 +2367,16 @@ second. Its Apache ratios are throughput 1.846576, CPU efficiency 2.186880,
 p99 0.662661, and scheduler delay 0.120562. Thus this comparison shows a
 23.62% p99 improvement, not a CPU gain; two additional independent complete
 passes are required before adopting the quantum change.
+
+
+Lightweight parent-poll diagnostic `37455287352` at `b4110bf` succeeds and
+observes 15 actual HTTP/2 connections. Their median maximum active poll is
+3.970 ms and the largest is 10.057 ms. These are wall durations, not isolated
+thread CPU measurements. The connection-local stream futures retain their
+existing unconstrained inner I/O behavior; previously their outer poll did not
+charge the connection task's cooperative budget. A trial charges one parent
+budget unit per primary or concurrent stream poll, including polls which perform
+work and then suspend. It keeps stream storage reuse, bounded admission and
+driver completion bursts, cancellation handling, and backpressure. Same-runner
+HTTP/2 comparisons decide whether the bounded polling improves the observed
+latency without throughput, CPU, or resource regressions.
