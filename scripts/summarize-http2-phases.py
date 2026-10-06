@@ -13,6 +13,15 @@ phases = {"h2_service_dispatch", "h2_response_queue", "plain_origin_acquire",
           "plain_origin_headers", "plain_origin_materialize"}
 clock_tolerance_ns = 1_000_000
 samples = []
+for snapshot_path in root.glob("*scheduler-*.json"):
+    snapshot = json.loads(snapshot_path.read_text())
+    if snapshot.get("thread_details") is not True or not snapshot["processes"]:
+        raise SystemExit("HTTP/2 phase diagnostics lack requested thread scheduler evidence")
+    for process in snapshot["processes"]:
+        if not process.get("threads") or not any(
+                thread["status"] == "live" and thread["tid"] == process["pid"]
+                for thread in process["threads"]):
+            raise SystemExit("HTTP/2 phase diagnostics lack a live process main thread")
 for line in (root / "qpxd-h2.log").read_text().splitlines():
     record = json.loads(line)
     if record.get("target") != "qpx_perf_phase":

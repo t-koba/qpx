@@ -222,12 +222,15 @@ if __name__ == '__main__':
         if sys.argv[1] == 'delta':
             print(delta(sys.argv[2], sys.argv[3]))
         else:
-            thread_mode = os.environ.get('QPX_PERF_SCHEDULER_THREADS', '0')
-            if thread_mode not in ('0', '1'):
-                raise RuntimeError('thread scheduler diagnostics must be 0 or 1')
-            record = snapshot(int(sys.argv[1]), thread_details=thread_mode == '1')
-            if len(sys.argv) > 2:
-                Path(sys.argv[2]).write_text(json.dumps(record, sort_keys=True) + '\n')
+            arguments = sys.argv[1:]
+            thread_details = arguments[:1] == ['--threads']
+            if thread_details:
+                arguments = arguments[1:]
+            if len(arguments) not in (1, 2):
+                raise RuntimeError('scheduler snapshot requires a PID and optional output path')
+            record = snapshot(int(arguments[0]), thread_details=thread_details)
+            if len(arguments) == 2:
+                Path(arguments[1]).write_text(json.dumps(record, sort_keys=True) + '\n')
             print(record['total_cpu_delay_ns'])
     except (OSError, RuntimeError, ValueError) as error:
         raise SystemExit(f'Invalid measurement: {error}') from error

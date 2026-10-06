@@ -157,7 +157,13 @@ process_tree_cpu_ms() {
 process_tree_cpu_clock_ms() {
   local root="$1"
   local output="${2:-}"
-  local arguments=("$root")
+  local arguments=()
+  case "${QPX_PERF_SCHEDULER_THREADS:-0}" in
+    0) ;;
+    1) arguments+=(--threads) ;;
+    *) echo "Invalid measurement: thread scheduler diagnostics must be 0 or 1" >&2; return 1 ;;
+  esac
+  arguments+=("$root")
   if [ -n "$output" ]; then
     arguments+=("$output")
   fi

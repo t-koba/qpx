@@ -102,3 +102,26 @@ finally:
         reader.socket.close()
     os.sched_setaffinity(0, original_affinity)
 PY_PROBE
+
+# Exercise the shell-to-privileged-reader path, including sudo's environment reset.
+QPX_PERF_SCHEDULER_THREADS=1 process_tree_scheduler_run_delay_ns "$$" \
+  "$ROOT_DIR/target/perf/scheduler-accounting-shell-probe.json" >/dev/null
+process_tree_scheduler_run_delay_ns "$$" \
+  "$ROOT_DIR/target/perf/scheduler-accounting-shell-normal-probe.json" >/dev/null
+python3 - "$ROOT_DIR/target/perf" "$$" <<'PY_SHELL_PROBE'
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+pid = int(sys.argv[2])
+detailed = json.loads((root / 'scheduler-accounting-shell-probe.json').read_text())
+normal = json.loads((root / 'scheduler-accounting-shell-normal-probe.json').read_text())
+if detailed['thread_details'] is not True or not any(
+        thread['status'] == 'live' and thread['tid'] == pid
+        for process in detailed['processes'] for thread in process['threads']):
+    raise SystemExit('Privileged scheduler reader omitted the requested real shell thread')
+if normal['thread_details'] is not False or any('threads' in row for row in normal['processes']):
+    raise SystemExit('Normal privileged scheduler reader unexpectedly enabled thread diagnostics')
+print('Real privileged shell thread diagnostics verified')
+PY_SHELL_PROBE
