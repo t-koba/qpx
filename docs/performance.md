@@ -2463,3 +2463,13 @@ Mandatory `37459729264` also fails 1 KiB/m=100 p99 1.236887 versus
 1.1, maximum latency 2.934164 versus 1.1, and dominance 0.750275 versus
 0.95. Streaming in that run fails slow scheduler delay 3.777323 versus
 1.5; a separate passing revision comparison does not supersede that failure.
+
+The native writer's 67 pre-creation stat samples motivate removing the
+duplicate final-component inspection on Unix. Creation retains
+`O_CREAT | O_EXCL | O_NOFOLLOW`, exact 0600 permissions and all directory
+validation. The [Linux open specification](https://man7.org/linux/man-pages/man2/open.2.html)
+requires exclusive creation to reject existing components, including dangling
+symlinks. Real filesystem tests preserve existing target contents, reject both
+symlink forms and existing regular files, and verify private creation.
+Non-Unix inspection remains explicit. This small trial must be measured;
+the observed stat share does not imply the complete cache-miss goals are met.

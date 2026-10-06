@@ -1776,6 +1776,9 @@ fn temp_path(parent: &Path) -> PathBuf {
 }
 
 fn create_secure_new_file(path: &Path) -> Result<File> {
+    // Exclusive creation rejects an existing final component atomically,
+    // including dangling symlinks. A preceding stat cannot strengthen it.
+    #[cfg(not(unix))]
     reject_symlink(path)?;
     let mut options = OpenOptions::new();
     options.create_new(true).write(true).read(true);
@@ -1866,6 +1869,7 @@ fn validate_directory_metadata(path: &Path, metadata: fs::Metadata) -> Result<()
     Ok(())
 }
 
+#[cfg(not(unix))]
 fn reject_symlink(path: &Path) -> Result<()> {
     if let Ok(meta) = fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
@@ -2952,5 +2956,41 @@ mod tests {
         assert!(backend.get("ns", "link").await.is_err());
         assert!(read_metadata_trailer_sync(&path).is_err());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_creation_rejects_existing_and_dangling_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = temp_dir("exclusive-creation");
+        ensure_private_dir(&dir).expect("create private directory");
+        let target = dir.join("target");
+        fs::write(&target, b"protected").expect("write protected target");
+        let linked = dir.join("linked");
+        symlink(&target, &linked).expect("create existing target symlink");
+        assert!(create_secure_new_file(&linked).is_err());
+        assert!(create_secure_new_file(&target).is_err());
+        assert_eq!(
+            fs::read(&target).expect("read protected target"),
+            b"protected"
+        );
+        let absent = dir.join("absent");
+        let dangling = dir.join("dangling");
+        symlink(&absent, &dangling).expect("create dangling symlink");
+        assert!(create_secure_new_file(&dangling).is_err());
+        assert!(!absent.exists());
+        let fresh = dir.join("fresh");
+        let file = create_secure_new_file(&fresh).expect("create new private file");
+        assert_eq!(
+            file.metadata()
+                .expect("new file metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(file);
+        fs::remove_dir_all(dir).expect("remove test directory");
     }
 }
