@@ -27,7 +27,7 @@ const LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
 #[cfg(target_os = "linux")]
-const FILE_NOTSENT_LOWAT: u32 = 64 * 1024;
+const FILE_NOTSENT_LOWAT: u32 = 128 * 1024;
 #[cfg(target_os = "linux")]
 const SOCKET_NOTSENT_LOWAT: u32 = BALANCED_ZERO_COPY_QUANTUM as u32;
 #[cfg(target_os = "linux")]

@@ -2270,3 +2270,21 @@ are not assigned fabricated counters. The real Linux accounting probe checks
 a competing live thread and confirms that normal snapshots omit this detail.
 This evidence is intended to distinguish connection-task scheduling from
 origin wait and worker oversubscription before selecting another optimization.
+
+WebDAV diagnostic `37447272741` at `b398d0b` records 181 sampled real
+1 MiB file sends. The file-send p99 sample takes 11.844 ms: 10.235 ms
+precedes its actual I/O notification, 1.401 ms follows notification before
+resumption, and 0.202 ms executes inside future polls. Forty samples suspend;
+the median completes without suspension. Metadata p99 is 0.014 ms and file
+read p99 is 0.516 ms. Thread sampling and debug logging make these diagnostic
+values unsuitable as acceptance evidence. The run's initial summarizer fails
+on duration-only timer providers; reprocessing the retained real logs with
+the corrected provider-aware summarizer recovers the observations.
+
+This motivates a bounded file-send queue trial: increase TCP_NOTSENT_LOWAT
+from 64 to 128 KiB while retaining the existing 64 KiB contended transfer
+quantum, cooperative handoffs, cancellation restoration, and low-speed client
+backpressure. This changes the I/O readiness bound, not the previously rejected
+128 KiB transfer quantum. Same-runner revision comparisons and all required
+resource and correctness checks determine adoption; no improvement is claimed
+before those comparisons complete.
