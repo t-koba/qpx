@@ -28,6 +28,16 @@ struct StartedPhase {
     notified_resumptions: u64,
     io_sample_id: u64,
     first_notification_ns: u64,
+    poll_cpu: Option<PollCpu>,
+}
+
+#[derive(Default)]
+struct PollCpu {
+    polls: u64,
+    errors: u64,
+    active_ns: u64,
+    max_ns: u64,
+    cpu_at_max_wall_ns: u64,
 }
 
 struct RecordedWake {
@@ -92,6 +102,8 @@ impl PhaseTimer {
                     notified_resumptions: 0,
                     io_sample_id: 0,
                     first_notification_ns: 0,
+                    poll_cpu: (cfg!(target_os = "linux") && phase == "h2_connection_poll")
+                        .then(PollCpu::default),
                 })
             }),
         }
@@ -175,8 +187,39 @@ impl PhaseTimer {
             let waker = std::task::Waker::from(Arc::clone(&probe));
             let mut observed = std::task::Context::from_waker(&waker);
             let at = Instant::now();
+            #[cfg(target_os = "linux")]
+            let cpu_before = started.poll_cpu.as_ref().map(|_| native_thread_cpu_ns());
             let result = future.as_mut().poll(&mut observed);
+            #[cfg(target_os = "linux")]
+            let cpu_after = started.poll_cpu.as_ref().map(|_| native_thread_cpu_ns());
             let elapsed = at.elapsed().as_nanos() as u64;
+            #[cfg(target_os = "linux")]
+            if let (Some(before), Some(after), Some(cpu)) =
+                (cpu_before, cpu_after, started.poll_cpu.as_mut())
+            {
+                let measured = before.and_then(|before| {
+                    after.and_then(|after| {
+                        after.checked_sub(before).ok_or_else(|| {
+                            std::io::Error::other("performance phase thread CPU clock regressed")
+                        })
+                    })
+                });
+                match measured {
+                    Ok(measured) => {
+                        cpu.polls += 1;
+                        cpu.active_ns += measured;
+                        cpu.max_ns = cpu.max_ns.max(measured);
+                        if elapsed >= started.max_active_poll_ns {
+                            cpu.cpu_at_max_wall_ns = measured;
+                        }
+                    }
+                    Err(error) => {
+                        cpu.errors += 1;
+                        tracing::debug!(target: "qpx_perf_phase", error = ?error,
+                            "performance phase CPU sampling failed");
+                    }
+                }
+            }
             started.polls += 1;
             started.pending_polls += u64::from(result.is_pending());
             started.active_poll_ns += elapsed;
@@ -192,25 +235,35 @@ impl PhaseTimer {
 
 #[cfg(target_os = "linux")]
 fn native_monotonic_ns() -> std::io::Result<u64> {
+    native_clock_ns(libc::CLOCK_MONOTONIC)
+}
+
+#[cfg(target_os = "linux")]
+fn native_thread_cpu_ns() -> std::io::Result<u64> {
+    native_clock_ns(libc::CLOCK_THREAD_CPUTIME_ID)
+}
+
+#[cfg(target_os = "linux")]
+fn native_clock_ns(clock_id: libc::clockid_t) -> std::io::Result<u64> {
     let mut clock = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // SAFETY: CLOCK_MONOTONIC is a valid clock and clock points to writable
-    // initialized storage owned exclusively by this call.
-    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut clock) } != 0 {
+    // SAFETY: callers provide a valid clock identifier and clock points to
+    // initialized writable storage owned exclusively by this call.
+    if unsafe { libc::clock_gettime(clock_id, &mut clock) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     if !(0..1_000_000_000).contains(&clock.tv_nsec) {
         return Err(std::io::Error::other(
-            "invalid native I/O monotonic nanoseconds",
+            "invalid performance diagnostic clock nanoseconds",
         ));
     }
     u64::try_from(clock.tv_sec)
         .ok()
         .and_then(|seconds| seconds.checked_mul(1_000_000_000))
         .and_then(|seconds| seconds.checked_add(clock.tv_nsec as u64))
-        .ok_or_else(|| std::io::Error::other("invalid native I/O monotonic seconds"))
+        .ok_or_else(|| std::io::Error::other("invalid performance diagnostic clock seconds"))
 }
 
 impl Drop for PhaseTimer {
@@ -231,6 +284,12 @@ impl Drop for PhaseTimer {
                 notified_resumptions = started.notified_resumptions,
                 io_sample_id = started.io_sample_id,
                 first_notification_ns = started.first_notification_ns,
+                poll_cpu_enabled = started.poll_cpu.is_some(),
+                poll_cpu_samples = started.poll_cpu.as_ref().map_or(0, |cpu| cpu.polls),
+                poll_cpu_errors = started.poll_cpu.as_ref().map_or(0, |cpu| cpu.errors),
+                active_poll_cpu_ns = started.poll_cpu.as_ref().map_or(0, |cpu| cpu.active_ns),
+                max_active_poll_cpu_ns = started.poll_cpu.as_ref().map_or(0, |cpu| cpu.max_ns),
+                cpu_at_max_wall_poll_ns = started.poll_cpu.as_ref().map_or(0, |cpu| cpu.cpu_at_max_wall_ns),
                 thread = ?completed_thread, "performance phase completed");
         }
     }
@@ -263,23 +322,7 @@ mod tests {
         });
         let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
         client.write_all(&[1]).await.unwrap();
-        let mut timer = PhaseTimer {
-            phase: "tcp_readiness_test",
-            started: Some(Box::new(StartedPhase {
-                at: Instant::now(),
-                thread: std::thread::current().id(),
-                polls: 0,
-                pending_polls: 0,
-                active_poll_ns: 0,
-                max_active_poll_ns: 0,
-                notified_wait_ns: 0,
-                before_notify_ns: 0,
-                unnotified_wait_ns: 0,
-                notified_resumptions: 0,
-                io_sample_id: 0,
-                first_notification_ns: 0,
-            })),
-        };
+        let mut timer = PhaseTimer::begin_sampled("h2_connection_poll", true);
         #[cfg(target_os = "linux")]
         timer.record_tcp_identity(&client).unwrap();
         let mut response = [0; 5];
@@ -298,7 +341,15 @@ mod tests {
         assert!(sample.before_notify_ns > 0);
         assert!(sample.first_notification_ns > 0);
         #[cfg(target_os = "linux")]
-        assert!(sample.io_sample_id > 0);
+        {
+            assert!(sample.io_sample_id > 0);
+            let cpu = sample.poll_cpu.as_ref().expect("thread CPU evidence");
+            assert_eq!(cpu.polls, sample.polls);
+            assert_eq!(cpu.errors, 0);
+            assert!(cpu.active_ns > 0);
+            assert!(cpu.max_ns <= sample.max_active_poll_ns);
+            assert!(cpu.active_ns <= sample.active_poll_ns);
+        }
         assert!(
             sample.active_poll_ns
                 + sample.before_notify_ns

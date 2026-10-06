@@ -2583,3 +2583,16 @@ p99 3,823.336, dispatch p99 1,266.176 and resumption p99 546.670. Hot
 publication is not the dominant median phase. The bounded-writer trial
 therefore targets actual blocking-pool participation and dispatch contention,
 not an unsupported global hot-cache rewrite.
+
+
+HTTP/2 parent-poll diagnostics now measure Linux thread CPU time around each
+actual poll, alongside its existing wall time. The thread CPU clock is read
+only for sampled native parent-connection diagnostics; mandatory runs make
+no additional clock reads. Each before/after pair is local to one synchronous
+poll, so migration between polls does not mix clocks from different threads.
+The report retains total/max poll CPU and CPU inside the longest wall poll,
+allowing OS suspension during that same poll to be separated from actual
+execution. Missing samples, clock errors, regression and inconsistent
+accounting invalidate the diagnostic explicitly. The real TCP readiness test
+checks complete clock coverage on Linux. This investigation does not repeat
+the rejected cooperative-budget trial or change scheduling or acceptance.

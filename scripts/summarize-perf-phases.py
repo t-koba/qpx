@@ -21,6 +21,8 @@ for path in sorted(root.rglob("*.log")):
             continue
         fields = record.get("fields", record)
         message = fields.get("message")
+        if message == "performance phase CPU sampling failed":
+            raise SystemExit(f"Thread CPU measurement failed in {path}: {fields.get('error')}")
         if message == "file socket queue sampling failed":
             raise SystemExit(f"TCP send queue measurement failed in {path}: {fields.get('error')}")
         if message == "file socket queue sampled":
@@ -62,6 +64,22 @@ for path in sorted(root.rglob("*.log")):
                         "unnotified_wait_ns")) > elapsed):
                 raise SystemExit(f"inconsistent phase poll accounting in {path}")
             counters["outside_poll_ns"] = elapsed - counters["active_poll_ns"]
+            if fields["phase"] == "h2_connection_poll":
+                cpu_metrics = ("active_poll_cpu_ns", "max_active_poll_cpu_ns", "cpu_at_max_wall_poll_ns")
+                if (fields.get("poll_cpu_enabled") is not True
+                        or fields.get("poll_cpu_samples") != counters["polls"]
+                        or fields.get("poll_cpu_errors") != 0
+                        or any(type(fields.get(name)) is not int or fields[name] < 0
+                               for name in cpu_metrics)):
+                    raise SystemExit(f"HTTP/2 parent poll lacks complete thread CPU measurements in {path}")
+                if (fields["active_poll_cpu_ns"] > counters["active_poll_ns"]
+                        or fields["max_active_poll_cpu_ns"] > counters["max_active_poll_ns"]
+                        or fields["max_active_poll_cpu_ns"] > fields["active_poll_cpu_ns"]
+                        or fields["cpu_at_max_wall_poll_ns"] > fields["max_active_poll_cpu_ns"]):
+                    raise SystemExit(f"HTTP/2 parent poll thread CPU accounting is inconsistent in {path}")
+                counters.update({name: fields[name] for name in cpu_metrics})
+                counters["non_cpu_at_max_wall_poll_ns"] = (
+                    counters["max_active_poll_ns"] - fields["cpu_at_max_wall_poll_ns"])
             poll_samples[key].append(counters)
         elif fields["phase"] == "file_body_send":
             raise SystemExit(f"file-body phase lacks observed future polls in {path}")
@@ -107,3 +125,8 @@ for record in records:
               f"before_notify_median_us={record['before_notify_ns']['median'] / 1000:.3f} "
               f"notified_wait_median_us={record['notified_wait_ns']['median'] / 1000:.3f} "
               f"unnotified_wait_median_us={record['unnotified_wait_ns']['median'] / 1000:.3f}")
+    if record["phase"] == "h2_connection_poll" and record.get("observed_future_samples"):
+        print(f"{record['source']} {record['phase']}: "
+              f"max_poll_cpu_p99_us={record['max_active_poll_cpu_ns']['p99'] / 1000:.3f} "
+              f"cpu_at_max_wall_poll_p99_us={record['cpu_at_max_wall_poll_ns']['p99'] / 1000:.3f} "
+              f"non_cpu_at_max_wall_poll_p99_us={record['non_cpu_at_max_wall_poll_ns']['p99'] / 1000:.3f}")
