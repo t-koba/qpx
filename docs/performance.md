@@ -2473,3 +2473,16 @@ symlinks. Real filesystem tests preserve existing target contents, reject both
 symlink forms and existing regular files, and verify private creation.
 Non-Unix inspection remains explicit. This small trial must be measured;
 the observed stat share does not imply the complete cache-miss goals are met.
+
+The first 2 MiB socket-queue comparison `37459148193` passes, but does
+not demonstrate an absolute CPU improvement: qpx fast total CPU changes
+from 259.05 to 299.46 ms, with sample spreads 1.409 and 1.382; slow
+total CPU changes from 31.00 to 32.01 ms. Fast qpx measurement windows
+are only 174.35 and 173.86 ms. The same-runner window diagnostic now
+compares the original 8 fast/1 slow transfers with 64 fast/8 slow transfers,
+using the same binary, unchanged CPU scheduling and unchanged loopback MTU.
+Both retain alternating role sampling, three samples, original aggregation,
+all original thresholds and complete-transfer validation. Either failure
+remains nonzero and retains its separate logs and results. This diagnostic
+does not replace or alter any required CI lane; duration sensitivity must
+be established independently before a measurement change is considered.

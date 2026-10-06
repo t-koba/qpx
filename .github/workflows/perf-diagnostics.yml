@@ -196,12 +196,12 @@ jobs:
               python3 scripts/perf-evaluate.py "origin and cache objectives" -- bash scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl
               ;;
             streaming-window)
-              failed=0
-              QPX_STREAMING_COMPARE_FAST_TRANSFERS=64 QPX_STREAMING_COMPARE_SLOW_TRANSFERS=8 \
-                python3 scripts/perf-evaluate.py "streaming window diagnostic measurement" -- bash scripts/perf-audit-streaming-compare.sh || failed=1
-              python3 scripts/perf-evaluate.py "streaming window diagnostic objectives" -- \
-                bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json window-diagnostic || failed=1
-              exit "$failed"
+              case "$REVISION_ORDER" in
+                baseline-current) export QPX_STREAMING_WINDOW_ORDER=normal-extended ;;
+                current-baseline) export QPX_STREAMING_WINDOW_ORDER=extended-normal ;;
+                *) echo "unsupported streaming window order: $REVISION_ORDER" >&2; exit 2 ;;
+              esac
+              python3 scripts/perf-evaluate.py "streaming same-runner window diagnostics" -- bash scripts/perf-diagnose-streaming-window.sh
               ;;
             streaming-affinity)
               failed=0
