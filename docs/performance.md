@@ -2330,3 +2330,14 @@ contained workload windows and exactly one notified pending poll are reported
 separately from excluded multi-poll phases. Missing arrivals and trace loss
 invalidate the diagnostic. This added instrumentation does not run in mandatory
 performance gates and cannot replace their acceptance results.
+
+
+A separate follow-up tests a 96 KiB contended file quantum with the 128 KiB
+queue bound. The retained native profile places 75.1% of 1 MiB CPU samples
+under the sendfile syscall; the previous 128 KiB quantum trial retained the
+64 KiB queue bound and was rejected. The new intermediate quantum keeps
+explicit contended handoffs and the current bounded queue/cancellation guards.
+Its purpose is to reduce repeated sendfile and handoff overhead without
+returning to the rejected doubled quantum. The same-runner comparison against
+`284e3c0` must meet every original criterion and the requested p99 goal;
+this remains a trial until independent complete measurements establish a gain.
