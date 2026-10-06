@@ -2495,3 +2495,15 @@ p99 from 9.929 to 10.348 ms, and maximum latency from 14.406 to 31.290 ms.
 Nginx p99 changes from 7.686 to 7.972 ms and maximum latency from
 11.231 to 11.470 ms. The extra parent budget charge is removed; stream
 reuse, admission and bounded driver completion bursts remain unchanged.
+
+The file-cork trial is rejected after the two additional comparisons.
+Runs `37462561946` and `37462565670` fail the unchanged 1.5 CPU
+efficiency requirement with ratios 1.341262 and 1.354612. In the reversed
+comparison, current qpx p99 is 27.051 ms versus baseline 25.655 ms and
+CPU efficiency 3,421.50 versus 3,488.82 requests/CPU second. In the
+third comparison, current p99 is 30.260 versus baseline 28.318 ms and
+CPU efficiency 3,356.51 versus 3,412.31. The additional runs regress
+both absolute p99 and CPU efficiency; the first passing runner does not
+justify adoption. Automatic file corking is removed. Real tail-delivery
+and caller-cork preservation tests remain, together with failure and
+cancellation checks; queue bounds and scheduling quanta are unchanged.

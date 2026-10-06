@@ -129,7 +129,7 @@ async fn send_file_inner(
     sampled_scheduling: bool,
 ) -> io::Result<()> {
     #[cfg(target_os = "linux")]
-    let mut send_queue = ZeroCopySendQueueGuard::begin_file(stream, region.len())?;
+    let mut send_queue = ZeroCopySendQueueGuard::begin(stream, FILE_NOTSENT_LOWAT)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::future::{Future, poll_fn};
@@ -232,7 +232,6 @@ async fn send_file_inner(
 struct ZeroCopySendQueueGuard<'a> {
     stream: &'a TcpStream,
     original: u32,
-    original_cork: Option<bool>,
     restored: bool,
 }
 
@@ -248,28 +247,12 @@ impl<'a> ZeroCopySendQueueGuard<'a> {
         Ok(Self {
             stream,
             original,
-            original_cork: None,
             restored: false,
         })
     }
 
-    fn begin_file(stream: &'a TcpStream, body_bytes: u64) -> io::Result<Self> {
-        let mut guard = Self::begin(stream, FILE_NOTSENT_LOWAT)?;
-        if body_bytes > CONTENDED_FILE_ZERO_COPY_QUANTUM {
-            let socket = socket2::SockRef::from(stream);
-            guard.original_cork = Some(socket.tcp_cork()?);
-            // Keep partial segments across bounded sendfile scheduling handoffs.
-            // Restore the caller's setting on completion, error, and cancellation.
-            socket.set_tcp_cork(true)?;
-        }
-        Ok(guard)
-    }
-
     fn restore(&mut self) -> io::Result<()> {
         let socket = socket2::SockRef::from(self.stream);
-        if let Some(original_cork) = self.original_cork {
-            socket.set_tcp_cork(original_cork)?;
-        }
         socket.set_tcp_notsent_lowat(self.original)?;
         self.restored = true;
         Ok(())
@@ -1145,10 +1128,12 @@ mod tests {
             "file transfer duplicated its socket descriptor"
         );
         let (queued, unsent) = socket_send_queue(&server).expect("read real TCP send queue");
-        assert!(
+        assert_eq!(
             socket2::SockRef::from(&server)
                 .tcp_cork()
-                .expect("read active cork")
+                .expect("read active cork"),
+            original_cork,
+            "file transfer changed the caller's cork setting"
         );
         assert!(unsent <= queued, "unsent bytes exceed the total send queue");
         assert!(
