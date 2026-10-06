@@ -2288,3 +2288,13 @@ backpressure. This changes the I/O readiness bound, not the previously rejected
 128 KiB transfer quantum. Same-runner revision comparisons and all required
 resource and correctness checks determine adoption; no improvement is claimed
 before those comparisons complete.
+
+Cache prefix-state reuse at `ce22724` is rejected after same-runner comparison
+`37445151300` against `c0f44b9`. Persistent miss throughput changes from
+11,949.65 to 11,924.55 requests/s and CPU efficiency from 5,301.93 to
+5,202.53 requests/CPU second. All measurement-quality checks pass, but CPU
+efficiency regresses by 1.87% and the strong miss objectives still fail:
+throughput ratio 0.920927, CPU efficiency ratio 0.874083, and scheduler
+delay ratio 3.157372. The p99 improvement is insufficient evidence for
+adoption given the other results. Restore the original full SHA-256 path;
+do not repeat prefix reuse without new profiling evidence.
