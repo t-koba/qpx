@@ -2,6 +2,7 @@
 """Read Linux TGID delay accounting, including completed threads."""
 
 import json
+import errno
 import os
 from pathlib import Path
 import socket
@@ -101,14 +102,49 @@ class Taskstats:
                 'cpu_count': count, 'cpu_delay_total_ns': delay}
 
 
-def identity(base):
+def identity(base, *, allow_terminated=False):
     fields = (base / 'stat').read_text().rsplit(') ', 1)[1].split()
     if fields[0] in ('Z', 'X'):
+        if allow_terminated:
+            return None
         raise RuntimeError(f'measured process has terminated: {base.name}')
     return int(fields[19])
 
 
-def snapshot(root):
+def thread_snapshot(reader, task):
+    """Retain live thread counters without replacing the completed-thread TGID total."""
+    tid = int(task.name)
+    try:
+        start = identity(task, allow_terminated=True)
+        if start is None:
+            return {'tid': tid, 'status': 'terminated_during_snapshot'}
+        name = (task / 'comm').read_text().strip()
+        scheduler = [int(value) for value in (task / 'schedstat').read_text().split()]
+        if len(scheduler) != 3 or any(value < 0 for value in scheduler):
+            raise RuntimeError(f'invalid thread scheduler counters: {tid}')
+        status = (task / 'status').read_text().splitlines()
+        affinity = [line.split(':', 1)[1].strip() for line in status
+                    if line.startswith('Cpus_allowed_list:')]
+        if len(affinity) != 1 or not affinity[0]:
+            raise RuntimeError(f'missing thread CPU affinity: {tid}')
+        record = reader.read(tid, thread=True)
+        end = identity(task, allow_terminated=True)
+        if end is None:
+            return {'tid': tid, 'status': 'terminated_during_snapshot'}
+        if end != start:
+            raise RuntimeError(f'measured thread identity changed: {tid}')
+    except OSError as error:
+        if error.errno not in (errno.ENOENT, errno.ESRCH) or task.exists():
+            raise
+        return {'tid': tid, 'status': 'exited_during_snapshot'}
+    record.update({'tid': tid, 'status': 'live', 'start_ticks': start,
+                   'name': name, 'allowed_cpus': affinity[0],
+                   'scheduled_cpu_ns': scheduler[0],
+                   'schedstat_wait_ns': scheduler[1], 'timeslices': scheduler[2]})
+    return record
+
+
+def snapshot(root, *, thread_details=False):
     if Path('/proc/sys/kernel/task_delayacct').read_text().strip() != '1':
         raise RuntimeError('kernel.task_delayacct must be enabled before process startup')
     reader = Taskstats()
@@ -126,13 +162,16 @@ def snapshot(root):
             seen.add(pid)
             base = Path('/proc') / str(pid)
             before = identity(base)
-            for task in (base / 'task').iterdir():
+            tasks = list((base / 'task').iterdir())
+            for task in tasks:
                 try:
                     pending.extend(int(child) for child in (task / 'children').read_text().split())
                 except FileNotFoundError:
                     # Completed threads remain included in the TGID aggregate.
                     continue
             record = reader.read(pid)
+            if thread_details:
+                record['threads'] = [thread_snapshot(reader, task) for task in tasks]
             if identity(base) != before:
                 raise RuntimeError(f'measured process identity changed: {pid}')
             record['start_ticks'] = before
@@ -143,6 +182,7 @@ def snapshot(root):
     finished_epoch = time.time_ns()
     finished_clock_end = time.monotonic_ns()
     return {'measurement': 'linux_taskstats_tgid_cpu_delay_ns_v1', 'root_pid': root,
+            'thread_details': thread_details,
             'task_delayacct': True, 'started_monotonic_ns': started,
             'started_epoch_ns': started_epoch, 'started_clock_end_monotonic_ns': started_clock_end,
             'finished_monotonic_ns': finished, 'finished_epoch_ns': finished_epoch,
@@ -182,7 +222,10 @@ if __name__ == '__main__':
         if sys.argv[1] == 'delta':
             print(delta(sys.argv[2], sys.argv[3]))
         else:
-            record = snapshot(int(sys.argv[1]))
+            thread_mode = os.environ.get('QPX_PERF_SCHEDULER_THREADS', '0')
+            if thread_mode not in ('0', '1'):
+                raise RuntimeError('thread scheduler diagnostics must be 0 or 1')
+            record = snapshot(int(sys.argv[1]), thread_details=thread_mode == '1')
             if len(sys.argv) > 2:
                 Path(sys.argv[2]).write_text(json.dumps(record, sort_keys=True) + '\n')
             print(record['total_cpu_delay_ns'])

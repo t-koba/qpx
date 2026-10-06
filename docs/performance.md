@@ -2259,3 +2259,14 @@ Its HTTP/2 workload coverage now recognizes all four required dimension
 combinations, without discarding any failed performance criteria. Feature-rich
 1 MiB scheduler delay and dominance remain unstable, and WebDAV 1 MiB p99
 does not meet the requested 1.0 goal. This is not completion.
+
+HTTP/2 phase diagnostics now retain per-thread TASKSTATS CPU delay, schedstat
+CPU execution time, timeslice count, thread name, start identity, and allowed
+CPU list in scheduler snapshots. Only the phase diagnostic enables these
+additional reads; mandatory comparisons keep the existing TGID sampling.
+Completed threads remain included in the authoritative TGID delay total.
+Threads that exit during a diagnostic snapshot are explicitly marked and
+are not assigned fabricated counters. The real Linux accounting probe checks
+a competing live thread and confirms that normal snapshots omit this detail.
+This evidence is intended to distinguish connection-task scheduling from
+origin wait and worker oversubscription before selecting another optimization.

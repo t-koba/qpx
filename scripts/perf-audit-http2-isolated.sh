@@ -25,6 +25,7 @@ case "${1:-}" in
 esac
 if [ "$phases" = 1 ]; then
   export RUST_LOG=warn,qpx_perf_phase=debug
+  export QPX_PERF_SCHEDULER_THREADS=1
   body_sizes=1024
   stream_values=100
 fi
