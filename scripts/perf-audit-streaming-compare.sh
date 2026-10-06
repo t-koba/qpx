@@ -310,7 +310,7 @@ run_client() {
   local port="$2"
   local read_mode="$3"
   local delay_ms="$4"
-  run_client_process python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" "$ROOT_DIR/scripts" "$SLOW_TRANSFERS" <<'PY'
+  run_client_process python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" "$ROOT_DIR/scripts" "$SLOW_TRANSFERS" "$BACKEND_PORT" <<'PY'
 import json
 import os
 import socket
@@ -332,6 +332,7 @@ delay = float(delay_ms) / 1000.0
 expected = int(expected)
 chunk_bytes = int(chunk_bytes)
 transfers = int(sys.argv[9]) if read_mode == "slow" else int(fast_transfers)
+backend_port = int(sys.argv[10])
 # Allow the existing I/O timeout, one second per planned transfer and all
 # intentional pacing, while rejecting indefinitely progressing measurements.
 completion_seconds = 120.0 + transfers + delay * ((expected + chunk_bytes - 1) // chunk_bytes) * transfers
@@ -339,6 +340,38 @@ completed_transfers = 0
 transfer_received = 0
 stage = "starting"
 last_progress = None
+sock = None
+
+
+def failure_socket_snapshot():
+    # Inspect only an already failed measurement, before closing its real socket.
+    if sock is None or sock.fileno() < 0:
+        return {"status": "unavailable", "reason": "no open transfer socket"}
+    snapshot = {"status": "captured", "monotonic_ns": time.monotonic_ns()}
+    try:
+        local = sock.getsockname()
+        peer = sock.getpeername()
+        snapshot.update(local_address=local, peer_address=peer,
+                        receive_buffer_bytes=sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF),
+                        send_buffer_bytes=sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF))
+        if sys.platform == "linux":
+            snapshot["tcp_info_hex"] = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 256).hex()
+            states = subprocess.run([
+                "ss", "-tinmp",
+                f"( sport = :{peer[1]} and dport = :{local[1]} ) or "
+                f"( sport = :{local[1]} and dport = :{peer[1]} ) or "
+                f"( sport = :{backend_port} or dport = :{backend_port} )",
+            ], capture_output=True, text=True, check=True, timeout=5)
+            snapshot["socket_states"] = states.stdout
+            snapshot["socket_states_stderr"] = states.stderr
+            snapshot["socket_state_rows_available"] = len(states.stdout.splitlines()) > 1
+        else:
+            snapshot["kernel_state_status"] = "Linux TCP_INFO and ss are unavailable on this platform"
+    except (OSError, subprocess.SubprocessError) as snapshot_error:
+        snapshot.update(status="failed", reason=str(snapshot_error))
+    return snapshot
+
+
 try:
     with measurement_deadline(completion_seconds, "streaming client"):
         started = time.perf_counter()
@@ -417,11 +450,11 @@ try:
                     next_observation += chunk_bytes
                     if read_mode == "slow":
                         time.sleep(delay)
-            sock.close()
             if transfer_received != expected:
                 raise RuntimeError(
                     f"incomplete streaming transfer: received {transfer_received}, expected {expected}"
                 )
+            sock.close()
             received += transfer_received
             completed_transfers += 1
             first_byte_ms.append((first_byte - transfer_started) * 1000.0)
@@ -451,15 +484,20 @@ try:
             "valid": received == expected * transfers,
         }))
 except (OSError, RuntimeError) as error:
+    failure_time = time.perf_counter()
     print(json.dumps({"valid": False, "proxy": proxy, "read_mode": read_mode,
                       "reason": str(error), "completion_deadline_seconds": completion_seconds,
                       "planned_transfers": transfers, "completed_transfers": completed_transfers,
                       "diagnostic_cpu_partition": cpu_partition,
                       "stage": stage, "transfer_received_bytes": transfer_received,
                       "expected_transfer_bytes": expected,
+                      "failure_socket_snapshot": failure_socket_snapshot(),
                       "last_progress_age_ms": None if last_progress is None else
-                          (time.perf_counter() - last_progress) * 1000.0}), file=sys.stderr, flush=True)
+                          (failure_time - last_progress) * 1000.0}), file=sys.stderr, flush=True)
     raise
+finally:
+    if sock is not None:
+        sock.close()
 PY
 }
 

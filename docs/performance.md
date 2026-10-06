@@ -2390,3 +2390,15 @@ qpx CPU efficiency declines from 3,535.89 to 3,442.52 requests/CPU second
 against the same-runner baseline. The contended quantum returns to 64 KiB;
 the isolated 128 KiB queue-bound trial remains separate. The first passing
 comparison does not constitute three independent acceptance passes.
+
+
+At `b4110bf`, mandatory streaming run `37455267043` is invalid: nginx
+completes two of eight fast transfers before the 128-second deadline,
+with 30,884,758 bytes received in the third; Apache completes seven,
+with 1,243,083 bytes received in the eighth. Last progress ages are
+140.361 and 78.805 ms. Failure-only socket inspection now retains the
+actual receiver buffers, TCP_INFO, both frontend endpoints and owned origin
+sockets before closing the failed transfer. Failed inspection is explicit,
+and the original failure still exits nonzero. Successful measurements keep
+their existing observation path and deadlines. The real truncated-response
+check verifies socket identity and buffer evidence.

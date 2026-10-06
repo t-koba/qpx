@@ -36,12 +36,13 @@ def serve():
         failures.append(error)
 
 
+record_port = listener.getsockname()[1]
 server = threading.Thread(target=serve)
 server.start()
 try:
     result = subprocess.run(
         [sys.executable, "-", "real-truncated-server", str(listener.getsockname()[1]),
-         "fast", "0", "8192", "4096", "1", str(root / "scripts"), "1"],
+         "fast", "0", "8192", "4096", "1", str(root / "scripts"), "1", str(record_port)],
         input=client, capture_output=True, text=True, timeout=10,
         env=dict(os.environ, QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS="0",
                  PYTHONDONTWRITEBYTECODE="1"),
@@ -59,4 +60,12 @@ assert record["valid"] is False and record["stage"] == "response_body", record
 assert "incomplete streaming transfer" in record["reason"], record
 assert record["completed_transfers"] == 0 and record["transfer_received_bytes"] == 4096, record
 assert record["expected_transfer_bytes"] == 8192 and record["last_progress_age_ms"] >= 0, record
+snapshot = record["failure_socket_snapshot"]
+assert snapshot["local_address"][0] == "127.0.0.1", snapshot
+assert snapshot["peer_address"] == ["127.0.0.1", record_port], snapshot
+assert snapshot["receive_buffer_bytes"] > 0 and snapshot["send_buffer_bytes"] > 0, snapshot
+if sys.platform == "linux":
+    assert snapshot["status"] == "captured" and snapshot["tcp_info_hex"], snapshot
+else:
+    assert snapshot["status"] == "captured" and snapshot["kernel_state_status"], snapshot
 print("Real streaming client failure evidence check passed")
