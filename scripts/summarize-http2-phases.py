@@ -10,7 +10,8 @@ import sys
 
 root, output = map(Path, sys.argv[1:])
 phases = {"h2_service_dispatch", "h2_response_queue", "plain_origin_acquire",
-          "plain_origin_headers", "plain_origin_materialize"}
+          "plain_origin_headers", "plain_origin_materialize", "plain_origin_write",
+          "plain_origin_read"}
 clock_tolerance_ns = 1_000_000
 samples = []
 for snapshot_path in root.glob("*scheduler-*.json"):

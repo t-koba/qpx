@@ -402,14 +402,17 @@ pub(crate) async fn send_serialized_http1_head_with_interim_reusable_raw_respons
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let write_phase = crate::perf_diagnostics::phase_timer!("plain_origin_write");
     if let Err(error) = stream.write_all(&write_buf).await {
         return Err(SerializedHttp1HeadSendError {
             error: error.into(),
             write_buf,
         });
     }
+    drop(write_phase);
     // The reverse fast path wraps this entire operation in the route deadline.
     // Avoid registering a second timer for the same response-head wait.
+    let read_phase = crate::perf_diagnostics::phase_timer!("plain_origin_read");
     let result = response::read_finalized_raw_response_head_with_interim_under_external_deadline(
         &mut stream,
         read_buf,
@@ -418,6 +421,7 @@ where
         proxy_name,
     )
     .await;
+    drop(read_phase);
     let (interim, final_head, buffered_body) = match result {
         Ok(response) => response,
         Err(error) => {
