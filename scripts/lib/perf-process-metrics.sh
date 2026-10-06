@@ -242,26 +242,6 @@ process_tree_scheduler_delta_ns() {
   python3 "$(dirname "${BASH_SOURCE[0]}")/perf-process-scheduler.py" delta "$1" "$2"
 }
 
-monitor_process_tree_rss_peak() {
-  local root="$1"
-  local output="$2"
-  local initial="${3:-}"
-  if [ -z "$initial" ]; then
-    initial="$(process_tree_status_kb "$root" "VmRSS")"
-  fi
-  monitor_process_tree_peak rss-monitor "$root" "$output" "$initial"
-}
-
-monitor_process_tree_fd_peak() {
-  local root="$1"
-  local output="$2"
-  local initial="${3:-}"
-  if [ -z "$initial" ]; then
-    initial="$(process_tree_fd_count "$root")"
-  fi
-  monitor_process_tree_peak monitor "$root" "$output" "$initial"
-}
-
 start_process_tree_peak() {
   local mode="$1" root="$2" output="$3" initial="$4"
   local deadline=$((SECONDS + 20))

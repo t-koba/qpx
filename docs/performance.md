@@ -2298,3 +2298,35 @@ throughput ratio 0.920927, CPU efficiency ratio 0.874083, and scheduler
 delay ratio 3.157372. The p99 improvement is insufficient evidence for
 adoption given the other results. Restore the original full SHA-256 path;
 do not repeat prefix reuse without new profiling evidence.
+
+
+Same-runner WebDAV queue comparison `37448545607` measures baseline
+`b398d0b` and the 128 KiB queue trial `1172744`. The 1 MiB qpx p99
+falls from 61.067 to 41.987 ms; its Apache ratio is 0.825914, satisfying
+the requested p99 goal in this one run. Throughput improves from 3,734.34
+to 3,790.87 requests/s and CPU efficiency from 3,387.69 to 3,464.53
+requests/CPU second. The CPU ratio remains 1.363950 below the existing
+1.5 minimum, so the overall comparison fails and the trial is not accepted.
+Three independent complete passes remain required. Native diagnostic
+`37450694300` retains 2,035 CPU callchains in the second 1 MiB window;
+1,529 include the sendfile syscall, and 1,699 have a kernel leaf. These
+instrumented counts locate CPU consumption but do not establish a gain.
+
+Required HTTP/2 job `112222291288` at `b997cc9` fails because a 74.72 ms
+calibration finishes before the FD observer collects its first sample.
+The actual FD CSV contains its header and zero observations. Resource
+observers now publish readiness only after a real snapshot is flushed,
+and every HTTP/2, proxy, and streaming workload waits for that readiness.
+No-observation, observer failure, and readiness timeout remain errors.
+The real Linux process sampler check stops observers immediately after
+readiness and validates their actual CSV and sampling metadata, replacing
+its previous fixed startup sleep.
+
+The `http2-io-timeline` diagnostic correlates kernel TCP receive tracepoints
+with actual origin-future notification timestamps. A real TCP probe verifies
+the tracepoint socket identities before building. Sampled phases carry their
+real local/peer tuple and a CLOCK_MONOTONIC calibration interval; fully
+contained workload windows and exactly one notified pending poll are reported
+separately from excluded multi-poll phases. Missing arrivals and trace loss
+invalidate the diagnostic. This added instrumentation does not run in mandatory
+performance gates and cannot replace their acceptance results.

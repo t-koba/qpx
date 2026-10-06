@@ -698,8 +698,13 @@ require scripts/lib/perf-process-metrics.sh 'process_cpu_ms_portable()'
 require scripts/lib/perf-process-metrics.sh 'ps -o time='
 require scripts/lib/perf-process-metrics.sh 'process_tree_fd_count()'
 require scripts/lib/perf-process-metrics.sh 'process_tree_scheduler_run_delay_ns()'
-require scripts/lib/perf-process-metrics.sh 'monitor_process_tree_fd_peak()'
-require scripts/lib/perf-process-metrics.sh 'monitor_process_tree_rss_peak()'
+require scripts/lib/perf-process-metrics.sh 'start_process_tree_peak()'
+require scripts/lib/perf-process-metrics.sh 'while [ ! -s "${output}.ready" ]; do'
+require scripts/lib/perf-process-fds.py "Path(str(output) + '.ready').write_text"
+for sampler_consumer in scripts/perf-audit-http2-compare.sh scripts/perf-audit-proxy-compare.sh scripts/perf-audit-streaming-compare.sh scripts/check-perf-process-sampler.sh; do
+  require "$sampler_consumer" 'start_process_tree_peak monitor'
+  require "$sampler_consumer" 'start_process_tree_peak rss-monitor'
+done
 require scripts/lib/perf-process-metrics.sh 'peak_growth()'
 require scripts/check-origin-cache-performance.sh 'rss_growth_kb != rss_peak_kb - rss_baseline_kb'
 require scripts/check-origin-cache-performance.sh 'fd_growth != fd_peak - fd_baseline'
