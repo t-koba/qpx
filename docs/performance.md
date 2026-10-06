@@ -2507,3 +2507,29 @@ both absolute p99 and CPU efficiency; the first passing runner does not
 justify adoption. Automatic file corking is removed. Real tail-delivery
 and caller-cork preservation tests remain, together with failure and
 cancellation checks; queue bounds and scheduling quanta are unchanged.
+
+Same-runner window run `37463590497` at `a57fa3a` has a complete normal
+phase but an invalid extended phase. Apache completes only six of 64
+fast transfers within 184 seconds, receiving 26,281,878 bytes of the next
+100 MiB body. Failure-only socket evidence shows its actual upstream
+receive buffer 29,685 bytes and advertised window 29,696 bytes, below
+the observed 65,483-byte MSS. The origin retains 2,203,386 unsent bytes,
+reports seven retransmissions and is receive-window limited for 183,183 ms,
+100% of its busy interval. The frontend receiver is empty with an advertised
+403,456-byte window. This locates the observed stall on the origin-to-Apache
+leg rather than the benchmark receiver. It does not establish all stall causes.
+The next isolated same-runner diagnostic changes only loopback MTU between
+65,536 and 1,500 with the original 8/1 transfers, normal CPU scheduling,
+all three samples and unchanged original acceptance/quality checks. Version
+order controls MTU order for repetitions. This differs from the prior CPU
+partition experiments and does not change a required gate.
+
+Writer phase run `37463128686` at `9c3cd44` succeeds. Its 236 sampled
+cache writes have medians 64.856 microseconds dispatch, 76.145 execution,
+11.943 directory validation, 30.721 creation, 9.164 encoding/write,
+16.075 commit, 1.812 index update and 449.200 total persistence.
+Independent phase medians are not additive and the run mixes cache lanes.
+Directory validation p99 is 4,187.387 microseconds; dispatch p99 is
+786.811. The next diagnostic separately measures return-to-async-worker
+waiting and hot-cache publication, retaining the sampled parent's decision
+and making no clock reads when diagnostics are disabled.

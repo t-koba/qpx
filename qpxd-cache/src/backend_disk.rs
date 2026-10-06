@@ -903,14 +903,21 @@ impl DiskCacheBackend {
             let value = value.clone();
             let (meta_key, meta_bytes) = metadata.unzip();
             let mut writer_phase = persistence_phase.child("cache_writer_dispatch");
-            let (write, value, written_meta) = tokio::task::spawn_blocking(move || {
+            let (result, resume_phase) = tokio::task::spawn_blocking(move || {
                 writer_phase.enter("cache_writer_execution");
-                write_cached_object_sync(write_path.as_path(), value, meta_bytes, ttl_secs)
+                let result =
+                    write_cached_object_sync(write_path.as_path(), value, meta_bytes, ttl_secs);
+                let resume_phase = writer_phase.child("cache_writer_resume");
+                drop(writer_phase);
+                (result, resume_phase)
             })
             .await
-            .context("disk cache body writer task failed")??;
+            .context("disk cache body writer task failed")?;
+            drop(resume_phase);
+            let (write, value, written_meta) = result?;
             self.remember_write(path.to_path_buf(), write.total_len, write.expires_at_ms)
                 .await?;
+            let _hot_phase = persistence_phase.child("cache_hot_publish");
             self.hot_insert(
                 namespace,
                 key,
