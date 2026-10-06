@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 use tracing::warn;
 
@@ -64,6 +64,7 @@ pub struct DiskCacheBackend {
     hot_responses: std::sync::Arc<Vec<ArcSwapOption<HotResponseEntry>>>,
     background_sweep_started: std::sync::Arc<AtomicBool>,
     indexed_flag: std::sync::Arc<AtomicBool>,
+    blocking_writer_slots: std::sync::Arc<Semaphore>,
     state: std::sync::Arc<Mutex<DiskCacheState>>,
 }
 
@@ -282,6 +283,9 @@ impl DiskCacheBackend {
             ));
         }
         ensure_private_dir(&root)?;
+        let writer_slots = std::thread::available_parallelism()
+            .context("failed to determine disk cache writer parallelism")?
+            .get();
         let backend = Self {
             root,
             max_bytes,
@@ -297,6 +301,7 @@ impl DiskCacheBackend {
             hot_responses: std::sync::Arc::new(decoded_slots()),
             background_sweep_started: std::sync::Arc::new(AtomicBool::new(false)),
             indexed_flag: std::sync::Arc::new(AtomicBool::new(false)),
+            blocking_writer_slots: std::sync::Arc::new(Semaphore::new(writer_slots)),
             state: std::sync::Arc::new(Mutex::new(DiskCacheState::default())),
         };
         backend.ensure_background_sweep();
@@ -829,11 +834,10 @@ impl DiskCacheBackend {
     ) -> Result<()> {
         let write_path = path.to_path_buf();
         let value = Bytes::copy_from_slice(value);
-        let (write, value) = tokio::task::spawn_blocking(move || {
-            write_cached_bytes_sync(write_path.as_path(), value, ttl_secs)
-        })
-        .await
-        .context("disk cache writer task failed")??;
+        let (write, value) = self
+            .blocking_write(move || write_cached_bytes_sync(write_path.as_path(), value, ttl_secs))
+            .await
+            .context("disk cache writer task failed")??;
         self.remember_write(path.to_path_buf(), write.total_len, write.expires_at_ms)
             .await?;
         self.hot_insert(
@@ -902,19 +906,12 @@ impl DiskCacheBackend {
             let write_path = path.to_path_buf();
             let value = value.clone();
             let (meta_key, meta_bytes) = metadata.unzip();
-            let mut writer_phase = persistence_phase.child("cache_writer_dispatch");
-            let (result, resume_phase) = tokio::task::spawn_blocking(move || {
-                writer_phase.enter("cache_writer_execution");
-                let result =
-                    write_cached_object_sync(write_path.as_path(), value, meta_bytes, ttl_secs);
-                let resume_phase = writer_phase.child("cache_writer_resume");
-                drop(writer_phase);
-                (result, resume_phase)
-            })
-            .await
-            .context("disk cache body writer task failed")?;
-            drop(resume_phase);
-            let (write, value, written_meta) = result?;
+            let (write, value, written_meta) = self
+                .blocking_write(move || {
+                    write_cached_object_sync(write_path.as_path(), value, meta_bytes, ttl_secs)
+                })
+                .await
+                .context("disk cache body writer task failed")??;
             self.remember_write(path.to_path_buf(), write.total_len, write.expires_at_ms)
                 .await?;
             let _hot_phase = persistence_phase.child("cache_hot_publish");
@@ -977,6 +974,34 @@ impl DiskCacheBackend {
             .await?;
         self.hot_remove(path).await;
         Ok(())
+    }
+
+    async fn blocking_write<T: Send + 'static>(
+        &self,
+        write: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T> {
+        let mut phase = crate::perf_diagnostics::phase_timer!("cache_writer_admission");
+        let permit = self
+            .blocking_writer_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .context("disk cache writer admission closed")?;
+        phase.enter("cache_writer_dispatch");
+        let (result, resume_phase) = tokio::task::spawn_blocking(move || {
+            // Cancellation of the async caller must not admit another writer
+            // while this filesystem operation is still executing.
+            let _permit = permit;
+            phase.enter("cache_writer_execution");
+            let result = write();
+            let resume_phase = phase.child("cache_writer_resume");
+            drop(phase);
+            (result, resume_phase)
+        })
+        .await
+        .context("disk cache blocking writer task failed")?;
+        drop(resume_phase);
+        Ok(result)
     }
 
     async fn background_sweep(self) {
@@ -1924,6 +1949,108 @@ mod tests {
             max_object_bytes: 1024 * 1024,
             auth_header_env: None,
         }
+    }
+
+    #[tokio::test]
+    async fn blocking_writer_failure_releases_admission() {
+        let dir = temp_dir("writer-failure");
+        let mut backend =
+            DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("create backend");
+        backend.blocking_writer_slots = Arc::new(Semaphore::new(1));
+        let path = backend.path_for("ns", "object");
+        let shard = path
+            .parent()
+            .expect("object parent")
+            .parent()
+            .expect("first shard");
+        fs::write(shard, b"protected").expect("obstruct object directory");
+        assert!(backend.put("ns", "object", b"body", 60).await.is_err());
+        assert_eq!(fs::read(shard).expect("read protected file"), b"protected");
+        assert_eq!(backend.blocking_writer_slots.available_permits(), 1);
+        fs::remove_file(shard).expect("remove obstruction");
+        backend
+            .put("ns", "object", b"body", 60)
+            .await
+            .expect("persist after failure");
+        assert_eq!(
+            backend.get("ns", "object").await.expect("read object"),
+            Some(Bytes::from_static(b"body"))
+        );
+        assert_eq!(backend.blocking_writer_slots.available_permits(), 1);
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn blocking_writer_retains_admission_after_caller_cancellation() {
+        let dir = temp_dir("writer-cancellation");
+        let mut backend =
+            DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("create backend");
+        backend.blocking_writer_slots = Arc::new(Semaphore::new(1));
+        let first_path = backend.path_for("ns", "first");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_backend = backend.clone();
+        let first = tokio::spawn(async move {
+            first_backend
+                .blocking_write(move || {
+                    started_tx.send(()).expect("notify writer start");
+                    release_rx
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("release filesystem writer");
+                    let result =
+                        write_cached_bytes_sync(&first_path, Bytes::from_static(b"first body"), 60);
+                    completed_tx
+                        .send(result.is_ok())
+                        .expect("notify writer completion");
+                    result
+                })
+                .await
+        });
+        timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("writer starts before deadline")
+            .expect("writer start notification");
+        first.abort();
+        let Err(cancelled) = first.await else {
+            panic!("writer caller completed instead of being cancelled");
+        };
+        assert!(cancelled.is_cancelled());
+        assert_eq!(backend.blocking_writer_slots.available_permits(), 0);
+
+        let second_backend = backend.clone();
+        let mut second =
+            tokio::spawn(
+                async move { second_backend.put("ns", "second", b"second body", 60).await },
+            );
+        assert!(
+            timeout(Duration::from_millis(50), &mut second)
+                .await
+                .is_err()
+        );
+        assert!(!backend.path_for("ns", "second").exists());
+        release_tx.send(()).expect("release first writer");
+        assert!(
+            timeout(Duration::from_secs(2), completed_rx)
+                .await
+                .expect("first writer completes")
+                .expect("first writer completion notification")
+        );
+        timeout(Duration::from_secs(2), second)
+            .await
+            .expect("second writer completes")
+            .expect("second writer task succeeds")
+            .expect("second writer persists object");
+        assert_eq!(backend.blocking_writer_slots.available_permits(), 1);
+        assert_eq!(
+            backend.get("ns", "first").await.expect("read first"),
+            Some(Bytes::from_static(b"first body"))
+        );
+        assert_eq!(
+            backend.get("ns", "second").await.expect("read second"),
+            Some(Bytes::from_static(b"second body"))
+        );
+        fs::remove_dir_all(dir).expect("remove test directory");
     }
 
     #[test]

@@ -2533,3 +2533,53 @@ Directory validation p99 is 4,187.387 microseconds; dispatch p99 is
 786.811. The next diagnostic separately measures return-to-async-worker
 waiting and hot-cache publication, retaining the sampled parent's decision
 and making no clock reads when diagnostics are disabled.
+
+
+Exclusive-create comparison `37463356086` at `2a4d347` is complete and
+measurement-valid, but still fails cache-miss goals. Against `9c3cd44` on
+the same runner, qpx throughput changes from 11,587.63 to 11,944.12
+requests/s and CPU efficiency from 5,104.22 to 5,219.01 requests/CPU second.
+P99 changes from 20.609 to 21.699 ms and scheduler delay from 330.921 to
+378.626 microseconds/request. Current nginx-relative ratios are throughput
+0.920807, CPU efficiency 0.877842, p99 0.321724 and delay 2.890531.
+The original 2.6 delay gate and the stronger 1.0 miss goals remain failures;
+the modest throughput/CPU changes do not establish complete improvement.
+
+Normal-CPU MTU comparison `37466162062` at `c87b29c` has an invalid
+65,536-MTU phase: Apache completes seven of eight transfers and receives
+25,108,374 bytes of the eighth before the unchanged 128-second deadline.
+The same-runner 1,500-MTU phase completes every transfer and passes both
+fast and slow original acceptance and measurement-quality criteria. The
+complete diagnostic remains failed because its first phase is invalid.
+A reversed-order independent comparison is required before adoption; CPU
+affinity, transfer counts, aggregation and thresholds are unchanged.
+
+Per-thread cache-miss evidence from `37463128686` round 2 separates four
+I/O workers from 40 additional participating blocking-pool workers. The
+four I/O workers accumulate 13.915 seconds CPU and 13.470 seconds scheduler
+queue delay; the additional workers accumulate 4.433 seconds CPU and
+21.026 seconds queue delay. Nginx's complete process tree accumulates
+16.493 seconds CPU and 9.101 seconds queue delay in its separate window.
+The threads are participating threads, not simultaneously runnable threads;
+these instrumented windows are diagnostic evidence, not acceptance ratios.
+They motivate a separate trial that bounds synchronous disk writers by
+available CPU parallelism. Other blocking I/O and streaming file writes keep
+their existing paths. Admission is asynchronous and shared by clones of
+the disk backend; its owned permit remains inside the blocking closure so
+cancelling the async caller cannot admit work before its filesystem write
+finishes. Creation security, atomic publication, capacity enforcement and
+writeback admission are unchanged. Real filesystem tests cover caller
+cancellation, queued work, persistent contents and failure recovery. The
+trial must pass same-runner comparisons before being retained as an
+optimization; fewer workers alone are not a performance result.
+
+
+Post-writer diagnostic `37466166225` at `c87b29c` records 242 sampled
+cache writes. Median dispatch is 65.675 microseconds, writer execution
+77.202, async resumption 59.565, index update 1.963 and hot publication
+5.894; total persistence median is 423.900. These independently aggregated
+medians are not additive. Creation p99 is 5,349.373 microseconds, execution
+p99 3,823.336, dispatch p99 1,266.176 and resumption p99 546.670. Hot
+publication is not the dominant median phase. The bounded-writer trial
+therefore targets actual blocking-pool participation and dispatch contention,
+not an unsupported global hot-cache rewrite.
