@@ -129,7 +129,7 @@ async fn send_file_inner(
     sampled_scheduling: bool,
 ) -> io::Result<()> {
     #[cfg(target_os = "linux")]
-    let mut send_queue = ZeroCopySendQueueGuard::begin(stream, FILE_NOTSENT_LOWAT)?;
+    let mut send_queue = ZeroCopySendQueueGuard::begin_file(stream, region.len())?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::future::{Future, poll_fn};
@@ -232,6 +232,7 @@ async fn send_file_inner(
 struct ZeroCopySendQueueGuard<'a> {
     stream: &'a TcpStream,
     original: u32,
+    original_cork: Option<bool>,
     restored: bool,
 }
 
@@ -247,12 +248,29 @@ impl<'a> ZeroCopySendQueueGuard<'a> {
         Ok(Self {
             stream,
             original,
+            original_cork: None,
             restored: false,
         })
     }
 
+    fn begin_file(stream: &'a TcpStream, body_bytes: u64) -> io::Result<Self> {
+        let mut guard = Self::begin(stream, FILE_NOTSENT_LOWAT)?;
+        if body_bytes > CONTENDED_FILE_ZERO_COPY_QUANTUM {
+            let socket = socket2::SockRef::from(stream);
+            guard.original_cork = Some(socket.tcp_cork()?);
+            // Keep partial segments across bounded sendfile scheduling handoffs.
+            // Restore the caller's setting on completion, error, and cancellation.
+            socket.set_tcp_cork(true)?;
+        }
+        Ok(guard)
+    }
+
     fn restore(&mut self) -> io::Result<()> {
-        socket2::SockRef::from(self.stream).set_tcp_notsent_lowat(self.original)?;
+        let socket = socket2::SockRef::from(self.stream);
+        if let Some(original_cork) = self.original_cork {
+            socket.set_tcp_cork(original_cork)?;
+        }
+        socket.set_tcp_notsent_lowat(self.original)?;
         self.restored = true;
         Ok(())
     }
@@ -264,7 +282,7 @@ impl Drop for ZeroCopySendQueueGuard<'_> {
         if !self.restored
             && let Err(error) = self.restore()
         {
-            tracing::error!(error = %error, "failed to restore zero-copy transfer send queue limit");
+            tracing::error!(error = %error, "failed to restore zero-copy transfer socket settings");
         }
     }
 }
@@ -995,7 +1013,7 @@ mod tests {
     #[tokio::test]
     async fn failed_file_transfer_restores_socket_send_queue_limit() {
         let file = tempfile::tempfile().expect("create empty transfer file");
-        let mut body = Body::empty().with_file_region_for_zero_copy(Arc::new(file), 0, 1024);
+        let mut body = Body::empty().with_file_region_for_zero_copy(Arc::new(file), 0, 1024 * 1024);
         let region = body
             .take_file_region_without_trailers()
             .expect("file region");
@@ -1019,6 +1037,12 @@ mod tests {
                 .expect("read restored send queue limit"),
             512 * 1024,
             "failed file transfer did not restore the original socket setting"
+        );
+        assert!(
+            !socket2::SockRef::from(&server)
+                .tcp_cork()
+                .expect("read restored cork"),
+            "failed file transfer retained corking"
         );
         drop(server);
         drop(client);
@@ -1101,6 +1125,9 @@ mod tests {
         let original_limit = socket2::SockRef::from(&server)
             .tcp_notsent_lowat()
             .expect("read original send queue limit");
+        let original_cork = socket2::SockRef::from(&server)
+            .tcp_cork()
+            .expect("read original cork");
         let socket_target = std::fs::read_link(format!("/proc/self/fd/{}", server.as_raw_fd()))
             .expect("socket descriptor identity");
         let mut transfer = Box::pin(send_file(&server, &region));
@@ -1118,12 +1145,24 @@ mod tests {
             "file transfer duplicated its socket descriptor"
         );
         let (queued, unsent) = socket_send_queue(&server).expect("read real TCP send queue");
+        assert!(
+            socket2::SockRef::from(&server)
+                .tcp_cork()
+                .expect("read active cork")
+        );
         assert!(unsent <= queued, "unsent bytes exceed the total send queue");
         assert!(
             unsent < 1024 * 1024,
             "file sender queued an entire large response before client progress: {unsent} bytes"
         );
         drop(transfer);
+        assert_eq!(
+            socket2::SockRef::from(&server)
+                .tcp_cork()
+                .expect("read cancelled cork"),
+            original_cork,
+            "cancelled file transfer did not restore corking"
+        );
         assert_eq!(
             socket2::SockRef::from(&server)
                 .tcp_notsent_lowat()
@@ -1133,5 +1172,57 @@ mod tests {
         );
         drop(server);
         drop(client);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn large_file_transfer_delivers_its_tail_and_preserves_original_cork() {
+        for original_cork in [false, true] {
+            let mut file = tempfile::tempfile().expect("create transfer file");
+            let payload = vec![0x6a; 129 * 1024 + 17];
+            file.write_all(&payload).expect("write real file payload");
+            file.flush().expect("flush file");
+            let mut body = Body::empty().with_file_region_for_zero_copy(
+                Arc::new(file),
+                0,
+                payload.len() as u64,
+            );
+            let region = body
+                .take_file_region_without_trailers()
+                .expect("file region");
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind listener");
+            let mut client = TcpStream::connect(listener.local_addr().expect("listener address"))
+                .await
+                .expect("connect receiver");
+            let (server, _) = listener.accept().await.expect("accept receiver");
+            let socket = socket2::SockRef::from(&server);
+            socket
+                .set_tcp_cork(original_cork)
+                .expect("set original cork");
+            let length = payload.len();
+            let reader = tokio::spawn(async move {
+                let mut received = vec![0; length];
+                tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut received))
+                    .await
+                    .expect("file tail delivery timed out")
+                    .expect("read real file body");
+                received
+            });
+            tokio::time::timeout(Duration::from_secs(5), send_file(&server, &region))
+                .await
+                .expect("file sender timed out")
+                .expect("send file region");
+            assert_eq!(
+                socket.tcp_cork().expect("read completed cork"),
+                original_cork
+            );
+            // The original corked caller owns its final flush.
+            socket
+                .set_tcp_cork(false)
+                .expect("flush the original caller's socket");
+            assert_eq!(reader.await.expect("real receiver task"), payload);
+        }
     }
 }

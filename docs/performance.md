@@ -2415,3 +2415,21 @@ length, timeouts, cancellation and original-setting restoration. File-body
 queue settings are unchanged. A real Linux slow-receiver test inspects
 backpressure and cancellation restoration; same-runner comparisons must
 pass all unchanged streaming objectives before the trial can be adopted.
+
+
+WebDAV socket diagnostic `37458026041` at `6a3e6ed` observes 1 MiB
+qpx median TCP MSS 65,483 bytes and median bytes per data segment
+50,280.59, 54,243.85 and 54,884.28 across its three rounds. Maximum
+unsent queues are 196,502, 196,449 and 160,768 bytes. Together with the
+retained 75.1% sendfile-kernel CPU profile, these measurements motivate
+a separate large-file TCP_CORK trial to retain partial segments across
+64 KiB scheduling handoffs. It applies only to file regions larger than
+one contended quantum, leaving small responses and socket relays unchanged.
+The existing queue guard preserves and restores original corking before
+the original queue limit on completion, failure and cancellation; failed
+restoration remains an explicit error. Real Linux tests verify the partial
+file tail, both original cork states, declared-region failure and cancellation.
+The [Linux TCP documentation](https://man7.org/linux/man-pages/man7/tcp.7.html)
+describes flushing partial frames when corking is cleared and its kernel
+flush ceiling. Same-runner comparisons and three independent original-gate
+passes are required; packet coalescing alone is not an acceptance result.
