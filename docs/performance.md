@@ -2380,3 +2380,13 @@ work and then suspend. It keeps stream storage reuse, bounded admission and
 driver completion bursts, cancellation handling, and backpressure. Same-runner
 HTTP/2 comparisons decide whether the bounded polling improves the observed
 latency without throughput, CPU, or resource regressions.
+
+
+The 96 KiB quantum trial is rejected after the two additional independent
+comparisons, `37455005056` and `37455016332`. Although 1 MiB p99 ratios
+are 0.564204 and 0.567628, CPU efficiency ratios are 1.350217 and 1.401710,
+below the unchanged 1.5 requirement. In the first additional comparison,
+qpx CPU efficiency declines from 3,535.89 to 3,442.52 requests/CPU second
+against the same-runner baseline. The contended quantum returns to 64 KiB;
+the isolated 128 KiB queue-bound trial remains separate. The first passing
+comparison does not constitute three independent acceptance passes.
