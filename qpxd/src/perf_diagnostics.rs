@@ -5,7 +5,13 @@ const SAMPLE_INTERVAL: u64 = 1024;
 
 pub(crate) struct PhaseTimer {
     phase: &'static str,
-    started: Option<Instant>,
+    // Keep thread evidence out of unsampled request-state storage.
+    started: Option<Box<StartedPhase>>,
+}
+
+struct StartedPhase {
+    at: Instant,
+    thread: std::thread::ThreadId,
 }
 
 impl PhaseTimer {
@@ -21,18 +27,26 @@ impl PhaseTimer {
                 .is_multiple_of(SAMPLE_INTERVAL);
         Self {
             phase,
-            started: sampled.then(Instant::now),
+            started: sampled.then(|| {
+                Box::new(StartedPhase {
+                    at: Instant::now(),
+                    thread: std::thread::current().id(),
+                })
+            }),
         }
     }
 }
 
 impl Drop for PhaseTimer {
     fn drop(&mut self) {
-        if let Some(started) = self.started {
+        if let Some(started) = self.started.as_ref() {
+            let completed_thread = std::thread::current().id();
             tracing::debug!(target: "qpx_perf_phase", phase = self.phase,
-                elapsed_ns = started.elapsed().as_nanos() as u64,
+                elapsed_ns = started.at.elapsed().as_nanos() as u64,
                 sample_interval = SAMPLE_INTERVAL,
-                thread = ?std::thread::current().id(), "performance phase completed");
+                started_thread = ?started.thread,
+                migrated = started.thread != completed_thread,
+                thread = ?completed_thread, "performance phase completed");
         }
     }
 }

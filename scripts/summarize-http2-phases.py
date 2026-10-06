@@ -33,6 +33,8 @@ for line in (root / "qpxd-h2.log").read_text().splitlines():
         raise SystemExit("HTTP/2 phase log has an unexpected event")
     if type(fields["elapsed_ns"]) is not int or fields["elapsed_ns"] < 0:
         raise SystemExit("HTTP/2 phase log has an invalid duration")
+    if type(fields.get("migrated")) is not bool or not fields.get("started_thread"):
+        raise SystemExit("HTTP/2 phase log lacks real task migration evidence")
     stamp = datetime.datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00"))
     if stamp.utcoffset() != datetime.timedelta(0):
         raise SystemExit("HTTP/2 phase timestamp must be UTC")
@@ -78,6 +80,8 @@ for before_path in sorted(root.glob("http2.qpxd.1024.m100.round-*.attempt-1.sche
                         "p99_ns": values[min(len(values) - 1, (99 * len(values)) // 100)],
                         "max_ns": values[-1], "window_start_epoch_ns": lower,
                         "window_end_epoch_ns": upper, "clock_tolerance_ns": clock_tolerance_ns})
+        records[-1]["migrated_samples"] = sum(fields["migrated"] for fields in selected)
+        records[-1]["completion_threads"] = sorted({fields["thread"] for fields in selected})
 if len(windows) != 3 or {record["round"] for record in records} != {1, 2, 3}:
     raise SystemExit("HTTP/2 phase diagnostics require three timed rounds")
 windows.sort()
@@ -87,4 +91,4 @@ output.write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
 for record in records:
     print(f"HTTP/2 1024-byte m=100 round={record['round']} {record['phase']}: "
           f"samples={record['samples']} median_us={record['median_ns'] / 1000:.3f} "
-          f"p99_us={record['p99_ns'] / 1000:.3f}")
+          f"p99_us={record['p99_ns'] / 1000:.3f} migrated_samples={record['migrated_samples']}")
