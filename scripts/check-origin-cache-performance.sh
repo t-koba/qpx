@@ -326,8 +326,8 @@ for lane in lanes:
             "max_scheduler_queue_delay_ratio": 1.0,
         },
         ("feature_rich_cache_hit_http1", 1024): {
-            "min_throughput_ratio": 0.8,
-            "min_cpu_efficiency_ratio": 0.7,
+            "min_throughput_ratio": 1.0,
+            "min_cpu_efficiency_ratio": 1.0,
             "max_p99_latency_ratio": 1.0,
             "min_dominance_score": 0.9,
             "max_rss_peak_ratio": 1.0,

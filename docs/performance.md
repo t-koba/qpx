@@ -2235,3 +2235,27 @@ cover differential headers/body, transformed Host cache keys, single admission,
 guard rejection, active modules, transformed eligibility, runtime reload,
 persistent reads after restart, and Vary negotiation. Independent same-runner
 comparisons and all required CI gates remain necessary for adoption.
+
+At `1572db6`, independent same-runner comparisons `37271969582`,
+`37271972205`, and `37271974820` validate the feature-rich 1 KiB lane:
+
+| Run | Throughput ratio | CPU efficiency ratio | Scheduler delay ratio | p99 ratio |
+|---|---:|---:|---:|---:|
+| 37271969582 | 1.259054 | 1.752318 | 0.729753 | 0.492561 |
+| 37271972205 | 1.192299 | 1.654871 | 0.760995 | 0.443869 |
+| 37271974820 | 1.118741 | 1.534141 | 0.827364 | 0.546777 |
+
+All three satisfy throughput and CPU efficiency ratios of at least 1.0,
+and scheduler delay and p99 ratios of at most 1.0. These throughput and CPU
+goals now replace the weaker 0.8 and 0.7 mandatory minima, including the
+checker's protection against weakening objectives. Native diagnostic
+`37271977323` confirms the prepared cache-hit path is exercised; its
+instrumented measurements are not substituted for acceptance results.
+
+The comparison runs still fail overall because persistent misses do not
+meet their throughput, CPU efficiency, and scheduler delay goals. Mandatory
+CI `37340800470` at `048f964` also fails HTTP/2, streaming, and proxy.
+Its HTTP/2 workload coverage now recognizes all four required dimension
+combinations, without discarding any failed performance criteria. Feature-rich
+1 MiB scheduler delay and dominance remain unstable, and WebDAV 1 MiB p99
+does not meet the requested 1.0 goal. This is not completion.
