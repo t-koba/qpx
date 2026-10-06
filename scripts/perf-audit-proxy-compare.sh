@@ -1365,10 +1365,10 @@ LUA
       kernel_resource_metrics=true
       rss_baseline_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
       fd_baseline="$(process_tree_fd_count "$resource_pid")"
-      monitor_process_tree_rss_peak "$resource_pid" "$rss_peak_file" "$rss_baseline_kb" &
-      rss_peak_monitor_pid=$!
-      monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" "$fd_baseline" &
-      fd_peak_monitor_pid=$!
+      start_process_tree_peak rss-monitor "$resource_pid" "$rss_peak_file" "$rss_baseline_kb" || return 1
+      rss_peak_monitor_pid=$PERF_PROCESS_PEAK_PID
+      start_process_tree_peak monitor "$resource_pid" "$fd_peak_file" "$fd_baseline" || return 1
+      fd_peak_monitor_pid=$PERF_PROCESS_PEAK_PID
       scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid" "$TMP_DIR/${artifact_name}.attempt-${attempt}.scheduler-before.json")"
     fi
     cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"

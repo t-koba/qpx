@@ -262,6 +262,28 @@ monitor_process_tree_fd_peak() {
   monitor_process_tree_peak monitor "$root" "$output" "$initial"
 }
 
+start_process_tree_peak() {
+  local mode="$1" root="$2" output="$3" initial="$4"
+  local deadline=$((SECONDS + 20))
+  rm -f "${output}.ready" "${output}.error" "${output}.sampling.json"
+  monitor_process_tree_peak "$mode" "$root" "$output" "$initial" &
+  PERF_PROCESS_PEAK_PID=$!
+  # A complete first observation owns readiness; interpreter startup does not.
+  while [ ! -s "${output}.ready" ]; do
+    if [ -f "${output}.error" ] || ! kill -0 "$PERF_PROCESS_PEAK_PID" 2>/dev/null \
+      || [ "$SECONDS" -ge "$deadline" ]; then
+      echo "process peak sampler failed before readiness: $output" >&2
+      if [ -f "${output}.error" ]; then
+        cat "${output}.error" >&2
+      fi
+      kill "$PERF_PROCESS_PEAK_PID" 2>/dev/null || true
+      wait "$PERF_PROCESS_PEAK_PID" 2>/dev/null || true
+      return 1
+    fi
+    sleep 0.01
+  done
+}
+
 monitor_process_tree_peak() {
   local mode="$1" root="$2" output="$3" initial="$4"
   local stop="${output}.stop"

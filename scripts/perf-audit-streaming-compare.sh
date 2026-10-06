@@ -512,21 +512,21 @@ run_one() {
       kernel_resource_metrics=true
       rss_baseline_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
       rss_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.rss-peak"
-      monitor_process_tree_rss_peak "$resource_pid" "$rss_peak_file" "$rss_baseline_kb" &
-      rss_peak_monitor_pid=$!
+      start_process_tree_peak rss-monitor "$resource_pid" "$rss_peak_file" "$rss_baseline_kb" || return 1
+      rss_peak_monitor_pid=$PERF_PROCESS_PEAK_PID
       fd_baseline="$(process_tree_fd_count "$resource_pid")"
       fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.fd-peak"
-      monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" "$fd_baseline" &
-      fd_peak_monitor_pid=$!
+      start_process_tree_peak monitor "$resource_pid" "$fd_peak_file" "$fd_baseline" || return 1
+      fd_peak_monitor_pid=$PERF_PROCESS_PEAK_PID
       if [ "$resource_pid" != "$BACKEND_PID" ]; then
         backend_rss_baseline_kb="$(process_tree_status_kb "$BACKEND_PID" "VmRSS")"
         backend_rss_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-rss-peak"
-        monitor_process_tree_rss_peak "$BACKEND_PID" "$backend_rss_peak_file" "$backend_rss_baseline_kb" &
-        backend_rss_peak_monitor_pid=$!
+        start_process_tree_peak rss-monitor "$BACKEND_PID" "$backend_rss_peak_file" "$backend_rss_baseline_kb" || return 1
+        backend_rss_peak_monitor_pid=$PERF_PROCESS_PEAK_PID
         backend_fd_baseline="$(process_tree_fd_count "$BACKEND_PID")"
         backend_fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-fd-peak"
-        monitor_process_tree_fd_peak "$BACKEND_PID" "$backend_fd_peak_file" "$backend_fd_baseline" &
-        backend_fd_peak_monitor_pid=$!
+        start_process_tree_peak monitor "$BACKEND_PID" "$backend_fd_peak_file" "$backend_fd_baseline" || return 1
+        backend_fd_peak_monitor_pid=$PERF_PROCESS_PEAK_PID
       else
         backend_rss_baseline_kb="$rss_baseline_kb"
         backend_fd_baseline="$fd_baseline"

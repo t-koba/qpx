@@ -100,6 +100,9 @@ elif mode in ('monitor', 'rss-monitor'):
                 previous = now
                 count += 1
                 writer.writerow([time.monotonic_ns(), value])
+                if count == 1:
+                    handle.flush()
+                    Path(str(output) + '.ready').write_text('1\n')
                 if value > peak:
                     peak = value
                     output.write_text(str(peak) + '\n')

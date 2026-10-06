@@ -74,11 +74,10 @@ fi
 fd_before="$(process_tree_fd_count "$root")"
 rss_before="$(process_tree_status_kb "$root" VmRSS)"
 snapshot_process_tree_fds "$root" "$work/descriptors.json"
-monitor_process_tree_fd_peak "$root" "$work/fd" "$fd_before" &
-fd_monitor=$!
-monitor_process_tree_rss_peak "$root" "$work/rss" "$rss_before" &
-rss_monitor=$!
-sleep 0.3
+start_process_tree_peak monitor "$root" "$work/fd" "$fd_before"
+fd_monitor=$PERF_PROCESS_PEAK_PID
+start_process_tree_peak rss-monitor "$root" "$work/rss" "$rss_before"
+rss_monitor=$PERF_PROCESS_PEAK_PID
 kill "$fd_monitor" "$rss_monitor"
 wait "$fd_monitor" || true
 wait "$rss_monitor" || true
