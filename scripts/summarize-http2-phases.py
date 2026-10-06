@@ -85,18 +85,28 @@ for before_path in sorted(root.glob("http2.qpxd.1024.m100.round-*.attempt-1.sche
         records[-1]["completion_threads"] = sorted({fields["thread"] for fields in selected})
         if phase == "plain_origin_read":
             for fields in selected:
-                for key in ("polls", "pending_polls", "active_poll_ns", "max_active_poll_ns"):
+                for key in ("polls", "pending_polls", "active_poll_ns", "max_active_poll_ns",
+                            "notified_wait_ns", "before_notify_ns", "unnotified_wait_ns",
+                            "notified_resumptions"):
                     if type(fields.get(key)) is not int or fields[key] < 0:
                         raise SystemExit("Origin read diagnostics lack real Future poll evidence")
                 if (fields["polls"] < 1 or fields["pending_polls"] >= fields["polls"]
                         or fields["active_poll_ns"] > fields["elapsed_ns"]
-                        or fields["max_active_poll_ns"] > fields["active_poll_ns"]):
+                        or fields["max_active_poll_ns"] > fields["active_poll_ns"]
+                        or fields["notified_resumptions"] > fields["pending_polls"]
+                        or sum(fields[key] for key in (
+                            "active_poll_ns", "notified_wait_ns", "before_notify_ns",
+                            "unnotified_wait_ns")) > fields["elapsed_ns"]):
                     raise SystemExit("Origin read Future poll counters are inconsistent")
             records[-1]["median_active_poll_ns"] = statistics.median(
                 fields["active_poll_ns"] for fields in selected)
             records[-1]["median_outside_poll_ns"] = statistics.median(
                 fields["elapsed_ns"] - fields["active_poll_ns"] for fields in selected)
             records[-1]["pending_polls"] = sum(fields["pending_polls"] for fields in selected)
+            for key in ("notified_wait_ns", "before_notify_ns", "unnotified_wait_ns"):
+                records[-1][f"median_{key}"] = statistics.median(fields[key] for fields in selected)
+            records[-1]["notified_resumptions"] = sum(
+                fields["notified_resumptions"] for fields in selected)
 if len(windows) != 3 or {record["round"] for record in records} != {1, 2, 3}:
     raise SystemExit("HTTP/2 phase diagnostics require three timed rounds")
 windows.sort()
@@ -109,6 +119,10 @@ for record in records:
         poll_detail = (f" active_poll_median_us={record['median_active_poll_ns'] / 1000:.3f}"
                        f" outside_poll_median_us={record['median_outside_poll_ns'] / 1000:.3f}"
                        f" pending_polls={record['pending_polls']}")
+        poll_detail += (f" notified_wait_median_us={record['median_notified_wait_ns'] / 1000:.3f}"
+                        f" before_notify_median_us={record['median_before_notify_ns'] / 1000:.3f}"
+                        f" unnotified_wait_median_us={record['median_unnotified_wait_ns'] / 1000:.3f}"
+                        f" notified_resumptions={record['notified_resumptions']}")
     print(f"HTTP/2 1024-byte m=100 round={record['round']} {record['phase']}: "
           f"samples={record['samples']} median_us={record['median_ns'] / 1000:.3f} "
           f"p99_us={record['p99_ns'] / 1000:.3f} migrated_samples={record['migrated_samples']}"
