@@ -29,7 +29,7 @@ const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
 #[cfg(target_os = "linux")]
 const FILE_NOTSENT_LOWAT: u32 = 128 * 1024;
 #[cfg(target_os = "linux")]
-const SOCKET_NOTSENT_LOWAT: u32 = BALANCED_ZERO_COPY_QUANTUM as u32;
+const SOCKET_NOTSENT_LOWAT: u32 = 2 * BALANCED_ZERO_COPY_QUANTUM as u32;
 #[cfg(target_os = "linux")]
 const MAX_SPLICE_SOCKET_BATCH: usize = 48 * 1024;
 
@@ -849,6 +849,99 @@ mod tests {
                 .expect("read failed send queue limit"),
             original,
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn slow_splice_receiver_keeps_a_bounded_queue_and_restores_on_cancel() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let source_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind source");
+        let source = TcpStream::connect(source_listener.local_addr().expect("source address"))
+            .await
+            .expect("connect source");
+        let (mut source_peer, _) = source_listener.accept().await.expect("accept source");
+        let destination_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind destination");
+        let receiver = tokio::net::TcpSocket::new_v4().expect("create receiver socket");
+        receiver
+            .set_recv_buffer_size(16 * 1024)
+            .expect("bound the slow receiver window");
+        let client = receiver
+            .connect(
+                destination_listener
+                    .local_addr()
+                    .expect("destination address"),
+            )
+            .await
+            .expect("connect slow receiver");
+        let (destination, _) = destination_listener
+            .accept()
+            .await
+            .expect("accept receiver");
+        let socket = socket2::SockRef::from(&destination);
+        socket
+            .set_send_buffer_size(4 * 1024 * 1024)
+            .expect("allow the bounded send queue");
+        // The host can enforce a smaller socket buffer than the requested size.
+        let backpressure_threshold = (socket.send_buffer_size().expect("read actual send buffer")
+            / 4)
+        .min(SOCKET_NOTSENT_LOWAT as usize / 2) as u32;
+        let original = 512 * 1024;
+        socket
+            .set_tcp_notsent_lowat(original)
+            .expect("set original queue limit");
+        let writer = tokio::spawn(async move {
+            let chunk = [0x5a; 64 * 1024];
+            for _ in 0..128 {
+                source_peer
+                    .write_all(&chunk)
+                    .await
+                    .expect("write real source payload");
+            }
+        });
+        let mut transfer = Box::pin(splice_tcp_exact(
+            &source,
+            &destination,
+            8 * 1024 * 1024,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        ));
+        let unsent = tokio::time::timeout(
+            Duration::from_secs(5),
+            poll_fn(|cx| {
+                let result = transfer.as_mut().poll(cx);
+                assert!(
+                    result.is_pending(),
+                    "slow receiver unexpectedly completed: {result:?}"
+                );
+                let (_, unsent) =
+                    socket_send_queue(&destination).expect("inspect actual send queue");
+                if unsent >= backpressure_threshold {
+                    Poll::Ready(unsent)
+                } else {
+                    Poll::Pending
+                }
+            }),
+        )
+        .await
+        .expect("real destination did not develop backpressure");
+        assert!(
+            u64::from(unsent) <= u64::from(SOCKET_NOTSENT_LOWAT) + MAX_SPLICE_SOCKET_BATCH as u64,
+            "splice queued beyond its bounded submission: {unsent} bytes"
+        );
+        drop(transfer);
+        assert_eq!(
+            socket.tcp_notsent_lowat().expect("read restored limit"),
+            original
+        );
+        writer.abort();
+        if let Err(error) = writer.await {
+            assert!(error.is_cancelled(), "source writer failed: {error}");
+        }
+        drop(client);
     }
 
     #[tokio::test]

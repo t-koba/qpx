@@ -2402,3 +2402,16 @@ sockets before closing the failed transfer. Failed inspection is explicit,
 and the original failure still exits nonzero. Successful measurements keep
 their existing observation path and deadlines. The real truncated-response
 check verifies socket identity and buffer evidence.
+
+The retained native streaming profile `37256213596` has three complete
+100 MiB slow transfers with 176, 176 and 177 destination WouldBlock events,
+but only 9, 9 and 14 source WouldBlock events. Lightweight diagnostics at
+`b4110bf` show qpx frontend time slices of 205, 209 and 202 versus nginx
+132, 112 and 113; qpx frontend CPU is 23.02..25.26 ms versus nginx
+114.93..121.68 ms. A separate trial raises the bounded socket-relay
+TCP_NOTSENT_LOWAT from 1 to 2 MiB to investigate destination wake frequency.
+It retains the 48 KiB syscall cap, 1 MiB pipe, scheduling quanta, exact
+length, timeouts, cancellation and original-setting restoration. File-body
+queue settings are unchanged. A real Linux slow-receiver test inspects
+backpressure and cancellation restoration; same-runner comparisons must
+pass all unchanged streaming objectives before the trial can be adopted.
