@@ -40,10 +40,17 @@ for path in sorted(root.rglob("*.log")):
             raise SystemExit(f"invalid phase duration in {path}")
         key = (str(path.relative_to(root)), fields["phase"], fields["sample_interval"])
         samples[key].append(elapsed)
-        counters = {name: fields[name] for name in (
+        counter_names = (
             "polls", "pending_polls", "active_poll_ns", "max_active_poll_ns",
             "before_notify_ns", "notified_wait_ns", "unnotified_wait_ns",
-            "notified_resumptions")}
+            "notified_resumptions")
+        present = set(counter_names).intersection(fields)
+        if not present and fields["phase"] != "file_body_send":
+            # Other crates emit duration-only phases using their own timers.
+            continue
+        if present != set(counter_names):
+            raise SystemExit(f"phase lacks complete future poll counters in {path}")
+        counters = {name: fields[name] for name in counter_names}
         if not all(type(value) is int and value >= 0 for value in counters.values()):
             raise SystemExit(f"invalid phase poll counter in {path}")
         if counters["polls"]:
