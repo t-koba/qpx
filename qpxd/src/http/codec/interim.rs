@@ -10,7 +10,7 @@ use http::{Request, Response};
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use tokio::io::AsyncReadExt;
@@ -25,6 +25,9 @@ const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
 // Release response buffers promptly without letting a continuously ready completion queue
 // postpone admission until every previously admitted stream has finished.
 const H2_COMPLETION_BURST: usize = 8;
+// Bound actual stream work per connection poll independently of Tokio's
+// cooperative budget, which can cover an entire multiplexed request batch.
+const H2_STREAM_POLLS_PER_CONNECTION_POLL: usize = 2 * H2_COMPLETION_BURST;
 
 enum H2ConnectionEvent<'a> {
     ConcurrentStreamCompleted(ReusableBoxFuture<'a, ()>),
@@ -129,194 +132,223 @@ where
         builder.enable_connect_protocol();
     }
     let mut conn = timeout(idle_timeout, builder.handshake(io)).await??;
-    let active_streams = AtomicUsize::new(0);
-    let mut reusable_primary_stream: Option<ReusableBoxFuture<'_, ()>> = None;
-    let mut reusable_concurrent_streams: Vec<ReusableBoxFuture<'_, ()>> = Vec::new();
-    let mut primary_stream = None;
-    let mut concurrent_streams = FuturesUnordered::new();
-    let mut accepting_streams = true;
-    let mut completions_since_admission = 0usize;
-    let mut completions_since_drive = 0usize;
-    let idle_timer = tokio::time::sleep(idle_timeout);
-    tokio::pin!(idle_timer);
-    loop {
-        let accept_backlog_available = concurrent_streams.len() < H2_ACCEPT_BACKLOG;
-        if accepting_streams && !accept_backlog_available {
-            let progress = poll_fn(|cx| {
-                Poll::Ready(match conn.poll_closed(cx) {
-                    Poll::Ready(result) => Some(result),
-                    Poll::Pending => None,
+    let stream_poll_budget = AtomicUsize::new(H2_STREAM_POLLS_PER_CONNECTION_POLL);
+    let driver = async {
+        let active_streams = AtomicUsize::new(0);
+        let mut reusable_primary_stream: Option<ReusableBoxFuture<'_, ()>> = None;
+        let mut reusable_concurrent_streams: Vec<ReusableBoxFuture<'_, ()>> = Vec::new();
+        let mut primary_stream = None;
+        let mut concurrent_streams = FuturesUnordered::new();
+        let mut accepting_streams = true;
+        let mut completions_since_admission = 0usize;
+        let mut completions_since_drive = 0usize;
+        let idle_timer = tokio::time::sleep(idle_timeout);
+        tokio::pin!(idle_timer);
+        loop {
+            let accept_backlog_available = concurrent_streams.len() < H2_ACCEPT_BACKLOG;
+            if accepting_streams && !accept_backlog_available {
+                let progress = poll_fn(|cx| {
+                    Poll::Ready(match conn.poll_closed(cx) {
+                        Poll::Ready(result) => Some(result),
+                        Poll::Pending => None,
+                    })
                 })
-            })
-            .await;
-            completions_since_drive = 0;
-            if let Some(result) = progress {
-                match result {
-                    Ok(()) => {
+                .await;
+                completions_since_drive = 0;
+                if let Some(result) = progress {
+                    match result {
+                        Ok(()) => {
+                            accepting_streams = false;
+                            if primary_stream.is_none() && concurrent_streams.is_empty() {
+                                break;
+                            }
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+            // Reap completed streams first to release response buffers. The reusable primary
+            // future sits outside FuturesUnordered, so poll it before the concurrent completion
+            // queue to give it the same bounded progress guarantee. After a bounded completion
+            // burst, prefer a ready admission so multiplexed requests cannot starve.
+            let mut accepted_stream = None;
+            let event = if prioritize_h2_admission(completions_since_admission) {
+                tokio::select! {
+                    biased;
+                    accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
+                        accepted_stream = Some(accepted);
+                        H2ConnectionEvent::Accepted
+                    }
+                    completed = poll_optional_h2_stream(&mut primary_stream, &stream_poll_budget), if primary_stream.is_some() => {
+                        let () = completed;
+                        H2ConnectionEvent::PrimaryStreamCompleted
+                    }
+                    Some(stream) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                        H2ConnectionEvent::ConcurrentStreamCompleted(stream)
+                    }
+                    () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    completed = poll_optional_h2_stream(&mut primary_stream, &stream_poll_budget), if primary_stream.is_some() => {
+                        let () = completed;
+                        H2ConnectionEvent::PrimaryStreamCompleted
+                    }
+                    Some(stream) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
+                        H2ConnectionEvent::ConcurrentStreamCompleted(stream)
+                    }
+                    accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
+                        accepted_stream = Some(accepted);
+                        H2ConnectionEvent::Accepted
+                    }
+                    () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
+                }
+            };
+            match event {
+                H2ConnectionEvent::ConcurrentStreamCompleted(stream) => {
+                    // Reuse completed stream storage within this connection, bounded by
+                    // the existing admission limit. The completion queue holds only
+                    // pointers instead of copying each large request state into a node.
+                    if reusable_concurrent_streams.len() < H2_ACCEPT_BACKLOG {
+                        reusable_concurrent_streams.push(stream);
+                    }
+                    completions_since_admission = completions_since_admission.saturating_add(1);
+                    completions_since_drive += 1;
+                    if completions_since_drive >= H2_COMPLETION_BURST
+                        || !accepting_streams
+                        || (primary_stream.is_none() && concurrent_streams.is_empty())
+                    {
+                        drive_h2_connection_now(&mut conn).await?;
+                        completions_since_drive = 0;
+                    }
+                    if primary_stream.is_none() && concurrent_streams.is_empty() {
+                        if !accepting_streams {
+                            break;
+                        }
+                        idle_timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + idle_timeout);
+                    }
+                }
+                H2ConnectionEvent::PrimaryStreamCompleted => {
+                    completions_since_admission = completions_since_admission.saturating_add(1);
+                    reusable_primary_stream = primary_stream.take();
+                    completions_since_drive += 1;
+                    if completions_since_drive >= H2_COMPLETION_BURST
+                        || !accepting_streams
+                        || concurrent_streams.is_empty()
+                    {
+                        drive_h2_connection_now(&mut conn).await?;
+                        completions_since_drive = 0;
+                    }
+                    if !accepting_streams && concurrent_streams.is_empty() {
+                        break;
+                    }
+                    if concurrent_streams.is_empty() {
+                        idle_timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + idle_timeout);
+                    }
+                }
+                H2ConnectionEvent::Accepted => {
+                    // Admission polls the driver too. Batch ready completions between
+                    // those polls while always flushing the final outstanding stream.
+                    completions_since_drive = 0;
+                    let accepted = accepted_stream.ok_or_else(|| {
+                        anyhow::anyhow!("accepted stream event is missing its result")
+                    })?;
+                    let Some(result) = accepted else {
                         accepting_streams = false;
                         if primary_stream.is_none() && concurrent_streams.is_empty() {
                             break;
                         }
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-        // Reap completed streams first to release response buffers. The reusable primary
-        // future sits outside FuturesUnordered, so poll it before the concurrent completion
-        // queue to give it the same bounded progress guarantee. After a bounded completion
-        // burst, prefer a ready admission so multiplexed requests cannot starve.
-        let mut accepted_stream = None;
-        let event = if prioritize_h2_admission(completions_since_admission) {
-            tokio::select! {
-                biased;
-                accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
-                    accepted_stream = Some(accepted);
-                    H2ConnectionEvent::Accepted
-                }
-                completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
-                    let () = completed;
-                    H2ConnectionEvent::PrimaryStreamCompleted
-                }
-                Some(stream) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
-                    H2ConnectionEvent::ConcurrentStreamCompleted(stream)
-                }
-                () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
-            }
-        } else {
-            tokio::select! {
-                biased;
-                completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
-                    let () = completed;
-                    H2ConnectionEvent::PrimaryStreamCompleted
-                }
-                Some(stream) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
-                    H2ConnectionEvent::ConcurrentStreamCompleted(stream)
-                }
-                accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
-                    accepted_stream = Some(accepted);
-                    H2ConnectionEvent::Accepted
-                }
-                () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
-            }
-        };
-        match event {
-            H2ConnectionEvent::ConcurrentStreamCompleted(stream) => {
-                // Reuse completed stream storage within this connection, bounded by
-                // the existing admission limit. The completion queue holds only
-                // pointers instead of copying each large request state into a node.
-                if reusable_concurrent_streams.len() < H2_ACCEPT_BACKLOG {
-                    reusable_concurrent_streams.push(stream);
-                }
-                completions_since_admission = completions_since_admission.saturating_add(1);
-                completions_since_drive += 1;
-                if completions_since_drive >= H2_COMPLETION_BURST
-                    || !accepting_streams
-                    || (primary_stream.is_none() && concurrent_streams.is_empty())
-                {
-                    drive_h2_connection_now(&mut conn).await?;
-                    completions_since_drive = 0;
-                }
-                if primary_stream.is_none() && concurrent_streams.is_empty() {
-                    if !accepting_streams {
-                        break;
-                    }
-                    idle_timer
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + idle_timeout);
-                }
-            }
-            H2ConnectionEvent::PrimaryStreamCompleted => {
-                completions_since_admission = completions_since_admission.saturating_add(1);
-                reusable_primary_stream = primary_stream.take();
-                completions_since_drive += 1;
-                if completions_since_drive >= H2_COMPLETION_BURST
-                    || !accepting_streams
-                    || concurrent_streams.is_empty()
-                {
-                    drive_h2_connection_now(&mut conn).await?;
-                    completions_since_drive = 0;
-                }
-                if !accepting_streams && concurrent_streams.is_empty() {
-                    break;
-                }
-                if concurrent_streams.is_empty() {
-                    idle_timer
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + idle_timeout);
-                }
-            }
-            H2ConnectionEvent::Accepted => {
-                // Admission polls the driver too. Batch ready completions between
-                // those polls while always flushing the final outstanding stream.
-                completions_since_drive = 0;
-                let accepted = accepted_stream.ok_or_else(|| {
-                    anyhow::anyhow!("accepted stream event is missing its result")
-                })?;
-                let Some(result) = accepted else {
-                    accepting_streams = false;
+                        continue;
+                    };
+                    completions_since_admission = 0;
+                    let (request, respond) = result?;
+                    let active_stream = ActiveH2Stream::new(&active_streams);
+                    let stream = tokio::task::unconstrained(serve_h2_stream(
+                        request,
+                        respond,
+                        &service,
+                        body_channel_capacity,
+                        idle_timeout,
+                        active_stream,
+                    ));
                     if primary_stream.is_none() && concurrent_streams.is_empty() {
-                        break;
+                        let reusable = if let Some(mut reusable) = reusable_primary_stream.take() {
+                            reusable.set(stream);
+                            reusable
+                        } else {
+                            ReusableBoxFuture::new(stream)
+                        };
+                        primary_stream = Some(reusable);
+                    } else {
+                        let reusable = if let Some(mut reusable) = reusable_concurrent_streams.pop()
+                        {
+                            reusable.set(stream);
+                            reusable
+                        } else {
+                            ReusableBoxFuture::new(stream)
+                        };
+                        concurrent_streams
+                            .push(complete_reusable_h2_stream(reusable, &stream_poll_budget));
                     }
-                    continue;
-                };
-                completions_since_admission = 0;
-                let (request, respond) = result?;
-                let active_stream = ActiveH2Stream::new(&active_streams);
-                let stream = tokio::task::unconstrained(serve_h2_stream(
-                    request,
-                    respond,
-                    &service,
-                    body_channel_capacity,
-                    idle_timeout,
-                    active_stream,
-                ));
-                if primary_stream.is_none() && concurrent_streams.is_empty() {
-                    let reusable = if let Some(mut reusable) = reusable_primary_stream.take() {
-                        reusable.set(stream);
-                        reusable
-                    } else {
-                        ReusableBoxFuture::new(stream)
-                    };
-                    primary_stream = Some(reusable);
-                } else {
-                    let reusable = if let Some(mut reusable) = reusable_concurrent_streams.pop() {
-                        reusable.set(stream);
-                        reusable
-                    } else {
-                        ReusableBoxFuture::new(stream)
-                    };
-                    concurrent_streams.push(complete_reusable_h2_stream(reusable));
                 }
-            }
-            H2ConnectionEvent::IdleTimeout => {
-                if primary_stream.is_none() && concurrent_streams.is_empty() {
-                    return Ok(());
+                H2ConnectionEvent::IdleTimeout => {
+                    if primary_stream.is_none() && concurrent_streams.is_empty() {
+                        return Ok(());
+                    }
+                    idle_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_timeout);
                 }
-                idle_timer
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + idle_timeout);
             }
         }
-    }
-    drop(reusable_primary_stream);
-    drop(primary_stream);
-    drop(concurrent_streams);
-    drop(reusable_concurrent_streams);
-    poll_fn(|cx| conn.poll_closed(cx)).await?;
-    Ok(())
+        drop(reusable_primary_stream);
+        drop(primary_stream);
+        drop(concurrent_streams);
+        drop(reusable_concurrent_streams);
+        poll_fn(|cx| conn.poll_closed(cx)).await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::pin!(driver);
+    poll_fn(|cx| {
+        stream_poll_budget.store(H2_STREAM_POLLS_PER_CONNECTION_POLL, Ordering::Relaxed);
+        driver.as_mut().poll(cx)
+    })
+    .await
 }
 
 async fn complete_reusable_h2_stream<'a>(
     mut stream: ReusableBoxFuture<'a, ()>,
+    budget: &'a AtomicUsize,
 ) -> ReusableBoxFuture<'a, ()> {
-    stream.get_pin().await;
+    poll_fn(|cx| poll_budgeted_h2_stream(&mut stream, budget, cx)).await;
     stream
 }
 
-async fn poll_optional_h2_stream<T>(stream: &mut Option<ReusableBoxFuture<'_, T>>) -> T {
+fn poll_budgeted_h2_stream<T>(
+    stream: &mut ReusableBoxFuture<'_, T>,
+    budget: &AtomicUsize,
+    cx: &mut std::task::Context<'_>,
+) -> Poll<T> {
+    let remaining = budget.load(Ordering::Relaxed);
+    if remaining == 0 {
+        cx.waker().wake_by_ref();
+        return Poll::Pending;
+    }
+    budget.store(remaining - 1, Ordering::Relaxed);
+    stream.poll(cx)
+}
+
+async fn poll_optional_h2_stream<T>(
+    stream: &mut Option<ReusableBoxFuture<'_, T>>,
+    budget: &AtomicUsize,
+) -> T {
     poll_fn(|cx| match stream.as_mut() {
-        Some(stream) => stream.poll(cx),
+        Some(stream) => poll_budgeted_h2_stream(stream, budget, cx),
         None => std::task::Poll::Pending,
     })
     .await
@@ -783,7 +815,7 @@ mod tests {
 
     #[tokio::test]
     async fn h2_scheduler_completes_a_multiplexed_request_batch() {
-        const REQUESTS: usize = 128;
+        const REQUESTS: usize = 2 * super::H2_ACCEPT_BACKLOG;
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind actual HTTP/2 server");

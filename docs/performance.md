@@ -2623,3 +2623,26 @@ real Apache binary directly, while only its foreground/config invocation
 enters the existing owned profiler process group. Both servers must shut
 down cleanly and both profiles must report zero lost samples. This is an
 instrumented diagnostic, not an acceptance measurement or server change.
+
+
+HTTP/2 CPU diagnostic `37469840074` completes with all 15 sampled parent
+connections valid. Median maximum wall poll is 4.219 milliseconds and median
+maximum CPU poll is 3.007 milliseconds. CPU inside the longest wall poll has
+a median of 2.833 milliseconds, with 1.207 milliseconds non-CPU time in that
+same poll. The independently aggregated maximum CPU and wall medians are not
+additive. Actual execution therefore contributes materially to long polls.
+A separate product trial bounds stream-future polls to sixteen per actual
+parent connection poll. The connection driver resets this shared local budget
+at each outer poll; exhausted stream work wakes and yields while transport
+progress and admission retain their existing paths. This is a strict stream
+work bound, distinct from the rejected Tokio cooperative-budget trial. The
+real TCP multiplexed batch now exceeds the 256-stream admission bound with
+512 requests. All 618 library tests and all-feature Clippy pass. Performance
+retention requires same-runner comparisons against `0104674`.
+
+Normal-CPU extended-window diagnostic `37470554096` at `68d7b0d` completes
+all 64 fast and eight slow transfers in all three samples at MTU 1,500.
+Every unchanged criterion passes: fast throughput ratio 2.134113, total CPU
+efficiency 1.468283 and scheduler delay 1.502987; slow scheduler delay
+0.473673. This is one independent passing extended-window comparison, not
+three passes and not a replacement for the required original-window lane.
