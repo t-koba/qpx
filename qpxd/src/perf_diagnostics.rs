@@ -64,6 +64,18 @@ impl PhaseTimer {
             && samples
                 .fetch_add(1, Ordering::Relaxed)
                 .is_multiple_of(SAMPLE_INTERVAL);
+        Self::begin_sampled(phase, sampled)
+    }
+
+    pub(crate) fn begin_native_h2_connection() -> Self {
+        Self::begin_sampled(
+            "h2_connection_poll",
+            *TCP_TIMELINE_ENABLED
+                && tracing::enabled!(target: "qpx_perf_phase", tracing::Level::DEBUG),
+        )
+    }
+
+    fn begin_sampled(phase: &'static str, sampled: bool) -> Self {
         Self {
             phase,
             started: sampled.then(|| {
@@ -207,7 +219,7 @@ impl Drop for PhaseTimer {
             let completed_thread = std::thread::current().id();
             tracing::debug!(target: "qpx_perf_phase", phase = self.phase,
                 elapsed_ns = started.at.elapsed().as_nanos() as u64,
-                sample_interval = SAMPLE_INTERVAL,
+                sample_interval = if self.phase == "h2_connection_poll" { 1 } else { SAMPLE_INTERVAL },
                 started_thread = ?started.thread,
                 migrated = started.thread != completed_thread,
                 polls = started.polls, pending_polls = started.pending_polls,

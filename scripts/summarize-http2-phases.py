@@ -30,6 +30,12 @@ for line in (root / "qpxd-h2.log").read_text().splitlines():
     fields = record["fields"]
     if fields.get("phase") not in phases:
         continue
+    if fields.get("message") == "native TCP phase identity":
+        identity = fields.get("io_sample_id")
+        if type(identity) is not int or identity <= 0:
+            raise SystemExit("HTTP/2 TCP phase identity is invalid")
+        # Identity events calibrate clocks but are not completed phase durations.
+        continue
     if fields.get("message") != "performance phase completed":
         raise SystemExit("HTTP/2 phase log has an unexpected event")
     if type(fields["elapsed_ns"]) is not int or fields["elapsed_ns"] < 0:

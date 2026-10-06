@@ -306,8 +306,10 @@ jobs:
               QPX_NATIVE_WORKLOAD=webdav python3 scripts/perf-evaluate.py "native WebDAV CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
               ;;
             http2-phases)
-              python3 scripts/perf-evaluate.py "isolated HTTP/2 phase diagnostics" -- bash scripts/perf-audit-http2-isolated.sh --phases target/perf/perf-audit-http2-compare.jsonl
+              QPX_PERF_NATIVE_IO_TIMELINE=1 python3 scripts/perf-evaluate.py "isolated HTTP/2 phase diagnostics" -- bash scripts/perf-audit-http2-isolated.sh --phases target/perf/perf-audit-http2-compare.jsonl
               python3 scripts/summarize-http2-phases.py target/perf/http2-compare-logs target/perf/http2-phase-summary.json
+              python3 scripts/summarize-perf-phases.py target/perf/http2-compare-logs target/perf/http2-poll-summary.json
+              jq -e 'any(.[]; .phase == "h2_connection_poll" and .observed_future_samples > 0 and .max_active_poll_ns.max > 0)' target/perf/http2-poll-summary.json
               ;;
             http2-worker-scaling)
               for workers in 4 1 2; do

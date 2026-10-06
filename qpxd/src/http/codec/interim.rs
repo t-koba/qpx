@@ -95,6 +95,34 @@ where
         + Sync
         + 'static,
 {
+    let mut phase = crate::perf_diagnostics::PhaseTimer::begin_native_h2_connection();
+    phase
+        .observe_future(serve_h2_connection_inner(
+            io,
+            service,
+            enable_connect_protocol,
+            idle_timeout,
+            body_channel_capacity,
+            h2_tuning,
+        ))
+        .await
+}
+
+async fn serve_h2_connection_inner<I, S>(
+    io: I,
+    service: S,
+    enable_connect_protocol: bool,
+    idle_timeout: Duration,
+    body_channel_capacity: usize,
+    h2_tuning: H2TransportTuning,
+) -> Result<()>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Send
+        + Sync
+        + 'static,
+{
     let mut builder = h2::server::Builder::new();
     crate::http::codec::h2::tune_h2_server_builder_with(&mut builder, h2_tuning);
     if enable_connect_protocol {

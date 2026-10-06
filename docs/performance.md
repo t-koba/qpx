@@ -2341,3 +2341,29 @@ Its purpose is to reduce repeated sendfile and handoff overhead without
 returning to the rejected doubled quantum. The same-runner comparison against
 `284e3c0` must meet every original criterion and the requested p99 goal;
 this remains a trial until independent complete measurements establish a gain.
+
+
+TCP-arrival diagnostic `37452325332` succeeds at `9391eea`, matching
+439 single-pending origin reads with zero missing receive events, zero
+unpaired completed identities, and no trace loss. Across three rounds,
+median arrival-to-notification bounds are 27.653..27.793,
+34.551..34.651, and 27.991..28.071 microseconds; median notification-to-resume
+waits are 59.422, 101.266, and 73.347 microseconds. The corresponding
+arrival-to-notification p99 lower bounds are 1.791, 1.653, and 1.877 ms;
+notification-to-resume p99 is 2.307, 2.225, and 2.503 ms. These include
+kernel tracing overhead and are not normal performance results. They justify
+measuring the parent connection future's maximum active poll before changing
+its cooperative scheduling. Phase-only diagnostics now observe every real
+HTTP/2 parent connection without enabling kernel event recording; ordinary
+runs retain disabled diagnostic sampling.
+
+
+The first intermediate-quantum comparison, `37453145641` at `eac7083`,
+passes both WebDAV lanes, every existing resource/quality criterion, and
+the 1 MiB p99 goal. Against `284e3c0` on the same runner, 1 MiB qpx p99
+changes from 22.019 to 16.817 ms, throughput from 6,379.50 to 6,361.41
+requests/s, and CPU efficiency from 5,895.61 to 5,891.74 requests/CPU
+second. Its Apache ratios are throughput 1.846576, CPU efficiency 2.186880,
+p99 0.662661, and scheduler delay 0.120562. Thus this comparison shows a
+23.62% p99 improvement, not a CPU gain; two additional independent complete
+passes are required before adopting the quantum change.
