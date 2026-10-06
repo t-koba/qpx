@@ -43,4 +43,20 @@ if [ "$profiles" -eq 0 ]; then
   echo "$workload callgrind profiling produced no dumps" >&2
   exit 1
 fi
+python3 - "$QPX_PROXY_PROFILE_DIR" "$profiles" <<'PY'
+import json
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+records = [json.loads(line) for line in (root / "sample-manifest.jsonl").read_text().splitlines()]
+names = [record["profile"] for record in records]
+if len(names) != int(sys.argv[2]) or len(set(names)) != len(names):
+    raise SystemExit("Callgrind sample manifest does not cover every nonempty dump exactly once")
+for record in records:
+    if (record["pid"] <= 0 or record["attempt"] <= 0 or not record["workload"]
+            or not (root / record["profile"]).is_file()
+            or not (root / (record["profile"] + ".annotated.txt")).is_file()):
+        raise SystemExit("Callgrind sample manifest references incomplete evidence")
+print(f"Callgrind sample manifest verified: {len(records)} workload windows")
+PY
 echo "Callgrind workload: $workload; profiles: $profiles"

@@ -1401,7 +1401,40 @@ LUA
     fi
     if [ "$CALLGRIND_DIAGNOSTICS" = 1 ] && [ "$proxy" = "$CALLGRIND_PROXY" ]; then
       callgrind_control -i off "$resource_pid" >/dev/null
+      python3 - "${QPX_PROXY_PROFILE_DIR:?callgrind profile directory is required}" "$resource_pid" "$TMP_DIR/callgrind-before.json" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+root, pid, output = sys.argv[1:]
+pattern = re.compile(r"callgrind\." + re.escape(pid) + r"\.out\.\d+")
+Path(output).write_text(json.dumps(sorted(p.name for p in Path(root).iterdir()
+                                       if p.is_file() and pattern.fullmatch(p.name))))
+PY
       callgrind_control -d "$resource_pid" >/dev/null
+      python3 - "$QPX_PROXY_PROFILE_DIR" "$resource_pid" "$TMP_DIR/callgrind-before.json" "$artifact_name" "$attempt" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+import time
+root, pid, before, workload, attempt = sys.argv[1:]
+root = Path(root)
+pattern = re.compile(r"callgrind\." + re.escape(pid) + r"\.out\.\d+")
+previous = set(json.loads(Path(before).read_text()))
+current = {p.name for p in root.iterdir() if p.is_file() and pattern.fullmatch(p.name)}
+created = current - previous
+if not previous <= current or len(created) != 1:
+    raise SystemExit("Callgrind dump is missing, ambiguous, or removed a prior sample")
+name = created.pop()
+if not (root / name).stat().st_size:
+    raise SystemExit("Callgrind sample dump is empty")
+record = {"pid": int(pid), "profile": name, "workload": workload,
+          "attempt": int(attempt), "recorded_epoch_ns": time.time_ns()}
+with (root / "sample-manifest.jsonl").open("a") as output:
+    output.write(json.dumps(record, sort_keys=True) + "\n")
+print("Callgrind sample retained: " + json.dumps(record, sort_keys=True))
+PY
     fi
     if [ -n "$thread_sampler_pid" ]; then
       wait "$thread_sampler_pid"
