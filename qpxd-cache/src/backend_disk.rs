@@ -1489,51 +1489,11 @@ fn open_zero_copy_source(key: &str, path: &Path, body_len: u64) -> Option<std::s
     }
 }
 
-thread_local! {
-    // Related index and body keys share their first compression block.
-    // Keep exactly one verified prefix per thread, independent of key cardinality.
-    static FILE_ID_PREFIX: std::cell::RefCell<Option<([u8; 64], Sha256)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 fn cache_file_id(namespace: &str, key: &str) -> DiskCacheFileId {
-    let parts: [&[u8]; 3] = [namespace.as_bytes(), &[0], key.as_bytes()];
-    let mut prefix = [0; 64];
-    let mut filled = 0;
-    for part in parts {
-        let len = part.len().min(prefix.len() - filled);
-        prefix[filled..filled + len].copy_from_slice(&part[..len]);
-        filled += len;
-        if filled == prefix.len() {
-            break;
-        }
-    }
-    let mut hasher = if filled == prefix.len() {
-        FILE_ID_PREFIX.with(|cached| {
-            let mut cached = cached.borrow_mut();
-            if let Some((previous, state)) = cached.as_ref()
-                && previous == &prefix
-            {
-                return state.clone();
-            }
-            let mut state = Sha256::new();
-            state.update(prefix);
-            *cached = Some((prefix, state.clone()));
-            state
-        })
-    } else {
-        Sha256::new()
-    };
-    let mut skip = if filled == prefix.len() {
-        prefix.len()
-    } else {
-        0
-    };
-    for part in parts {
-        let consumed = skip.min(part.len());
-        skip -= consumed;
-        hasher.update(&part[consumed..]);
-    }
+    let mut hasher = Sha256::new();
+    hasher.update(namespace.as_bytes());
+    hasher.update([0]);
+    hasher.update(key.as_bytes());
     let digest = hasher.finalize();
     DiskCacheFileId(digest.into())
 }
@@ -1914,24 +1874,6 @@ fn reject_symlink(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn file_id_prefix_reuse_preserves_full_sha256_identity() {
-        for namespace_len in [0, 1, 63, 64, 65, 128] {
-            for key_len in [0, 1, 63, 64, 65, 128] {
-                let namespace = "n".repeat(namespace_len);
-                for suffix in [":index", ":default:body", ":other", ""] {
-                    let key = format!("{}{suffix}", "k".repeat(key_len));
-                    let mut input = namespace.as_bytes().to_vec();
-                    input.push(0);
-                    input.extend_from_slice(key.as_bytes());
-                    let expected: [u8; 32] = super::Sha256::digest(&input).into();
-                    assert_eq!(super::cache_file_id(&namespace, &key).0, expected);
-                    assert_eq!(super::cache_file_id(&namespace, &key).0, expected);
-                }
-            }
-        }
-    }
-
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
