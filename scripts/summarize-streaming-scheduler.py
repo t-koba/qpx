@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """Summarize real streaming thread counters without substituting the TGID total."""
 
+import importlib.util
 import json
 from pathlib import Path
 import sys
 
 root, output = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location(
+    "scheduler", Path(__file__).parent / "lib/perf-process-scheduler.py")
+scheduler = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(scheduler)
 records = []
-for role in ("qpxd", "nginx", "apache", "lighttpd"):
+for role in ("qpxd", "nginx", "apache", "lighttpd", "direct-backend"):
     for mode in ("fast", "slow"):
         for round_number in range(1, 4):
-            for family in ("", "backend-"):
+            for family in (("",) if role == "direct-backend" else ("", "backend-")):
                 name = f"streaming.{role}.{mode}.round-{round_number}.attempt-1.{family}scheduler-"
-                before = json.loads((root / f"{name}before.json").read_text())
-                after = json.loads((root / f"{name}after.json").read_text())
+                before_path, after_path = root / f"{name}before.json", root / f"{name}after.json"
+                before = json.loads(before_path.read_text())
+                after = json.loads(after_path.read_text())
+                delay = scheduler.delta(before_path, after_path)
                 for snapshot in (before, after):
                     if (snapshot["measurement"] != "linux_taskstats_tgid_cpu_delay_ns_v1"
                             or snapshot.get("thread_details") is not True
@@ -31,15 +38,13 @@ for role in ("qpxd", "nginx", "apache", "lighttpd"):
                     raise SystemExit("Streaming scheduler window has invalid identity or timing")
                 old = {(row["pid"], row["start_ticks"]): row for row in before["processes"]}
                 new = {(row["pid"], row["start_ticks"]): row for row in after["processes"]}
-                if old.keys() != new.keys():
-                    raise SystemExit("Streaming process tree changed during measurement")
                 threads = []
-                for identity, previous in old.items():
+                for identity in new:
+                    previous = old.get(identity)
                     current = new[identity]
-                    if current["cpu_delay_total_ns"] < previous["cpu_delay_total_ns"]:
-                        raise SystemExit("Streaming TGID delay counter regressed")
-                    old_threads = {(t["tid"], t["start_ticks"]): t for t in previous["threads"]
-                                   if t["status"] == "live"}
+                    old_threads = {} if previous is None else {
+                        (t["tid"], t["start_ticks"]): t for t in previous["threads"]
+                        if t["status"] == "live"}
                     new_threads = {(t["tid"], t["start_ticks"]): t for t in current["threads"]
                                    if t["status"] == "live"}
                     for thread_id in sorted(old_threads.keys() | new_threads.keys()):
@@ -55,9 +60,10 @@ for role in ("qpxd", "nginx", "apache", "lighttpd"):
                                     raise SystemExit(f"Streaming thread counter regressed: {field}")
                                 row[field] = delta
                         threads.append(row)
-                delay = after["total_cpu_delay_ns"] - before["total_cpu_delay_ns"]
                 records.append({"role": role, "mode": mode, "round": round_number,
                                 "family": "origin" if family else "frontend",
+                                "appeared_processes": [row for identity, row in new.items()
+                                                       if identity not in old],
                                 "total_cpu_delay_ns": delay, "threads": threads})
                 print(f"Streaming {role} {mode} round={round_number} "
                       f"{records[-1]['family']} delay_us={delay / 1000:.3f}")
