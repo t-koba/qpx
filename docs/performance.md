@@ -2486,3 +2486,12 @@ all original thresholds and complete-transfer validation. Either failure
 remains nonzero and retains its separate logs and results. This diagnostic
 does not replace or alter any required CI lane; duration sensitivity must
 be established independently before a measurement change is considered.
+
+The cooperative HTTP/2 budget trial is rejected using the complete valid
+1 KiB/m=100 lane in `37457960356`, independently of its invalid direct
+backend 1 MiB sample. Same-runner qpx throughput changes from 17,621.97
+to 17,243.75 requests/s, CPU efficiency from 10,866.94 to 10,666.32,
+p99 from 9.929 to 10.348 ms, and maximum latency from 14.406 to 31.290 ms.
+Nginx p99 changes from 7.686 to 7.972 ms and maximum latency from
+11.231 to 11.470 ms. The extra parent budget charge is removed; stream
+reuse, admission and bounded driver completion bursts remain unchanged.

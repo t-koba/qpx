@@ -310,28 +310,16 @@ where
 async fn complete_reusable_h2_stream<'a>(
     mut stream: ReusableBoxFuture<'a, ()>,
 ) -> ReusableBoxFuture<'a, ()> {
-    poll_fn(|cx| poll_budgeted_h2_stream(stream.get_pin(), cx)).await;
+    stream.get_pin().await;
     stream
 }
 
 async fn poll_optional_h2_stream<T>(stream: &mut Option<ReusableBoxFuture<'_, T>>) -> T {
     poll_fn(|cx| match stream.as_mut() {
-        Some(stream) => poll_budgeted_h2_stream(stream.get_pin(), cx),
+        Some(stream) => stream.poll(cx),
         None => std::task::Poll::Pending,
     })
     .await
-}
-
-fn poll_budgeted_h2_stream<F: std::future::Future + ?Sized>(
-    stream: std::pin::Pin<&mut F>,
-    cx: &mut std::task::Context<'_>,
-) -> Poll<F::Output> {
-    let budget = std::task::ready!(tokio::task::coop::poll_proceed(cx));
-    let result = stream.poll(cx);
-    // A stream poll can parse, dispatch, or enqueue data before becoming pending.
-    // Charge the parent once per poll while retaining its inner I/O scheduling.
-    budget.made_progress();
-    result
 }
 
 async fn drive_h2_connection_now<I>(conn: &mut h2::server::Connection<I, Bytes>) -> Result<()>
