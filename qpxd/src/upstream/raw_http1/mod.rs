@@ -412,15 +412,15 @@ where
     drop(write_phase);
     // The reverse fast path wraps this entire operation in the route deadline.
     // Avoid registering a second timer for the same response-head wait.
-    let read_phase = crate::perf_diagnostics::phase_timer!("plain_origin_read");
-    let result = response::read_finalized_raw_response_head_with_interim_under_external_deadline(
+    let mut read_phase = crate::perf_diagnostics::phase_timer!("plain_origin_read");
+    let read = response::read_finalized_raw_response_head_with_interim_under_external_deadline(
         &mut stream,
         read_buf,
         request_method,
         request_version,
         proxy_name,
-    )
-    .await;
+    );
+    let result = read_phase.observe_future(read).await;
     drop(read_phase);
     let (interim, final_head, buffered_body) = match result {
         Ok(response) => response,

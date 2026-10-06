@@ -83,6 +83,20 @@ for before_path in sorted(root.glob("http2.qpxd.1024.m100.round-*.attempt-1.sche
                         "window_end_epoch_ns": upper, "clock_tolerance_ns": clock_tolerance_ns})
         records[-1]["migrated_samples"] = sum(fields["migrated"] for fields in selected)
         records[-1]["completion_threads"] = sorted({fields["thread"] for fields in selected})
+        if phase == "plain_origin_read":
+            for fields in selected:
+                for key in ("polls", "pending_polls", "active_poll_ns", "max_active_poll_ns"):
+                    if type(fields.get(key)) is not int or fields[key] < 0:
+                        raise SystemExit("Origin read diagnostics lack real Future poll evidence")
+                if (fields["polls"] < 1 or fields["pending_polls"] >= fields["polls"]
+                        or fields["active_poll_ns"] > fields["elapsed_ns"]
+                        or fields["max_active_poll_ns"] > fields["active_poll_ns"]):
+                    raise SystemExit("Origin read Future poll counters are inconsistent")
+            records[-1]["median_active_poll_ns"] = statistics.median(
+                fields["active_poll_ns"] for fields in selected)
+            records[-1]["median_outside_poll_ns"] = statistics.median(
+                fields["elapsed_ns"] - fields["active_poll_ns"] for fields in selected)
+            records[-1]["pending_polls"] = sum(fields["pending_polls"] for fields in selected)
 if len(windows) != 3 or {record["round"] for record in records} != {1, 2, 3}:
     raise SystemExit("HTTP/2 phase diagnostics require three timed rounds")
 windows.sort()
@@ -90,6 +104,12 @@ if any(a[1] >= b[0] for a, b in zip(windows, windows[1:])):
     raise SystemExit("HTTP/2 phase measurement windows overlap")
 output.write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
 for record in records:
+    poll_detail = ""
+    if record["phase"] == "plain_origin_read":
+        poll_detail = (f" active_poll_median_us={record['median_active_poll_ns'] / 1000:.3f}"
+                       f" outside_poll_median_us={record['median_outside_poll_ns'] / 1000:.3f}"
+                       f" pending_polls={record['pending_polls']}")
     print(f"HTTP/2 1024-byte m=100 round={record['round']} {record['phase']}: "
           f"samples={record['samples']} median_us={record['median_ns'] / 1000:.3f} "
-          f"p99_us={record['p99_ns'] / 1000:.3f} migrated_samples={record['migrated_samples']}")
+          f"p99_us={record['p99_ns'] / 1000:.3f} migrated_samples={record['migrated_samples']}"
+          f"{poll_detail}")
