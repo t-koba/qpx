@@ -24,11 +24,21 @@ if [ ! -r /sys/kernel/tracing/events/tcp/tcp_retransmit_skb/id ]; then
   echo "required kernel TCP retransmission tracepoint is unavailable" >&2
   exit 1
 fi
+if [ "${QPX_PERF_NATIVE_IO_TIMELINE:-0}" = 1 ]; then
+  if [ ! -r /sys/kernel/tracing/events/tcp/tcp_probe/id ]; then
+    echo "required kernel TCP receive tracepoint is unavailable" >&2
+    exit 1
+  fi
+  TCP_EVENTS="$TCP_EVENTS,tcp:tcp_probe"
+fi
 # Exercise the same kernel event recorder with a real socket before measurement.
 "$PERF_BIN" record -v --no-buildid --clockid CLOCK_MONOTONIC -e "$EVENTS,$TCP_EVENTS" \
-  -o "$PROFILE_DIR/probe.data" -- python3 - <<'PY_PROBE'
+  -o "$PROFILE_DIR/probe.data" -- python3 - "$PROFILE_DIR/probe.tcp.json" <<'PY_PROBE'
+import json
+from pathlib import Path
 import selectors
 import socket
+import sys
 listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 listener.bind(("127.0.0.1", 0))
 listener.listen(1)
@@ -53,6 +63,11 @@ try:
             received += chunk
         if received != expected:
             raise SystemExit("real socket probe response mismatch")
+        Path(sys.argv[1]).write_text(json.dumps({
+            "local": "%s:%d" % reader.getsockname(),
+            "peer": "%s:%d" % reader.getpeername(),
+            "payload_bytes": len(expected),
+        }) + "\n")
 finally:
     reader.close()
     writer.close()
@@ -63,6 +78,10 @@ PY_PROBE
 if ! rg -q 'syscalls:sys_exit_epoll_wait' "$PROFILE_DIR/probe.events.txt"; then
   echo "real socket probe produced no kernel wait events" >&2
   exit 1
+fi
+if [ "${QPX_PERF_NATIVE_IO_TIMELINE:-0}" = 1 ]; then
+  python3 "$ROOT_DIR/scripts/summarize-http2-io-timeline.py" --probe \
+    "$PROFILE_DIR/probe.tcp.json" "$PROFILE_DIR/probe.events.txt"
 fi
 python3 "$ROOT_DIR/scripts/lib/perf-tcp-sampler.py" --probe-only
 if [ "${1:-}" = --probe-only ]; then
@@ -97,10 +116,15 @@ cleanup_sampler() {
   fi
 }
 trap cleanup_sampler EXIT
-QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES=1048576 \
+tcp_record_args=(-e tcp:tcp_retransmit_skb --filter "$TCP_FILTER")
+if [ "${QPX_PERF_NATIVE_IO_TIMELINE:-0}" = 1 ]; then
+  tcp_record_args+=(-e tcp:tcp_probe --filter "$TCP_FILTER")
+fi
+QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 \
+  QPX_HTTP2_COMPARE_BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1048576}" \
   QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
   "$PERF_BIN" record --no-buildid --clockid CLOCK_MONOTONIC -a -m 8M -e "$EVENTS" \
-    -e tcp:tcp_retransmit_skb --filter "$TCP_FILTER" \
+    "${tcp_record_args[@]}" \
     -o "$PROFILE_DIR/measurement.data" -- bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" \
     || status=$?
 touch "$STOP_FILE"
@@ -156,4 +180,9 @@ root = Path(sys.argv[1])
     "event_stream": "measurement.events.txt",
 }, indent=2) + "\n")
 PY_MANIFEST
+if [ "${QPX_PERF_NATIVE_IO_TIMELINE:-0}" = 1 ]; then
+  python3 "$ROOT_DIR/scripts/summarize-http2-io-timeline.py" \
+    "$ROOT_DIR/target/perf/http2-compare-logs" "$PROFILE_DIR/measurement.events.txt" \
+    "$PROFILE_DIR/io-timeline.json"
+fi
 exit "$status"

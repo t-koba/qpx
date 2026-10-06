@@ -19,7 +19,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-scheduler, streaming-window, streaming-affinity, streaming-mtu, streaming-mtu-normal, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-worker-scaling, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-scheduler, streaming-window, streaming-affinity, streaming-mtu, streaming-mtu-normal, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-worker-scaling, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -68,9 +68,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid strace time valgrind wrk jq
       - name: verify native CPU profiler before build
-        if: inputs.category == 'proxy-native' || inputs.category == 'http1-native' || inputs.category == 'http2-native' || inputs.category == 'http2-client' || inputs.category == 'streaming-native' || inputs.category == 'webdav-native' || inputs.category == 'http2-events'
+        if: inputs.category == 'proxy-native' || inputs.category == 'http1-native' || inputs.category == 'http2-native' || inputs.category == 'http2-client' || inputs.category == 'streaming-native' || inputs.category == 'webdav-native' || (inputs.category == 'http2-events' || inputs.category == 'http2-io-timeline')
         run: |
-          if [ "${{ inputs.category }}" = http2-events ]; then
+          if [[ "${{ inputs.category }}" = http2-events || "${{ inputs.category }}" = http2-io-timeline ]]; then
             sudo apt-get install -y "linux-tools-$(uname -r)" ripgrep
           else
             sudo apt-get install -y linux-tools-generic ripgrep
@@ -84,7 +84,7 @@ jobs:
             exit 1
           fi
           dpkg-query -L "${perf_packages[@]}" > target/perf/native-perf-package-files.txt
-          if [ "${{ inputs.category }}" = http2-events ]; then
+          if [[ "${{ inputs.category }}" = http2-events || "${{ inputs.category }}" = http2-io-timeline ]]; then
             kernel_release="$(uname -r)"
             kernel_tools_dir="/usr/lib/linux-tools/$kernel_release"
             if ! rg -F -x -q "$kernel_tools_dir" target/perf/native-perf-package-files.txt; then
@@ -108,7 +108,7 @@ jobs:
           "$perf_binary" record -e cpu-clock -F 199 --clockid CLOCK_MONOTONIC \
             --call-graph dwarf,16384 -o target/perf/native-perf-probe.data \
             -- python3 -c $'import time\nend = time.monotonic() + 0.1\nwhile time.monotonic() < end:\n    pass'
-          if [ "${{ inputs.category }}" = http2-events ]; then
+          if [[ "${{ inputs.category }}" = http2-events || "${{ inputs.category }}" = http2-io-timeline ]]; then
             if ! mountpoint -q /sys/kernel/tracing; then
               sudo mount -t tracefs tracefs /sys/kernel/tracing
             fi
@@ -116,7 +116,12 @@ jobs:
             sudo chmod -R a+rX /sys/kernel/tracing/events/syscalls /sys/kernel/tracing/events/ftrace /sys/kernel/tracing/events/tcp
             sudo chmod a+r /sys/kernel/tracing/events/header_page /sys/kernel/tracing/events/header_event \
               /sys/kernel/tracing/printk_formats /sys/kernel/tracing/saved_cmdlines
-            QPX_NATIVE_PERF_BIN="$perf_binary" bash scripts/perf-diagnose-http2-events.sh --probe-only
+            if [ "${{ inputs.category }}" = http2-io-timeline ]; then
+              QPX_PERF_NATIVE_IO_TIMELINE=1 QPX_NATIVE_PERF_BIN="$perf_binary" \
+                bash scripts/perf-diagnose-http2-events.sh --probe-only
+            else
+              QPX_NATIVE_PERF_BIN="$perf_binary" bash scripts/perf-diagnose-http2-events.sh --probe-only
+            fi
           fi
           echo "QPX_NATIVE_PERF_BIN=$perf_binary" >> "$GITHUB_ENV"
       - name: build before measurement
@@ -320,6 +325,11 @@ jobs:
             streaming-native)
               QPX_NATIVE_WORKLOAD=streaming RUST_LOG=warn,qpx_perf_splice=debug python3 scripts/perf-evaluate.py "native streaming CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
               python3 scripts/summarize-splice-batches.py target/perf/streaming-compare-logs/qpxd.log target/perf/splice-counter-summary.json
+              ;;
+            http2-io-timeline)
+              RUST_LOG=warn,qpx_perf_phase=debug QPX_PERF_NATIVE_IO_TIMELINE=1 \
+                QPX_HTTP2_COMPARE_BODY_SIZES=1024 \
+                python3 scripts/perf-evaluate.py "HTTP/2 real TCP arrival and notification timeline" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-events.sh
               ;;
             http2-events)
               python3 scripts/perf-evaluate.py "HTTP/2 kernel wait events" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-events.sh

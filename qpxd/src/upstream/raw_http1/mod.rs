@@ -413,6 +413,12 @@ where
     // The reverse fast path wraps this entire operation in the route deadline.
     // Avoid registering a second timer for the same response-head wait.
     let mut read_phase = crate::perf_diagnostics::phase_timer!("plain_origin_read");
+    if let Err(error) = read_phase.record_native_tcp_identity(&stream) {
+        return Err(SerializedHttp1HeadSendError {
+            error: error.into(),
+            write_buf,
+        });
+    }
     let read = response::read_finalized_raw_response_head_with_interim_under_external_deadline(
         &mut stream,
         read_buf,

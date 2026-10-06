@@ -3,6 +3,11 @@ use std::time::Instant;
 use std::{sync::Arc, task::Wake};
 
 const SAMPLE_INTERVAL: u64 = 1024;
+static TCP_TIMELINE_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    std::env::var_os("QPX_PERF_NATIVE_IO_TIMELINE").as_deref() == Some(std::ffi::OsStr::new("1"))
+});
+#[cfg(target_os = "linux")]
+static IO_SAMPLE_IDS: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct PhaseTimer {
     phase: &'static str,
@@ -21,6 +26,8 @@ struct StartedPhase {
     before_notify_ns: u64,
     unnotified_wait_ns: u64,
     notified_resumptions: u64,
+    io_sample_id: u64,
+    first_notification_ns: u64,
 }
 
 struct RecordedWake {
@@ -71,9 +78,59 @@ impl PhaseTimer {
                     before_notify_ns: 0,
                     unnotified_wait_ns: 0,
                     notified_resumptions: 0,
+                    io_sample_id: 0,
+                    first_notification_ns: 0,
                 })
             }),
         }
+    }
+
+    pub(crate) fn record_native_tcp_identity<S: 'static>(
+        &mut self,
+        stream: &S,
+    ) -> std::io::Result<()> {
+        if !*TCP_TIMELINE_ENABLED || self.started.is_none() {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let socket = (stream as &dyn std::any::Any)
+                .downcast_ref::<tokio::net::TcpStream>()
+                .ok_or_else(|| std::io::Error::other("native I/O phase requires a TCP stream"))?;
+            self.record_tcp_identity(socket)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = stream;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "native I/O phase timeline requires Linux",
+            ))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn record_tcp_identity(&mut self, socket: &tokio::net::TcpStream) -> std::io::Result<()> {
+        let local = socket.local_addr()?;
+        let peer = socket.peer_addr()?;
+        let started = self
+            .started
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("native I/O identity requires a sampled phase"))?;
+        let monotonic_before_ns = native_monotonic_ns()?;
+        let phase_offset_ns = started.at.elapsed().as_nanos() as u64;
+        let monotonic_after_ns = native_monotonic_ns()?;
+        if monotonic_after_ns < monotonic_before_ns {
+            return Err(std::io::Error::other(
+                "native I/O monotonic clock regressed",
+            ));
+        }
+        started.io_sample_id = IO_SAMPLE_IDS.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(target: "qpx_perf_phase", phase = self.phase,
+            io_sample_id = started.io_sample_id, monotonic_before_ns, monotonic_after_ns,
+            phase_offset_ns,
+            local = %local, peer = %peer, "native TCP phase identity");
+        Ok(())
     }
 
     pub(crate) async fn observe_future<F: std::future::Future>(&mut self, future: F) -> F::Output {
@@ -87,6 +144,9 @@ impl PhaseTimer {
             if let Some((previous, pending_since)) = pending.take() {
                 let notified = previous.first_notify_ns.load(Ordering::Relaxed);
                 if notified > 0 && notified - 1 <= poll_started {
+                    if started.first_notification_ns == 0 {
+                        started.first_notification_ns = notified - 1;
+                    }
                     let notification = (notified - 1).clamp(pending_since, poll_started);
                     started.before_notify_ns += notification - pending_since;
                     started.notified_wait_ns += poll_started - notification;
@@ -118,6 +178,29 @@ impl PhaseTimer {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn native_monotonic_ns() -> std::io::Result<u64> {
+    let mut clock = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: CLOCK_MONOTONIC is a valid clock and clock points to writable
+    // initialized storage owned exclusively by this call.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut clock) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if !(0..1_000_000_000).contains(&clock.tv_nsec) {
+        return Err(std::io::Error::other(
+            "invalid native I/O monotonic nanoseconds",
+        ));
+    }
+    u64::try_from(clock.tv_sec)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+        .and_then(|seconds| seconds.checked_add(clock.tv_nsec as u64))
+        .ok_or_else(|| std::io::Error::other("invalid native I/O monotonic seconds"))
+}
+
 impl Drop for PhaseTimer {
     fn drop(&mut self) {
         if let Some(started) = self.started.as_ref() {
@@ -134,6 +217,8 @@ impl Drop for PhaseTimer {
                 before_notify_ns = started.before_notify_ns,
                 unnotified_wait_ns = started.unnotified_wait_ns,
                 notified_resumptions = started.notified_resumptions,
+                io_sample_id = started.io_sample_id,
+                first_notification_ns = started.first_notification_ns,
                 thread = ?completed_thread, "performance phase completed");
         }
     }
@@ -179,8 +264,12 @@ mod tests {
                 before_notify_ns: 0,
                 unnotified_wait_ns: 0,
                 notified_resumptions: 0,
+                io_sample_id: 0,
+                first_notification_ns: 0,
             })),
         };
+        #[cfg(target_os = "linux")]
+        timer.record_tcp_identity(&client).unwrap();
         let mut response = [0; 5];
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -195,6 +284,9 @@ mod tests {
         assert!(sample.pending_polls > 0);
         assert!(sample.notified_resumptions > 0);
         assert!(sample.before_notify_ns > 0);
+        assert!(sample.first_notification_ns > 0);
+        #[cfg(target_os = "linux")]
+        assert!(sample.io_sample_id > 0);
         assert!(
             sample.active_poll_ns
                 + sample.before_notify_ns
