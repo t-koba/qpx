@@ -19,15 +19,34 @@ impl PhaseTimer {
             started: sampled.then(Instant::now),
         }
     }
+
+    pub(crate) fn child(&self, phase: &'static str) -> Self {
+        Self {
+            phase,
+            started: self.started.map(|_| Instant::now()),
+        }
+    }
+
+    pub(crate) fn enter(&mut self, phase: &'static str) {
+        if let Some(started) = self.started {
+            let now = Instant::now();
+            self.record(now.duration_since(started).as_nanos() as u64);
+            self.started = Some(now);
+        }
+        self.phase = phase;
+    }
+
+    fn record(&self, elapsed_ns: u64) {
+        tracing::debug!(target: "qpx_perf_phase", phase = self.phase,
+            elapsed_ns, sample_interval = SAMPLE_INTERVAL,
+            thread = ?std::thread::current().id(), "performance phase completed");
+    }
 }
 
 impl Drop for PhaseTimer {
     fn drop(&mut self) {
         if let Some(started) = self.started {
-            tracing::debug!(target: "qpx_perf_phase", phase = self.phase,
-                elapsed_ns = started.elapsed().as_nanos() as u64,
-                sample_interval = SAMPLE_INTERVAL,
-                thread = ?std::thread::current().id(), "performance phase completed");
+            self.record(started.elapsed().as_nanos() as u64);
         }
     }
 }

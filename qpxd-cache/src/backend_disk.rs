@@ -897,12 +897,14 @@ impl DiskCacheBackend {
         metadata: Option<(String, Bytes)>,
         ttl_secs: u64,
     ) -> Result<()> {
-        let _phase = crate::perf_diagnostics::phase_timer!("cache_persistence");
+        let persistence_phase = crate::perf_diagnostics::phase_timer!("cache_persistence");
         if let CachedBody::Memory(value) = body {
             let write_path = path.to_path_buf();
             let value = value.clone();
             let (meta_key, meta_bytes) = metadata.unzip();
+            let mut writer_phase = persistence_phase.child("cache_writer_dispatch");
             let (write, value, written_meta) = tokio::task::spawn_blocking(move || {
+                writer_phase.enter("cache_writer_execution");
                 write_cached_object_sync(write_path.as_path(), value, meta_bytes, ttl_secs)
             })
             .await
@@ -1682,6 +1684,7 @@ fn write_cached_object_sync(
     metadata: Option<Bytes>,
     ttl_secs: u64,
 ) -> Result<(DiskCacheWrite, Bytes, Option<Bytes>)> {
+    let mut disk_phase = crate::perf_diagnostics::phase_timer!("cache_directory_validation");
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("disk cache path missing parent: {}", path.display()))?;
@@ -1695,7 +1698,9 @@ fn write_cached_object_sync(
     };
     let tmp_path = temp_path(parent);
     let result = (|| {
+        disk_phase.enter("cache_object_create");
         let mut file = create_secure_new_file(&tmp_path)?;
+        disk_phase.enter("cache_object_encode_write");
         let raw_header = serde_json::to_vec(&header)?;
         let header_length = u32::try_from(raw_header.len())
             .context("disk cache header exceeds framing limit")?
@@ -1737,6 +1742,7 @@ fn write_cached_object_sync(
         // rename without an fsync. This matches the behavior of other HTTP
         // caches and keeps write-heavy miss workloads off the disk sync path.
         let total_len = body_offset + header.body_len + header.trailer_len();
+        disk_phase.enter("cache_object_commit");
         drop(file);
         fs::rename(&tmp_path, path)
             .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;

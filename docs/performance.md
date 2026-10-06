@@ -2433,3 +2433,33 @@ The [Linux TCP documentation](https://man7.org/linux/man-pages/man7/tcp.7.html)
 describes flushing partial frames when corking is cleared and its kernel
 flush ceiling. Same-runner comparisons and three independent original-gate
 passes are required; packet coalescing alone is not an acceptance result.
+
+The first cork comparison, `37459734822` at `4e96630`, passes both
+WebDAV sizes and every original resource, quality and performance criterion.
+Against `bf163fc` on the same runner, 1 MiB qpx p99 changes from 20.157
+to 17.814 ms, throughput from 6,201.08 to 6,213.44 requests/s, and CPU
+efficiency from 5,698.18 to 5,527.87 requests/CPU second. Apache ratios
+are p99 0.695588 and CPU efficiency 2.123397. This is an 11.62% p99
+improvement with a 2.99% CPU efficiency decline, not a CPU optimization.
+Additional independent comparisons `37462561946` and `37462565670`
+reverse and then restore version order before an adoption decision.
+
+Native cache-miss diagnostic `37459811347` at `4e96630` contains 4,267
+actual CPU samples with no lost samples. Of these, 815 include the disk
+object writer: 288 include directory validation, 299 secure file creation,
+143 rename, and 59 vectored writes. Creation includes 67 path-stat and
+30 permission-change samples. These overlapping callchain categories are
+not additive. The writer diagnostic now separates blocking-pool dispatch
+from execution and directory validation, creation, encoding/write and commit.
+Child timers retain the parent's sampling decision; disabled diagnostics
+do not read the clock or allocate. These observations do not justify dropping
+path security checks or weakening persistence and capacity requirements.
+
+HTTP/2 revision comparison `37457960356` is invalid: the current direct
+backend 1 MiB/m=100 sample completes in 7.88 seconds, below the unchanged
+8-second minimum. Only two of three samples are valid. The cooperative
+budget trial therefore has no complete same-runner acceptance evidence.
+Mandatory `37459729264` also fails 1 KiB/m=100 p99 1.236887 versus
+1.1, maximum latency 2.934164 versus 1.1, and dominance 0.750275 versus
+0.95. Streaming in that run fails slow scheduler delay 3.777323 versus
+1.5; a separate passing revision comparison does not supersede that failure.
