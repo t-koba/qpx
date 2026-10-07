@@ -2783,6 +2783,13 @@ Each interval runs synchronously on the same writer thread; normal comparisons
 perform no additional clock reads. The report requires complete paired coverage
 for every interval and rejects clock failures. This separates filesystem waiting
 from CPU work before selecting a storage change; it does not establish acceptance.
+The `http2-native` diagnostic also records Linux process I/O counters
+(`rchar`, `wchar`, `syscr`, `syscw`) in the existing scheduler snapshots.
+Read failures, missing counters, identity changes and counter regression fail
+the measurement. Normal runs leave this observer disabled. Compare deltas only
+within each actual workload window; these process-wide counters do not identify
+a socket, include every network syscall, or establish a causal latency result.
+
 The bounded persistent-writer trial `37686721638` was rejected. Its pinned
 comparison against `9b8b31c` reduced cache-miss CPU efficiency by 1.99% and
 increased RSS by 21.93%; the 1 MiB cache-hit p99 rose by 19.26%. Per-object

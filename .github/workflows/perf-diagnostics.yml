@@ -355,7 +355,7 @@ jobs:
               exit "$failed"
               ;;
             http2-native)
-              QPX_NATIVE_WORKLOAD=http2 python3 scripts/perf-evaluate.py "native HTTP/2 CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
+              QPX_NATIVE_WORKLOAD=http2 QPX_PERF_PROCESS_IO_COUNTERS=1 python3 scripts/perf-evaluate.py "native HTTP/2 CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
               ;;
             http2-timeline-native)
               QPX_NATIVE_WORKLOAD=http2-timeline python3 scripts/perf-evaluate.py "correlated native HTTP/2 CPU and TCP diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh

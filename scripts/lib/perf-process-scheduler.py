@@ -145,6 +145,10 @@ def thread_snapshot(reader, task):
 
 
 def snapshot(root, *, thread_details=False):
+    io_option = os.environ.get('QPX_PERF_PROCESS_IO_COUNTERS', '0')
+    if io_option not in ('0', '1'):
+        raise RuntimeError('process I/O diagnostics must be 0 or 1')
+    io_counters = io_option == '1'
     if Path('/proc/sys/kernel/task_delayacct').read_text().strip() != '1':
         raise RuntimeError('kernel.task_delayacct must be enabled before process startup')
     reader = Taskstats()
@@ -170,6 +174,14 @@ def snapshot(root, *, thread_details=False):
                     # Completed threads remain included in the TGID aggregate.
                     continue
             record = reader.read(pid)
+            if io_counters:
+                fields = dict(line.split(':', 1) for line in (base / 'io').read_text().splitlines())
+                if not {'rchar', 'wchar', 'syscr', 'syscw'} <= fields.keys():
+                    raise RuntimeError(f'required process I/O counters are missing: {pid}')
+                record['io'] = {key: int(fields[key])
+                                for key in ('rchar', 'wchar', 'syscr', 'syscw')}
+                if any(value < 0 for value in record['io'].values()):
+                    raise RuntimeError(f'invalid process I/O counters: {pid}')
             if thread_details:
                 record['threads'] = [thread_snapshot(reader, task) for task in tasks]
             if identity(base) != before:
@@ -183,6 +195,7 @@ def snapshot(root, *, thread_details=False):
     finished_clock_end = time.monotonic_ns()
     return {'measurement': 'linux_taskstats_tgid_cpu_delay_ns_v1', 'root_pid': root,
             'thread_details': thread_details,
+            'io_counters': io_counters,
             'task_delayacct': True, 'started_monotonic_ns': started,
             'started_epoch_ns': started_epoch, 'started_clock_end_monotonic_ns': started_clock_end,
             'finished_monotonic_ns': finished, 'finished_epoch_ns': finished_epoch,
@@ -201,6 +214,8 @@ def delta(before_path, after_path):
         raise RuntimeError('scheduler snapshots do not describe the same measurement')
     previous = {row['pid']: row for row in before['processes']}
     current = {row['pid']: row for row in after['processes']}
+    if before.get('io_counters', False) != after.get('io_counters', False):
+        raise RuntimeError('process I/O snapshots have different diagnostic settings')
     if not previous.keys() <= current.keys():
         raise RuntimeError('measured process exited before its final scheduler snapshot')
     for pid, row in previous.items():
@@ -209,6 +224,10 @@ def delta(before_path, after_path):
                 or current[pid]['cpu_delay_total_ns'] < row['cpu_delay_total_ns']
                 or current[pid]['cpu_count'] < row['cpu_count']):
             raise RuntimeError(f'measured process identity or scheduler counter changed: {pid}')
+        if before.get('io_counters', False):
+            for key in ('rchar', 'wchar', 'syscr', 'syscw'):
+                if row['io'][key] < 0 or current[pid]['io'][key] < row['io'][key]:
+                    raise RuntimeError(f'measured process I/O counter regressed: {pid}/{key}')
     for record in (before, after):
         if record['total_cpu_delay_ns'] != sum(row['cpu_delay_total_ns'] for row in record['processes']):
             raise RuntimeError('scheduler snapshot total is inconsistent')
