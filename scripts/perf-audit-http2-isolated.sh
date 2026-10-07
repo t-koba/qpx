@@ -7,10 +7,8 @@ if [ "$(uname -s)" != Linux ]; then
   exit 1
 fi
 if [ "${1:-}" != --inside ]; then
-  if [ "$#" -ne 1 ] && { [ "$#" -ne 2 ] || { [ "$1" != --native ] && [ "$1" != --phases ]; }; } \
-    && { [ "$#" -ne 4 ] || [ "$1" != --phases ] || [ "$2" != --workers ]; } \
-    && { [ "$#" -ne 3 ] || [ "$1" != --workers ]; }; then
-    echo "usage: perf-audit-http2-isolated.sh [--native|--phases] [--workers 1|2|4] <comparison-jsonl>" >&2
+  if [ "$#" -ne 1 ] && { [ "$#" -ne 2 ] || { [ "$1" != --native ] && [ "$1" != --phases ]; }; }; then
+    echo "usage: perf-audit-http2-isolated.sh [--native|--phases] <comparison-jsonl>" >&2
     exit 2
   fi
   exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA,QPX_HTTP2_COMPARE_LOG_DIR,QPXD_REAL_BIN,QPX_NATIVE_PROFILE_DIR,QPX_NATIVE_PERF_BIN,QPX_NATIVE_WRAPPER_SOURCE,QPX_PERF_NATIVE_IO_TIMELINE,QPX_PERF_MEMORY_MAP_DIAGNOSTICS,QPX_PERF_PROCESS_IO_COUNTERS \
@@ -25,17 +23,6 @@ case "${1:-}" in
   --native) native=1; shift ;;
   --phases) native=1; phases=1; shift ;;
 esac
-if [ "${1:-}" = --workers ]; then
-  if [ "$#" -ne 3 ] || { [ "$native" = 1 ] && [ "$phases" != 1 ]; }; then
-    echo "Worker scaling requires normal measurement or phase diagnostics and one output path" >&2
-    exit 2
-  fi
-  case "$2" in
-    1|2|4) export QPX_HTTP2_COMPARE_SERVER_WORKERS="$2" ;;
-    *) echo "Worker scaling requires 1, 2, or 4 server workers" >&2; exit 2 ;;
-  esac
-  shift 2
-fi
 if [ "$phases" = 1 ]; then
   export RUST_LOG=warn,qpx_perf_phase=debug
   export QPX_PERF_SCHEDULER_THREADS=1
@@ -63,7 +50,7 @@ trap 'rm -rf "$work_dir"' EXIT
 ip link set dev lo mtu 1500 up
 ip -json link show dev lo > "$work_dir/interfaces.json"
 h2load_binary="$(command -v h2load)"
-read -r client_cpus server_cpus < <(python3 - "$work_dir" "$output.environment.json" "$namespace" "$host_namespace" "$h2load_binary" "$native" "${QPX_HTTP2_COMPARE_SERVER_WORKERS:-}" <<'PY'
+read -r client_cpus server_cpus < <(python3 - "$work_dir" "$output.environment.json" "$namespace" "$host_namespace" "$h2load_binary" "$native" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -85,8 +72,8 @@ manifest = {
     "client_cpus": client, "server_cpus": server,
     "calibration_min_duration_ms": 8000,
     "diagnostic_instrumentation": sys.argv[6] == "1",
-    "diagnostic_server_workers": int(sys.argv[7]) if sys.argv[7] else None,
-    "configuration_diagnostic": bool(sys.argv[7]),
+    "diagnostic_server_workers": None,
+    "configuration_diagnostic": False,
     "replaces_required_gate": False,
 }
 Path(sys.argv[2]).write_text(json.dumps(manifest, indent=2) + "\n")
@@ -141,20 +128,4 @@ for proxy in ('qpxd', 'nginx'):
                 count += 1
 print(f'HTTP/2 memory map windows validated: {count}')
 PY_MAPS
-fi
-if [ -n "${QPX_HTTP2_COMPARE_SERVER_WORKERS:-}" ]; then
-  python3 - "$output" "$QPX_HTTP2_COMPARE_SERVER_WORKERS" "$phases" <<'PY_WORKERS'
-import json
-from pathlib import Path
-import sys
-
-records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
-dimensions = {(1024, 100)} if sys.argv[3] == '1' else {(size, streams) for size in (1024, 1048576) for streams in (1, 100)}
-expected = {(role, size, streams) for role in ('qpxd', 'nginx', 'direct-backend') for size, streams in dimensions}
-actual = {(row['proxy'], row['body_bytes'], row['max_concurrent_streams']) for row in records}
-if len(records) != len(expected) or actual != expected:
-    raise SystemExit("Worker scaling diagnostics lack the complete matched comparison")
-if any(row['server_workers'] != int(sys.argv[2]) for row in records):
-    raise SystemExit("Worker scaling diagnostics did not apply the requested worker count")
-PY_WORKERS
 fi

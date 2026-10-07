@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-scheduler, streaming-revision, proxy-threads, proxy-phases, cache-writer-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, feature-large-native, http1-native, http2-native, http2-timeline-native, http2-phases, http2-worker-scaling, http2-worker-normal, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-scheduler, streaming-revision, proxy-threads, proxy-phases, cache-writer-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, feature-large-native, http1-native, http2-native, http2-timeline-native, http2-phases, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -330,29 +330,6 @@ jobs:
               python3 scripts/summarize-http2-phases.py target/perf/http2-compare-logs target/perf/http2-phase-summary.json
               python3 scripts/summarize-perf-phases.py target/perf/http2-compare-logs target/perf/http2-poll-summary.json
               jq -e 'any(.[]; .phase == "h2_connection_poll" and .observed_future_samples > 0 and .max_active_poll_ns.max > 0)' target/perf/http2-poll-summary.json
-              ;;
-            http2-worker-scaling)
-              for workers in 4 1 2; do
-                evidence="target/perf/http2-worker-scaling/workers-${workers}"
-                mkdir -p "$evidence"
-                QPX_HTTP2_COMPARE_LOG_DIR="$PWD/$evidence/logs" \
-                  python3 scripts/perf-evaluate.py "HTTP/2 ${workers}-worker phase diagnostics" -- \
-                  bash scripts/perf-audit-http2-isolated.sh --phases --workers "$workers" "$evidence/comparison.jsonl"
-                python3 scripts/summarize-http2-phases.py "$evidence/logs" "$evidence/phases.json"
-              done
-              ;;
-            http2-worker-normal)
-              evidence="target/perf/http2-worker-normal/workers-1"
-              mkdir -p "$evidence"
-              QPX_PERF_MEMORY_MAP_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_LOG_DIR="$PWD/$evidence/logs" \
-                python3 scripts/perf-evaluate.py "uninstrumented single-worker HTTP/2 comparison" -- \
-                bash scripts/perf-audit-http2-isolated.sh --workers 1 "$evidence/comparison.jsonl"
-              failed=0
-              python3 scripts/perf-evaluate.py "single-worker HTTP/2 measurement quality" -- \
-                bash scripts/check-http2-performance.sh "$evidence/comparison.jsonl" perf/http2-performance-objectives.json measurement-quality || failed=1
-              python3 scripts/perf-evaluate.py "single-worker HTTP/2 existing objectives" -- \
-                bash scripts/check-http2-performance.sh "$evidence/comparison.jsonl" || failed=1
-              exit "$failed"
               ;;
             http2-native)
               QPX_NATIVE_WORKLOAD=http2 QPX_PERF_PROCESS_IO_COUNTERS=1 python3 scripts/perf-evaluate.py "native HTTP/2 CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh

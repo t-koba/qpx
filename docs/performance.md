@@ -2705,14 +2705,13 @@ This is correlation: a longer origin wait can itself permit migration.
 It does not prove that adding connection runtimes or pinning tasks will
 improve the unchanged full workload, resource and shutdown requirements.
 
-The `http2-worker-normal` diagnostic measures the single-worker configuration
-without phase logging, profiler capture or thread sampling, using all four
-required body-size/multiplexing combinations and three alternating samples.
-Both references and qpx use one worker on the unchanged server CPU partition.
-The isolated environment records the explicit worker configuration and its
-non-replacement status. Complete role/dimension coverage and exact applied
-worker counts are verified before the original finite measurement-quality
-and acceptance checks run. No required measurement or objective is changed.
+The worker-count experiment is closed. The completed normal single-worker
+measurements fail RSS, FD and maximum-latency objectives (see the retained
+results below), so no worker-count change is adopted. Retire the
+`http2-worker-scaling` and `http2-worker-normal` workflow categories and the
+isolated runner's `--workers` argument. Retain the measured evidence and
+rejection rationale; normal balanced CPU partitioning, native causal profiles
+and all required acceptance categories remain in use.
 
 Changing the diagnostic workflow catalog no longer starts an unrelated default
 streaming diagnostic automatically. Explicit dispatch and the existing sampler,
