@@ -2783,11 +2783,10 @@ Each interval runs synchronously on the same writer thread; normal comparisons
 perform no additional clock reads. The report requires complete paired coverage
 for every interval and rejects clock failures. This separates filesystem waiting
 from CPU work before selecting a storage change; it does not establish acceptance.
-The persistent-writer comparison candidate retains the same filesystem worker
-count and atomic publication. A bounded shared queue feeds those workers,
-removing per-object blocking-task dispatch. Accepted work survives caller
-cancellation and drains before backend shutdown; write and worker failures
-remain errors. Independent pinned comparisons must justify adoption.
+The bounded persistent-writer trial `37686721638` was rejected. Its pinned
+comparison against `9b8b31c` reduced cache-miss CPU efficiency by 1.99% and
+increased RSS by 21.93%; the 1 MiB cache-hit p99 rose by 19.26%. Per-object
+blocking dispatch remains in production, and the trial worker module was removed.
 
 Normal single-worker HTTP/2 diagnostic `37568710346` completes all four
 size/stream configurations without native instrumentation. The 1 KiB,
