@@ -3505,19 +3505,18 @@ missing objects remain idempotent. All 110 cache library tests pass with
 real filesystem fixtures and a real TCP cache server. This is a correctness
 fix, not a performance optimization or an acceptance measurement.
 
-A separate HTTP/2 trial requests a cooperative handoff at connection-loop
-boundaries after 2 ms, following an explicit driver flush. Its deadline
-starts afresh on every parent poll, so suspended I/O consumes no budget.
-Stream admission limits, completion storage, flow control, idle timeout,
-cancellation and protocol features remain intact. Unlike the rejected
-fixed 16-poll quota, this targets the measured 4.220 ms median long-poll
-CPU residency without forcing a handoff after a short ready burst.
-All 621 library tests, all-feature/all-target Clippy and structure checks
-pass. Adoption requires a normal same-runner comparison against the
-preceding instrumentation-cleanup commit and the unchanged acceptance
-objectives; this is not an established improvement yet. One nested driver
-or stream poll can overrun that interval, so the comparison must establish
-the actual tail rather than treating the deadline as a hard CPU bound.
+Reject the separate 2 ms HTTP/2 loop-boundary handoff trial after run
+37618831819. Its full comparison is invalid because one direct-backend
+1 MiB window lasts 13.33 s against the unchanged 12.5 s maximum. All three
+small 100-stream windows remain valid for both qpxd and nginx. There,
+qpxd throughput and total-CPU efficiency improve by 5.2% and 4.5%, but
+p99 only falls from 5.389 to 5.300 ms and maximum latency rises from
+8.609 to 9.286 ms. The unchanged p99 goal still fails at 1.444 against
+nginx, and maximum per-window queue delay still fails at 2.391 against
+the 2.0 limit. The trial does not resolve the measured tail and adds a
+clock/atomic state machine. Remove it instead of keeping unproven budget
+machinery or repeating a different quota. The incomplete full comparison
+does not count as an independent acceptance pass.
 
 The 6a75c8a CalDAV compliance run reports an unknown get-by-URL result
 and a truncated-XML error. The identical client passes 30 consecutive
