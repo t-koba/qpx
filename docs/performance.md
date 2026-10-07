@@ -3443,3 +3443,12 @@ reset first fails a regression requiring a downstream body error. Abort the
 body on read failure and retain the error in the log, while preserving clean
 FIN as successful EOF. This corrects silent truncation classification; it
 does not establish that the unrecorded CI failure was a connection reset.
+
+The same IPC transport audit finds that shared-memory ring corruption and
+doorbell wait failures also become successful response EOF. A real mapped
+file regression corrupts the published message length and fails before the
+fix. The shared-memory response reader now aborts downstream on read or
+wait failure and rejects reuse, while explicit ring EOF remains reusable.
+All 621 library tests pass; real qpxd/qpxf CGI end-to-end tests pass in both
+TCP and shared-memory modes. This fixes error classification without
+claiming to resolve the unrecorded earlier CGI response mismatch.

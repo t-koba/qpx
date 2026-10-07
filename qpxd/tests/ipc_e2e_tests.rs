@@ -39,7 +39,7 @@ mod e2e {
         script_path
     }
 
-    fn write_qpxd_config(path: &std::path::Path, qpxd_listen: &str, qpxf_addr: &str) {
+    fn write_qpxd_config(path: &std::path::Path, qpxd_listen: &str, qpxf_addr: &str, mode: &str) {
         let config = format!(
             r#"edges:
 - kind: reverse
@@ -52,7 +52,7 @@ mod e2e {
     target:
       type: ipc
       endpoint: '{qpxf_addr}'
-      mode: tcp
+      mode: {mode}
       timeout_ms: 5000"#,
         );
         std::fs::write(path, config).unwrap();
@@ -76,10 +76,19 @@ handlers:
 
     #[tokio::test]
     async fn test_qpxd_to_qpxf_e2e_cgi() {
+        run_qpxd_to_qpxf_e2e_cgi("tcp").await;
+    }
+
+    #[tokio::test]
+    async fn test_qpxd_to_qpxf_e2e_cgi_shm() {
+        run_qpxd_to_qpxf_e2e_cgi("shm").await;
+    }
+
+    async fn run_qpxd_to_qpxf_e2e_cgi(mode: &str) {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("trace")
             .try_init();
-        let tmp = tempdir("qpxd-qpxf-e2e");
+        let tmp = tempdir(&format!("qpxd-qpxf-e2e-{mode}"));
         let _script = create_cgi_script(&tmp);
 
         // Start qpxf server in-process (library), bound to a random local port.
@@ -134,7 +143,7 @@ handlers:
 
         let qpxd_listen = format!("127.0.0.1:{qpxd_port}");
         let qpxd_cfg_path = tmp.join("qpxd.yaml");
-        write_qpxd_config(&qpxd_cfg_path, &qpxd_listen, &qpxf_addr_str);
+        write_qpxd_config(&qpxd_cfg_path, &qpxd_listen, &qpxf_addr_str, mode);
 
         let qpxd_bin = std::path::Path::new(env!("CARGO_BIN_EXE_qpxd"));
         let mut qpxd_child = tokio::process::Command::new(qpxd_bin)

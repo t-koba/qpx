@@ -3,12 +3,12 @@ use super::meta::build_ipc_meta;
 use super::pool::{PooledIpcConnection, checkin_stream, checkout_stream};
 use super::shm::{
     IPC_DOWNSTREAM_ABORT_POLL_INTERVAL, IpcShmPair, SHM_RING_SIZE, abort_shm_request_writer,
-    downstream_body_closed, maybe_cleanup_ipc_shm_dir, read_shm_response_meta_after_body_writer,
-    take_or_finish_req_ring, write_request_body_to_shm,
+    downstream_body_closed, maybe_cleanup_ipc_shm_dir, read_shm_response_body,
+    read_shm_response_meta_after_body_writer, take_or_finish_req_ring, write_request_body_to_shm,
 };
 use super::{ClientConnInfo, IpcUpstream};
 use anyhow::{Result, anyhow};
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use hyper::{Request, Response, StatusCode};
 use qpx_core::config::IpcMode;
 use qpx_core::ipc::meta::IpcResponseMeta;
@@ -187,68 +187,9 @@ async fn proxy_ipc_backend(
             .ok_or_else(|| anyhow!("IPC SHM request body writer missing"))?;
         let ipc_pool = ipc_pool.clone();
         tokio::spawn(async move {
-            let mut reusable = true;
-            let mut seen = 0usize;
-            let mut data = Vec::new();
-            loop {
-                match res_ring.try_pop_into(&mut data) {
-                    Ok(true) => {
-                        if data.is_empty() {
-                            break;
-                        }
-                        seen = match seen.checked_add(data.len()) {
-                            Some(seen) => seen,
-                            None => {
-                                sender.abort();
-                                reusable = false;
-                                break;
-                            }
-                        };
-                        if let Some(limit) = max_response_bytes
-                            && seen > limit
-                        {
-                            sender.abort();
-                            reusable = false;
-                            break;
-                        }
-                        let cap = data.capacity();
-                        let chunk =
-                            Bytes::from(std::mem::replace(&mut data, Vec::with_capacity(cap)));
-                        if sender.send_data(chunk).await.is_err() {
-                            reusable = false;
-                            break;
-                        }
-                    }
-                    Ok(false) => {
-                        tokio::select! {
-                            wait = timeout(timeout_dur, res_ring.wait_for_data()) => {
-                                match wait {
-                                    Ok(Ok(())) => {}
-                                    Ok(Err(_)) => {
-                                        reusable = false;
-                                        break;
-                                    }
-                                    Err(_) => {
-                                        sender.abort();
-                                        reusable = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            _ = tokio::time::sleep(IPC_DOWNSTREAM_ABORT_POLL_INTERVAL) => {
-                                if downstream_body_closed(&mut sender).await {
-                                    reusable = false;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        reusable = false;
-                        break;
-                    }
-                }
-            }
+            let reusable =
+                read_shm_response_body(&mut sender, &mut res_ring, max_response_bytes, timeout_dur)
+                    .await;
             if reusable {
                 match take_or_finish_req_ring(pending_req_ring, &mut body_writer).await {
                     Ok(req_ring) => {

@@ -119,3 +119,54 @@ async fn downstream_body_closed_reports_dropped_receiver() {
     assert!(downstream_body_closed(&mut sender).await);
     assert!(sender.is_closed());
 }
+
+#[tokio::test]
+#[cfg(unix)]
+async fn shm_response_corruption_aborts_the_downstream_body() {
+    use super::shm::read_shm_response_body;
+    use std::os::unix::fs::FileExt;
+
+    for corrupt in [false, true] {
+        let path = temp_shm_path("ipc-response-corruption");
+        let mut ring = ShmRingBuffer::create_or_open(&path, 64 * 1024).unwrap();
+        assert!(ring.try_push(b"response").unwrap());
+        if corrupt {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .read(true)
+                .open(&path)
+                .unwrap();
+            let mut header_length = [0; 4];
+            file.read_exact_at(&mut header_length, 44).unwrap();
+            file.write_all_at(
+                &u32::MAX.to_le_bytes(),
+                u32::from_le_bytes(header_length).into(),
+            )
+            .unwrap();
+        } else {
+            assert!(ring.try_push(&[]).unwrap());
+        }
+        let (mut sender, mut body) = Body::channel_with_capacity(16);
+        let reusable =
+            read_shm_response_body(&mut sender, &mut ring, None, Duration::from_secs(1)).await;
+        drop(sender);
+        let chunk = timeout(Duration::from_secs(1), body.data()).await.unwrap();
+        ring.unlink_doorbells().unwrap();
+        drop(ring);
+        remove_ipc_shm_path(&path);
+        if corrupt {
+            assert!(!reusable, "corrupted response must not be reused");
+            assert!(
+                matches!(chunk, Some(Err(_))),
+                "corrupted response must remain a body error"
+            );
+        } else {
+            assert!(reusable, "complete response must remain reusable");
+            assert_eq!(chunk.unwrap().unwrap(), Bytes::from_static(b"response"));
+            assert!(
+                body.data().await.is_none(),
+                "explicit ring EOF must remain successful"
+            );
+        }
+    }
+}

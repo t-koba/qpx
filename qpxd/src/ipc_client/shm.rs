@@ -136,6 +136,72 @@ pub(super) async fn take_or_finish_req_ring(
     }
 }
 
+pub(super) async fn read_shm_response_body(
+    sender: &mut qpx_http::body::Sender,
+    res_ring: &mut ShmRingBuffer,
+    max_response_bytes: Option<usize>,
+    timeout_dur: Duration,
+) -> bool {
+    let mut seen = 0usize;
+    let mut data = Vec::new();
+    loop {
+        match res_ring.try_pop_into(&mut data) {
+            Ok(true) => {
+                if data.is_empty() {
+                    return true;
+                }
+                seen = match seen.checked_add(data.len()) {
+                    Some(seen) => seen,
+                    None => {
+                        sender.abort();
+                        return false;
+                    }
+                };
+                if let Some(limit) = max_response_bytes
+                    && seen > limit
+                {
+                    sender.abort();
+                    return false;
+                }
+                let cap = data.capacity();
+                let chunk =
+                    bytes::Bytes::from(std::mem::replace(&mut data, Vec::with_capacity(cap)));
+                if sender.send_data(chunk).await.is_err() {
+                    return false;
+                }
+            }
+            Ok(false) => {
+                tokio::select! {
+                    wait = timeout(timeout_dur, res_ring.wait_for_data()) => {
+                        match wait {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                tracing::warn!(error = ?error, "IPC SHM response body wait failed");
+                                sender.abort();
+                                return false;
+                            }
+                            Err(_) => {
+                                sender.abort();
+                                return false;
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep(IPC_DOWNSTREAM_ABORT_POLL_INTERVAL) => {
+                        if downstream_body_closed(sender).await {
+                            return false;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = ?error, "IPC SHM response body read failed");
+                sender.abort();
+                return false;
+            }
+        }
+    }
+}
+
 pub(super) async fn downstream_body_closed(sender: &mut qpx_http::body::Sender) -> bool {
     sender.is_closed()
 }
