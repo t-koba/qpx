@@ -288,7 +288,7 @@ impl DiskCacheBackend {
         let writer_slots = std::thread::available_parallelism()
             .context("failed to determine disk cache writer parallelism")?
             .get()
-            .div_ceil(2);
+            .div_ceil(4);
         let backend = Self {
             root,
             max_bytes,

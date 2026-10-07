@@ -3151,3 +3151,29 @@ the actual checked-out SHA to measurement and aggregation. This permits the
 third LTO pair to retain its original product revisions while subsequent
 workflow fixes remain independently identifiable. Only revision comparisons
 accept this input; it cannot be combined with retained profile analysis.
+
+Half-budget cache comparison `37587098455` validates every required lane
+against `7a0b001`. Unique-miss throughput changes from 21,490.136815 to
+21,939.497679 requests/s, CPU efficiency from 9,805.812897 to 9,684.845776,
+p99 from 44.393 to 25.093 ms, and scheduler delay from 145.680215 to
+133.992082 microseconds/request. Delay ratio 1.809990 still exceeds the
+unchanged 1.0 goal. A reverse-order independent comparison retains these
+same product revisions. Prepare a separate quarter-CPU writer budget,
+rounded up, giving one admitted writer on a four-CPU runner. The existing
+native writer CPU/scheduler evidence and measured residual wait motivate
+this admission trial; it is not established performance acceptance.
+All 106 real-filesystem/HTTP cache library tests, all-feature/all-target
+Clippy with warnings denied, formatting and spelling pass. Preserve permit
+ownership through cancellation, writeback limits, secure publication and
+all filesystem error checks. Compare this candidate against `5d53760`
+separately; retain only independently demonstrated full-goal improvement.
+
+HTTP/2 driver comparison `37586340451`, current-baseline order, passes
+baseline and current measurement quality in all four lanes. Removing the
+non-final explicit drive does not show a CPU improvement: efficiencies
+fall by 1.621%, 0.567%, 1.212% and 2.500% for small/single, small/multiplex,
+large/single and large/multiplex respectively. Large/multiplex scheduler
+delay rises from 567.714139 to 672.223148 microseconds/request. Small/
+multiplex p99 ratio 1.273715 misses 1.1 and aggregate dominance 1.377921
+misses 1.5. Keep the change provisional while an independent reversed-order
+pair distinguishes ordering variation from a product regression.
