@@ -216,11 +216,12 @@ impl FileSystemDataStore {
         });
     }
 
-    fn read_file_backed_with_metadata(
+    fn read_resource_with_metadata(
         &self,
         resource: &ResourceId,
+        file_backed: bool,
     ) -> Result<Option<ResourceRead>> {
-        let _phase = crate::perf_diagnostics::phase_timer!("webdav_file_read");
+        let _phase = file_backed.then(|| crate::perf_diagnostics::phase_timer!("webdav_file_read"));
         let (path, metadata) = match self.resolve_existing(resource) {
             Ok(resolved) => resolved,
             Err(error)
@@ -250,7 +251,8 @@ impl FileSystemDataStore {
                 && entry.modified == modified
                 && entry.file_identity == current_file_identity
                 && (entry.read.body.len() as u64 == metadata.len()
-                    || (entry.read.body.is_empty()
+                    || (file_backed
+                        && entry.read.body.is_empty()
                         && entry.read.file.is_some()
                         && entry.file_identity.is_some()))
         }) {
@@ -273,8 +275,8 @@ impl FileSystemDataStore {
             return Err(anyhow!("WebDAV resource changed while it was opened"));
         }
         let mut body = Bytes::new();
-        if metadata.len() <= READ_CACHE_MAX_OBJECT_BYTES as u64 {
-            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        if !file_backed || metadata.len() <= READ_CACHE_MAX_OBJECT_BYTES as u64 {
+            let mut bytes = Vec::with_capacity(metadata.len().min(usize::MAX as u64) as usize);
             file.read_to_end(&mut bytes)?;
             if bytes.len() as u64 != metadata.len() {
                 return Err(anyhow!("WebDAV resource length changed while it was read"));
@@ -284,7 +286,7 @@ impl FileSystemDataStore {
         let completed_metadata = file.metadata()?;
         if completed_metadata.len() != metadata.len() || completed_metadata.modified()? != modified
         {
-            return Err(anyhow!("WebDAV resource changed while it was opened"));
+            return Err(anyhow!("WebDAV resource changed while it was read"));
         }
         let resource_metadata = Self::resource_metadata(&metadata)?.0;
         let etag = http::HeaderValue::from_str(&resource_metadata.etag)?;
@@ -370,77 +372,7 @@ impl WebDavDataStore for FileSystemDataStore {
     }
 
     fn read_with_metadata(&self, resource: &ResourceId) -> Result<Option<ResourceRead>> {
-        let (path, metadata) = match self.resolve_existing(resource) {
-            Ok(resolved) => resolved,
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        let modified = metadata.modified()?;
-        if !metadata.is_file() {
-            let resource_metadata = Self::resource_metadata(&metadata)?.0;
-            let etag = http::HeaderValue::from_str(&resource_metadata.etag)?;
-            return Ok(Some(ResourceRead {
-                metadata: Arc::new(resource_metadata),
-                etag,
-                body: Bytes::new(),
-                file: None,
-            }));
-        }
-        let snapshot = self.read_cache.load();
-        let current_file_identity = file_identity(&metadata);
-        if let Some(entry) = snapshot.entries.iter().find(|entry| {
-            entry.resource.is_same_resource(resource)
-                && entry.content_length == metadata.len()
-                && entry.modified == modified
-                && entry.file_identity == current_file_identity
-                && entry.read.body.len() as u64 == metadata.len()
-        }) {
-            return Ok(Some(entry.read.clone()));
-        }
-        drop(snapshot);
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(&path)?;
-        let opened_metadata = file.metadata()?;
-        if !opened_metadata.is_file()
-            || opened_metadata.len() != metadata.len()
-            || opened_metadata.modified()? != modified
-            || file_identity(&opened_metadata) != current_file_identity
-        {
-            return Err(anyhow!("WebDAV resource changed while it was opened"));
-        }
-        let mut bytes = Vec::with_capacity(metadata.len().min(usize::MAX as u64) as usize);
-        file.read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != metadata.len() {
-            return Err(anyhow!("WebDAV resource length changed while it was read"));
-        }
-        let completed_metadata = file.metadata()?;
-        if completed_metadata.len() != metadata.len() || completed_metadata.modified()? != modified
-        {
-            return Err(anyhow!("WebDAV resource changed while it was read"));
-        }
-        let body = Bytes::from(bytes);
-        let resource_metadata = Self::resource_metadata(&metadata)?.0;
-        let etag = http::HeaderValue::from_str(&resource_metadata.etag)?;
-        let read = ResourceRead {
-            metadata: Arc::new(resource_metadata),
-            etag,
-            body,
-            file: Some(Arc::new(file)),
-        };
-        self.cache_read(resource, &metadata, modified, &read);
-        Ok(Some(read))
+        self.read_resource_with_metadata(resource, false)
     }
 
     fn read_with_metadata_and_content_type_file_backed(
@@ -448,7 +380,7 @@ impl WebDavDataStore for FileSystemDataStore {
         resource: &ResourceId,
         content_type: Option<String>,
     ) -> Result<Option<ResourceRead>> {
-        let Some(mut read) = self.read_file_backed_with_metadata(resource)? else {
+        let Some(mut read) = self.read_resource_with_metadata(resource, true)? else {
             return Ok(None);
         };
         if read.metadata.content_type != content_type {
@@ -682,6 +614,20 @@ mod tests {
         assert!(Arc::ptr_eq(&first_file, &cached_file));
         #[cfg(not(unix))]
         drop(cached_file);
+
+        let materialized = store
+            .read_with_metadata(&file)
+            .unwrap()
+            .expect("materialized resource after file-backed read");
+        assert_eq!(materialized.body.as_ref(), content.as_slice());
+        let backed_after_materialized = store
+            .read_with_metadata_and_content_type_file_backed(&file, None)
+            .unwrap()
+            .expect("file-backed resource after materialized read");
+        assert_eq!(
+            backed_after_materialized.metadata.content_length,
+            content.len() as u64
+        );
 
         assert!(!store.put(&file, &content, None).unwrap());
         let replaced = store
