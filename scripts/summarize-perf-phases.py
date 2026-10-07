@@ -11,6 +11,7 @@ root, output = map(Path, sys.argv[1:])
 samples = collections.defaultdict(list)
 poll_samples = collections.defaultdict(list)
 socket_samples = collections.defaultdict(list)
+sync_cpu_samples = collections.defaultdict(list)
 for path in sorted(root.rglob("*.log")):
     for line in path.open(errors="strict"):
         try:
@@ -23,6 +24,13 @@ for path in sorted(root.rglob("*.log")):
         message = fields.get("message")
         if message == "performance phase CPU sampling failed":
             raise SystemExit(f"Thread CPU measurement failed in {path}: {fields.get('error')}")
+        if message == "performance phase synchronous CPU sampled":
+            wall, cpu = fields["elapsed_ns"], fields["cpu_ns"]
+            if not all(type(value) is int and value >= 0 for value in (wall, cpu)) or cpu > wall:
+                raise SystemExit(f"invalid synchronous phase CPU measurement in {path}")
+            key = (str(path.relative_to(root)), fields["phase"], fields["sample_interval"])
+            sync_cpu_samples[key].append((wall, cpu, wall - cpu))
+            continue
         if message == "file socket queue sampling failed":
             raise SystemExit(f"TCP send queue measurement failed in {path}: {fields.get('error')}")
         if message == "file socket queue sampled":
@@ -94,6 +102,18 @@ for (source, phase, interval), values in sorted(samples.items()):
         "p99_ns": values[min(len(values) - 1, (99 * len(values)) // 100)],
         "max_ns": values[-1],
     }
+    synchronous = sync_cpu_samples[(source, phase, interval)]
+    if phase == "cache_writer_execution" and len(synchronous) != len(values):
+        raise SystemExit(f"cache writer lacks complete synchronous CPU coverage in {source}")
+    if synchronous:
+        record["observed_sync_cpu_samples"] = len(synchronous)
+        for index, metric in enumerate(("sync_wall_ns", "sync_cpu_ns", "sync_non_cpu_ns")):
+            measurements = sorted(value[index] for value in synchronous)
+            record[metric] = {
+                "median": statistics.median(measurements),
+                "p99": measurements[min(len(measurements) - 1, (99 * len(measurements)) // 100)],
+                "max": measurements[-1],
+            }
     observed = poll_samples[(source, phase, interval)]
     if observed:
         record["observed_future_samples"] = len(observed)
@@ -119,6 +139,11 @@ output.with_name("socket-queue-summary.json").write_text(json.dumps(socket_recor
 for record in records:
     print(f"{record['source']} {record['phase']}: samples={record['samples']} "
           f"median_us={record['median_ns'] / 1000:.3f} p99_us={record['p99_ns'] / 1000:.3f}")
+    if record.get("observed_sync_cpu_samples"):
+        print(f"{record['source']} {record['phase']}: "
+              f"sync_cpu_median_us={record['sync_cpu_ns']['median'] / 1000:.3f} "
+              f"sync_cpu_p99_us={record['sync_cpu_ns']['p99'] / 1000:.3f} "
+              f"sync_non_cpu_p99_us={record['sync_non_cpu_ns']['p99'] / 1000:.3f}")
     if record.get("observed_future_samples"):
         print(f"{record['source']} {record['phase']}: "
               f"active_poll_median_us={record['active_poll_ns']['median'] / 1000:.3f} "

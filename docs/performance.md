@@ -2702,3 +2702,17 @@ Changing the diagnostic workflow catalog no longer starts an unrelated default
 streaming diagnostic automatically. Explicit dispatch and the existing sampler,
 streaming and configuration-watch path triggers remain. All eight required CI
 categories still run independently of this diagnostic trigger adjustment.
+
+
+Bounded-writer phase diagnostic `37567343959` at `a85c0d7` records 128
+sampled writes. Admission median is 0.251 microseconds and p99 2,137.988;
+execution median is 142.022 and p99 5,917.674; dispatch p99 is 1,378.348.
+These wall durations alone do not attribute long writer execution to CPU
+work versus OS/filesystem suspension, and differ from earlier runner windows.
+Sampled Linux writers now bracket the actual synchronous filesystem closure
+with the thread CPU clock. Each pair remains on one thread and records CPU,
+wall and their non-CPU difference; async admission/dispatch/resumption cannot
+mix CPU clocks. Normal comparisons make no additional clock reads. Clock
+failure, inconsistent counters or incomplete sampled-writer coverage fail the
+phase summarizer explicitly. This adds diagnosis, not another writer-limit
+or filesystem-security optimization.

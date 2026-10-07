@@ -993,7 +993,7 @@ impl DiskCacheBackend {
             // while this filesystem operation is still executing.
             let _permit = permit;
             phase.enter("cache_writer_execution");
-            let result = write();
+            let result = phase.measure_sync(write);
             let resume_phase = phase.child("cache_writer_resume");
             drop(phase);
             (result, resume_phase)
