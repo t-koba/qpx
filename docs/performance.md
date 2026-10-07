@@ -2947,3 +2947,36 @@ diagnostic evidence, not successful mapping validation. Preserve the
 flag explicitly and require actual qpx/nginx maps for all 24 measured
 windows before evaluating the diagnostic. No missing map is accepted
 as zero RSS and no measurement condition is changed.
+
+Directory-fanout comparison `37577110575` rejects `ac8dc44` against
+`d3926aa`. All five miss samples per revision are valid. Qpx miss throughput
+falls from 12,324.579433 to 10,373.353981 requests/s, CPU efficiency from
+5,402.462380 to 4,731.604737 requests/CPU second, and scheduler delay rises
+from 317.201482 to 421.149247 microseconds/request. P99 improves from
+18.010 to 15.961 ms, but the throughput and CPU regressions reject the trial.
+Current reference ratios are throughput 0.837761, CPU efficiency 0.766841
+and delay 3.608466, failing the stronger 1.0 goals and the existing 2.6
+delay gate. Restore the original two-plus-two directory layout; do not
+repeat fanout reduction without new causal evidence.
+
+The earlier native miss profile `37570638116` has 470 header-lookup stacks,
+391 including openat and 37 including error-context string formatting.
+The missing-object open path constructs a formatted anyhow error before
+callers inspect its I/O kind and turn NotFound into a normal cache miss.
+Return explicit `Ok(None)` at the actual NotFound boundary instead. Keep
+path context and errors for every other open failure, and keep all header,
+schema, size, expiration and symlink validation. This removes measured
+missing-object error construction; it does not establish an acceptance gain.
+Do not replace real reads with an authoritative-index shortcut: the real
+read-error regression intentionally installs invalid objects after indexing
+and requires their errors to remain observable.
+
+Normal streaming job `112653283392` at `de27a12` completes every sample
+but fails slow delay ratio 7.096905 against 1.5. Raw qpx frontend delays are
+275.432, 0 and 325.386 microseconds across three rounds; its backend delays
+are 0, 4.658 and 0. Nginx frontend delays are 23.524, 40.670 and 0, and
+backend delays are 0, 5.179 and 0. The maximum-delay aggregate is 325.386
+versus 45.849 microseconds/transfer. This failing window places the excess
+in the frontend, unlike the separate successful thread diagnostic's backend
+spike; neither result licenses removing backend accounting or changing the
+unchanged delay objective.

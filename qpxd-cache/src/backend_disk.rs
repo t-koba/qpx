@@ -345,10 +345,8 @@ impl DiskCacheBackend {
             + 8;
         let mut path = PathBuf::with_capacity(capacity);
         path.push(&self.root);
-        // Bound filesystem fanout to 4,096 leaf directories while preserving
-        // the complete content identity in the filename.
-        path.push(&digest[0..1]);
-        path.push(&digest[1..3]);
+        path.push(&digest[0..2]);
+        path.push(&digest[2..4]);
         path.push(&digest);
         path.set_extension(DISK_CACHE_FILE_EXT);
         path
@@ -371,7 +369,7 @@ impl DiskCacheBackend {
                 continue;
             };
             match read_disk_cache_header_sync(&path) {
-                Ok(read) => {
+                Ok(Some(read)) => {
                     if read.header.expires_at_ms <= now_ms() {
                         remove_cache_file_sync(&path)?;
                         continue;
@@ -391,7 +389,7 @@ impl DiskCacheBackend {
                         },
                     );
                 }
-                Err(error) if cache_file_not_found(&error) => continue,
+                Ok(None) => continue,
                 Err(error) => return Err(error),
             }
         }
@@ -420,10 +418,8 @@ impl DiskCacheBackend {
 
     async fn open_valid(&self, path: PathBuf) -> Result<Option<DiskCacheRead>> {
         self.ensure_indexed().await?;
-        let read = match read_disk_cache_header_sync(&path) {
-            Ok(read) => read,
-            Err(error) if cache_file_not_found(&error) => return Ok(None),
-            Err(error) => return Err(error),
+        let Some(read) = read_disk_cache_header_sync(&path)? else {
+            return Ok(None);
         };
         if read.header.expires_at_ms <= now_ms() {
             self.delete_path(&path).await?;
@@ -1556,8 +1552,8 @@ fn cache_file_id_from_path(root: &Path, path: &Path) -> Option<DiskCacheFileId> 
     if encoded.len() != 64 {
         return None;
     }
-    if first.as_bytes() != &encoded.as_bytes()[0..1]
-        || second.as_bytes() != &encoded.as_bytes()[1..3]
+    if first.as_bytes() != &encoded.as_bytes()[0..2]
+        || second.as_bytes() != &encoded.as_bytes()[2..4]
     {
         return None;
     }
@@ -1617,13 +1613,7 @@ fn collect_cache_files_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn cache_file_not_found(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<std::io::Error>()
-        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-}
-
-fn read_disk_cache_header_sync(path: &Path) -> Result<DiskCacheRead> {
+fn read_disk_cache_header_sync(path: &Path) -> Result<Option<DiskCacheRead>> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -1635,9 +1625,16 @@ fn read_disk_cache_header_sync(path: &Path) -> Result<DiskCacheRead> {
     }
     #[cfg(not(unix))]
     reject_symlink(path)?;
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("failed to open disk cache object {}", path.display()))?;
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        // Absence is an expected storage result, not a formatted error that
+        // callers must allocate and then inspect to rediscover a cache miss.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to open disk cache object {}", path.display()));
+        }
+    };
     let meta = file.metadata()?;
     let mut magic = [0; DISK_CACHE_MAGIC.len()];
     file.read_exact(&mut magic)?;
@@ -1666,20 +1663,18 @@ fn read_disk_cache_header_sync(path: &Path) -> Result<DiskCacheRead> {
             header.meta_len
         ));
     }
-    Ok(DiskCacheRead {
+    Ok(Some(DiskCacheRead {
         file,
         path: path.to_path_buf(),
         header,
         body_offset,
         total_len: meta.len(),
-    })
+    }))
 }
 
 fn read_metadata_trailer_sync(path: &Path) -> Result<Option<Bytes>> {
-    let read = match read_disk_cache_header_sync(path) {
-        Ok(read) => read,
-        Err(error) if cache_file_not_found(&error) => return Ok(None),
-        Err(error) => return Err(error),
+    let Some(read) = read_disk_cache_header_sync(path)? else {
+        return Ok(None);
     };
     if read.header.meta_len == 0 {
         return Ok(None);
@@ -2662,20 +2657,20 @@ mod tests {
 
         let encoded = cache_file_id_hex(id);
         let noncanonical_fanout = dir
-            .join(&encoded[0..2])
-            .join(&encoded[2..4])
+            .join(&encoded[0..1])
+            .join(&encoded[1..3])
             .join(format!("{encoded}.{DISK_CACHE_FILE_EXT}"));
         assert_eq!(cache_file_id_from_path(&dir, &noncanonical_fanout), None);
         for suffix in ["QPXC", "qpxc.extra", "qpxc.", "qpxc.qpxc"] {
             let invalid = dir
-                .join(&encoded[0..1])
-                .join(&encoded[1..3])
+                .join(&encoded[0..2])
+                .join(&encoded[2..4])
                 .join(format!("{encoded}.{suffix}"));
             assert_eq!(cache_file_id_from_path(&dir, &invalid), None);
         }
         let misplaced = dir
             .join("ff")
-            .join(&encoded[1..3])
+            .join(&encoded[2..4])
             .join(format!("{encoded}.{DISK_CACHE_FILE_EXT}"));
         assert_eq!(cache_file_id_from_path(&dir, &misplaced), None);
         let non_ascii = format!("{}x", "€".repeat(21));
@@ -2992,7 +2987,9 @@ mod tests {
             .await
             .expect("put original");
         let path = backend.path_for("ns", "key");
-        let mut read = read_disk_cache_header_sync(&path).expect("validated original file");
+        let mut read = read_disk_cache_header_sync(&path)
+            .expect("validated original file")
+            .expect("original file exists");
         write_cached_bytes_sync(&path, Bytes::from_static(b"replaced"), 60)
             .expect("replace object atomically");
         let mut snapshot = Vec::new();
