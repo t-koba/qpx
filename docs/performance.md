@@ -3457,7 +3457,8 @@ bounded Tokio frame queue and one-shot error channel, without retry delays,
 extra tasks, unbounded buffering or suppression of producer errors. Remove
 the unused dependency channel feature. Verify concurrent final-frame drain,
 buffered-data-before-abort ordering, trailers and real TCP/CGI smoke tests;
-the next Linux CI must still confirm that the original failure is resolved.
+Linux CI `37667223134` confirms that the original real IPC smoke and the
+concurrent final-frame regression pass.
 
 Inspection separately finds a definite IPC transport error-propagation bug:
 the TCP body reader handles a failed read like successful EOF. A real socket
@@ -3640,3 +3641,12 @@ per CPU second and scheduler queue delay rose from 276.95 to 966.73 us per
 request. Production transport ownership remains in the connection dispatcher.
 The real TCP regression verifies response flushing with two pending handlers,
 reset error propagation and cancellation of both handlers.
+
+Same-runner cache comparison 37663911538 does not justify adopting the direct
+HTTP attempt timeout trial. All 68 requested role/lane windows were valid and
+cache-miss writeback was verified. Cache-miss CPU efficiency rose 5.90%, but the
+reference rose 5.00%; relative CPU efficiency improved only 0.86%. Candidate
+scheduler delay rose from 156.84 to 158.90 us per request, and its reference
+ratio worsened from 1.290329 to 1.339421 against the unchanged 1.0 objective.
+Restore the previous attempt constructor instead of retaining an unproven
+optimization. The independently verified shared-body completion fix remains.
