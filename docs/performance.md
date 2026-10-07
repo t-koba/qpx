@@ -3296,3 +3296,54 @@ actual workload windows, including second-round callchains and memory-copy
 callers. Existing native ownership, shutdown, exact ELF preservation and
 lost-sample checks remain mandatory. This diagnostic does not replace any
 required comparison or change normal workload conditions or objectives.
+
+
+HTTP/1 dependency CPU diagnostic `37595769573` at `6da93fe` succeeds with
+one owned profile and zero lost samples. All three qpx/nginx 1 MiB rounds
+retain successful real-client exits and identity-checked role snapshots.
+Qpx's actual server PID 9920 uses about 4.1 CPU seconds per 10-second
+workload; wrapper 9909 and profiler 9913 contribute only about 0.017 seconds
+and remain separate. Median client CPU is 19.737982 seconds for qpx versus
+8.854103 for nginx, and backend worker CPU is about 4.090211 versus
+0.767318 seconds. Nginx frontend CPU is about 9.992058 seconds. Thus the
+instrumented qpx workload drives both real client threads close to full
+CPU use, whereas its frontend uses about 0.41 cores. Aggregate qpx
+throughput 1,612.658578 requests/s and CPU efficiency 3,924.819277 exceed
+nginx's 497.162079 and 499.199199, but qpx's diagnostic scheduler delay
+94.309407 microseconds/request exceeds nginx's 0.382759. These are marked
+instrumented measurements, not independent normal-goal passes. Role CPU
+alone does not establish scheduler pressure at each wakeup; monitoring
+processes and time-varying demand are not covered by their sum. Do not
+change workload conditions, affinity or acceptance ratios based on this
+observation. Use actual callsite/scheduling evidence before a product trial.
+
+Anchored-publication comparison `37595197462` fixes `c7f7375` against
+`5d8d65a`, both using quarter-CPU writer admission. Both products pass all
+five measurement-quality evaluations. Miss throughput improves from
+30,525.141242 to 34,225.446573 requests/s, CPU efficiency from
+12,273.196721 to 13,361.742868, p99 from 4.382 to 3.705 ms, and scheduler
+delay from 63.262012 to 54.589572 microseconds/request. The current strong
+miss CPU ratio 0.900171 remains below 1.0 and delay ratio 1.010005 exceeds
+1.0. Feature-rich 1 MiB throughput is essentially unchanged, while its
+delay improves from 156.393716 to 144.034101 but still exceeds nginx's
+129.445750. Feature-rich 1 KiB throughput ratio 0.986883 also misses 1.0.
+This is evidence of reduced miss-path overhead, not a full-goal pass.
+
+Feature-rich 1 MiB native diagnostic `37597299627` at `fb85795` succeeds
+with one owned profile, three actual qpx/nginx rounds and zero lost samples.
+The second-round callchains contain 996 stacks, no sendfile or splice,
+632 socket poll-write stacks and 625 TCP-send stacks. Kernel page clearing
+and copying from user buffers account for 201 and 129 leaf samples,
+respectively. Metadata and access logging are minor in this workload.
+Inspection identifies the generic raw HTTP/1 listener's single-frame
+optimization consuming the memory fallback without checking its existing
+file extent. Unlike the transport's equivalent selection, it discards the
+extent and forces copied socket writes on feature-rich cache hits.
+
+Preserve file extents in generic response selection and pass them through
+the existing framing-validated file sender. Compression negotiation,
+guards, headers, logging and body limits still execute unchanged. A real
+file regression first fails on the former selection, then verifies extent
+preservation and exact offset/length payload transfer over real TCP. All
+620 qpxd library tests pass after the fix. Require fresh native evidence
+and independent normal comparisons before claiming a performance gain.
