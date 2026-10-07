@@ -186,7 +186,7 @@ perf_proc_python() {
   if [ "$(id -u)" -eq 0 ]; then
     python3 "$@"
   else
-    sudo -n python3 "$@"
+    sudo -n env QPX_PERF_PROCESS_IO_COUNTERS="${QPX_PERF_PROCESS_IO_COUNTERS:-0}" python3 "$@"
   fi
 }
 

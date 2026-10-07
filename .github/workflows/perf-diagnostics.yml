@@ -356,6 +356,13 @@ jobs:
               ;;
             http2-native)
               QPX_NATIVE_WORKLOAD=http2 QPX_PERF_PROCESS_IO_COUNTERS=1 python3 scripts/perf-evaluate.py "native HTTP/2 CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
+              python3 - <<'IO_COUNTERS'
+          import json
+          from pathlib import Path
+          paths = list(Path('target/perf/http2-compare-logs').glob('*scheduler-*.json'))
+          if not paths or any(json.loads(path.read_text()).get('io_counters') is not True for path in paths):
+              raise SystemExit('HTTP/2 diagnostic process I/O counters are missing')
+          IO_COUNTERS
               ;;
             http2-timeline-native)
               QPX_NATIVE_WORKLOAD=http2-timeline python3 scripts/perf-evaluate.py "correlated native HTTP/2 CPU and TCP diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
