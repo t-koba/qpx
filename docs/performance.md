@@ -3481,6 +3481,20 @@ connects long parent execution to owned CPU callchains; the normal observer
 remains disabled. Remove this interval instrumentation after the callsite
 investigation, rather than retaining another permanent timing layer.
 
+Native HTTP/2 diagnostic `37614001737` completes with one owned profile,
+68 decoded workload windows and zero lost samples. Match the small
+100-stream second-round callchains to Linux TID and monotonic poll bounds:
+1,640 of 1,758 CPU samples lie in polls longer than 1 ms, and 1,636 lie
+in intervals whose thread CPU accounts for at least half their wall time.
+The matching workload window plus one-second margins contains 2,132 long
+polls with median wall/thread CPU of 4.826/4.220 ms and maxima of
+10.560/7.541 ms. Reverse dispatch appears in 755 stacks, stream service
+in 653, and diagnostic code in 53; application mutex contention is absent.
+This identifies prolonged connection execution rather than one dominant
+application function or a purely descheduled parent. It does not prove a
+performance remedy. Remove the temporary interval logging and native
+override now that the retained callchains have been correlated.
+
 The filesystem audit finds a deletion invariant missing from the disk
 cache: replacing an object parent with a symlink makes public deletion
 remove the object outside the cache, although cold reads already reject

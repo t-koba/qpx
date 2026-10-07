@@ -106,14 +106,9 @@ APACHE_WRAPPER
     log_directory="$ROOT_DIR/target/perf/proxy-compare-logs"
     ;;
   http2)
-    QPX_PERF_NATIVE_IO_TIMELINE=1 QPXD_BIN="$wrapper" bash "$ROOT_DIR/scripts/perf-audit-http2-isolated.sh" \
+    QPXD_BIN="$wrapper" bash "$ROOT_DIR/scripts/perf-audit-http2-isolated.sh" \
       --native "$ROOT_DIR/target/perf/perf-audit-http2-compare.jsonl"
     log_directory="$ROOT_DIR/target/perf/http2-compare-logs"
-    if ! rg -q 'native H2 long poll interval' "$log_directory/qpxd-h2.log" \
-      || rg -q 'native H2 poll interval clock failed|performance phase CPU sampling failed' "$log_directory/qpxd-h2.log"; then
-      echo "Native HTTP/2 long poll CPU intervals are missing or invalid" >&2
-      exit 1
-    fi
     ;;
   streaming)
     export QPX_NATIVE_BACKEND_REAL_BIN

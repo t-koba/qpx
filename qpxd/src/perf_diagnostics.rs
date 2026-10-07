@@ -188,15 +188,11 @@ impl PhaseTimer {
             let mut observed = std::task::Context::from_waker(&waker);
             let at = Instant::now();
             #[cfg(target_os = "linux")]
-            let monotonic_before = started.poll_cpu.as_ref().map(|_| native_monotonic_ns());
-            #[cfg(target_os = "linux")]
             let cpu_before = started.poll_cpu.as_ref().map(|_| native_thread_cpu_ns());
             let result = future.as_mut().poll(&mut observed);
             #[cfg(target_os = "linux")]
             let cpu_after = started.poll_cpu.as_ref().map(|_| native_thread_cpu_ns());
             let elapsed = at.elapsed().as_nanos() as u64;
-            #[cfg(target_os = "linux")]
-            let monotonic_after = started.poll_cpu.as_ref().map(|_| native_monotonic_ns());
             #[cfg(target_os = "linux")]
             if let (Some(before), Some(after), Some(cpu)) =
                 (cpu_before, cpu_after, started.poll_cpu.as_mut())
@@ -213,25 +209,6 @@ impl PhaseTimer {
                         cpu.polls += 1;
                         cpu.active_ns += measured;
                         cpu.max_ns = cpu.max_ns.max(measured);
-                        if elapsed >= 1_000_000 {
-                            match monotonic_before.zip(monotonic_after) {
-                                Some((Ok(begin), Ok(end))) if end >= begin => {
-                                    // SAFETY: gettid has no arguments and returns this Linux thread.
-                                    let native_tid = unsafe { libc::gettid() };
-                                    tracing::debug!(target: "qpx_perf_phase", native_tid,
-                                        monotonic_begin_ns = begin, monotonic_end_ns = end,
-                                        wall_ns = elapsed, cpu_ns = measured,
-                                        poll_index = started.polls,
-                                        thread = ?std::thread::current().id(),
-                                        "native H2 long poll interval");
-                                }
-                                clocks => {
-                                    cpu.errors += 1;
-                                    tracing::error!(target: "qpx_perf_phase", clocks = ?clocks,
-                                        "native H2 poll interval clock failed");
-                                }
-                            }
-                        }
                         if elapsed >= started.max_active_poll_ns {
                             cpu.cpu_at_max_wall_ns = measured;
                         }
