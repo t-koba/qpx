@@ -1,6 +1,6 @@
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
-use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
+use crate::http3::codec::h1_headers_to_http;
 use crate::policy_context::{AuditRecord, emit_audit_log};
 use anyhow::Result;
 use bytes::Bytes;
@@ -144,7 +144,7 @@ pub(super) fn finalize_qpx_connect_head_response(
         "QPX HTTP/3 extended CONNECT response",
     )?;
     let mut out = http::Response::builder().status(status).body(())?;
-    *out.headers_mut() = http_headers_to_h1(downstream.headers())?;
+    *out.headers_mut() = downstream.headers().clone();
     Ok(out)
 }
 

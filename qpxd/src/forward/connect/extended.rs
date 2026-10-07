@@ -1,4 +1,4 @@
-use crate::http::codec::h2::{h1_headers_to_http, http_headers_to_h1, tuned_h2_client_builder};
+use crate::http::codec::h2::{h1_headers_to_http, tuned_h2_client_builder};
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use ::http::{
     HeaderMap as Http1HeaderMap, Method, Request, Request as Http1Request,
@@ -188,7 +188,7 @@ pub(super) fn normalize_h2_upstream_connect_headers(
     *request.version_mut() = http::Version::HTTP_2;
     *request.headers_mut() = headers.clone();
     prepare_request_with_headers_in_place(&mut request, proxy_name, None, false);
-    http_headers_to_h1(request.headers())
+    Ok(request.into_parts().0.headers)
 }
 
 fn parse_h2_extended_connect_upstream(
@@ -439,13 +439,6 @@ async fn finish_h2_extended_connect_upload(
         warn!(error = ?err, "dropping forbidden HTTP/2 extended CONNECT request trailers");
         return send_empty_h2_end_stream(upstream_send, sender);
     }
-    let trailers = match http_headers_to_h1(&trailers) {
-        Ok(trailers) => trailers,
-        Err(err) => {
-            warn!(error = ?err, "invalid HTTP/2 extended CONNECT request trailers");
-            return send_empty_h2_end_stream(upstream_send, sender);
-        }
-    };
     if upstream_send.send_trailers(trailers).is_err() {
         abort_downstream(sender);
         return false;

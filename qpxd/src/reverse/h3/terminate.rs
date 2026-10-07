@@ -1,7 +1,6 @@
 use super::super::{
     ReloadableReverse, record_reverse_connection_filter_block, reverse_quic_connection_filter_match,
 };
-use crate::http3::codec::http_headers_to_h1;
 use crate::http3::listener::{
     H3ConnInfo, H3ConnectKind, H3HttpResponse, H3Limits, H3RequestHandler,
 };
@@ -388,7 +387,7 @@ impl H3RequestHandler for ReverseH3Handler {
                         .ok()?;
                         let mut response =
                             ::http::Response::builder().status(status).body(()).ok()?;
-                        *response.headers_mut() = http_headers_to_h1(&head.headers).ok()?;
+                        *response.headers_mut() = head.headers;
                         Some(response)
                     })
                     .collect(),

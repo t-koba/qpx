@@ -1,5 +1,5 @@
 use super::headers::h1_headers_into_http;
-pub(crate) use super::headers::{h1_headers_to_http, http_headers_to_h1};
+pub(crate) use super::headers::h1_headers_to_http;
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::upstream::raw_http1::{InterimResponseHead, RawHttp1ResponseHead};
 use ::http::{Request as Http1Request, Response as Http1Response};
@@ -123,7 +123,7 @@ pub(crate) async fn send_h2_response_with_interim(
         qpx_http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
         let mut informational = Http1Response::new(());
         *informational.status_mut() = status;
-        *informational.headers_mut() = http_headers_to_h1(&headers)?;
+        *informational.headers_mut() = headers;
         respond.send_informational(informational)?;
     }
 

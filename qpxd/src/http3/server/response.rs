@@ -237,8 +237,6 @@ where
     let sent_trailers = trailers.is_some();
     if let Some(mut trailers) = trailers {
         qpx_http::protocol::semantics::sanitize_response_trailers(&mut trailers);
-        let trailers = crate::http3::codec::http_headers_to_h1(&trailers)
-            .map_err(H3ResponseSendError::after_trailers_started)?;
         timeout_or_deadline(
             req_stream.send_trailers(trailers),
             body_send_timeout,

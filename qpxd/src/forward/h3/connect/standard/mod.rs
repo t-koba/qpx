@@ -1,7 +1,6 @@
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::connect_established_response as connect_established;
 use crate::http::protocol::l7::finalize_response_with_headers;
-use crate::http3::codec::http_headers_to_h1;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response};
 use crate::policy_context::{AuditRecord, emit_audit_log};
@@ -88,7 +87,7 @@ pub(super) fn build_h3_connect_success_response(
         "HTTP/3 CONNECT response",
     )?;
     let mut out = ::http::Response::builder().status(status).body(())?;
-    *out.headers_mut() = http_headers_to_h1(response.headers())?;
+    *out.headers_mut() = response.headers().clone();
     Ok(out)
 }
 

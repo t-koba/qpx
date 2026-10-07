@@ -1,7 +1,7 @@
 use super::OriginEndpoint;
 use crate::http::codec::h2::parse_declared_content_length;
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
-use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
+use crate::http3::codec::h1_headers_to_http;
 use crate::http3::quic::{
     build_h3_client_config, enforce_h3_connection_trust, extract_h3_connection_certificate_info,
 };
@@ -444,7 +444,7 @@ fn prepare_h3_origin_request(
         .method(parts.method.as_str())
         .uri(parts.uri.to_string())
         .body(())?;
-    *out.headers_mut() = http_headers_to_h1(&parts.headers)?;
+    *out.headers_mut() = parts.headers;
     Ok((out, body, declared_length))
 }
 
@@ -489,12 +489,9 @@ async fn stream_h3_request_body(
     if let Some(trailers) = trailers {
         validate_request_trailers(&trailers)
             .map_err(|err| anyhow!("invalid HTTP/3 request trailers: {err:?}"))?;
-        timeout(
-            timeout_dur,
-            req_stream.send_trailers(http_headers_to_h1(&trailers)?),
-        )
-        .await
-        .map_err(|_| anyhow!("HTTP/3 upstream request trailers send timed out"))??;
+        timeout(timeout_dur, req_stream.send_trailers(trailers))
+            .await
+            .map_err(|_| anyhow!("HTTP/3 upstream request trailers send timed out"))??;
     }
     timeout(timeout_dur, req_stream.finish())
         .await

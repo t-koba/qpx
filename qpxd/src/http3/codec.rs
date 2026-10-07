@@ -1,4 +1,4 @@
-pub(crate) use crate::http::codec::headers::{h1_headers_to_http, http_headers_to_h1};
+pub(crate) use crate::http::codec::headers::h1_headers_to_http;
 use ::http::{Request as Http1Request, Response as Http1Response};
 use anyhow::{Result, anyhow};
 use hyper::{Request, Uri};
@@ -85,7 +85,7 @@ pub(crate) fn prepare_h3_response_head(
     };
 
     let mut out = Http1Response::builder().status(status).body(())?;
-    *out.headers_mut() = http_headers_to_h1(&headers)?;
+    *out.headers_mut() = headers;
     Ok(PreparedH3ResponseHead {
         head: out,
         body_allowed: !no_body,

@@ -232,8 +232,7 @@ impl H3RequestHandler for ForwardH3Handler {
                             .ok()?;
                             let mut response =
                                 ::http::Response::builder().status(status).body(()).ok()?;
-                            *response.headers_mut() =
-                                crate::http3::codec::http_headers_to_h1(&head.headers).ok()?;
+                            *response.headers_mut() = head.headers;
                             Some(response)
                         })
                         .collect();

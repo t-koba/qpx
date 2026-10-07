@@ -1,7 +1,7 @@
 use crate::http::protocol::l7::{
     finalize_response_with_headers, prepare_request_with_headers_in_place,
 };
-use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
+use crate::http3::codec::h1_headers_to_http;
 use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::h3_buf_to_bytes;
 use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
@@ -69,7 +69,7 @@ pub(in crate::forward) fn normalize_h3_upstream_connect_headers(
     *request.version_mut() = http::Version::HTTP_3;
     *request.headers_mut() = headers.clone();
     prepare_request_with_headers_in_place(&mut request, proxy_name, None, false);
-    http_headers_to_h1(request.headers())
+    Ok(request.into_parts().0.headers)
 }
 
 pub(in crate::forward) async fn recv_upstream_h3_response_with_interim(
@@ -259,7 +259,7 @@ pub(super) fn finalize_h3_connect_head_response(
         "HTTP/3 extended CONNECT response",
     )?;
     let mut out = ::http::Response::builder().status(status).body(())?;
-    *out.headers_mut() = http_headers_to_h1(downstream.headers())?;
+    *out.headers_mut() = downstream.headers().clone();
     Ok(out)
 }
 

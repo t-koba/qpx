@@ -7,7 +7,6 @@ use crate::http::protocol::common::connect_established_response as connect_estab
 use crate::http::protocol::l7::{
     finalize_response_with_headers, prepare_request_with_headers_in_place,
 };
-use crate::http3::codec::http_headers_to_h1;
 use anyhow::{Result, anyhow};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
@@ -71,7 +70,7 @@ pub(super) fn build_qpx_connect_success_head(
         "QPX HTTP/3 extended CONNECT response",
     )?;
     let mut out = http::Response::builder().status(status).body(())?;
-    *out.headers_mut() = http_headers_to_h1(response.headers())?;
+    *out.headers_mut() = response.headers().clone();
     Ok(out)
 }
 

@@ -1,6 +1,5 @@
 use crate::http::codec::h2::{
-    h1_headers_to_http, h2_response_to_hyper_with_inflight, http_headers_to_h1,
-    parse_declared_content_length,
+    h1_headers_to_http, h2_response_to_hyper_with_inflight, parse_declared_content_length,
 };
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::upstream::raw_http1::Http1ResponseWithInterim;
@@ -74,7 +73,7 @@ pub(super) async fn send_h2_request_with_sender(
         .method(parts.method.as_str())
         .uri(http_uri_to_http1_uri(&parts.uri)?)
         .body(())?;
-    *request.headers_mut() = http_headers_to_h1(&parts.headers)?;
+    *request.headers_mut() = parts.headers;
     *request.version_mut() = ::http::Version::HTTP_2;
 
     let (mut response, mut send_stream) = sender.send_request(request, false)?;
@@ -148,7 +147,7 @@ async fn stream_request_body_to_h2(
     if let Some(trailers) = trailers {
         qpx_http::protocol::semantics::validate_request_trailers(&trailers)
             .map_err(|err| anyhow!("{}", err))?;
-        send_stream.send_trailers(http_headers_to_h1(&trailers)?)?;
+        send_stream.send_trailers(trailers)?;
     } else {
         send_stream.send_data(Bytes::new(), true)?;
     }

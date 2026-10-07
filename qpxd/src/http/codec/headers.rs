@@ -32,10 +32,6 @@ pub(crate) fn h1_headers_into_http(src: ::http::HeaderMap) -> Result<http::Heade
     h1_headers_to_http(&src)
 }
 
-pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {
-    Ok(src.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::h1_headers_to_http;
