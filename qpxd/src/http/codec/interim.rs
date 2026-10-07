@@ -25,6 +25,25 @@ const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
 // Release response buffers promptly without letting a continuously ready completion queue
 // postpone admission until every previously admitted stream has finished.
 const H2_COMPLETION_BURST: usize = 8;
+const H2_CONNECTION_POLL_BUDGET_NS: u64 = 2_000_000;
+
+struct H2ConnectionPollBudget {
+    epoch: std::time::Instant,
+    deadline_ns: std::sync::atomic::AtomicU64,
+}
+
+impl H2ConnectionPollBudget {
+    fn begin_poll(&self) {
+        self.deadline_ns.store(
+            self.epoch.elapsed().as_nanos() as u64 + H2_CONNECTION_POLL_BUDGET_NS,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn exhausted(&self) -> bool {
+        self.epoch.elapsed().as_nanos() as u64 >= self.deadline_ns.load(Ordering::Relaxed)
+    }
+}
 
 enum H2ConnectionEvent<'a> {
     ConcurrentStreamCompleted(ReusableBoxFuture<'a, ()>),
@@ -95,17 +114,26 @@ where
         + Sync
         + 'static,
 {
+    let budget = H2ConnectionPollBudget {
+        epoch: std::time::Instant::now(),
+        deadline_ns: std::sync::atomic::AtomicU64::new(0),
+    };
     let mut phase = crate::perf_diagnostics::PhaseTimer::begin_native_h2_connection();
-    phase
-        .observe_future(serve_h2_connection_inner(
-            io,
-            service,
-            enable_connect_protocol,
-            idle_timeout,
-            body_channel_capacity,
-            h2_tuning,
-        ))
-        .await
+    let future = phase.observe_future(serve_h2_connection_inner(
+        io,
+        service,
+        enable_connect_protocol,
+        idle_timeout,
+        body_channel_capacity,
+        h2_tuning,
+        &budget,
+    ));
+    tokio::pin!(future);
+    poll_fn(|cx| {
+        budget.begin_poll();
+        future.as_mut().poll(cx)
+    })
+    .await
 }
 
 async fn serve_h2_connection_inner<I, S>(
@@ -115,6 +143,7 @@ async fn serve_h2_connection_inner<I, S>(
     idle_timeout: Duration,
     body_channel_capacity: usize,
     h2_tuning: H2TransportTuning,
+    budget: &H2ConnectionPollBudget,
 ) -> Result<()>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -140,6 +169,13 @@ where
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     loop {
+        if budget.exhausted() {
+            // Flush ready responses before sharing the worker with other connections.
+            // Reset the deadline on each task poll so I/O suspension does not consume it.
+            drive_h2_connection_now(&mut conn).await?;
+            completions_since_drive = 0;
+            tokio::task::yield_now().await;
+        }
         let accept_backlog_available = concurrent_streams.len() < H2_ACCEPT_BACKLOG;
         if accepting_streams && !accept_backlog_available {
             let progress = poll_fn(|cx| {

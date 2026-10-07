@@ -3504,3 +3504,15 @@ verified parent descriptor on Unix. Failed deletion preserves accounting;
 missing objects remain idempotent. All 110 cache library tests pass with
 real filesystem fixtures and a real TCP cache server. This is a correctness
 fix, not a performance optimization or an acceptance measurement.
+
+A separate HTTP/2 trial bounds continuous connection execution to 2 ms
+before an explicit driver flush and cooperative handoff. Its deadline
+starts afresh on every parent poll, so suspended I/O consumes no budget.
+Stream admission limits, completion storage, flow control, idle timeout,
+cancellation and protocol features remain intact. Unlike the rejected
+fixed 16-poll quota, this targets the measured 4.220 ms median long-poll
+CPU residency without forcing a handoff after a short ready burst.
+All 621 library tests, all-feature/all-target Clippy and structure checks
+pass. Adoption requires a normal same-runner comparison against the
+preceding instrumentation-cleanup commit and the unchanged acceptance
+objectives; this is not an established improvement yet.
