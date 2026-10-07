@@ -1477,6 +1477,12 @@ async fn build_reverse_attempt_request(
     Err(anyhow!("reverse retry template missing or incomplete"))
 }
 
+type ReverseHttpAttemptResponse = (
+    InterimList,
+    Response<Body>,
+    Option<qpx_core::tls::UpstreamCertificateInfo>,
+);
+
 struct ReverseHttpAttemptTransport<'a> {
     timeout: Duration,
     connection_pool: Option<&'a PreparedPlainHttp1ConnectionAffinity>,
@@ -1503,23 +1509,19 @@ fn proxy_reverse_http_without_interim<'a>(
     ))
 }
 
-async fn proxy_reverse_http_attempt(
-    pools: &crate::pool::PoolRegistry,
+// Return the timeout directly so the caller does not move a second async wrapper.
+fn proxy_reverse_http_attempt<'a>(
+    pools: &'a crate::pool::PoolRegistry,
     req_for_upstream: Request<Body>,
-    upstream_origin: &OriginEndpoint,
+    upstream_origin: &'a OriginEndpoint,
     request_version: http::Version,
-    proxy_name: &str,
-    route: &HttpRoute,
-    transport: ReverseHttpAttemptTransport<'_>,
-) -> std::result::Result<
-    Result<(
-        InterimList,
-        Response<Body>,
-        Option<qpx_core::tls::UpstreamCertificateInfo>,
-    )>,
-    tokio::time::error::Elapsed,
+    proxy_name: &'a str,
+    route: &'a HttpRoute,
+    transport: ReverseHttpAttemptTransport<'a>,
+) -> tokio::time::Timeout<
+    impl std::future::Future<Output = Result<ReverseHttpAttemptResponse>> + Send + 'a,
 > {
-    timeout(transport.timeout, async {
+    timeout(transport.timeout, async move {
         if upstream_origin.upstream.starts_with("ipc://")
             || upstream_origin.upstream.starts_with("ipc+unix://")
         {
@@ -1578,7 +1580,6 @@ async fn proxy_reverse_http_attempt(
             None,
         ))
     })
-    .await
 }
 
 #[cfg(test)]
