@@ -200,6 +200,11 @@ where
                 () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
             }
         };
+        let stream_completed = matches!(
+            event,
+            H2ConnectionEvent::ConcurrentStreamCompleted(_)
+                | H2ConnectionEvent::PrimaryStreamCompleted
+        );
         match event {
             H2ConnectionEvent::ConcurrentStreamCompleted(stream) => {
                 // Reuse completed stream storage within this connection, bounded by
@@ -208,43 +213,9 @@ where
                 if reusable_concurrent_streams.len() < H2_ACCEPT_BACKLOG {
                     reusable_concurrent_streams.push(stream);
                 }
-                completions_since_admission = completions_since_admission.saturating_add(1);
-                completions_since_drive += 1;
-                if completions_since_drive >= H2_COMPLETION_BURST
-                    || !accepting_streams
-                    || (primary_stream.is_none() && concurrent_streams.is_empty())
-                {
-                    drive_h2_connection_now(&mut conn).await?;
-                    completions_since_drive = 0;
-                }
-                if primary_stream.is_none() && concurrent_streams.is_empty() {
-                    if !accepting_streams {
-                        break;
-                    }
-                    idle_timer
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + idle_timeout);
-                }
             }
             H2ConnectionEvent::PrimaryStreamCompleted => {
-                completions_since_admission = completions_since_admission.saturating_add(1);
                 reusable_primary_stream = primary_stream.take();
-                completions_since_drive += 1;
-                if completions_since_drive >= H2_COMPLETION_BURST
-                    || !accepting_streams
-                    || concurrent_streams.is_empty()
-                {
-                    drive_h2_connection_now(&mut conn).await?;
-                    completions_since_drive = 0;
-                }
-                if !accepting_streams && concurrent_streams.is_empty() {
-                    break;
-                }
-                if concurrent_streams.is_empty() {
-                    idle_timer
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + idle_timeout);
-                }
             }
             H2ConnectionEvent::Accepted => {
                 // Admission polls the driver too. Batch ready completions between
@@ -292,6 +263,24 @@ where
             H2ConnectionEvent::IdleTimeout => {
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
                     return Ok(());
+                }
+                idle_timer
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + idle_timeout);
+            }
+        }
+        if stream_completed {
+            completions_since_admission = completions_since_admission.saturating_add(1);
+            completions_since_drive += 1;
+            let streams_empty = primary_stream.is_none() && concurrent_streams.is_empty();
+            if completions_since_drive >= H2_COMPLETION_BURST || !accepting_streams || streams_empty
+            {
+                drive_h2_connection_now(&mut conn).await?;
+                completions_since_drive = 0;
+            }
+            if streams_empty {
+                if !accepting_streams {
+                    break;
                 }
                 idle_timer
                     .as_mut()

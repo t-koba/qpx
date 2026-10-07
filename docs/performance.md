@@ -3452,3 +3452,23 @@ wait failure and rejects reuse, while explicit ring EOF remains reusable.
 All 621 library tests pass; real qpxd/qpxf CGI end-to-end tests pass in both
 TCP and shared-memory modes. This fixes error classification without
 claiming to resolve the unrecorded earlier CGI response mismatch.
+
+WebDAV native diagnostic `37609809581` at `ed928f4` retains both server
+profiles and twelve workload windows with zero lost samples. The second
+1 MiB qpx window has 1,811 stacks: sendfile appears in 1,136, socket splice
+in 954, and page-cache pipe confirmation/release in 137. Request preparation
+appears in only six. Apache's 2,195 stacks contain no sendfile; page clearing
+and copying from iterators appear in 690 and 460. Profiling perturbs both
+servers, so its Apache-relative CPU ratio is not a normal acceptance result.
+These stacks do not justify repeating rejected blocking admission, file
+quantum or copied-body trials. The normal `ed928f4` streaming gate fails
+fast total CPU efficiency 1.207774 against 1.25; HTTP/2 still fails small
+multiplexed p99/max ratios 1.162440/1.212146 against 1.1 and aggregate
+dominance 1.425023 against 1.5. Both audits pass measurement quality.
+
+Primary and concurrent HTTP/2 stream completion now share driver progress
+and idle-deadline handling. Storage recycling remains specific to each
+stream kind; completion bursts, final-stream flushing and admission order
+are unchanged. All 621 library tests pass, including real TCP multiplexing,
+slow-client flow control, cancellation and idle deadlines. This removes
+duplicate state transitions without claiming a performance gain.
