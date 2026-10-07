@@ -3581,3 +3581,10 @@ The normal reverse handler constructs its full dispatch state in this box;
 keeping a completed allocation serves no response-lifetime purpose. This
 is a lifetime cleanup, not proof of a CPU or tail-latency improvement.
 Require a pinned comparison against 1841516 before evaluating performance.
+
+Remove the retired test-only upstream HTTP/1 relay implementation and its
+reader helpers. Move oversized-chunk and cancellation checks to the actual
+pull body reader over TCP. The read-capacity check now observes a real TCP
+stream instead of synthesizing reads and accepting writes without I/O.
+The old channel receiver parameter had no remaining production caller;
+remove that branch while preserving the header timeout and framing checks.

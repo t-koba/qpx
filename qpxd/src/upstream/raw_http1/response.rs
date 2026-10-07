@@ -2,17 +2,10 @@ use super::io::{
     determine_response_body_kind, fill_buffer_capped, response_body_allows_reuse,
     response_keep_alive,
 };
-#[cfg(test)]
-use super::io::{
-    fill_buffer, read_buf_with_timeout, read_crlf_line, read_limited_with_timeout,
-    read_trailer_headers,
-};
 use super::{
     Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, InterimResponseHead, MAX_HEADER_BYTES,
     RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, RawHttp1BodyFraming, RawHttp1ResponseHead,
 };
-#[cfg(test)]
-use super::{MAX_CHUNKED_BODY_BYTES, READ_BUF_SIZE};
 use crate::http::codec::h1_common::{parse_response_header_map_recycled, parse_version};
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
@@ -22,8 +15,6 @@ use qpx_http::body::Body;
 use std::cell::RefCell;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-#[cfg(test)]
-use tokio::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ResponseBodyKind {
@@ -80,7 +71,6 @@ where
                     1,
                     MAX_HEADER_BYTES,
                     RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-                    None,
                 )
                 .await?;
             }
@@ -93,7 +83,6 @@ where
                         1,
                         MAX_HEADER_BYTES,
                         RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-                        None,
                     )
                     .await?;
                 }
@@ -257,7 +246,6 @@ where
             1,
             MAX_HEADER_BYTES,
             RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-            None,
         )
         .await;
     }
@@ -595,116 +583,6 @@ where
         response.extensions_mut().insert(head.raw);
     }
     response
-}
-
-#[cfg(test)]
-pub(super) async fn forward_close_delimited_body<S>(
-    mut stream: S,
-    mut prefix: BytesMut,
-    sender: &mut qpx_http::body::Sender,
-    read_timeout: Duration,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    if !prefix.is_empty() {
-        sender.send_data(prefix.split().freeze()).await?;
-    }
-    let mut chunk = BytesMut::with_capacity(READ_BUF_SIZE);
-    loop {
-        chunk.clear();
-        chunk.reserve(READ_BUF_SIZE);
-        let n = read_buf_with_timeout(&mut stream, &mut chunk, read_timeout, Some(sender)).await?;
-        if n == 0 {
-            return Ok(());
-        }
-        sender.send_data(chunk.split().freeze()).await?;
-    }
-}
-
-#[cfg(test)]
-pub(super) async fn forward_chunked_body<S>(
-    mut stream: S,
-    mut buf: BytesMut,
-    sender: &mut qpx_http::body::Sender,
-    read_timeout: Duration,
-) -> Result<(S, BytesMut)>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut total_body_bytes = 0u64;
-    loop {
-        let line = read_crlf_line(&mut stream, &mut buf, read_timeout, sender).await?;
-        let size_token = line
-            .split(|b| *b == b';')
-            .next()
-            .ok_or_else(|| anyhow!("invalid chunk-size line"))?;
-        let size_str = std::str::from_utf8(size_token)?.trim();
-        let size = usize::from_str_radix(size_str, 16)
-            .map_err(|_| anyhow!("invalid chunk-size: {}", size_str))?;
-        total_body_bytes = total_body_bytes
-            .checked_add(size as u64)
-            .ok_or_else(|| anyhow!("chunked response body size overflow"))?;
-        if total_body_bytes > MAX_CHUNKED_BODY_BYTES {
-            return Err(anyhow!(
-                "chunked response body exceeds hard cap of {} bytes",
-                MAX_CHUNKED_BODY_BYTES
-            ));
-        }
-        if size == 0 {
-            let trailers =
-                read_trailer_headers(&mut stream, &mut buf, read_timeout, sender).await?;
-            if let Some(trailers) = trailers {
-                sender.send_trailers(trailers).await?;
-            }
-            return Ok((stream, buf));
-        }
-
-        forward_chunk_payload_segmented(&mut stream, &mut buf, size, sender, read_timeout).await?;
-    }
-}
-
-#[cfg(test)]
-async fn forward_chunk_payload_segmented<S>(
-    stream: &mut S,
-    buf: &mut BytesMut,
-    mut remaining: usize,
-    sender: &mut qpx_http::body::Sender,
-    read_timeout: Duration,
-) -> Result<()>
-where
-    S: AsyncRead + Unpin,
-{
-    let mut chunk = BytesMut::with_capacity(READ_BUF_SIZE);
-    while remaining > 0 {
-        if !buf.is_empty() {
-            let take = buf.len().min(remaining).min(READ_BUF_SIZE);
-            sender.send_data(buf.split_to(take).freeze()).await?;
-            remaining -= take;
-            continue;
-        }
-
-        let cap = remaining.min(READ_BUF_SIZE);
-        chunk.clear();
-        chunk.resize(cap, 0);
-        let n = read_limited_with_timeout(stream, &mut chunk[..cap], read_timeout, Some(&*sender))
-            .await?;
-        if n == 0 {
-            return Err(anyhow!(
-                "peer connection closed before chunk payload completed"
-            ));
-        }
-        chunk.truncate(n);
-        sender.send_data(chunk.split().freeze()).await?;
-        remaining -= n;
-    }
-
-    fill_buffer(stream, buf, 2, read_timeout, Some(&*sender)).await?;
-    if &buf[..2] != b"\r\n" {
-        return Err(anyhow!("chunk payload missing trailing CRLF"));
-    }
-    buf.advance(2);
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,11 +1,10 @@
 use super::io::{determine_response_body_kind, response_body_allows_reuse};
 use super::response::{
-    ParsedResponseHead, RawParsedResponseHead, ResponseBodyKind, build_raw_response,
-    build_response, forward_chunked_body, forward_close_delimited_body,
+    ParsedResponseHead, RawParsedResponseHead, ResponseBodyKind, build_raw_response, build_response,
 };
 use super::{
-    Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-    RawHttp1ResponseHead, parse_declared_content_length, send_http1_request_with_interim,
+    Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, RawHttp1ResponseHead,
+    parse_declared_content_length, send_http1_request_with_interim,
 };
 use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
@@ -324,7 +323,12 @@ async fn pull_content_length_response_recycles_after_complete_body() {
 #[tokio::test]
 async fn short_content_length_response_uses_bounded_read_capacity() {
     let max_read_capacity = Arc::new(AtomicUsize::new(0));
-    let stream = RecordingStream::new(Bytes::from_static(b"OK"), max_read_capacity.clone());
+    let (stream, mut origin) = connected_tcp_pair().await;
+    origin.write_all(b"OK").await.expect("write body");
+    let stream = ReadCapacityObserver {
+        stream,
+        max_read_capacity: max_read_capacity.clone(),
+    };
     let response = build_response(
         stream,
         ParsedResponseHead {
@@ -380,22 +384,29 @@ async fn pull_content_length_response_does_not_recycle_with_leftover_bytes() {
 
 #[tokio::test]
 async fn chunked_response_reader_rejects_oversized_chunk_before_payload_allocation() {
-    let (mut origin, proxy) = tokio::io::duplex(1024);
+    let (proxy, mut origin) = connected_tcp_pair().await;
     origin
         .write_all(b"40000001\r\n")
         .await
         .expect("write chunk header");
-    drop(origin);
-    let (mut sender, _body) = Body::channel_with_capacity(16);
-
-    let err = forward_chunked_body(
+    let response = build_response(
         proxy,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body_kind: ResponseBodyKind::Chunked,
+        },
         BytesMut::new(),
-        &mut sender,
-        RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-    )
-    .await
-    .expect_err("oversized chunk");
+        BytesMut::new(),
+        None,
+    );
+    let err = response
+        .into_body()
+        .frame()
+        .await
+        .expect("error frame")
+        .expect_err("oversized chunk");
     assert!(
         err.to_string().contains("chunked response body exceeds"),
         "{err}"
@@ -435,29 +446,34 @@ async fn chunked_response_reader_sanitizes_trailers_before_exposure() {
 }
 
 #[tokio::test]
-async fn response_body_relay_exits_when_downstream_body_is_dropped() {
-    let (stream, _peer) = tokio::io::duplex(64);
-    let (mut sender, body) = Body::channel();
-    let relay = tokio::spawn(async move {
-        forward_close_delimited_body(
-            stream,
-            BytesMut::new(),
-            &mut sender,
-            Duration::from_secs(30),
-        )
-        .await
-    });
-
+async fn response_body_drop_closes_pending_upstream_tcp_read() {
+    let (stream, mut origin) = connected_tcp_pair().await;
+    let response = build_response(
+        stream,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body_kind: ResponseBodyKind::CloseDelimited,
+        },
+        BytesMut::new(),
+        BytesMut::new(),
+        None,
+    );
+    let mut body = response.into_body();
+    std::future::poll_fn(|cx| {
+        assert!(http_body::Body::poll_frame(Pin::new(&mut body), cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
     drop(body);
-
-    let err = tokio::time::timeout(Duration::from_millis(200), relay)
-        .await
-        .expect("relay should observe downstream close")
-        .expect("relay task")
-        .expect_err("relay must stop without waiting for upstream read timeout");
-    assert!(
-        format!("{err:?}").contains("downstream response body receiver closed"),
-        "unexpected error: {err:?}"
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(200), origin.read(&mut byte))
+            .await
+            .expect("body drop must close upstream without waiting for the read timeout")
+            .expect("read upstream close"),
+        0,
     );
 }
 
@@ -509,52 +525,46 @@ async fn write_http1_request_announces_chunked_request_trailers() {
     assert!(text.contains("x-checksum: abc123\r\n"));
 }
 
-struct RecordingStream {
-    input: Bytes,
-    offset: usize,
+async fn connected_tcp_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let client = TcpStream::connect(listener.local_addr().expect("address"))
+        .await
+        .expect("connect");
+    let (server, _) = listener.accept().await.expect("accept");
+    (client, server)
+}
+
+struct ReadCapacityObserver {
+    stream: TcpStream,
     max_read_capacity: Arc<AtomicUsize>,
 }
 
-impl RecordingStream {
-    fn new(input: Bytes, max_read_capacity: Arc<AtomicUsize>) -> Self {
-        Self {
-            input,
-            offset: 0,
-            max_read_capacity,
-        }
-    }
-}
-
-impl AsyncRead for RecordingStream {
+impl AsyncRead for ReadCapacityObserver {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         self.max_read_capacity
             .fetch_max(buf.remaining(), Ordering::SeqCst);
-        let remaining = &self.input[self.offset..];
-        let len = remaining.len().min(buf.remaining());
-        buf.put_slice(&remaining[..len]);
-        self.offset += len;
-        Poll::Ready(Ok(()))
+        Pin::new(&mut self.stream).poll_read(cx, buf)
     }
 }
 
-impl AsyncWrite for RecordingStream {
+impl AsyncWrite for ReadCapacityObserver {
     fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Poll::Ready(Ok(buf.len()))
+        Pin::new(&mut self.stream).poll_write(cx, buf)
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
