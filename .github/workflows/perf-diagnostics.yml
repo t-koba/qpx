@@ -343,7 +343,7 @@ jobs:
             http2-worker-normal)
               evidence="target/perf/http2-worker-normal/workers-1"
               mkdir -p "$evidence"
-              QPX_HTTP2_COMPARE_LOG_DIR="$PWD/$evidence/logs" \
+              QPX_PERF_MEMORY_MAP_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_LOG_DIR="$PWD/$evidence/logs" \
                 python3 scripts/perf-evaluate.py "uninstrumented single-worker HTTP/2 comparison" -- \
                 bash scripts/perf-audit-http2-isolated.sh --workers 1 "$evidence/comparison.jsonl"
               failed=0

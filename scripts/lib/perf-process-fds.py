@@ -73,6 +73,51 @@ def rss(root):
     return totals
 
 
+def memory_maps(root):
+    pending, seen, processes = [root], set(), []
+    while pending:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        base = Path('/proc') / pid
+        try:
+            for task in (base / 'task').iterdir():
+                try:
+                    pending.extend((task / 'children').read_text().split())
+                except FileNotFoundError:
+                    continue
+            fields = dict(line.split(':', 1) for line in (base / 'status').read_text().splitlines()
+                          if ':' in line)
+            if fields['State'].lstrip().startswith('Z'):
+                continue
+            text = (base / 'smaps').read_text()
+        except FileNotFoundError:
+            continue
+        mappings, current = {}, None
+        for line in text.splitlines():
+            first = line.split()[0]
+            if '-' in first and ':' not in first:
+                header = line.split(None, 5)
+                name = header[5] if len(header) == 6 else '[anonymous]'
+                current = mappings.setdefault((name, header[1]), {})
+            elif current is not None and ':' in line:
+                field, value = line.split(':', 1)
+                if field in ('Rss', 'Pss', 'Anonymous', 'Private_Clean', 'Private_Dirty',
+                             'Shared_Clean', 'Shared_Dirty', 'Swap'):
+                    current[field] = current.get(field, 0) + int(value.split()[0])
+        if not mappings or any('Rss' not in values for values in mappings.values()):
+            raise RuntimeError('process memory map snapshot is incomplete')
+        processes.append({'pid': int(pid), 'mappings': [
+            {'name': name, 'permissions': permissions, 'kilobytes': values}
+            for (name, permissions), values in sorted(mappings.items())
+        ]})
+    if not processes:
+        raise RuntimeError('process memory map snapshot is empty')
+    return {'monotonic_ns': time.monotonic_ns(), 'processes': processes,
+            'window': 'after_workload_sampler_shutdown'}
+
+
 mode, root = sys.argv[1:3]
 if mode == 'count':
     print(len(descriptors(root)))
@@ -81,6 +126,9 @@ elif mode == 'snapshot':
 elif mode in ('monitor', 'rss-monitor'):
     output, stop = map(Path, sys.argv[3:5])
     peak = int(sys.argv[5])
+    maps_enabled = sys.argv[6] if len(sys.argv) > 6 else '0'
+    if maps_enabled not in ('0', '1'):
+        raise SystemExit('memory map diagnostics must be 0 or 1')
     interval = 0.01 if mode == 'rss-monitor' else 0.05
     snapshot = (lambda: rss(root)) if mode == 'rss-monitor' else (lambda: len(descriptors(root)))
     started = time.monotonic()
@@ -126,6 +174,11 @@ elif mode in ('monitor', 'rss-monitor'):
             'elapsed_ns': elapsed_ns, 'cpu_time_ns': cpu_time_ns,
             'cpu_fraction_of_one_core': cpu_time_ns / elapsed_ns,
         }, sort_keys=True) + '\n')
+        if mode == 'rss-monitor' and maps_enabled == '1':
+            # Procfs map walks happen after all workload observations and
+            # sampler CPU accounting, never inside the measured polling loop.
+            Path(str(output) + '.memory-maps.json').write_text(
+                json.dumps(memory_maps(root), sort_keys=True) + '\n')
     except Exception as error:
         Path(str(output) + '.error').write_text(str(error) + '\n')
         raise

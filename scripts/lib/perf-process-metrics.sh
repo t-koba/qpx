@@ -272,7 +272,7 @@ monitor_process_tree_peak() {
   # Keep one reader alive across samples so privilege setup and interpreter
   # startup do not compete with the load generator on every polling interval.
   perf_proc_python "$(dirname "${BASH_SOURCE[0]}")/perf-process-fds.py" \
-    "$mode" "$root" "$output" "$stop" "$initial" &
+    "$mode" "$root" "$output" "$stop" "$initial" "${QPX_PERF_MEMORY_MAP_DIAGNOSTICS:-0}" &
   reader=$!
   trap 'touch "$stop"' TERM INT
   if wait "$reader"; then

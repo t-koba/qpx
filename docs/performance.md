@@ -2895,3 +2895,18 @@ Native diagnostics now retain real backend TCP_INFO before and after
 each completed transfer, socket buffer sizes, addresses and monotonic
 timestamps. Incomplete or failed records fail the diagnostic explicitly.
 Normal transfers and their acceptance thresholds are unchanged.
+
+RSS component diagnostic `37574258005` confirms that the first valid
+1 KiB/100-stream qpx window peaks at 26,596 KiB: anonymous 6,816 KiB,
+file-backed 19,780 KiB. Nginx peaks at 23,968 KiB: anonymous 12,364 KiB,
+file-backed 11,596 KiB and shared 8 KiB. The file-backed difference is
+not evidence of heap retention. At 1 MiB/100 streams, qpx anonymous
+memory rises to 18,208 KiB while file-backed memory remains 19,780 KiB;
+nginx anonymous memory is 13,388 KiB. Backend peaks are 17,100 versus
+16,452 KiB. These individual sample peaks do not replace conservative
+aggregate acceptance values or imply simultaneous peaks. The next
+single-worker diagnostic records per-file/per-permission resident maps
+after the workload sampler stops. Map collection does not run in the
+polling loop and occurs after sampler CPU accounting; snapshots are
+explicitly post-workload observations, not peak allocation profiles.
+Missing maps fail the diagnostic instead of becoming zero memory.
