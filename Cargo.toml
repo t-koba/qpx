@@ -137,8 +137,8 @@ byteorder_slice = "3"
 mimalloc = { version = "0.1.52", default-features = false }
 
 [profile.release]
-# Release defaults are already optimized; these settings mainly reduce size while keeping perf.
-lto = "thin"
+# Optimize across crates with one code generation unit.
+lto = "fat"
 codegen-units = 1
 strip = "symbols"
 

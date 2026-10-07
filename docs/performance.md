@@ -2980,3 +2980,25 @@ versus 45.849 microseconds/transfer. This failing window places the excess
 in the frontend, unlike the separate successful thread diagnostic's backend
 spike; neither result licenses removing backend accounting or changing the
 unchanged delay objective.
+
+Memory-map diagnostic `37578400568` validates actual frontend snapshots for
+all 24 required qpx/nginx windows. Post-workload qpx executable mappings
+remain 16,920 KiB in every lane, including 15,324 KiB of the qpx binary's
+executable text. Nginx's process-tree executable mappings are 9,556 KiB for
+1 KiB/single stream and 9,620 KiB in the other lanes. Median qpx anonymous
+memory is 6,864/7,028 KiB in the two small lanes, versus nginx
+12,524/12,520 KiB. The large lanes retain 10,708 KiB qpx anonymous memory
+versus nginx 13,748/13,732 KiB. These snapshots occur after the workload;
+they do not replace sampled peak RSS or prove the absence of temporary
+large-response allocations. Single-worker acceptance still fails RSS,
+FD and maximum-latency objectives and is not adopted.
+
+The executable-page footprint directs a separate release-build trial from
+thin to fat LTO. The [Cargo profile specification](https://doc.rust-lang.org/cargo/reference/profiles.html#lto)
+defines fat LTO as optimization across crates in the dependency graph.
+Keep the same feature set, optimization level, codegen-unit count, panic
+behavior, servers, filesystems, measurement conditions and thresholds.
+The fixed `b91a395` baseline retains thin LTO. Required CI and an independent
+normal four-worker HTTP/2 comparison must establish the trial's actual
+CPU, latency and resource behavior; whole-program optimization alone is
+not a performance result. Compile and runtime regressions reject the trial.
