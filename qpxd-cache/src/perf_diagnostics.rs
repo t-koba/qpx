@@ -85,7 +85,8 @@ fn thread_cpu_ns() -> std::io::Result<u64> {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // The thread CPU clock brackets one synchronous closure without migration.
+    // SAFETY: `time` is an initialized, exclusively borrowed timespec that stays
+    // valid for this call. CLOCK_THREAD_CPUTIME_ID refers to the calling thread.
     if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
