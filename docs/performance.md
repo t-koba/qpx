@@ -3650,3 +3650,11 @@ scheduler delay rose from 156.84 to 158.90 us per request, and its reference
 ratio worsened from 1.290329 to 1.339421 against the unchanged 1.0 objective.
 Restore the previous attempt constructor instead of retaining an unproven
 optimization. The independently verified shared-body completion fix remains.
+
+Retire the streaming MTU, CPU-partition and extended-window experiment entry
+points and their three dedicated scripts. Their completed measurements did
+not establish normal-workload reproducibility, and they must not be repeated
+without a new causal hypothesis. Historical measurements above remain evidence
+for rejection. Normal streaming acceptance, same-runner revision comparison,
+native CPU/TCP recording and retained-profile analysis remain available.
+No mandatory workload, threshold, error check or real TCP test changes.

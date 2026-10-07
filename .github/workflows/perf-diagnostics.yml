@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-scheduler, streaming-window, streaming-affinity, streaming-mtu, streaming-mtu-normal, streaming-mtu-unpartitioned, streaming-mtu-window-unpartitioned, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writer-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, feature-large-native, http1-native, http2-native, http2-timeline-native, http2-phases, http2-worker-scaling, http2-worker-normal, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-scheduler, streaming-revision, proxy-threads, proxy-phases, cache-writer-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, feature-large-native, http1-native, http2-native, http2-timeline-native, http2-phases, http2-worker-scaling, http2-worker-normal, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -233,48 +233,6 @@ jobs:
                 QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS=5 \
                 python3 scripts/perf-evaluate.py "origin and cache comparison" -- bash scripts/perf-audit-proxy-compare.sh
               python3 scripts/perf-evaluate.py "origin and cache objectives" -- bash scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl
-              ;;
-            streaming-window)
-              case "$REVISION_ORDER" in
-                baseline-current) export QPX_STREAMING_WINDOW_ORDER=normal-extended ;;
-                current-baseline) export QPX_STREAMING_WINDOW_ORDER=extended-normal ;;
-                *) echo "unsupported streaming window order: $REVISION_ORDER" >&2; exit 2 ;;
-              esac
-              python3 scripts/perf-evaluate.py "streaming same-runner window diagnostics" -- bash scripts/perf-diagnose-streaming-window.sh
-              ;;
-            streaming-affinity)
-              failed=0
-              python3 scripts/perf-evaluate.py "streaming CPU partition diagnostic measurement" -- bash scripts/perf-diagnose-streaming-affinity.sh || failed=1
-              python3 scripts/perf-evaluate.py "streaming CPU partition diagnostic objectives" -- \
-                bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json window-diagnostic || failed=1
-              exit "$failed"
-              ;;
-            streaming-mtu-normal)
-              python3 scripts/perf-evaluate.py "streaming normal workload same-runner MTU diagnostics" -- timeout --signal=TERM --kill-after=40s 12m bash scripts/perf-diagnose-streaming-mtu.sh --normal
-              ;;
-            streaming-mtu-unpartitioned)
-              case "$REVISION_ORDER" in
-                baseline-current) export QPX_STREAMING_MTU_ORDER=65536-1500 ;;
-                current-baseline) export QPX_STREAMING_MTU_ORDER=1500-65536 ;;
-                *) echo "unsupported streaming MTU order: $REVISION_ORDER" >&2; exit 2 ;;
-              esac
-              python3 scripts/perf-evaluate.py "streaming normal CPU scheduling same-runner MTU diagnostics" -- timeout --signal=TERM --kill-after=40s 12m bash scripts/perf-diagnose-streaming-mtu.sh --unpartitioned-normal
-              ;;
-            streaming-mtu-window-unpartitioned)
-              python3 scripts/perf-evaluate.py "streaming normal CPU scheduling MTU 1500 extended window diagnostics" -- timeout --signal=TERM --kill-after=40s 12m bash scripts/perf-diagnose-streaming-mtu.sh --unpartitioned-window
-              ;;
-            streaming-mtu)
-              python3 scripts/perf-evaluate.py "streaming same-runner MTU diagnostics" -- timeout --signal=TERM --kill-after=40s 28m bash scripts/perf-diagnose-streaming-mtu.sh
-              ;;
-            streaming-duration)
-              QPX_STREAMING_COMPARE_FAST_TRANSFERS=512 \
-                python3 scripts/perf-evaluate.py "extended streaming measurement" -- bash scripts/perf-audit-streaming-compare.sh
-              failed=0
-              python3 scripts/perf-evaluate.py "extended streaming measurement quality" -- \
-                bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json measurement-quality || failed=1
-              python3 scripts/perf-evaluate.py "extended streaming existing acceptance" -- \
-                bash scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json || failed=1
-              exit "$failed"
               ;;
             streaming-revision)
               case "$REVISION_ORDER" in
