@@ -44,7 +44,7 @@ def descriptors(root, include_targets=False):
 def rss(root):
     pending = [root]
     seen = set()
-    total = 0
+    totals = {field: 0 for field in ("VmRSS", "RssAnon", "RssFile", "RssShmem")}
     measured = 0
     while pending:
         pid = pending.pop()
@@ -63,13 +63,14 @@ def rss(root):
                           if ':' in line)
             if fields['State'].lstrip().startswith('Z'):
                 continue
-            total += int(fields['VmRSS'].split()[0])
+            for field in totals:
+                totals[field] += int(fields[field].split()[0])
             measured += 1
         except FileNotFoundError:
             continue
     if not measured:
         raise RuntimeError('process RSS snapshot is empty')
-    return total
+    return totals
 
 
 mode, root = sys.argv[1:3]
@@ -92,14 +93,21 @@ elif mode in ('monitor', 'rss-monitor'):
         output.write_text(str(peak) + '\n')
         with Path(str(output) + '.samples.csv').open('w', newline='') as handle:
             writer = csv.writer(handle)
-            writer.writerow(['monotonic_ns', 'value'])
+            columns = ['monotonic_ns', 'value']
+            if mode == 'rss-monitor':
+                columns.extend(['rss_anon_kb', 'rss_file_kb', 'rss_shmem_kb'])
+            writer.writerow(columns)
             while not stop.exists() and (Path('/proc') / root).exists():
-                value = snapshot()
+                observation = snapshot()
+                value = observation["VmRSS"] if mode == "rss-monitor" else observation
                 now = time.monotonic()
                 maximum_gap = max(maximum_gap, now - previous)
                 previous = now
                 count += 1
-                writer.writerow([time.monotonic_ns(), value])
+                row = [time.monotonic_ns(), value]
+                if mode == "rss-monitor":
+                    row.extend(observation[field] for field in ("RssAnon", "RssFile", "RssShmem"))
+                writer.writerow(row)
                 if count == 1:
                     handle.flush()
                     Path(str(output) + '.ready').write_text('1\n')

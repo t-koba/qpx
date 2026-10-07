@@ -2851,3 +2851,17 @@ samples. Normal backend invocation and all mandatory workloads are unchanged.
 Profiler costs belong to diagnostic runs; these CPU totals cannot replace
 uninstrumented acceptance measurements. No new transfer optimization is
 adopted without the resulting profiles.
+
+Normal single-worker HTTP/2 evidence also separates the resource failure:
+1 KiB/100-stream qpx RSS is 26,672 KiB plus backend 16,216 KiB, versus
+nginx 23,772 KiB plus backend 16,144 KiB. At 1 MiB/100 streams qpx peaks
+at 39,156 KiB plus backend 17,112 KiB, versus nginx 24,580 KiB plus backend
+16,444 KiB. Backend FD peak is 185 under qpx versus 116 under nginx;
+independent peak values need not occur simultaneously. These observations
+are not grounds to disable pooling or reduce concurrency. RSS sampler CSVs
+now retain anonymous, file-backed and shared resident memory from the same
+already-read `/proc/<pid>/status` snapshot. The accepted `value` remains the
+same complete process-tree VmRSS sum, with unchanged timing, aggregation
+and thresholds. Missing component fields fail explicitly. The additional
+columns distinguish active/retained anonymous allocations from executable
+and shared mappings before a memory optimization is considered.
