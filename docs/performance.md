@@ -2783,6 +2783,11 @@ Each interval runs synchronously on the same writer thread; normal comparisons
 perform no additional clock reads. The report requires complete paired coverage
 for every interval and rejects clock failures. This separates filesystem waiting
 from CPU work before selecting a storage change; it does not establish acceptance.
+The persistent-writer comparison candidate retains the same filesystem worker
+count and atomic publication. A bounded shared queue feeds those workers,
+removing per-object blocking-task dispatch. Accepted work survives caller
+cancellation and drains before backend shutdown; write and worker failures
+remain errors. Independent pinned comparisons must justify adoption.
 
 Normal single-worker HTTP/2 diagnostic `37568710346` completes all four
 size/stream configurations without native instrumentation. The 1 KiB,
