@@ -155,6 +155,29 @@ for path in paths:
             or record.get("exit_status") not in (0, -15, 143)):
         raise SystemExit(f"native profiler shutdown was not complete: {path}")
 PY
+if [ "$workload" = streaming ]; then
+  python3 - "$log_directory/backend-tcp.jsonl" <<'PY'
+import json
+from pathlib import Path
+import sys
+records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
+# Five real servers, three interleaved rounds, 64 fast and one slow transfer.
+if len(records) < 5 * 3 * (64 + 1):
+    raise SystemExit("backend TCP diagnostics lack completed transfer records")
+for record in records:
+    if record.get("status") != "ok" or record.get("stream_bytes", 0) <= 0:
+        raise SystemExit("backend TCP diagnostics contain a failed transfer snapshot")
+    before, after = record["before"], record["after"]
+    if after["monotonic_ns"] <= before["monotonic_ns"]:
+        raise SystemExit("backend TCP diagnostic timestamps are not ordered")
+    for snapshot in (before, after):
+        if (len(bytes.fromhex(snapshot["tcp_info_hex"])) < 104
+                or snapshot["send_buffer_bytes"] <= 0
+                or snapshot["receive_buffer_bytes"] <= 0):
+            raise SystemExit("backend TCP diagnostics contain an incomplete snapshot")
+print(f"Backend TCP diagnostics validated: {len(records)} transfers")
+PY
+fi
 profiles=0
 for profile in "$QPX_NATIVE_PROFILE_DIR"/*.data; do
   [ -f "$profile" ] || continue

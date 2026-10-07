@@ -101,12 +101,39 @@ start_streaming_backend() {
   cat >"$TMP_DIR/streaming_backend.py" <<'PY'
 import socketserver
 import sys
+import json
+import os
+import socket
+import time
 from http.server import BaseHTTPRequestHandler
 
 port = int(sys.argv[1])
 stream_bytes = int(sys.argv[2])
 chunk_bytes = int(sys.argv[3])
 payload = b"x" * chunk_bytes
+diagnostic = os.environ["QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS"] == "1"
+tcp_log_fd = None
+if diagnostic:
+    if not hasattr(socket, "TCP_INFO"):
+        raise SystemExit("backend TCP diagnostics require Linux TCP_INFO")
+    tcp_log_fd = os.open(os.environ["QPX_STREAMING_COMPARE_BACKEND_TCP_LOG"],
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+
+def tcp_snapshot(connection):
+    info = connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 256)
+    if len(info) < 104:
+        raise RuntimeError("backend TCP_INFO is shorter than the base Linux layout")
+    return {
+        "monotonic_ns": time.monotonic_ns(),
+        "tcp_info_hex": info.hex(),
+        "send_buffer_bytes": connection.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF),
+        "receive_buffer_bytes": connection.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF),
+    }
+
+def record_tcp(record):
+    encoded = (json.dumps(record, sort_keys=True) + "\n").encode()
+    if os.write(tcp_log_fd, encoded) != len(encoded):
+        raise RuntimeError("backend TCP diagnostic record was not written completely")
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -122,6 +149,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/stream":
             self.send_error(404)
             return
+        if diagnostic:
+            try:
+                tcp_before = tcp_snapshot(self.connection)
+            except Exception as error:
+                record_tcp({"status": "error", "error": str(error)})
+                raise
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(stream_bytes))
@@ -132,6 +165,17 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload[:n])
             self.wfile.flush()
             remaining -= n
+        if diagnostic:
+            try:
+                record_tcp({
+                    "status": "ok", "stream_bytes": stream_bytes,
+                    "local_address": self.connection.getsockname(),
+                    "peer_address": self.connection.getpeername(),
+                    "before": tcp_before, "after": tcp_snapshot(self.connection),
+                })
+            except Exception as error:
+                record_tcp({"status": "error", "error": str(error)})
+                raise
 
     def log_message(self, fmt, *args):
         return
@@ -143,6 +187,7 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
 with Server(("127.0.0.1", port), Handler) as httpd:
     httpd.serve_forever()
 PY
+  export QPX_STREAMING_COMPARE_BACKEND_TCP_LOG="$LOG_DIR/backend-tcp.jsonl"
   run_server_process "${QPX_STREAMING_COMPARE_BACKEND_BIN:-python3}" "$TMP_DIR/streaming_backend.py" "$BACKEND_PORT" "$STREAM_BYTES" "$CHUNK_BYTES" >"$LOG_DIR/backend.log" 2>&1 &
   BACKEND_PID=$!
   register_pid "$BACKEND_PID"

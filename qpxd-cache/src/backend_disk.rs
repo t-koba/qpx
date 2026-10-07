@@ -65,7 +65,6 @@ pub struct DiskCacheBackend {
     background_sweep_started: std::sync::Arc<AtomicBool>,
     indexed_flag: std::sync::Arc<AtomicBool>,
     blocking_writer_slots: std::sync::Arc<Semaphore>,
-    blocking_reader_slots: std::sync::Arc<Semaphore>,
     state: std::sync::Arc<Mutex<DiskCacheState>>,
 }
 
@@ -303,7 +302,6 @@ impl DiskCacheBackend {
             background_sweep_started: std::sync::Arc::new(AtomicBool::new(false)),
             indexed_flag: std::sync::Arc::new(AtomicBool::new(false)),
             blocking_writer_slots: std::sync::Arc::new(Semaphore::new(writer_slots)),
-            blocking_reader_slots: std::sync::Arc::new(Semaphore::new(writer_slots)),
             state: std::sync::Arc::new(Mutex::new(DiskCacheState::default())),
         };
         backend.ensure_background_sweep();
@@ -420,11 +418,7 @@ impl DiskCacheBackend {
 
     async fn open_valid(&self, path: PathBuf) -> Result<Option<DiskCacheRead>> {
         self.ensure_indexed().await?;
-        let read_path = path.clone();
-        let read = match self
-            .blocking_read(move || read_disk_cache_header_sync(&read_path))
-            .await?
-        {
+        let read = match read_disk_cache_header_sync(&path) {
             Ok(read) => read,
             Err(error) if cache_file_not_found(&error) => return Ok(None),
             Err(error) => return Err(error),
@@ -885,7 +879,6 @@ impl DiskCacheBackend {
         Ok(len)
     }
 
-    #[cfg(test)]
     async fn read_response_metadata(&self, namespace: &str, key: &str) -> Result<Option<Bytes>> {
         let now = now_ms();
         let recent = self.hot_recent.load();
@@ -894,8 +887,9 @@ impl DiskCacheBackend {
         }
         let body_key = cache_body_storage_key(key);
         let path = self.path_for(namespace, body_key.as_str());
-        self.blocking_read(move || read_metadata_trailer_sync(&path))
-            .await?
+        // Read the header and trailer without a separate task handoff for
+        // each lookup stage; independent measurements reject that dispatch cost.
+        read_metadata_trailer_sync(&path)
     }
 
     async fn put_object_path(
@@ -980,26 +974,6 @@ impl DiskCacheBackend {
             .await?;
         self.hot_remove(path).await;
         Ok(())
-    }
-
-    async fn blocking_read<T: Send + 'static>(
-        &self,
-        read: impl FnOnce() -> T + Send + 'static,
-    ) -> Result<T> {
-        let permit = self
-            .blocking_reader_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .context("disk cache reader admission closed")?;
-        tokio::task::spawn_blocking(move || {
-            // Keep admission until filesystem work finishes, even if the
-            // async caller is cancelled while a read is blocked in the kernel.
-            let _permit = permit;
-            read()
-        })
-        .await
-        .context("disk cache blocking reader task failed")
     }
 
     async fn blocking_write<T: Send + 'static>(
@@ -1115,42 +1089,16 @@ impl CacheBackend for DiskCacheBackend {
         namespace: &str,
         keys: &[String],
     ) -> Result<Vec<Option<std::sync::Arc<CachedResponseEnvelope>>>> {
-        let now = now_ms();
-        let mut raw_values = vec![None; keys.len()];
-        let mut cold_paths = Vec::new();
-        {
-            let recent = self.hot_recent.load();
-            for (index, key) in keys.iter().enumerate() {
-                if let Some(entry) = recent_hot_entry(&recent, namespace, key, now) {
-                    raw_values[index] = Some(entry.value.clone());
-                } else {
-                    let body_key = cache_body_storage_key(key);
-                    cold_paths.push((index, self.path_for(namespace, &body_key)));
-                }
-            }
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let raw = self.read_response_metadata(namespace, key).await?;
+            let decoded = match raw {
+                Some(raw) => Some(self.decode_response_metadata(namespace, key, raw)?),
+                None => None,
+            };
+            out.push(decoded);
         }
-        if !cold_paths.is_empty() {
-            let cold_values = self
-                .blocking_read(move || {
-                    cold_paths
-                        .into_iter()
-                        .map(|(index, path)| {
-                            read_metadata_trailer_sync(&path).map(|raw| (index, raw))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .await??;
-            for (index, raw) in cold_values {
-                raw_values[index] = raw;
-            }
-        }
-        keys.iter()
-            .zip(raw_values)
-            .map(|(key, raw)| {
-                raw.map(|raw| self.decode_response_metadata(namespace, key, raw))
-                    .transpose()
-            })
-            .collect()
+        Ok(out)
     }
 
     fn get_response_candidate(
@@ -2001,66 +1949,6 @@ mod tests {
             max_object_bytes: 1024 * 1024,
             auth_header_env: None,
         }
-    }
-
-    #[tokio::test]
-    async fn blocking_reader_retains_admission_after_caller_cancellation() {
-        let dir = temp_dir("reader-cancellation");
-        let mut backend =
-            DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("create backend");
-        backend.blocking_reader_slots = Arc::new(Semaphore::new(1));
-        let path = backend.path_for("ns", "object");
-        write_cached_bytes_sync(&path, Bytes::from_static(b"body"), 60)
-            .expect("persist real object");
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let first_backend = backend.clone();
-        let first_path = path.clone();
-        let first = tokio::spawn(async move {
-            first_backend
-                .blocking_read(move || {
-                    started_tx.send(()).expect("notify reader start");
-                    release_rx
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("release filesystem reader");
-                    read_disk_cache_header_sync(&first_path)
-                })
-                .await
-        });
-        timeout(Duration::from_secs(2), started_rx)
-            .await
-            .expect("reader starts before deadline")
-            .expect("reader start notification");
-        first.abort();
-        assert!(
-            first
-                .await
-                .err()
-                .expect("reader caller cancelled")
-                .is_cancelled()
-        );
-        assert_eq!(backend.blocking_reader_slots.available_permits(), 0);
-        let second_backend = backend.clone();
-        let mut second = tokio::spawn(async move {
-            second_backend
-                .blocking_read(move || read_disk_cache_header_sync(&path))
-                .await
-        });
-        assert!(
-            timeout(Duration::from_millis(50), &mut second)
-                .await
-                .is_err()
-        );
-        release_tx.send(()).expect("release first reader");
-        let read = timeout(Duration::from_secs(2), second)
-            .await
-            .expect("second reader completes")
-            .expect("second reader task succeeds")
-            .expect("reader dispatch succeeds")
-            .expect("read real object");
-        assert_eq!(read.header.body_len, 4);
-        assert_eq!(backend.blocking_reader_slots.available_permits(), 1);
-        fs::remove_dir_all(dir).expect("remove test directory");
     }
 
     #[tokio::test]

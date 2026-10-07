@@ -2865,3 +2865,33 @@ same complete process-tree VmRSS sum, with unchanged timing, aggregation
 and thresholds. Missing component fields fail explicitly. The additional
 columns distinguish active/retained anonymous allocations from executable
 and shared mappings before a memory optimization is considered.
+
+Cold-read comparison `37573130578` rejects the individual blocking-pool
+dispatch trial `6cfacc2` against `419c22e`. Five valid miss samples per
+revision show throughput 12,272.928136 to 8,676.692287 requests/s, CPU
+efficiency 5,456.097561 to 3,614.867110 requests/CPU second and scheduler
+delay 324.607859 to 830.932301 microseconds/request. Miss p99 improves
+17.549 to 15.573 ms, but this does not compensate for the throughput and
+CPU regressions. Current reference ratios fail throughput 0.688173 below
+1.0, CPU efficiency 0.601009 below 1.0 and delay 5.413118 above 1.0.
+Ordinary 1 MiB hits also regress CPU efficiency 3,025.435540 to
+2,390.332326 and delay 117.968936 to 523.464825; feature-rich 1 MiB hits
+regress similarly. All recorded workload samples are valid. Restore the
+previous read path and remove the rejected reader admission/dispatch
+machinery; retain bounded writers and the real TCP health-probe test fix.
+The async-worker filesystem stall remains a causal observation, but
+per-stage task handoffs are not an accepted solution.
+
+Backend CPU diagnostic `37573871933` completes two owned profiles and
+eighteen workload reports with zero lost samples. In the second fast
+64-transfer window, backend profiles contain 382 samples under qpx and
+210 under lighttpd. Page clearing counts are 53 versus 52; inclusive
+TCP transmit counts are 108 versus 25 and receive softirq counts 62
+versus 17. Inclusive counts overlap and are not additive. This directs
+the next investigation toward TCP traffic rather than Python payload
+generation. Linux `tcp_read_sock` performs receive-space adjustment and
+receive-buffer cleanup, so splice does not itself omit those operations.
+Native diagnostics now retain real backend TCP_INFO before and after
+each completed transfer, socket buffer sizes, addresses and monotonic
+timestamps. Incomplete or failed records fail the diagnostic explicitly.
+Normal transfers and their acceptance thresholds are unchanged.
