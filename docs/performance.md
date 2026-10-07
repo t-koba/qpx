@@ -3195,3 +3195,28 @@ These correctness changes are separate from writer admission experiments;
 their pinned revisions and benchmark results remain unchanged. Real parent
 replacement and FIFO regressions join the complete cache test suite, and
 Linux CI must validate the Linux syscall path before full acceptance.
+
+
+Second half-budget cache comparison `37590822735`, current-baseline order,
+retains `5d53760` against `7a0b001`. Unique-miss throughput changes from
+31,059.968070 to 32,403.421680 requests/s, CPU efficiency from 13,345.536481
+to 14,781.687063, p99 from 5.471 to 4.828 ms, and scheduler delay from
+128.124063 to 88.751277 microseconds/request. Its delay ratio 1.040205 still
+misses the unchanged 1.0 goal. Feature-rich 1 MiB throughput ratio 0.998706
+also misses 1.0. The first and second comparisons therefore do not establish
+full-goal adoption; the independent quarter-budget trial remains pending.
+
+Cache publication now retains a verified parent directory descriptor through
+exclusive temporary creation, atomic rename, and failure cleanup. Existing
+Unix parents are opened with the same whole-path no-symlink validation used
+for reads. Missing parents are created using mkdirat and opened with
+O_DIRECTORY/O_NOFOLLOW relative to owned descriptors; new permissions are
+applied to those descriptors. Neither publication nor cleanup reopens the
+parent by pathname. The zero-copy source also uses whole-path validation.
+A real-filesystem regression replaces the parent with an outside symlink
+between acquisition and publication, verifies that create/rename/cleanup
+remain in the acquired directory, and rejects missing-child creation through
+the replacement without creating anything outside. All 109 cache library
+tests pass. This also removes repeated ancestor metadata inspections from
+existing-parent publication, a cost visible in the native cache profile;
+performance improvement requires a separate fixed-revision comparison.

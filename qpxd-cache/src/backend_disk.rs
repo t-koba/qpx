@@ -13,7 +13,9 @@ use qpx_http::body::Body;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{IoSlice, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -26,6 +28,7 @@ use tracing::warn;
 
 #[cfg(unix)]
 mod nofollow;
+mod publication;
 
 const DISK_CACHE_MAGIC: &[u8] = b"QPX-DISK-CACHE\0\x01";
 const DISK_CACHE_SCHEMA_VERSION: u16 = 2;
@@ -935,10 +938,7 @@ impl DiskCacheBackend {
         }
 
         let mut source = body.to_body();
-        let parent = path
-            .parent()
-            .ok_or_else(|| anyhow!("disk cache path missing parent: {}", path.display()))?;
-        ensure_private_dir(parent)?;
+        let publication = publication::CachePublication::new(path)?;
         let expires_at_ms = now_ms().saturating_add(ttl_secs.saturating_mul(1000));
         let header = DiskCacheHeader {
             schema_version: DISK_CACHE_SCHEMA_VERSION,
@@ -946,9 +946,8 @@ impl DiskCacheBackend {
             body_len: body.len(),
             meta_len: metadata.as_ref().map_or(0, |(_, meta)| meta.len() as u64),
         };
-        let tmp_path = temp_path(parent);
         let streamed: std::result::Result<u64, anyhow::Error> = async {
-            let mut file = TokioFile::from_std(create_secure_new_file(&tmp_path)?);
+            let mut file = TokioFile::from_std(publication.create()?);
             let body_offset = write_header_async(&mut file, &header).await?;
             while let Some(chunk) = source.data().await {
                 file.write_all(chunk?.as_ref()).await?;
@@ -964,16 +963,11 @@ impl DiskCacheBackend {
             // publish atomically via rename instead of paying for an fsync.
             let body_len = header.body_len;
             drop(file);
-            fs::rename(&tmp_path, path).with_context(|| {
-                format!("failed to commit disk cache object {}", path.display())
-            })?;
+            publication.commit()?;
             Ok(body_offset + body_len + header.trailer_len())
         }
         .await;
-        if streamed.is_err() {
-            let _ = fs::remove_file(&tmp_path);
-        }
-        let total_len = streamed?;
+        let total_len = publication.finish(streamed)?;
         self.remember_write(path.to_path_buf(), total_len, expires_at_ms)
             .await?;
         self.hot_remove(path).await;
@@ -1507,14 +1501,11 @@ fn open_zero_copy_source(key: &str, path: &Path, body_len: u64) -> Option<std::s
     if !is_cache_body_storage_key(key) || body_len < DISK_CACHE_ZERO_COPY_MIN_BYTES {
         return None;
     }
-    let mut options = OpenOptions::new();
-    options.read(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    match options.open(path) {
+    let opened = nofollow::open(path);
+    #[cfg(not(unix))]
+    let opened = reject_symlink(path).and_then(|()| File::open(path).map_err(Into::into));
+    match opened {
         Ok(file) => Some(std::sync::Arc::new(file)),
         Err(err) => {
             warn!(
@@ -1722,10 +1713,7 @@ fn write_cached_object_sync(
     ttl_secs: u64,
 ) -> Result<(DiskCacheWrite, Bytes, Option<Bytes>)> {
     let mut disk_phase = crate::perf_diagnostics::phase_timer!("cache_directory_validation");
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("disk cache path missing parent: {}", path.display()))?;
-    ensure_private_dir(parent)?;
+    let publication = publication::CachePublication::new(path)?;
     let expires_at_ms = now_ms().saturating_add(ttl_secs.saturating_mul(1000));
     let header = DiskCacheHeader {
         schema_version: DISK_CACHE_SCHEMA_VERSION,
@@ -1733,10 +1721,9 @@ fn write_cached_object_sync(
         body_len: value.len() as u64,
         meta_len: metadata.as_ref().map_or(0, |meta| meta.len() as u64),
     };
-    let tmp_path = temp_path(parent);
     let result = (|| {
         disk_phase.enter("cache_object_create");
-        let mut file = create_secure_new_file(&tmp_path)?;
+        let mut file = publication.create()?;
         disk_phase.enter("cache_object_encode_write");
         let raw_header = serde_json::to_vec(&header)?;
         let header_length = u32::try_from(raw_header.len())
@@ -1781,18 +1768,16 @@ fn write_cached_object_sync(
         let total_len = body_offset + header.body_len + header.trailer_len();
         disk_phase.enter("cache_object_commit");
         drop(file);
-        fs::rename(&tmp_path, path)
-            .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;
+        publication.commit()?;
         Ok(DiskCacheWrite {
             body_offset,
             expires_at_ms,
             total_len,
         })
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-    result.map(|write| (write, value, metadata))
+    publication
+        .finish(result)
+        .map(|write| (write, value, metadata))
 }
 
 async fn write_header_async(file: &mut TokioFile, header: &DiskCacheHeader) -> Result<u64> {
@@ -1812,26 +1797,29 @@ fn temp_path(parent: &Path) -> PathBuf {
     ))
 }
 
+#[cfg(all(unix, test))]
+fn create_secure_new_file(path: &Path) -> Result<File> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("disk cache path missing parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("disk cache path missing file name"))?;
+    nofollow::Directory::open(parent)?
+        .create(name)
+        .map_err(Into::into)
+}
+
+#[cfg(not(unix))]
 fn create_secure_new_file(path: &Path) -> Result<File> {
     // Exclusive creation rejects an existing final component atomically,
     // including dangling symlinks. A preceding stat cannot strengthen it.
-    #[cfg(not(unix))]
     reject_symlink(path)?;
     let mut options = OpenOptions::new();
     options.create_new(true).write(true).read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
     let file = options
         .open(path)
         .with_context(|| format!("failed to create disk cache file {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
     Ok(file)
 }
 
@@ -1927,7 +1915,7 @@ mod tests {
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_dir(name: &str) -> PathBuf {
+    pub(super) fn temp_dir(name: &str) -> PathBuf {
         let base = if Path::new("/private/tmp").is_dir() {
             PathBuf::from("/private/tmp")
         } else {
