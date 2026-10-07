@@ -8,7 +8,7 @@ use crate::http3::quic::{
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
-use hyper::{Request, StatusCode};
+use hyper::Request;
 use qpx_core::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::validate_request_trailers;
@@ -280,15 +280,16 @@ pub(super) async fn proxy_h3_origin(
     Ok(crate::upstream::raw_http1::Http1ResponseWithInterim {
         interim: interim
             .into_iter()
-            .map(|head| crate::upstream::raw_http1::InterimResponseHead {
-                status: qpx_http::protocol::semantics::validate_http_status_class(
-                    head.status(),
-                    "HTTP/3 interim response",
-                )
-                .unwrap_or(StatusCode::OK),
-                headers: h1_headers_to_http(head.headers()).unwrap_or_default(),
+            .map(|head| -> Result<_> {
+                Ok(crate::upstream::raw_http1::InterimResponseHead {
+                    status: qpx_http::protocol::semantics::validate_http_status_class(
+                        head.status(),
+                        "HTTP/3 interim response",
+                    )?,
+                    headers: h1_headers_to_http(head.headers())?,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
         response,
         upstream_cert: Some(pooled.upstream_cert.clone()),
         response_finalized: false,
@@ -511,6 +512,7 @@ mod tests {
         record_h3_body_content_length,
     };
     use crate::upstream::origin::http_backend::h3_pool::*;
+    use hyper::StatusCode;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, oneshot};
     use tokio::time::Duration;

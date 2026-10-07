@@ -3,6 +3,7 @@ pub mod h1_common;
 pub mod h1_request_body;
 pub mod h2;
 pub(crate) mod header_pool;
+pub(crate) mod headers;
 pub mod interim;
 pub(crate) mod lazy_timeout;
 

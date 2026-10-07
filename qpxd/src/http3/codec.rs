@@ -1,43 +1,8 @@
+pub(crate) use crate::http::codec::headers::{h1_headers_to_http, http_headers_to_h1};
 use ::http::{Request as Http1Request, Response as Http1Response};
 use anyhow::{Result, anyhow};
-use http::header::COOKIE;
 use hyper::{Request, Uri};
 use qpx_http::body::Body;
-
-pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
-    let mut headers = http::HeaderMap::new();
-    for (name, value) in src {
-        let name = http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            .map_err(|e| anyhow!("invalid header name from HTTP/3 message: {e}"))?;
-        let value = http::HeaderValue::from_bytes(value.as_bytes())
-            .map_err(|e| anyhow!("invalid header value from HTTP/3 message: {e}"))?;
-        if name == COOKIE
-            && let Some(existing) = headers.get(COOKIE).cloned()
-        {
-            let mut merged =
-                Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
-            merged.extend_from_slice(existing.as_bytes());
-            merged.extend_from_slice(b"; ");
-            merged.extend_from_slice(value.as_bytes());
-            headers.insert(COOKIE, http::HeaderValue::from_bytes(merged.as_slice())?);
-            continue;
-        }
-        headers.append(name, value);
-    }
-    Ok(headers)
-}
-
-pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {
-    let mut headers = ::http::HeaderMap::new();
-    for (name, value) in src {
-        let name = ::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            .map_err(|e| anyhow!("invalid header name for HTTP/3 message: {e}"))?;
-        let value = ::http::HeaderValue::from_bytes(value.as_bytes())
-            .map_err(|e| anyhow!("invalid header value for HTTP/3 message: {e}"))?;
-        headers.append(name, value);
-    }
-    Ok(headers)
-}
 
 pub(crate) fn sanitize_interim_response_for_h3(
     mut response: Http1Response<()>,

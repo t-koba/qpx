@@ -779,7 +779,8 @@ mod tests {
             .await
             .expect("bind actual HTTP/2 server");
         let address = listener.local_addr().expect("HTTP/2 server address");
-        let service = handler_fn(|_req: Request<Body>| async move {
+        let service = handler_fn(|req: Request<Body>| async move {
+            assert_eq!(req.headers()["cookie"], "; a=1; ");
             Ok::<_, Infallible>(Response::new(Body::from("ok")))
         });
         tokio::spawn(async move {
@@ -818,6 +819,9 @@ mod tests {
                 }
                 let request = ::http::Request::builder()
                     .method("GET")
+                    .header("cookie", "")
+                    .header("cookie", "a=1")
+                    .header("cookie", "")
                     .uri(format!("https://reverse_edges.test/{request_id}"))
                     .body(())
                     .expect("request");
