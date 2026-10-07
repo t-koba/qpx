@@ -3541,6 +3541,14 @@ regression confirms that no outside descendant is created. All 112 cache
 tests and Clippy pass. This is a trial pending the normal same-runner cache
 comparison against edc9e26, including both persistent and feature-rich
 lanes and unchanged strong miss goals; it is not an acceptance pass.
+Run 37624735653 retains every required lane with all five miss samples
+valid. Miss throughput changes from 24,952.26 to 25,111.99 requests/s,
+but CPU efficiency falls from 11,403.00 to 10,569.50 requests/CPU second
+and queue delay rises from 75.87 to 96.26 us/request. The strong queue
+ratio still fails at 1.022722 against the unchanged 1.0 maximum. The
+p99 reduction from 14.110 to 5.430 ms does not justify the CPU and queue
+regressions. Restore the original verified directory creation and retain
+the real-filesystem permission and symlink-boundary regressions.
 
 Trial independently scheduled multiplexed HTTP/2 streams after the retained
 native profile places 93.1% of samples in CPU-active long connection polls.

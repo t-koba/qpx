@@ -34,37 +34,11 @@ impl Directory {
                 "disk cache path must not contain parent traversal",
             ));
         }
-        let mut remaining = path;
-        let mut missing = Vec::new();
-        // Locate an existing prefix, then verify every component before creating anything.
-        // Metadata is only a search hint; the owned no-follow descriptor is authoritative.
-        let mut parent = loop {
-            let candidate = if remaining.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                remaining
+        let mut parent = Self::open(Path::new(if path.is_absolute() { "/" } else { "." }))?;
+        for part in path.components() {
+            let Component::Normal(part) = part else {
+                continue;
             };
-            match std::fs::symlink_metadata(candidate) {
-                Ok(_) => break Self::open(candidate)?,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    let part = remaining.file_name().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "disk cache directory missing name",
-                        )
-                    })?;
-                    missing.push(part);
-                    remaining = remaining.parent().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "disk cache directory missing parent",
-                        )
-                    })?;
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        for part in missing.into_iter().rev() {
             let name = component_name(part)?;
             let mut created = false;
             // SAFETY: the name and owned directory descriptor remain live;
