@@ -2771,3 +2771,20 @@ also fails maximum latency 3.543734 against 1.3, dominance 0.901989 against
 throughput, CPU, latency and queue checks, but fail RSS (1.198363 and
 1.371587); the 100-stream lane also fails FD 1.288793. One worker is
 therefore not an accepted replacement for the required configuration.
+
+MacOS CI job `112627781955` at `4b712f1` exposes a race in the retained
+512-request real TCP scheduler test: stream 513 (the 257th request) is
+reset with REFUSED_STREAM when the client sends before receiving the
+server's 256-stream SETTINGS limit. The h2 client builder defaults its
+pre-SETTINGS send allowance to unlimited. The test now starts that
+allowance at zero, keeping the first stream pending until actual peer
+SETTINGS. The next `ready()` call waits for that pending admission and the
+test asserts the advertised limit before sending the remaining requests. It still
+sends and consumes all 512 requests concurrently, retains the same
+timeouts, and does not retry or hide refused streams.
+All 618 qpxd library tests and all-feature/all-target Clippy pass locally;
+20 additional independent real TCP connections complete the full batch.
+Required proxy CI at `a85c0d7` still fails WebDAV 1 MiB CPU efficiency
+1.346366 against 1.5 and miss scheduler delay 2.679133 against 2.6.
+Its WebDAV p99 ratio is 0.563131 and miss p99 ratio is 0.293505; those
+latency gains do not compensate for the failed criteria.

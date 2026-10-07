@@ -801,7 +801,14 @@ mod tests {
         let socket = TcpStream::connect(address)
             .await
             .expect("connect HTTP/2 client");
-        let (mut client, connection) = h2::client::handshake(socket).await.expect("handshake");
+        // Keep the first stream pending until the peer's SETTINGS arrives. The
+        // default unlimited initial allowance could exceed the advertised limit.
+        let mut client_builder = h2::client::Builder::new();
+        client_builder.initial_max_send_streams(0);
+        let (mut client, connection) = client_builder
+            .handshake::<_, bytes::Bytes>(socket)
+            .await
+            .expect("handshake");
         tokio::spawn(async move {
             connection.await.expect("client connection");
         });
@@ -812,6 +819,12 @@ mod tests {
         let send_loop = tokio::spawn(async move {
             for request_id in 0..REQUESTS {
                 client = client.ready().await.expect("client ready");
+                if request_id == 1 {
+                    assert_eq!(
+                        client.current_max_send_streams(),
+                        super::H2_MAX_CONCURRENT_STREAMS
+                    );
+                }
                 let request = ::http::Request::builder()
                     .method("GET")
                     .uri(format!("https://reverse_edges.test/{request_id}"))
