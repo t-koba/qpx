@@ -2646,3 +2646,33 @@ Every unchanged criterion passes: fast throughput ratio 2.134113, total CPU
 efficiency 1.468283 and scheduler delay 1.502987; slow scheduler delay
 0.473673. This is one independent passing extended-window comparison, not
 three passes and not a replacement for the required original-window lane.
+
+
+Strict HTTP/2 stream-poll trial `8869af8` is rejected after same-runner
+comparison `37472969555` against `0104674`. In the 1 KiB/100-stream
+lane throughput falls from 17,868.14 to 16,090.96 requests/s and total
+CPU efficiency from 10,990.64 to 9,571.64 requests/CPU second. P99 grows
+from 9.753 to 13.694 milliseconds and maximum latency from 14.895 to
+26.296 milliseconds. Scheduler delay rises from 103.329 to 177.360
+microseconds/request. Restore the preceding connection driver and retain
+the real 512-request batch coverage. Long active polls alone do not establish
+that additional stream handoffs improve end-to-end latency; do not repeat
+this quota trial without new causal evidence.
+
+Second normal-CPU extended streaming window `37472974183` completes all
+transfers but fails slow scheduler delay 3.214545 against 1.5. The first
+extended-window pass is not reproducible across independent runs. Keep the
+required measurement unchanged; MTU and longer windows alone do not meet
+the existing scheduler objective.
+
+Bounded cache-writer comparison `37468756032` at `0ed0c2a` against
+`c87b29c` completes five valid miss samples per revision. Miss throughput
+improves from 16,609.48 to 19,354.79 requests/s, p99 from 282.105 to
+103.420 milliseconds and scheduler delay from 247.466 to 149.869
+microseconds/request. Absolute CPU efficiency declines from 9,171.50 to
+8,925.05 requests/CPU second, while the reference declines from 9,013.98
+to 8,695.57. Current reference ratios are throughput 1.641413, CPU
+1.026390, p99 0.367490 and scheduler delay 2.012374. The last ratio fails
+the requested 1.0 goal. This single run is insufficient for adoption; a
+reversed-order independent comparison is required before deciding whether
+the measured queue reduction compensates for the absolute CPU change.
