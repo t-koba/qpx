@@ -311,10 +311,9 @@ async fn load_candidate_variant_keys(
     key: &CacheRequestKey,
     request_method: &Method,
 ) -> Result<Arc<VariantIndex>> {
-    let primary = key.primary_hash_arc();
-    let storage_key = super::vary::index_storage_key(primary.as_ref());
+    let storage_key = key.primary_index_storage_key_arc();
     let mut variants = backend
-        .get_decoded_variant_index(namespace, storage_key.as_str())
+        .get_decoded_variant_index(namespace, storage_key.as_ref())
         .await?
         .unwrap_or_else(|| Arc::new(VariantIndex::default()));
     let mut get_primary = None;
@@ -333,7 +332,7 @@ async fn load_candidate_variant_keys(
     if variants.variants.is_empty() {
         // Vary-less stores publish no variant index; probe the canonical
         // default variant, falling back to the GET method group for HEAD.
-        let mut probed = vec![super::vary::variant_storage_key(primary.as_ref(), &[])];
+        let mut probed = vec![key.primary_default_variant_storage_key().to_string()];
         if let Some(get_primary) = get_primary.as_ref() {
             probed.push(super::vary::variant_storage_key(get_primary, &[]));
         }
