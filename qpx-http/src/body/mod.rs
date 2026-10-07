@@ -1,11 +1,12 @@
+mod channel;
 pub mod metrics;
 pub mod tee;
 
 use bytes::Bytes;
+use channel::{Channel, ChannelSender};
 use http::HeaderMap;
 use http_body::Frame;
 use http_body_util::BodyExt as _;
-use http_body_util::channel::{Channel, SendError as ChannelSendError, Sender as ChannelSender};
 use http_body_util::combinators::UnsyncBoxBody;
 use std::collections::VecDeque;
 use std::fmt;
@@ -48,12 +49,6 @@ impl From<hyper::Error> for BodyError {
 
 impl From<hyper_util::client::legacy::Error> for BodyError {
     fn from(value: hyper_util::client::legacy::Error) -> Self {
-        Self::new(value.to_string())
-    }
-}
-
-impl From<ChannelSendError> for BodyError {
-    fn from(value: ChannelSendError) -> Self {
         Self::new(value.to_string())
     }
 }
@@ -167,7 +162,7 @@ impl Body {
     }
 
     pub fn channel_with_capacity(capacity: usize) -> (Sender, Self) {
-        let (sender, body) = Channel::<Bytes, BodyError>::new(capacity);
+        let (sender, body) = Channel::new(capacity);
         let close_signal = Arc::new(BodyCloseSignal {
             token: CancellationToken::new(),
         });
@@ -657,7 +652,7 @@ impl BodyInner {
 
 #[derive(Debug)]
 pub struct Sender {
-    inner: Option<ChannelSender<Bytes, BodyError>>,
+    inner: Option<ChannelSender>,
     close_signal: Arc<BodyCloseSignal>,
 }
 
@@ -721,7 +716,11 @@ impl http_body::Body for LimitedBody {
 impl Sender {
     pub async fn send_data(&mut self, data: Bytes) -> Result<(), BodyError> {
         match self.inner.as_mut() {
-            Some(inner) => inner.send_data(data).await.map_err(BodyError::from),
+            Some(inner) => inner
+                .frames
+                .send(Frame::data(data))
+                .await
+                .map_err(|_| BodyError::new("failed to send frame")),
             None => Err(BodyError::new("body sender closed")),
         }
     }
@@ -729,6 +728,7 @@ impl Sender {
     pub fn try_send_data(&mut self, data: Bytes) -> Result<(), BodyError> {
         match self.inner.as_mut() {
             Some(inner) => inner
+                .frames
                 .try_send(Frame::data(data))
                 .map_err(|_| BodyError::new("body channel is full")),
             None => Err(BodyError::new("body sender closed")),
@@ -737,7 +737,11 @@ impl Sender {
 
     pub async fn send_trailers(&mut self, trailers: HeaderMap) -> Result<(), BodyError> {
         match self.inner.as_mut() {
-            Some(inner) => inner.send_trailers(trailers).await.map_err(BodyError::from),
+            Some(inner) => inner
+                .frames
+                .send(Frame::trailers(trailers))
+                .await
+                .map_err(|_| BodyError::new("failed to send frame")),
             None => Err(BodyError::new("body sender closed")),
         }
     }
@@ -745,6 +749,7 @@ impl Sender {
     pub fn try_send_trailers(&mut self, trailers: HeaderMap) -> Result<(), BodyError> {
         match self.inner.as_mut() {
             Some(inner) => inner
+                .frames
                 .try_send(Frame::trailers(trailers))
                 .map_err(|_| BodyError::new("body channel is full")),
             None => Err(BodyError::new("body sender closed")),
@@ -757,7 +762,7 @@ impl Sender {
 
     pub fn abort_with_error(&mut self, error: BodyError) {
         if let Some(inner) = self.inner.take() {
-            inner.abort(error);
+            let _ = inner.error.send(error);
         }
     }
 
@@ -946,6 +951,59 @@ mod tests {
             .await
             .expect("closed notification");
         assert!(started.elapsed() < std::time::Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn channel_drains_final_frame_during_concurrent_sender_drop() {
+        let (work_tx, work_rx) = std::sync::mpsc::channel::<Sender>();
+        let producer = std::thread::spawn(move || {
+            for mut sender in work_rx {
+                sender
+                    .try_send_data(Bytes::from_static(b"final frame"))
+                    .expect("send final frame");
+            }
+        });
+        for round in 0..100_000 {
+            let (sender, body) = Body::channel_with_capacity(1);
+            work_tx.send(sender).expect("send body producer");
+            let actual = body.collect().await.expect("collect body").to_bytes();
+            assert_eq!(actual.as_ref(), b"final frame", "round {round}");
+        }
+        drop(work_tx);
+        producer.join().expect("body producer");
+    }
+
+    #[tokio::test]
+    async fn channel_drains_buffer_before_propagating_abort() {
+        let (mut sender, mut body) = Body::channel_with_capacity(1);
+        sender
+            .send_data(Bytes::from_static(b"buffered"))
+            .await
+            .unwrap();
+        sender.abort_with_error(BodyError::new("producer failed"));
+
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            "buffered"
+        );
+        assert_eq!(
+            body.frame().await.unwrap().unwrap_err().to_string(),
+            "producer failed"
+        );
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn channel_preserves_trailers_on_sender_drop() {
+        let (mut sender, body) = Body::channel_with_capacity(2);
+        sender.send_data(Bytes::from_static(b"body")).await.unwrap();
+        let mut trailers = HeaderMap::new();
+        trailers.insert("x-complete", "yes".parse().unwrap());
+        sender.send_trailers(trailers).await.unwrap();
+        drop(sender);
+        let collected = body.collect().await.unwrap();
+        assert_eq!(collected.trailers().unwrap()["x-complete"], "yes");
+        assert_eq!(collected.to_bytes(), "body");
     }
 
     #[tokio::test]

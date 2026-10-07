@@ -3445,6 +3445,20 @@ the IPC case in debug builds too with the same request count, concurrency
 and thresholds. Eleven local real-CGI/TCP executions verify 352 responses
 without reproducing that Linux release failure; do not claim it resolved.
 
+CI `37663879567` repeats the IPC failure with status 200 and an empty body.
+A real shared-body channel regression reproduces the same loss: a producer
+thread enqueues an 11-byte final frame and drops its sender, but collection
+returns zero bytes at iteration 14,073. The `http-body-util` 0.1.3 channel
+polls the frame queue and its separate completion receiver independently;
+closure between those polls can return EOF despite a newly queued frame.
+The shared qpx body channel now reads the terminal error or EOF only after
+the frame queue reports that it is drained and closed. This uses the same
+bounded Tokio frame queue and one-shot error channel, without retry delays,
+extra tasks, unbounded buffering or suppression of producer errors. Remove
+the unused dependency channel feature. Verify concurrent final-frame drain,
+buffered-data-before-abort ordering, trailers and real TCP/CGI smoke tests;
+the next Linux CI must still confirm that the original failure is resolved.
+
 Inspection separately finds a definite IPC transport error-propagation bug:
 the TCP body reader handles a failed read like successful EOF. A real socket
 reset first fails a regression requiring a downstream body error. Abort the

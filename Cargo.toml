@@ -94,7 +94,7 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "server",
 tower-service = "0.3"
 http = "1"
 http-body = "1"
-http-body-util = { version = "0.1", features = ["channel"] }
+http-body-util = "0.1"
 h2 = "0.4"
 httparse = "1"
 libc = "0.2"

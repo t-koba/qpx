@@ -1418,7 +1418,6 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
- "tokio",
 ]
 
 [[package]]
