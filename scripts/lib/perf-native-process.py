@@ -70,7 +70,8 @@ def main():
     observer = os.environ["QPX_NATIVE_PERF_BIN"]
     if mode in ("cpu", "client-cpu"):
         lifecycle["ring_buffer_bytes"] = 8 * 1024 * 1024
-        command = [observer, "record", "-m", "8M", "-e", "cpu-clock", "-F", "199",
+        # Resolve recorded stacks only after shutdown, against the preserved ELF.
+        command = [observer, "record", "--no-buildid", "-m", "8M", "-e", "cpu-clock", "-F", "199",
                    "--clockid", "CLOCK_MONOTONIC"]
         if mode == "cpu":
             command.extend(["--call-graph", "dwarf,16384"])

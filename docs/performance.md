@@ -565,6 +565,12 @@ Native copy-call reports disable perf's inline source expansion: the runner's
 addr2line resolver failed to read its cached ELF and retried each address until
 the report deadline. Function call chains remain recorded and displayed; the
 raw DWARF stacks and real binary are preserved for source-level analysis.
+CPU recording uses `--no-buildid` to defer stack processing until reporting:
+perf 6.17 also walks callchains during build-ID postprocessing, and the same
+resolver failure prevented graceful recorder shutdown. The preserved exact ELF
+and SHA-256 remain required; report generation still rejects forced shutdown,
+lost samples and incomplete windows. Workload binaries must not be rebuilt
+between recording and reporting.
 The `webdav-native` diagnostic profiles the normal 1 KiB and 1 MiB WebDAV
 workloads against Apache, retaining per-thread waiting snapshots and six timed
 CPU reports. It preserves the normal allocator environment and does not replace
