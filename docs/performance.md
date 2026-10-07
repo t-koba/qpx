@@ -3027,3 +3027,32 @@ independent same-runner WebDAV comparison against `9e5189a`, unchanged
 CPU/p99/resource gates and full CI; normal measurement is not instrumented.
 The running cache-miss and LTO comparisons remain pinned to their original
 revision pairs and do not include this trial.
+
+
+Missing-object comparison `37580145066` validates all five miss samples
+per revision. Against `d3926aa`, explicit NotFound handling at `b91a395`
+changes qpx throughput from 29,110.168065 to 30,152.224122 requests/s,
+CPU efficiency from 13,142.024401 to 13,155.691234 requests/CPU second,
+p99 from 6.485 to 5.589 ms, and scheduler delay from 125.264767 to
+129.590955 microseconds/request. Current nginx delay is 61.197001, so
+the stronger 1.0 delay goal still fails at 2.117603. These are one-run
+results; the cleanup is not three independent full acceptance passes.
+
+Normal fat-LTO HTTP/2 job `112661663055` at `9e5189a` fails only the
+1 KiB/100-stream lane: p99 6.330 versus nginx 4.879 ms (1.297397 versus
+1.1), maximum latency ratio 1.217097 versus 1.1, dominance 0.908197
+versus 0.95, and delay 62.836901 versus 27.831929 microseconds/request
+(2.257727 versus 2.0). Current CPU and RSS profiles are being measured
+separately; the existing strict stream-poll quota remains rejected.
+
+Replayable-body comparison `37581936545` rejects the 1 MiB tier expansion
+at `43f8a15` against `9e5189a`. All three samples per size/revision are
+valid. Qpx 1 MiB CPU efficiency rises from 3,650.088652 to 4,522.638436
+requests/CPU second, but throughput falls from 4,077.936315 to
+3,297.942050 requests/s. P99 falls from 56.259 to 36.108 ms, yet the
+current Apache reference is 29.791 ms, leaving p99 ratio 1.212044 above
+1.0. CPU ratio 1.393667 also misses 1.5. Restore the 64 KiB per-object
+materialization bound. Keep file-identity validation and preservation of
+an already verified complete snapshot: those fix stale atomic replacement
+and descriptor re-read semantics without eagerly materializing large files.
+The profile does not justify repeating eager large-body caching unchanged.

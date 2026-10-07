@@ -14,7 +14,7 @@ const READ_CACHE_MAX_ENTRIES: usize = 64;
 // Keep replayable bodies in memory only while they fit the cache body's
 // in-memory tier. Larger resources use their verified file region directly so
 // a zero-copy response does not first pay for a redundant materialization.
-const READ_CACHE_MAX_OBJECT_BYTES: usize = READ_CACHE_MAX_BYTES / READ_CACHE_MAX_ENTRIES;
+const READ_CACHE_MAX_OBJECT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 struct ReadCacheEntry {
