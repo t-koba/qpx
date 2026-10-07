@@ -13,7 +13,7 @@ if [ "${1:-}" != --inside ]; then
     echo "usage: perf-audit-http2-isolated.sh [--native|--phases] [--workers 1|2|4] <comparison-jsonl>" >&2
     exit 2
   fi
-  exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA,QPX_HTTP2_COMPARE_LOG_DIR,QPXD_REAL_BIN,QPX_NATIVE_PROFILE_DIR,QPX_NATIVE_PERF_BIN,QPX_NATIVE_WRAPPER_SOURCE,QPX_PERF_NATIVE_IO_TIMELINE \
+  exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA,QPX_HTTP2_COMPARE_LOG_DIR,QPXD_REAL_BIN,QPX_NATIVE_PROFILE_DIR,QPX_NATIVE_PERF_BIN,QPX_NATIVE_WRAPPER_SOURCE,QPX_PERF_NATIVE_IO_TIMELINE,QPX_PERF_MEMORY_MAP_DIAGNOSTICS \
     unshare --net bash "$ROOT_DIR/scripts/perf-audit-http2-isolated.sh" --inside "$@"
 fi
 shift
@@ -114,6 +114,34 @@ taskset -c "$server_cpus" setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init
   QPX_HTTP2_COMPARE_BODY_SIZES="$body_sizes" \
   QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES="$stream_values" QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS=3 \
   bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" "$output"
+if [ "${QPX_PERF_MEMORY_MAP_DIAGNOSTICS:-0}" = 1 ]; then
+  python3 - "$QPX_HTTP2_COMPARE_LOG_DIR" <<'PY_MAPS'
+import json
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+count = 0
+for proxy in ('qpxd', 'nginx'):
+    for body in (1024, 1048576):
+        for streams in (1, 100):
+            for round_index in (1, 2, 3):
+                path = root / (f'http2.{proxy}.{body}.m{streams}.round-{round_index}'
+                               '.attempt-1.rss-peak.memory-maps.json')
+                record = json.loads(path.read_text())
+                if (record.get('window') != 'after_workload_sampler_shutdown'
+                        or record.get('monotonic_ns', 0) <= 0
+                        or not record.get('processes')):
+                    raise SystemExit(f'HTTP/2 memory map window is incomplete: {path}')
+                for process in record['processes']:
+                    if process.get('pid', 0) <= 0 or not process.get('mappings'):
+                        raise SystemExit(f'HTTP/2 memory map process is incomplete: {path}')
+                    for mapping in process['mappings']:
+                        if mapping.get('kilobytes', {}).get('Rss', -1) < 0:
+                            raise SystemExit(f'HTTP/2 memory map RSS is missing: {path}')
+                count += 1
+print(f'HTTP/2 memory map windows validated: {count}')
+PY_MAPS
+fi
 if [ -n "${QPX_HTTP2_COMPARE_SERVER_WORKERS:-}" ]; then
   python3 - "$output" "$QPX_HTTP2_COMPARE_SERVER_WORKERS" "$phases" <<'PY_WORKERS'
 import json

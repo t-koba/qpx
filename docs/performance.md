@@ -2939,3 +2939,11 @@ Thus these counters do not represent identical completed wire intervals.
 Packet counts alone do not explain the earlier CPU sample difference;
 zero retransmissions do not justify changing MSS, destination batching
 or reintroducing a rejected queue-size trial.
+
+Memory-map diagnostic `37576510138` completes its normal measurements
+but retains no map records: the isolated namespace's explicit sudo
+environment allowlist omitted the diagnostic flag. This is missing
+diagnostic evidence, not successful mapping validation. Preserve the
+flag explicitly and require actual qpx/nginx maps for all 24 measured
+windows before evaluating the diagnostic. No missing map is accepted
+as zero RSS and no measurement condition is changed.
