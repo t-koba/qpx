@@ -2736,3 +2736,38 @@ Together with the preceding comparison's absolute CPU increase, this provides
 no support for retaining the larger queue. Restore the preceding 1 MiB bound
 and keep the real slow-receiver bounded-queue and cancellation-restoration
 regression. Do not repeat the queue enlargement without new causal evidence.
+
+Reversed bounded-writer comparison `37567339190` at `a85c0d7` against
+`c87b29c` completes five valid 1 KiB miss samples for each revision.
+Qpx throughput increases from 19,069.64 to 21,437.76 requests/s, CPU
+efficiency from 9,021.59 to 9,367.59 requests/CPU second, p99 falls from
+123.772 to 13.374 milliseconds, and scheduler delay falls from 137.118
+to 116.890 microseconds/request. The reference CPU efficiency increases
+from 10,784.39 to 11,024.65. Current reference ratios remain CPU 0.849695
+and delay 1.457607, failing the requested 1.0 goals. Ordinary cache hit
+1 KiB throughput also fails 1.149013 against 1.2; 1 MiB hit delay fails
+1.108932 against 1.0, and feature-rich 1 MiB delay fails 1.039970 against
+1.0. Feature-rich 1 KiB still passes. The writer bound has repeated queue
+and p99 gains but not three independent full acceptance passes.
+
+Isolated writer CPU diagnostic `37569219983` records 227 complete real
+1 KiB filesystem closures. Median CPU is 82.311 microseconds, CPU p99
+148.450 microseconds and non-CPU p99 1,001.768 microseconds. The longest
+paired closure takes 101.956203 milliseconds with only 0.099203 milliseconds
+of thread CPU. That closure occurs between observed workload windows, so
+it is not an acceptance latency sample. The retained workload thread CSVs
+also observe actual uninterruptible waits in `jbd2_log_wait_commit`,
+`__lock_buffer`, `__wait_on_buffer`, and `do_get_write_access` across the
+five miss windows. These observations establish filesystem journal/buffer
+waiting in the workload, but do not attribute every delay to that cause.
+No sampled-clock errors or missing writer CPU pairs occur.
+
+Normal single-worker HTTP/2 diagnostic `37568710346` completes all four
+size/stream configurations without native instrumentation. The 1 KiB,
+100-stream p99 ratio is 0.965511, but maximum latency is 1.257576 against
+1.1 and total RSS is 1.074456 against 1.0. The 1 KiB/single-stream lane
+also fails maximum latency 3.543734 against 1.3, dominance 0.901989 against
+1.05, RSS 1.079821 and FD 1.042654 against 1.0. Both 1 MiB lanes pass
+throughput, CPU, latency and queue checks, but fail RSS (1.198363 and
+1.371587); the 100-stream lane also fails FD 1.288793. One worker is
+therefore not an accepted replacement for the required configuration.
