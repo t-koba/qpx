@@ -22,7 +22,7 @@ phases=0
 body_sizes="1024 1048576"
 stream_values="1 100"
 case "${1:-}" in
-  --native) native=1; shift ;;
+  --native) native=1; export RUST_LOG=warn,qpx_perf_tls=debug; shift ;;
   --phases) native=1; phases=1; shift ;;
 esac
 if [ "${1:-}" = --workers ]; then

@@ -144,6 +144,50 @@ PY_QUALITY
 echo "Native CPU profiles: $profiles"
 echo "Native workload CPU reports: $reports"
 
+if [ "$workload" = http2 ]; then
+  python3 - "$log_directory" "$QPX_NATIVE_PROFILE_DIR/tls-vectored-writes.json" <<'PY_TLS'
+import json
+from pathlib import Path
+import sys
+root, output = map(Path, sys.argv[1:])
+started = 0
+samples = []
+for path in sorted(root.rglob("*.log")):
+    for line in path.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("target") != "qpx_perf_tls":
+            continue
+        fields = record.get("fields", record)
+        if fields.get("message") == "coalesced vectored write diagnostics enabled":
+            started += 1
+            continue
+        if fields.get("message") != "coalesced pending vectored write sampled":
+            continue
+        names = ("pending_bytes", "first_slice_bytes", "offered_bytes", "offered_slices",
+                 "consumed_bytes", "omitted_slice_bytes", "sample_interval")
+        if not all(type(fields.get(name)) is int and fields[name] >= 0 for name in names):
+            raise SystemExit("TLS vectored-write diagnostic has invalid counters")
+        if (fields["sample_interval"] != 1024 or fields["offered_slices"] == 0
+                or fields["consumed_bytes"] > fields["first_slice_bytes"]
+                or fields["offered_bytes"] < fields["first_slice_bytes"]
+                or fields["omitted_slice_bytes"] != fields["offered_bytes"] - fields["first_slice_bytes"]):
+            raise SystemExit("TLS vectored-write diagnostic counters are inconsistent")
+        samples.append({name: fields[name] for name in names})
+if started == 0:
+    raise SystemExit("TLS vectored-write diagnostic did not start on a real connection")
+output.write_text(json.dumps({
+    "measurement": "native_tls_pending_vectored_write_samples_v1",
+    "scope": "complete_profile_including_calibration_and_all_lanes",
+    "started_connections": started, "sample_interval": 1024,
+    "sampled_events": len(samples), "samples": samples,
+}, indent=2) + "\n")
+print(f"TLS pending vectored-write samples retained: {len(samples)}")
+PY_TLS
+fi
+
 if [ "$workload" = streaming ]; then
   python3 - "$log_directory/backend-tcp.jsonl" <<'PY'
 import json

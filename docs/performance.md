@@ -3347,3 +3347,48 @@ file regression first fails on the former selection, then verifies extent
 preservation and exact offset/length payload transfer over real TCP. All
 620 qpxd library tests pass after the fix. Require fresh native evidence
 and independent normal comparisons before claiming a performance gain.
+
+Post-selection-fix native run `37600355788` at `392ba5c` succeeds with
+one owned profile, three real qpx/nginx rounds and zero lost samples.
+Second-round callchains now contain sendfile in 977 of 1,644 stacks,
+splice in 929 and socket poll-write in 83. Page clearing and copying from
+user buffers appear as leaves in only two and one samples, respectively.
+This establishes restoration of file transfer and removal of the former
+copied-write path, but not performance improvement. Instrumented qpx CPU
+efficiency is 1,984.560570 versus nginx's 2,063.968668, and qpx scheduler
+delay is 435.436212 versus 250.370140 microseconds/request. These separate
+runner measurements must not be treated as a causal before/after estimate.
+The pinned normal comparison remains pending; keep the selection change
+provisional and investigate file-transfer syscall/handoff cost if it
+reproduces a regression. Do not repeat rejected WebDAV quantum changes on
+the strength of a restored syscall alone.
+
+Second quarter-budget comparison `37597012779` reverses the product order
+to current-baseline and passes all five measurement-quality evaluations
+for both revisions. Miss throughput rises from 29,915.693089 to
+35,721.299485 requests/s, CPU efficiency from 13,345.060659 to
+16,437.458668, p99 falls from 5.678 to 4.459 ms, and scheduler delay falls
+from 105.321864 to 61.031070 microseconds/request. Strong miss ratios are
+2.397451 throughput, 1.565037 CPU and 0.902902 delay, giving a second
+independent strong-miss pass. The complete comparison still fails ordinary
+1 MiB cache delay ratio 1.490586 against 1.0. These are pinned historical
+admission results, not three full-goal passes at the latest HEAD.
+
+The retained large-body lanes of H2 native diagnostic `37582972906` contain
+3,220 single-stream and 2,018 multiplexed stacks. AES-GCM bulk encryption
+is the leaf in 512 and 314 samples (about 16%); socket sends appear in
+1,450 and 720 stacks. Coalescer inspection identifies a possible source of
+extra TLS writes: with buffered bytes present, the bulk vectored path
+forwards only the first nonempty caller slice alongside its buffer and
+returns partial caller consumption. This is legal I/O behavior, but the
+profile does not establish how often that branch is exercised.
+
+Native H2 diagnostics now sample successful executions of that branch,
+retaining pending bytes, offered slices/bytes, first-slice size, caller
+consumption and omitted-slice bytes. The diagnostic target is enabled
+inside the isolated native namespace, and real connection-start records
+distinguish zero observed branch executions from missing instrumentation.
+The retained summary validates all counters and explicitly covers the
+complete profile including calibration and all lanes; it is not attributed
+to a single measured window. Normal workload logging and writer behavior
+are unchanged. Use the actual samples before proposing any batching change.
