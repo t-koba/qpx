@@ -260,7 +260,10 @@ pub(super) async fn serve_raw_or_fallback(
                         .await?
                     }
                     PreparedRawHttp1Response::Generic(interim, mut response) => {
-                        if let Some(body) = take_generic_in_memory_body(&interim, &mut response) {
+                        if interim.is_empty()
+                            && let Some(body) =
+                                response.body_mut().take_single_frame_without_trailers()
+                        {
                             let (parts, _) = response.into_parts();
                             send_static_http1_response(
                                 &mut stream,
@@ -325,16 +328,6 @@ pub(super) async fn serve_raw_or_fallback(
             }
         }
     }
-}
-
-fn take_generic_in_memory_body(
-    interim: &InterimList,
-    response: &mut Response<Body>,
-) -> Option<Bytes> {
-    if !interim.is_empty() || response.body().has_file_region() {
-        return None;
-    }
-    response.body_mut().take_single_frame_without_trailers()
 }
 
 fn try_prepare_request<'a>(
@@ -408,65 +401,4 @@ fn prepare_complete_request<'a>(
         return FastParse::Fallback;
     };
     FastParse::Prepared { consumed, request }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    use tokio::net::TcpListener;
-
-    #[tokio::test]
-    async fn generic_file_response_preserves_its_extent_and_transfers_over_real_tcp() {
-        let payload = vec![b'x'; 1024 * 1024];
-        let mut file = tempfile::tempfile().expect("create real response file");
-        file.write_all(b"prefix").expect("write file prefix");
-        file.write_all(&payload).expect("write file payload");
-        file.write_all(b"suffix").expect("write file suffix");
-        let body = Body::from(payload.clone())
-            .mark_trailers_sanitized()
-            .with_file_region(Arc::new(file), 6, payload.len() as u64);
-        let mut response = Response::builder()
-            .header(http::header::CONTENT_LENGTH, payload.len())
-            .body(body)
-            .expect("file response");
-        assert!(take_generic_in_memory_body(&Vec::new(), &mut response).is_none());
-        assert!(response.body().has_file_region());
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind real listener");
-        let mut client = TcpStream::connect(listener.local_addr().expect("listener address"))
-            .await
-            .expect("connect real client");
-        let (mut server, _) = listener.accept().await.expect("accept real client");
-        let transfer = tokio::spawn(async move {
-            let keep_alive = send_http1_response_with_interim_tcp(
-                &mut server,
-                http::Version::HTTP_11,
-                &http::Method::GET,
-                response,
-                &[],
-                false,
-                Duration::from_secs(5),
-                &mut BytesMut::new(),
-            )
-            .await
-            .expect("transfer real file response");
-            assert!(!keep_alive);
-            server.shutdown().await.expect("close real response socket");
-        });
-        let mut received = Vec::new();
-        tokio::time::timeout(Duration::from_secs(10), client.read_to_end(&mut received))
-            .await
-            .expect("response timeout")
-            .expect("read real response");
-        transfer.await.expect("join response transfer");
-        let header_end = received
-            .windows(4)
-            .position(|bytes| bytes == b"\r\n\r\n")
-            .expect("HTTP response headers")
-            + 4;
-        assert_eq!(&received[header_end..], payload);
-    }
 }

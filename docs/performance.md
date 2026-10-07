@@ -3392,3 +3392,30 @@ The retained summary validates all counters and explicitly covers the
 complete profile including calibration and all lanes; it is not attributed
 to a single measured window. Normal workload logging and writer behavior
 are unchanged. Use the actual samples before proposing any batching change.
+
+Pinned normal comparison `37600364322` rejects the generic file-extent
+selection change. Both revisions pass all five measurement-quality lanes.
+Against `fb85795`, `392ba5c` raises ordinary 1 MiB throughput from
+2,603.367836 to 2,801.755346 requests/s, but lowers CPU efficiency from
+5,772.413793 to 3,547.984887 and raises scheduler delay from 42.719221 to
+177.210374 microseconds/request. Feature-rich 1 MiB CPU efficiency falls
+from 5,743.891403 to 3,506.586022 and delay rises from 55.670874 to
+174.667666. Restore the previous single-frame selection and remove the
+trial-specific helper and regression test. The memory body remains an
+equivalent complete payload; the optional file extent is a transfer hint.
+Do not retain an optimization merely because it eliminates copied syscalls.
+
+Fresh cache native diagnostic `37602256740` retains two owned profiles,
+eleven workload reports and zero lost samples. The second-round miss window
+contains 4,546 stacks: memory copying appears as a leaf in 237 samples,
+openat2 in 463 stacks, mkdir in 84, and the synchronous object writer in
+353. These do not justify changing fan-out, weakening path validation or
+repeating the rejected cold-reader split. Memory-copy callers are spread
+across dispatch and origin futures; no single new root cause is established.
+
+HTTP/2 CI `37600317589` completes all requests and passes measurement
+quality. Its small multiplexed lane still fails p99 ratio 1.277690 against
+1.1, maximum latency ratio 1.270515 against 1.1, dominance 0.901184 against
+0.95 and scheduler delay ratio 2.183969 against 2.0. Both large-body lanes
+pass. The pending TLS diagnostic investigates actual writer behavior;
+failure alone is not evidence for another scheduling or batching trial.
