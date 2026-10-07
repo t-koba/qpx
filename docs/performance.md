@@ -3177,3 +3177,21 @@ delay rises from 567.714139 to 672.223148 microseconds/request. Small/
 multiplex p99 ratio 1.273715 misses 1.1 and aggregate dominance 1.377921
 misses 1.5. Keep the change provisional while an independent reversed-order
 pair distinguishes ordering variation from a product regression.
+
+Cold cache reads expose a separate filesystem confinement defect: after the
+index is initialized, replacing an object's parent directory with a symlink
+permits reading the valid object after it has been moved outside the cache.
+A real-filesystem regression fails before the fix. Final-component
+`O_NOFOLLOW` does not protect ancestor components. Linux reads now use
+`openat2` with `RESOLVE_NO_SYMLINKS`, validating the entire path in the same
+operation that opens it; unsupported or restricted syscalls remain errors.
+Other Unix platforms walk each component through owned directory descriptors
+with `openat` and `O_NOFOLLOW`. Both paths reject parent traversal and retain
+the verified file descriptor, so there is no separate validation/open race.
+Nonblocking opens and regular-file validation also reject real FIFO objects
+without waiting for an external writer. Missing objects alone remain cache
+misses. Existing format, length, expiry and metadata errors still propagate.
+These correctness changes are separate from writer admission experiments;
+their pinned revisions and benchmark results remain unchanged. Real parent
+replacement and FIFO regressions join the complete cache test suite, and
+Linux CI must validate the Linux syscall path before full acceptance.

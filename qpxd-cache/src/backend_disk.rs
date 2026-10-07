@@ -24,6 +24,9 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 use tracing::warn;
 
+#[cfg(unix)]
+mod nofollow;
+
 const DISK_CACHE_MAGIC: &[u8] = b"QPX-DISK-CACHE\0\x01";
 const DISK_CACHE_SCHEMA_VERSION: u16 = 2;
 const DISK_CACHE_FILE_EXT: &str = "qpxc";
@@ -1617,18 +1620,14 @@ fn collect_cache_files_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn read_disk_cache_header_sync(path: &Path) -> Result<Option<DiskCacheRead>> {
-    let mut options = OpenOptions::new();
-    options.read(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Validate and open the same object; a separate lstat both duplicates
-        // miss I/O and leaves a symlink replacement window before open.
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
+    let opened = nofollow::open(path);
     #[cfg(not(unix))]
-    reject_symlink(path)?;
-    let mut file = match options.open(path) {
+    let opened = {
+        reject_symlink(path)?;
+        File::open(path)
+    };
+    let mut file = match opened {
         Ok(file) => file,
         // Absence is an expected storage result, not a formatted error that
         // callers must allocate and then inspect to rediscover a cache miss.
@@ -1639,6 +1638,12 @@ fn read_disk_cache_header_sync(path: &Path) -> Result<Option<DiskCacheRead>> {
         }
     };
     let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(anyhow!(
+            "disk cache object must be a regular file: {}",
+            path.display()
+        ));
+    }
     let mut magic = [0; DISK_CACHE_MAGIC.len()];
     file.read_exact(&mut magic)?;
     if magic != DISK_CACHE_MAGIC {
@@ -3077,6 +3082,54 @@ mod tests {
             .expect("reconcile absent object");
         assert!(backend.state.lock().await.total_bytes <= backend.max_bytes);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disk_backend_rejects_replaced_parent_on_cold_reads() {
+        let dir = temp_dir("replaced-parent-read");
+        let outside = temp_dir("outside-parent-read");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend
+            .put("ns", "key", b"protected", 60)
+            .await
+            .expect("put object");
+        let cold = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("cold backend");
+        cold.ensure_indexed().await.expect("initialize cold index");
+        let path = backend.path_for("ns", "key");
+        let parent = path.parent().expect("object parent");
+        let saved = outside.join("saved");
+        fs::rename(parent, &saved).expect("move parent outside cache");
+        std::os::unix::fs::symlink(&saved, parent).expect("replace parent with symlink");
+        assert!(cold.get("ns", "key").await.is_err());
+        assert!(read_metadata_trailer_sync(&path).is_err());
+        assert_eq!(
+            read_disk_cache_header_sync(&saved.join(path.file_name().expect("object name")))
+                .expect("outside object remains valid")
+                .expect("outside object exists")
+                .header
+                .body_len,
+            9
+        );
+        fs::remove_dir_all(dir).expect("remove cache fixture");
+        fs::remove_dir_all(outside).expect("remove outside fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disk_backend_rejects_fifo_objects_without_blocking() {
+        let dir = temp_dir("fifo-object-read");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend.ensure_indexed().await.expect("initialize index");
+        let path = backend.path_for("ns", "fifo");
+        ensure_private_dir(path.parent().expect("object parent")).expect("create parent");
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("FIFO path");
+        // SAFETY: name is a live NUL-terminated fixture path and the mode is valid.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(backend.get("ns", "fifo").await.is_err());
+        assert!(read_metadata_trailer_sync(&path).is_err());
+        fs::remove_dir_all(dir).expect("remove FIFO fixture");
     }
 
     #[cfg(unix)]
