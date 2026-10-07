@@ -15,7 +15,7 @@ def main():
     server = os.environ["QPXD_REAL_BIN"]
     mode = os.environ.get("QPX_NATIVE_PROFILE_MODE", "cpu")
     reference_role = os.environ.get("QPX_NATIVE_REFERENCE_ROLE")
-    if reference_role is not None and (reference_role != "apache-webdav" or mode != "cpu"):
+    if reference_role is not None and (reference_role not in ("apache-webdav", "streaming-backend") or mode != "cpu"):
         raise SystemExit("unsupported native reference profile role")
     if mode not in ("cpu", "client-cpu", "syscalls"):
         raise SystemExit("unsupported native profiler mode")
@@ -26,11 +26,17 @@ def main():
         # sample window. Profile every logged calibration and measurement.
         os.execv(server, [server, *arguments])
     if reference_role is not None:
-        if "-f" not in arguments or "-DFOREGROUND" not in arguments:
-            raise SystemExit("native Apache reference profiling requires a foreground server config")
-        config = Path(arguments[arguments.index("-f") + 1])
-        if not config.is_file():
-            raise SystemExit("native Apache reference server config is missing")
+        if reference_role == "apache-webdav":
+            if "-f" not in arguments or "-DFOREGROUND" not in arguments:
+                raise SystemExit("native Apache reference profiling requires a foreground server config")
+            config = Path(arguments[arguments.index("-f") + 1])
+            if not config.is_file():
+                raise SystemExit("native Apache reference server config is missing")
+        else:
+            if (len(arguments) != 4 or Path(arguments[0]).name != "streaming_backend.py"
+                    or not Path(arguments[0]).is_file()
+                    or not all(value.isdecimal() and int(value) > 0 for value in arguments[1:])):
+                raise SystemExit("native streaming backend profiling requires the real server script and parameters")
         role = reference_role
     elif "--config" in arguments:
         role = Path(arguments[arguments.index("--config") + 1]).stem

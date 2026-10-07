@@ -115,13 +115,26 @@ APACHE_WRAPPER
     minimum_reports=12
     ;;
   streaming)
+    export QPX_NATIVE_BACKEND_REAL_BIN
+    QPX_NATIVE_BACKEND_REAL_BIN="$(command -v python3)"
+    backend_wrapper="$QPX_NATIVE_PROFILE_DIR/backend-perf"
+    cat >"$backend_wrapper" <<'BACKEND_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+export QPXD_REAL_BIN="$QPX_NATIVE_BACKEND_REAL_BIN"
+export QPX_NATIVE_REFERENCE_ROLE=streaming-backend
+exec python3 "$QPX_NATIVE_WRAPPER_SOURCE" "$@"
+BACKEND_WRAPPER
+    chmod 755 "$backend_wrapper"
+    "$QPX_NATIVE_BACKEND_REAL_BIN" --version
     QPXD_BIN="$wrapper" QPX_STREAMING_COMPARE_NATIVE_DIAGNOSTICS=1 \
+      QPX_STREAMING_COMPARE_BACKEND_BIN="$backend_wrapper" \
       QPX_STREAMING_COMPARE_FAST_TRANSFERS=64 \
       bash "$ROOT_DIR/scripts/perf-audit-streaming-compare.sh"
-    roles="qpxd-streaming"
+    roles="qpxd-streaming streaming-backend"
     log_directory="$ROOT_DIR/target/perf/streaming-compare-logs"
-    expected_profiles=1
-    minimum_reports=6
+    expected_profiles=2
+    minimum_reports=18
     ;;
   *) echo "unsupported native CPU workload: $workload" >&2; exit 2 ;;
 esac
@@ -168,7 +181,17 @@ for role in $roles; do
   if [ "$workload" = http2 ] || [ "$workload" = streaming ]; then
     sample_role=qpxd
   fi
-  for sample in "$role_log_directory"/*."$sample_role".*.rss-peak.samples.csv; do
+  report_suffix=cpu-report
+  callchain_suffix=callchains
+  if [ "$role" = streaming-backend ]; then
+    samples=("$role_log_directory"/streaming.qpxd.*.backend-rss-peak.samples.csv
+             "$role_log_directory"/streaming.lighttpd.*.backend-rss-peak.samples.csv)
+    report_suffix=backend-cpu-report
+    callchain_suffix=backend-callchains
+  else
+    samples=("$role_log_directory"/*."$sample_role".*.rss-peak.samples.csv)
+  fi
+  for sample in "${samples[@]}"; do
     [ -f "$sample" ] || continue
     window="$(python3 - "$sample" <<'PY'
 import csv
@@ -187,8 +210,8 @@ PY
     echo "Native CPU workload report started: $sample"
     timeout --signal=TERM --kill-after=10s 180s "$QPX_NATIVE_PERF_BIN" report --stdio --header --no-children --call-graph none \
       --sort symbol --percent-limit 0.5 --time "$window" \
-      -i "$QPX_NATIVE_PROFILE_DIR/$role.data" >"$sample.cpu-report.txt"
-    if ! rg -q '^# Samples: [1-9]' "$sample.cpu-report.txt"; then
+      -i "$QPX_NATIVE_PROFILE_DIR/$role.data" >"$sample.$report_suffix.txt"
+    if ! rg -q '^# Samples: [1-9]' "$sample.$report_suffix.txt"; then
       echo "native workload CPU profile contains no samples: $sample" >&2
       exit 1
     fi
@@ -203,8 +226,8 @@ PY
       echo "Native workload callsite decoding started: $sample"
       timeout --signal=TERM --kill-after=10s 180s "$QPX_NATIVE_PERF_BIN" script --no-inline \
         --fields comm,pid,tid,time,ip,sym,symoff,dso --time "$window" \
-        -i "$QPX_NATIVE_PROFILE_DIR/$role.data" >"$sample.callchains.txt"
-      if [ ! -s "$sample.callchains.txt" ]; then
+        -i "$QPX_NATIVE_PROFILE_DIR/$role.data" >"$sample.$callchain_suffix.txt"
+      if [ ! -s "$sample.$callchain_suffix.txt" ]; then
         echo "native workload callsite decoding contains no samples: $sample" >&2
         exit 1
       fi

@@ -2837,3 +2837,17 @@ workloads. The slow lane passes all criteria; the fast lane fails total CPU
 efficiency 1.102846 against 1.25 and scheduler delay 6.436598 against 6.0.
 Cold-cache reads are not part of this workload. These results do not justify
 reintroducing the rejected larger socket queue or relaxing existing gates.
+
+The failed normal fast streaming window at `6cfacc2` records qpx server CPU
+224.904046 ms and backend CPU 252.113351 ms, versus lighttpd server CPU
+377.244401 ms and backend CPU 164.215619 ms. Conservative aggregate total
+CPU is 488.999489 versus 539.291118 ms; independently aggregated component
+medians are not additive. A qpx-only CPU profile cannot explain this total
+CPU objective. The native streaming diagnostic now records the real Python
+backend alongside qpx, retaining backend windows under both qpx and lighttpd
+loads. It requires two complete owned profiles, all eighteen workload
+reports, real script/parameter validation, clean shutdown and zero lost
+samples. Normal backend invocation and all mandatory workloads are unchanged.
+Profiler costs belong to diagnostic runs; these CPU totals cannot replace
+uninstrumented acceptance measurements. No new transfer optimization is
+adopted without the resulting profiles.

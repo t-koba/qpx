@@ -143,7 +143,7 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
 with Server(("127.0.0.1", port), Handler) as httpd:
     httpd.serve_forever()
 PY
-  run_server_process python3 "$TMP_DIR/streaming_backend.py" "$BACKEND_PORT" "$STREAM_BYTES" "$CHUNK_BYTES" >"$LOG_DIR/backend.log" 2>&1 &
+  run_server_process "${QPX_STREAMING_COMPARE_BACKEND_BIN:-python3}" "$TMP_DIR/streaming_backend.py" "$BACKEND_PORT" "$STREAM_BYTES" "$CHUNK_BYTES" >"$LOG_DIR/backend.log" 2>&1 &
   BACKEND_PID=$!
   register_pid "$BACKEND_PID"
   wait_http "streaming-backend" "$BACKEND_PORT" "$BACKEND_PID" "$LOG_DIR/backend.log"
