@@ -3541,3 +3541,15 @@ regression confirms that no outside descendant is created. All 112 cache
 tests and Clippy pass. This is a trial pending the normal same-runner cache
 comparison against edc9e26, including both persistent and feature-rich
 lanes and unchanged strong miss goals; it is not an acceptance pass.
+
+Trial independently scheduled multiplexed HTTP/2 streams after the retained
+native profile places 93.1% of samples in CPU-active long connection polls.
+The primary stream keeps its reusable inline future. Additional streams use
+Tokio's existing JoinSet under the unchanged admission bound, replacing the
+connection-local reusable completion pool. Connection teardown aborts owned
+stream tasks, and join failures propagate instead of being ignored. The
+real-TCP disconnect regression now retains two pending requests until socket
+closure and verifies both service futures are dropped. All 622 library tests
+and all-feature/all-target Clippy pass. This changes scheduler ownership,
+not another arbitrary polling quota; adoption still requires a pinned
+same-runner HTTP/2 comparison with every original gate unchanged.
