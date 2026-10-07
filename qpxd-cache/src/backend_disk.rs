@@ -670,15 +670,10 @@ impl DiskCacheBackend {
     async fn delete_path(&self, path: &Path) -> Result<()> {
         let file_id = cache_file_id_from_path(&self.root, path)
             .ok_or_else(|| anyhow!("invalid disk cache object path: {}", path.display()))?;
-        match tokio::fs::remove_file(path).await {
-            Ok(()) => (),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("failed to remove disk cache object {}", path.display())
-                });
-            }
-        }
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || remove_cache_file_sync(&path))
+            .await
+            .context("disk cache removal task failed")??;
         self.hot_recent_remove(file_id);
         let mut state = self.state.lock().await;
         if let Some(entry) = state.hot_entries.pop(&file_id) {
@@ -1579,7 +1574,25 @@ fn now_ms() -> u64 {
 }
 
 fn remove_cache_file_sync(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
+    #[cfg(unix)]
+    let removed = (|| {
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "disk cache path missing parent",
+            )
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "disk cache path missing file name",
+            )
+        })?;
+        nofollow::Directory::open(parent)?.remove(name)
+    })();
+    #[cfg(not(unix))]
+    let removed = fs::remove_file(path);
+    match removed {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error)
@@ -3070,6 +3083,41 @@ mod tests {
             .expect("reconcile absent object");
         assert!(backend.state.lock().await.total_bytes <= backend.max_bytes);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disk_backend_rejects_replaced_parent_on_deletion() {
+        let dir = temp_dir("replaced-parent-delete");
+        let outside = temp_dir("outside-parent-delete");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend
+            .put("ns", "key", b"protected", 60)
+            .await
+            .expect("put object");
+        let path = backend.path_for("ns", "key");
+        let parent = path.parent().expect("object parent");
+        let saved = outside.join("saved");
+        fs::rename(parent, &saved).expect("move parent outside cache");
+        std::os::unix::fs::symlink(&saved, parent).expect("replace parent with symlink");
+        let result = backend.delete("ns", "key").await;
+        assert!(remove_cache_file_sync(&path).is_err());
+        assert!(
+            backend
+                .state
+                .lock()
+                .await
+                .entries
+                .contains_key(&cache_file_id("ns", "key"))
+        );
+        let preserved = saved.join(path.file_name().expect("object name")).exists();
+        fs::remove_dir_all(dir).expect("remove cache fixture");
+        fs::remove_dir_all(outside).expect("remove outside fixture");
+        assert!(
+            preserved,
+            "deletion must preserve objects outside the cache"
+        );
+        assert!(result.is_err(), "deletion must reject a symlinked parent");
     }
 
     #[cfg(unix)]

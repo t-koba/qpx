@@ -3480,3 +3480,13 @@ matrix and rejects missing intervals or clock errors. This temporarily
 connects long parent execution to owned CPU callchains; the normal observer
 remains disabled. Remove this interval instrumentation after the callsite
 investigation, rather than retaining another permanent timing layer.
+
+The filesystem audit finds a deletion invariant missing from the disk
+cache: replacing an object parent with a symlink makes public deletion
+remove the object outside the cache, although cold reads already reject
+that path. A real directory-rename/symlink regression fails before the fix.
+Public deletion and index cleanup now share removal through the existing
+verified parent descriptor on Unix. Failed deletion preserves accounting;
+missing objects remain idempotent. All 110 cache library tests pass with
+real filesystem fixtures and a real TCP cache server. This is a correctness
+fix, not a performance optimization or an acceptance measurement.
