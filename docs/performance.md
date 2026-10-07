@@ -2788,3 +2788,30 @@ Required proxy CI at `a85c0d7` still fails WebDAV 1 MiB CPU efficiency
 1.346366 against 1.5 and miss scheduler delay 2.679133 against 2.6.
 Its WebDAV p99 ratio is 0.563131 and miss p99 ratio is 0.293505; those
 latency gains do not compensate for the failed criteria.
+
+Native diagnostic `37570638116` at `4b712f1` records 4,277 samples in the
+second 1 KiB cache-miss window with no lost samples. Header reads account
+for 470 inclusive samples (10.99%); lookup-related `openat` calls account
+for 391 (9.14%). Metadata trailer reads account for 215 (5.03%, overlapping
+header reads). Actual workload thread CSVs from `37569219983` show the
+initial async runtime workers in uninterruptible filesystem waits,
+including `walk_component`, `open_last_lookups`, `__wait_on_buffer`, and
+`jbd2_log_wait_commit`. Small synchronous cold reads can therefore block
+a runtime worker even though their typical duration is short.
+
+The cold-read trial moves header and trailer reads to the blocking pool,
+with a shared reader semaphore sized to available CPU parallelism and
+independent of writer admission. Cancellation keeps the owned permit in
+the filesystem closure until it finishes. Metadata variants are batched
+into one dispatch; hot metadata and response candidates retain their
+existing in-memory paths. File validation, expiration, corruption and
+symlink errors remain unchanged. Initial directory indexing is unchanged.
+All 107 cache library tests and all-feature/all-target Clippy pass locally,
+including a real-file read cancellation/admission test. This is a trial,
+not an accepted performance gain; same-runner measurements must assess
+its dispatch cost, throughput, CPU efficiency, latency and scheduler delay.
+The first concurrent qpxd suite run completes 617 tests but the persistent
+restart test receives 502 during its initial origin dispatch, before the
+restart. The isolated test passes and a subsequent full run passes all
+618 tests. The origin failure is not yet reproduced or attributed; no
+retry, timeout change or error suppression was added to the test.
