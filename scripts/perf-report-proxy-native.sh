@@ -99,9 +99,9 @@ PY
         --sort symbol --show-nr-samples --time "$window" \
         -i "$QPX_NATIVE_PROFILE_DIR/$role.data" >"$sample.memmove-callers.txt"
     fi
-    if [[ "$sample" = *.round-2.* ]]; then
+    if [[ "$sample" = *.round-2.* ]] || [ "$workload" = http2-timeline ]; then
       echo "Native workload callsite decoding started: $sample"
-      timeout --signal=TERM --kill-after=10s 180s "$QPX_NATIVE_PERF_BIN" script --no-inline \
+      timeout --signal=TERM --kill-after=10s 180s "$QPX_NATIVE_PERF_BIN" script --no-inline --ns \
         --fields comm,pid,tid,time,ip,sym,symoff,dso --time "$window" \
         -i "$QPX_NATIVE_PROFILE_DIR/$role.data" >"$sample.$callchain_suffix.txt"
       if [ ! -s "$sample.$callchain_suffix.txt" ]; then

@@ -157,7 +157,8 @@ for sample in root.glob("http2.qpxd.*.attempt-*.rss-peak.sampling.json"):
         pids.add(process["pid"])
 if not pids:
     raise SystemExit("kernel recording lacks real qpxd resource sample windows")
-pattern = re.compile(r"^\s*qpxd\S*\s+(\d+)/(\d+)\s+\d+\.\d+:\s+syscalls:")
+# Tokio workers keep their thread name while sharing the owned server's process ID.
+pattern = re.compile(r"^\s*(?:qpxd\S*|tokio-rt-worker)\s+(\d+)/(\d+)\s+\d+\.\d+:\s+syscalls:")
 with Path(sys.argv[2]).open() as events:
     for line in events:
         match = pattern.match(line)
