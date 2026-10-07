@@ -3619,8 +3619,10 @@ workload window. Missing receive events remain diagnostic failures.
 
 Correlated native recording 37651776577 validates 444 response waits with no
 missing receive events or lost CPU samples. Notification-to-resumption p95 is
-1.679 ms, while connection polls contain 6--10 ms of CPU execution. Separate
-transport ownership from the connection-local request dispatcher using one
-driver task and bounded admission. Stream storage remains reusable; a full
-admission queue still drives response flushing, flow control and disconnects.
-This is a measured hypothesis, pending the complete same-runner comparison.
+1.679 ms, while connection polls contain 6--10 ms of CPU execution. The separate
+transport-driver hypothesis was rejected by same-runner comparison 37655432336:
+for 1 MiB with 100 streams, CPU efficiency fell from 950.09 to 672.23 requests
+per CPU second and scheduler queue delay rose from 276.95 to 966.73 us per
+request. Production transport ownership remains in the connection dispatcher.
+The real TCP regression verifies response flushing with two pending handlers,
+reset error propagation and cancellation of both handlers.
