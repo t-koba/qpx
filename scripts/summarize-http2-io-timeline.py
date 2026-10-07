@@ -103,8 +103,11 @@ for sample_id, phase in completed.items():
         raise SystemExit("Native I/O phase clock calibration regressed")
     lower = identity["monotonic_before_ns"] - identity["phase_offset_ns"]
     upper = identity["monotonic_after_ns"] - identity["phase_offset_ns"]
+    request_start = identity.get("request_started_monotonic_ns")
+    if type(request_start) is not int or not 0 < request_start <= lower:
+        raise SystemExit("Native I/O phase lacks a valid request-start boundary")
     round_number = next((number for number, begin, end in windows
-                         if lower >= begin and upper + phase["elapsed_ns"] <= end), None)
+                         if request_start >= begin and upper + phase["elapsed_ns"] <= end), None)
     if round_number is None:
         counts["outside_or_crossing_workload_window"] += 1
         continue
@@ -120,7 +123,7 @@ for sample_id, phase in completed.items():
         raise SystemExit("Native I/O phase has no valid first notification timestamp")
     socket = address(identity["local"]) + address(identity["peer"])
     timestamps = arrivals[socket]
-    index = bisect.bisect_left(timestamps, lower)
+    index = bisect.bisect_left(timestamps, request_start)
     if index == len(timestamps) or timestamps[index] > upper + notification:
         failures.append(f"sample {sample_id} has no TCP receive event before notification")
         continue
@@ -130,8 +133,10 @@ for sample_id, phase in completed.items():
         "local": identity["local"], "peer": identity["peer"],
         "tcp_receive_monotonic_ns": arrival,
         "calibration_span_ns": upper - lower,
-        "before_receive_lower_ns": arrival - upper,
-        "before_receive_upper_ns": arrival - lower,
+        "request_started_monotonic_ns": request_start,
+        "received_before_read_phase": arrival < lower,
+        "before_receive_lower_ns": max(0, arrival - upper),
+        "before_receive_upper_ns": max(0, arrival - lower),
         "receive_to_notification_lower_ns": lower + notification - arrival,
         "receive_to_notification_upper_ns": upper + notification - arrival,
         "notification_to_resume_ns": phase["notified_wait_ns"],
@@ -152,7 +157,7 @@ for round_number, _, _ in windows:
           f"notification_to_resume_median_us="
           f"{statistics.median(row['notification_to_resume_ns'] for row in selected) / 1000:.3f}")
 output.write_text(json.dumps({
-    "measurement": "real_tcp_receive_to_future_notification_v1",
+    "measurement": "real_tcp_receive_to_future_notification_v2",
     "clock": "CLOCK_MONOTONIC", "diagnostic_instrumentation": True,
     "replaces_required_gate": False, "counts": dict(counts),
     "failures": failures, "samples": rows,

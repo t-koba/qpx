@@ -402,8 +402,14 @@ pub(crate) async fn send_serialized_http1_head_with_interim_reusable_raw_respons
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let mut read_phase = crate::perf_diagnostics::phase_timer!("plain_origin_read");
     let write_phase = crate::perf_diagnostics::phase_timer!("plain_origin_write");
-    if let Err(error) = stream.write_all(&write_buf).await {
+    let written = async {
+        read_phase.mark_native_request_start()?;
+        stream.write_all(&write_buf).await
+    }
+    .await;
+    if let Err(error) = written {
         return Err(SerializedHttp1HeadSendError {
             error: error.into(),
             write_buf,
@@ -412,8 +418,7 @@ where
     drop(write_phase);
     // The reverse fast path wraps this entire operation in the route deadline.
     // Avoid registering a second timer for the same response-head wait.
-    let mut read_phase = crate::perf_diagnostics::phase_timer!("plain_origin_read");
-    if let Err(error) = read_phase.record_native_tcp_identity(&stream) {
+    if let Err(error) = read_phase.begin_native_tcp_read(&stream) {
         return Err(SerializedHttp1HeadSendError {
             error: error.into(),
             write_buf,

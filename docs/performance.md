@@ -137,7 +137,9 @@ The `proxy-native` diagnostic uses Linux perf's software CPU clock at 199 Hz
 with DWARF call stacks, including kernel CPU work. It preserves raw profiles
 and symbol reports for the cache and feature-rich roles. The exact ELF executable
 is preserved as gzip with its SHA-256 and uncompressed size before measurement,
-so raw addresses and DWARF stacks can be resolved after the runner is removed. All reports
+so raw addresses and DWARF stacks can be resolved after the runner is removed.
+Report generation verifies the executable's ELF format, size and SHA-256 against
+that recording before decoding any addresses. All reports
 are retained before sampling-quality validation; any lost samples fail the
 diagnostic and are recorded explicitly in `sampling-quality.json`. Each perf
 ring uses 8 MiB to retain DWARF samples during report-consumer scheduling delays;
@@ -3608,3 +3610,9 @@ joining different executions. Kernel process validation includes the owned
 server descendants when a profiler wraps qpxd. Real TCP probes, complete
 profiler shutdown and lost-event checks remain required. This diagnostic
 does not replace any acceptance measurement or change a performance gate.
+TCP arrival searches start immediately before the request write, because a
+response can reach the socket before the response-read phase begins. The read
+duration still excludes the write. An earlier arrival contributes zero network
+wait inside that read phase; its full arrival-to-notification interval remains
+visible. Both request start and read completion must lie in the same measured
+workload window. Missing receive events remain diagnostic failures.

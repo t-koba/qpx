@@ -18,6 +18,7 @@ esac
 # Harness shutdown also closes perf's output before report generation.
 echo "Native CPU report generation started: $workload"
 python3 - "$QPX_NATIVE_PROFILE_DIR" "$roles" <<'PY'
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -30,6 +31,14 @@ for path in paths:
     if (record.get("forced_shutdown") is not False or record.get("requested_signal") != 15
             or record.get("exit_status") not in (0, -15, 143)):
         raise SystemExit(f"native profiler shutdown was not complete: {path}")
+binary = json.loads((Path(sys.argv[1]) / "binary.json").read_text())
+with Path(binary["source"]).open("rb") as executable:
+    if (executable.read(4) != b"\x7fELF"
+            or executable.seek(0, 2) != binary["uncompressed_bytes"]):
+        raise SystemExit("native profile executable format or size changed")
+    executable.seek(0)
+    if hashlib.file_digest(executable, "sha256").hexdigest() != binary["sha256"]:
+        raise SystemExit("native profile executable differs from recording")
 PY
 
 profiles=0

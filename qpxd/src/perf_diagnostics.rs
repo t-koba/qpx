@@ -28,6 +28,8 @@ struct StartedPhase {
     notified_resumptions: u64,
     io_sample_id: u64,
     first_notification_ns: u64,
+    #[cfg(target_os = "linux")]
+    request_started_monotonic_ns: u64,
     poll_cpu: Option<PollCpu>,
 }
 
@@ -102,6 +104,8 @@ impl PhaseTimer {
                     notified_resumptions: 0,
                     io_sample_id: 0,
                     first_notification_ns: 0,
+                    #[cfg(target_os = "linux")]
+                    request_started_monotonic_ns: 0,
                     poll_cpu: (cfg!(target_os = "linux") && phase == "h2_connection_poll")
                         .then(PollCpu::default),
                 })
@@ -109,10 +113,35 @@ impl PhaseTimer {
         }
     }
 
-    pub(crate) fn record_native_tcp_identity<S: 'static>(
-        &mut self,
-        stream: &S,
-    ) -> std::io::Result<()> {
+    pub(crate) fn mark_native_request_start(&mut self) -> std::io::Result<()> {
+        if !*TCP_TIMELINE_ENABLED || self.started.is_none() {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.mark_tcp_request_start()
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "native I/O phase timeline requires Linux",
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mark_tcp_request_start(&mut self) -> std::io::Result<()> {
+        if let Some(started) = self.started.as_mut() {
+            started.request_started_monotonic_ns = native_monotonic_ns()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn begin_native_tcp_read<S: 'static>(&mut self, stream: &S) -> std::io::Result<()> {
+        // The read observation excludes writing; TCP arrival can precede it.
+        if let Some(started) = self.started.as_mut() {
+            started.at = Instant::now();
+            started.thread = std::thread::current().id();
+        }
         if !*TCP_TIMELINE_ENABLED || self.started.is_none() {
             return Ok(());
         }
@@ -149,10 +178,18 @@ impl PhaseTimer {
                 "native I/O monotonic clock regressed",
             ));
         }
+        if started.request_started_monotonic_ns == 0
+            || started.request_started_monotonic_ns > monotonic_before_ns - phase_offset_ns
+        {
+            return Err(std::io::Error::other(
+                "native I/O phase lacks its request start",
+            ));
+        }
         started.io_sample_id = IO_SAMPLE_IDS.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(target: "qpx_perf_phase", phase = self.phase,
             io_sample_id = started.io_sample_id, monotonic_before_ns, monotonic_after_ns,
             phase_offset_ns,
+            request_started_monotonic_ns = started.request_started_monotonic_ns,
             local = %local, peer = %peer, "native TCP phase identity");
         Ok(())
     }
@@ -309,6 +346,42 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
+    async fn sampled_read_preserves_request_start_when_response_is_already_readable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0];
+            socket.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, [1]);
+            socket.write_all(b"ready").await.unwrap();
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut timer = PhaseTimer::begin_sampled("plain_origin_read", true);
+        #[cfg(target_os = "linux")]
+        timer.mark_tcp_request_start().unwrap();
+        client.write_all(&[1]).await.unwrap();
+        server.await.unwrap();
+        let mut first_byte = [0];
+        assert_eq!(client.peek(&mut first_byte).await.unwrap(), 1);
+        assert_eq!(&first_byte, b"r");
+        let response_ready = Instant::now();
+        timer.begin_native_tcp_read(&client).unwrap();
+        assert!(timer.started.as_ref().unwrap().at >= response_ready);
+        #[cfg(target_os = "linux")]
+        {
+            timer.record_tcp_identity(&client).unwrap();
+            assert!(timer.started.as_ref().unwrap().request_started_monotonic_ns > 0);
+        }
+        let mut response = [0; 5];
+        timer
+            .observe_future(client.read_exact(&mut response))
+            .await
+            .unwrap();
+        assert_eq!(&response, b"ready");
+    }
+
+    #[tokio::test]
     async fn sampled_future_forwards_real_tcp_readiness() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -321,8 +394,11 @@ mod tests {
             socket.write_all(b"ready").await.unwrap();
         });
         let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
-        client.write_all(&[1]).await.unwrap();
         let mut timer = PhaseTimer::begin_sampled("h2_connection_poll", true);
+        #[cfg(target_os = "linux")]
+        timer.mark_tcp_request_start().unwrap();
+        client.write_all(&[1]).await.unwrap();
+        timer.begin_native_tcp_read(&client).unwrap();
         #[cfg(target_os = "linux")]
         timer.record_tcp_identity(&client).unwrap();
         let mut response = [0; 5];
