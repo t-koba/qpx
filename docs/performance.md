@@ -2688,6 +2688,14 @@ still beats qpx (4.643 versus 5.430 milliseconds). Two workers therefore
 do not eliminate the tail disadvantage. Timed origin-header phases include
 thread migration with multiple workers; the single worker has none.
 These instrumented results are causal-investigation evidence, not acceptance.
+Reanalysis of the retained timed windows separates origin-header samples
+by observed task migration. With four workers, 919 non-migrated samples
+have median 313.928 and p99 2,095.814 microseconds; 497 migrated samples
+have median 920.442 and p99 2,849.785. Two-worker medians are 434.798 and
+981.500; the one-worker median is 552.802 with no migrated samples.
+This is correlation: a longer origin wait can itself permit migration.
+It does not prove that adding connection runtimes or pinning tasks will
+improve the unchanged full workload, resource and shutdown requirements.
 
 The `http2-worker-normal` diagnostic measures the single-worker configuration
 without phase logging, profiler capture or thread sampling, using all four
@@ -3383,16 +3391,6 @@ forwards only the first nonempty caller slice alongside its buffer and
 returns partial caller consumption. This is legal I/O behavior, but the
 profile does not establish how often that branch is exercised.
 
-Native H2 diagnostics now sample successful executions of that branch,
-retaining pending bytes, offered slices/bytes, first-slice size, caller
-consumption and omitted-slice bytes. The diagnostic target is enabled
-inside the isolated native namespace, and real connection-start records
-distinguish zero observed branch executions from missing instrumentation.
-The retained summary validates all counters and explicitly covers the
-complete profile including calibration and all lanes; it is not attributed
-to a single measured window. Normal workload logging and writer behavior
-are unchanged. Use the actual samples before proposing any batching change.
-
 Pinned normal comparison `37600364322` rejects the generic file-extent
 selection change. Both revisions pass all five measurement-quality lanes.
 Against `fb85795`, `392ba5c` raises ordinary 1 MiB throughput from
@@ -3417,7 +3415,7 @@ HTTP/2 CI `37600317589` completes all requests and passes measurement
 quality. Its small multiplexed lane still fails p99 ratio 1.277690 against
 1.1, maximum latency ratio 1.270515 against 1.1, dominance 0.901184 against
 0.95 and scheduler delay ratio 2.183969 against 2.0. Both large-body lanes
-pass. The pending TLS diagnostic investigates actual writer behavior;
+pass. The completed TLS diagnostic below does not establish a batching cause;
 failure alone is not evidence for another scheduling or batching trial.
 
 TLS native diagnostic `37602167315` succeeds with zero lost samples and
