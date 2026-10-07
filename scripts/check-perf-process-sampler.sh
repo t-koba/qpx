@@ -47,6 +47,13 @@ while time.monotonic() < deadline:
         worker = threading.Thread(target=consume_cpu)
         worker.start()
         worker.join()
+        payload = bytes(range(256)) * 256
+        with (work / 'io-probe').open('wb', buffering=0) as output:
+            if output.write(payload) != len(payload):
+                raise RuntimeError('real process I/O probe had a short write')
+        with (work / 'io-probe').open('rb', buffering=0) as source:
+            if source.read() != payload:
+                raise RuntimeError('real process I/O probe readback differed')
         (work / 'cpu-done').write_text(str(consumed[0]))
     time.sleep(0.01)
 PY_SERVER
@@ -103,7 +110,7 @@ for kind in ('fd', 'rss'):
 assert json.loads((root / 'descriptors.json').read_text())
 PY_RESULTS
 cpu_before="$(process_tree_cpu_clock_ms "$root" "$work/cpu-before.json")"
-scheduler_before="$(process_tree_scheduler_run_delay_ns "$root" "$work/scheduler-before.json")"
+scheduler_before="$(QPX_PERF_PROCESS_IO_COUNTERS=1 process_tree_scheduler_run_delay_ns "$root" "$work/scheduler-before.json")"
 touch "$work/cpu-work"
 for ((attempt = 0; attempt < 100; attempt++)); do
   [ -s "$work/cpu-done" ] && break
@@ -111,7 +118,7 @@ for ((attempt = 0; attempt < 100; attempt++)); do
   sleep 0.02
 done
 cpu_after="$(process_tree_cpu_clock_ms "$root" "$work/cpu-after.json")"
-scheduler_after="$(process_tree_scheduler_run_delay_ns "$root" "$work/scheduler-after.json")"
+scheduler_after="$(QPX_PERF_PROCESS_IO_COUNTERS=1 process_tree_scheduler_run_delay_ns "$root" "$work/scheduler-after.json")"
 scheduler_delta="$(process_tree_scheduler_delta_ns "$work/scheduler-before.json" "$work/scheduler-after.json")"
 [ "$scheduler_delta" = "$(monotonic_counter_delta "real scheduler delay" "$scheduler_before" "$scheduler_after")" ]
 if process_tree_scheduler_delta_ns "$work/scheduler-after.json" "$work/scheduler-before.json" >"$work/reversed-scheduler" 2>"$work/reversed-scheduler-error"; then
@@ -132,6 +139,14 @@ consumed = int((root / 'cpu-done').read_text())
 assert before['measurement'] == after['measurement'] == 'linux_process_cpu_clock_ns_v1'
 assert after['total_cpu_ns'] - before['total_cpu_ns'] >= consumed
 assert float(sys.argv[3]) > float(sys.argv[2])
+io_before = json.loads((root / 'scheduler-before.json').read_text())
+io_after = json.loads((root / 'scheduler-after.json').read_text())
+assert io_before['io_counters'] is True and io_after['io_counters'] is True
+previous = {row['pid']: row for row in io_before['processes']}
+current = {row['pid']: row for row in io_after['processes']}
+probe_pid = io_before['root_pid']
+for key, minimum in (('rchar', 65536), ('wchar', 65536), ('syscr', 1), ('syscw', 1)):
+    assert current[probe_pid]['io'][key] - previous[probe_pid]['io'][key] >= minimum, key
 for record in (before, after):
     assert record['total_cpu_ns'] == sum(row['cpu_ns'] for row in record['processes'])
     assert all(0 < row['resolution_ns'] <= 1_000_000 for row in record['processes'])
