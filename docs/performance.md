@@ -2716,3 +2716,10 @@ mix CPU clocks. Normal comparisons make no additional clock reads. Clock
 failure, inconsistent counters or incomplete sampled-writer coverage fail the
 phase summarizer explicitly. This adds diagnosis, not another writer-limit
 or filesystem-security optimization.
+
+The `cache-writer-phases` diagnostic isolates qpx and nginx persistent-cache
+1 KiB workloads, retaining five miss samples and the existing alternating
+sampling. It requires at least one writer execution sample and complete CPU
+coverage for every sampled execution. This avoids mixing 1 KiB and 1 MiB
+writer durations from the broader proxy-phase diagnostic. Reports and raw
+logs remain available even when coverage validation fails.

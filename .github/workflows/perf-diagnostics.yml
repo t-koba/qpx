@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-scheduler, streaming-window, streaming-affinity, streaming-mtu, streaming-mtu-normal, streaming-mtu-unpartitioned, streaming-mtu-window-unpartitioned, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-worker-scaling, http2-worker-normal, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-scheduler, streaming-window, streaming-affinity, streaming-mtu, streaming-mtu-normal, streaming-mtu-unpartitioned, streaming-mtu-window-unpartitioned, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writer-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-worker-scaling, http2-worker-normal, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -249,6 +249,15 @@ jobs:
               ;;
             proxy-threads)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 python3 scripts/perf-evaluate.py "thread diagnostics" -- bash scripts/perf-audit-proxy-matrix.sh
+              ;;
+            cache-writer-phases)
+              RUST_LOG=warn,qpx_perf_phase=debug QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+                QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-cache,nginx-cache \
+                QPX_PROXY_COMPARE_BODY_SIZES=1024 \
+                QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS=5 \
+                python3 scripts/perf-evaluate.py "1 KiB cache writer CPU and wait diagnostics" -- bash scripts/perf-audit-proxy-compare.sh
+              python3 scripts/summarize-perf-phases.py target/perf/proxy-compare-logs target/perf/phase-summary.json
+              jq -e 'any(.[]; .phase == "cache_writer_execution" and .observed_sync_cpu_samples == .samples and .samples > 0)' target/perf/phase-summary.json
               ;;
             cache-writeback)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 QPX_PROXY_COMPARE_WRITEBACK_DIAGNOSTICS=1 \
