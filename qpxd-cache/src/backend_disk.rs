@@ -1726,7 +1726,7 @@ fn write_cached_object_sync(
     ttl_secs: u64,
 ) -> Result<(DiskCacheWrite, Bytes, Option<Bytes>)> {
     let mut disk_phase = crate::perf_diagnostics::phase_timer!("cache_directory_validation");
-    let publication = publication::CachePublication::new(path)?;
+    let publication = disk_phase.measure_sync(|| publication::CachePublication::new(path))?;
     let expires_at_ms = now_ms().saturating_add(ttl_secs.saturating_mul(1000));
     let header = DiskCacheHeader {
         schema_version: DISK_CACHE_SCHEMA_VERSION,
@@ -1736,52 +1736,56 @@ fn write_cached_object_sync(
     };
     let result = (|| {
         disk_phase.enter("cache_object_create");
-        let mut file = publication.create()?;
+        let mut file = disk_phase.measure_sync(|| publication.create())?;
         disk_phase.enter("cache_object_encode_write");
-        let raw_header = serde_json::to_vec(&header)?;
-        let header_length = u32::try_from(raw_header.len())
-            .context("disk cache header exceeds framing limit")?
-            .to_be_bytes();
-        let metadata_length = u32::try_from(metadata.as_ref().map_or(0, |meta| meta.len()))
-            .context("disk cache metadata exceeds framing limit")?
-            .to_be_bytes();
-        let metadata_prefix = if metadata.is_some() {
-            metadata_length.as_slice()
-        } else {
-            &[]
-        };
-        let mut buffers = [
-            IoSlice::new(DISK_CACHE_MAGIC),
-            IoSlice::new(&header_length),
-            IoSlice::new(&raw_header),
-            IoSlice::new(&value),
-            IoSlice::new(metadata_prefix),
-            IoSlice::new(metadata.as_deref().unwrap_or(&[])),
-        ];
-        let mut remaining = buffers.as_mut_slice();
-        while !remaining.is_empty() {
-            match file.write_vectored(remaining) {
-                Ok(0) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "disk cache object write made no progress",
-                    )
-                    .into());
+        let body_offset = disk_phase.measure_sync(|| -> Result<u64> {
+            let raw_header = serde_json::to_vec(&header)?;
+            let header_length = u32::try_from(raw_header.len())
+                .context("disk cache header exceeds framing limit")?
+                .to_be_bytes();
+            let metadata_length = u32::try_from(metadata.as_ref().map_or(0, |meta| meta.len()))
+                .context("disk cache metadata exceeds framing limit")?
+                .to_be_bytes();
+            let metadata_prefix = if metadata.is_some() {
+                metadata_length.as_slice()
+            } else {
+                &[]
+            };
+            let mut buffers = [
+                IoSlice::new(DISK_CACHE_MAGIC),
+                IoSlice::new(&header_length),
+                IoSlice::new(&raw_header),
+                IoSlice::new(&value),
+                IoSlice::new(metadata_prefix),
+                IoSlice::new(metadata.as_deref().unwrap_or(&[])),
+            ];
+            let mut remaining = buffers.as_mut_slice();
+            while !remaining.is_empty() {
+                match file.write_vectored(remaining) {
+                    Ok(0) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "disk cache object write made no progress",
+                        )
+                        .into());
+                    }
+                    Ok(written) => IoSlice::advance_slices(&mut remaining, written),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error.into()),
                 }
-                Ok(written) => IoSlice::advance_slices(&mut remaining, written),
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error.into()),
             }
-        }
-        let body_offset = DISK_CACHE_MAGIC.len() as u64 + 4 + raw_header.len() as u64;
+            Ok(DISK_CACHE_MAGIC.len() as u64 + 4 + raw_header.len() as u64)
+        })?;
         // Durability note: cache objects are re-fetchable from the origin, so
         // writes are committed to the page cache and published atomically via
         // rename without an fsync. This matches the behavior of other HTTP
         // caches and keeps write-heavy miss workloads off the disk sync path.
         let total_len = body_offset + header.body_len + header.trailer_len();
         disk_phase.enter("cache_object_commit");
-        drop(file);
-        publication.commit()?;
+        disk_phase.measure_sync(|| {
+            drop(file);
+            publication.commit()
+        })?;
         Ok(DiskCacheWrite {
             body_offset,
             expires_at_ms,

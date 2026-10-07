@@ -2777,6 +2777,12 @@ also observe actual uninterruptible waits in `jbd2_log_wait_commit`,
 five miss windows. These observations establish filesystem journal/buffer
 waiting in the workload, but do not attribute every delay to that cause.
 No sampled-clock errors or missing writer CPU pairs occur.
+The existing cache-writer diagnostic also measures thread CPU and wall time
+for directory validation, object creation, encoding/write and atomic publication.
+Each interval runs synchronously on the same writer thread; normal comparisons
+perform no additional clock reads. The report requires complete paired coverage
+for every interval and rejects clock failures. This separates filesystem waiting
+from CPU work before selecting a storage change; it does not establish acceptance.
 
 Normal single-worker HTTP/2 diagnostic `37568710346` completes all four
 size/stream configurations without native instrumentation. The 1 KiB,

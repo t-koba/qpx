@@ -103,8 +103,10 @@ for (source, phase, interval), values in sorted(samples.items()):
         "max_ns": values[-1],
     }
     synchronous = sync_cpu_samples[(source, phase, interval)]
-    if phase == "cache_writer_execution" and len(synchronous) != len(values):
-        raise SystemExit(f"cache writer lacks complete synchronous CPU coverage in {source}")
+    if phase in {"cache_writer_execution", "cache_directory_validation",
+                 "cache_object_create", "cache_object_encode_write", "cache_object_commit"} \
+            and len(synchronous) != len(values):
+        raise SystemExit(f"{phase} lacks complete synchronous CPU coverage in {source}")
     if synchronous:
         record["observed_sync_cpu_samples"] = len(synchronous)
         for index, metric in enumerate(("sync_wall_ns", "sync_cpu_ns", "sync_non_cpu_ns")):

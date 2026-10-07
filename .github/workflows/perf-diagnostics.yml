@@ -255,7 +255,7 @@ jobs:
                 QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS=5 \
                 python3 scripts/perf-evaluate.py "1 KiB cache writer CPU and wait diagnostics" -- bash scripts/perf-audit-proxy-compare.sh
               python3 scripts/summarize-perf-phases.py target/perf/proxy-compare-logs target/perf/phase-summary.json
-              jq -e 'any(.[]; .phase == "cache_writer_execution" and .observed_sync_cpu_samples == .samples and .samples > 0)' target/perf/phase-summary.json
+              jq -e '. as $rows | ["cache_writer_execution", "cache_directory_validation", "cache_object_create", "cache_object_encode_write", "cache_object_commit"] | all(.[]; . as $phase | any($rows[]; .phase == $phase and .observed_sync_cpu_samples == .samples and .samples > 0))' target/perf/phase-summary.json
               ;;
             cache-writeback)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 QPX_PROXY_COMPARE_WRITEBACK_DIAGNOSTICS=1 \
