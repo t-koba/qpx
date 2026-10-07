@@ -378,6 +378,8 @@ async fn serve_h2_stream<S>(
             return;
         }
     };
+    // Release completed dispatch storage before a slow response holds the stream open.
+    drop(service_call);
     drop(dispatch_phase);
     let _send_phase = crate::perf_diagnostics::phase_timer!("h2_response_queue");
     let interim = take_interim_response_heads(&mut response);

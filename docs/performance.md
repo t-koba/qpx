@@ -3573,3 +3573,11 @@ from 591.23 to 437.66 requests/s (-26.0%), total CPU efficiency falls from
 reusable stream futures and retain the stronger real-TCP teardown test.
 Long CPU-active polls alone do not establish that task separation improves
 the required latency and CPU-efficiency goals. No thresholds change.
+
+The H2 stream retains its completed boxed service future until response
+body transmission finishes. Release that allocation immediately after
+service completion, before sending headers or waiting on body flow control.
+The normal reverse handler constructs its full dispatch state in this box;
+keeping a completed allocation serves no response-lifetime purpose. This
+is a lifetime cleanup, not proof of a CPU or tail-latency improvement.
+Require a pinned comparison against 1841516 before evaluating performance.
