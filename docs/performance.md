@@ -3078,3 +3078,26 @@ normal run is therefore not three independent acceptance passes.
 The driver cleanup passes all 619 qpxd library tests with real TCP servers,
 all-feature/all-target Clippy with warnings denied, formatting, spelling,
 and the unchanged eight-category/sixteen-evaluation gate completeness check.
+
+Native cache diagnostic `37584784094` at `27d2c2d` succeeds with two
+owned profiles, eleven workload reports and zero lost samples. The second
+unique-miss window contains 4,264 CPU stacks: 785 include object writes,
+394 header reads and 133 memmove. Per-thread sampled counter differences
+attribute about 16.9 seconds CPU and 17.8 seconds scheduler wait to four
+I/O workers, and 4.5 seconds CPU and 18.9 seconds wait to additional
+blocking workers. The participating-thread count and sequential `/proc`
+snapshots do not establish simultaneous writer concurrency, and these
+instrumented values are not acceptance measurements.
+Trial a writer admission budget of half the available CPU count, rounded
+up, reserving CPU capacity for the socket workers. Preserve asynchronous
+admission, clone sharing, permit ownership through caller cancellation,
+atomic publication, path validation and the existing writeback limit.
+Compare all cache lanes against `7a0b001`; retain only if independently
+measured throughput, CPU, p99 and scheduler-delay goals improve without
+regressions. The earlier fanout and per-stage reader dispatch trials remain
+rejected. Fewer threads alone do not establish a performance benefit.
+The writer-budget trial passes all 106 cache library tests with real
+filesystem and HTTP servers, including cancelled-caller admission and
+failure recovery, plus all-feature/all-target Clippy with warnings denied,
+formatting and spelling checks. An initial sandboxed run could not bind
+the HTTP test server; the authorized real-server run passes completely.

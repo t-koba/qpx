@@ -283,9 +283,12 @@ impl DiskCacheBackend {
             ));
         }
         ensure_private_dir(&root)?;
+        // Disk writes share CPU capacity with socket workers. Keep asynchronous
+        // admission bounded without occupying the entire available CPU budget.
         let writer_slots = std::thread::available_parallelism()
             .context("failed to determine disk cache writer parallelism")?
-            .get();
+            .get()
+            .div_ceil(2);
         let backend = Self {
             root,
             max_bytes,
