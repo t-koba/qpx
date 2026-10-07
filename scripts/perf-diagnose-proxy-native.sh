@@ -62,11 +62,17 @@ case "$workload" in
       bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh"
     log_directory="$ROOT_DIR/target/perf/proxy-compare-logs"
     ;;
-  proxy)
+  proxy|feature-large)
     log_directory="$QPX_NATIVE_PROFILE_DIR/workloads"
+    roles=(qpxd-cache qpxd-feature-rich)
+    body_sizes=1024
+    if [ "$workload" = feature-large ]; then
+      roles=(qpxd-feature-rich)
+      body_sizes=1048576
+    fi
     # Keep unrelated cache loaders out of each pair's measurement lifetime,
     # matching the normal matrix and same-runner revision comparisons.
-    for role in qpxd-cache qpxd-feature-rich; do
+    for role in "${roles[@]}"; do
       case "$role" in
         qpxd-cache) proxies=qpxd-cache,nginx-cache ;;
         qpxd-feature-rich) proxies=qpxd-feature-rich,nginx-feature-rich ;;
@@ -74,7 +80,7 @@ case "$workload" in
       QPXD_BIN="$wrapper" QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
         QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS=5 \
         QPX_PROXY_COMPARE_PROXY_FILTER="$proxies" \
-        QPX_PROXY_COMPARE_BODY_SIZES=1024 \
+        QPX_PROXY_COMPARE_BODY_SIZES="$body_sizes" \
         QPX_PROXY_COMPARE_LOG_DIR="$log_directory/$role" \
         bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh" "$QPX_NATIVE_PROFILE_DIR/$role.jsonl"
     done

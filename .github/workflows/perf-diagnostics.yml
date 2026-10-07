@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-scheduler, streaming-window, streaming-affinity, streaming-mtu, streaming-mtu-normal, streaming-mtu-unpartitioned, streaming-mtu-window-unpartitioned, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writer-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, http1-native, http2-native, http2-phases, http2-worker-scaling, http2-worker-normal, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-scheduler, streaming-window, streaming-affinity, streaming-mtu, streaming-mtu-normal, streaming-mtu-unpartitioned, streaming-mtu-window-unpartitioned, streaming-duration, streaming-revision, proxy-threads, proxy-phases, cache-writer-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, feature-large-native, http1-native, http2-native, http2-phases, http2-worker-scaling, http2-worker-normal, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -101,7 +101,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils lighttpd nginx nghttp2-client openssl squid strace time valgrind wrk jq
       - name: verify native CPU profiler before build
-        if: inputs.category == 'proxy-native' || inputs.category == 'http1-native' || inputs.category == 'http2-native' || inputs.category == 'http2-client' || inputs.category == 'streaming-native' || inputs.category == 'webdav-native' || (inputs.category == 'http2-events' || inputs.category == 'http2-io-timeline')
+        if: inputs.category == 'proxy-native' || inputs.category == 'feature-large-native' || inputs.category == 'http1-native' || inputs.category == 'http2-native' || inputs.category == 'http2-client' || inputs.category == 'streaming-native' || inputs.category == 'webdav-native' || (inputs.category == 'http2-events' || inputs.category == 'http2-io-timeline')
         run: |
           if [[ "${{ inputs.category }}" = http2-events || "${{ inputs.category }}" = http2-io-timeline ]]; then
             sudo apt-get install -y "linux-tools-$(uname -r)" ripgrep
@@ -357,6 +357,9 @@ jobs:
               ;;
             proxy-native)
               python3 scripts/perf-evaluate.py "native CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
+              ;;
+            feature-large-native)
+              QPX_NATIVE_WORKLOAD=feature-large python3 scripts/perf-evaluate.py "native feature-rich 1 MiB CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh
               ;;
             http1-native)
               QPX_NATIVE_WORKLOAD=http1 python3 scripts/perf-evaluate.py "native HTTP/1 CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-proxy-native.sh

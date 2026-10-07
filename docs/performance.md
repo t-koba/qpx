@@ -3274,3 +3274,25 @@ the profiler wrapper and observer when present. Attribute frontend CPU to
 the actual server PID from the retained lifecycle/callchain evidence rather
 than adding observer CPU to the server. Backend and client role accounting
 must likewise use their recorded process identities.
+
+
+Quarter-budget comparison `37593006673` fixes `f723a71` against half-budget
+`5d53760`, baseline-current order. Unique-miss throughput improves from
+31,910.678599 to 38,023.526054 requests/s, CPU efficiency from
+14,329.439861 to 16,988.169643, p99 from 5.054 to 4.176 ms, and scheduler
+delay from 90.497826 to 57.962707 microseconds/request. Current nginx delay
+is 59.804166, giving a strict-goal ratio about 0.969. This independent run
+meets the strong miss goals, but feature-rich 1 MiB throughput ratio
+0.972713 misses the unchanged 1.0 gate. Reverse the product sampling order
+in a second independent comparison before claiming reproducible admission
+improvement. Anchored publication is compared separately against `5d8d65a`
+with the same quarter-budget admission; no thresholds or features change.
+
+
+The remaining feature-rich 1 MiB throughput failures need workload-specific
+CPU evidence. `feature-large-native` profiles only the real feature-rich
+qpx/nginx 1 MiB pair, retaining one owned qpx profile and at least three
+actual workload windows, including second-round callchains and memory-copy
+callers. Existing native ownership, shutdown, exact ELF preservation and
+lost-sample checks remain mandatory. This diagnostic does not replace any
+required comparison or change normal workload conditions or objectives.

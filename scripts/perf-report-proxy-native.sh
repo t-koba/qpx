@@ -7,6 +7,7 @@ QPX_NATIVE_PERF_BIN="${QPX_NATIVE_PERF_BIN:?native perf executable is required}"
 case "$workload" in
   http1) roles=qpxd; expected_profiles=1; minimum_reports=6 ;;
   proxy) roles="qpxd-cache qpxd-feature-rich"; expected_profiles=2; minimum_reports=11 ;;
+  feature-large) roles=qpxd-feature-rich; expected_profiles=1; minimum_reports=3 ;;
   webdav) roles="qpxd-webdav apache-webdav"; expected_profiles=2; minimum_reports=12 ;;
   http2) roles=qpxd-h2; expected_profiles=1; minimum_reports=12 ;;
   streaming) roles="qpxd-streaming streaming-backend"; expected_profiles=2; minimum_reports=18 ;;
@@ -50,7 +51,7 @@ reports=0
 for role in $roles; do
   sample_role="$role"
   role_log_directory="$log_directory"
-  if [ "$workload" = proxy ]; then
+  if [ "$workload" = proxy ] || [ "$workload" = feature-large ]; then
     role_log_directory="$log_directory/$role"
   fi
   if [ "$workload" = http2 ] || [ "$workload" = streaming ]; then
@@ -90,7 +91,7 @@ PY
       echo "native workload CPU profile contains no samples: $sample" >&2
       exit 1
     fi
-    if [ "$workload" = proxy ] && [[ "$sample" = *.round-2.* ]]; then
+    if { [ "$workload" = proxy ] || [ "$workload" = feature-large ]; } && [[ "$sample" = *.round-2.* ]]; then
       echo "Native memory-copy caller report started: $sample"
       timeout --signal=TERM --kill-after=10s 180s "$QPX_NATIVE_PERF_BIN" report --stdio --header --no-children \
         --no-inline --call-graph flat,0.5,32,caller --symbol-filter memmove --percentage absolute \
