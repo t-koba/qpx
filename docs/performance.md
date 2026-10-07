@@ -3561,3 +3561,15 @@ closure and verifies both service futures are dropped. All 622 library tests
 and all-feature/all-target Clippy pass. This changes scheduler ownership,
 not another arbitrary polling quota; adoption still requires a pinned
 same-runner HTTP/2 comparison with every original gate unchanged.
+
+Reject the stream-task trial after pinned comparison 37627668054 against
+54de1b1. All 72 baseline/current windows retain complete requests with zero
+request failures and non-2xx responses. At 1 MiB/m=100, throughput falls
+from 591.23 to 437.66 requests/s (-26.0%), total CPU efficiency falls from
+509.114359 to 297.075209 requests/CPU second (-41.6%), p99 rises from
+264.437 to 328.785 ms (+24.3%), and queue delay rises from 652.667350 to
+2476.350518 us/request (3.794 times). At 1 KiB/m=100, queue delay rises
+59.5% despite an 11.1% throughput gain. Restore the connection-local
+reusable stream futures and retain the stronger real-TCP teardown test.
+Long CPU-active polls alone do not establish that task separation improves
+the required latency and CPU-efficiency goals. No thresholds change.
