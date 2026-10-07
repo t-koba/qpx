@@ -2910,3 +2910,32 @@ after the workload sampler stops. Map collection does not run in the
 polling loop and occurs after sampler CPU accounting; snapshots are
 explicitly post-workload observations, not peak allocation profiles.
 Missing maps fail the diagnostic instead of becoming zero memory.
+
+The cache writer profile also provides a separate filesystem-layout lead:
+288 of 4,267 native samples include directory validation; sampled writer
+directory-validation p99 is 4,187.387 microseconds. The previous two-plus-two
+hex-digit layout can create 65,536 leaf directories, while the real nginx
+reference uses `levels=1:2` (4,096 leaves). A one-plus-two layout trial
+reduces directory fanout without reducing hash identity, stored responses,
+capacity enforcement, private directory/file permissions, symlink checks
+or atomic publication. Full digest filenames and strict canonical-path
+parsing remain. Former-layout paths are not accepted as canonical; no
+compatibility search or implicit fallback is added. Real filesystem restart,
+concurrent creation, malformed path, permission and symlink tests retain
+their existing expectations. This is a profile-directed trial, not a claimed
+throughput/CPU improvement. Independent comparisons against `d3926aa` must
+assess all cache lanes and the stronger miss objectives before adoption.
+
+Backend TCP diagnostic `37576114230` validates all 975 transfer records.
+Second fast qpx/lighttpd windows each contain 64 records and zero backend
+retransmissions. Backend data segments total 121,261 versus 110,407;
+incoming segments total 20,383 versus 26,726. Median final advertised
+receive windows are 2,695,168 versus 279,552 bytes. Qpx is not limited by
+the tiny receive window observed in the earlier Apache stall. Snapshots
+occur after the backend finishes writing, not after all queued bytes are
+acknowledged: transmitted-byte totals are 6,677,658,418 versus
+6,511,996,333, below the full 6,710,886,400-byte payload in both cases.
+Thus these counters do not represent identical completed wire intervals.
+Packet counts alone do not explain the earlier CPU sample difference;
+zero retransmissions do not justify changing MSS, destination batching
+or reintroducing a rejected queue-size trial.

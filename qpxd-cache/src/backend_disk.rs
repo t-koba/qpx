@@ -345,8 +345,10 @@ impl DiskCacheBackend {
             + 8;
         let mut path = PathBuf::with_capacity(capacity);
         path.push(&self.root);
-        path.push(&digest[0..2]);
-        path.push(&digest[2..4]);
+        // Bound filesystem fanout to 4,096 leaf directories while preserving
+        // the complete content identity in the filename.
+        path.push(&digest[0..1]);
+        path.push(&digest[1..3]);
         path.push(&digest);
         path.set_extension(DISK_CACHE_FILE_EXT);
         path
@@ -1554,8 +1556,8 @@ fn cache_file_id_from_path(root: &Path, path: &Path) -> Option<DiskCacheFileId> 
     if encoded.len() != 64 {
         return None;
     }
-    if first.as_bytes() != &encoded.as_bytes()[0..2]
-        || second.as_bytes() != &encoded.as_bytes()[2..4]
+    if first.as_bytes() != &encoded.as_bytes()[0..1]
+        || second.as_bytes() != &encoded.as_bytes()[1..3]
     {
         return None;
     }
@@ -2659,16 +2661,21 @@ mod tests {
         assert_eq!(cache_file_id_from_path(&dir, &path), Some(id));
 
         let encoded = cache_file_id_hex(id);
+        let noncanonical_fanout = dir
+            .join(&encoded[0..2])
+            .join(&encoded[2..4])
+            .join(format!("{encoded}.{DISK_CACHE_FILE_EXT}"));
+        assert_eq!(cache_file_id_from_path(&dir, &noncanonical_fanout), None);
         for suffix in ["QPXC", "qpxc.extra", "qpxc.", "qpxc.qpxc"] {
             let invalid = dir
-                .join(&encoded[0..2])
-                .join(&encoded[2..4])
+                .join(&encoded[0..1])
+                .join(&encoded[1..3])
                 .join(format!("{encoded}.{suffix}"));
             assert_eq!(cache_file_id_from_path(&dir, &invalid), None);
         }
         let misplaced = dir
             .join("ff")
-            .join(&encoded[2..4])
+            .join(&encoded[1..3])
             .join(format!("{encoded}.{DISK_CACHE_FILE_EXT}"));
         assert_eq!(cache_file_id_from_path(&dir, &misplaced), None);
         let non_ascii = format!("{}x", "€".repeat(21));
