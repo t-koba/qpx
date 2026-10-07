@@ -2676,3 +2676,29 @@ to 8,695.57. Current reference ratios are throughput 1.641413, CPU
 the requested 1.0 goal. This single run is insufficient for adoption; a
 reversed-order independent comparison is required before deciding whether
 the measured queue reduction compensates for the absolute CPU change.
+
+
+Worker-scaling phase diagnostic `37567341492` at `a85c0d7` keeps the same
+two server CPUs and matches each role's worker count. Qpx 1 KiB/100-stream
+throughput is 40,977.32 requests/s with four workers, 39,897.56 with two
+and 48,710.82 with one. Scheduler delay is respectively 45.112, 28.988
+and 0.851 microseconds/request. P99 is 4.888, 4.506 and 2.391 milliseconds.
+The one-worker reference p99 is 2.771 milliseconds, but its maximum latency
+still beats qpx (4.643 versus 5.430 milliseconds). Two workers therefore
+do not eliminate the tail disadvantage. Timed origin-header phases include
+thread migration with multiple workers; the single worker has none.
+These instrumented results are causal-investigation evidence, not acceptance.
+
+The `http2-worker-normal` diagnostic measures the single-worker configuration
+without phase logging, profiler capture or thread sampling, using all four
+required body-size/multiplexing combinations and three alternating samples.
+Both references and qpx use one worker on the unchanged server CPU partition.
+The isolated environment records the explicit worker configuration and its
+non-replacement status. Complete role/dimension coverage and exact applied
+worker counts are verified before the original finite measurement-quality
+and acceptance checks run. No required measurement or objective is changed.
+
+Changing the diagnostic workflow catalog no longer starts an unrelated default
+streaming diagnostic automatically. Explicit dispatch and the existing sampler,
+streaming and configuration-watch path triggers remain. All eight required CI
+categories still run independently of this diagnostic trigger adjustment.
