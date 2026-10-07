@@ -3529,3 +3529,15 @@ now share error propagation to the body consumer, preserving the original
 failure message. Complete framing still delivers clean EOF. Failed DAV
 compliance runs retain the fixture, server log and client communication
 dump for diagnosis rather than suppressing the tester's unknown result.
+
+The retained cache-miss native profile contains 4,546 stacks, including
+311 publication stacks and 84 mkdir frames. Trial creating only missing
+directory suffixes: existing ancestors previously incurred mkdirat/openat
+again whenever a fanout directory was first created. Metadata only locates
+a candidate prefix; the complete prefix must still pass the existing
+no-symlink descriptor open before any creation. New directories retain
+mode 0700, existing permissions remain unchanged, and a symlink-prefix
+regression confirms that no outside descendant is created. All 112 cache
+tests and Clippy pass. This is a trial pending the normal same-runner cache
+comparison against edc9e26, including both persistent and feature-rich
+lanes and unchanged strong miss goals; it is not an acceptance pass.
