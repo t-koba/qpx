@@ -2723,3 +2723,16 @@ sampling. It requires at least one writer execution sample and complete CPU
 coverage for every sampled execution. This avoids mixing 1 KiB and 1 MiB
 writer durations from the broader proxy-phase diagnostic. Reports and raw
 logs remain available even when coverage validation fails.
+
+
+The 2 MiB splice send-queue trial is rejected after reversed same-runner
+comparison `37567909316` at `a85c0d7` against `09a8892`. Current fast
+qpx total CPU is 457.866 milliseconds versus baseline 371.469; qpx-only
+CPU is 213.243 versus 170.539; transfer time is 249.264 versus 223.037.
+Slow total CPU is 39.426 versus 38.512 milliseconds. All samples complete
+and the original relative criteria pass, but fast CPU spreads are 2.292
+and 1.330, so a relative pass does not establish an absolute improvement.
+Together with the preceding comparison's absolute CPU increase, this provides
+no support for retaining the larger queue. Restore the preceding 1 MiB bound
+and keep the real slow-receiver bounded-queue and cancellation-restoration
+regression. Do not repeat the queue enlargement without new causal evidence.

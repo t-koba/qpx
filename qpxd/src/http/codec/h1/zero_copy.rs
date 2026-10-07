@@ -29,7 +29,7 @@ const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
 #[cfg(target_os = "linux")]
 const FILE_NOTSENT_LOWAT: u32 = 128 * 1024;
 #[cfg(target_os = "linux")]
-const SOCKET_NOTSENT_LOWAT: u32 = 2 * BALANCED_ZERO_COPY_QUANTUM as u32;
+const SOCKET_NOTSENT_LOWAT: u32 = BALANCED_ZERO_COPY_QUANTUM as u32;
 #[cfg(target_os = "linux")]
 const MAX_SPLICE_SOCKET_BATCH: usize = 48 * 1024;
 
