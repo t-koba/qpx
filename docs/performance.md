@@ -3101,3 +3101,23 @@ filesystem and HTTP servers, including cancelled-caller admission and
 failure recovery, plus all-feature/all-target Clippy with warnings denied,
 formatting and spelling checks. An initial sandboxed run could not bind
 the HTTP test server; the authorized real-server run passes completely.
+
+Streaming native run `37586376660` at `7a0b001` fails when Apache's first
+64-transfer fast window exceeds the unchanged 184-second completion deadline.
+The subsequent qpx and lighttpd windows complete, but `set -e` previously
+terminated the diagnostic before decoding either owned CPU profile. The
+raw profiles, exact executable and lifecycle records are retained.
+Extract native report generation into a shared reporting script and retain
+completed owned windows before validating all backend transfer snapshots.
+A failed benchmark still fails the diagnostic; incomplete profiles, forced
+shutdown, empty windows, lost samples and incomplete TCP snapshots remain
+explicit failures. Add retained streaming-profile analysis without another
+workload or release build. Restore only the recorded executable destination
+inside the workspace, verifying ELF format, byte count and SHA-256 before
+atomic publication. Require completed source-run identity and all three
+valid qpx/lighttpd fast and slow source samples; record the source revision,
+source conclusion and analysis revision separately. This recovery supplies
+CPU evidence and cannot replace acceptance or erase Apache's failure.
+Bash syntax, ShellCheck, Actionlint, Python syntax, spelling and the unchanged
+8-category/16-evaluation gate inventory pass. Positive Linux validation uses
+the real retained profiles from the failed run, without mocks or stubs.

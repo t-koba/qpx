@@ -30,7 +30,7 @@ on:
         options: [baseline-current, current-baseline]
         default: baseline-current
       profile_source_run:
-        description: Existing http2-client run to reanalyze without repeating requests
+        description: Existing http2-client or streaming-native run to reanalyze without repeating requests
         type: string
         default: ""
 
@@ -152,15 +152,15 @@ jobs:
           SOURCE_RUN: ${{ inputs.profile_source_run }}
           CATEGORY: ${{ inputs.category }}
         run: |
-          if [ "$CATEGORY" != http2-client ] || [[ ! "$SOURCE_RUN" =~ ^[0-9]+$ ]]; then
-            echo "existing profile analysis requires http2-client and a numeric run ID" >&2
+          if { [ "$CATEGORY" != http2-client ] && [ "$CATEGORY" != streaming-native ]; } || [[ ! "$SOURCE_RUN" =~ ^[0-9]+$ ]]; then
+            echo "existing profile analysis requires http2-client or streaming-native and a numeric run ID" >&2
             exit 1
           fi
-      - name: download existing client CPU profiles
+      - name: download existing CPU profiles
         if: inputs.profile_source_run != ''
         uses: actions/download-artifact@v8
         with:
-          name: performance-diagnostics-http2-client
+          name: ${{ format('performance-diagnostics-{0}', inputs.category) }}
           path: target/perf
           run-id: ${{ inputs.profile_source_run }}
           github-token: ${{ github.token }}
@@ -398,6 +398,25 @@ jobs:
               ;;
             *) echo "unsupported diagnostic category: $CATEGORY" >&2; exit 2 ;;
           esac
+      - name: decode retained native streaming CPU profiles
+        if: inputs.category == 'streaming-native' && inputs.profile_source_run != ''
+        env:
+          SOURCE_RUN: ${{ inputs.profile_source_run }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          profiles=(target/perf/profiles/native.*)
+          if [ "${#profiles[@]}" -ne 1 ] || [ ! -d "${profiles[0]}" ]; then
+            echo "native CPU profile directory is missing or ambiguous" >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" > target/perf/native-source-run.json
+          python3 scripts/restore-native-profile-binary.py "${profiles[0]}" "$GITHUB_WORKSPACE" target/perf/native-source-run.json
+          status=0
+          bash scripts/perf-report-proxy-native.sh streaming "${profiles[0]}" \
+            "$GITHUB_WORKSPACE/target/perf/streaming-compare-logs" || status=1
+          python3 scripts/summarize-splice-batches.py target/perf/streaming-compare-logs/qpxd.log \
+            target/perf/splice-counter-summary.json || status=1
+          exit "$status"
       - name: summarize retained load-generator CPU profiles
         if: always() && inputs.category == 'http2-client'
         env:
