@@ -24,6 +24,10 @@ on:
         description: Baseline commit for a same-runner revision comparison
         type: string
         default: "9500bb1d764e8cee9b0b24bd9bea96ba512418fc"
+      comparison_ref:
+        description: Pinned current commit for revision comparisons; empty uses the workflow revision
+        type: string
+        default: ""
       revision_order:
         description: Version order for the same-runner origin/cache comparison
         type: choice
@@ -50,6 +54,36 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          ref: ${{ inputs.comparison_ref || github.sha }}
+      - name: validate and record comparison revision
+        env:
+          COMPARISON_REF: ${{ inputs.comparison_ref }}
+          CATEGORY: ${{ inputs.category }}
+          SOURCE_RUN: ${{ inputs.profile_source_run }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          if [ -n "$COMPARISON_REF" ]; then
+            case "$CATEGORY" in
+              webdav-revision|cache-revision|http2-revision|streaming-revision) ;;
+              *) echo "pinned comparison revisions require a revision comparison category" >&2; exit 1 ;;
+            esac
+            if [ -n "$SOURCE_RUN" ]; then
+              echo "pinned comparison revisions cannot be combined with retained profile analysis" >&2
+              exit 1
+            fi
+          fi
+          COMPARISON_SHA="$(git rev-parse HEAD)"
+          export COMPARISON_SHA
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          output = Path("target/perf")
+          output.mkdir(parents=True, exist_ok=True)
+          record = {name.lower(): os.environ[name] for name in (
+              "WORKFLOW_SHA", "COMPARISON_SHA", "COMPARISON_REF", "CATEGORY")}
+          (output / "comparison-revision.json").write_text(json.dumps(record, indent=2) + "\n")
+          PY
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
@@ -172,6 +206,12 @@ jobs:
           CATEGORY: ${{ inputs.category || 'streaming-scheduler' }}
           REVISION_ORDER: ${{ inputs.revision_order }}
         run: |
+          case "$CATEGORY" in
+            webdav-revision|cache-revision|http2-revision|streaming-revision)
+              GITHUB_SHA="$(git rev-parse HEAD)"
+              export GITHUB_SHA
+              ;;
+          esac
           case "$CATEGORY" in
             scheduler-accounting)
               python3 scripts/perf-evaluate.py "completed thread scheduler accounting" -- bash scripts/check-perf-scheduler-accounting.sh

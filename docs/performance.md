@@ -3121,3 +3121,33 @@ CPU evidence and cannot replace acceptance or erase Apache's failure.
 Bash syntax, ShellCheck, Actionlint, Python syntax, spelling and the unchanged
 8-category/16-evaluation gate inventory pass. Positive Linux validation uses
 the real retained profiles from the failed run, without mocks or stubs.
+
+Retained analysis `37588643172` restores the exact source ELF, produces two
+owned profiles and eighteen reports with zero lost samples, and still fails
+the original incomplete backend TCP snapshot requirement. All 195 qpx splice
+transfers have valid counters. The second fast window contains splice in
+242 of 265 qpx stacks. Backend page clearing appears in 62 of 312 stacks
+under qpx and 31 of 169 under lighttpd, beneath the kernel page-fragment
+allocation path. This is evidence for investigating page lifetime, not proof
+that changing pipe capacity improves performance or acceptance.
+
+Second LTO comparison `37585262565` fixes fat `27d2c2d` against thin
+`b91a395` in baseline-current order. Both 100-stream lanes have valid three
+samples per revision. For 1 KiB, throughput changes from 41,011.60 to
+39,813.51 requests/s, CPU efficiency from 24,502.948113 to 23,879.950800,
+p99 from 4.944 to 5.106 ms, and peak RSS from 79,208 to 76,116 KiB.
+For 1 MiB, CPU efficiency changes from 998.352125 to 973.801653 and p99
+from 125.117 to 132.301 ms. Single-stream quality fails for the current
+direct-backend 1 KiB lane and qpx 1 MiB throughput spread; those lanes
+cannot establish adoption. The small-response CPU improvement in the first
+comparison is not reproduced. Keep fat LTO provisional pending a third
+fixed-revision comparison in current-baseline order. The current nginx
+1 MiB/100-stream scheduler reference also changes substantially, so the
+10.348722 relative-delay failure does not establish a tenfold qpx regression.
+
+Revision diagnostics accept an optional pinned current checkout separately
+from the workflow revision. Record both SHAs and the requested ref, and pass
+the actual checked-out SHA to measurement and aggregation. This permits the
+third LTO pair to retain its original product revisions while subsequent
+workflow fixes remain independently identifiable. Only revision comparisons
+accept this input; it cannot be combined with retained profile analysis.
