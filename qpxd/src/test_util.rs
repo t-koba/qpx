@@ -21,7 +21,8 @@ pub(crate) async fn spawn_static_http_server(
         .expect("bind static http server");
     let addr = listener.local_addr().expect("server addr");
     tokio::spawn(async move {
-        for _ in 0..accepts {
+        let mut completed_requests = 0;
+        while completed_requests < accepts {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let mut raw = Vec::new();
             let mut buf = [0u8; 1024];
@@ -35,6 +36,15 @@ pub(crate) async fn spawn_static_http_server(
                     break;
                 }
             }
+            // TCP health probes close without sending an HTTP request. They
+            // must not consume the finite application-request allowance.
+            if raw.is_empty() {
+                continue;
+            }
+            assert!(
+                raw.windows(4).any(|window| window == b"\r\n\r\n"),
+                "static HTTP server received an incomplete request head"
+            );
             drain_declared_request_body(&mut stream, raw.as_slice(), &mut buf).await;
             let mut response = format!(
                 "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -52,6 +62,7 @@ pub(crate) async fn spawn_static_http_server(
                 .write_all(response.as_bytes())
                 .await
                 .expect("write response");
+            completed_requests += 1;
         }
     });
     addr
@@ -110,4 +121,30 @@ async fn drain_declared_request_body(
         }
         received_body = received_body.saturating_add(n);
     }
+}
+
+#[tokio::test]
+async fn static_http_server_preserves_request_allowance_after_tcp_health_probe() {
+    let addr = spawn_static_http_server("200 OK", Vec::new(), "real body".into(), 1).await;
+    let probe = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect health probe");
+    drop(probe);
+    let mut client = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect HTTP client");
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .expect("send real request");
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.read_to_end(&mut response),
+    )
+    .await
+    .expect("response before deadline")
+    .expect("read real response");
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert!(response.ends_with(b"real body"));
 }

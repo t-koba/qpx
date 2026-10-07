@@ -119,10 +119,16 @@ async fn publish(
     )
     .await
     .expect("real origin dispatch");
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = qpx_http::body::to_bytes(response.into_body())
         .await
         .expect("origin body");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "origin response: {}",
+        String::from_utf8_lossy(&body)
+    );
     assert_eq!(body.as_ref(), b"policy-payload");
     let fast = prepared.cache_hit.as_ref().expect("prepared cache path");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {

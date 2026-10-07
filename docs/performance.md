@@ -2812,6 +2812,28 @@ not an accepted performance gain; same-runner measurements must assess
 its dispatch cost, throughput, CPU efficiency, latency and scheduler delay.
 The first concurrent qpxd suite run completes 617 tests but the persistent
 restart test receives 502 during its initial origin dispatch, before the
-restart. The isolated test passes and a subsequent full run passes all
-618 tests. The origin failure is not yet reproduced or attributed; no
-retry, timeout change or error suppression was added to the test.
+restart. Coverage, RFC and Windows CI subsequently reproduce the failure.
+The cause is the finite real HTTP test server counting accepted TCP
+connections instead of completed HTTP requests. The router's immediate TCP
+health probe closes without sending a request and can consume the only
+response allowance after cold lookup yields. The helper now counts completed
+HTTP requests, explicitly handles empty health-probe connections and rejects
+incomplete nonempty heads. A real TCP probe followed by a full HTTP response
+regression test and all 619 qpxd library tests pass. No health checks, cache
+features, admission checks or timeouts are disabled or relaxed.
+
+Third bounded-writer comparison `37570528339` at `4b712f1` versus `c87b29c`
+uses current-baseline order and five valid miss samples per server/revision.
+Qpx throughput improves 11,634.967446 to 12,465.572034 requests/s (+7.14%),
+CPU efficiency 5,208.903226 to 5,507.881990 requests/CPU second (+5.74%),
+p99 22.357 to 16.992 ms (-24.00%) and scheduler delay 360.340266 to
+309.848569 microseconds/request (-14.01%). Current reference ratios remain
+CPU 0.909260 below 1.0 and delay 2.148861 above 1.0; all performance goals
+are not achieved. The cold-read trial runs independently against `419c22e`
+in baseline-current order as diagnostic `37573130578`.
+
+Required streaming job `112636446994` at `6cfacc2` completes valid fast/slow
+workloads. The slow lane passes all criteria; the fast lane fails total CPU
+efficiency 1.102846 against 1.25 and scheduler delay 6.436598 against 6.0.
+Cold-cache reads are not part of this workload. These results do not justify
+reintroducing the rejected larger socket queue or relaxing existing gates.
