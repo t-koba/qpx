@@ -305,7 +305,12 @@ fn spawn_tcp_response_reader(
                 }
             };
             match read {
-                None | Some(Ok(0)) | Some(Err(_)) => break,
+                None | Some(Ok(0)) => break,
+                Some(Err(error)) => {
+                    warn!(error = ?error, "IPC TCP response body read failed");
+                    sender.abort();
+                    break;
+                }
                 Some(Ok(n)) => {
                     let Some(next_seen) = seen.checked_add(n) else {
                         sender.abort();
@@ -360,4 +365,50 @@ pub(super) fn validate_ipc_response_status(status: u16) -> Result<StatusCode> {
         return Err(anyhow!("IPC response status is out of range: {status}"));
     }
     StatusCode::from_u16(status).map_err(|err| anyhow!("invalid IPC response status: {err}"))
+}
+
+#[cfg(test)]
+mod tcp_response_tests {
+    use super::super::backend::IpcStream;
+    use super::*;
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn reset_response_connection_aborts_the_downstream_body() {
+        for reset in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let stream = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (mut peer, _) = listener.accept().await.unwrap();
+            if reset {
+                socket2::SockRef::from(&peer)
+                    .set_linger(Some(Duration::ZERO))
+                    .unwrap();
+            } else {
+                peer.shutdown().await.unwrap();
+            }
+            drop(peer);
+            let (sender, mut body) = Body::channel();
+            spawn_tcp_response_reader(
+                sender,
+                PooledIpcConnection {
+                    stream: IpcStream::Tcp(stream),
+                    shm: None,
+                    active_permit: None,
+                },
+                None,
+                Duration::from_secs(5),
+            );
+            let chunk = timeout(Duration::from_secs(5), body.data()).await.unwrap();
+            if reset {
+                assert!(
+                    matches!(chunk, Some(Err(_))),
+                    "reset must remain a body error"
+                );
+            } else {
+                assert!(chunk.is_none(), "graceful EOF must remain successful");
+            }
+        }
+    }
 }

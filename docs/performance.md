@@ -3419,3 +3419,29 @@ quality. Its small multiplexed lane still fails p99 ratio 1.277690 against
 0.95 and scheduler delay ratio 2.183969 against 2.0. Both large-body lanes
 pass. The pending TLS diagnostic investigates actual writer behavior;
 failure alone is not evidence for another scheduling or batching trial.
+
+TLS native diagnostic `37602167315` succeeds with zero lost samples and
+1,425 real coalescer connection-start records. Only one 1-in-1,024 branch
+sample is recorded across calibration and all measured lanes: 1,996 pending
+bytes, a 256-byte first slice and 14,358 omitted caller bytes. This bounds
+successful branch executions to between one and 1,024 over the complete
+profile, without attributing them to a particular lane. It does not establish
+this legal partial-write path as the cause of the persistent multiplexed
+tail. Remove the temporary target, collector and native logging override;
+retain the original writer and the completed artifact as evidence. Do not
+introduce an all-slice batching optimization based on this sparse observation.
+
+CI `37602395612` reports an unexpected IPC CGI response body in perf smoke,
+while the other ten smoke cases and all three advanced transports pass.
+The former message discarded the actual body and process log. Retain a
+bounded body prefix/length and the existing daemon log on failure, and run
+the IPC case in debug builds too with the same request count, concurrency
+and thresholds. Eleven local real-CGI/TCP executions verify 352 responses
+without reproducing that Linux release failure; do not claim it resolved.
+
+Inspection separately finds a definite IPC transport error-propagation bug:
+the TCP body reader handles a failed read like successful EOF. A real socket
+reset first fails a regression requiring a downstream body error. Abort the
+body on read failure and retain the error in the log, while preserving clean
+FIN as successful EOF. This corrects silent truncation classification; it
+does not establish that the unrecorded CI failure was a connection reset.

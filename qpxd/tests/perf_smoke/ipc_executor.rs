@@ -6,11 +6,6 @@ use tracing::warn;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reverse_ipc_executor_perf_smoke() -> Result<()> {
-    if cfg!(debug_assertions) {
-        eprintln!("skipping perf smoke assertions in debug build");
-        return Ok(());
-    }
-
     let dir = temp_dir("qpxd-ipc-executor-perf")?;
     let _script = create_cgi_script(&dir)?;
     let qpxf_listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -54,7 +49,7 @@ async fn reverse_ipc_executor_perf_smoke() -> Result<()> {
 
     let cfg = dir.join("ipc-executor-perf.yaml");
     let qpxf_addr = qpxf_addr.to_string();
-    let (port, _qpxd) =
+    let (port, qpxd) =
         spawn_qpxd_on_random_port(&cfg, dir.join("ipc-executor-perf.log"), |port| {
             format!(
                 r#"runtime:
@@ -94,7 +89,11 @@ edges:
             assert_eq!(response.status(), StatusCode::OK);
             let body = response.into_body().collect().await?.to_bytes();
             if !body.as_ref().starts_with(b"Hello from CGI!") {
-                return Err(anyhow!("unexpected ipc response body"));
+                return Err(anyhow!(
+                    "unexpected ipc response body: length={}, prefix={:?}",
+                    body.len(),
+                    &body[..body.len().min(64)]
+                ));
             }
             Ok(())
         })
@@ -111,7 +110,7 @@ edges:
     )
     .await;
     qpxf_task.abort();
-    result
+    result.with_context(|| format!("IPC executor process log: {}", qpxd.inner.log_tail()))
 }
 
 fn create_cgi_script(dir: &Path) -> Result<PathBuf> {

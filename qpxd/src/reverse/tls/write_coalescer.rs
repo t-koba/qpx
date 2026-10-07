@@ -15,8 +15,6 @@ pub(in crate::reverse) struct AdaptiveWriteCoalescer<T> {
 
 impl<T> AdaptiveWriteCoalescer<T> {
     pub(in crate::reverse) fn new(inner: T) -> Self {
-        tracing::debug!(target: "qpx_perf_tls", sample_interval = 1024,
-            "coalesced vectored write diagnostics enabled");
         Self {
             inner,
             buffered: Vec::new(),
@@ -107,7 +105,6 @@ where
                 continue;
             }
             let consumed = count - pending.len();
-            sample_split_vectored_write(pending.len(), first.len(), buffers, consumed);
             self.buffered.clear();
             self.written = 0;
             return Poll::Ready(Ok(consumed));
@@ -129,27 +126,6 @@ where
             self.buffered.extend_from_slice(slice);
         }
     }
-}
-
-fn sample_split_vectored_write(
-    pending_bytes: usize,
-    first_slice_bytes: usize,
-    buffers: &[IoSlice<'_>],
-    consumed_bytes: usize,
-) {
-    if !tracing::enabled!(target: "qpx_perf_tls", tracing::Level::DEBUG) {
-        return;
-    }
-    static SAMPLES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sample = SAMPLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if !sample.is_multiple_of(1024) {
-        return;
-    }
-    let offered_bytes = buffers.iter().map(|buffer| buffer.len()).sum::<usize>();
-    tracing::debug!(target: "qpx_perf_tls", pending_bytes, first_slice_bytes,
-        offered_bytes, offered_slices = buffers.len(), consumed_bytes,
-        omitted_slice_bytes = offered_bytes.saturating_sub(first_slice_bytes),
-        sample_interval = 1024, "coalesced pending vectored write sampled");
 }
 
 impl<T> AsyncRead for AdaptiveWriteCoalescer<T>

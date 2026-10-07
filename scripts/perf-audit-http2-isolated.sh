@@ -25,9 +25,6 @@ case "${1:-}" in
   --native) native=1; shift ;;
   --phases) native=1; phases=1; shift ;;
 esac
-if [ "$native" = 1 ] && [ "$phases" = 0 ]; then
-  export RUST_LOG=warn,qpx_perf_tls=debug
-fi
 if [ "${1:-}" = --workers ]; then
   if [ "$#" -ne 3 ] || { [ "$native" = 1 ] && [ "$phases" != 1 ]; }; then
     echo "Worker scaling requires normal measurement or phase diagnostics and one output path" >&2
