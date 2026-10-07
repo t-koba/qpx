@@ -15,7 +15,7 @@ pub(crate) async fn forward_content_length_request_body<R>(
     mut read_half: R,
     mut read_buf: BytesMut,
     mut remaining: u64,
-    mut sender: Sender,
+    sender: &mut Sender,
     read_timeout: Duration,
 ) -> Result<(R, BytesMut)>
 where
@@ -55,7 +55,7 @@ where
 pub(crate) async fn forward_chunked_request_body<R>(
     mut read_half: R,
     mut read_buf: BytesMut,
-    mut sender: Sender,
+    sender: &mut Sender,
     read_timeout: Duration,
 ) -> Result<(R, BytesMut)>
 where
@@ -100,7 +100,7 @@ where
             &mut read_half,
             &mut read_buf,
             size,
-            &mut sender,
+            sender,
             deliver,
             read_timeout,
         )
@@ -285,12 +285,12 @@ mod tests {
         drop(client);
         let (read_half, write_half) = tokio::io::split(server);
         drop(write_half);
-        let (sender, _body) = Body::channel();
+        let (mut sender, _body) = Body::channel();
 
         let err = forward_chunked_request_body(
             read_half,
             BytesMut::new(),
-            sender,
+            &mut sender,
             Duration::from_secs(1),
         )
         .await
@@ -307,13 +307,13 @@ mod tests {
         client.write_all(b"abc").await.expect("write partial body");
         let (read_half, write_half) = tokio::io::split(server);
         drop(write_half);
-        let (sender, _body) = Body::channel();
+        let (mut sender, _body) = Body::channel();
 
         let err = forward_content_length_request_body(
             read_half,
             BytesMut::new(),
             10,
-            sender,
+            &mut sender,
             Duration::from_millis(10),
         )
         .await

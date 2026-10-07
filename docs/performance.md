@@ -3482,7 +3482,7 @@ remains disabled. Remove this interval instrumentation after the callsite
 investigation, rather than retaining another permanent timing layer.
 
 Native HTTP/2 diagnostic `37614001737` completes with one owned profile,
-68 decoded workload windows and zero lost samples. Match the small
+68 workload CPU reports and zero lost samples. Match the small
 100-stream second-round callchains to Linux TID and monotonic poll bounds:
 1,640 of 1,758 CPU samples lie in polls longer than 1 ms, and 1,636 lie
 in intervals whose thread CPU accounts for at least half their wall time.
@@ -3505,8 +3505,8 @@ missing objects remain idempotent. All 110 cache library tests pass with
 real filesystem fixtures and a real TCP cache server. This is a correctness
 fix, not a performance optimization or an acceptance measurement.
 
-A separate HTTP/2 trial bounds continuous connection execution to 2 ms
-before an explicit driver flush and cooperative handoff. Its deadline
+A separate HTTP/2 trial requests a cooperative handoff at connection-loop
+boundaries after 2 ms, following an explicit driver flush. Its deadline
 starts afresh on every parent poll, so suspended I/O consumes no budget.
 Stream admission limits, completion storage, flow control, idle timeout,
 cancellation and protocol features remain intact. Unlike the rejected
@@ -3515,4 +3515,18 @@ CPU residency without forcing a handoff after a short ready burst.
 All 621 library tests, all-feature/all-target Clippy and structure checks
 pass. Adoption requires a normal same-runner comparison against the
 preceding instrumentation-cleanup commit and the unchanged acceptance
-objectives; this is not an established improvement yet.
+objectives; this is not an established improvement yet. One nested driver
+or stream poll can overrun that interval, so the comparison must establish
+the actual tail rather than treating the deadline as a hard CPU bound.
+
+The 6a75c8a CalDAV compliance run reports an unknown get-by-URL result
+and a truncated-XML error. The identical client passes 30 consecutive
+local real-server runs; the CI request bytes were not retained, so its
+specific disconnect cause is not established. A real TCP partial request
+does reproduce the same XML error: HTTP/1 body-reader failure drops its
+sender as successful EOF, exposing an incomplete body to the application.
+The regression fails before correction. Content-length and chunked readers
+now share error propagation to the body consumer, preserving the original
+failure message. Complete framing still delivers clean EOF. Failed DAV
+compliance runs retain the fixture, server log and client communication
+dump for diagnosis rather than suppressing the tester's unknown result.

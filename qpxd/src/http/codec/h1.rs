@@ -373,24 +373,30 @@ where
                 read_buf,
             },
         ),
-        RequestBodyKind::ContentLength(length) => {
-            let (sender, body) = Body::channel_with_capacity(body_channel_capacity.max(1));
+        RequestBodyKind::ContentLength(_) | RequestBodyKind::Chunked => {
+            let (mut sender, body) = Body::channel_with_capacity(body_channel_capacity.max(1));
             let task = tokio::spawn(async move {
-                forward_content_length_request_body(
-                    read_half,
-                    read_buf,
-                    length,
-                    sender,
-                    read_timeout,
-                )
-                .await
-            });
-            (body, RequestBodyRead::Spawned(task))
-        }
-        RequestBodyKind::Chunked => {
-            let (sender, body) = Body::channel_with_capacity(body_channel_capacity.max(1));
-            let task = tokio::spawn(async move {
-                forward_chunked_request_body(read_half, read_buf, sender, read_timeout).await
+                let result = match kind {
+                    RequestBodyKind::ContentLength(length) => {
+                        forward_content_length_request_body(
+                            read_half,
+                            read_buf,
+                            length,
+                            &mut sender,
+                            read_timeout,
+                        )
+                        .await
+                    }
+                    RequestBodyKind::Chunked => {
+                        forward_chunked_request_body(read_half, read_buf, &mut sender, read_timeout)
+                            .await
+                    }
+                    RequestBodyKind::Empty => unreachable!("empty bodies have no reader task"),
+                };
+                if let Err(error) = &result {
+                    sender.abort_with_error(qpx_http::body::BodyError::new(error.to_string()));
+                }
+                result
             });
             (body, RequestBodyRead::Spawned(task))
         }

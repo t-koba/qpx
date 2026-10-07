@@ -752,8 +752,12 @@ impl Sender {
     }
 
     pub fn abort(&mut self) {
+        self.abort_with_error(BodyError::aborted());
+    }
+
+    pub fn abort_with_error(&mut self, error: BodyError) {
         if let Some(inner) = self.inner.take() {
-            inner.abort(BodyError::aborted());
+            inner.abort(error);
         }
     }
 

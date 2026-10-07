@@ -243,6 +243,13 @@ jobs:
         run: |
           export PATH="$RUNNER_TEMP/caldav-venv/bin:$PATH"
           bash ./scripts/e2e-webdav-compliance.sh
+      - name: retain failed DAV compliance evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webdav-compliance-failure
+          path: target/webdav-compliance
+          if-no-files-found: ignore
 
   http_rfc_all_features:
     name: HTTP RFC workspace all-features

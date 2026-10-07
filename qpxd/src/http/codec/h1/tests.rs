@@ -8,6 +8,48 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::net::{TcpListener, TcpStream};
 
+#[tokio::test]
+async fn incomplete_request_body_aborts_the_consumer_on_real_tcp() {
+    for (kind, wire, complete) in [
+        (RequestBodyKind::ContentLength(10), &b"abc"[..], false),
+        (RequestBodyKind::Chunked, &b"a\r\nabc"[..], false),
+        (RequestBodyKind::Chunked, &b"invalid\r\n"[..], false),
+        (RequestBodyKind::ContentLength(3), &b"abc"[..], true),
+        (
+            RequestBodyKind::Chunked,
+            &b"3\r\nabc\r\n0\r\n\r\n"[..],
+            true,
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let mut client = TcpStream::connect(listener.local_addr().expect("address"))
+            .await
+            .expect("connect");
+        let (server, _) = listener.accept().await.expect("accept");
+        client.write_all(wire).await.expect("write body prefix");
+        client.shutdown().await.expect("close request write side");
+        let (reader, _writer) = server.into_split();
+        let (body, read) =
+            prepare_request_body(reader, BytesMut::new(), kind, Duration::from_secs(1), 2);
+        let received = qpx_http::body::to_bytes(body).await;
+        let RequestBodyRead::Spawned(task) = read else {
+            panic!("request body must have a reader task");
+        };
+        let read = task.await.expect("reader task");
+        if complete {
+            assert_eq!(received.expect("complete body"), "abc");
+            read.expect("complete framing");
+        } else {
+            let received =
+                received.expect_err("incomplete framing must not become successful body EOF");
+            assert_eq!(
+                received.to_string(),
+                read.expect_err("invalid framing").to_string()
+            );
+        }
+    }
+}
+
 #[test]
 fn request_head_parser_promotes_storage_for_many_headers() {
     let mut raw = b"GET / HTTP/1.1\r\nHost: example.test\r\n".to_vec();

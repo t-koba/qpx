@@ -15,13 +15,15 @@ cleanup() {
   if [[ $status -ne 0 ]]; then
     [[ -f "$TMP_DIR/qpxd.log" ]] && sed -n '1,240p' "$TMP_DIR/qpxd.log" >&2
     [[ -f "$TMP_DIR/caldav-results.json" ]] && cat "$TMP_DIR/caldav-results.json" >&2
+    mkdir -p "$ROOT_DIR/target/webdav-compliance"
+    cp -R "$TMP_DIR/." "$ROOT_DIR/target/webdav-compliance/"
   fi
   rm -rf "$TMP_DIR"
   exit "$status"
 }
 trap cleanup EXIT
 
-mkdir -p "$TMP_DIR/root/dav" "$TMP_DIR/state"
+mkdir -p "$TMP_DIR/root/dav" "$TMP_DIR/state" "$TMP_DIR/communication"
 QPX_STATE_DIR="$TMP_DIR/state" \
 QPX_WEBDAV_ROOT="$TMP_DIR/root" \
 QPX_WEBDAV_METADATA="$TMP_DIR/webdav.redb" \
@@ -41,7 +43,7 @@ curl --fail --silent --show-error \
   --data '<C:mkcalendar xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:"><D:set><D:prop><D:displayname>Compliance</D:displayname></D:prop></D:set></C:mkcalendar>' \
   http://127.0.0.1:18086/dav/compliance
 
-"$CALDAV_TESTER_BIN" \
+TMPDIR="$TMP_DIR/communication" PYTHON_CALDAV_COMMDUMP=1 "$CALDAV_TESTER_BIN" \
   --caldav-url http://127.0.0.1:18086/dav/ \
   --caldav-username unused \
   --caldav-password unused \
