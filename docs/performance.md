@@ -3472,3 +3472,11 @@ stream kind; completion bursts, final-stream flushing and admission order
 are unchanged. All 621 library tests pass, including real TCP multiplexing,
 slow-client flow control, cancellation and idle deadlines. This removes
 duplicate state transitions without claiming a performance gain.
+
+The native HTTP/2 CPU diagnostic now enables the existing connection-poll
+observer and retains monotonic begin/end bounds, Linux TID and thread CPU
+for polls lasting at least 1 ms. It keeps the complete native workload
+matrix and rejects missing intervals or clock errors. This temporarily
+connects long parent execution to owned CPU callchains; the normal observer
+remains disabled. Remove this interval instrumentation after the callsite
+investigation, rather than retaining another permanent timing layer.

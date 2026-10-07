@@ -36,8 +36,10 @@ if [ "${1:-}" = --workers ]; then
   esac
   shift 2
 fi
-if [ "$phases" = 1 ]; then
+if [ "$phases" = 1 ] || [ "${QPX_PERF_NATIVE_IO_TIMELINE:-0}" = 1 ]; then
   export RUST_LOG=warn,qpx_perf_phase=debug
+fi
+if [ "$phases" = 1 ]; then
   export QPX_PERF_SCHEDULER_THREADS=1
   body_sizes=1024
   stream_values=100
