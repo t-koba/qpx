@@ -2,7 +2,7 @@ use crate::http::codec::h2::{
     H2_MAX_CONCURRENT_STREAMS, H2TransportTuning, send_h2_response_with_interim,
 };
 use crate::upstream::raw_http1::InterimResponseHead;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use h2::Reason;
@@ -12,10 +12,10 @@ use qpx_observability::RequestHandler;
 use std::convert::Infallible;
 use std::future::poll_fn;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::Poll;
 use tokio::io::AsyncReadExt;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::ReusableBoxFuture;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, warn};
 
 pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -25,6 +25,8 @@ const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
 // Release response buffers promptly without letting a continuously ready completion queue
 // postpone admission until every previously admitted stream has finished.
 const H2_COMPLETION_BURST: usize = 8;
+
+type AcceptedH2Stream = (Request<h2::RecvStream>, h2::server::SendResponse<Bytes>);
 
 enum H2ConnectionEvent<'a> {
     ConcurrentStreamCompleted(ReusableBoxFuture<'a, ()>),
@@ -128,52 +130,34 @@ where
     if enable_connect_protocol {
         builder.enable_connect_protocol();
     }
-    let mut conn = timeout(idle_timeout, builder.handshake(io)).await??;
+    let conn = timeout(idle_timeout, builder.handshake(io)).await??;
+    // Keep transport progress independent of request execution. There is one
+    // driver per connection; stream futures still share reusable local storage.
+    let (admissions, mut accepted) = tokio::sync::mpsc::channel(H2_ACCEPT_BACKLOG);
+    let mut transport = AbortOnDropHandle::new(tokio::spawn(drive_h2_transport(conn, admissions)));
     let active_streams = AtomicUsize::new(0);
     let mut reusable_primary_stream: Option<ReusableBoxFuture<'_, ()>> = None;
     let mut reusable_concurrent_streams: Vec<ReusableBoxFuture<'_, ()>> = Vec::new();
     let mut primary_stream = None;
     let mut concurrent_streams = FuturesUnordered::new();
-    let mut accepting_streams = true;
     let mut completions_since_admission = 0usize;
-    let mut completions_since_drive = 0usize;
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     loop {
         let accept_backlog_available = concurrent_streams.len() < H2_ACCEPT_BACKLOG;
-        if accepting_streams && !accept_backlog_available {
-            let progress = poll_fn(|cx| {
-                Poll::Ready(match conn.poll_closed(cx) {
-                    Poll::Ready(result) => Some(result),
-                    Poll::Pending => None,
-                })
-            })
-            .await;
-            completions_since_drive = 0;
-            if let Some(result) = progress {
-                match result {
-                    Ok(()) => {
-                        accepting_streams = false;
-                        if primary_stream.is_none() && concurrent_streams.is_empty() {
-                            break;
-                        }
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
         // Reap completed streams first to release response buffers. The reusable primary
         // future sits outside FuturesUnordered, so poll it before the concurrent completion
         // queue to give it the same bounded progress guarantee. After a bounded completion
         // burst, prefer a ready admission so multiplexed requests cannot starve.
-        let mut accepted_stream = None;
+        let mut admitted = None;
         let event = if prioritize_h2_admission(completions_since_admission) {
             tokio::select! {
                 biased;
-                accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
-                    accepted_stream = Some(accepted);
+                result = &mut transport => return result.context("HTTP/2 transport task failed")?,
+                request = accepted.recv(), if accept_backlog_available => {
+                    admitted = request;
                     H2ConnectionEvent::Accepted
-                }
+                },
                 completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
                     let () = completed;
                     H2ConnectionEvent::PrimaryStreamCompleted
@@ -186,6 +170,7 @@ where
         } else {
             tokio::select! {
                 biased;
+                result = &mut transport => return result.context("HTTP/2 transport task failed")?,
                 completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
                     let () = completed;
                     H2ConnectionEvent::PrimaryStreamCompleted
@@ -193,10 +178,10 @@ where
                 Some(stream) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
                     H2ConnectionEvent::ConcurrentStreamCompleted(stream)
                 }
-                accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
-                    accepted_stream = Some(accepted);
+                request = accepted.recv(), if accept_backlog_available => {
+                    admitted = request;
                     H2ConnectionEvent::Accepted
-                }
+                },
                 () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
             }
         };
@@ -218,21 +203,10 @@ where
                 reusable_primary_stream = primary_stream.take();
             }
             H2ConnectionEvent::Accepted => {
-                // Admission polls the driver too. Batch ready completions between
-                // those polls while always flushing the final outstanding stream.
-                completions_since_drive = 0;
-                let accepted = accepted_stream.ok_or_else(|| {
-                    anyhow::anyhow!("accepted stream event is missing its result")
-                })?;
-                let Some(result) = accepted else {
-                    accepting_streams = false;
-                    if primary_stream.is_none() && concurrent_streams.is_empty() {
-                        break;
-                    }
-                    continue;
+                let Some((request, respond)) = admitted else {
+                    return transport.await.context("HTTP/2 transport task failed")?;
                 };
                 completions_since_admission = 0;
-                let (request, respond) = result?;
                 let active_stream = ActiveH2Stream::new(&active_streams);
                 let stream = tokio::task::unconstrained(serve_h2_stream(
                     request,
@@ -262,7 +236,11 @@ where
             }
             H2ConnectionEvent::IdleTimeout => {
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
-                    return Ok(());
+                    transport.abort();
+                    return match transport.await {
+                        Err(error) if error.is_cancelled() => Ok(()),
+                        result => result.context("HTTP/2 transport task failed")?,
+                    };
                 }
                 idle_timer
                     .as_mut()
@@ -271,29 +249,14 @@ where
         }
         if stream_completed {
             completions_since_admission = completions_since_admission.saturating_add(1);
-            completions_since_drive += 1;
             let streams_empty = primary_stream.is_none() && concurrent_streams.is_empty();
-            if completions_since_drive >= H2_COMPLETION_BURST || !accepting_streams || streams_empty
-            {
-                drive_h2_connection_now(&mut conn).await?;
-                completions_since_drive = 0;
-            }
             if streams_empty {
-                if !accepting_streams {
-                    break;
-                }
                 idle_timer
                     .as_mut()
                     .reset(tokio::time::Instant::now() + idle_timeout);
             }
         }
     }
-    drop(reusable_primary_stream);
-    drop(primary_stream);
-    drop(concurrent_streams);
-    drop(reusable_concurrent_streams);
-    poll_fn(|cx| conn.poll_closed(cx)).await?;
-    Ok(())
 }
 
 async fn complete_reusable_h2_stream<'a>(
@@ -311,20 +274,34 @@ async fn poll_optional_h2_stream<T>(stream: &mut Option<ReusableBoxFuture<'_, T>
     .await
 }
 
-async fn drive_h2_connection_now<I>(conn: &mut h2::server::Connection<I, Bytes>) -> Result<()>
+async fn drive_h2_transport<I>(
+    mut conn: h2::server::Connection<I, Bytes>,
+    admissions: tokio::sync::mpsc::Sender<AcceptedH2Stream>,
+) -> Result<()>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    if let Some(result) = poll_fn(|cx| {
-        Poll::Ready(match conn.poll_closed(cx) {
-            Poll::Ready(result) => Some(result),
-            Poll::Pending => None,
-        })
-    })
-    .await
-    {
-        result?;
+    while let Some(request) = conn.accept().await {
+        match admissions.try_send(request?) {
+            Ok(()) => (),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(request)) => {
+                // A full admission queue must not stop response flushing,
+                // receive flow control or disconnect detection.
+                tokio::select! {
+                    permit = admissions.reserve() => match permit {
+                        Ok(permit) => permit.send(request),
+                        Err(_) => return Ok(()),
+                    },
+                    result = poll_fn(|cx| conn.poll_closed(cx)) => {
+                        result?;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+        }
     }
+    poll_fn(|cx| conn.poll_closed(cx)).await?;
     Ok(())
 }
 
@@ -461,7 +438,10 @@ pub(crate) fn take_interim_response_heads(
 
 #[cfg(test)]
 mod tests {
-    use super::{H2_COMPLETION_BURST, H2_PREFACE, prioritize_h2_admission, serve_h2_with_interim};
+    use super::{
+        H2_COMPLETION_BURST, H2_PREFACE, drive_h2_transport, prioritize_h2_admission,
+        serve_h2_with_interim,
+    };
     use h2::Reason;
     use http::{Request, Response};
     use qpx_http::body::Body;
@@ -474,6 +454,75 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Notify;
     use tokio::time::{Duration, sleep, timeout};
+
+    #[tokio::test]
+    async fn h2_transport_flushes_and_detects_disconnect_with_full_admission_queue() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client_io = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        socket2::SockRef::from(&client_io)
+            .set_linger(Some(Duration::ZERO))
+            .unwrap();
+        let (server_io, _) = listener.accept().await.unwrap();
+        let (admissions, mut accepted) = tokio::sync::mpsc::channel(1);
+        let transport = tokio::spawn(async move {
+            let conn = h2::server::handshake(server_io).await.unwrap();
+            drive_h2_transport(conn, admissions).await
+        });
+        let (mut client, connection) = h2::client::handshake(client_io).await.unwrap();
+        let connection_task = tokio::spawn(connection);
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            client = client.ready().await.unwrap();
+            requests.push(
+                client
+                    .send_request(
+                        Request::builder()
+                            .uri("https://transport.test/backpressure")
+                            .body(())
+                            .unwrap(),
+                        true,
+                    )
+                    .unwrap(),
+            );
+        }
+        let (_, mut respond) = timeout(Duration::from_secs(1), accepted.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while accepted.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("admission queue must fill");
+        let mut body = respond.send_response(Response::new(()), false).unwrap();
+        body.send_data(bytes::Bytes::from_static(b"ready"), true)
+            .unwrap();
+        let (response, _) = requests.remove(0);
+        let response = timeout(Duration::from_secs(1), response)
+            .await
+            .expect("response headers must flush while admission is full")
+            .unwrap();
+        let mut body = response.into_body();
+        assert_eq!(
+            timeout(Duration::from_secs(1), body.data())
+                .await
+                .expect("response body must flush while admission is full")
+                .unwrap()
+                .unwrap(),
+            bytes::Bytes::from_static(b"ready")
+        );
+        assert_eq!(accepted.len(), 1);
+        connection_task.abort();
+        let result = timeout(Duration::from_secs(1), transport)
+            .await
+            .expect("disconnect must terminate a backpressured transport")
+            .unwrap();
+        assert!(result.is_err(), "TCP reset must remain an error");
+    }
 
     #[test]
     fn h2_admission_priority_starts_after_a_bounded_completion_burst() {

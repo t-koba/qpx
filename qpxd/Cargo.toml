@@ -116,7 +116,7 @@ h3-datagram = { workspace = true, optional = true }
 
 # Async runtime
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 socket2.workspace = true
 
 # Policy assertion verification and certificate/key parsing used by qpxd itself.

@@ -3616,3 +3616,11 @@ duration still excludes the write. An earlier arrival contributes zero network
 wait inside that read phase; its full arrival-to-notification interval remains
 visible. Both request start and read completion must lie in the same measured
 workload window. Missing receive events remain diagnostic failures.
+
+Correlated native recording 37651776577 validates 444 response waits with no
+missing receive events or lost CPU samples. Notification-to-resumption p95 is
+1.679 ms, while connection polls contain 6--10 ms of CPU execution. Separate
+transport ownership from the connection-local request dispatcher using one
+driver task and bounded admission. Stream storage remains reusable; a full
+admission queue still drives response flushing, flow control and disconnects.
+This is a measured hypothesis, pending the complete same-runner comparison.
