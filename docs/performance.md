@@ -3056,3 +3056,25 @@ materialization bound. Keep file-identity validation and preservation of
 an already verified complete snapshot: those fix stale atomic replacement
 and descriptor re-read semantics without eagerly materializing large files.
 The profile does not justify repeating eager large-body caching unchanged.
+
+HTTP/2 native diagnostic `37582972906` records 1,770 stacks with zero
+lost samples for 1 KiB/100 streams. `drive_h2_connection_now` appears in
+468 stacks; these include necessary final-response flushes, so this is
+not an estimate of removable CPU cost. In locked h2 0.4.19,
+`server::Connection::poll_accept` first calls `poll_closed`. The current
+completion loop explicitly drives after eight completions immediately
+before prioritizing admission, which polls the same driver again.
+Remove that redundant non-final drive and its separate counter. Keep the
+eight-completion admission priority, bounded backlog, backlog-full driver,
+and explicit final/closed-admission flushes. Validate real TCP lifecycle
+and multiplexed tests, then compare independently against `27d2c2d`;
+this is distinct from the rejected stream-poll quota and scheduler trials.
+
+Normal streaming job `112673111182` at `27d2c2d` passes sample quality and
+all slow-reader objectives, including scheduler-delay ratio 0.377392.
+Fast-reader total CPU efficiency is 1.226796 versus the unchanged 1.25
+minimum; all other fast-reader objectives pass. The earlier successful
+normal run is therefore not three independent acceptance passes.
+The driver cleanup passes all 619 qpxd library tests with real TCP servers,
+all-feature/all-target Clippy with warnings denied, formatting, spelling,
+and the unchanged eight-category/sixteen-evaluation gate completeness check.
