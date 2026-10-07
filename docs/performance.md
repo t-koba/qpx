@@ -3247,3 +3247,30 @@ are unchanged. Direct-backend runs name the same process as frontend and
 backend, so their role counters must not be added twice. Real child CPU
 work, failed/signal exits, and a real HTTP server serving a real file verify
 the client wrapper locally. Linux execution must verify dependency capture.
+
+
+Second driver comparison `37591390878`, baseline-current order, rejects
+removal of the bounded non-final HTTP/2 drive. Both revisions pass all
+required measurement-quality lanes. Total CPU efficiency changes by
+-0.606%, -0.091%, +0.031% and -1.014% across small/single,
+small/multiplex, large/single and large/multiplex. Large/multiplex p99
+changes from 260.842 to 279.293 ms (+7.074%), scheduler delay from
+566.541439 to 617.927177 microseconds/request (+9.070%), and RSS rises
+4.686%. The first pair also lacked CPU gains and worsened large/multiplex
+delay. Restore the preceding completion-burst drive, preserving admission
+fairness, final-response flushing, closed-connection errors and backlog
+limits. Do not repeat this removal without new causal evidence.
+
+The restored driver passes all 619 real TCP/library tests and all-feature,
+all-target Clippy with warnings denied, formatting and spelling. Local
+compilation first ran out of disk space; removing only reproducible local
+build executables permitted the same test run to complete. Retained profile
+archives and raw measurement evidence are preserved. Anchored publication
+`c7f7375` also passes Linux, macOS and Windows build/test jobs. Full CI and
+independent performance goals remain outstanding.
+
+Native frontend snapshots retain individual process identities, including
+the profiler wrapper and observer when present. Attribute frontend CPU to
+the actual server PID from the retained lifecycle/callchain evidence rather
+than adding observer CPU to the server. Backend and client role accounting
+must likewise use their recorded process identities.

@@ -136,6 +136,7 @@ where
     let mut concurrent_streams = FuturesUnordered::new();
     let mut accepting_streams = true;
     let mut completions_since_admission = 0usize;
+    let mut completions_since_drive = 0usize;
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     loop {
@@ -148,6 +149,7 @@ where
                 })
             })
             .await;
+            completions_since_drive = 0;
             if let Some(result) = progress {
                 match result {
                     Ok(()) => {
@@ -207,12 +209,13 @@ where
                     reusable_concurrent_streams.push(stream);
                 }
                 completions_since_admission = completions_since_admission.saturating_add(1);
-                // The prioritized admission after a bounded completion burst polls
-                // the connection driver. Explicitly flush only when admission cannot
-                // drive it or the final response has completed.
-                if !accepting_streams || (primary_stream.is_none() && concurrent_streams.is_empty())
+                completions_since_drive += 1;
+                if completions_since_drive >= H2_COMPLETION_BURST
+                    || !accepting_streams
+                    || (primary_stream.is_none() && concurrent_streams.is_empty())
                 {
                     drive_h2_connection_now(&mut conn).await?;
+                    completions_since_drive = 0;
                 }
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
                     if !accepting_streams {
@@ -226,8 +229,13 @@ where
             H2ConnectionEvent::PrimaryStreamCompleted => {
                 completions_since_admission = completions_since_admission.saturating_add(1);
                 reusable_primary_stream = primary_stream.take();
-                if !accepting_streams || concurrent_streams.is_empty() {
+                completions_since_drive += 1;
+                if completions_since_drive >= H2_COMPLETION_BURST
+                    || !accepting_streams
+                    || concurrent_streams.is_empty()
+                {
                     drive_h2_connection_now(&mut conn).await?;
+                    completions_since_drive = 0;
                 }
                 if !accepting_streams && concurrent_streams.is_empty() {
                     break;
@@ -239,6 +247,9 @@ where
                 }
             }
             H2ConnectionEvent::Accepted => {
+                // Admission polls the driver too. Batch ready completions between
+                // those polls while always flushing the final outstanding stream.
+                completions_since_drive = 0;
                 let accepted = accepted_stream.ok_or_else(|| {
                     anyhow::anyhow!("accepted stream event is missing its result")
                 })?;
