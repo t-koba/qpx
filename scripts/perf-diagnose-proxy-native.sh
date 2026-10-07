@@ -110,6 +110,17 @@ APACHE_WRAPPER
       --native "$ROOT_DIR/target/perf/perf-audit-http2-compare.jsonl"
     log_directory="$ROOT_DIR/target/perf/http2-compare-logs"
     ;;
+  http2-timeline)
+    if QPXD_BIN="$wrapper" RUST_LOG=warn,qpx_perf_phase=debug \
+      QPX_PERF_NATIVE_IO_TIMELINE=1 QPX_HTTP2_COMPARE_BODY_SIZES=1024 \
+      bash "$ROOT_DIR/scripts/perf-diagnose-http2-events.sh"; then
+      workload_status=0
+    else
+      workload_status=$?
+      echo "Native HTTP/2 timeline failed; retaining completed CPU windows" >&2
+    fi
+    log_directory="$ROOT_DIR/target/perf/http2-compare-logs"
+    ;;
   streaming)
     export QPX_NATIVE_BACKEND_REAL_BIN
     QPX_NATIVE_BACKEND_REAL_BIN="$(command -v python3)"

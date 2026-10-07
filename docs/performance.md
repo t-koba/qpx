@@ -3580,7 +3580,12 @@ service completion, before sending headers or waiting on body flow control.
 The normal reverse handler constructs its full dispatch state in this box;
 keeping a completed allocation serves no response-lifetime purpose. This
 is a lifetime cleanup, not proof of a CPU or tail-latency improvement.
-Require a pinned comparison against 1841516 before evaluating performance.
+Pinned comparison 37635737168 against 1841516 retains 72 complete workload
+windows, with no failed requests or non-2xx responses. Large/multiplex RSS
+falls 5.779%, but throughput falls 2.250%, CPU efficiency falls 1.853%, and
+scheduler delay rises 3.912%. Small/multiplex p99 improves 2.053% but still
+fails the nginx ratio at 1.242393 against 1.1. This single comparison does
+not establish a general performance improvement or satisfy the goals.
 
 Remove the retired test-only upstream HTTP/1 relay implementation and its
 reader helpers. Move oversized-chunk and cancellation checks to the actual
@@ -3588,3 +3593,12 @@ pull body reader over TCP. The read-capacity check now observes a real TCP
 stream instead of synthesizing reads and accepting writes without I/O.
 The old channel receiver parameter had no remaining production caller;
 remove that branch while preserving the header timeout and framing checks.
+
+The `http2-timeline-native` diagnostic composes the existing owned CPU
+profiler and real TCP receive/notification recorder in one 1 KiB/100-stream
+workload. Both use CLOCK_MONOTONIC and retain the same three actual windows,
+so delayed notifications can be correlated with CPU callchains without
+joining different executions. Kernel process validation includes the owned
+server descendants when a profiler wraps qpxd. Real TCP probes, complete
+profiler shutdown and lost-event checks remain required. This diagnostic
+does not replace any acceptance measurement or change a performance gate.

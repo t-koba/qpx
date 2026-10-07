@@ -143,14 +143,21 @@ import re
 import sys
 root = Path(sys.argv[1])
 pids = set()
-for sample in root.glob("http2.qpxd.*.rss-peak.sampling.json"):
+for sample in root.glob("http2.qpxd.*.attempt-*.rss-peak.sampling.json"):
     pid = json.loads(sample.read_text())["pid"]
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         raise SystemExit("qpxd resource sampling has an invalid process ID")
-    pids.add(pid)
+    scheduler = sample.with_name(sample.name.replace(".rss-peak.sampling.json", ".scheduler-before.json"))
+    owned = json.loads(scheduler.read_text())
+    if owned["root_pid"] != pid or not owned["processes"]:
+        raise SystemExit("kernel recording lacks the sampled process tree")
+    for process in owned["processes"]:
+        if type(process["pid"]) is not int or process["pid"] <= 0 or process["start_ticks"] <= 0:
+            raise SystemExit("kernel recording has an invalid owned process identity")
+        pids.add(process["pid"])
 if not pids:
     raise SystemExit("kernel recording lacks real qpxd resource sample windows")
-pattern = re.compile(r"^\s*.*?\s+(\d+)/(\d+)\s+\d+\.\d+:\s+syscalls:")
+pattern = re.compile(r"^\s*qpxd\S*\s+(\d+)/(\d+)\s+\d+\.\d+:\s+syscalls:")
 with Path(sys.argv[2]).open() as events:
     for line in events:
         match = pattern.match(line)

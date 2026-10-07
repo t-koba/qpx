@@ -10,6 +10,7 @@ case "$workload" in
   feature-large) roles=qpxd-feature-rich; expected_profiles=1; minimum_reports=3 ;;
   webdav) roles="qpxd-webdav apache-webdav"; expected_profiles=2; minimum_reports=12 ;;
   http2) roles=qpxd-h2; expected_profiles=1; minimum_reports=12 ;;
+  http2-timeline) roles=qpxd-h2; expected_profiles=1; minimum_reports=3 ;;
   streaming) roles="qpxd-streaming streaming-backend"; expected_profiles=2; minimum_reports=18 ;;
   *) echo "unsupported native report workload: $workload" >&2; exit 2 ;;
 esac
@@ -54,7 +55,7 @@ for role in $roles; do
   if [ "$workload" = proxy ] || [ "$workload" = feature-large ]; then
     role_log_directory="$log_directory/$role"
   fi
-  if [ "$workload" = http2 ] || [ "$workload" = streaming ]; then
+  if [ "$workload" = http2 ] || [ "$workload" = http2-timeline ] || [ "$workload" = streaming ]; then
     sample_role=qpxd
   fi
   report_suffix=cpu-report
