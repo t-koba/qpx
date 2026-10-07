@@ -1344,11 +1344,11 @@ pub(super) fn apply_webdav_file_region(
             "WebDAV file region length does not match the response body"
         ));
     }
-    if region.len >= 64 * 1024 && cfg!(any(target_os = "linux", target_os = "macos")) {
-        return Ok(body.with_file_region_for_zero_copy(region.file, region.offset, region.len));
-    }
     if body_len != 0 || region.len == 0 {
         return Ok(body);
+    }
+    if region.len >= 64 * 1024 && cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Ok(body.with_file_region_for_zero_copy(region.file, region.offset, region.len));
     }
     let bytes = materialize_webdav_file_region(&region.file, region.offset, region.len)?;
     Ok(Body::from(bytes).mark_trailers_sanitized())

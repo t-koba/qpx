@@ -14,7 +14,7 @@ const READ_CACHE_MAX_ENTRIES: usize = 64;
 // Keep replayable bodies in memory only while they fit the cache body's
 // in-memory tier. Larger resources use their verified file region directly so
 // a zero-copy response does not first pay for a redundant materialization.
-const READ_CACHE_MAX_OBJECT_BYTES: usize = 64 * 1024;
+const READ_CACHE_MAX_OBJECT_BYTES: usize = READ_CACHE_MAX_BYTES / READ_CACHE_MAX_ENTRIES;
 
 #[derive(Debug, Clone)]
 struct ReadCacheEntry {
@@ -248,11 +248,11 @@ impl FileSystemDataStore {
             entry.resource.is_same_resource(resource)
                 && entry.content_length == metadata.len()
                 && entry.modified == modified
+                && entry.file_identity == current_file_identity
                 && (entry.read.body.len() as u64 == metadata.len()
                     || (entry.read.body.is_empty()
                         && entry.read.file.is_some()
-                        && entry.file_identity.is_some()
-                        && entry.file_identity == current_file_identity))
+                        && entry.file_identity.is_some()))
         }) {
             return Ok(Some(entry.read.clone()));
         }
@@ -268,6 +268,7 @@ impl FileSystemDataStore {
         if !opened_metadata.is_file()
             || opened_metadata.len() != metadata.len()
             || opened_metadata.modified()? != modified
+            || file_identity(&opened_metadata) != current_file_identity
         {
             return Err(anyhow!("WebDAV resource changed while it was opened"));
         }
@@ -392,10 +393,12 @@ impl WebDavDataStore for FileSystemDataStore {
             }));
         }
         let snapshot = self.read_cache.load();
+        let current_file_identity = file_identity(&metadata);
         if let Some(entry) = snapshot.entries.iter().find(|entry| {
             entry.resource.is_same_resource(resource)
                 && entry.content_length == metadata.len()
                 && entry.modified == modified
+                && entry.file_identity == current_file_identity
                 && entry.read.body.len() as u64 == metadata.len()
         }) {
             return Ok(Some(entry.read.clone()));
@@ -413,6 +416,7 @@ impl WebDavDataStore for FileSystemDataStore {
         if !opened_metadata.is_file()
             || opened_metadata.len() != metadata.len()
             || opened_metadata.modified()? != modified
+            || file_identity(&opened_metadata) != current_file_identity
         {
             return Err(anyhow!("WebDAV resource changed while it was opened"));
         }
@@ -589,6 +593,68 @@ mod tests {
         assert_eq!(backed.body, Bytes::from_static(b"payload"));
         assert!(backed.file.is_some());
         assert_eq!(store.read(&file).unwrap(), b"payload".as_slice());
+    }
+
+    #[test]
+    fn replayable_file_bodies_share_the_bounded_cache_snapshot() {
+        let directory = tempdir().unwrap();
+        let store = FileSystemDataStore::open(directory.path()).unwrap();
+        let resource = ResourceId::parse("/replayable.bin").unwrap();
+        let content = vec![b'x'; READ_CACHE_MAX_OBJECT_BYTES];
+        store.put(&resource, &content, None).unwrap();
+        let first = store
+            .read_with_metadata_and_content_type_file_backed(&resource, None)
+            .unwrap()
+            .unwrap();
+        let second = store
+            .read_with_metadata_and_content_type_file_backed(&resource, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.body.as_ref(), content);
+        assert_eq!(first.body.as_ptr(), second.body.as_ptr());
+        assert!(first.file.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_body_revalidates_file_identity_when_length_and_time_match() {
+        for file_backed in [true, false] {
+            let directory = tempdir().unwrap();
+            let store = FileSystemDataStore::open(directory.path()).unwrap();
+            let resource = ResourceId::parse("/snapshot.bin").unwrap();
+            store.put(&resource, b"original", None).unwrap();
+            let original = store
+                .read_with_metadata_and_content_type_file_backed(&resource, None)
+                .unwrap()
+                .unwrap();
+            let modified = original
+                .file
+                .as_ref()
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .modified()
+                .unwrap();
+            let replacement = directory.path().join("replacement.bin");
+            fs::write(&replacement, b"replaced").unwrap();
+            OpenOptions::new()
+                .write(true)
+                .open(&replacement)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            fs::rename(&replacement, directory.path().join("snapshot.bin")).unwrap();
+            if file_backed {
+                let current = store
+                    .read_with_metadata_and_content_type_file_backed(&resource, None)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(current.body.as_ref(), b"replaced");
+            } else {
+                assert_eq!(store.read(&resource).unwrap(), b"replaced".as_slice());
+            }
+            assert_eq!(original.body.as_ref(), b"original");
+        }
     }
 
     #[test]

@@ -37,21 +37,26 @@ async fn materialized_webdav_file_region_keeps_verified_snapshot() {
     use std::io::Write as _;
 
     let mut file = tempfile::tempfile().expect("temporary WebDAV file");
-    file.write_all(b"changed!").expect("write WebDAV file");
+    let snapshot = vec![b's'; 1024 * 1024];
+    file.write_all(&vec![b'c'; snapshot.len()])
+        .expect("write WebDAV file");
     let region = qpx_webdav::ResourceFileRegion {
         file: StdArc::new(file),
         offset: 0,
-        len: 8,
+        len: snapshot.len() as u64,
     };
     let body = super::dispatch::apply_webdav_file_region(
-        Body::from("snapshot").mark_trailers_sanitized(),
-        8,
+        Body::from(snapshot.clone()).mark_trailers_sanitized(),
+        snapshot.len() as u64,
         region,
     )
     .expect("apply WebDAV file region");
 
     assert!(!body.has_file_region());
-    assert_eq!(to_bytes(body).await.expect("WebDAV body"), "snapshot");
+    assert_eq!(
+        to_bytes(body).await.expect("WebDAV body").as_ref(),
+        snapshot
+    );
 }
 
 #[tokio::test]

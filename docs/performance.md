@@ -3002,3 +3002,28 @@ The fixed `b91a395` baseline retains thin LTO. Required CI and an independent
 normal four-worker HTTP/2 comparison must establish the trial's actual
 CPU, latency and resource behavior; whole-program optimization alone is
 not a performance result. Compile and runtime regressions reject the trial.
+
+
+The bounded WebDAV replayable-body trial follows native comparison
+`37470949995`: qpx's 1 MiB second-round profile contains sendfile in
+1,539 of 2,145 stacks, while Apache uses writev in 1,112 of 1,674 stacks.
+This is evidence for comparing transport strategies, not proof of a gain.
+The existing 64 MiB/64-entry cache budget now permits one equal-share
+1 MiB body per entry. Verified complete bodies remain shared Bytes snapshots
+and use the existing vectored HTTP/1 response path. Objects beyond that
+per-entry bound retain verified file descriptors and zero-copy delivery.
+There is no mmap access to externally mutable files. Every lookup still
+checks the real filesystem and symlink confinement. Cache hits and opened
+files also compare inode/device identity on Unix so an atomic replacement
+with unchanged length and modification time cannot reuse the old snapshot.
+
+All 23 WebDAV library tests and 619 qpxd library tests pass with real
+filesystem/TCP services. WebDAV and qpxd all-feature/all-target Clippy pass.
+Real-file regressions verify shared payload storage, replacement identity,
+unchanged old snapshots, and non-materialized regions above the tier bound.
+The transport regression now retains a complete 1 MiB snapshot even when
+its accompanying descriptor contains different data. Adoption requires an
+independent same-runner WebDAV comparison against `9e5189a`, unchanged
+CPU/p99/resource gates and full CI; normal measurement is not instrumented.
+The running cache-miss and LTO comparisons remain pinned to their original
+revision pairs and do not include this trial.
