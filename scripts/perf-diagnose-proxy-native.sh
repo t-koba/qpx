@@ -56,6 +56,7 @@ workload_status=0
 case "$workload" in
   http1)
     QPXD_BIN="$wrapper" QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+      QPX_PROXY_COMPARE_DEPENDENCY_CPU_DIAGNOSTICS=1 \
       QPX_PROXY_COMPARE_PROXY_FILTER=direct-backend,qpxd,nginx,apache,lighttpd \
       QPX_PROXY_COMPARE_BODY_SIZES="1024 1048576" \
       bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh"

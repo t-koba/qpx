@@ -30,6 +30,7 @@ PROXY_FILTER="${QPX_PROXY_COMPARE_PROXY_FILTER:-}"
 PROFILE_PROXY="${QPX_PROXY_COMPARE_PROFILE_PROXY:-}"
 PROFILE_SECONDS="${QPX_PROXY_COMPARE_PROFILE_SECONDS:-0}"
 THREAD_DIAGNOSTICS="${QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS:-0}"
+DEPENDENCY_CPU_DIAGNOSTICS="${QPX_PROXY_COMPARE_DEPENDENCY_CPU_DIAGNOSTICS:-0}"
 WRITEBACK_DIAGNOSTICS="${QPX_PROXY_COMPARE_WRITEBACK_DIAGNOSTICS:-0}"
 CALLGRIND_DIAGNOSTICS="${QPX_PROXY_COMPARE_CALLGRIND_DIAGNOSTICS:-0}"
 CALLGRIND_PROXY="${QPX_PROXY_COMPARE_CALLGRIND_PROXY:-qpxd-feature-rich}"
@@ -1222,6 +1223,7 @@ run_one() {
   local fd_baseline fd_peak fd_growth fd_peak_file fd_peak_monitor_pid kernel_resource_metrics
   local scheduler_before_ns scheduler_after_ns scheduler_run_delay_ns scheduler_queue_delay_us_per_request
   local attempt failed_sample samples_file valid_sample_count median_index selected_sample profile_pid wrk_succeeded
+  local dependency_prefix
   body_kind="$(body_profile "$body_bytes")"
 
   cat >"$lua" <<LUA
@@ -1390,8 +1392,30 @@ LUA
       callgrind_control -i on "$resource_pid" >/dev/null
     fi
     wrk_succeeded=true
-    if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "sample-${artifact_name}-${attempt}" >"$out" 2>&1; then
-      wrk_succeeded=false
+    if [ "$DEPENDENCY_CPU_DIAGNOSTICS" = 1 ]; then
+      dependency_prefix="$LOG_DIR/${artifact_name}.attempt-${attempt}.dependency-cpu"
+      process_tree_cpu_clock_ms "$resource_pid" "$dependency_prefix.frontend-before.json" >/dev/null
+      process_tree_cpu_clock_ms "$BACKEND_PID" "$dependency_prefix.backend-before.json" >/dev/null
+      if ! python3 scripts/lib/perf-client-cpu.py "$dependency_prefix.client.json" \
+        wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "sample-${artifact_name}-${attempt}" >"$out" 2>&1; then
+        wrk_succeeded=false
+      fi
+      if [ ! -s "$dependency_prefix.client.json" ]; then
+        echo "dependency CPU capture did not retain the workload exit status" >&2
+        exit 1
+      fi
+      process_tree_cpu_clock_ms "$BACKEND_PID" "$dependency_prefix.backend-after.json" >/dev/null
+      process_tree_cpu_clock_ms "$resource_pid" "$dependency_prefix.frontend-after.json" >/dev/null
+      python3 scripts/lib/perf-process-cpu.py delta \
+        "$dependency_prefix.frontend-before.json" "$dependency_prefix.frontend-after.json" \
+        >"$dependency_prefix.frontend-delta-ms.txt"
+      python3 scripts/lib/perf-process-cpu.py delta \
+        "$dependency_prefix.backend-before.json" "$dependency_prefix.backend-after.json" \
+        >"$dependency_prefix.backend-delta-ms.txt"
+    else
+      if ! wrk -t"$THREADS" -c"$CONCURRENCY" -d"${DURATION_SECONDS}s" --timeout "$WRK_TIMEOUT" -s "$lua" "$url" -- "sample-${artifact_name}-${attempt}" >"$out" 2>&1; then
+        wrk_succeeded=false
+      fi
     fi
     if [ "$WRITEBACK_DIAGNOSTICS" = 1 ] && [ "$proxy" = qpxd-cache ]; then
       curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$((port + 1000))/metrics" \
@@ -1693,6 +1717,17 @@ case "$THREAD_DIAGNOSTICS" in
     fi
     ;;
   *) echo "QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS must be 0 or 1" >&2; exit 1 ;;
+esac
+
+case "$DEPENDENCY_CPU_DIAGNOSTICS" in
+  0) ;;
+  1)
+    if [ "$THREAD_DIAGNOSTICS" != 1 ] || [ ! -d /proc ]; then
+      echo "dependency CPU captures require marked Linux diagnostics" >&2
+      exit 1
+    fi
+    ;;
+  *) echo "QPX_PROXY_COMPARE_DEPENDENCY_CPU_DIAGNOSTICS must be 0 or 1" >&2; exit 1 ;;
 esac
 
 case "$WRITEBACK_DIAGNOSTICS" in

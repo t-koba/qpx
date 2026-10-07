@@ -3220,3 +3220,30 @@ the replacement without creating anything outside. All 109 cache library
 tests pass. This also removes repeated ancestor metadata inspections from
 existing-parent publication, a cost visible in the native cache profile;
 performance improvement requires a separate fixed-revision comparison.
+
+
+Third fixed LTO comparison `37590455070`, current-baseline order, passes
+measurement quality for all lanes on both revisions. Fat `27d2c2d` versus
+thin `b91a395` changes total CPU efficiency by +5.817%, +2.316%, +2.031%
+and +2.398% for small/single, small/multiplex, large/single and
+large/multiplex. Small-response RSS falls about 4.4%; large/multiplex RSS
+rises 4.727% and p99 rises 1.384%. Required small/multiplex p99 ratio
+1.220976 and maximum ratio 1.229589 exceed 1.1, dominance 0.909622 misses
+0.95, and large/multiplex FD ratio 1.055215 exceeds 1.0. The second
+comparison did not reproduce these CPU gains, so this does not establish
+three independent full-goal passes.
+
+Fresh HTTP/1 native diagnostic `37590967932` retains zero lost samples.
+Of 843 qpx 1 MiB stacks, 688 include splice (81.6%) and none include
+memmove. The measured qpx workload serves about 1,659 requests/s against
+nginx's 516, so the same benchmark settings do not imply equal backend
+and client CPU demand. The dependency-load explanation is still a
+hypothesis. HTTP/1 native diagnostics now capture high-resolution owned
+frontend/backend process-clock snapshots immediately around each real
+wrk workload, with identity-checked deltas, and wait4 client user/system
+CPU usage, elapsed time and original exit status. All sidecars remain
+explicit diagnostic artifacts; normal comparisons and acceptance objectives
+are unchanged. Direct-backend runs name the same process as frontend and
+backend, so their role counters must not be added twice. Real child CPU
+work, failed/signal exits, and a real HTTP server serving a real file verify
+the client wrapper locally. Linux execution must verify dependency capture.
