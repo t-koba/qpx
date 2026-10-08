@@ -116,10 +116,46 @@ impl HttpCacheBackend {
         host: &str,
         port: u16,
     ) -> Result<Http1SendRequest> {
-        if let Some(sender) = self.idle.lock().await.pop() {
-            return Ok(sender);
+        // Idle pooled senders may have been closed by the peer while parked;
+        // hyper reports those as "connection was not ready" at send time, so
+        // validate before handing one out and fall through to a fresh dial.
+        while let Some(mut sender) = self.idle.lock().await.pop() {
+            if sender.is_closed() {
+                continue;
+            }
+            match timeout(self.timeout, sender.ready()).await {
+                Ok(Ok(())) => return Ok(sender),
+                _ => continue,
+            }
         }
         self.open_sender(scheme, host, port).await
+    }
+
+    /// Sends `req` on a pooled `sender`, retrying once with a fresh connection
+    /// when the pooled sender rejects the request before dispatch.
+    /// `try_send_request` recovers the request only in that pre-dispatch case,
+    /// so a retry never replays a request that already reached the peer; this
+    /// covers the race where the peer closes the connection between checkout
+    /// and send, which `checkout_sender` validation cannot observe.
+    async fn send_with_fresh_retry(
+        &self,
+        mut sender: Http1SendRequest,
+        req: Request<Body>,
+        scheme: &str,
+        host: &str,
+        port: u16,
+    ) -> Result<(hyper::Response<hyper::body::Incoming>, Http1SendRequest)> {
+        match timeout(self.timeout, sender.try_send_request(req)).await? {
+            Ok(resp) => Ok((resp, sender)),
+            Err(mut err) => {
+                let Some(req) = err.take_message() else {
+                    return Err(err.into_error().into());
+                };
+                let mut fresh = self.open_sender(scheme, host, port).await?;
+                let resp = timeout(self.timeout, fresh.send_request(req)).await??;
+                Ok((resp, fresh))
+            }
+        }
     }
 
     async fn recycle_sender(&self, sender: Http1SendRequest) {
@@ -156,8 +192,10 @@ impl HttpCacheBackend {
                 .insert(HOST, http::HeaderValue::from_str(authority.as_str())?);
         }
 
-        let mut sender = self.checkout_sender(scheme, host, port).await?;
-        let resp = timeout(self.timeout, sender.send_request(req)).await??;
+        let sender = self.checkout_sender(scheme, host, port).await?;
+        let (resp, sender) = self
+            .send_with_fresh_retry(sender, req, scheme, host, port)
+            .await?;
         let status = resp.status();
         let max_body_bytes = if status == StatusCode::OK {
             self.max_object_bytes
@@ -219,8 +257,10 @@ impl HttpCacheBackend {
                 .insert(HOST, http::HeaderValue::from_str(authority.as_str())?);
         }
 
-        let mut sender = self.checkout_sender(scheme, host, port).await?;
-        let resp = timeout(self.timeout, sender.send_request(req)).await??;
+        let sender = self.checkout_sender(scheme, host, port).await?;
+        let (resp, sender) = self
+            .send_with_fresh_retry(sender, req, scheme, host, port)
+            .await?;
         let status = resp.status();
         let max_body_bytes = if status == StatusCode::OK {
             self.max_object_bytes
@@ -277,6 +317,9 @@ struct BatchGetResponse {
 }
 
 async fn recycle_sender(idle: Arc<AsyncMutex<Vec<Http1SendRequest>>>, sender: Http1SendRequest) {
+    if sender.is_closed() {
+        return;
+    }
     let mut idle = idle.lock().await;
     if idle.len() < HTTP_CACHE_MAX_IDLE_CONNECTIONS {
         idle.push(sender);
@@ -413,8 +456,10 @@ impl CacheBackend for HttpCacheBackend {
                 .insert(HOST, http::HeaderValue::from_str(authority.as_str())?);
         }
 
-        let mut sender = self.checkout_sender(scheme, host, port).await?;
-        let resp = timeout(self.timeout, sender.send_request(req)).await??;
+        let sender = self.checkout_sender(scheme, host, port).await?;
+        let (resp, sender) = self
+            .send_with_fresh_retry(sender, req, scheme, host, port)
+            .await?;
         let expected_status = if range.is_some() {
             StatusCode::PARTIAL_CONTENT
         } else {

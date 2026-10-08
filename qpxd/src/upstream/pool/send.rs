@@ -33,9 +33,25 @@ pub(crate) async fn send_via_upstream_proxy(
         .map_err(|_| anyhow!("upstream proxy concurrency limiter closed"))?;
 
     let sender = { slot.senders.lock().await.pop() };
+    // Idle pooled senders may have been closed by the peer while parked;
+    // hyper reports those as "connection was not ready" at send time, so
+    // validate before reuse and fall through to a fresh dial.
     let mut sender = match sender {
-        Some(sender) => sender,
-        None => match open_upstream_proxy_sender(&endpoint, timeout_dur, upstream.trust()).await {
+        Some(mut pooled) if !pooled.is_closed() => {
+            match timeout(timeout_dur, pooled.ready()).await {
+                Ok(Ok(())) => pooled,
+                _ => match open_upstream_proxy_sender(&endpoint, timeout_dur, upstream.trust())
+                    .await
+                {
+                    Ok(sender) => sender,
+                    Err(err) => {
+                        upstream.mark_connect_error();
+                        return Err(err);
+                    }
+                },
+            }
+        }
+        _ => match open_upstream_proxy_sender(&endpoint, timeout_dur, upstream.trust()).await {
             Ok(sender) => sender,
             Err(err) => {
                 upstream.mark_connect_error();
@@ -45,16 +61,51 @@ pub(crate) async fn send_via_upstream_proxy(
     };
     let started = Instant::now();
 
-    match timeout(timeout_dur, sender.send_request(req)).await {
+    // `try_send_request` recovers the request when the pooled sender rejects it
+    // before dispatch, so a single retry on a fresh connection never replays a
+    // request that already reached the peer. This covers the race where the
+    // peer closes the connection between checkout and send, which the checkout
+    // validation above cannot observe.
+    match timeout(timeout_dur, sender.try_send_request(req)).await {
         Ok(Ok(response)) => {
             let response = response.map(Body::from);
             upstream.mark_http_response(response.status(), started.elapsed());
-            slot.senders.lock().await.push(sender);
+            if !sender.is_closed() {
+                slot.senders.lock().await.push(sender);
+            }
             Ok(response)
         }
-        Ok(Err(err)) => {
-            upstream.mark_reset();
-            Err(err.into())
+        Ok(Err(mut err)) => {
+            let Some(req) = err.take_message() else {
+                upstream.mark_reset();
+                return Err(err.into_error().into());
+            };
+            let mut fresh =
+                match open_upstream_proxy_sender(&endpoint, timeout_dur, upstream.trust()).await {
+                    Ok(sender) => sender,
+                    Err(err) => {
+                        upstream.mark_connect_error();
+                        return Err(err);
+                    }
+                };
+            match timeout(timeout_dur, fresh.send_request(req)).await {
+                Ok(Ok(response)) => {
+                    let response = response.map(Body::from);
+                    upstream.mark_http_response(response.status(), started.elapsed());
+                    if !fresh.is_closed() {
+                        slot.senders.lock().await.push(fresh);
+                    }
+                    Ok(response)
+                }
+                Ok(Err(err)) => {
+                    upstream.mark_reset();
+                    Err(err.into())
+                }
+                Err(_) => {
+                    upstream.mark_timeout();
+                    Err(anyhow!("upstream proxy request timed out"))
+                }
+            }
         }
         Err(_) => {
             upstream.mark_timeout();
