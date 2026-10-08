@@ -118,6 +118,9 @@ impl H3HttpResponse {
     }
 }
 
+// async-trait emits `#[must_use]` on the boxed future, which is already `#[must_use]`;
+// newer clippy reports it as `double_must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub(crate) trait H3RequestHandler: Clone + Send + Sync + 'static {
     fn limits(&self) -> H3Limits;

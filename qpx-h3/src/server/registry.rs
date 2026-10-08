@@ -41,7 +41,7 @@ impl ShardedWebTransportSessionRegistry {
         max_sessions != 0
             && self
                 .active_sessions
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                     (current < max_sessions).then_some(current + 1)
                 })
                 .is_ok()

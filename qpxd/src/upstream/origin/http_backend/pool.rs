@@ -225,7 +225,7 @@ impl<T> Http1IdleShards<T> {
     fn push_preferred(&self, entry: T, max: &AtomicUsize, shard: usize) {
         let reserved = self
             .len
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |len| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |len| {
                 (len < max.load(Ordering::Relaxed)).then_some(len + 1)
             });
         let Ok(previous_len) = reserved else {

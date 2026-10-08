@@ -5,11 +5,17 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const TUNNEL_CHUNK_BYTES: usize = 16 * 1024;
 
+// async-trait emits `#[must_use]` on the boxed future, which is already `#[must_use]`;
+// newer clippy reports it as `double_must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub(crate) trait TunnelHalf: Send {
     async fn recv(&mut self) -> io::Result<Option<Bytes>>;
 }
 
+// async-trait emits `#[must_use]` on the boxed future, which is already `#[must_use]`;
+// newer clippy reports it as `double_must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub(crate) trait TunnelHalfWrite: Send {
     async fn send(&mut self, data: Bytes) -> io::Result<()>;

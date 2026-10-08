@@ -343,6 +343,9 @@ impl<'a> HttpModuleEvent<'a> {
     }
 }
 
+// async-trait emits `#[must_use]` on the boxed future, which is already `#[must_use]`;
+// newer clippy reports it as `double_must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait HttpModule: Send + Sync {
     fn order(&self) -> i16 {

@@ -136,6 +136,9 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 }
 
 /// Trait for request executors (CGI, WASM, etc.).
+// async-trait emits `#[must_use]` on the boxed future, which is already `#[must_use]`;
+// newer clippy reports it as `double_must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Executor: Send + Sync {
     async fn start(&self, req: CgiRequest) -> Result<Execution>;

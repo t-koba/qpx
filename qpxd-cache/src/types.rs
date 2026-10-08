@@ -138,6 +138,9 @@ impl InFlightRevalidations {
     }
 }
 
+// async-trait emits `#[must_use]` on the boxed future, which is already `#[must_use]`;
+// newer clippy reports it as `double_must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait CacheBackend: Send + Sync {
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<Bytes>>;

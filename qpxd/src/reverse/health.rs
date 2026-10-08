@@ -328,7 +328,7 @@ impl UpstreamEndpoint {
     fn eject(&self, duration: Duration, reason: EjectionReason) {
         let shift = self
             .ejection_backoff_shift
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some((current + 1).min(ADAPTIVE_MAX_BACKOFF_SHIFT))
             })
             .unwrap_or(0)
@@ -476,12 +476,12 @@ impl UpstreamEndpoint {
         self.adaptive_failures
             .store(failures / 2, Ordering::Relaxed);
         self.adaptive_latency_samples
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current / 2)
             })
             .ok();
         self.adaptive_latency_total_ms
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current / 2)
             })
             .ok();
