@@ -47,3 +47,6 @@
 
 # Local mizu harness (private)
 /.mizu/
+
+# Local VCS-adapter ref mirror (private)
+/refs/
