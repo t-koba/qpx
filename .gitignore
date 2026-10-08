@@ -44,3 +44,6 @@
 *.log
 *.pcapng
 *.tmp
+
+# Local mizu harness (private)
+/.mizu/
