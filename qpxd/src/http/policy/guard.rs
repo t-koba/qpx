@@ -290,6 +290,49 @@ fn validate_smuggling(req: &Request<Body>) -> Option<HttpGuardReject> {
             "Transfer-Encoding with Content-Length is not allowed",
         ));
     }
+    // H1 framing policy (RFC 9112): only a single `chunked` coding is a valid
+    // Transfer-Encoding for HTTP/1 requests. Reject multiple, masked
+    // (`gzip, chunked`), extended (`chunked; ext=1`) and unknown (`x-chunked`)
+    // codings fail-closed so every ingress path shares one policy gate with
+    // the transport (`h1_common::has_only_chunked_transfer_encoding`).
+    // H2/H3 are skipped here; `validate_invalid_framing` owns their
+    // trailers-only TE rule.
+    if req.version() != http::Version::HTTP_2
+        && req.version() != http::Version::HTTP_3
+        && req.headers().contains_key(http::header::TRANSFER_ENCODING)
+    {
+        let mut tokens: Vec<&str> = Vec::new();
+        for value in req
+            .headers()
+            .get_all(http::header::TRANSFER_ENCODING)
+            .iter()
+        {
+            let Ok(raw) = value.to_str() else {
+                return Some(bad_request("invalid Transfer-Encoding header"));
+            };
+            for token in raw.split(',') {
+                let token = token.trim();
+                if !token.is_empty() {
+                    tokens.push(token);
+                }
+            }
+        }
+        match tokens.as_slice() {
+            [token] if token.eq_ignore_ascii_case("chunked") => {}
+            _ => {
+                return Some(bad_request(
+                    "unsupported Transfer-Encoding: only a single chunked coding is supported",
+                ));
+            }
+        }
+        // Transfer-Encoding is an HTTP/1.1 framing feature; reject it on
+        // HTTP/1.0 to close close-delimited request-body desyncs.
+        if req.version() == http::Version::HTTP_10 {
+            return Some(bad_request(
+                "Transfer-Encoding is not valid on HTTP/1.0 requests",
+            ));
+        }
+    }
     None
 }
 
