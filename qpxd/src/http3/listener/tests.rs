@@ -75,3 +75,17 @@ fn priority_scheduler_orders_incremental_work_by_urgency() {
     assert_eq!(scheduler.next_task(), Some("u7"));
     assert_eq!(scheduler.next_task(), None);
 }
+
+#[test]
+fn h3_field_section_cap_matches_edge_caps() {
+    assert_eq!(
+        super::connection::H3_MAX_FIELD_SECTION_SIZE as usize,
+        crate::http::codec::h1_common::MAX_HEADER_BYTES,
+        "H3 pre-decode cap must stay aligned with the H1 edge cap",
+    );
+    assert_eq!(
+        super::connection::H3_MAX_FIELD_SECTION_SIZE,
+        crate::http::codec::h2::H2_MAX_HEADER_LIST_SIZE as u64,
+        "H3 pre-decode cap must stay aligned with the H2 transport cap",
+    );
+}

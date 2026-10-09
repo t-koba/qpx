@@ -9,6 +9,12 @@ use std::sync::Arc;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tracing::{info, warn};
 
+// Bound pre-decode field-section buffering at the transport, aligned with the
+// HTTP/1 edge cap (h1_common::MAX_HEADER_BYTES) and the H2 cap
+// (http::codec::h2::H2_MAX_HEADER_LIST_SIZE). The h3 crate defaults to
+// VarInt::MAX when unset, so an explicit cap is the fail-closed default.
+pub(crate) const H3_MAX_FIELD_SECTION_SIZE: u64 = 128 * 1024;
+
 pub(crate) async fn serve_endpoint<H: H3RequestHandler>(
     endpoint: quinn::Endpoint,
     dst_port: u16,
@@ -101,6 +107,7 @@ async fn serve_connection<H: H3RequestHandler>(
         // optional, and sending one after trailers has exposed platform-specific
         // trailer-drain flakes in the h3 client used by the e2e tests.
         .send_grease(false)
+        .max_field_section_size(H3_MAX_FIELD_SECTION_SIZE)
         .enable_extended_connect(handler.enable_extended_connect())
         .enable_datagram(handler.enable_datagram());
     let mut h3_conn = builder
