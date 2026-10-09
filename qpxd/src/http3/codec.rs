@@ -55,8 +55,23 @@ pub(crate) fn sanitize_interim_response_for_h3(
     Ok(response)
 }
 
+// Bound decoded header field count at the semantic boundary, aligned with the
+// HTTP/1 edge cap (MAX_HTTP1_REQUEST_HEADERS = 128, mapped to 431) and the H2
+// transport cap (H2_MAX_HEADER_COUNT). Byte caps alone still admit thousands
+// of tiny fields within budget (HTTP/2 Bomb pattern), so the count ceiling is
+// the fail-closed default; per-route guard `header_count` remains the policy
+// knob for stricter limits.
+pub(crate) const H3_MAX_HEADER_COUNT: usize = 128;
+
+#[derive(Debug, thiserror::Error)]
+#[error("HTTP/3 request header fields exceeded configured limits")]
+struct H3HeaderCountTooLarge;
+
 pub(crate) fn h3_request_to_hyper(req: Http1Request<()>, body: Body) -> Result<Request<Body>> {
     let (parts, _) = req.into_parts();
+    if parts.headers.len() > H3_MAX_HEADER_COUNT {
+        return Err(H3HeaderCountTooLarge.into());
+    }
     let method = parts
         .method
         .as_str()
@@ -158,7 +173,9 @@ pub(crate) fn parse_content_length_fields(headers: &http::HeaderMap) -> Result<O
 #[cfg(test)]
 mod tests {
     use super::sanitize_interim_response_for_h3;
-    use super::{h1_headers_to_http, prepare_h3_response_head};
+    use super::{
+        H3_MAX_HEADER_COUNT, h1_headers_to_http, h3_request_to_hyper, prepare_h3_response_head,
+    };
 
     #[test]
     fn h3_cookie_fields_are_merged_for_generic_context() {
@@ -267,6 +284,38 @@ mod tests {
                 .contains_key(::http::header::TRANSFER_ENCODING)
         );
         assert!(!interim.headers().contains_key(::http::header::TRAILER));
+    }
+
+    #[test]
+    fn h3_header_count_cap_matches_edge_caps() {
+        assert_eq!(
+            H3_MAX_HEADER_COUNT, 128,
+            "H3 decoded-field cap must stay aligned with the H1 edge cap",
+        );
+        assert_eq!(
+            H3_MAX_HEADER_COUNT,
+            crate::http::codec::h2::H2_MAX_HEADER_COUNT,
+            "H3 decoded-field cap must stay aligned with the H2 transport cap",
+        );
+    }
+
+    #[test]
+    fn h3_request_with_many_tiny_headers_is_refused_at_count_ceiling() {
+        // 200 distinct tiny headers total ~2 KiB: far under the 128 KiB byte
+        // cap, over the 128-field edge cap, so acceptance would prove the
+        // count gap is open.
+        let mut builder = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/many-tiny");
+        for i in 0..200 {
+            builder = builder.header(format!("x-tiny-{i:04}"), "b");
+        }
+        let request = builder.body(()).expect("request");
+        let result = h3_request_to_hyper(request, qpx_http::body::Body::empty());
+        assert!(
+            result.is_err(),
+            "many-tiny-header H3 request must be refused at the count ceiling",
+        );
     }
 
     #[test]
