@@ -207,7 +207,11 @@ async fn run_http01_server_with_listener(
             builder
                 .timer(TokioTimer::new())
                 .keep_alive(false)
-                .header_read_timeout(Some(ACME_HTTP01_HEADER_READ_TIMEOUT));
+                .header_read_timeout(Some(ACME_HTTP01_HEADER_READ_TIMEOUT))
+                // Align to edge policy (MAX_HEADER_BYTES / MAX_HTTP1_REQUEST_HEADERS):
+                // challenge requests are tiny GETs; fail closed on oversize heads.
+                .max_buf_size(128 * 1024)
+                .max_headers(128);
             let conn = builder.serve_connection(TokioIo::new(stream), service);
             let result = tokio::time::timeout(ACME_HTTP01_REQUEST_TIMEOUT, conn).await;
             match result {
