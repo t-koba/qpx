@@ -231,6 +231,7 @@ cargo build -p qpxd -p qpxf
 - `named_sets` can be backed by inline `values` or `file`. For destination intelligence, use `type: domain|cidr|string|regex` and prefix the set name with `category:`, `reputation:`, or `application:`. `qpxd` also watches `named_sets[].file` targets during hot reload.
 - `tls_trust` / `upstream_trust` are available on named upstreams, reverse routes, and TLS inspection. They enforce upstream pinning, issuer/SAN constraints, and optional per-upstream mTLS client cert selection via `client_cert` / `client_key`.
 - `edges[kind=reverse].sni_host_exceptions` is the explicit allowlist for host/SNI mismatch exceptions when `enforce_sni_host_match: true` is enabled.
+- SNI/ALPN policy enforces on the plaintext outer ClientHello (`sni`, `alpn`): this build has no encrypted-inner decryption, so under Encrypted Client Hello the inner name stays invisible and the outer value is the decision value (fail-closed default).
 - `resilience.outlier_detection.consecutive_failures.resets` counts transport resets alongside 5xx/timeouts for ejection decisions on named upstreams.
 - `reverse-tls-acme-letsencrypt.yaml` now also shows `acme.directory_url` for staging/private ACME endpoints.
 - Transport-aware shaping uses one canonical surface: `rate_limit` / `rate_limit_profiles` with `apply_to`, `requests`, `traffic`, and `sessions`. WebTransport supports session-wide `webtransport` plus `webtransport_bidi`, `webtransport_uni`, `webtransport_datagram`, and direction-specific `*_downstream` / `*_upstream` scopes.
