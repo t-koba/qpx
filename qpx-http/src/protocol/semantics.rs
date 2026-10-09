@@ -169,6 +169,8 @@ pub enum RequestValidationError {
     HostAuthorityMismatch,
     InvalidContentLength,
     BothTransferEncodingAndContentLength,
+    InvalidTransferEncoding,
+    UpgradeWithContentLength,
     InvalidH2H3ConnectionHeader,
     InvalidH2H3TeHeader,
     InvalidExpectHeader,
@@ -189,6 +191,10 @@ impl fmt::Display for RequestValidationError {
             Self::InvalidContentLength => "invalid Content-Length",
             Self::BothTransferEncodingAndContentLength => {
                 "request must not contain both Transfer-Encoding and Content-Length"
+            }
+            Self::InvalidTransferEncoding => "invalid Transfer-Encoding",
+            Self::UpgradeWithContentLength => {
+                "request must not contain both Upgrade and Content-Length"
             }
             Self::InvalidH2H3ConnectionHeader => {
                 "HTTP/2 and HTTP/3 requests must not contain connection-specific headers"
@@ -267,7 +273,7 @@ pub fn is_intrinsically_valid_common_h2_request<B>(req: &http::Request<B>) -> bo
 pub fn validate_incoming_request_with_metadata<B>(
     req: &http::Request<B>,
 ) -> Result<ValidatedIncomingRequest, RequestValidationError> {
-    validate_request_body_length_headers(req.headers())?;
+    validate_request_body_length_headers(req.version(), req.headers())?;
     validate_expect_header(req.headers())?;
     validate_h2_h3_request_headers(req.version(), req.headers())?;
     let is_h2_extended_connect = req.version() == Version::HTTP_2
@@ -426,7 +432,7 @@ fn is_prohibited_trailer_field(name: &str) -> bool {
     not(feature = "http3-backend-qpx")
 ))]
 pub fn validate_h2_h3_connect_headers(headers: &HeaderMap) -> Result<(), RequestValidationError> {
-    validate_request_body_length_headers(headers)?;
+    validate_request_body_length_headers(Version::HTTP_3, headers)?;
     validate_h2_h3_request_headers(Version::HTTP_3, headers)
 }
 
@@ -621,7 +627,10 @@ fn default_port_for_scheme(scheme: &str) -> Option<u16> {
     }
 }
 
-fn validate_request_body_length_headers(headers: &HeaderMap) -> Result<(), RequestValidationError> {
+fn validate_request_body_length_headers(
+    version: Version,
+    headers: &HeaderMap,
+) -> Result<(), RequestValidationError> {
     let mut parsed_content_length = None::<u64>;
     for value in headers.get_all(CONTENT_LENGTH) {
         let raw = value
@@ -648,6 +657,39 @@ fn validate_request_body_length_headers(headers: &HeaderMap) -> Result<(), Reque
 
     if parsed_content_length.is_some() && headers.contains_key(TRANSFER_ENCODING) {
         return Err(RequestValidationError::BothTransferEncodingAndContentLength);
+    }
+
+    // H1-only framing rules (RFC 9112 section 6.1; CVE-2026-58055 edge mitigation).
+    // H2/H3 keep their existing connection-header/TE validation below, and H2
+    // extended CONNECT / WebTransport never carry a plain Upgrade header.
+    if version != Version::HTTP_2 && version != Version::HTTP_3 {
+        if headers.contains_key(TRANSFER_ENCODING) {
+            let mut saw_coding = false;
+            let mut last_coding: Option<String> = None;
+            for value in headers.get_all(TRANSFER_ENCODING) {
+                let raw = value
+                    .to_str()
+                    .map_err(|_| RequestValidationError::InvalidTransferEncoding)?;
+                for token in raw.split(',') {
+                    let token = token.trim();
+                    if token.is_empty() {
+                        continue;
+                    }
+                    saw_coding = true;
+                    last_coding = Some(token.to_ascii_lowercase());
+                }
+            }
+            // Transfer-Encoding without a final "chunked" coding must be rejected
+            // with 400: a proxy that forwards it as Content-Length (or ignores the
+            // trailing codings) creates a CL/TE desync with the next hop.
+            match (saw_coding, last_coding) {
+                (true, Some(last)) if last == "chunked" => {}
+                _ => return Err(RequestValidationError::InvalidTransferEncoding),
+            }
+        }
+        if parsed_content_length.is_some() && headers.contains_key("upgrade") {
+            return Err(RequestValidationError::UpgradeWithContentLength);
+        }
     }
     Ok(())
 }

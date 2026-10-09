@@ -534,3 +534,88 @@ fn common_h2_retrieval_predicate_rejects_other_protocol_shapes() {
         assert!(!is_intrinsically_valid_common_h2_request(&request));
     }
 }
+
+#[test]
+fn validate_accepts_h1_chunked_transfer_encoding() {
+    let req = http::Request::builder()
+        .version(Version::HTTP_11)
+        .method(Method::POST)
+        .uri("http://example.com/upload")
+        .header(HOST, "example.com")
+        .header(TRANSFER_ENCODING, "chunked")
+        .body(())
+        .expect("request");
+    validate_incoming_request(&req).expect("chunked-final TE must pass");
+}
+
+#[test]
+fn validate_accepts_h1_transfer_encoding_ending_in_chunked() {
+    let req = http::Request::builder()
+        .version(Version::HTTP_11)
+        .method(Method::POST)
+        .uri("http://example.com/upload")
+        .header(HOST, "example.com")
+        .header(TRANSFER_ENCODING, "gzip, chunked")
+        .body(())
+        .expect("request");
+    validate_incoming_request(&req).expect("gzip, chunked must pass");
+}
+
+#[test]
+fn validate_rejects_h1_chunked_not_final_transfer_encoding() {
+    let req = http::Request::builder()
+        .version(Version::HTTP_11)
+        .method(Method::POST)
+        .uri("http://example.com/upload")
+        .header(HOST, "example.com")
+        .header(TRANSFER_ENCODING, "chunked, identity")
+        .body(())
+        .expect("request");
+    let err = validate_incoming_request(&req).expect_err("chunked, identity must fail");
+    assert_eq!(err, RequestValidationError::InvalidTransferEncoding);
+}
+
+#[test]
+fn validate_rejects_h1_transfer_encoding_without_chunked() {
+    let req = http::Request::builder()
+        .version(Version::HTTP_11)
+        .method(Method::POST)
+        .uri("http://example.com/upload")
+        .header(HOST, "example.com")
+        .header(TRANSFER_ENCODING, "gzip")
+        .body(())
+        .expect("request");
+    let err = validate_incoming_request(&req).expect_err("gzip without chunked must fail");
+    assert_eq!(err, RequestValidationError::InvalidTransferEncoding);
+    assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn validate_rejects_h1_upgrade_with_content_length() {
+    let req = http::Request::builder()
+        .version(Version::HTTP_11)
+        .method(Method::GET)
+        .uri("http://example.com/chat")
+        .header(HOST, "example.com")
+        .header("upgrade", "websocket")
+        .header(CONTENT_LENGTH, "5")
+        .body(())
+        .expect("request");
+    let err = validate_incoming_request(&req).expect_err("Upgrade+CL must fail");
+    assert_eq!(err, RequestValidationError::UpgradeWithContentLength);
+    assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn validate_accepts_h1_websocket_upgrade_without_body() {
+    let req = http::Request::builder()
+        .version(Version::HTTP_11)
+        .method(Method::GET)
+        .uri("http://example.com/chat")
+        .header(HOST, "example.com")
+        .header("upgrade", "websocket")
+        .header(CONNECTION, "Upgrade")
+        .body(())
+        .expect("request");
+    validate_incoming_request(&req).expect("bodiless WS upgrade must pass");
+}
