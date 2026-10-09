@@ -706,3 +706,61 @@ fn h2_cookie_fields_are_merged_for_generic_context() {
     assert_eq!(cookie, "a=1; b=2");
     assert_eq!(converted.get_all(http::header::COOKIE).iter().count(), 1);
 }
+
+#[test]
+fn h2_header_list_cap_matches_h1_edge_cap() {
+    assert_eq!(
+        H2_MAX_HEADER_LIST_SIZE as usize,
+        crate::http::codec::h1_common::MAX_HEADER_BYTES,
+        "H2 pre-decode cap must stay aligned with the H1 edge cap",
+    );
+}
+
+#[tokio::test]
+async fn h2_server_refuses_header_list_over_transport_cap() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        let mut builder = h2::server::Builder::new();
+        tune_h2_server_builder_with(&mut builder, H2TransportTuning::default());
+        let mut conn = builder
+            .handshake::<_, bytes::Bytes>(socket)
+            .await
+            .expect("handshake");
+        // An oversized header block must not surface as a servable request:
+        // the transport records Oversize and refuses the stream.
+        match conn.accept().await {
+            None => "closed".to_string(),
+            Some(Ok((_request, _respond))) => "accepted".to_string(),
+            Some(Err(err)) => format!("accept-err: {err}"),
+        }
+    });
+
+    let socket = TcpStream::connect(addr).await.expect("connect");
+    let (mut client, connection) = h2::client::handshake(socket).await.expect("handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client = client.ready().await.expect("ready");
+    // 200 KiB single header: over the 128 KiB transport cap, well under the
+    // 16 MiB h2-crate default, so acceptance would prove the cap is unset.
+    let big = "a".repeat(200 * 1024);
+    let request = ::http::Request::builder()
+        .method("GET")
+        .uri("https://reverse_edges.test/oversize")
+        .header("x-big", big)
+        .body(())
+        .expect("request");
+    let (response_future, _) = client.send_request(request, true).expect("send");
+    let client_outcome = match response_future.await {
+        Ok(_) => "accepted".to_string(),
+        Err(err) => format!("client-err: {err}"),
+    };
+    let server_outcome = server.await.expect("server");
+    assert_ne!(
+        (server_outcome.clone(), client_outcome.clone()),
+        ("accepted".to_string(), "accepted".to_string()),
+        "oversized H2 header list must be refused at the transport, got server={server_outcome} client={client_outcome}",
+    );
+}

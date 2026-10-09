@@ -26,6 +26,10 @@ const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
 const H2_MAX_SEND_BUFFER_SIZE: usize = 16 * 1024;
 const H2_UPSTREAM_RESPONSE_FRAME_SIZE: usize = H2_MAX_FRAME_SIZE as usize;
 pub(crate) const H2_MAX_CONCURRENT_STREAMS: usize = 256;
+// Bound pre-decode header-block buffering at the transport, aligned with the
+// HTTP/1 edge cap (h1_common::MAX_HEADER_BYTES). The h2 crate defaults to
+// 16 MiB when unset, so an explicit cap is the fail-closed default.
+pub(crate) const H2_MAX_HEADER_LIST_SIZE: u32 = 128 * 1024;
 const H2_DIRECT_SEND_BODY_MAX_BYTES: u64 = 16 * 1024;
 const H2_INITIAL_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_FRAME_SIZE as usize;
 const H2_MIN_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_SEND_BUFFER_SIZE;
@@ -59,6 +63,7 @@ pub(crate) fn tuned_h2_client_builder_with(tuning: H2TransportTuning) -> h2::cli
     builder.initial_connection_window_size(tuning.initial_connection_window_size);
     builder.max_frame_size(H2_MAX_FRAME_SIZE);
     builder.max_send_buffer_size(H2_MAX_SEND_BUFFER_SIZE);
+    builder.max_header_list_size(H2_MAX_HEADER_LIST_SIZE);
     builder
 }
 
@@ -70,6 +75,7 @@ pub(crate) fn tune_h2_server_builder_with(
     builder.initial_connection_window_size(tuning.initial_connection_window_size);
     builder.max_frame_size(H2_MAX_FRAME_SIZE);
     builder.max_send_buffer_size(H2_MAX_SEND_BUFFER_SIZE);
+    builder.max_header_list_size(H2_MAX_HEADER_LIST_SIZE);
     builder.max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS as u32);
 }
 
