@@ -27,8 +27,6 @@ use tracing::warn;
 const DISK_CACHE_MAGIC: &[u8] = b"QPX-DISK-CACHE\0\x01";
 const DISK_CACHE_SCHEMA_VERSION: u16 = 2;
 const DISK_CACHE_FILE_EXT: &str = "qpxc";
-// File size overhead of the on-disk header: magic bytes + u32 header length.
-const DISK_CACHE_HEADER_OVERHEAD_BYTES: u64 = DISK_CACHE_MAGIC.len() as u64 + 4;
 const DISK_CACHE_CHUNK_BYTES: usize = 64 * 1024;
 const DISK_CACHE_HOT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const DISK_CACHE_HOT_MAX_OBJECT_BYTES: u64 = 2 * 1024 * 1024;
@@ -834,9 +832,9 @@ impl DiskCacheBackend {
             meta_len: metadata.as_ref().map_or(0, |(_, meta)| meta.len() as u64),
         };
         let tmp_path = temp_path(parent);
-        let streamed: std::result::Result<u64, anyhow::Error> = async {
+        let streamed: std::result::Result<(u64, u64), anyhow::Error> = async {
             let mut file = TokioFile::from_std(create_secure_new_file(&tmp_path)?);
-            write_header_async(&mut file, &header).await?;
+            let body_offset = write_header_async(&mut file, &header).await?;
             while let Some(chunk) = source.data().await {
                 file.write_all(chunk?.as_ref()).await?;
             }
@@ -844,22 +842,36 @@ impl DiskCacheBackend {
                 file.write_all(&(meta.len() as u32).to_be_bytes()).await?;
                 file.write_all(meta.as_ref()).await?;
             }
+            // Await a real close before publishing: drop() only schedules the
+            // close on the blocking pool, so rename could otherwise win over
+            // the still-queued tail bytes and commit a truncated object.
+            // Cache objects stay re-fetchable, so no fsync, but a short object
+            // must fail closed here instead of being indexed as valid.
+            file.flush().await?;
+            tokio::io::AsyncWriteExt::shutdown(&mut file).await?;
+            let expected_len = body_offset + header.body_len + header.trailer_len();
+            let actual_len = file.metadata().await?.len();
+            if actual_len != expected_len {
+                return Err(anyhow!(
+                    "disk cache object length mismatch: file {} expected {}",
+                    actual_len,
+                    expected_len
+                ));
+            }
             // Cache objects are re-fetchable, so commit to the page cache and
             // publish atomically via rename instead of paying for an fsync.
-            let body_len = header.body_len;
             drop(file);
             fs::rename(&tmp_path, path).with_context(|| {
                 format!("failed to commit disk cache object {}", path.display())
             })?;
-            Ok(body_len)
+            Ok((header.body_len, expected_len))
         }
         .await;
         if streamed.is_err() {
             let _ = fs::remove_file(&tmp_path);
             invalidate_ensured_dir(parent);
         }
-        let body_len = streamed?;
-        let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + body_len + header.trailer_len();
+        let (_body_len, total_len) = streamed?;
         self.remember_write(path.to_path_buf(), total_len, expires_at_ms)
             .await?;
         self.hot_remove(path).await;
@@ -1562,7 +1574,7 @@ fn write_cached_object_sync(
         // writes are committed to the page cache and published atomically via
         // rename without an fsync. This matches the behavior of other HTTP
         // caches and keeps write-heavy miss workloads off the disk sync path.
-        let total_len = DISK_CACHE_HEADER_OVERHEAD_BYTES + header.body_len + header.trailer_len();
+        let total_len = body_offset + header.body_len + header.trailer_len();
         drop(file);
         fs::rename(&tmp_path, path)
             .with_context(|| format!("failed to commit disk cache object {}", path.display()))?;
