@@ -77,7 +77,7 @@ dirs-next = "2"
 zeroize = "1"
 
 # TLS
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "ring", "std", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "ring", "std", "tls12"] }
 tokio-rustls = "0.26"
 webpki-roots = "1"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
