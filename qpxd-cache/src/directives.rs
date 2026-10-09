@@ -162,8 +162,13 @@ fn parse_targeted_response_directives(
             "no-cache" => match value {
                 BareItem::Boolean(true) => out.no_cache = true,
                 BareItem::String(fields) => {
-                    out.no_cache_fields
-                        .extend(parse_cache_field_name_list(fields.as_str()));
+                    let parsed = parse_cache_field_name_list(fields.as_str());
+                    // Fail closed: `private=""`-style empty values must act as bare.
+                    if parsed.is_empty() {
+                        out.no_cache = true;
+                    } else {
+                        out.no_cache_fields.extend(parsed);
+                    }
                 }
                 _ => return Err(()),
             },
@@ -171,8 +176,13 @@ fn parse_targeted_response_directives(
             "private" => match value {
                 BareItem::Boolean(true) => out.private = true,
                 BareItem::String(fields) => {
-                    out.private_fields
-                        .extend(parse_cache_field_name_list(fields.as_str()));
+                    let parsed = parse_cache_field_name_list(fields.as_str());
+                    // Fail closed: empty values must act as bare whole-message `private`.
+                    if parsed.is_empty() {
+                        out.private = true;
+                    } else {
+                        out.private_fields.extend(parsed);
+                    }
                 }
                 _ => return Err(()),
             },
@@ -220,20 +230,32 @@ fn parse_cache_control_response_directives(headers: &http::HeaderMap) -> Respons
             if directive == "no-store" {
                 out.no_store = true;
             } else if directive == "no-cache" {
-                if let Some(value) = value.as_deref() {
-                    out.no_cache_fields
-                        .extend(parse_cache_field_name_list(value));
-                } else {
-                    out.no_cache = true;
+                match value.as_deref() {
+                    None => out.no_cache = true,
+                    Some(value) => {
+                        let fields = parse_cache_field_name_list(value);
+                        // Fail closed: `no-cache =`, `no-cache=""` must force revalidation.
+                        if fields.is_empty() {
+                            out.no_cache = true;
+                        } else {
+                            out.no_cache_fields.extend(fields);
+                        }
+                    }
                 }
             } else if directive == "must-understand" {
                 out.must_understand = true;
             } else if directive == "private" {
-                if let Some(value) = value.as_deref() {
-                    out.private_fields
-                        .extend(parse_cache_field_name_list(value));
-                } else {
-                    out.private = true;
+                match value.as_deref() {
+                    None => out.private = true,
+                    Some(value) => {
+                        let fields = parse_cache_field_name_list(value);
+                        // Fail closed: `private =`, `private=""` must mean whole-message private.
+                        if fields.is_empty() {
+                            out.private = true;
+                        } else {
+                            out.private_fields.extend(fields);
+                        }
+                    }
                 }
             } else if directive == "public" {
                 out.public = true;
@@ -338,7 +360,7 @@ fn parse_u64_directive(value: &str) -> Option<u64> {
 fn parse_cache_field_name_list(value: &str) -> Vec<String> {
     value
         .split(',')
-        .map(|token| token.trim().trim_matches('"').to_ascii_lowercase())
+        .map(|token| token.trim().trim_matches('"').trim().to_ascii_lowercase())
         .filter(|token| !token.is_empty())
         .collect()
 }
@@ -389,4 +411,44 @@ fn directives_range_invalid(headers: &http::HeaderMap) -> bool {
 
 fn directives_if_range_invalid(headers: &http::HeaderMap) -> bool {
     headers.contains_key(IF_RANGE) && parse_if_range_header(headers).is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn response_directives_for_cache_control(value: &str) -> ResponseDirectives {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_str(value).expect("valid test header"),
+        );
+        parse_cache_control_response_directives(&headers)
+    }
+
+    #[test]
+    fn empty_cache_control_field_values_fail_closed() {
+        // `private =` / `private=""` must act as bare whole-message `private`.
+        for raw in ["private =", "private=\"\"", "private=\" \""] {
+            let parsed = response_directives_for_cache_control(raw);
+            assert!(parsed.private, "bare private for {raw:?}");
+            assert!(parsed.private_fields.is_empty(), "no fields for {raw:?}");
+        }
+        // `no-cache =` / `no-cache=""` must force revalidation.
+        for raw in ["no-cache =", "no-cache=\"\"", "no-cache=\" \""] {
+            let parsed = response_directives_for_cache_control(raw);
+            assert!(parsed.no_cache, "bare no-cache for {raw:?}");
+            assert!(parsed.no_cache_fields.is_empty(), "no fields for {raw:?}");
+        }
+    }
+
+    #[test]
+    fn ows_field_values_still_yield_field_lists() {
+        let parsed = response_directives_for_cache_control("no-cache =\"authorization\"");
+        assert!(!parsed.no_cache);
+        assert_eq!(parsed.no_cache_fields, vec!["authorization".to_string()]);
+        let parsed = response_directives_for_cache_control("private = \"cookie\"");
+        assert!(!parsed.private);
+        assert_eq!(parsed.private_fields, vec!["cookie".to_string()]);
+    }
 }
