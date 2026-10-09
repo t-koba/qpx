@@ -1,5 +1,6 @@
 use super::{normalize_h3_upstream_connect_headers, recv_upstream_h3_response_with_interim};
 use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
+use crate::http3::listener::H3_MAX_FIELD_SECTION_SIZE;
 use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
@@ -70,7 +71,10 @@ pub(super) async fn open_upstream_connect_udp_stream(
     .await??;
     enforce_h3_connection_trust(&connection, &upstream_host, trust)?;
     let mut builder = ::h3::client::builder();
-    builder.enable_extended_connect(true).enable_datagram(true);
+    builder
+        .enable_extended_connect(true)
+        .enable_datagram(true)
+        .max_field_section_size(H3_MAX_FIELD_SECTION_SIZE);
     let h3_build = builder.build::<_, _, Bytes>(h3_quinn::Connection::new(connection));
     let (mut h3_conn, mut sender) = timeout(timeout_dur, h3_build).await??;
     use h3_datagram::datagram_handler::HandleDatagramsExt as _;

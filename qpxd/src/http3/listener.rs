@@ -19,7 +19,7 @@ use tracing::warn;
 mod connection;
 mod scheduler;
 
-pub(crate) use self::connection::serve_endpoint;
+pub(crate) use self::connection::{H3_MAX_FIELD_SECTION_SIZE, serve_endpoint};
 use self::scheduler::{ScheduledH3Stream, request_priority, run_priority_scheduler};
 
 #[derive(Debug, Clone)]

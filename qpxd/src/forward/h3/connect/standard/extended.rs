@@ -4,6 +4,7 @@ use crate::http::protocol::l7::{
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
 use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::h3_buf_to_bytes;
+use crate::http3::listener::H3_MAX_FIELD_SECTION_SIZE;
 use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
@@ -136,6 +137,7 @@ pub(super) async fn open_upstream_extended_connect_stream(
     let mut builder = ::h3::client::builder();
     builder.enable_extended_connect(true);
     builder.enable_datagram(input.enable_datagram);
+    builder.max_field_section_size(H3_MAX_FIELD_SECTION_SIZE);
     let h3_build = builder.build::<_, _, Bytes>(quic_conn);
     let (mut h3_conn, mut sender) = match timeout(input.timeout_dur, h3_build).await {
         Ok(Ok(parts)) => parts,

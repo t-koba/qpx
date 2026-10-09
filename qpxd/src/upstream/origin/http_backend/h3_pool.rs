@@ -2,6 +2,7 @@ use super::OriginEndpoint;
 use crate::http::codec::h2::parse_declared_content_length;
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
+use crate::http3::listener::H3_MAX_FIELD_SECTION_SIZE;
 use crate::http3::quic::{
     build_h3_client_config, enforce_h3_connection_trust, extract_h3_connection_certificate_info,
 };
@@ -337,6 +338,7 @@ async fn connect_h3_origin(
     enforce_h3_connection_trust(&connection, key.server_name.as_str(), trust)?;
     let quic_conn = h3_quinn::Connection::new(connection);
     let mut builder = ::h3::client::builder();
+    builder.max_field_section_size(H3_MAX_FIELD_SECTION_SIZE);
     let h3_build = builder.build::<_, _, Bytes>(quic_conn);
     let (mut h3_conn, sender) = timeout(timeout_dur, h3_build)
         .await
