@@ -764,3 +764,63 @@ async fn h2_server_refuses_header_list_over_transport_cap() {
         "oversized H2 header list must be refused at the transport, got server={server_outcome} client={client_outcome}",
     );
 }
+
+#[test]
+fn h2_header_count_cap_matches_h1_edge_cap() {
+    assert_eq!(
+        H2_MAX_HEADER_COUNT, 128,
+        "H2 decoded-field cap must stay aligned with the H1 edge cap",
+    );
+}
+
+#[tokio::test]
+async fn h2_server_refuses_header_count_over_edge_cap() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        let mut builder = h2::server::Builder::new();
+        tune_h2_server_builder_with(&mut builder, H2TransportTuning::default());
+        let mut conn = builder
+            .handshake::<_, bytes::Bytes>(socket)
+            .await
+            .expect("handshake");
+        // Many tiny fields fit well within the 128 KiB byte cap but must not
+        // surface as a servable request: the semantic boundary refuses them.
+        match conn.accept().await {
+            None => "closed".to_string(),
+            Some(Ok((request, _respond))) => match h2_request_to_hyper(request) {
+                Ok(_) => "accepted".to_string(),
+                Err(err) => format!("convert-err: {err}"),
+            },
+            Some(Err(err)) => format!("accept-err: {err}"),
+        }
+    });
+
+    let socket = TcpStream::connect(addr).await.expect("connect");
+    let (mut client, connection) = h2::client::handshake(socket).await.expect("handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client = client.ready().await.expect("ready");
+    // 200 distinct tiny headers total ~2 KiB: far under the byte cap, over the
+    // 128-field edge cap, so acceptance would prove the count gap is open.
+    let mut builder = ::http::Request::builder()
+        .method("GET")
+        .uri("https://reverse_edges.test/many-tiny");
+    for i in 0..200 {
+        builder = builder.header(format!("x-tiny-{i:04}"), "b");
+    }
+    let request = builder.body(()).expect("request");
+    let (response_future, _) = client.send_request(request, true).expect("send");
+    let client_outcome = match response_future.await {
+        Ok(_) => "accepted".to_string(),
+        Err(err) => format!("client-err: {err}"),
+    };
+    let server_outcome = server.await.expect("server");
+    assert_ne!(
+        server_outcome.as_str(),
+        "accepted",
+        "many-tiny-header H2 request must be refused at the count ceiling, got server={server_outcome} client={client_outcome}",
+    );
+}

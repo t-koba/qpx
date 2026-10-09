@@ -30,6 +30,12 @@ pub(crate) const H2_MAX_CONCURRENT_STREAMS: usize = 256;
 // HTTP/1 edge cap (h1_common::MAX_HEADER_BYTES). The h2 crate defaults to
 // 16 MiB when unset, so an explicit cap is the fail-closed default.
 pub(crate) const H2_MAX_HEADER_LIST_SIZE: u32 = 128 * 1024;
+// Bound decoded header field count at the transport, aligned with the HTTP/1
+// edge cap (MAX_HTTP1_REQUEST_HEADERS = 128, mapped to 431). Byte caps alone
+// still admit thousands of tiny fields within budget (HTTP/2 Bomb pattern),
+// so the count ceiling is the fail-closed default; per-route guard
+// `header_count` remains the policy knob for stricter limits.
+pub(crate) const H2_MAX_HEADER_COUNT: usize = 128;
 const H2_DIRECT_SEND_BODY_MAX_BYTES: u64 = 16 * 1024;
 const H2_INITIAL_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_FRAME_SIZE as usize;
 const H2_MIN_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_SEND_BUFFER_SIZE;
@@ -90,6 +96,9 @@ pub(crate) fn h2_request_to_hyper_with_capacity(
 ) -> Result<Request<Body>> {
     let (mut parts, body) = req.into_parts();
     parts.headers = h1_headers_into_http(parts.headers)?;
+    if parts.headers.len() > H2_MAX_HEADER_COUNT {
+        return Err(H2HeaderCountTooLarge.into());
+    }
     // The h2 transport already enforces RFC 9113 content-length reconciliation
     // while decoding DATA / END_STREAM on the inbound stream. We still parse the
     // header locally to reject conflicting field-values before handing the
@@ -605,6 +614,10 @@ pub(crate) fn parse_declared_content_length(headers: &http::HeaderMap) -> Result
     }
     Ok(parsed)
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("HTTP/2 request header fields exceeded configured limits")]
+struct H2HeaderCountTooLarge;
 
 struct InflightRelease(Option<Arc<AtomicUsize>>);
 
