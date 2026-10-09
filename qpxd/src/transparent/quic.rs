@@ -141,7 +141,7 @@ fn parse_protected_initial_header(packet: &[u8]) -> Option<ProtectedInitialHeade
 }
 
 fn initial_suite() -> Option<&'static rustls::Tls13CipherSuite> {
-    rustls::crypto::ring::default_provider()
+    rustls::crypto::aws_lc_rs::default_provider()
         .cipher_suites
         .iter()
         .find_map(|suite| match (suite.suite(), suite.tls13()) {
@@ -330,7 +330,7 @@ mod tests {
     }
 
     fn build_client_initial(server_name: &str, alpn: Option<&[u8]>) -> (Vec<u8>, Vec<u8>) {
-        let provider = rustls::crypto::ring::default_provider();
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
         let mut client = ClientConfig::builder_with_provider(provider.into())
             .with_protocol_versions(&[&rustls::version::TLS13])
             .expect("versions")

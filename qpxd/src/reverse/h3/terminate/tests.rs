@@ -250,7 +250,7 @@ async fn filter_quic_recv_batch_drops_blocked_initials_and_compacts_batch() {
 }
 
 fn build_client_initial(server_name: &str, alpn: Option<&[u8]>) -> Vec<u8> {
-    let provider = rustls::crypto::ring::default_provider();
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
     let mut client = ClientConfig::builder_with_provider(provider.into())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .expect("versions")
@@ -342,7 +342,7 @@ fn build_client_initial(server_name: &str, alpn: Option<&[u8]>) -> Vec<u8> {
 }
 
 fn initial_suite() -> Option<&'static rustls::Tls13CipherSuite> {
-    rustls::crypto::ring::default_provider()
+    rustls::crypto::aws_lc_rs::default_provider()
         .cipher_suites
         .iter()
         .find_map(|suite| match (suite.suite(), suite.tls13()) {

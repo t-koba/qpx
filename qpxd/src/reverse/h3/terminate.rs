@@ -209,7 +209,7 @@ pub(crate) fn build_reverse_tls_config(
     }
     let resolver = Arc::new(QuicSniResolver::new(tls)?);
 
-    let provider = quinn::rustls::crypto::ring::default_provider();
+    let provider = quinn::rustls::crypto::aws_lc_rs::default_provider();
     let base = quinn::rustls::ServerConfig::builder_with_provider(provider.into())
         .with_protocol_versions(&[&quinn::rustls::version::TLS13])
         .map_err(|_| anyhow!("failed to configure TLS versions for HTTP/3"))?;
@@ -262,7 +262,7 @@ impl QuicSniResolver {
                 }
                 let chain = load_cert_chain(Path::new(cert_path))?;
                 let key = load_private_key(Path::new(key_path))?;
-                let signing_key = quinn::rustls::crypto::ring::sign::any_supported_type(&key)
+                let signing_key = quinn::rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
                     .map_err(|_| anyhow!("unsupported key"))?;
                 let certified =
                     Arc::new(quinn::rustls::sign::CertifiedKey::new(chain, signing_key));

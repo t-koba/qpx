@@ -7,7 +7,7 @@ use instant_acme::{
 use qpx_core::config::{AcmeConfig, Config};
 use qpx_core::tls::{load_cert_chain, load_private_key};
 use rcgen::{CertificateParams, CustomExtension, DistinguishedName, DnType, KeyPair};
-use rustls::crypto::ring::sign::any_supported_type;
+use rustls::crypto::aws_lc_rs::sign::any_supported_type;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::sign::CertifiedKey;
 use std::collections::HashSet;
@@ -123,7 +123,7 @@ fn load_cert_into_store(state: &AcmeRuntime, sni: &str) -> Result<()> {
     );
     #[cfg(feature = "http3")]
     {
-        let signing_key = quinn::rustls::crypto::ring::sign::any_supported_type(&key)
+        let signing_key = quinn::rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
             .map_err(|_| anyhow!("unsupported key"))?;
         let certified = Arc::new(quinn::rustls::sign::CertifiedKey::new(
             quic_chain,

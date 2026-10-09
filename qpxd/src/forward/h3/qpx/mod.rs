@@ -162,7 +162,7 @@ fn build_forward_tls_config(
     sans.dedup();
     let (cert_chain, key) = ca.issue_server_cert(&sans)?;
 
-    let provider = quinn::rustls::crypto::ring::default_provider();
+    let provider = quinn::rustls::crypto::aws_lc_rs::default_provider();
     let tls = quinn::rustls::ServerConfig::builder_with_provider(provider.into())
         .with_protocol_versions(&[&quinn::rustls::version::TLS13])
         .map_err(|_| anyhow!("failed to configure TLS versions for forward HTTP/3"))?

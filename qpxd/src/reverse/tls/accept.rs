@@ -60,7 +60,7 @@ struct SniResolver {
 impl SniResolver {
     fn new(tls: &qpx_core::config::ReverseTlsConfig) -> Result<Self> {
         use qpx_core::tls::{load_cert_chain, load_private_key};
-        use rustls::crypto::ring::sign::any_supported_type;
+        use rustls::crypto::aws_lc_rs::sign::any_supported_type;
         use rustls::sign::CertifiedKey;
         use std::collections::{HashMap, HashSet};
         use std::path::Path;

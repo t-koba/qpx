@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use lru::LruCache;
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 use rustls::ServerConfig;
-use rustls::crypto::ring::sign::any_supported_type;
+use rustls::crypto::aws_lc_rs::sign::any_supported_type;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
