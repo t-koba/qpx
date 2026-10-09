@@ -56,7 +56,7 @@ pub(super) async fn prepare_reverse_cache(
             cache_collapse_guard: None,
         }));
     }
-    let query_digest = if request_cache_policy.is_some() && request_method.as_str() == "QUERY" {
+    let query_digest = if request_cache_policy.is_some() && *request_method == Method::QUERY {
         let (buffered, digest) =
             buffer_query_for_cache_key(req, route.plan.streaming.max_request_body_bytes).await?;
         req = buffered;
@@ -549,7 +549,7 @@ mod query_cache_tests {
 
     async fn digest(content_type: &str, body: &'static str) -> String {
         let request = Request::builder()
-            .method("QUERY")
+            .method(Method::QUERY)
             .uri("https://example.com/search")
             .header(CONTENT_TYPE, content_type)
             .body(Body::from(body))

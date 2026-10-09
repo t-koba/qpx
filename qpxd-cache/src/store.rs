@@ -477,8 +477,7 @@ fn is_response_storable(
         return false;
     }
     match *request_method {
-        Method::GET | Method::HEAD => true,
-        _ if request_method.as_str() == "QUERY" => true,
+        Method::GET | Method::HEAD | Method::QUERY => true,
         Method::POST | Method::PATCH => {
             has_explicit_freshness(response.headers(), directives)
                 && key
@@ -495,8 +494,7 @@ fn response_storage_key(
     key: &CacheRequestKey,
 ) -> Option<CacheRequestKey> {
     match *request_method {
-        Method::GET | Method::HEAD => Some(key.clone()),
-        _ if request_method.as_str() == "QUERY" => Some(key.clone()),
+        Method::GET | Method::HEAD | Method::QUERY => Some(key.clone()),
         Method::POST | Method::PATCH if content_location_matches_target(response_headers, key) => {
             Some(key.with_method_group("GET"))
         }

@@ -264,7 +264,7 @@ pub fn build_hot_hit_response(
 fn lookup_precheck(request_method: &Method, req: &RequestDirectives) -> Option<LookupOutcome> {
     if *request_method != Method::GET
         && *request_method != Method::HEAD
-        && request_method.as_str() != "QUERY"
+        && *request_method != Method::QUERY
         || req.has_unsupported_conditionals
         || req.no_store
     {

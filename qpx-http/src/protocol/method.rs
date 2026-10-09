@@ -32,11 +32,13 @@ impl MethodSemantics {
 /// non-idempotent. A proxy must not retry, use 0-RTT, or skip cache
 /// invalidation without an explicit registry entry.
 pub fn method_semantics(method: &Method) -> MethodSemantics {
+    if *method == Method::QUERY {
+        return MethodSemantics::QUERY;
+    }
     match method.as_str() {
         "GET" | "HEAD" | "OPTIONS" | "PRI" | "PROPFIND" | "REPORT" | "SEARCH" | "TRACE" => {
             MethodSemantics::new(true, true)
         }
-        "QUERY" => MethodSemantics::QUERY,
         "ACL" | "BASELINE-CONTROL" | "BIND" | "CHECKIN" | "CHECKOUT" | "COPY" | "DELETE"
         | "LABEL" | "LINK" | "MERGE" | "MKACTIVITY" | "MKCALENDAR" | "MKCOL" | "MKREDIRECTREF"
         | "MKWORKSPACE" | "MOVE" | "ORDERPATCH" | "PROPPATCH" | "PUT" | "REBIND" | "UNCHECKOUT"
@@ -61,7 +63,7 @@ mod tests {
 
     #[test]
     fn query_is_safe_idempotent_and_content_keyed() {
-        let method = Method::from_bytes(b"QUERY").expect("QUERY method");
+        let method = Method::QUERY;
         let semantics = method_semantics(&method);
         assert!(semantics.safe);
         assert!(semantics.idempotent);

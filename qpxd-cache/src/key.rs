@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn query_content_digest_selects_variant_without_fragmenting_primary_index() {
         let request = Request::builder()
-            .method("QUERY")
+            .method(Method::QUERY)
             .uri("https://example.com/search")
             .body(Body::empty())
             .unwrap();
