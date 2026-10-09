@@ -36,6 +36,14 @@ pub(crate) const H2_MAX_HEADER_LIST_SIZE: u32 = 128 * 1024;
 // so the count ceiling is the fail-closed default; per-route guard
 // `header_count` remains the policy knob for stricter limits.
 pub(crate) const H2_MAX_HEADER_COUNT: usize = 128;
+// Pin the h2 reset-flood ceilings to their current upstream defaults instead
+// of inheriting them silently. The h2 docs mark the pending-accept (20) and
+// local-error (1024) defaults as "could change"; a future h2 upgrade must
+// not silently widen the edge. No behavior change at h2 0.4.20, no new
+// policy knob: explicitness is the fail-closed default.
+pub(crate) const H2_MAX_PENDING_ACCEPT_RESET_STREAMS: usize = 20;
+pub(crate) const H2_MAX_LOCAL_ERROR_RESET_STREAMS: usize = 1024;
+pub(crate) const H2_MAX_CONCURRENT_RESET_STREAMS: usize = 50;
 const H2_DIRECT_SEND_BODY_MAX_BYTES: u64 = 16 * 1024;
 const H2_INITIAL_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_FRAME_SIZE as usize;
 const H2_MIN_SCHEDULER_BUFFER_BYTES: usize = H2_MAX_SEND_BUFFER_SIZE;
@@ -83,6 +91,9 @@ pub(crate) fn tune_h2_server_builder_with(
     builder.max_send_buffer_size(H2_MAX_SEND_BUFFER_SIZE);
     builder.max_header_list_size(H2_MAX_HEADER_LIST_SIZE);
     builder.max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS as u32);
+    builder.max_pending_accept_reset_streams(H2_MAX_PENDING_ACCEPT_RESET_STREAMS);
+    builder.max_local_error_reset_streams(Some(H2_MAX_LOCAL_ERROR_RESET_STREAMS));
+    builder.max_concurrent_reset_streams(H2_MAX_CONCURRENT_RESET_STREAMS);
 }
 
 #[cfg(test)]

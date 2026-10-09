@@ -766,6 +766,20 @@ async fn h2_server_refuses_header_list_over_transport_cap() {
 }
 
 #[test]
+fn h2_reset_flood_caps_are_pinned_to_current_h2_defaults() {
+    // Explicitness guard: h2 marks pending-accept (20) and local-error (1024)
+    // defaults as "could change" and concurrent-reset defaults as 50. If h2
+    // moves any default, this test forces a deliberate review instead of a
+    // silent edge widening. Tuning itself is exercised by the tuned-builder
+    // handshake tests below.
+    assert_eq!(H2_MAX_PENDING_ACCEPT_RESET_STREAMS, 20);
+    assert_eq!(H2_MAX_LOCAL_ERROR_RESET_STREAMS, 1024);
+    assert_eq!(H2_MAX_CONCURRENT_RESET_STREAMS, 50);
+    let mut builder = h2::server::Builder::new();
+    tune_h2_server_builder_with(&mut builder, H2TransportTuning::default());
+}
+
+#[test]
 fn h2_header_count_cap_matches_h1_edge_cap() {
     assert_eq!(
         H2_MAX_HEADER_COUNT, 128,
