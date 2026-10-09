@@ -150,7 +150,7 @@ mTLS, and RFC 9421 transport protection are separate configuration concerns.
 | 9000, 9001, 9002 | transport-library-with-contract | QUIC transport/TLS/loss behavior with qpx resource limits | qpx-h3 E2E and interop lane |
 | 9221 | transport-library-with-contract | bounded QUIC DATAGRAM handling | qpx-h3 datagram tests |
 | 9297 | native | HTTP Datagrams, context IDs, Capsule fallback | both-backend datagram/capsule tests |
-| 9298 | native | CONNECT-UDP URI template, flow policy, chained relay; no H1 optimistic data | both-backend MASQUE tests |
+| 9298 | native | CONNECT-UDP URI template, flow policy, chained relay; no H1 optimistic data; single target per tunnel with non-zero Context IDs dropped fail-closed; LISTEN-style multi-target and ECN/DSCP context extensions not supported | both-backend MASQUE tests |
 | 9484 | native | CONNECT-IP capsules, MTU/CIDR policy, chained relay, Linux TUN, macOS utun, Windows Wintun | `connect_ip` codec/relay tests; platform and interop lanes |
 | 6455, 8441, 9220 | native | strict WebSocket handshake and H1/H2/H3 tunnel paths | WebSocket unit and forward/reverse E2E tests |
 | 9931 | native | rejected H1 CONNECT/Upgrade closes; data is not forwarded before success | tunnel RFC scenarios |
