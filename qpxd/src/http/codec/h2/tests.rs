@@ -824,3 +824,56 @@ async fn h2_server_refuses_header_count_over_edge_cap() {
         "many-tiny-header H2 request must be refused at the count ceiling, got server={server_outcome} client={client_outcome}",
     );
 }
+
+#[tokio::test]
+async fn h2_server_refuses_cookie_split_over_edge_cap() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        let mut builder = h2::server::Builder::new();
+        tune_h2_server_builder_with(&mut builder, H2TransportTuning::default());
+        let mut conn = builder
+            .handshake::<_, bytes::Bytes>(socket)
+            .await
+            .expect("handshake");
+        // 200 `cookie` fields merge to one downstream but must still count as
+        // 200 raw fields at the transport ceiling (H1 raw-field parity).
+        match conn.accept().await {
+            None => "closed".to_string(),
+            Some(Ok((request, _respond))) => match h2_request_to_hyper(request) {
+                Ok(_) => "accepted".to_string(),
+                Err(err) => format!("convert-err: {err}"),
+            },
+            Some(Err(err)) => format!("accept-err: {err}"),
+        }
+    });
+
+    let socket = TcpStream::connect(addr).await.expect("connect");
+    let (mut client, connection) = h2::client::handshake(socket).await.expect("handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client = client.ready().await.expect("ready");
+    // 200 tiny `cookie` fields total ~800B: far under the byte cap, over the
+    // 128-field edge cap; without a pre-merge count they collapse to len==1
+    // and would be accepted.
+    let mut builder = ::http::Request::builder()
+        .method("GET")
+        .uri("https://reverse_edges.test/many-cookie");
+    for i in 0..200 {
+        builder = builder.header("cookie", format!("a{i:04}=b"));
+    }
+    let request = builder.body(()).expect("request");
+    let (response_future, _) = client.send_request(request, true).expect("send");
+    let client_outcome = match response_future.await {
+        Ok(_) => "accepted".to_string(),
+        Err(err) => format!("client-err: {err}"),
+    };
+    let server_outcome = server.await.expect("server");
+    assert_ne!(
+        server_outcome.as_str(),
+        "accepted",
+        "cookie-split H2 request must be refused at the count ceiling, got server={server_outcome} client={client_outcome}",
+    );
+}

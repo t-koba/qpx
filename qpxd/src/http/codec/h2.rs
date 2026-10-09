@@ -95,10 +95,14 @@ pub(crate) fn h2_request_to_hyper_with_capacity(
     body_channel_capacity: usize,
 ) -> Result<Request<Body>> {
     let (mut parts, body) = req.into_parts();
-    parts.headers = h1_headers_into_http(parts.headers)?;
+    // Count raw fields before the cookie merge: `h1_headers_into_http`
+    // coalesces N `cookie` fields into one, so a post-merge `len()` would let
+    // a cookie-split flood (e.g. 200 tiny `cookie` fields) pass the 128-field
+    // edge cap that H1 enforces on raw fields. Keep raw-field parity.
     if parts.headers.len() > H2_MAX_HEADER_COUNT {
         return Err(H2HeaderCountTooLarge.into());
     }
+    parts.headers = h1_headers_into_http(parts.headers)?;
     // The h2 transport already enforces RFC 9113 content-length reconciliation
     // while decoding DATA / END_STREAM on the inbound stream. We still parse the
     // header locally to reject conflicting field-values before handing the
