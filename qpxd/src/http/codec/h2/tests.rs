@@ -759,8 +759,8 @@ async fn h2_server_refuses_header_list_over_transport_cap() {
     };
     let server_outcome = server.await.expect("server");
     assert_ne!(
-        (server_outcome.clone(), client_outcome.clone()),
-        ("accepted".to_string(), "accepted".to_string()),
+        server_outcome.as_str(),
+        "accepted",
         "oversized H2 header list must be refused at the transport, got server={server_outcome} client={client_outcome}",
     );
 }
