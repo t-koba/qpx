@@ -1135,6 +1135,7 @@ mod tests {
                 default_ttl_secs: Some(600),
                 max_object_bytes: 1024 * 1024,
                 allow_set_cookie_store: false,
+                allow_authorization_without_vary_store: false,
             }),
             capture: None,
             rate_limit: None,
@@ -1344,6 +1345,7 @@ mod tests {
             default_ttl_secs: Some(600),
             max_object_bytes: 1024 * 1024,
             allow_set_cookie_store: false,
+            allow_authorization_without_vary_store: false,
         };
         let reference = qpxd_cache::lookup(
             &Method::GET,

@@ -307,6 +307,7 @@ mod forward_query_cache_tests {
             default_ttl_secs: None,
             max_object_bytes: 1024 * 1024,
             allow_set_cookie_store: false,
+            allow_authorization_without_vary_store: false,
         };
         let req = Request::builder()
             .method(Method::QUERY)

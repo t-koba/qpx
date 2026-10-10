@@ -36,6 +36,12 @@ pub struct CachePolicyConfig {
     pub max_object_bytes: usize,
     #[serde(default)]
     pub allow_set_cookie_store: bool,
+    /// Fail-closed default: Authorization-bearing requests are only storable
+    /// when the response carries `Vary: Authorization` (or the operator opts
+    /// out). Mirrors the `Set-Cookie` gate; prevents one user's
+    /// credential-varying response from being served to another credential.
+    #[serde(default)]
+    pub allow_authorization_without_vary_store: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

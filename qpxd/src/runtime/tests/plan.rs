@@ -128,6 +128,7 @@ fn runtime_plan_marks_cache_lookup_and_store() {
         default_ttl_secs: Some(60),
         max_object_bytes: 1024,
         allow_set_cookie_store: false,
+        allow_authorization_without_vary_store: false,
     });
     let mut config = base_config();
     push_reverse(&mut config, reverse_edge(route));

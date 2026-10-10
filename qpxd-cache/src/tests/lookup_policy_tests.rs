@@ -304,3 +304,157 @@ async fn stale_no_cache_entry_revalidates_and_updates() {
         Some("qpx; fwd=stale; fwd-status=304")
     );
 }
+
+#[tokio::test]
+async fn authorization_public_without_vary_is_not_shared_across_credentials() {
+    let mut req_a = make_get_request("/auth-no-vary");
+    req_a.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer A"),
+    );
+    let key = CacheRequestKey::for_lookup(&req_a, "http")
+        .expect("key")
+        .expect("some key");
+    let response = make_response(StatusCode::OK, "public, max-age=60", "private-a");
+    let backends = backend_map();
+    let _ = store_and_drain(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+    let mut req_b = make_get_request("/auth-no-vary");
+    req_b.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer B"),
+    );
+    let out = lookup(
+        req_b.method(),
+        req_b.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(
+        !matches!(out, LookupOutcome::Hit(_)),
+        "public Authorization response without Vary: Authorization must not be served across credentials"
+    );
+}
+
+#[tokio::test]
+async fn authorization_public_with_vary_authorization_is_partitioned() {
+    let mut req_a = make_get_request("/auth-vary");
+    req_a.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer A"),
+    );
+    let key = CacheRequestKey::for_lookup(&req_a, "http")
+        .expect("key")
+        .expect("some key");
+    let mut response = make_response(StatusCode::OK, "public, max-age=60", "private-a");
+    response
+        .headers_mut()
+        .insert(VARY, http::HeaderValue::from_static("Authorization"));
+    let backends = backend_map();
+    let _ = store_and_drain(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+    let out_same = lookup(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(matches!(out_same, LookupOutcome::Hit(_)));
+    let mut req_b = make_get_request("/auth-vary");
+    req_b.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer B"),
+    );
+    let out_other = lookup(
+        req_b.method(),
+        req_b.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(matches!(out_other, LookupOutcome::Miss));
+}
+
+#[tokio::test]
+async fn authorization_without_vary_opt_out_restores_shared_storage() {
+    let mut req_a = make_get_request("/auth-opt-out");
+    req_a.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer A"),
+    );
+    let key = CacheRequestKey::for_lookup(&req_a, "http")
+        .expect("key")
+        .expect("some key");
+    let response = make_response(StatusCode::OK, "public, max-age=60", "shared");
+    let backends = backend_map();
+    let mut p = policy();
+    p.allow_authorization_without_vary_store = true;
+    let _ = store_and_drain(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &p,
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+    let mut req_b = make_get_request("/auth-opt-out");
+    req_b.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer B"),
+    );
+    let out = lookup(
+        req_b.method(),
+        req_b.headers(),
+        &key,
+        &p,
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(matches!(out, LookupOutcome::Hit(_)));
+}

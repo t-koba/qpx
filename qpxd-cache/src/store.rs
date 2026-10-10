@@ -470,6 +470,18 @@ fn is_response_storable(
     {
         return false;
     }
+    // Fail-closed: an Authorization-bearing request that clears the RFC 9111
+    // §3.5 shared-storage gate must also carry `Vary: Authorization`, or the
+    // Vary-less canonical variant would be served to other credentials.
+    // Mirrors the `Set-Cookie` gate above; operators whose representations do
+    // not vary by credentials can opt out via policy.
+    if request_headers.contains_key(AUTHORIZATION) && !policy.allow_authorization_without_vary_store
+    {
+        match parse_vary(response.headers()) {
+            VarySpec::Fields(fields) if fields.iter().any(|name| name == "authorization") => {}
+            _ => return false,
+        }
+    }
     if response.status().is_informational() {
         return false;
     }
