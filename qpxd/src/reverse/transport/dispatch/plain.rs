@@ -3,7 +3,9 @@ use super::super::mirrors::{
 };
 use super::super::{InterimList, ReverseConnInfo};
 use super::apply_reverse_route_metadata;
-use super::prepare::{enforce_selected_reverse_route_constraints, reverse_security_rejection};
+use super::route_constraints::{
+    enforce_selected_reverse_route_constraints, reverse_security_rejection,
+};
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::reverse::ReloadableReverse;
 use crate::reverse::router::HttpRoute;
