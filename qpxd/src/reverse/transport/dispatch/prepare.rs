@@ -1,12 +1,10 @@
 use super::PreparedReverseRequest;
-use super::prepare_cors::prepare_cors_preflight;
+use super::prepare_early::{EarlyReversePrepare, check_early_reverse_prepare};
 use super::prepare_finalize::finalize_reverse_route_selection;
 use super::prepare_initial::{
     InitialReverseScan, initial_scan_reverse_routes, reverse_prefilter_context,
 };
 use super::prepare_scan::observe_body_and_rescan_reverse_routes;
-use super::prepare_single::{SingleHttpPrepare, try_prepare_single_http_reverse_request};
-use super::route_constraints::reverse_security_rejection;
 use crate::http::dispatch::request_body_too_large_response;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::reverse::transport::{InterimList, ReverseConnInfo};
@@ -82,34 +80,14 @@ pub(super) async fn prepare_reverse_request(
     cors_request: Option<&qpx_core::cors::CorsRequest>,
 ) -> Result<std::result::Result<PreparedReverseRequest, (InterimList, Response<Body>)>> {
     let router = &compiled.router;
-    if let Some(response) = reverse_security_rejection(&req, conn, &state, &compiled)? {
-        return Ok(Err(response));
-    }
-
-    if let Some(cors_request) = cors_request.filter(|request| request.is_preflight())
-        && let Some(response) = prepare_cors_preflight(
-            req.headers().clone(),
-            req.version(),
-            base,
-            conn,
-            &state,
-            router,
-            cors_request,
-        )
-        .await?
-    {
-        return Ok(Err(response));
-    }
-
-    match try_prepare_single_http_reverse_request(req, base, conn, &state, &compiled, cors_request)?
-    {
-        SingleHttpPrepare::Hit(fast) => {
+    match check_early_reverse_prepare(req, base, conn, &state, &compiled, cors_request).await? {
+        EarlyReversePrepare::Settled(fast) => {
             return match *fast {
                 Ok(prepared) => Ok(Ok(prepared)),
                 Err(response) => Ok(Err(response)),
             };
         }
-        SingleHttpPrepare::Miss(req_back) => {
+        EarlyReversePrepare::Continue(req_back) => {
             req = *req_back;
         }
     }
