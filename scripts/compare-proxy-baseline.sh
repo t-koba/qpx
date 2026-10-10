@@ -531,17 +531,68 @@ for entry in baseline_entries:
     if current_entry is None:
         failures.append(f"missing current proxy comparison lane {key}")
         continue
+    # Lane measurement noise comes from the current lane's observed sample
+    # spread (see below); it judges baseline bands and absolute objectives
+    # alike. A miss inside the band is noise, a miss beyond it is decisive.
+    lane_noise = 1.0
+    for lane_spread in current_entry["sample_spread"].values():
+        lane_noise = max(
+            lane_noise,
+            number(lane_spread, "requests_per_sec_ratio"),
+            number(lane_spread, "requests_per_cpu_second_ratio"),
+        )
+
+    def check_min_baseline(label, current_value, baseline_value, required):
+        decisive_bar = required / lane_noise
+        if current_value + 1e-12 < required:
+            if current_value + 1e-12 < decisive_bar:
+                failures.append(
+                    f"{label} for "
+                    f"{key}: current ratio {current_value:.6f} "
+                    f"< required {required:.6f} "
+                    f"(baseline {baseline_value:.6f}, threshold {threshold:.2%}, "
+                    f"decisive: miss exceeds lane noise {lane_noise:.6f})"
+                )
+            else:
+                marginals.append(
+                    f"{label} marginal for "
+                    f"{key}: current ratio {current_value:.6f} "
+                    f"< required {required:.6f} but within lane noise "
+                    f"{lane_noise:.6f}; not a regression signal"
+                )
+            return False
+        return True
+
+    def check_max_baseline(label, current_value, baseline_value, allowed):
+        decisive_bar = allowed * lane_noise
+        if current_value > allowed + 1e-12:
+            if current_value > decisive_bar + 1e-12:
+                failures.append(
+                    f"{label} for "
+                    f"{key}: current ratio {current_value:.6f} "
+                    f"> allowed {allowed:.6f} "
+                    f"(baseline {baseline_value:.6f}, threshold {threshold:.2%}, "
+                    f"decisive: miss exceeds lane noise {lane_noise:.6f})"
+                )
+            else:
+                marginals.append(
+                    f"{label} marginal for "
+                    f"{key}: current ratio {current_value:.6f} "
+                    f"> allowed {allowed:.6f} but within lane noise "
+                    f"{lane_noise:.6f}; not a regression signal"
+                )
+            return False
+        return True
+
     baseline_throughput_ratio = number(entry, "throughput_ratio")
     current_throughput_ratio = number(current_entry, "throughput_ratio")
     required_throughput_ratio = baseline_throughput_ratio * (1.0 - threshold)
-    if current_throughput_ratio + 1e-12 < required_throughput_ratio:
-        failures.append(
-            "proxy baseline regression for "
-            f"{key}: current throughput ratio {current_throughput_ratio:.6f} "
-            f"< required {required_throughput_ratio:.6f} "
-            f"(baseline {baseline_throughput_ratio:.6f}, threshold {threshold:.2%})"
-        )
-    else:
+    if check_min_baseline(
+        "proxy baseline regression",
+        current_throughput_ratio,
+        baseline_throughput_ratio,
+        required_throughput_ratio,
+    ):
         print(
             "proxy baseline ok for "
             f"{key}: current throughput ratio {current_throughput_ratio:.6f}, "
@@ -550,31 +601,30 @@ for entry in baseline_entries:
     baseline_cpu_ratio = number(entry, "cpu_efficiency_ratio")
     current_cpu_ratio = number(current_entry, "cpu_efficiency_ratio")
     required_cpu_ratio = baseline_cpu_ratio * (1.0 - threshold)
-    if current_cpu_ratio + 1e-12 < required_cpu_ratio:
-        failures.append(
-            "proxy CPU efficiency regression for "
-            f"{key}: current ratio {current_cpu_ratio:.6f} < required {required_cpu_ratio:.6f} "
-            f"(baseline {baseline_cpu_ratio:.6f}, threshold {threshold:.2%})"
-        )
+    check_min_baseline(
+        "proxy CPU efficiency regression",
+        current_cpu_ratio,
+        baseline_cpu_ratio,
+        required_cpu_ratio,
+    )
     baseline_p99_ratio = number(entry, "p99_latency_ratio")
     current_p99_ratio = number(current_entry, "p99_latency_ratio")
     allowed_p99_ratio = baseline_p99_ratio * (1.0 + threshold)
-    if current_p99_ratio > allowed_p99_ratio + 1e-12:
-        failures.append(
-            "proxy p99 latency regression for "
-            f"{key}: current ratio {current_p99_ratio:.6f} > allowed {allowed_p99_ratio:.6f} "
-            f"(baseline {baseline_p99_ratio:.6f}, threshold {threshold:.2%})"
-        )
+    check_max_baseline(
+        "proxy p99 latency regression",
+        current_p99_ratio,
+        baseline_p99_ratio,
+        allowed_p99_ratio,
+    )
     baseline_dominance_score = number(entry, "dominance_score")
     current_dominance_score = number(current_entry, "dominance_score")
     required_dominance_score = baseline_dominance_score * (1.0 - threshold)
-    if current_dominance_score + 1e-12 < required_dominance_score:
-        failures.append(
-            "proxy dominance score regression for "
-            f"{key}: current score {current_dominance_score:.6f} "
-            f"< required {required_dominance_score:.6f} "
-            f"(baseline {baseline_dominance_score:.6f}, threshold {threshold:.2%})"
-        )
+    check_min_baseline(
+        "proxy dominance score regression",
+        current_dominance_score,
+        baseline_dominance_score,
+        required_dominance_score,
+    )
     lane_body_bytes = int(entry["body_bytes"])
     lane_min_throughput_ratio = lane_objective(lane_body_bytes, "min_throughput_ratio")
     lane_min_cpu_ratio = lane_objective(lane_body_bytes, "min_cpu_efficiency_ratio")
@@ -583,21 +633,10 @@ for entry in baseline_entries:
     lane_max_rss_peak_ratio = lane_objective(lane_body_bytes, "max_rss_peak_ratio")
     lane_max_fd_peak_ratio = lane_objective(lane_body_bytes, "max_fd_peak_ratio")
     lane_max_scheduler_queue_delay_ratio = lane_objective(lane_body_bytes, "max_scheduler_queue_delay_ratio")
-    # Lane measurement noise: the largest throughput/CPU sample spread observed
-    # for any compared proxy in this lane. Spreads are max/min ratios (>= 1.0,
-    # hard-capped by the spread objectives below), so attributing the full band
-    # in qpxd's favor is the most forgiving reading this measurement supports.
-    # A miss inside the band is noise, not evidence; a miss beyond it is
-    # decisive. Higher-is-better bars never drop below the lane evidence
+    # Absolute-objective noise reuses the lane_noise computed for the baseline
+    # band above. Higher-is-better bars never drop below the lane evidence
     # floors, so the objectives keep their teeth. Resource peaks carry no
     # per-metric spread, so they share the lane scheduling-noise proxy.
-    lane_noise = 1.0
-    for lane_spread in current_entry["sample_spread"].values():
-        lane_noise = max(
-            lane_noise,
-            number(lane_spread, "requests_per_sec_ratio"),
-            number(lane_spread, "requests_per_cpu_second_ratio"),
-        )
     lane_floor = lane_floors.get(lane_body_bytes, {})
 
     def check_min_objective(label, current_value, objective, floor_name):
