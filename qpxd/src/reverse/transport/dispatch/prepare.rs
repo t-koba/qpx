@@ -1,6 +1,7 @@
 use super::prepare_cors::{apply_cors_to_early_response, prepare_cors_preflight};
 use super::prepare_scan::{
-    ReverseRouteSelection, sanitized_headers_for_route_scan, scan_reverse_routes,
+    ReverseRouteSelection, observe_body_and_rescan_reverse_routes,
+    sanitized_headers_for_route_scan, scan_reverse_routes,
 };
 use super::prepare_single::{SingleHttpPrepare, try_prepare_single_http_reverse_request};
 use super::route_constraints::{
@@ -8,7 +9,6 @@ use super::route_constraints::{
 };
 use super::{InlineCache, PreparedReverseRequest, ReversePreparedContext, ReversePreparedRoute};
 use crate::http::body::observation::RequestObservationPlan;
-use crate::http::body::size::observed_request_size;
 use crate::http::dispatch::request_body_too_large_response;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::policy_context::{
@@ -124,10 +124,6 @@ pub(super) async fn prepare_reverse_request(
     let host = base.host().unwrap_or_default();
     let request_method = &base.method;
     let request_version = req.version();
-    let request_body_too_large = || {
-        request_body_too_large_response(request_method, request_version, proxy_name, None)
-            .map(empty_interim_response)
-    };
     let prefilter_ctx = MatchPrefilterContext {
         method: Some(request_method.as_str()),
         dst_port: Some(conn.dst_port),
@@ -181,56 +177,24 @@ pub(super) async fn prepare_reverse_request(
         std::borrow::Cow::Owned(headers) => Some(headers),
     };
 
-    if selection.route_idx.is_none() && !selection.observation_plan.is_empty() {
-        req = match selection
-            .observation_plan
-            .observe_request(
-                req,
-                selection.max_observed_request_body_bytes,
-                std::time::Duration::from_millis(compiled.streaming.body_read_timeout_ms),
-            )
-            .await
-        {
-            Ok(req) => req,
-            Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
-                return Ok(Err(request_body_too_large()?));
-            }
-            Err(err) => return Err(err),
-        };
-    }
-    let request_rpc = if selection.observation_plan.needs_rpc {
-        Some(crate::http::rpc::inspect_request(&req).await)
-    } else {
-        None
-    };
-
-    if selection.route_idx.is_none()
-        && let Err(error) = scan_reverse_routes(
-            router,
-            req.headers(),
-            owned_sanitized_headers
-                .as_ref()
-                .unwrap_or_else(|| req.headers()),
-            base,
-            &state,
-            conn,
-            host,
-            prefilter_ctx,
-            observed_request_size(&req),
-            request_rpc.as_ref(),
-            false,
-            identity_request.as_ref(),
-            &mut selection,
-        )
-        .await
+    let (observed_req, request_rpc) = match observe_body_and_rescan_reverse_routes(
+        req,
+        base,
+        conn,
+        &state,
+        &compiled,
+        host,
+        prefilter_ctx,
+        identity_request.as_ref(),
+        &mut selection,
+        &owned_sanitized_headers,
+    )
+    .await?
     {
-        if let Some(response) =
-            authentication_response_for_error(request_method, request_version, proxy_name, &error)
-        {
-            return Ok(Err(empty_interim_response(response?)));
-        }
-        return Err(error);
-    }
+        Ok(observed) => observed,
+        Err(response) => return Ok(Err(response)),
+    };
+    req = observed_req;
 
     let selected_route_idx = selection
         .route_idx

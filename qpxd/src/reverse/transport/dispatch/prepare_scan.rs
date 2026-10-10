@@ -1,15 +1,20 @@
 use super::InlineCache;
 use crate::http::body::observation::RequestObservationPlan;
+use crate::http::body::size::observed_request_size;
+use crate::http::dispatch::request_body_too_large_response;
 use crate::http::policy::response_policy::response_request_obs;
 use crate::http::protocol::base_fields::BaseRequestFields;
+use crate::policy_context::authentication_response_for_error;
 use crate::policy_context::{
     EffectivePolicyContext, IdentityRequestContext, resolve_identity_for_request,
     sanitize_headers_for_policy,
 };
 use crate::reverse::transport::destination::classify_reverse_destination;
-use crate::reverse::transport::{ReverseConnInfo, ReverseRouter};
+use crate::reverse::transport::{
+    InterimList, ReverseConnInfo, ReverseRouter, empty_interim_response,
+};
 use anyhow::{Result, anyhow};
-use hyper::Request;
+use hyper::{Request, Response};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -215,4 +220,87 @@ pub(super) fn sanitized_headers_for_route_scan<'a>(
 
 fn policy_context_cache_key(policy: &EffectivePolicyContext) -> usize {
     policy as *const EffectivePolicyContext as usize
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "observed-body rescan carries explicit immutable match facts for the second scan"
+)]
+pub(super) async fn observe_body_and_rescan_reverse_routes(
+    mut req: Request<Body>,
+    base: &BaseRequestFields,
+    conn: &ReverseConnInfo,
+    state: &Arc<crate::runtime::RuntimeState>,
+    compiled: &Arc<crate::reverse::CompiledReverse>,
+    host: &str,
+    prefilter_ctx: MatchPrefilterContext<'_>,
+    identity_request: Option<&IdentityRequestContext>,
+    selection: &mut ReverseRouteSelection,
+    owned_sanitized_headers: &Option<http::HeaderMap>,
+) -> Result<
+    std::result::Result<
+        (Request<Body>, Option<crate::http::rpc::RpcMatchContext>),
+        (InterimList, Response<Body>),
+    >,
+> {
+    let proxy_name = state.plan.identity.proxy_name.as_ref();
+    let request_method = &base.method;
+    let request_version = req.version();
+    if selection.route_idx.is_none() && !selection.observation_plan.is_empty() {
+        req = match selection
+            .observation_plan
+            .observe_request(
+                req,
+                selection.max_observed_request_body_bytes,
+                std::time::Duration::from_millis(compiled.streaming.body_read_timeout_ms),
+            )
+            .await
+        {
+            Ok(req) => req,
+            Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
+                let response = request_body_too_large_response(
+                    request_method,
+                    request_version,
+                    proxy_name,
+                    None,
+                )
+                .map(empty_interim_response)?;
+                return Ok(Err(response));
+            }
+            Err(err) => return Err(err),
+        };
+    }
+    let request_rpc = if selection.observation_plan.needs_rpc {
+        Some(crate::http::rpc::inspect_request(&req).await)
+    } else {
+        None
+    };
+    if selection.route_idx.is_none()
+        && let Err(error) = scan_reverse_routes(
+            &compiled.router,
+            req.headers(),
+            owned_sanitized_headers
+                .as_ref()
+                .unwrap_or_else(|| req.headers()),
+            base,
+            state,
+            conn,
+            host,
+            prefilter_ctx,
+            observed_request_size(&req),
+            request_rpc.as_ref(),
+            false,
+            identity_request,
+            selection,
+        )
+        .await
+    {
+        if let Some(response) =
+            authentication_response_for_error(request_method, request_version, proxy_name, &error)
+        {
+            return Ok(Err(empty_interim_response(response?)));
+        }
+        return Err(error);
+    }
+    Ok(Ok((req, request_rpc)))
 }
