@@ -1,22 +1,20 @@
-use super::prepare_cors::{apply_cors_to_early_response, prepare_cors_preflight};
+use super::prepare_cors::prepare_cors_preflight;
+use super::prepare_finalize::finalize_reverse_route_selection;
 use super::prepare_scan::{
     ReverseRouteSelection, observe_body_and_rescan_reverse_routes,
     sanitized_headers_for_route_scan, scan_reverse_routes,
 };
 use super::prepare_single::{SingleHttpPrepare, try_prepare_single_http_reverse_request};
-use super::route_constraints::{
-    enforce_selected_reverse_route_constraints, reverse_security_rejection,
-};
-use super::{InlineCache, PreparedReverseRequest, ReversePreparedContext, ReversePreparedRoute};
+use super::route_constraints::reverse_security_rejection;
+use super::{InlineCache, PreparedReverseRequest};
 use crate::http::body::observation::RequestObservationPlan;
 use crate::http::dispatch::request_body_too_large_response;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::policy_context::{
     EffectivePolicyContext, IdentityRequestContext, authentication_response_for_error,
 };
-use crate::reverse::transport::destination::classify_reverse_destination;
 use crate::reverse::transport::{InterimList, ReverseConnInfo, empty_interim_response};
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use hyper::{Method, Request, Response};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
@@ -172,7 +170,7 @@ pub(super) async fn prepare_reverse_request(
         }
         return Err(error);
     }
-    let mut owned_sanitized_headers = match sanitized_route_headers {
+    let owned_sanitized_headers = match sanitized_route_headers {
         std::borrow::Cow::Borrowed(_) => None,
         std::borrow::Cow::Owned(headers) => Some(headers),
     };
@@ -196,66 +194,16 @@ pub(super) async fn prepare_reverse_request(
     };
     req = observed_req;
 
-    let selected_route_idx = selection
-        .route_idx
-        .ok_or_else(|| anyhow!("no route matched"))?;
-    let selected_route = router
-        .route_at(selected_route_idx)
-        .ok_or_else(|| anyhow!("selected reverse route is unavailable"))?;
-    let selected_resolution_override = selected_route.plan.destination_resolution.as_ref();
-    let selected_override_key = super::destination_override_key(selected_resolution_override);
-    if !selection
-        .request_destination_cache
-        .contains(selected_override_key)
-    {
-        let destination = if selected_route.requires_destination_after_selection()
-            || state.destination_trace_enabled()
-        {
-            classify_reverse_destination(&state, conn, host, None, selected_resolution_override)
-        } else {
-            crate::destination::DestinationMetadata::default()
-        };
-        selection
-            .request_destination_cache
-            .push(selected_override_key, destination);
-    }
-    req = match enforce_selected_reverse_route_constraints(
+    finalize_reverse_route_selection(
         req,
-        selected_route,
-        &base.method,
-        &state,
+        base,
         conn,
-    )? {
-        Ok(req) => req,
-        Err(mut response) => {
-            super::apply_reverse_route_metadata(
-                selected_route,
-                conn.tls_terminated,
-                &mut response.1,
-            )?;
-            apply_cors_to_early_response(selected_route, cors_request, &mut response.1);
-            return Ok(Err(response));
-        }
-    };
-
-    Ok(Ok(PreparedReverseRequest {
-        req,
-        context: ReversePreparedContext { compiled, state },
-        route: ReversePreparedRoute {
-            route_idx: selected_route_idx,
-            selected_policy: selection.selected_policy,
-            identity: selection
-                .selected_identity
-                .ok_or_else(|| anyhow!("identity missing for selected reverse route"))?,
-            sanitized_headers: owned_sanitized_headers.take(),
-            request_destination_cache: selection.request_destination_cache,
-            max_observed_request_body_bytes: selection.max_observed_request_body_bytes,
-        },
-        observation: crate::http::pipeline::types::RequestObservation {
-            request_rpc,
-            response_request_observation: Default::default(),
-            request_body_observed: selection.observation_plan.needs_body,
-            request_rpc_observed: selection.observation_plan.needs_rpc,
-        },
-    }))
+        &state,
+        &compiled,
+        cors_request,
+        host,
+        selection,
+        owned_sanitized_headers,
+        request_rpc,
+    )
 }

@@ -24,6 +24,7 @@ mod outcome;
 mod plain;
 mod prepare;
 mod prepare_cors;
+mod prepare_finalize;
 mod prepare_retry;
 mod prepare_scan;
 mod prepare_single;
