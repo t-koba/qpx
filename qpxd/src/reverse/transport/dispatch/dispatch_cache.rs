@@ -5,8 +5,8 @@ use crate::http::capture::cache_flow::{
 };
 use crate::http::dispatch::{
     DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheDecisionInput,
-    DispatchCollapsedCacheDecisionInput, DispatchOutcome, cache_decision_is_hit,
-    dispatch_cache_collapse_continue, dispatch_cache_collapse_response,
+    DispatchCollapsedCacheDecisionInput, DispatchOutcome, buffer_query_for_cache_key,
+    cache_decision_is_hit, dispatch_cache_collapse_continue, dispatch_cache_collapse_response,
     finalize_dispatch_cache_decision, finalize_dispatch_collapsed_cache_decision,
     prepare_dispatch_cache_key_pair, record_cache_lookup_duration, record_cache_lookup_result,
 };
@@ -15,12 +15,10 @@ use crate::runtime;
 use crate::runtime::Runtime;
 use crate::upstream::origin::{OriginEndpoint, proxy_http};
 use anyhow::{Result, anyhow};
-use http::header::{CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE};
 use hyper::{Method, Request, Response};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::{Duration, timeout};
@@ -143,43 +141,6 @@ pub(super) async fn prepare_reverse_cache(
         revalidation_state,
         cache_collapse_guard: guard,
     }))
-}
-
-async fn buffer_query_for_cache_key(
-    req: Request<Body>,
-    max_body_bytes: usize,
-) -> Result<(Request<Body>, String)> {
-    let (parts, mut body) = req.into_parts();
-    let mut content = Vec::new();
-    while let Some(chunk) = body.data().await {
-        let chunk = chunk?;
-        let next = content
-            .len()
-            .checked_add(chunk.len())
-            .ok_or_else(|| anyhow!("QUERY request body length overflow"))?;
-        if next > max_body_bytes {
-            return Err(anyhow!(
-                "QUERY request body exceeds route limit of {} bytes",
-                max_body_bytes
-            ));
-        }
-        content.extend_from_slice(&chunk);
-    }
-    let mut hasher = Sha256::new();
-    hasher.update(b"qpx-query-cache-key-v1\0");
-    for name in [CONTENT_TYPE, CONTENT_ENCODING, CONTENT_LANGUAGE] {
-        hasher.update(name.as_str().as_bytes());
-        hasher.update([0]);
-        for value in parts.headers.get_all(&name) {
-            hasher.update((value.as_bytes().len() as u64).to_be_bytes());
-            hasher.update(value.as_bytes());
-        }
-        hasher.update([0xff]);
-    }
-    hasher.update((content.len() as u64).to_be_bytes());
-    hasher.update(&content);
-    let digest = format!("sha-256:{:x}", hasher.finalize());
-    Ok((Request::from_parts(parts, Body::from(content)), digest))
 }
 
 struct ReverseCacheLookupInput<'a> {
@@ -546,6 +507,7 @@ async fn reverse_cache_collapse_response(
 #[cfg(test)]
 mod query_cache_tests {
     use super::*;
+    use http::header::CONTENT_TYPE;
 
     async fn digest(content_type: &str, body: &'static str) -> String {
         let request = Request::builder()

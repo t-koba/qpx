@@ -85,8 +85,15 @@ pub(super) async fn prepare_forward_dispatch(
             crate::http::capture::stream::limit_response_body_for_plan(response, selected_plan);
         return Ok(ForwardDispatchPrepareOutcome::Response(Box::new(response)));
     }
-    let (request_headers_snapshot, cache_lookup_key, cache_target_key) =
-        prepare_forward_cache_keys(&req, action, cache_policy)?;
+    let (req_out, request_headers_snapshot, cache_lookup_key, cache_target_key) =
+        prepare_forward_cache_keys(
+            req,
+            action,
+            cache_policy,
+            selected_plan.streaming.max_request_body_bytes,
+        )
+        .await?;
+    req = req_out;
     let upstream = resolve_upstream(action, &state, listener_name)
         .map_err(|err| DispatchError::UpstreamUnavailable(err.to_string()))?;
     request_limit_ctx.upstream = upstream.as_ref().map(|upstream| upstream.key().to_string());

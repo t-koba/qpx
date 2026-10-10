@@ -6,9 +6,10 @@ use crate::http::capture::cache_flow::{
 use crate::http::dispatch::{
     DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheDecisionInput,
     DispatchCacheLookupOutcome, DispatchCollapsedCacheDecisionInput, DispatchOutcome,
-    cache_decision_is_hit, dispatch_cache_collapse_continue, dispatch_cache_collapse_response,
-    finalize_dispatch_cache_decision, finalize_dispatch_collapsed_cache_decision,
-    prepare_dispatch_cache_keys, record_cache_lookup_duration, record_cache_lookup_result,
+    buffer_query_for_cache_key, cache_decision_is_hit, dispatch_cache_collapse_continue,
+    dispatch_cache_collapse_response, finalize_dispatch_cache_decision,
+    finalize_dispatch_collapsed_cache_decision, prepare_dispatch_cache_key_pair,
+    record_cache_lookup_duration, record_cache_lookup_result,
 };
 use crate::runtime::Runtime;
 use crate::upstream::http1::proxy_http1_request;
@@ -257,11 +258,13 @@ async fn finalize_forward_collapsed_cache_decision(
     .await
 }
 
-pub(super) fn prepare_forward_cache_keys(
-    req: &Request<Body>,
+pub(super) async fn prepare_forward_cache_keys(
+    req: Request<Body>,
     action: &qpx_core::config::ActionConfig,
     cache_policy: Option<&qpx_core::config::CachePolicyConfig>,
+    max_request_body_bytes: usize,
 ) -> Result<(
+    Request<Body>,
     Option<http::HeaderMap>,
     Option<CacheRequestKey>,
     Option<CacheRequestKey>,
@@ -272,7 +275,67 @@ pub(super) fn prepare_forward_cache_keys(
             ActionKind::Direct | ActionKind::Proxy | ActionKind::Tunnel | ActionKind::Inspect
         );
     if !cache_applicable {
-        return Ok((None, None, None));
+        return Ok((req, None, None, None));
     }
-    prepare_dispatch_cache_keys(req, cache_policy, req.uri().scheme_str().unwrap_or("http"))
+    // RFC 10008 Sec 2.7: the cache key for QUERY MUST incorporate request
+    // content and related metadata. Bind the body digest exactly like the
+    // reverse path; an over-limit body fails closed via the helper error.
+    if *req.method() == Method::QUERY {
+        let (req, digest) = buffer_query_for_cache_key(req, max_request_body_bytes).await?;
+        let scheme = req.uri().scheme_str().unwrap_or("http").to_string();
+        let (lookup, target) =
+            prepare_dispatch_cache_key_pair(&req, cache_policy, scheme.as_str())?;
+        let lookup = lookup.map(|key| key.with_content_digest(digest.clone()));
+        let target = target.map(|key| key.with_content_digest(digest));
+        let snapshot = lookup.as_ref().map(|_| req.headers().clone());
+        return Ok((req, snapshot, lookup, target));
+    }
+    let scheme = req.uri().scheme_str().unwrap_or("http").to_string();
+    let (snapshot, lookup, target) =
+        crate::http::dispatch::prepare_dispatch_cache_keys(&req, cache_policy, scheme.as_str())?;
+    Ok((req, snapshot, lookup, target))
+}
+
+#[cfg(test)]
+mod forward_query_cache_tests {
+    use super::*;
+
+    async fn forward_keys(content_type: &str, body: &'static str) -> Option<CacheRequestKey> {
+        let action = qpx_core::config::ActionConfig {
+            kind: ActionKind::Direct,
+            upstream: None,
+            local_response: None,
+        };
+        let policy = qpx_core::config::CachePolicyConfig {
+            enabled: true,
+            backend: "test".to_string(),
+            namespace: None,
+            default_ttl_secs: None,
+            max_object_bytes: 1024 * 1024,
+            allow_set_cookie_store: false,
+        };
+        let req = Request::builder()
+            .method(Method::QUERY)
+            .uri("http://example.com/search")
+            .header(http::header::CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .unwrap();
+        let (_, _, lookup, _) = prepare_forward_cache_keys(req, &action, Some(&policy), 1024)
+            .await
+            .unwrap();
+        lookup
+    }
+
+    #[tokio::test]
+    async fn forward_query_keys_differ_by_body_and_content_type() {
+        let first = forward_keys("application/sql", "select 1").await.unwrap();
+        let other_body = forward_keys("application/sql", "select 2").await.unwrap();
+        let other_type = forward_keys("text/plain", "select 1").await.unwrap();
+        let same = forward_keys("application/sql", "select 1").await.unwrap();
+        assert_ne!(first.content_digest, other_body.content_digest);
+        assert_ne!(first.content_digest, other_type.content_digest);
+        assert_eq!(first.content_digest, same.content_digest);
+        // Same primary index (shared URI), distinct variants (content digest).
+        assert_eq!(first.primary_hash(), other_body.primary_hash());
+    }
 }

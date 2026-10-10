@@ -3,11 +3,13 @@ use crate::http::capture::cache_flow::{
     CacheWritebackContext, process_upstream_response_for_cache,
 };
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use http::header::{CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE};
 use hyper::{Method, Request, Response};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
+use sha2::{Digest, Sha256};
 
 pub(crate) enum DispatchCacheLookupOutcome {
     // Both payloads are large (`Response<Body>` and a `RevalidationState` embedding a
@@ -57,6 +59,47 @@ pub(crate) fn prepare_dispatch_cache_keys(
         prepare_dispatch_cache_key_pair(req, cache_policy, cache_default_scheme)?;
     let snapshot = cache_lookup_key.as_ref().map(|_| req.headers().clone());
     Ok((snapshot, cache_lookup_key, cache_target_key))
+}
+
+/// Buffers a QUERY request body and derives its RFC 10008 Sec 2.7 cache key
+/// content digest over the body plus representation metadata. Shared by the
+/// forward and reverse dispatch paths so both bind QUERY cache entries to
+/// request content instead of the URI alone.
+pub(crate) async fn buffer_query_for_cache_key(
+    req: Request<Body>,
+    max_body_bytes: usize,
+) -> Result<(Request<Body>, String)> {
+    let (parts, mut body) = req.into_parts();
+    let mut content = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let chunk = chunk?;
+        let next = content
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| anyhow!("QUERY request body length overflow"))?;
+        if next > max_body_bytes {
+            return Err(anyhow!(
+                "QUERY request body exceeds route limit of {} bytes",
+                max_body_bytes
+            ));
+        }
+        content.extend_from_slice(&chunk);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"qpx-query-cache-key-v1\0");
+    for name in [CONTENT_TYPE, CONTENT_ENCODING, CONTENT_LANGUAGE] {
+        hasher.update(name.as_str().as_bytes());
+        hasher.update([0]);
+        for value in parts.headers.get_all(&name) {
+            hasher.update((value.as_bytes().len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+        hasher.update([0xff]);
+    }
+    hasher.update((content.len() as u64).to_be_bytes());
+    hasher.update(&content);
+    let digest = format!("sha-256:{:x}", hasher.finalize());
+    Ok((Request::from_parts(parts, Body::from(content)), digest))
 }
 
 pub(crate) fn prepare_dispatch_cache_key_pair(
