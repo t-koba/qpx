@@ -45,7 +45,7 @@ check_crate() {
   fi
 }
 
-check_crate qpx-core baa11551d00a297cb25ce838c77ffe3eeaea6f42ab511cef3cfc7d3a802a3920
+check_crate qpx-core e84e32209f24cf94665cc422021b10da5d65fbb3d1bec161eb15e2a1cef40fe8
 check_crate qpx-auth c17be9a9eb26c0587c0425b1d2088ebe1ad09d5c7f43a00dc8677938ecf842c5
 check_crate qpx-h3 cd9fcefc7ac1cb75406ab51a30de364be14e9ea72b243b850f43f03e649a211a
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a
