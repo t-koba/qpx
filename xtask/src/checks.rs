@@ -1811,8 +1811,21 @@ fn response_compression_worker_backpressure_violations(content: &str) -> Vec<&'s
 fn check_reverse_retry_template_bounded_body(root: &Path) -> Result<()> {
     let template_rel = "qpxd/src/reverse/transport/request_template.rs";
     let template = fs::read_to_string(root.join(template_rel))?;
-    let prepare_rel = "qpxd/src/reverse/transport/dispatch/prepare.rs";
-    let prepare = fs::read_to_string(root.join(prepare_rel))?;
+    let dispatch_dir = root.join("qpxd/src/reverse/transport/dispatch");
+    let mut prepare = String::new();
+    let mut names: Vec<String> = Vec::new();
+    for entry in fs::read_dir(&dispatch_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("prepare") && name.ends_with(".rs") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    for name in &names {
+        prepare.push_str(&fs::read_to_string(dispatch_dir.join(name))?);
+        prepare.push('\n');
+    }
     let validate_rel = "qpx-core/src/config/validate/reverse.rs";
     let validate = fs::read_to_string(root.join(validate_rel))?;
     let violations = reverse_retry_template_bounded_body_violations(&template, &prepare, &validate);
