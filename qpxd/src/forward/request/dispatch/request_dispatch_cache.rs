@@ -6,10 +6,9 @@ use crate::http::capture::cache_flow::{
 use crate::http::dispatch::{
     DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheDecisionInput,
     DispatchCacheLookupOutcome, DispatchCollapsedCacheDecisionInput, DispatchOutcome,
-    buffer_query_for_cache_key, cache_decision_is_hit, dispatch_cache_collapse_continue,
-    dispatch_cache_collapse_response, finalize_dispatch_cache_decision,
-    finalize_dispatch_collapsed_cache_decision, prepare_dispatch_cache_key_pair,
-    record_cache_lookup_duration, record_cache_lookup_result,
+    cache_decision_is_hit, dispatch_cache_collapse_continue, dispatch_cache_collapse_response,
+    finalize_dispatch_cache_decision, finalize_dispatch_collapsed_cache_decision,
+    prepare_query_aware_cache_key_pair, record_cache_lookup_duration, record_cache_lookup_result,
 };
 use crate::runtime::Runtime;
 use crate::upstream::http1::proxy_http1_request;
@@ -277,22 +276,17 @@ pub(super) async fn prepare_forward_cache_keys(
     if !cache_applicable {
         return Ok((req, None, None, None));
     }
-    // RFC 10008 Sec 2.7: the cache key for QUERY MUST incorporate request
-    // content and related metadata. Bind the body digest exactly like the
-    // reverse path; an over-limit body fails closed via the helper error.
-    if *req.method() == Method::QUERY {
-        let (req, digest) = buffer_query_for_cache_key(req, max_request_body_bytes).await?;
-        let scheme = req.uri().scheme_str().unwrap_or("http").to_string();
-        let (lookup, target) =
-            prepare_dispatch_cache_key_pair(&req, cache_policy, scheme.as_str())?;
-        let lookup = lookup.map(|key| key.with_content_digest(digest.clone()));
-        let target = target.map(|key| key.with_content_digest(digest));
-        let snapshot = lookup.as_ref().map(|_| req.headers().clone());
-        return Ok((req, snapshot, lookup, target));
-    }
+    // RFC 10008 Sec 2.7: QUERY keys bind request content via the shared
+    // helper; an over-limit body fails closed via the helper error.
     let scheme = req.uri().scheme_str().unwrap_or("http").to_string();
-    let (snapshot, lookup, target) =
-        crate::http::dispatch::prepare_dispatch_cache_keys(&req, cache_policy, scheme.as_str())?;
+    let (req, lookup, target) = prepare_query_aware_cache_key_pair(
+        req,
+        cache_policy,
+        scheme.as_str(),
+        max_request_body_bytes,
+    )
+    .await?;
+    let snapshot = lookup.as_ref().map(|_| req.headers().clone());
     Ok((req, snapshot, lookup, target))
 }
 

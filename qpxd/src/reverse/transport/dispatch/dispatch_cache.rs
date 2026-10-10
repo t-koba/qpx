@@ -5,10 +5,10 @@ use crate::http::capture::cache_flow::{
 };
 use crate::http::dispatch::{
     DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheDecisionInput,
-    DispatchCollapsedCacheDecisionInput, DispatchOutcome, buffer_query_for_cache_key,
-    cache_decision_is_hit, dispatch_cache_collapse_continue, dispatch_cache_collapse_response,
+    DispatchCollapsedCacheDecisionInput, DispatchOutcome, cache_decision_is_hit,
+    dispatch_cache_collapse_continue, dispatch_cache_collapse_response,
     finalize_dispatch_cache_decision, finalize_dispatch_collapsed_cache_decision,
-    prepare_dispatch_cache_key_pair, record_cache_lookup_duration, record_cache_lookup_result,
+    prepare_query_aware_cache_key_pair, record_cache_lookup_duration, record_cache_lookup_result,
 };
 use crate::reverse::router::HttpRoute;
 use crate::runtime;
@@ -54,21 +54,16 @@ pub(super) async fn prepare_reverse_cache(
             cache_collapse_guard: None,
         }));
     }
-    let query_digest = if request_cache_policy.is_some() && *request_method == Method::QUERY {
-        let (buffered, digest) =
-            buffer_query_for_cache_key(req, route.plan.streaming.max_request_body_bytes).await?;
-        req = buffered;
-        Some(digest)
-    } else {
-        None
-    };
     let cache_default_scheme = if conn.tls_terminated { "https" } else { "http" };
-    let (mut cache_lookup_key, mut cache_target_key) =
-        prepare_dispatch_cache_key_pair(&req, request_cache_policy, cache_default_scheme)?;
-    if let Some(digest) = query_digest {
-        cache_lookup_key = cache_lookup_key.map(|key| key.with_content_digest(digest.clone()));
-        cache_target_key = cache_target_key.map(|key| key.with_content_digest(digest));
-    }
+    let max_body_bytes = route.plan.streaming.max_request_body_bytes;
+    let (buffered, cache_lookup_key, cache_target_key) = prepare_query_aware_cache_key_pair(
+        req,
+        request_cache_policy,
+        cache_default_scheme,
+        max_body_bytes,
+    )
+    .await?;
+    req = buffered;
     let mut request_headers_snapshot = None;
     let mut revalidation_state = None;
     if let (Some(_), Some(policy)) = (cache_lookup_key.as_ref(), request_cache_policy) {
@@ -507,6 +502,7 @@ async fn reverse_cache_collapse_response(
 #[cfg(test)]
 mod query_cache_tests {
     use super::*;
+    use crate::http::dispatch::cache::buffer_query_for_cache_key;
     use http::header::CONTENT_TYPE;
 
     async fn digest(content_type: &str, body: &'static str) -> String {

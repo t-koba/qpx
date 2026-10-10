@@ -21,10 +21,10 @@ pub(crate) use audit::{DispatchAuditContext, annotate_dispatch_response};
 pub(crate) use audit_builder::{DispatchAuditInput, build_dispatch_audit_context};
 pub(crate) use cache::{
     DispatchCacheCollapseOutcome, DispatchCacheLookupOutcome, DispatchCacheWriteInput,
-    DispatchCachedResponseInput, buffer_query_for_cache_key, dispatch_cache_collapse_continue,
+    DispatchCachedResponseInput, dispatch_cache_collapse_continue,
     dispatch_cache_collapse_response, finalize_dispatch_cached_response,
-    finalize_dispatch_stale_if_error_response, prepare_dispatch_cache_key_pair,
-    prepare_dispatch_cache_keys, write_dispatch_cache_result,
+    finalize_dispatch_stale_if_error_response, prepare_query_aware_cache_key_pair,
+    write_dispatch_cache_result,
 };
 pub(crate) use cache_decision::{
     DispatchCacheDecisionInput, DispatchCollapsedCacheDecisionInput, cache_decision_is_hit,

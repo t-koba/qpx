@@ -43,24 +43,6 @@ pub(crate) fn dispatch_cache_collapse_response(
     DispatchCacheCollapseOutcome::Response(Box::new(response))
 }
 
-pub(crate) fn prepare_dispatch_cache_keys(
-    req: &Request<Body>,
-    cache_policy: Option<&qpx_core::config::CachePolicyConfig>,
-    cache_default_scheme: &str,
-) -> Result<(
-    Option<http::HeaderMap>,
-    Option<CacheRequestKey>,
-    Option<CacheRequestKey>,
-)> {
-    if cache_policy.is_none() {
-        return Ok((None, None, None));
-    }
-    let (cache_lookup_key, cache_target_key) =
-        prepare_dispatch_cache_key_pair(req, cache_policy, cache_default_scheme)?;
-    let snapshot = cache_lookup_key.as_ref().map(|_| req.headers().clone());
-    Ok((snapshot, cache_lookup_key, cache_target_key))
-}
-
 /// Buffers a QUERY request body and derives its RFC 10008 Sec 2.7 cache key
 /// content digest over the body plus representation metadata. Shared by the
 /// forward and reverse dispatch paths so both bind QUERY cache entries to
@@ -102,7 +84,37 @@ pub(crate) async fn buffer_query_for_cache_key(
     Ok((Request::from_parts(parts, Body::from(content)), digest))
 }
 
-pub(crate) fn prepare_dispatch_cache_key_pair(
+/// Derives cache keys for GET-like and QUERY requests. QUERY bodies are
+/// buffered and bound to the RFC 10008 Sec 2.7 content digest; an over-limit
+/// body fails closed via the helper error. Shared by forward and reverse
+/// dispatch so both bind QUERY entries to request content, not the URI alone.
+pub(crate) async fn prepare_query_aware_cache_key_pair(
+    req: Request<Body>,
+    cache_policy: Option<&qpx_core::config::CachePolicyConfig>,
+    cache_default_scheme: &str,
+    max_body_bytes: usize,
+) -> Result<(
+    Request<Body>,
+    Option<CacheRequestKey>,
+    Option<CacheRequestKey>,
+)> {
+    if cache_policy.is_none() {
+        return Ok((req, None, None));
+    }
+    if *req.method() == Method::QUERY {
+        let (req, digest) = buffer_query_for_cache_key(req, max_body_bytes).await?;
+        let (lookup, target) =
+            prepare_dispatch_cache_key_pair(&req, cache_policy, cache_default_scheme)?;
+        let lookup = lookup.map(|key| key.with_content_digest(digest.clone()));
+        let target = target.map(|key| key.with_content_digest(digest));
+        return Ok((req, lookup, target));
+    }
+    let (lookup, target) =
+        prepare_dispatch_cache_key_pair(&req, cache_policy, cache_default_scheme)?;
+    Ok((req, lookup, target))
+}
+
+fn prepare_dispatch_cache_key_pair(
     req: &Request<Body>,
     cache_policy: Option<&qpx_core::config::CachePolicyConfig>,
     cache_default_scheme: &str,
