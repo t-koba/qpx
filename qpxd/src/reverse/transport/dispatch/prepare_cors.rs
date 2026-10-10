@@ -1,4 +1,4 @@
-use super::prepare::{ReverseRouteSelection, scan_reverse_routes};
+use super::prepare_scan::{ReverseRouteSelection, scan_reverse_routes};
 use super::{InlineCache, empty_interim_response};
 use crate::http::body::observation::RequestObservationPlan;
 use crate::http::protocol::base_fields::BaseRequestFields;
