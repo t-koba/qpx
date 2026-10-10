@@ -23,6 +23,7 @@ mod modules;
 mod outcome;
 mod plain;
 mod prepare;
+mod prepare_single;
 mod route_constraints;
 mod types;
 mod webdav;
@@ -61,8 +62,11 @@ use self::plain::dispatch_plain_reverse_http;
 pub(super) use self::plain::try_dispatch_unconditional_plain_reverse_request;
 use self::prepare::{
     attach_streaming_limits, buffer_reverse_guarded_request, prepare_reverse_request,
-    prepare_reverse_retry_dispatch, prepare_single_local_response_reverse_request,
-    prepare_single_plain_reverse_request, prepare_single_webdav_reverse_request,
+    prepare_reverse_retry_dispatch,
+};
+use self::prepare_single::{
+    prepare_single_local_response_reverse_request, prepare_single_plain_reverse_request,
+    prepare_single_webdav_reverse_request,
 };
 use self::types::*;
 #[cfg(test)]
