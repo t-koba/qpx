@@ -73,9 +73,13 @@ the actual request. Put authorization enforcement in the route policy rather
 than in an identity-dependent route selector when that route must serve browser
 CORS traffic.
 
-`allow_private_network` implements the current Private Network Access draft and
-defaults to false. Enable it only when the browser application is intentionally
-allowed to reach a more-private address space.
+`allow_private_network` implements the legacy Private Network Access preflight
+flag and defaults to false (fail-closed). It is retained for compatibility with
+clients that still send `Access-Control-Request-Private-Network`; that WICG
+effort has been superseded by Local Network Access, which gates local access by
+browser permission rather than proxy preflight opt-in. Enable it only when the
+browser application is intentionally allowed to reach a more-private address
+space.
 
 ## Manual check
 
@@ -94,4 +98,5 @@ for a complete checked configuration.
 Normative web-platform references:
 
 - [WHATWG Fetch Standard](https://fetch.spec.whatwg.org/)
-- [Private Network Access draft](https://wicg.github.io/private-network-access/)
+- [Private Network Access draft (legacy)](https://wicg.github.io/private-network-access/)
+- [Local Network Access (supersedes Private Network Access)](https://github.com/WICG/local-network-access/)

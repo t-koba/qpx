@@ -191,8 +191,9 @@ can own a validated CORS policy for upstream, weighted, IPC, local-response, and
 WebDAV targets. qpx handles matching preflights without invoking the target,
 uses the requested method for route selection, enforces credential/wildcard and
 `Authorization` wildcard restrictions, and makes the route policy authoritative
-over target response fields. Private Network Access is explicit and disabled by
-default because it remains a draft web-platform extension. Evidence is provided
+over target response fields. Private Network Access preflight support is explicit
+and disabled by default; it is a legacy web-platform extension superseded by
+permission-gated Local Network Access. Evidence is provided
 by `qpx_core::cors::tests`, reverse transport CORS tests across HTTP/1.1,
 HTTP/2, and HTTP/3, configuration validation tests, and the checked
 `reverse-cors-origin.yaml` sample.
