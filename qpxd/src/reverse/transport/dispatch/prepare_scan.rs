@@ -201,14 +201,14 @@ pub(super) async fn scan_reverse_routes(
 }
 
 pub(super) fn sanitized_headers_for_route_scan<'a>(
-    req: &'a Request<Body>,
+    headers: &'a http::HeaderMap,
     state: &crate::runtime::RuntimeState,
     conn: &ReverseConnInfo,
 ) -> Result<std::borrow::Cow<'a, http::HeaderMap>> {
     if state.security.identity_sources.sources.is_empty() {
-        return Ok(std::borrow::Cow::Borrowed(req.headers()));
+        return Ok(std::borrow::Cow::Borrowed(headers));
     }
-    let mut sanitized = req.headers().clone();
+    let mut sanitized = headers.clone();
     sanitize_headers_for_policy(
         state,
         &EffectivePolicyContext::default(),

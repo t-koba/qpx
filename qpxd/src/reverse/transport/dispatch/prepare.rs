@@ -1,22 +1,17 @@
+use super::PreparedReverseRequest;
 use super::prepare_cors::prepare_cors_preflight;
 use super::prepare_finalize::finalize_reverse_route_selection;
-use super::prepare_scan::{
-    ReverseRouteSelection, observe_body_and_rescan_reverse_routes,
-    sanitized_headers_for_route_scan, scan_reverse_routes,
+use super::prepare_initial::{
+    InitialReverseScan, initial_scan_reverse_routes, reverse_prefilter_context,
 };
+use super::prepare_scan::observe_body_and_rescan_reverse_routes;
 use super::prepare_single::{SingleHttpPrepare, try_prepare_single_http_reverse_request};
 use super::route_constraints::reverse_security_rejection;
-use super::{InlineCache, PreparedReverseRequest};
-use crate::http::body::observation::RequestObservationPlan;
 use crate::http::dispatch::request_body_too_large_response;
 use crate::http::protocol::base_fields::BaseRequestFields;
-use crate::policy_context::{
-    EffectivePolicyContext, IdentityRequestContext, authentication_response_for_error,
-};
-use crate::reverse::transport::{InterimList, ReverseConnInfo, empty_interim_response};
+use crate::reverse::transport::{InterimList, ReverseConnInfo};
 use anyhow::Result;
 use hyper::{Method, Request, Response};
-use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -87,7 +82,6 @@ pub(super) async fn prepare_reverse_request(
     cors_request: Option<&qpx_core::cors::CorsRequest>,
 ) -> Result<std::result::Result<PreparedReverseRequest, (InterimList, Response<Body>)>> {
     let router = &compiled.router;
-    let proxy_name = state.plan.identity.proxy_name.as_ref();
     if let Some(response) = reverse_security_rejection(&req, conn, &state, &compiled)? {
         return Ok(Err(response));
     }
@@ -120,59 +114,25 @@ pub(super) async fn prepare_reverse_request(
         }
     }
     let host = base.host().unwrap_or_default();
-    let request_method = &base.method;
-    let request_version = req.version();
-    let prefilter_ctx = MatchPrefilterContext {
-        method: Some(request_method.as_str()),
-        dst_port: Some(conn.dst_port),
-        src_ip: Some(conn.remote_addr.ip()),
-        host: (!host.is_empty()).then_some(host),
-        sni: conn.tls_sni.as_deref(),
-        path: base.path(),
-    };
-    let mut selection = ReverseRouteSelection {
-        route_idx: None,
-        selected_policy: EffectivePolicyContext::default(),
-        selected_identity: None,
-        request_destination_cache: InlineCache::new(),
-        identity_cache: InlineCache::new(),
-        observation_plan: RequestObservationPlan::default(),
-        max_observed_request_body_bytes: state.plan.limits.body.max_observed_request_body_bytes,
-        collect_observation_from_remaining: false,
-    };
-    let sanitized_route_headers = sanitized_headers_for_route_scan(&req, &state, conn)?;
-    let identity_request = if state.security.identity_sources.sources.is_empty() {
-        None
-    } else {
-        IdentityRequestContext::from_base(base, if conn.tls_terminated { "https" } else { "http" })
-    };
-    if let Err(error) = scan_reverse_routes(
-        router,
+    let prefilter_ctx = reverse_prefilter_context(base, conn, host);
+    let InitialReverseScan {
+        mut selection,
+        owned_sanitized_headers,
+        identity_request,
+    } = match initial_scan_reverse_routes(
         req.headers(),
-        sanitized_route_headers.as_ref(),
+        req.version(),
         base,
-        &state,
         conn,
+        &state,
+        router,
         host,
         prefilter_ctx.clone(),
-        None,
-        None,
-        false,
-        identity_request.as_ref(),
-        &mut selection,
     )
-    .await
+    .await?
     {
-        if let Some(response) =
-            authentication_response_for_error(request_method, request_version, proxy_name, &error)
-        {
-            return Ok(Err(empty_interim_response(response?)));
-        }
-        return Err(error);
-    }
-    let owned_sanitized_headers = match sanitized_route_headers {
-        std::borrow::Cow::Borrowed(_) => None,
-        std::borrow::Cow::Owned(headers) => Some(headers),
+        Ok(initial) => initial,
+        Err(response) => return Ok(Err(response)),
     };
 
     let (observed_req, request_rpc) = match observe_body_and_rescan_reverse_routes(
