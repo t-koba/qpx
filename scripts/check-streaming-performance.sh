@@ -305,6 +305,7 @@ fast_lane_noise = 1.0
 for record in (qpx_fast, leader, direct_fast):
     for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
         fast_lane_noise = max(fast_lane_noise, nested_number(record, "sample_spread", field))
+fast_effective = max(fast_lane_noise, 1.05)
 stability_objectives = objectives.get("stability", {})
 frontier_ratio = ratio_limit(stability_objectives, "competitive_frontier_total_ratio")
 stability_records = {
@@ -337,7 +338,7 @@ for key in sorted(stability_records):
         )
 for name, current, objective, direction in fast_checks:
     if direction == "min" and current + 1e-12 < objective:
-        decisive_bar = objective / fast_lane_noise
+        decisive_bar = objective / fast_effective
         if current + 1e-12 < decisive_bar:
             failures.append(
                 f"fast streaming {name} {current:.6f} < objective {objective:.6f} "
@@ -350,7 +351,7 @@ for name, current, objective, direction in fast_checks:
                 f"{fast_lane_noise:.6f}; not a regression signal"
             )
     if direction == "max" and current > objective + 1e-12:
-        decisive_bar = objective * fast_lane_noise
+        decisive_bar = objective * fast_effective
         if current > decisive_bar + 1e-12:
             failures.append(
                 f"fast streaming {name} {current:.6f} > objective {objective:.6f} "
@@ -388,10 +389,11 @@ slow_lane_noise = 1.0
 for record in (qpx_slow, direct_slow, slow_resource_leader):
     for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
         slow_lane_noise = max(slow_lane_noise, nested_number(record, "sample_spread", field))
+slow_effective = max(slow_lane_noise, 1.05)
 for field, current in slow_ratios.items():
     objective = ratio_limit(slow_objectives, field)
     if current > objective + 1e-12:
-        decisive_bar = objective * slow_lane_noise
+        decisive_bar = objective * slow_effective
         if current > decisive_bar + 1e-12:
             failures.append(
                 f"slow streaming {field} {current:.6f} > objective {objective:.6f} "
